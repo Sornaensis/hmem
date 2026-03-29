@@ -17,7 +17,7 @@ import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
 import Rel8
 
-import HMem.DB.Pool (runSession, DBException(..))
+import HMem.DB.Pool (runSession, runTransaction, DBException(..))
 import HMem.DB.Schema
 import HMem.Types
 
@@ -51,6 +51,7 @@ createCategory pool cc = do
               , mcName        = lit cc.name
               , mcDescription = lit cc.description
               , mcParentId    = lit cc.parentId
+              , mcDeletedAt   = unsafeDefault
               , mcCreatedAt   = unsafeDefault
               }
           ]
@@ -70,6 +71,7 @@ getCategory pool cid = do
   rows <- runSession pool $ Session.statement () $ run $ select $ do
     row <- each memoryCategorySchema
     where_ $ row.mcId ==. lit cid
+    where_ $ activeCategory row
     pure row
   case rows of
     []    -> pure Nothing
@@ -90,7 +92,7 @@ updateCategory pool cid uc = do
           , mcDescription = applyNullableUpdate row.mcDescription uc.description
           , mcParentId    = applyNullableUpdate row.mcParentId uc.parentId
           }
-      , updateWhere = \_ row -> row.mcId ==. lit cid
+      , updateWhere = \_ row -> row.mcId ==. lit cid &&. activeCategory row
       , returning = Returning id
       }
   case rows of
@@ -103,14 +105,34 @@ updateCategory pool cid uc = do
 
 deleteCategory :: Pool Hasql.Connection -> UUID -> IO Bool
 deleteCategory pool cid = do
-  n <- runSession pool $ Session.statement () $ runN $
-    delete Delete
-      { from = memoryCategorySchema
-      , using = pure ()
-      , deleteWhere = \_ row -> row.mcId ==. lit cid
-      , returning = NoReturning
-      }
-  pure (n > 0)
+  runTransaction pool $ do
+    n <- Session.statement () $ runN $
+      update Update
+        { target = memoryCategorySchema
+        , from = pure ()
+        , set = \_ row -> row { mcDeletedAt = deletedNow }
+        , updateWhere = \_ row -> row.mcId ==. lit cid &&. activeCategory row
+        , returning = NoReturning
+        }
+    if n == 0
+      then pure False
+      else do
+        Session.statement () $ run_ $
+          update Update
+            { target = memoryCategorySchema
+            , from = pure ()
+            , set = \_ row -> row { mcParentId = lit (Nothing :: Maybe UUID) }
+            , updateWhere = \_ row -> row.mcParentId ==. lit (Just cid) &&. activeCategory row
+            , returning = NoReturning
+            }
+        Session.statement () $ run_ $
+          delete Delete
+            { from = memoryCategoryLinkSchema
+            , using = pure ()
+            , deleteWhere = \_ row -> row.mclCategoryId ==. lit cid
+            , returning = NoReturning
+            }
+        pure True
 
 ------------------------------------------------------------------------
 -- List
@@ -124,6 +146,7 @@ listCategories pool wsId mlimit moffset = do
     limit (fromIntegral lim) $ offset (fromIntegral off) $ do
       row <- each memoryCategorySchema
       where_ $ row.mcWorkspaceId ==. lit (Just wsId)
+      where_ $ activeCategory row
       pure row
   pure $ map rowToCategory rows
 
@@ -136,6 +159,7 @@ listGlobalCategories pool mlimit moffset = do
     limit (fromIntegral lim) $ offset (fromIntegral off) $ do
       row <- each memoryCategorySchema
       where_ $ isNull row.mcWorkspaceId
+      where_ $ activeCategory row
       pure row
   pure $ map rowToCategory rows
 

@@ -7,6 +7,7 @@ import Test.Hspec
 
 import HMem.DB.Memory (createMemory)
 import HMem.DB.Project
+import HMem.DB.Task (createTask, getTask, listTasksByWorkspace)
 import HMem.DB.TestHarness
 import HMem.Types
 
@@ -93,6 +94,26 @@ spec = around withTestEnv $ do
     it "returns False for nonexistent ID" $ \env -> do
       ok <- deleteProject env.pool (read "00000000-0000-0000-0000-000000000099")
       ok `shouldBe` False
+
+    it "keeps tasks by clearing their project_id" $ \env -> do
+      ws <- createTestWorkspace env "projtask-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "To Archive"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Keep me"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      ok <- deleteProject env.pool proj.id
+      ok `shouldBe` True
+
+      got <- getTask env.pool task.id
+      got `shouldSatisfy` isJust
+      let Just detached = got
+      detached.projectId `shouldBe` Nothing
+
+      tasks <- listTasksByWorkspace env.pool ws.id Nothing Nothing Nothing Nothing
+      map (.id) tasks `shouldContain` [task.id]
 
   describe "listProjects" $ do
     it "lists projects for a workspace" $ \env -> do

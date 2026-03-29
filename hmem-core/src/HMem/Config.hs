@@ -6,6 +6,8 @@ module HMem.Config
   , PoolConfig(..)
   , LogConfig(..)
   , CorsConfig(..)
+  , AuthConfig(..)
+  , RateLimitConfig(..)
     -- * Defaults
   , defaultConfig
     -- * Load / Save
@@ -16,16 +18,20 @@ module HMem.Config
     -- * Paths
   , configDir
   , configFilePath
+    -- * Overrides
+  , applyEnvOverrides
     -- * Derived helpers
   , connectionString
   , serverUrl
   ) where
 
+import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), ToJSON(..), (.:?), (.!=), (.=))
 import Data.Aeson qualified as Aeson
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Yaml qualified as Yaml
+import System.Environment (lookupEnv)
 import System.Directory (getHomeDirectory, doesFileExist, createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
@@ -62,12 +68,25 @@ data CorsConfig = CorsConfig
   { allowedOrigins :: ![Text]
   } deriving stock (Show, Eq)
 
+data AuthConfig = AuthConfig
+  { enabled :: !Bool
+  , apiKey  :: !(Maybe Text)
+  } deriving stock (Show, Eq)
+
+data RateLimitConfig = RateLimitConfig
+  { rlEnabled           :: !Bool
+  , rlRequestsPerSecond :: !Double
+  , rlBurst             :: !Int
+  } deriving stock (Show, Eq)
+
 data HMemConfig = HMemConfig
   { server   :: !ServerConfig
   , database :: !DatabaseConfig
   , pool     :: !PoolConfig
   , logging  :: !LogConfig
   , cors     :: !CorsConfig
+  , auth     :: !AuthConfig
+  , rateLimit :: !RateLimitConfig
   } deriving stock (Show, Eq)
 
 ------------------------------------------------------------------------
@@ -133,6 +152,29 @@ instance ToJSON CorsConfig where
     [ "allowed_origins" .= cc.allowedOrigins
     ]
 
+instance FromJSON AuthConfig where
+  parseJSON = Aeson.withObject "AuthConfig" $ \o -> AuthConfig
+    <$> o .:? "enabled" .!= False
+    <*> o .:? "api_key"
+
+instance ToJSON AuthConfig where
+  toJSON ac = Aeson.object $
+    [ "enabled" .= ac.enabled ]
+    <> maybe [] (\k -> ["api_key" .= k]) ac.apiKey
+
+instance FromJSON RateLimitConfig where
+  parseJSON = Aeson.withObject "RateLimitConfig" $ \o -> RateLimitConfig
+    <$> o .:? "enabled" .!= False
+    <*> o .:? "requests_per_second" .!= 10.0
+    <*> o .:? "burst" .!= 20
+
+instance ToJSON RateLimitConfig where
+  toJSON rl = Aeson.object
+    [ "enabled" .= rl.rlEnabled
+    , "requests_per_second" .= rl.rlRequestsPerSecond
+    , "burst" .= rl.rlBurst
+    ]
+
 instance FromJSON HMemConfig where
   parseJSON = Aeson.withObject "HMemConfig" $ \o -> HMemConfig
     <$> o .:? "server"   .!= defServer
@@ -140,6 +182,8 @@ instance FromJSON HMemConfig where
     <*> o .:? "pool"     .!= defPool
     <*> o .:? "logging"  .!= defLogging
     <*> o .:? "cors"     .!= defCors
+    <*> o .:? "auth"     .!= defAuth
+    <*> o .:? "rate_limit" .!= defRateLimit
 
 instance ToJSON HMemConfig where
   toJSON cfg = Aeson.object
@@ -148,6 +192,8 @@ instance ToJSON HMemConfig where
     , "pool"     .= cfg.pool
     , "logging"  .= cfg.logging
     , "cors"     .= cfg.cors
+    , "auth"     .= cfg.auth
+    , "rate_limit" .= cfg.rateLimit
     ]
 
 ------------------------------------------------------------------------
@@ -172,6 +218,16 @@ defCorsOrigins = ["http://localhost", "http://127.0.0.1"]
 defCors :: CorsConfig
 defCors = CorsConfig { allowedOrigins = defCorsOrigins }
 
+defAuth :: AuthConfig
+defAuth = AuthConfig { enabled = False, apiKey = Nothing }
+
+defRateLimit :: RateLimitConfig
+defRateLimit = RateLimitConfig
+  { rlEnabled = False
+  , rlRequestsPerSecond = 10.0
+  , rlBurst = 20
+  }
+
 defaultConfig :: HMemConfig
 defaultConfig = HMemConfig
   { server   = defServer
@@ -179,6 +235,8 @@ defaultConfig = HMemConfig
   , pool     = defPool
   , logging  = defLogging
   , cors     = defCors
+  , auth     = defAuth
+  , rateLimit = defRateLimit
   }
 
 ------------------------------------------------------------------------
@@ -217,7 +275,10 @@ loadConfig = do
           pure defaultConfig
         Right c -> pure c
     else pure defaultConfig
-  let (warnings, validated) = validateConfig cfg
+  envPassword <- fmap T.pack <$> lookupEnv "HMEM_DB_PASSWORD"
+  envApiKey   <- fmap T.pack <$> lookupEnv "HMEM_API_KEY"
+  let cfg' = applyEnvOverrides envPassword envApiKey cfg
+      (warnings, validated) = validateConfig cfg'
   mapM_ (\w -> hPutStrLn stderr $ "Config warning: " <> w) warnings
   pure validated
 
@@ -228,6 +289,20 @@ saveConfig cfg = do
   createDirectoryIfMissing True dir
   path <- configFilePath
   Yaml.encodeFile path cfg
+
+-- | Apply environment-driven overrides after loading the file config.
+-- Supports @HMEM_DB_PASSWORD@ and @HMEM_API_KEY@, each taking
+-- precedence over the corresponding value in @config.yaml@ when set.
+applyEnvOverrides :: Maybe Text -> Maybe Text -> HMemConfig -> HMemConfig
+applyEnvOverrides mDbPassword mApiKey cfg =
+  cfg
+    { database = cfg.database
+        { password = mDbPassword <|> cfg.database.password
+        }
+    , auth = cfg.auth
+        { apiKey = mApiKey <|> cfg.auth.apiKey
+        }
+    }
 
 ------------------------------------------------------------------------
 -- Validation
@@ -242,8 +317,10 @@ validateConfig cfg = (warnings, corrected)
     (dbWarns,  db)  = validateDatabase cfg.database
     (plWarns,  pl)  = validatePool cfg.pool
     (lgWarns,  lg)  = validateLog cfg.logging
-    warnings  = srvWarns <> dbWarns <> plWarns <> lgWarns
-    corrected = cfg { server = srv, database = db, pool = pl, logging = lg }
+    (auWarns,  au)  = validateAuth cfg.auth
+    (rlWarns,  rl)  = validateRateLimit cfg.rateLimit
+    warnings  = srvWarns <> dbWarns <> plWarns <> lgWarns <> auWarns <> rlWarns
+    corrected = cfg { server = srv, database = db, pool = pl, logging = lg, auth = au, rateLimit = rl }
 
     validateServer s =
       let (ws, p) = clampField "server.port" 1 65535 s.port
@@ -271,6 +348,22 @@ validateConfig cfg = (warnings, corrected)
       let (ws1, ms) = clampField "logging.max_size_mb" 1 10000 l.maxSizeMB
           (ws2, bc) = clampField "logging.backup_count" 0 100 l.backupCount
       in  (ws1 <> ws2, LogConfig { level = l.level, maxSizeMB = ms, backupCount = bc })
+
+    validateAuth a
+      | a.enabled, Nothing <- a.apiKey =
+          ( ["auth.enabled is true but no auth.api_key or HMEM_API_KEY is configured; disabling auth"]
+          , a { enabled = False }
+          )
+      | otherwise = ([], a)
+
+    validateRateLimit rl =
+      let (ws1, rps) = clampFieldD "rate_limit.requests_per_second" 0.1 10000.0 rl.rlRequestsPerSecond
+          (ws2, burst) = clampField "rate_limit.burst" 1 100000 rl.rlBurst
+      in (ws1 <> ws2, RateLimitConfig
+        { rlEnabled = rl.rlEnabled
+        , rlRequestsPerSecond = rps
+        , rlBurst = burst
+        })
 
     clampField :: String -> Int -> Int -> Int -> ([String], Int)
     clampField name lo hi val

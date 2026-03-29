@@ -138,6 +138,24 @@ spec = around withTestEnv $ do
       ok <- deleteTask env.pool (read "00000000-0000-0000-0000-000000000099")
       ok `shouldBe` False
 
+    it "deletes subtasks when deleting a parent task" $ \env -> do
+      ws <- createTestWorkspace env "task-subdel-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Nested"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      ok <- deleteTask env.pool parent.id
+      ok `shouldBe` True
+
+      getTask env.pool parent.id `shouldReturn` Nothing
+      getTask env.pool child.id `shouldReturn` Nothing
+
   describe "listTasks" $ do
     it "lists tasks for a project ordered by priority" $ \env -> do
       ws <- createTestWorkspace env "tasklist-ws"

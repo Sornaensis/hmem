@@ -13,6 +13,9 @@ author:         hmem contributors
 maintainer:     hmem contributors
 license:        MPL-2.0
 build-type:     Simple
+data-files:
+    migrations/V001__initial_schema.sql
+    migrations/V002__soft_deletes_audit_and_integrity.sql
 
 library
   exposed-modules:

@@ -8,6 +8,7 @@ module HMem.DB.Pool
   ) where
 
 import Control.Exception (Exception, SomeException, throwIO, try)
+import Control.Monad (void)
 import Data.Pool (Pool, newPool, defaultPoolConfig, setNumStripes, withResource)
 import Data.Text.Encoding qualified as TE
 import Data.Text (Text)
@@ -20,6 +21,8 @@ import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
+
+import HMem.DB.RequestContext (currentRequestId)
 
 ------------------------------------------------------------------------
 -- Structured database exceptions
@@ -97,18 +100,19 @@ withConn pool action = withResource pool action
 -- | Run a Hasql Session via a connection pool, throwing a structured
 -- 'DBException' on error.
 runSession :: Pool Hasql.Connection -> Session.Session a -> IO a
-runSession pool sess = withConn pool $ \conn -> do
-  result <- Session.run sess conn
-  case result of
-    Left err -> throwIO (classifyError err)
-    Right a  -> pure a
+runSession = runManagedSession
 
 -- | Run a Hasql 'Session' inside a database transaction (BEGIN/COMMIT/ROLLBACK).
 -- Throws a structured 'DBException' on error.
 runTransaction :: Pool Hasql.Connection -> Session.Session a -> IO a
-runTransaction pool sess = withConn pool $ \conn -> do
+runTransaction = runManagedSession
+
+runManagedSession :: Pool Hasql.Connection -> Session.Session a -> IO a
+runManagedSession pool sess = withConn pool $ \conn -> do
+  mRequestId <- currentRequestId
   let txn = do
         Session.sql "BEGIN"
+        applyRequestIdContext mRequestId
         a <- sess
         Session.sql "COMMIT"
         pure a
@@ -121,6 +125,18 @@ runTransaction pool sess = withConn pool $ \conn -> do
       -- when throwIO propagates out.
       _ <- try @SomeException $ Session.run (Session.sql "ROLLBACK") conn
       throwIO (classifyError err)
+
+applyRequestIdContext :: Maybe Text -> Session.Session ()
+applyRequestIdContext Nothing = pure ()
+applyRequestIdContext (Just requestId) =
+  void $ Session.statement requestId setRequestIdStatement
+
+setRequestIdStatement :: Statement.Statement Text Text
+setRequestIdStatement = Statement.Statement
+  "SELECT set_config('hmem.request_id', $1, true)"
+  (E.param (E.nonNullable E.text))
+  (D.singleRow (D.column (D.nonNullable D.text)))
+  True
 
 -- | Check whether the pgvector extension is installed in the database.
 checkPgvector :: Pool Hasql.Connection -> IO Bool

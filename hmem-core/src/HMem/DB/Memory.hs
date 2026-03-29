@@ -8,6 +8,7 @@ module HMem.DB.Memory
 
     -- * Querying
   , listMemories
+  , listMemoriesWithQuery
   , searchMemories
 
     -- * Tags
@@ -128,6 +129,7 @@ createMemory pool cm = do
                 , memAccessCount    = unsafeDefault
                 , memFtsLanguage    = lit lang
                 , memSearchVector   = unsafeDefault
+                , memDeletedAt      = unsafeDefault
                 , memCreatedAt      = unsafeDefault
                 , memUpdatedAt      = unsafeDefault
                 }
@@ -181,6 +183,7 @@ createMemoryBatch pool cms = do
                 , memAccessCount    = unsafeDefault
                 , memFtsLanguage    = lit (fromMaybe "english" cm.ftsLanguage)
                 , memSearchVector   = unsafeDefault
+                , memDeletedAt      = unsafeDefault
                 , memCreatedAt      = unsafeDefault
                 , memUpdatedAt      = unsafeDefault
                 }
@@ -218,6 +221,7 @@ getMemory pool mid = do
     rs <- Session.statement () $ run $ select $ do
       row <- each memorySchema
       where_ $ row.memId ==. lit mid
+      where_ $ activeMemory row
       pure row
     ts <- case rs of
       [] -> pure []
@@ -253,7 +257,7 @@ updateMemory pool mid um = do
             , memConfidence = maybe row.memConfidence lit um.confidence
             , memPinned     = maybe row.memPinned lit um.pinned
             }
-        , updateWhere = \_ row -> row.memId ==. lit mid
+        , updateWhere = \_ row -> row.memId ==. lit mid &&. activeMemory row
         , returning = Returning id
         }
     ts <- case rs of
@@ -274,14 +278,54 @@ updateMemory pool mid um = do
 
 deleteMemory :: Pool Hasql.Connection -> UUID -> IO Bool
 deleteMemory pool mid = do
-  n <- runSession pool $ Session.statement () $ runN $
-    delete Delete
-      { from = memorySchema
-      , using = pure ()
-      , deleteWhere = \_ row -> row.memId ==. lit mid
-      , returning = NoReturning
-      }
-  pure (n > 0)
+  runTransaction pool $ do
+    n <- Session.statement () $ runN $
+      update Update
+        { target = memorySchema
+        , from = pure ()
+        , set = \_ row -> row { memDeletedAt = deletedNow }
+        , updateWhere = \_ row -> row.memId ==. lit mid &&. activeMemory row
+        , returning = NoReturning
+        }
+    if n == 0
+      then pure False
+      else do
+        Session.statement () $ run_ $
+          delete Delete
+            { from = memoryLinkSchema
+            , using = pure ()
+            , deleteWhere = \_ row -> row.mlSourceId ==. lit mid ||. row.mlTargetId ==. lit mid
+            , returning = NoReturning
+            }
+        Session.statement () $ run_ $
+          delete Delete
+            { from = memoryTagSchema
+            , using = pure ()
+            , deleteWhere = \_ row -> row.mtMemoryId ==. lit mid
+            , returning = NoReturning
+            }
+        Session.statement () $ run_ $
+          delete Delete
+            { from = memoryCategoryLinkSchema
+            , using = pure ()
+            , deleteWhere = \_ row -> row.mclMemoryId ==. lit mid
+            , returning = NoReturning
+            }
+        Session.statement () $ run_ $
+          delete Delete
+            { from = projectMemoryLinkSchema
+            , using = pure ()
+            , deleteWhere = \_ row -> row.pmlMemoryId ==. lit mid
+            , returning = NoReturning
+            }
+        Session.statement () $ run_ $
+          delete Delete
+            { from = taskMemoryLinkSchema
+            , using = pure ()
+            , deleteWhere = \_ row -> row.tmlMemoryId ==. lit mid
+            , returning = NoReturning
+            }
+        pure True
 
 ------------------------------------------------------------------------
 -- List
@@ -294,20 +338,46 @@ listMemories
   -> Maybe Int      -- ^ limit
   -> Maybe Int      -- ^ offset
   -> IO [Memory]
-listMemories pool mWsId mtype mlimit moffset = do
-  let lim = fromMaybe 50 mlimit
-      off = fromMaybe 0  moffset
+listMemories pool mWsId mtype mlimit moffset =
+  listMemoriesWithQuery pool MemoryListQuery
+    { workspaceId = mWsId
+    , memoryType = mtype
+    , createdAfter = Nothing
+    , createdBefore = Nothing
+    , updatedAfter = Nothing
+    , updatedBefore = Nothing
+    , limit = mlimit
+    , offset = moffset
+    }
+
+listMemoriesWithQuery :: Pool Hasql.Connection -> MemoryListQuery -> IO [Memory]
+listMemoriesWithQuery pool mq = do
+  let lim = fromMaybe 50 mq.limit
+      off = fromMaybe 0  mq.offset
   runSession pool $ do
     rows <- Session.statement () $ run $ select $
       limit (fromIntegral lim) $ offset (fromIntegral off) $
       orderBy ((\row -> row.memCreatedAt) >$< desc) $ do
         row <- each memorySchema
-        case mWsId of
+        where_ $ activeMemory row
+        case mq.workspaceId of
           Just wsId -> where_ $ row.memWorkspaceId ==. lit wsId
           Nothing   -> pure ()
-        case mtype of
+        case mq.memoryType of
           Nothing -> pure ()
           Just t  -> where_ $ row.memMemoryType ==. lit t
+        case mq.createdAfter of
+          Just createdAfter -> where_ $ row.memCreatedAt >=. lit createdAfter
+          Nothing -> pure ()
+        case mq.createdBefore of
+          Just createdBefore -> where_ $ row.memCreatedAt <=. lit createdBefore
+          Nothing -> pure ()
+        case mq.updatedAfter of
+          Just updatedAfter -> where_ $ row.memUpdatedAt >=. lit updatedAfter
+          Nothing -> pure ()
+        case mq.updatedBefore of
+          Just updatedBefore -> where_ $ row.memUpdatedAt <=. lit updatedBefore
+          Nothing -> pure ()
         pure row
     enrichRowsS rows
 
@@ -324,6 +394,7 @@ searchMemories pool sq = do
       off = fromMaybe 0  (sq.offset)
       imp = maybe 1 fromIntegral (sq.minImportance) :: Int16
       applyFilters row = do
+        where_ $ activeMemory row
         case sq.workspaceId of
           Just wsId -> where_ $ row.memWorkspaceId ==. lit wsId
           Nothing   -> pure ()
@@ -340,8 +411,11 @@ searchMemories pool sq = do
         case sq.categoryId of
           Just catId -> present $ do
             catLink <- each memoryCategoryLinkSchema
+            cat <- each memoryCategorySchema
             where_ $ catLink.mclMemoryId ==. row.memId
             where_ $ catLink.mclCategoryId ==. lit catId
+            where_ $ cat.mcId ==. catLink.mclCategoryId
+            where_ $ activeCategory cat
           Nothing -> pure ()
         case sq.pinnedOnly of
           Just True -> where_ $ row.memPinned ==. lit True
@@ -407,6 +481,10 @@ fetchTags pool mid = do
   runSession pool $ Session.statement () $ run $ select $
     orderBy (Prelude.id >$< asc) $ do
       row <- each memoryTagSchema
+      present $ do
+        mem <- each memorySchema
+        where_ $ mem.memId ==. row.mtMemoryId
+        where_ $ activeMemory mem
       where_ $ row.mtMemoryId ==. lit mid
       pure row.mtTag
 
@@ -443,6 +521,14 @@ getMemoryLinks pool mid = do
   rows <- runSession pool $ Session.statement () $ run $ select $
     orderBy ((\row -> row.mlCreatedAt) >$< desc) $ do
       row <- each memoryLinkSchema
+      present $ do
+        src <- each memorySchema
+        where_ $ src.memId ==. row.mlSourceId
+        where_ $ activeMemory src
+      present $ do
+        tgt <- each memorySchema
+        where_ $ tgt.memId ==. row.mlTargetId
+        where_ $ activeMemory tgt
       where_ $ row.mlSourceId ==. lit mid ||. row.mlTargetId ==. lit mid
       pure row
   pure $ map linkRowToMemoryLink rows
@@ -484,7 +570,7 @@ touchMemory pool mid =
           { memLastAccessedAt = function "now" ()
           , memAccessCount    = row.memAccessCount + lit 1
           }
-      , updateWhere = \_ row -> row.memId ==. lit mid
+      , updateWhere = \_ row -> row.memId ==. lit mid &&. activeMemory row
       , returning = NoReturning
       }
 
@@ -506,7 +592,7 @@ touchMemoryBatchStmt = Statement.Statement sql encoder Dec.noResult True
           \last_accessed_at = now(), \
           \access_count = memories.access_count + data.cnt \
           \FROM unnest($1::uuid[], $2::int4[]) AS data(id, cnt) \
-          \WHERE memories.id = data.id"
+          \WHERE memories.id = data.id AND memories.deleted_at IS NULL"
     encoder =
       contramap fst (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid))))
       <> contramap snd (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.int4))))
@@ -545,7 +631,7 @@ adjustImportance pool mid newImp = do
         { target = memorySchema
         , from = pure ()
         , set = \_ row -> row { memImportance = lit imp }
-        , updateWhere = \_ row -> row.memId ==. lit mid
+        , updateWhere = \_ row -> row.memId ==. lit mid &&. activeMemory row
         , returning = Returning id
         }
     ts <- case rs of
@@ -586,14 +672,22 @@ graphCTEStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
       [ "WITH RECURSIVE reachable(id, depth, path) AS ("
-      , "  SELECT $1::uuid, 0, ARRAY[$1::uuid]"
+      , "  SELECT m.id, 0, ARRAY[m.id]"
+      , "  FROM memories m"
+      , "  WHERE m.id = $1 AND m.deleted_at IS NULL"
       , "  UNION ALL"
       , "  SELECT sub.next_id, r.depth + 1, r.path || sub.next_id"
       , "  FROM reachable r"
       , "  CROSS JOIN LATERAL ("
-      , "    SELECT ml.target_id AS next_id FROM memory_links ml WHERE ml.source_id = r.id"
+      , "    SELECT ml.target_id AS next_id"
+      , "    FROM memory_links ml"
+      , "    JOIN memories tgt ON tgt.id = ml.target_id AND tgt.deleted_at IS NULL"
+      , "    WHERE ml.source_id = r.id"
       , "    UNION ALL"
-      , "    SELECT ml.source_id AS next_id FROM memory_links ml WHERE ml.target_id = r.id"
+      , "    SELECT ml.source_id AS next_id"
+      , "    FROM memory_links ml"
+      , "    JOIN memories src ON src.id = ml.source_id AND src.deleted_at IS NULL"
+      , "    WHERE ml.target_id = r.id"
       , "  ) sub"
       , "  WHERE r.depth < $2"
       , "    AND NOT (sub.next_id = ANY(r.path))"
@@ -601,12 +695,16 @@ graphCTEStatement = Statement.Statement sql encoder decoder True
       , "reachable_ids AS (SELECT DISTINCT id FROM reachable)"
       , "SELECT source_id, target_id, relation_type::text,"
       , "       strength::float8, created_at"
-      , "FROM memory_links"
+      , "FROM memory_links ml"
+      , "JOIN memories src ON src.id = ml.source_id AND src.deleted_at IS NULL"
+      , "JOIN memories tgt ON tgt.id = ml.target_id AND tgt.deleted_at IS NULL"
       , "WHERE source_id IN (SELECT id FROM reachable_ids)"
       , "UNION"
       , "SELECT source_id, target_id, relation_type::text,"
       , "       strength::float8, created_at"
-      , "FROM memory_links"
+      , "FROM memory_links ml"
+      , "JOIN memories src ON src.id = ml.source_id AND src.deleted_at IS NULL"
+      , "JOIN memories tgt ON tgt.id = ml.target_id AND tgt.deleted_at IS NULL"
       , "WHERE target_id IN (SELECT id FROM reachable_ids)"
       ]
     encoder =
@@ -639,6 +737,7 @@ fetchMemoriesByIds pool ids =
     rows <- Session.statement () $ run $ select $ do
       row <- each memorySchema
       where_ $ in_ row.memId (map lit ids)
+      where_ $ activeMemory row
       pure row
     enrichRowsS rows
 
@@ -647,11 +746,20 @@ findByRelation :: Pool Hasql.Connection -> UUID -> RelationType -> IO [MemoryLin
 findByRelation pool wsId relType = do
   rows <- runSession pool $ Session.statement () $ run $ select $ do
     link <- each memoryLinkSchema
+    present $ do
+      src <- each memorySchema
+      where_ $ src.memId ==. link.mlSourceId
+      where_ $ activeMemory src
+    present $ do
+      tgt <- each memorySchema
+      where_ $ tgt.memId ==. link.mlTargetId
+      where_ $ activeMemory tgt
     where_ $ link.mlRelationType ==. lit relType
     -- Match links where at least one endpoint is in the workspace
     present $ do
       mem <- each memorySchema
       where_ $ mem.memWorkspaceId ==. lit wsId
+      where_ $ activeMemory mem
       where_ $ mem.memId ==. link.mlSourceId ||. mem.memId ==. link.mlTargetId
     pure link
   pure $ map linkRowToMemoryLink rows
@@ -665,10 +773,15 @@ getProjectMemories :: Pool Hasql.Connection -> UUID -> IO [Memory]
 getProjectMemories pool projId =
   runSession pool $ do
     rows <- Session.statement () $ run $ select $ limit 200 $ do
+      present $ do
+        proj <- each projectSchema
+        where_ $ proj.projId ==. lit projId
+        where_ $ activeProject proj
       pml <- each projectMemoryLinkSchema
       where_ $ pml.pmlProjectId ==. lit projId
       mem <- each memorySchema
       where_ $ mem.memId ==. pml.pmlMemoryId
+      where_ $ activeMemory mem
       pure mem
     enrichRowsS rows
 
@@ -677,10 +790,15 @@ getTaskMemories :: Pool Hasql.Connection -> UUID -> IO [Memory]
 getTaskMemories pool taskId =
   runSession pool $ do
     rows <- Session.statement () $ run $ select $ limit 200 $ do
+      present $ do
+        task <- each taskSchema
+        where_ $ task.taskId ==. lit taskId
+        where_ $ activeTask task
       tml <- each taskMemoryLinkSchema
       where_ $ tml.tmlTaskId ==. lit taskId
       mem <- each memorySchema
       where_ $ mem.memId ==. tml.tmlMemoryId
+      where_ $ activeMemory mem
       pure mem
     enrichRowsS rows
 
@@ -697,7 +815,7 @@ togglePin pool mid pinVal = do
         { target = memorySchema
         , from = pure ()
         , set = \_ row -> row { memPinned = lit pinVal }
-        , updateWhere = \_ row -> row.memId ==. lit mid
+        , updateWhere = \_ row -> row.memId ==. lit mid &&. activeMemory row
         , returning = Returning Prelude.id
         }
     ts <- case rs of
@@ -744,6 +862,7 @@ activityUnionStatement = Statement.Statement sql encoder decoder True
       , "    m.updated_at AS ts"
       , "  FROM memories m"
       , "  WHERE ($1::uuid IS NULL OR m.workspace_id = $1)"
+      , "    AND m.deleted_at IS NULL"
       , "  UNION ALL"
       , "  SELECT"
       , "    CASE WHEN p.created_at = p.updated_at THEN 'created' ELSE 'updated' END,"
@@ -754,6 +873,7 @@ activityUnionStatement = Statement.Statement sql encoder decoder True
       , "    p.updated_at"
       , "  FROM projects p"
       , "  WHERE ($1::uuid IS NULL OR p.workspace_id = $1)"
+      , "    AND p.deleted_at IS NULL"
       , "  UNION ALL"
       , "  SELECT"
       , "    CASE WHEN t.created_at = t.updated_at THEN 'created' ELSE 'updated' END,"
@@ -764,6 +884,7 @@ activityUnionStatement = Statement.Statement sql encoder decoder True
       , "    t.updated_at"
       , "  FROM tasks t"
       , "  WHERE ($1::uuid IS NULL OR t.workspace_id = $1)"
+      , "    AND t.deleted_at IS NULL"
       , ") sub"
       , "ORDER BY ts DESC"
       , "LIMIT $2"
@@ -792,7 +913,7 @@ setEmbedding pool mid vec =
 setEmbeddingStatement :: Statement.Statement (UUID, Text) ()
 setEmbeddingStatement = Statement.Statement sql encoder decoder True
   where
-    sql = "UPDATE memories SET embedding = $2::vector WHERE id = $1"
+    sql = "UPDATE memories SET embedding = $2::vector WHERE id = $1 AND deleted_at IS NULL"
     encoder =
       contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
       contramap snd (Enc.param (Enc.nonNullable Enc.text))
@@ -851,6 +972,7 @@ similarStatement = Statement.Statement sql encoder decoder True
       , "       1 - (m.embedding <=> $1::vector) AS similarity"
       , "FROM memories m"
       , "WHERE m.workspace_id = $2"
+      , "  AND m.deleted_at IS NULL"
       , "  AND m.embedding IS NOT NULL"
       , "  AND 1 - (m.embedding <=> $1::vector) >= $3"
       , "ORDER BY m.embedding <=> $1::vector"

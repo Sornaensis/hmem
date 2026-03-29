@@ -10,6 +10,7 @@ module HMem.Types
   , CreateMemory(..)
   , UpdateMemory(..)
   , SearchQuery(..)
+  , MemoryListQuery(..)
   , MemoryLink(..)
   , CreateMemoryLink(..)
 
@@ -28,12 +29,14 @@ module HMem.Types
   , Project(..)
   , CreateProject(..)
   , UpdateProject(..)
+  , ProjectListQuery(..)
 
     -- * Task types
   , TaskStatus(..)
   , Task(..)
   , CreateTask(..)
   , UpdateTask(..)
+  , TaskListQuery(..)
 
     -- * Cleanup types
   , CleanupPolicy(..)
@@ -83,15 +86,38 @@ module HMem.Types
   , parseFieldUpdate
   , fieldUpdatePair
   , applyNullableUpdate
+
+    -- * Input validation
+  , maxMemoryContentBytes
+  , maxMemorySummaryBytes
+  , maxNameBytes
+  , maxDescriptionBytes
+  , validateCreateWorkspaceInput
+  , validateUpdateWorkspaceInput
+  , validateCreateMemoryInput
+  , validateUpdateMemoryInput
+  , validateCreateMemoryBatchInput
+  , validateMemoryListQuery
+  , validateCreateProjectInput
+  , validateUpdateProjectInput
+  , validateProjectListQuery
+  , validateCreateTaskInput
+  , validateUpdateTaskInput
+  , validateTaskListQuery
+  , validateCreateMemoryCategoryInput
+  , validateUpdateMemoryCategoryInput
+  , validateCreateWorkspaceGroupInput
   ) where
 
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, Pair)
+import Data.ByteString qualified as BS
 import Data.Char (isLower, isUpper, toLower)
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import GHC.Generics (Generic)
@@ -159,6 +185,136 @@ applyNullableUpdate :: Sql DBType (Maybe a) => Expr (Maybe a) -> FieldUpdate a -
 applyNullableUpdate old Unchanged   = old
 applyNullableUpdate _   SetNull     = lit Nothing
 applyNullableUpdate _   (SetTo val) = lit (Just val)
+
+------------------------------------------------------------------------
+-- Input validation
+------------------------------------------------------------------------
+
+maxMemoryContentBytes :: Int
+maxMemoryContentBytes = 512 * 1024
+
+maxMemorySummaryBytes :: Int
+maxMemorySummaryBytes = 10 * 1024
+
+maxNameBytes :: Int
+maxNameBytes = 1024
+
+maxDescriptionBytes :: Int
+maxDescriptionBytes = 100 * 1024
+
+validateCreateWorkspaceInput :: CreateWorkspace -> [Text]
+validateCreateWorkspaceInput cw =
+  validateRequiredText "name" maxNameBytes cw.name
+
+validateUpdateWorkspaceInput :: UpdateWorkspace -> [Text]
+validateUpdateWorkspaceInput uw =
+  maybe [] (validateRequiredText "name" maxNameBytes) uw.name
+
+validateCreateMemoryInput :: CreateMemory -> [Text]
+validateCreateMemoryInput cm =
+  validateRequiredText "content" maxMemoryContentBytes cm.content
+  <> validateOptionalText "summary" maxMemorySummaryBytes cm.summary
+
+validateUpdateMemoryInput :: UpdateMemory -> [Text]
+validateUpdateMemoryInput um =
+  maybe [] (validateRequiredText "content" maxMemoryContentBytes) um.content
+  <> validateOptionalFieldText "summary" maxMemorySummaryBytes um.summary
+
+validateCreateMemoryBatchInput :: [CreateMemory] -> [Text]
+validateCreateMemoryBatchInput cms =
+  ["memories must contain at least one item" | null cms]
+  <> ["memories must contain at most 100 items" | length cms > 100]
+  <> concat
+      [ prefixIssues ("memories[" <> T.pack (show idx) <> "].") (validateCreateMemoryInput cm)
+      | (idx, cm) <- zip [(0 :: Int) ..] cms
+      ]
+
+validateMemoryListQuery :: MemoryListQuery -> [Text]
+validateMemoryListQuery mq =
+  validateTimeRange "created_after" mq.createdAfter "created_before" mq.createdBefore
+  <> validateTimeRange "updated_after" mq.updatedAfter "updated_before" mq.updatedBefore
+
+validateCreateProjectInput :: CreateProject -> [Text]
+validateCreateProjectInput cp =
+  validateRequiredText "name" maxNameBytes cp.name
+  <> validateOptionalText "description" maxDescriptionBytes cp.description
+
+validateUpdateProjectInput :: UpdateProject -> [Text]
+validateUpdateProjectInput up =
+  maybe [] (validateRequiredText "name" maxNameBytes) up.name
+  <> validateOptionalFieldText "description" maxDescriptionBytes up.description
+
+validateProjectListQuery :: ProjectListQuery -> [Text]
+validateProjectListQuery pq =
+  validateTimeRange "created_after" pq.createdAfter "created_before" pq.createdBefore
+  <> validateTimeRange "updated_after" pq.updatedAfter "updated_before" pq.updatedBefore
+
+validateCreateTaskInput :: CreateTask -> [Text]
+validateCreateTaskInput ct =
+  validateRequiredText "title" maxNameBytes ct.title
+  <> validateOptionalText "description" maxDescriptionBytes ct.description
+
+validateUpdateTaskInput :: UpdateTask -> [Text]
+validateUpdateTaskInput ut =
+  maybe [] (validateRequiredText "title" maxNameBytes) ut.title
+  <> validateOptionalFieldText "description" maxDescriptionBytes ut.description
+
+validateTaskListQuery :: TaskListQuery -> [Text]
+validateTaskListQuery tq =
+  ["workspace_id or project_id is required" | tq.workspaceId == Nothing && tq.projectId == Nothing]
+  <> validateOptionalIntRange "priority" 1 10 tq.priority
+  <> validateTimeRange "created_after" tq.createdAfter "created_before" tq.createdBefore
+  <> validateTimeRange "updated_after" tq.updatedAfter "updated_before" tq.updatedBefore
+
+validateCreateMemoryCategoryInput :: CreateMemoryCategory -> [Text]
+validateCreateMemoryCategoryInput cc =
+  validateRequiredText "name" maxNameBytes cc.name
+
+validateUpdateMemoryCategoryInput :: UpdateMemoryCategory -> [Text]
+validateUpdateMemoryCategoryInput uc =
+  maybe [] (validateRequiredText "name" maxNameBytes) uc.name
+
+validateCreateWorkspaceGroupInput :: CreateWorkspaceGroup -> [Text]
+validateCreateWorkspaceGroupInput cg =
+  validateRequiredText "name" maxNameBytes cg.name
+
+validateRequiredText :: Text -> Int -> Text -> [Text]
+validateRequiredText field maxBytes value =
+  [field <> " must not be empty" | T.null (T.strip value)]
+  <> validateByteLength field maxBytes value
+
+validateOptionalText :: Text -> Int -> Maybe Text -> [Text]
+validateOptionalText field maxBytes = maybe [] (validateByteLength field maxBytes)
+
+validateOptionalFieldText :: Text -> Int -> FieldUpdate Text -> [Text]
+validateOptionalFieldText _ _ Unchanged = []
+validateOptionalFieldText _ _ SetNull = []
+validateOptionalFieldText field maxBytes (SetTo value) = validateByteLength field maxBytes value
+
+validateOptionalIntRange :: Text -> Int -> Int -> Maybe Int -> [Text]
+validateOptionalIntRange _ _ _ Nothing = []
+validateOptionalIntRange field lo hi (Just value)
+  | value < lo || value > hi = [field <> " must be between " <> T.pack (show lo) <> " and " <> T.pack (show hi)]
+  | otherwise = []
+
+validateByteLength :: Text -> Int -> Text -> [Text]
+validateByteLength field maxBytes value =
+  [ field <> " exceeds " <> T.pack (show maxBytes) <> " bytes"
+  | textSizeBytes value > maxBytes
+  ]
+
+validateTimeRange :: Text -> Maybe UTCTime -> Text -> Maybe UTCTime -> [Text]
+validateTimeRange _ Nothing _ _ = []
+validateTimeRange _ _ _ Nothing = []
+validateTimeRange startField (Just startTime) endField (Just endTime)
+  | startTime <= endTime = []
+  | otherwise = [startField <> " must be earlier than or equal to " <> endField]
+
+textSizeBytes :: Text -> Int
+textSizeBytes = BS.length . TE.encodeUtf8
+
+prefixIssues :: Text -> [Text] -> [Text]
+prefixIssues prefix = map (prefix <>)
 
 ------------------------------------------------------------------------
 -- MemoryType
@@ -568,6 +724,56 @@ data SearchQuery = SearchQuery
 instance ToJSON SearchQuery where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON SearchQuery where
+  parseJSON  = genericParseJSON jsonOptions
+
+data MemoryListQuery = MemoryListQuery
+  { workspaceId   :: Maybe UUID
+  , memoryType    :: Maybe MemoryType
+  , createdAfter  :: Maybe UTCTime
+  , createdBefore :: Maybe UTCTime
+  , updatedAfter  :: Maybe UTCTime
+  , updatedBefore :: Maybe UTCTime
+  , limit         :: Maybe Int
+  , offset        :: Maybe Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON MemoryListQuery where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON MemoryListQuery where
+  parseJSON  = genericParseJSON jsonOptions
+
+data ProjectListQuery = ProjectListQuery
+  { workspaceId   :: UUID
+  , status        :: Maybe ProjectStatus
+  , createdAfter  :: Maybe UTCTime
+  , createdBefore :: Maybe UTCTime
+  , updatedAfter  :: Maybe UTCTime
+  , updatedBefore :: Maybe UTCTime
+  , limit         :: Maybe Int
+  , offset        :: Maybe Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ProjectListQuery where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON ProjectListQuery where
+  parseJSON  = genericParseJSON jsonOptions
+
+data TaskListQuery = TaskListQuery
+  { workspaceId   :: Maybe UUID
+  , projectId     :: Maybe UUID
+  , status        :: Maybe TaskStatus
+  , priority      :: Maybe Int
+  , createdAfter  :: Maybe UTCTime
+  , createdBefore :: Maybe UTCTime
+  , updatedAfter  :: Maybe UTCTime
+  , updatedBefore :: Maybe UTCTime
+  , limit         :: Maybe Int
+  , offset        :: Maybe Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TaskListQuery where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON TaskListQuery where
   parseJSON  = genericParseJSON jsonOptions
 
 ------------------------------------------------------------------------

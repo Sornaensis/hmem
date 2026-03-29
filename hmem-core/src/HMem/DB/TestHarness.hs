@@ -1,19 +1,23 @@
 module HMem.DB.TestHarness
   ( -- * Test environment
     TestEnv(..)
+  , AuditLogRow(..)
   , withTestEnv
     -- * Ephemeral PostgreSQL
   , withEphemeralPg
     -- * DB utilities
   , cleanDB
   , ensureSchema
+  , getAuditLogRows
     -- * Fixture helpers
   , createTestWorkspace
   ) where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, bracket, try)
+import Data.Aeson (Value)
 import Data.ByteString qualified as BS
+import Data.Functor.Contravariant (contramap)
 import Data.List (sort)
 import Data.Pool (Pool)
 import Data.Text (Text)
@@ -33,7 +37,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Rel8
 
-import HMem.DB.Pool (createPool, withConn)
+import HMem.DB.Pool (createPool, runSession, withConn)
 import HMem.DB.Schema
 import HMem.Types
 
@@ -41,6 +45,15 @@ import HMem.Types
 data TestEnv = TestEnv
   { pool :: Pool Hasql.Connection
   }
+
+data AuditLogRow = AuditLogRow
+  { entityType :: Text
+  , entityId :: Text
+  , action :: Text
+  , requestId :: Maybe Text
+  , oldValues :: Maybe Value
+  , newValues :: Maybe Value
+  } deriving stock (Show, Eq)
 
 -- | Default connection string when HMEM_TEST_DB is not set.
 defaultTestConnStr :: Text
@@ -75,15 +88,16 @@ withTestEnv action = do
   action env
 
 -- | Check whether the schema has been applied and apply it if not.
--- Looks for @sql/migrations/@ relative to the working directory.
+-- Looks for @hmem-server/migrations/@ relative to the working directory.
 ensureSchema :: TestEnv -> IO ()
 ensureSchema env = withConn env.pool $ \conn -> do
-  let checkStmt = Statement.Statement
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
-        \WHERE table_schema = 'public' AND table_name = 'workspaces')"
-        E.noParams
-        (D.singleRow (D.column (D.nonNullable D.bool)))
-        True
+  let checkStmt =
+        Statement.Statement
+          "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'workspaces') \
+          \AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'audit_log')"
+          E.noParams
+          (D.singleRow (D.column (D.nonNullable D.bool)))
+          True
   result <- Session.run (Session.statement () checkStmt) conn
   case result of
     Right True -> pure ()  -- schema already applied
@@ -104,20 +118,20 @@ applyMigrations conn = do
         Left err -> fail $ "Failed to apply migration " <> f <> ": " <> show err
         Right _  -> pure ()
 
--- | Search a few candidate paths for @sql/migrations/@.
+-- | Search a few candidate paths for @hmem-server/migrations/@.
 findMigrationsDir :: IO FilePath
 findMigrationsDir = do
   let candidates =
-        [ "sql/migrations"
-        , "../sql/migrations"
-        , "../../sql/migrations"
+        [ "hmem-server/migrations"
+        , "../hmem-server/migrations"
+        , "../../hmem-server/migrations"
         ]
   found <- mapM (\p -> (,) <$> doesDirectoryExist p <*> pure p) candidates
   case [p | (True, p) <- found] of
     (p:_) -> pure p
     []    -> do
       cwd <- getCurrentDirectory
-      fail $ "Could not find sql/migrations/ (cwd: " <> cwd <> ")"
+      fail $ "Could not find hmem-server/migrations/ (cwd: " <> cwd <> ")"
 
 -- | Truncate all tables in dependency order, resetting the database
 -- to a clean state between tests.
@@ -125,6 +139,7 @@ cleanDB :: TestEnv -> IO ()
 cleanDB env = withConn env.pool $ \conn -> do
   let stmt = Statement.Statement sql E.noParams D.noResult True
       sql = "TRUNCATE \
+            \  audit_log, \
             \  workspace_group_members, \
             \  workspace_groups, \
             \  task_memory_links, \
@@ -145,6 +160,28 @@ cleanDB env = withConn env.pool $ \conn -> do
     Left err -> fail $ "Failed to clean test DB: " <> show err
     Right _  -> pure ()
 
+getAuditLogRows :: Pool Hasql.Connection -> Text -> Text -> IO [AuditLogRow]
+getAuditLogRows pool entityType entityId =
+  runSession pool $ Session.statement (entityType, entityId) auditLogRowsStatement
+
+auditLogRowsStatement :: Statement.Statement (Text, Text) [AuditLogRow]
+auditLogRowsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT entity_type, entity_id, action::text, request_id, old_values, new_values \
+          \FROM audit_log \
+          \WHERE entity_type = $1 AND entity_id = $2 \
+          \ORDER BY changed_at ASC, id ASC"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.text)) <>
+      contramap snd (E.param (E.nonNullable E.text))
+    decoder = D.rowList $ AuditLogRow
+      <$> D.column (D.nonNullable D.text)
+      <*> D.column (D.nonNullable D.text)
+      <*> D.column (D.nonNullable D.text)
+      <*> D.column (D.nullable D.text)
+      <*> D.column (D.nullable D.jsonb)
+      <*> D.column (D.nullable D.jsonb)
+
 -- | Insert a workspace with just a name and return its domain type.
 -- Useful as a test fixture since most entities require a workspace.
 createTestWorkspace :: TestEnv -> Text -> IO Workspace
@@ -160,6 +197,7 @@ createTestWorkspace env wsName = withConn env.pool $ \conn -> do
                   , wsGhOwner   = lit (Nothing :: Maybe Text)
                   , wsGhRepo    = lit (Nothing :: Maybe Text)
                   , wsType      = lit WsRepository
+                  , wsDeletedAt = unsafeDefault
                   , wsCreatedAt = unsafeDefault
                   , wsUpdatedAt = unsafeDefault
                   }

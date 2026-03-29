@@ -3,8 +3,12 @@
 module HMem.MCP.ToolsSpec (spec) where
 
 import Data.Aeson
+import Data.Aeson.Key (Key)
+import Data.Aeson.KeyMap qualified as KM
 import Data.Either (isLeft, isRight)
+import Data.Scientific (Scientific)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.UUID qualified as UUID
 import Test.Hspec
 
@@ -86,6 +90,12 @@ spec = do
         Right (MemoryDelete mid) -> mid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected MemoryDelete, got: " <> show other
 
+    it "parses memory_purge" $ do
+      let args = object [ "memory_id" .= testUUID ]
+      case parseToolCall "memory_purge" args of
+        Right (MemoryPurge mid) -> mid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected MemoryPurge, got: " <> show other
+
     it "parses memory_update" $ do
       let args = object
             [ "memory_id" .= testUUID
@@ -115,6 +125,19 @@ spec = do
           sq.limit `shouldBe` Just 10
           sq.offset `shouldBe` Just 5
         other -> expectationFailure $ "Expected MemorySearch, got: " <> show other
+
+    it "parses memory_list with date filters" $ do
+      let args = object
+            [ "workspace_id" .= testUUID
+            , "memory_type" .= ("long_term" :: Text)
+            , "created_after" .= ("2026-03-30T10:00:00Z" :: Text)
+            ]
+      case parseToolCall "memory_list" args of
+        Right (MemoryList mq) -> do
+          mq.workspaceId `shouldBe` Just parsedUUID
+          mq.memoryType `shouldBe` Just LongTerm
+          mq.createdAfter `shouldBe` Just (read "2026-03-30 10:00:00 UTC")
+        other -> expectationFailure $ "Expected MemoryList, got: " <> show other
 
     it "parses memory_link" $ do
       let args = object
@@ -246,6 +269,27 @@ spec = do
             }
       validateToolCall (MemoryCreateBatch (replicate 100 cm)) `shouldSatisfy` isRight
 
+    it "rejects batch items with empty content" $ do
+      let cm = CreateMemory
+            { workspaceId = parsedUUID, content = "   ", summary = Nothing
+            , memoryType = ShortTerm, importance = Nothing
+            , metadata = Nothing, expiresAt = Nothing, source = Nothing
+            , confidence = Nothing, pinned = Nothing, tags = Nothing
+            , ftsLanguage = Nothing
+            }
+      validateToolCall (MemoryCreateBatch [cm]) `shouldSatisfy` isLeft
+
+    it "rejects oversized project descriptions" $ do
+      let cp = CreateProject
+            { workspaceId = parsedUUID
+            , parentId = Nothing
+            , name = "project"
+            , description = Just (T.replicate (maxDescriptionBytes + 1) "a")
+            , priority = Nothing
+            , metadata = Nothing
+            }
+      validateToolCall (ProjectCreate cp) `shouldSatisfy` isLeft
+
     it "clamps memory_adjust_importance to 1-10" $ do
       case validateToolCall (MemoryAdjustImp parsedUUID 50) of
         Right (MemoryAdjustImp _ imp) -> imp `shouldBe` 10
@@ -270,14 +314,37 @@ spec = do
       validateToolCall (MemorySetEmbedding parsedUUID [0.1, 0.2, 0.3]) `shouldSatisfy` isRight
 
     it "rejects task_list with neither workspace_id nor project_id" $ do
-      validateToolCall (TaskList Nothing Nothing Nothing Nothing Nothing) `shouldSatisfy` isLeft
+      validateToolCall (TaskList TaskListQuery
+        { workspaceId = Nothing
+        , projectId = Nothing
+        , status = Nothing
+        , priority = Nothing
+        , createdAfter = Nothing
+        , createdBefore = Nothing
+        , updatedAfter = Nothing
+        , updatedBefore = Nothing
+        , limit = Nothing
+        , offset = Nothing
+        }) `shouldSatisfy` isLeft
 
     it "accepts task_list with workspace_id" $ do
-      validateToolCall (TaskList (Just parsedUUID) Nothing Nothing Nothing Nothing) `shouldSatisfy` isRight
+      validateToolCall (TaskList TaskListQuery
+        { workspaceId = Just parsedUUID
+        , projectId = Nothing
+        , status = Nothing
+        , priority = Nothing
+        , createdAfter = Nothing
+        , createdBefore = Nothing
+        , updatedAfter = Nothing
+        , updatedBefore = Nothing
+        , limit = Nothing
+        , offset = Nothing
+        }) `shouldSatisfy` isRight
 
     it "passes through simple tool calls unchanged" $ do
       validateToolCall (MemoryGet parsedUUID) `shouldBe` Right (MemoryGet parsedUUID)
       validateToolCall (MemoryDelete parsedUUID) `shouldBe` Right (MemoryDelete parsedUUID)
+      validateToolCall (MemoryPurge parsedUUID) `shouldBe` Right (MemoryPurge parsedUUID)
 
   describe "parseToolCall (project tools)" $ do
 
@@ -313,17 +380,25 @@ spec = do
         Right (ProjectDelete pid) -> pid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected ProjectDelete, got: " <> show other
 
+    it "parses project_purge" $ do
+      let args = object [ "project_id" .= testUUID ]
+      case parseToolCall "project_purge" args of
+        Right (ProjectPurge pid) -> pid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected ProjectPurge, got: " <> show other
+
     it "parses project_list with status filter" $ do
       let args = object
             [ "workspace_id" .= testUUID
             , "status"       .= ("active" :: Text)
             , "limit"        .= (10 :: Int)
+            , "updated_before" .= ("2026-03-30T12:00:00Z" :: Text)
             ]
       case parseToolCall "project_list" args of
-        Right (ProjectList wid mst ml _mo) -> do
-          wid `shouldBe` parsedUUID
-          mst `shouldBe` Just ProjActive
-          ml `shouldBe` Just 10
+        Right (ProjectList pq) -> do
+          pq.workspaceId `shouldBe` parsedUUID
+          pq.status `shouldBe` Just ProjActive
+          pq.limit `shouldBe` Just 10
+          pq.updatedBefore `shouldBe` Just (read "2026-03-30 12:00:00 UTC")
         other -> expectationFailure $ "Expected ProjectList, got: " <> show other
 
     it "parses project_link_memory and project_unlink_memory" $ do
@@ -379,17 +454,25 @@ spec = do
         Right (TaskDelete tid) -> tid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected TaskDelete, got: " <> show other
 
+    it "parses task_purge" $ do
+      let args = object [ "task_id" .= testUUID ]
+      case parseToolCall "task_purge" args of
+        Right (TaskPurge tid) -> tid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected TaskPurge, got: " <> show other
+
     it "parses task_list with workspace filter" $ do
       let args = object
             [ "workspace_id" .= testUUID
             , "status"       .= ("todo" :: Text)
+            , "priority"     .= (7 :: Int)
             , "limit"        .= (25 :: Int)
             ]
       case parseToolCall "task_list" args of
-        Right (TaskList mws _mpid mst ml _mo) -> do
-          mws `shouldBe` Just parsedUUID
-          mst `shouldBe` Just Todo
-          ml `shouldBe` Just 25
+        Right (TaskList tq) -> do
+          tq.workspaceId `shouldBe` Just parsedUUID
+          tq.status `shouldBe` Just Todo
+          tq.priority `shouldBe` Just 7
+          tq.limit `shouldBe` Just 25
         other -> expectationFailure $ "Expected TaskList, got: " <> show other
 
     it "parses task_dependency_add" $ do
@@ -430,9 +513,32 @@ spec = do
   describe "validateToolCall (list clamping)" $ do
 
     it "clamps project_list limit to 1-200" $ do
-      case validateToolCall (ProjectList parsedUUID Nothing (Just 500) Nothing) of
-        Right (ProjectList _ _ ml _) -> ml `shouldBe` Just 200
+      case validateToolCall (ProjectList ProjectListQuery
+        { workspaceId = parsedUUID
+        , status = Nothing
+        , createdAfter = Nothing
+        , createdBefore = Nothing
+        , updatedAfter = Nothing
+        , updatedBefore = Nothing
+        , limit = Just 500
+        , offset = Nothing
+        }) of
+        Right (ProjectList pq) -> pq.limit `shouldBe` Just 200
         other -> expectationFailure $ "Expected ProjectList, got: " <> show other
+
+    it "rejects invalid task_list priority and time range" $ do
+      validateToolCall (TaskList TaskListQuery
+        { workspaceId = Just parsedUUID
+        , projectId = Nothing
+        , status = Nothing
+        , priority = Just 99
+        , createdAfter = Nothing
+        , createdBefore = Nothing
+        , updatedAfter = Just (read "2026-03-30 11:00:00 UTC")
+        , updatedBefore = Just (read "2026-03-30 10:00:00 UTC")
+        , limit = Nothing
+        , offset = Nothing
+        }) `shouldSatisfy` isLeft
 
     it "clamps category_list limit" $ do
       case validateToolCall (CategoryList Nothing (Just 0) Nothing) of
@@ -443,3 +549,53 @@ spec = do
       case validateToolCall (WorkspaceList Nothing (Just 99999)) of
         Right (WorkspaceList _ mo) -> mo `shouldBe` Just 10000
         other -> expectationFailure $ "Expected WorkspaceList, got: " <> show other
+
+  describe "toolDefinitions" $ do
+
+    it "advertises maxLength for memory content" $ do
+      let Just schema = inputSchemaFor "memory_create"
+          Just properties = objectField "properties" schema
+          Just contentSchema = objectField "content" properties
+      numberField "maxLength" contentSchema `shouldBe` Just (fromIntegral maxMemoryContentBytes)
+
+    it "advertises batch size bounds" $ do
+      let Just schema = inputSchemaFor "memory_create_batch"
+          Just properties = objectField "properties" schema
+          Just memoriesSchema = objectField "memories" properties
+      numberField "minItems" memoriesSchema `shouldBe` Just 1
+      numberField "maxItems" memoriesSchema `shouldBe` Just 100
+
+    it "advertises list filter timestamps and task priority" $ do
+      let Just memorySchema = inputSchemaFor "memory_list"
+          Just memoryProps = objectField "properties" memorySchema
+          Just projectSchema = inputSchemaFor "project_list"
+          Just projectProps = objectField "properties" projectSchema
+          Just taskSchema = inputSchemaFor "task_list"
+          Just taskProps = objectField "properties" taskSchema
+          createdAfterType = objectField "created_after" memoryProps >>= textField "type"
+          updatedBeforeType = objectField "updated_before" projectProps >>= textField "type"
+          priorityType = objectField "priority" taskProps >>= textField "type"
+      createdAfterType `shouldBe` Just "string"
+      updatedBeforeType `shouldBe` Just "string"
+      priorityType `shouldBe` Just "integer"
+
+inputSchemaFor :: Text -> Maybe Value
+inputSchemaFor toolName = case filter ((== Just toolName) . textField "name") toolDefinitions of
+  (Object obj:_) -> KM.lookup "inputSchema" obj
+  _              -> Nothing
+
+objectField :: Key -> Value -> Maybe Value
+objectField key (Object obj) = KM.lookup key obj
+objectField _ _ = Nothing
+
+textField :: Key -> Value -> Maybe Text
+textField key (Object obj) = case KM.lookup key obj of
+  Just (String value) -> Just value
+  _                   -> Nothing
+textField _ _ = Nothing
+
+numberField :: Key -> Value -> Maybe Scientific
+numberField key (Object obj) = case KM.lookup key obj of
+  Just (Number value) -> Just value
+  _                   -> Nothing
+numberField _ _ = Nothing

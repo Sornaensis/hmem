@@ -51,6 +51,7 @@ tests:
     dependencies:
       - hmem-mcp
       - hspec
+      - scientific
 
 default-extensions:
   - OverloadedStrings

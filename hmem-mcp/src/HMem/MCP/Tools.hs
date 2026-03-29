@@ -36,8 +36,8 @@ toolDefinitions =
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
-          , "content"      .= prop "string" "The memory content"
-          , "summary"      .= prop "string" "Optional short summary"
+          , "content"      .= propMaxLength "string" "The memory content" maxMemoryContentBytes
+          , "summary"      .= propMaxLength "string" "Optional short summary" maxMemorySummaryBytes
           , "memory_type"  .= propEnum "string" "short_term or long_term" ["short_term", "long_term"]
           , "importance"   .= prop "integer" "1-10, default 5"
           , "source"       .= prop "string" "Provenance: user_stated, inferred, tool_output, web_search"
@@ -56,12 +56,14 @@ toolDefinitions =
           [ "memories" .= object
               [ "type" .= t "array"
               , "description" .= t "Array of memory objects to create (same schema as memory_create)"
+              , "minItems" .= (1 :: Int)
+              , "maxItems" .= (100 :: Int)
               , "items" .= object
                   [ "type" .= t "object"
                   , "properties" .= object
                       [ "workspace_id" .= prop "string" "UUID of the workspace"
-                      , "content"      .= prop "string" "The memory content"
-                      , "summary"      .= prop "string" "Optional short summary"
+                      , "content"      .= propMaxLength "string" "The memory content" maxMemoryContentBytes
+                      , "summary"      .= propMaxLength "string" "Optional short summary" maxMemorySummaryBytes
                       , "memory_type"  .= propEnum "string" "short_term or long_term" ["short_term", "long_term"]
                       , "importance"   .= prop "integer" "1-10, default 5"
                       , "source"       .= prop "string" "Provenance"
@@ -107,8 +109,8 @@ toolDefinitions =
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id"   .= prop "string" "UUID of the memory to update"
-          , "content"     .= prop "string" "New content"
-          , "summary"     .= prop "string" "New summary (null to clear)"
+          , "content"     .= propMaxLength "string" "New content" maxMemoryContentBytes
+          , "summary"     .= propMaxLength "string" "New summary (null to clear)" maxMemorySummaryBytes
           , "importance"  .= prop "integer" "New importance (1-10)"
           , "memory_type" .= propEnum "string" "New type" ["short_term", "long_term"]
           , "metadata"    .= prop "object" "New metadata JSON object"
@@ -120,10 +122,17 @@ toolDefinitions =
       , "required" .= [t "memory_id"]
       ]
 
-  , mkTool "memory_delete" "Delete a memory" $ object
+  , mkTool "memory_delete" "Soft-delete a memory" $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id" .= prop "string" "UUID of the memory to delete" ]
+      , "required" .= [t "memory_id"]
+      ]
+
+  , mkTool "memory_purge" "Permanently purge a soft-deleted memory" $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "memory_id" .= prop "string" "UUID of the soft-deleted memory to purge" ]
       , "required" .= [t "memory_id"]
       ]
 
@@ -143,8 +152,8 @@ toolDefinitions =
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
-          , "name"         .= prop "string" "Project name"
-          , "description"  .= prop "string" "Project description"
+          , "name"         .= propMaxLength "string" "Project name" maxNameBytes
+          , "description"  .= propMaxLength "string" "Project description" maxDescriptionBytes
           , "parent_id"    .= prop "string" "Parent project UUID for sub-projects"
           , "priority"     .= prop "integer" "1-10, default 5"
           ]
@@ -157,6 +166,10 @@ toolDefinitions =
           [ "workspace_id" .= prop "string" "UUID of the workspace"
           , "status"       .= propEnum "string" "Filter by status"
               ["active", "paused", "completed", "archived"]
+          , "created_after"  .= prop "string" "Filter for projects created on or after this ISO 8601 timestamp"
+          , "created_before" .= prop "string" "Filter for projects created on or before this ISO 8601 timestamp"
+          , "updated_after"  .= prop "string" "Filter for projects updated on or after this ISO 8601 timestamp"
+          , "updated_before" .= prop "string" "Filter for projects updated on or before this ISO 8601 timestamp"
           , "limit"        .= prop "integer" "Max results (default 50)"
           , "offset"       .= prop "integer" "Offset for pagination (default 0)"
           ]
@@ -168,8 +181,8 @@ toolDefinitions =
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
           , "project_id"  .= prop "string" "UUID of the project (optional)"
-          , "title"       .= prop "string" "Task title"
-          , "description" .= prop "string" "Task description"
+          , "title"       .= propMaxLength "string" "Task title" maxNameBytes
+          , "description" .= propMaxLength "string" "Task description" maxDescriptionBytes
           , "parent_id"   .= prop "string" "Parent task UUID for sub-tasks"
           , "priority"    .= prop "integer" "1-10, default 5"
           , "due_at"      .= prop "string" "ISO 8601 due date"
@@ -184,6 +197,11 @@ toolDefinitions =
           , "project_id" .= prop "string" "UUID of the project (use this or workspace_id)"
           , "status"     .= propEnum "string" "Filter by status"
               ["todo", "in_progress", "blocked", "done", "cancelled"]
+          , "priority"   .= prop "integer" "Filter by priority (1-10)"
+          , "created_after"  .= prop "string" "Filter for tasks created on or after this ISO 8601 timestamp"
+          , "created_before" .= prop "string" "Filter for tasks created on or before this ISO 8601 timestamp"
+          , "updated_after"  .= prop "string" "Filter for tasks updated on or after this ISO 8601 timestamp"
+          , "updated_before" .= prop "string" "Filter for tasks updated on or before this ISO 8601 timestamp"
           , "limit"      .= prop "integer" "Max results (default 50)"
           , "offset"     .= prop "integer" "Offset for pagination (default 0)"
           ]
@@ -194,8 +212,8 @@ toolDefinitions =
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id"     .= prop "string" "UUID of the task"
-          , "title"       .= prop "string" "New title"
-          , "description" .= prop "string" "New description"
+          , "title"       .= propMaxLength "string" "New title" maxNameBytes
+          , "description" .= propMaxLength "string" "New description" maxDescriptionBytes
           , "status"      .= propEnum "string" "New status"
               ["todo", "in_progress", "blocked", "done", "cancelled"]
           , "priority"    .= prop "integer" "New priority (1-10)"
@@ -206,7 +224,7 @@ toolDefinitions =
   , mkTool "workspace_register" "Register a new workspace" $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "name"           .= prop "string" "Workspace name"
+          [ "name"           .= propMaxLength "string" "Workspace name" maxNameBytes
           , "path"           .= prop "string" "Filesystem path"
           , "gh_owner"       .= prop "string" "GitHub owner"
           , "gh_repo"        .= prop "string" "GitHub repository"
@@ -235,7 +253,7 @@ toolDefinitions =
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id"   .= prop "string" "UUID of the workspace"
-          , "name"           .= prop "string" "New workspace name"
+          , "name"           .= propMaxLength "string" "New workspace name" maxNameBytes
           , "workspace_type" .= propEnum "string" "New workspace type"
               ["repository", "planning", "personal", "organization"]
           , "path"           .= prop "string" "New filesystem path (null to clear)"
@@ -245,10 +263,17 @@ toolDefinitions =
       , "required" .= [t "workspace_id"]
       ]
 
-  , mkTool "workspace_delete" "Delete a workspace" $ object
+  , mkTool "workspace_delete" "Soft-delete a workspace" $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace to delete" ]
+      , "required" .= [t "workspace_id"]
+      ]
+
+  , mkTool "workspace_purge" "Permanently purge a soft-deleted workspace" $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "workspace_id" .= prop "string" "UUID of the soft-deleted workspace to purge" ]
       , "required" .= [t "workspace_id"]
       ]
 
@@ -257,6 +282,10 @@ toolDefinitions =
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (omit for all workspaces)"
           , "memory_type"  .= propEnum "string" "Filter by type" ["short_term", "long_term"]
+          , "created_after"  .= prop "string" "Filter for memories created on or after this ISO 8601 timestamp"
+          , "created_before" .= prop "string" "Filter for memories created on or before this ISO 8601 timestamp"
+          , "updated_after"  .= prop "string" "Filter for memories updated on or after this ISO 8601 timestamp"
+          , "updated_before" .= prop "string" "Filter for memories updated on or before this ISO 8601 timestamp"
           , "limit"        .= prop "integer" "Max results (default 50)"
           , "offset"       .= prop "integer" "Offset for pagination (default 0)"
           ]
@@ -324,8 +353,8 @@ toolDefinitions =
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id"  .= prop "string" "UUID of the project"
-          , "name"        .= prop "string" "New name"
-          , "description" .= prop "string" "New description"
+          , "name"        .= propMaxLength "string" "New name" maxNameBytes
+          , "description" .= propMaxLength "string" "New description" maxDescriptionBytes
           , "status"      .= propEnum "string" "New status"
               ["active", "paused", "completed", "archived"]
           , "priority"    .= prop "integer" "New priority (1-10)"
@@ -333,10 +362,17 @@ toolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
-  , mkTool "project_delete" "Delete a project" $ object
+  , mkTool "project_delete" "Soft-delete a project" $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project to delete" ]
+      , "required" .= [t "project_id"]
+      ]
+
+  , mkTool "project_purge" "Permanently purge a soft-deleted project" $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "project_id" .= prop "string" "UUID of the soft-deleted project to purge" ]
       , "required" .= [t "project_id"]
       ]
 
@@ -348,10 +384,17 @@ toolDefinitions =
       , "required" .= [t "task_id"]
       ]
 
-  , mkTool "task_delete" "Delete a task" $ object
+  , mkTool "task_delete" "Soft-delete a task" $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the task to delete" ]
+      , "required" .= [t "task_id"]
+      ]
+
+  , mkTool "task_purge" "Permanently purge a soft-deleted task" $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "task_id" .= prop "string" "UUID of the soft-deleted task to purge" ]
       , "required" .= [t "task_id"]
       ]
 
@@ -360,7 +403,7 @@ toolDefinitions =
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (omit for a global category)"
-          , "name"         .= prop "string" "Category name"
+          , "name"         .= propMaxLength "string" "Category name" maxNameBytes
           , "description"  .= prop "string" "Category description"
           , "parent_id"    .= prop "string" "Parent category UUID for sub-categories"
           ]
@@ -388,17 +431,24 @@ toolDefinitions =
       [ "type" .= t "object"
       , "properties" .= object
           [ "category_id" .= prop "string" "UUID of the category"
-          , "name"        .= prop "string" "New name"
+          , "name"        .= propMaxLength "string" "New name" maxNameBytes
           , "description" .= prop "string" "New description"
           , "parent_id"   .= prop "string" "New parent category UUID"
           ]
       , "required" .= [t "category_id"]
       ]
 
-  , mkTool "category_delete" "Delete a memory category" $ object
+  , mkTool "category_delete" "Soft-delete a memory category" $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "category_id" .= prop "string" "UUID of the category to delete" ]
+      , "required" .= [t "category_id"]
+      ]
+
+  , mkTool "category_purge" "Permanently purge a soft-deleted memory category" $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "category_id" .= prop "string" "UUID of the soft-deleted category to purge" ]
       , "required" .= [t "category_id"]
       ]
 
@@ -551,7 +601,7 @@ toolDefinitions =
   , mkTool "workspace_group_create" "Create a workspace group (portfolio)" $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "name"        .= prop "string" "Group name"
+          [ "name"        .= propMaxLength "string" "Group name" maxNameBytes
           , "description" .= prop "string" "Group description"
           ]
       , "required" .= [t "name"]
@@ -658,19 +708,22 @@ data ToolCall
   | MemoryGet      UUID
   | MemoryUpdate   UUID UpdateMemory
   | MemoryDelete   UUID
+    | MemoryPurge    UUID
   | LinkMemories   UUID CreateMemoryLink   -- source_id, link body
   | MemoryLinksList UUID
   | ProjectCreate  CreateProject
   | ProjectGet     UUID
   | ProjectUpdate  UUID UpdateProject
   | ProjectDelete  UUID
-  | ProjectList    UUID (Maybe ProjectStatus) (Maybe Int) (Maybe Int)
+    | ProjectPurge   UUID
+    | ProjectList    ProjectListQuery
   | ProjectLinkMem UUID UUID               -- project_id, memory_id
   | ProjectUnlinkMem UUID UUID             -- project_id, memory_id
   | TaskCreate     CreateTask
   | TaskGet        UUID
   | TaskDelete     UUID
-  | TaskList       (Maybe UUID) (Maybe UUID) (Maybe TaskStatus) (Maybe Int) (Maybe Int)
+    | TaskPurge      UUID
+    | TaskList       TaskListQuery
   | TaskUpdate     UUID UpdateTask
   | TaskLinkMem    UUID UUID               -- task_id, memory_id
   | TaskUnlinkMem  UUID UUID               -- task_id, memory_id
@@ -680,11 +733,13 @@ data ToolCall
   | WorkspaceGet   UUID
   | WsUpdate       UUID UpdateWorkspace
   | WsDelete       UUID
+    | WsPurge        UUID
   | CategoryCreate CreateMemoryCategory
   | CategoryGet    UUID
   | CategoryList   (Maybe UUID) (Maybe Int) (Maybe Int) -- maybe workspace_id, limit, offset
   | CategoryUpdate UUID UpdateMemoryCategory
   | CategoryDelete UUID
+    | CategoryPurge  UUID
   | CategoryLinkMem   UUID UUID            -- memory_id, category_id
   | CategoryUnlinkMem UUID UUID            -- memory_id, category_id
   | MemorySetTags   UUID [Text]            -- memory_id, tags
@@ -693,7 +748,7 @@ data ToolCall
   | CleanupPolicyUpsert UpsertCleanupPolicy
   | WorkspaceReg   CreateWorkspace
   | CleanupRun     UUID
-  | MemoryList     (Maybe UUID) (Maybe MemoryType) (Maybe Int) (Maybe Int)
+    | MemoryList     MemoryListQuery
   | MemoryGraphCall UUID (Maybe Int)
   | MemoryFindByRelation UUID RelationType
   | MemoryAdjustImp UUID Int
@@ -718,67 +773,72 @@ data ToolCall
 -- a typed ToolCall, validating all fields against HMem.Types.
 parseToolCall :: Text -> Value -> Either String ToolCall
 parseToolCall name args = case name of
-  "memory_create"          -> MemoryCreate    <$> parse args
-  "memory_create_batch"    -> MemoryCreateBatch <$> need "memories"
-  "memory_search"          -> MemorySearch    <$> parse args
-  "memory_get"             -> MemoryGet       <$> need "memory_id"
-  "memory_update"          -> MemoryUpdate    <$> need "memory_id" <*> parse args
-  "memory_delete"          -> MemoryDelete    <$> need "memory_id"
-  "memory_link"            -> LinkMemories    <$> need "source_id" <*> parse args
-  "memory_links_list"      -> MemoryLinksList <$> need "memory_id"
-  "project_create"         -> ProjectCreate   <$> parse args
-  "project_get"            -> ProjectGet      <$> need "project_id"
-  "project_update"         -> ProjectUpdate   <$> need "project_id" <*> parse args
-  "project_delete"         -> ProjectDelete   <$> need "project_id"
-  "project_list"           -> ProjectList     <$> need "workspace_id" <*> opt "status" <*> opt "limit" <*> opt "offset"
-  "project_link_memory"    -> ProjectLinkMem  <$> need "project_id" <*> need "memory_id"
-  "project_unlink_memory"  -> ProjectUnlinkMem <$> need "project_id" <*> need "memory_id"
-  "task_create"            -> TaskCreate      <$> parse args
-  "task_get"               -> TaskGet         <$> need "task_id"
-  "task_delete"            -> TaskDelete      <$> need "task_id"
-  "task_list"              -> TaskList        <$> opt "workspace_id" <*> opt "project_id" <*> opt "status" <*> opt "limit" <*> opt "offset"
-  "task_update"            -> TaskUpdate      <$> need "task_id" <*> parse args
-  "task_link_memory"       -> TaskLinkMem     <$> need "task_id" <*> need "memory_id"
-  "task_unlink_memory"     -> TaskUnlinkMem   <$> need "task_id" <*> need "memory_id"
-  "task_dependency_add"    -> TaskDepAdd      <$> need "task_id" <*> need "depends_on_id"
-  "task_dependency_remove" -> TaskDepRemove   <$> need "task_id" <*> need "depends_on_id"
-  "category_create"        -> CategoryCreate  <$> parse args
-  "category_get"           -> CategoryGet     <$> need "category_id"
-  "category_list"          -> CategoryList    <$> opt "workspace_id" <*> opt "limit" <*> opt "offset"
-  "category_update"        -> CategoryUpdate  <$> need "category_id" <*> parse args
-  "category_delete"        -> CategoryDelete  <$> need "category_id"
-  "category_link_memory"   -> CategoryLinkMem   <$> need "memory_id" <*> need "category_id"
-  "category_unlink_memory" -> CategoryUnlinkMem <$> need "memory_id" <*> need "category_id"
-  "memory_set_tags"        -> MemorySetTags <$> need "memory_id" <*> need "tags"
-  "memory_unlink"          -> MemoryUnlink  <$> need "source_id" <*> need "target_id" <*> need "relation_type"
-  "cleanup_policies_list"  -> CleanupPoliciesList <$> need "workspace_id" <*> opt "limit" <*> opt "offset"
-  "cleanup_policy_upsert"  -> CleanupPolicyUpsert <$> parse args
-  "workspace_list"         -> WorkspaceList    <$> opt "limit" <*> opt "offset"
-  "workspace_get"          -> WorkspaceGet    <$> need "workspace_id"
-  "workspace_update"       -> WsUpdate        <$> need "workspace_id" <*> parse args
-  "workspace_delete"       -> WsDelete        <$> need "workspace_id"
-  "workspace_register"     -> WorkspaceReg    <$> parse args
-  "cleanup_run"            -> CleanupRun      <$> need "workspace_id"
-  "memory_list"             -> MemoryList      <$> opt "workspace_id" <*> opt "memory_type" <*> opt "limit" <*> opt "offset"
-  "memory_graph"            -> MemoryGraphCall <$> need "memory_id" <*> opt "depth"
-  "memory_find_by_relation" -> MemoryFindByRelation <$> need "workspace_id" <*> need "relation_type"
-  "memory_adjust_importance" -> MemoryAdjustImp <$> need "memory_id" <*> need "importance"
-  "project_list_memories"   -> ProjectListMem  <$> need "project_id"
-  "task_list_memories"      -> TaskListMem     <$> need "task_id"
-  "memory_pin"              -> MemoryPin       <$> need "memory_id"
-  "memory_unpin"            -> MemoryUnpin     <$> need "memory_id"
-  "workspace_group_create"  -> WsGroupCreate   <$> parse args
-  "workspace_group_get"     -> WsGroupGet      <$> need "group_id"
-  "workspace_group_list"    -> WsGroupList     <$> opt "limit" <*> opt "offset"
-  "workspace_group_delete"  -> WsGroupDelete   <$> need "group_id"
-  "workspace_group_add_member"    -> WsGroupAddMem  <$> need "group_id" <*> need "workspace_id"
-  "workspace_group_remove_member" -> WsGroupRmMem   <$> need "group_id" <*> need "workspace_id"
-  "workspace_group_list_members"  -> WsGroupListMem <$> need "group_id"
-  "activity_timeline"       -> ActivityTimeline <$> opt "workspace_id" <*> opt "limit"
-  "memory_get_tags"          -> MemoryGetTags    <$> need "memory_id"
-  "memory_similar"           -> MemorySimilar    <$> parse args
-  "memory_set_embedding"     -> MemorySetEmbedding <$> need "memory_id" <*> need "embedding"
-  _                        -> Left $ "Unknown tool: " <> T.unpack name
+    "memory_create"            -> MemoryCreate <$> parse args
+    "memory_create_batch"      -> MemoryCreateBatch <$> need "memories"
+    "memory_search"            -> MemorySearch <$> parse args
+    "memory_get"               -> MemoryGet <$> need "memory_id"
+    "memory_update"            -> MemoryUpdate <$> need "memory_id" <*> parse args
+    "memory_delete"            -> MemoryDelete <$> need "memory_id"
+    "memory_purge"             -> MemoryPurge <$> need "memory_id"
+    "memory_link"              -> LinkMemories <$> need "source_id" <*> parse args
+    "memory_links_list"        -> MemoryLinksList <$> need "memory_id"
+    "project_create"           -> ProjectCreate <$> parse args
+    "project_get"              -> ProjectGet <$> need "project_id"
+    "project_update"           -> ProjectUpdate <$> need "project_id" <*> parse args
+    "project_delete"           -> ProjectDelete <$> need "project_id"
+    "project_purge"            -> ProjectPurge <$> need "project_id"
+    "project_list"             -> ProjectList <$> parse args
+    "project_link_memory"      -> ProjectLinkMem <$> need "project_id" <*> need "memory_id"
+    "project_unlink_memory"    -> ProjectUnlinkMem <$> need "project_id" <*> need "memory_id"
+    "task_create"              -> TaskCreate <$> parse args
+    "task_get"                 -> TaskGet <$> need "task_id"
+    "task_delete"              -> TaskDelete <$> need "task_id"
+    "task_purge"               -> TaskPurge <$> need "task_id"
+    "task_list"                -> TaskList <$> parse args
+    "task_update"              -> TaskUpdate <$> need "task_id" <*> parse args
+    "task_link_memory"         -> TaskLinkMem <$> need "task_id" <*> need "memory_id"
+    "task_unlink_memory"       -> TaskUnlinkMem <$> need "task_id" <*> need "memory_id"
+    "task_dependency_add"      -> TaskDepAdd <$> need "task_id" <*> need "depends_on_id"
+    "task_dependency_remove"   -> TaskDepRemove <$> need "task_id" <*> need "depends_on_id"
+    "category_create"          -> CategoryCreate <$> parse args
+    "category_get"             -> CategoryGet <$> need "category_id"
+    "category_list"            -> CategoryList <$> opt "workspace_id" <*> opt "limit" <*> opt "offset"
+    "category_update"          -> CategoryUpdate <$> need "category_id" <*> parse args
+    "category_delete"          -> CategoryDelete <$> need "category_id"
+    "category_purge"           -> CategoryPurge <$> need "category_id"
+    "category_link_memory"     -> CategoryLinkMem <$> need "memory_id" <*> need "category_id"
+    "category_unlink_memory"   -> CategoryUnlinkMem <$> need "memory_id" <*> need "category_id"
+    "memory_set_tags"          -> MemorySetTags <$> need "memory_id" <*> need "tags"
+    "memory_unlink"            -> MemoryUnlink <$> need "source_id" <*> need "target_id" <*> need "relation_type"
+    "cleanup_policies_list"    -> CleanupPoliciesList <$> need "workspace_id" <*> opt "limit" <*> opt "offset"
+    "cleanup_policy_upsert"    -> CleanupPolicyUpsert <$> parse args
+    "workspace_list"           -> WorkspaceList <$> opt "limit" <*> opt "offset"
+    "workspace_get"            -> WorkspaceGet <$> need "workspace_id"
+    "workspace_update"         -> WsUpdate <$> need "workspace_id" <*> parse args
+    "workspace_delete"         -> WsDelete <$> need "workspace_id"
+    "workspace_purge"          -> WsPurge <$> need "workspace_id"
+    "workspace_register"       -> WorkspaceReg <$> parse args
+    "cleanup_run"              -> CleanupRun <$> need "workspace_id"
+    "memory_list"              -> MemoryList <$> parse args
+    "memory_graph"             -> MemoryGraphCall <$> need "memory_id" <*> opt "depth"
+    "memory_find_by_relation"  -> MemoryFindByRelation <$> need "workspace_id" <*> need "relation_type"
+    "memory_adjust_importance" -> MemoryAdjustImp <$> need "memory_id" <*> need "importance"
+    "project_list_memories"    -> ProjectListMem <$> need "project_id"
+    "task_list_memories"       -> TaskListMem <$> need "task_id"
+    "memory_pin"               -> MemoryPin <$> need "memory_id"
+    "memory_unpin"             -> MemoryUnpin <$> need "memory_id"
+    "workspace_group_create"   -> WsGroupCreate <$> parse args
+    "workspace_group_get"      -> WsGroupGet <$> need "group_id"
+    "workspace_group_list"     -> WsGroupList <$> opt "limit" <*> opt "offset"
+    "workspace_group_delete"   -> WsGroupDelete <$> need "group_id"
+    "workspace_group_add_member" -> WsGroupAddMem <$> need "group_id" <*> need "workspace_id"
+    "workspace_group_remove_member" -> WsGroupRmMem <$> need "group_id" <*> need "workspace_id"
+    "workspace_group_list_members" -> WsGroupListMem <$> need "group_id"
+    "activity_timeline"        -> ActivityTimeline <$> opt "workspace_id" <*> opt "limit"
+    "memory_get_tags"          -> MemoryGetTags <$> need "memory_id"
+    "memory_similar"           -> MemorySimilar <$> parse args
+    "memory_set_embedding"     -> MemorySetEmbedding <$> need "memory_id" <*> need "embedding"
+    _                           -> Left $ "Unknown tool: " <> T.unpack name
   where
     parse :: FromJSON a => Value -> Either String a
     parse = parseEither parseJSON
@@ -793,14 +853,18 @@ parseToolCall name args = case name of
 -- Tool call dispatch
 ------------------------------------------------------------------------
 
-handleToolCall :: Manager -> String -> Value -> IO Value
-handleToolCall mgr serverUrl params = case parseParams params of
-  Left err -> pure $ mcpError (T.pack err)
-  Right (name, args) -> case parseToolCall name args of
-    Left err   -> pure $ mcpError (T.pack err)
-    Right call -> case validateToolCall call of
-      Left vErr -> pure $ mcpError (T.pack vErr)
-      Right validCall -> executeToolCall mgr serverUrl validCall
+handleToolCall :: Manager -> String -> Maybe Text -> Value -> IO Value
+handleToolCall mgr serverUrl mApiKey params =
+    case parseParams params of
+        Left err -> pure $ mcpError (T.pack err)
+        Right (name, args) ->
+            case parseToolCall name args of
+                Left err -> pure $ mcpError (T.pack err)
+                Right call ->
+                    either
+                        (pure . mcpError . T.pack)
+                        (executeToolCall mgr serverUrl mApiKey)
+                        (validateToolCall call)
 
 parseParams :: Value -> Either String (Text, Value)
 parseParams = parseEither $ withObject "params" $ \o -> do
@@ -818,43 +882,60 @@ parseParams = parseEither $ withObject "params" $ \o -> do
 -- or Right with clamped values on soft corrections.
 validateToolCall :: ToolCall -> Either String ToolCall
 validateToolCall = \case
-  MemoryCreate cm
-    | not (validFtsLanguage cm.ftsLanguage) -> Left $ "Invalid fts_language: " <> show cm.ftsLanguage
-    | otherwise -> Right $ MemoryCreate $ clampCreateMemory cm
-  MemoryCreateBatch cms
-    | length cms > 100 -> Left "memory_create_batch: max 100 items per batch"
-    | any (\cm -> not (validFtsLanguage cm.ftsLanguage)) cms ->
-        Left "memory_create_batch: one or more items have an invalid fts_language"
-    | otherwise -> Right $ MemoryCreateBatch
-      [ clampCreateMemory cm | cm <- cms ]
-  MemorySearch sq
-    | not (validFtsLanguage sq.searchLanguage) -> Left $ "Invalid search_language: " <> show sq.searchLanguage
-    | otherwise -> Right $ MemorySearch sq
-    { limit        = clampMaybe 1 200 <$> sq.limit
-    , offset       = clampMaybe 0 10000 <$> sq.offset
-    , minImportance = clampMaybe 1 10 <$> sq.minImportance
-    }
-  MemoryUpdate mid um -> Right $ MemoryUpdate mid $ clampUpdateMemory um
-  MemoryAdjustImp mid imp -> Right $ MemoryAdjustImp mid (clamp 1 10 imp)
-  MemoryGraphCall mid md -> Right $ MemoryGraphCall mid (clampMaybe 1 5 <$> md)
-  MemoryList mws mt ml mo -> Right $ MemoryList mws mt (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
-  ProjectList wid ms ml mo -> Right $ ProjectList wid ms (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
-  TaskList mws mpid ms ml mo
-    | Nothing <- mws, Nothing <- mpid -> Left "task_list requires at least workspace_id or project_id"
-    | otherwise -> Right $ TaskList mws mpid ms (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
-  CategoryList mwid ml mo -> Right $ CategoryList mwid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
-  WsGroupList ml mo -> Right $ WsGroupList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
-  WorkspaceList ml mo -> Right $ WorkspaceList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
-  CleanupPoliciesList wid ml mo -> Right $ CleanupPoliciesList wid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
-  ActivityTimeline mws ml -> Right $ ActivityTimeline mws (clampMaybe 1 200 <$> ml)
-  MemorySimilar sq -> Right $ MemorySimilar sq
-    { limit = clampMaybe 1 200 <$> sq.limit
-    , minSimilarity = clampMaybe 0.0 1.0 <$> sq.minSimilarity
-    }
-  MemorySetEmbedding mid vec
-    | null vec  -> Left "memory_set_embedding: embedding must not be empty"
-    | otherwise -> Right $ MemorySetEmbedding mid vec
-  other -> Right other
+    MemoryCreate cm
+        | not (validFtsLanguage cm.ftsLanguage) -> Left $ "Invalid fts_language: " <> show cm.ftsLanguage
+        | otherwise ->
+                let cm' = clampCreateMemory cm
+                in MemoryCreate cm' <$ firstValidationError (validateCreateMemoryInput cm')
+    MemoryCreateBatch cms
+        | any (\cm -> not (validFtsLanguage cm.ftsLanguage)) cms ->
+                Left "memory_create_batch: one or more items have an invalid fts_language"
+        | otherwise ->
+                let cms' = [clampCreateMemory cm | cm <- cms]
+                in MemoryCreateBatch cms' <$ firstValidationError (validateCreateMemoryBatchInput cms')
+    MemorySearch sq
+        | not (validFtsLanguage sq.searchLanguage) -> Left $ "Invalid search_language: " <> show sq.searchLanguage
+        | otherwise -> Right $ MemorySearch sq
+                { limit = clampMaybe 1 200 <$> sq.limit
+                , offset = clampMaybe 0 10000 <$> sq.offset
+                , minImportance = clampMaybe 1 10 <$> sq.minImportance
+                }
+    MemoryUpdate mid um ->
+        let um' = clampUpdateMemory um
+        in MemoryUpdate mid um' <$ firstValidationError (validateUpdateMemoryInput um')
+    MemoryAdjustImp mid imp -> Right $ MemoryAdjustImp mid (clamp 1 10 imp)
+    MemoryGraphCall mid md -> Right $ MemoryGraphCall mid (clampMaybe 1 5 <$> md)
+    MemoryList mq ->
+        let mq' = clampMemoryListQuery mq
+        in MemoryList mq' <$ firstValidationError (validateMemoryListQuery mq')
+    ProjectCreate cp -> ProjectCreate cp <$ firstValidationError (validateCreateProjectInput cp)
+    ProjectList pq ->
+        let pq' = clampProjectListQuery pq
+        in ProjectList pq' <$ firstValidationError (validateProjectListQuery pq')
+    ProjectUpdate pid up -> ProjectUpdate pid up <$ firstValidationError (validateUpdateProjectInput up)
+    TaskCreate ct -> TaskCreate ct <$ firstValidationError (validateCreateTaskInput ct)
+    TaskList tq ->
+        let tq' = clampTaskListQuery tq
+        in TaskList tq' <$ firstValidationError (validateTaskListQuery tq')
+    TaskUpdate tid ut -> TaskUpdate tid ut <$ firstValidationError (validateUpdateTaskInput ut)
+    CategoryCreate cc -> CategoryCreate cc <$ firstValidationError (validateCreateMemoryCategoryInput cc)
+    CategoryList mwid ml mo -> Right $ CategoryList mwid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
+    CategoryUpdate cid uc -> CategoryUpdate cid uc <$ firstValidationError (validateUpdateMemoryCategoryInput uc)
+    WsGroupCreate cg -> WsGroupCreate cg <$ firstValidationError (validateCreateWorkspaceGroupInput cg)
+    WsGroupList ml mo -> Right $ WsGroupList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
+    WorkspaceReg cw -> WorkspaceReg cw <$ firstValidationError (validateCreateWorkspaceInput cw)
+    WorkspaceList ml mo -> Right $ WorkspaceList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
+    WsUpdate wid uw -> WsUpdate wid uw <$ firstValidationError (validateUpdateWorkspaceInput uw)
+    CleanupPoliciesList wid ml mo -> Right $ CleanupPoliciesList wid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
+    ActivityTimeline mws ml -> Right $ ActivityTimeline mws (clampMaybe 1 200 <$> ml)
+    MemorySimilar sq -> Right $ MemorySimilar sq
+        { limit = clampMaybe 1 200 <$> sq.limit
+        , minSimilarity = clampMaybe 0.0 1.0 <$> sq.minSimilarity
+        }
+    MemorySetEmbedding mid vec
+        | null vec  -> Left "memory_set_embedding: embedding must not be empty"
+        | otherwise -> Right $ MemorySetEmbedding mid vec
+    other -> Right other
 
 -- | Whitelist of valid PostgreSQL full-text search configurations.
 validFtsLanguages :: Set.Set Text
@@ -877,6 +958,10 @@ clamp lo hi = Prelude.max lo . Prelude.min hi
 
 clampMaybe :: Ord a => a -> a -> a -> a
 clampMaybe lo hi = clamp lo hi
+
+firstValidationError :: [Text] -> Either String ()
+firstValidationError [] = Right ()
+firstValidationError errs = Left (T.unpack (T.intercalate "; " errs))
 
 -- | Clamp numeric fields on a CreateMemory without record update syntax
 -- (avoids -Wambiguous-fields with DuplicateRecordFields).
@@ -910,146 +995,183 @@ clampUpdateMemory um = UpdateMemory
   , pinned     = um.pinned
   }
 
+clampMemoryListQuery :: MemoryListQuery -> MemoryListQuery
+clampMemoryListQuery mq = mq
+    { limit = clampMaybe 1 200 <$> mq.limit
+    , offset = clampMaybe 0 10000 <$> mq.offset
+    }
+
+clampProjectListQuery :: ProjectListQuery -> ProjectListQuery
+clampProjectListQuery pq = pq
+    { limit = clampMaybe 1 200 <$> pq.limit
+    , offset = clampMaybe 0 10000 <$> pq.offset
+    }
+
+clampTaskListQuery :: TaskListQuery -> TaskListQuery
+clampTaskListQuery tq = tq
+    { limit = clampMaybe 1 200 <$> tq.limit
+    , offset = clampMaybe 0 10000 <$> tq.offset
+    }
+
 -- | Execute a typed tool call against the hmem-server HTTP API.
-executeToolCall :: Manager -> String -> ToolCall -> IO Value
-executeToolCall mgr base = \case
-  MemoryCreate cm     -> postJSON mgr base "/api/v1/memories" cm
-  MemoryCreateBatch cms -> postJSON mgr base "/api/v1/memories/batch" cms
-  MemorySearch sq     -> postJSON mgr base "/api/v1/memories/search?compact=true" sq
-  MemoryGet mid       -> getJSON  mgr base ("/api/v1/memories/" <> uuidPath mid)
-  MemoryUpdate mid um -> putJSON  mgr base ("/api/v1/memories/" <> uuidPath mid) um
-  MemoryDelete mid    -> delJSON  mgr base ("/api/v1/memories/" <> uuidPath mid)
-  LinkMemories sid cl -> postJSON mgr base ("/api/v1/memories/" <> uuidPath sid <> "/links") cl
-  MemoryLinksList mid -> getJSON  mgr base ("/api/v1/memories/" <> uuidPath mid <> "/links")
-  ProjectCreate cp    -> postJSON mgr base "/api/v1/projects" cp
-  ProjectGet pid      -> getJSON  mgr base ("/api/v1/projects/" <> uuidPath pid)
-  ProjectUpdate pid up -> putJSON mgr base ("/api/v1/projects/" <> uuidPath pid) up
-  ProjectDelete pid   -> delJSON  mgr base ("/api/v1/projects/" <> uuidPath pid)
-  ProjectList wid ms ml mo -> getJSON mgr base ("/api/v1/projects" <> buildQuery
-                            [ ("workspace_id", Just $ uuidPath wid)
-                            , ("status", encodeParam <$> ms)
-                            , ("limit", show <$> ml)
-                            , ("offset", show <$> mo)
+executeToolCall :: Manager -> String -> Maybe Text -> ToolCall -> IO Value
+executeToolCall mgr base mApiKey = \case
+    MemoryCreate cm     -> postJSON mgr base mApiKey "/api/v1/memories" cm
+    MemoryCreateBatch cms -> postJSON mgr base mApiKey "/api/v1/memories/batch" cms
+    MemorySearch sq     -> postJSON mgr base mApiKey "/api/v1/memories/search?compact=true" sq
+    MemoryGet mid       -> getJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
+    MemoryUpdate mid um -> putJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid) um
+    MemoryDelete mid    -> delJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
+    MemoryPurge mid     -> delJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/purge")
+    LinkMemories sid cl -> postJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath sid <> "/links") cl
+    MemoryLinksList mid -> getJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/links")
+    ProjectCreate cp    -> postJSON mgr base mApiKey "/api/v1/projects" cp
+    ProjectGet pid      -> getJSON  mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
+    ProjectUpdate pid up -> putJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid) up
+    ProjectDelete pid   -> delJSON  mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
+    ProjectPurge pid    -> delJSON  mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/purge")
+    ProjectList pq -> getJSON mgr base mApiKey ("/api/v1/projects" <> buildQuery
+                            [ ("workspace_id", Just $ uuidPath pq.workspaceId)
+                            , ("status", encodeParam <$> pq.status)
+                            , ("created_after", encodeParam <$> pq.createdAfter)
+                            , ("created_before", encodeParam <$> pq.createdBefore)
+                            , ("updated_after", encodeParam <$> pq.updatedAfter)
+                            , ("updated_before", encodeParam <$> pq.updatedBefore)
+                            , ("limit", show <$> pq.limit)
+                            , ("offset", show <$> pq.offset)
                             ])
-  ProjectLinkMem pid mid -> postJSON mgr base ("/api/v1/projects/" <> uuidPath pid <> "/memories")
+    ProjectLinkMem pid mid -> postJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
                               (object ["memory_id" .= mid])
-  ProjectUnlinkMem pid mid -> delJSON mgr base ("/api/v1/projects/" <> uuidPath pid <> "/memories/"
+    ProjectUnlinkMem pid mid -> delJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories/"
                                 <> uuidPath mid)
-  TaskCreate ct       -> postJSON mgr base "/api/v1/tasks" ct
-  TaskGet tid         -> getJSON  mgr base ("/api/v1/tasks/" <> uuidPath tid)
-  TaskDelete tid      -> delJSON  mgr base ("/api/v1/tasks/" <> uuidPath tid)
-  TaskList mws mpid ms ml mo -> getJSON mgr base ("/api/v1/tasks" <> buildQuery
-                            [ ("workspace_id", uuidPath <$> mws)
-                            , ("project_id", uuidPath <$> mpid)
-                            , ("status", encodeParam <$> ms)
-                            , ("limit", show <$> ml)
-                            , ("offset", show <$> mo)
+    TaskCreate ct       -> postJSON mgr base mApiKey "/api/v1/tasks" ct
+    TaskGet tid         -> getJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+    TaskDelete tid      -> delJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+    TaskPurge tid       -> delJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/purge")
+    TaskList tq -> getJSON mgr base mApiKey ("/api/v1/tasks" <> buildQuery
+                            [ ("workspace_id", uuidPath <$> tq.workspaceId)
+                            , ("project_id", uuidPath <$> tq.projectId)
+                            , ("status", encodeParam <$> tq.status)
+                            , ("priority", show <$> tq.priority)
+                            , ("created_after", encodeParam <$> tq.createdAfter)
+                            , ("created_before", encodeParam <$> tq.createdBefore)
+                            , ("updated_after", encodeParam <$> tq.updatedAfter)
+                            , ("updated_before", encodeParam <$> tq.updatedBefore)
+                            , ("limit", show <$> tq.limit)
+                            , ("offset", show <$> tq.offset)
                             ])
-  TaskUpdate tid ut   -> putJSON  mgr base ("/api/v1/tasks/" <> uuidPath tid) ut
-  TaskLinkMem tid mid -> postJSON mgr base ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
+    TaskUpdate tid ut   -> putJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid) ut
+    TaskLinkMem tid mid -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
                             (object ["memory_id" .= mid])
-  TaskUnlinkMem tid mid -> delJSON mgr base ("/api/v1/tasks/" <> uuidPath tid <> "/memories/"
+    TaskUnlinkMem tid mid -> delJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories/"
                               <> uuidPath mid)
-  TaskDepAdd tid did  -> postJSON mgr base ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies")
+    TaskDepAdd tid did  -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies")
                             (object ["depends_on_id" .= did])
-  TaskDepRemove tid did -> delJSON mgr base ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/"
+    TaskDepRemove tid did -> delJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/"
                               <> uuidPath did)
-  CategoryCreate cc   -> postJSON mgr base "/api/v1/categories" cc
-  CategoryGet cid     -> getJSON  mgr base ("/api/v1/categories/" <> uuidPath cid)
-  CategoryList mwid ml mo -> getJSON mgr base ("/api/v1/categories" <> buildQuery
+    CategoryCreate cc   -> postJSON mgr base mApiKey "/api/v1/categories" cc
+    CategoryGet cid     -> getJSON  mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid)
+    CategoryList mwid ml mo -> getJSON mgr base mApiKey ("/api/v1/categories" <> buildQuery
                             [ ("workspace_id", uuidPath <$> mwid)
                             , ("limit", show <$> ml)
                             , ("offset", show <$> mo)
                             ])
-  CategoryUpdate cid uc -> putJSON mgr base ("/api/v1/categories/" <> uuidPath cid) uc
-  CategoryDelete cid  -> delJSON  mgr base ("/api/v1/categories/" <> uuidPath cid)
-  CategoryLinkMem mid cid -> postJSON mgr base "/api/v1/categories/link"
+    CategoryUpdate cid uc -> putJSON mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid) uc
+    CategoryDelete cid  -> delJSON  mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid)
+    CategoryPurge cid   -> delJSON  mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid <> "/purge")
+    CategoryLinkMem mid cid -> postJSON mgr base mApiKey "/api/v1/categories/link"
                                (object ["memory_id" .= mid, "category_id" .= cid])
-  CategoryUnlinkMem mid cid -> postJSON mgr base "/api/v1/categories/unlink"
+    CategoryUnlinkMem mid cid -> postJSON mgr base mApiKey "/api/v1/categories/unlink"
                                   (object ["memory_id" .= mid, "category_id" .= cid])
-  MemorySetTags mid tags -> putJSON mgr base ("/api/v1/memories/" <> uuidPath mid <> "/tags")
+    MemorySetTags mid tags -> putJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/tags")
                               (toJSON tags)
-  MemoryUnlink sid tid rt -> delJSON mgr base ("/api/v1/memories/" <> uuidPath sid <> "/links/"
+    MemoryUnlink sid tid rt -> delJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath sid <> "/links/"
                                <> uuidPath tid <> "/" <> T.unpack (relationTypeToText rt))
-  CleanupPoliciesList wid ml mo -> getJSON mgr base ("/api/v1/cleanup/policies" <> buildQuery
+    CleanupPoliciesList wid ml mo -> getJSON mgr base mApiKey ("/api/v1/cleanup/policies" <> buildQuery
                             [ ("workspace_id", Just $ uuidPath wid)
                             , ("limit", show <$> ml)
                             , ("offset", show <$> mo)
                             ])
-  CleanupPolicyUpsert cp  -> postJSON mgr base "/api/v1/cleanup/policies" cp
-  WorkspaceList ml mo      -> getJSON  mgr base ("/api/v1/workspaces" <> buildQuery
+    CleanupPolicyUpsert cp  -> postJSON mgr base mApiKey "/api/v1/cleanup/policies" cp
+    WorkspaceList ml mo      -> getJSON  mgr base mApiKey ("/api/v1/workspaces" <> buildQuery
                             [ ("limit", show <$> ml)
                             , ("offset", show <$> mo)
                             ])
-  WorkspaceGet wid        -> getJSON  mgr base ("/api/v1/workspaces/" <> uuidPath wid)
-  WsUpdate wid uw         -> putJSON  mgr base ("/api/v1/workspaces/" <> uuidPath wid) uw
-  WsDelete wid            -> delJSON  mgr base ("/api/v1/workspaces/" <> uuidPath wid)
-  WorkspaceReg cw     -> postJSON mgr base "/api/v1/workspaces" cw
-  CleanupRun wid      -> postJSON mgr base "/api/v1/cleanup/run"
+    WorkspaceGet wid        -> getJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid)
+    WsUpdate wid uw         -> putJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid) uw
+    WsDelete wid            -> delJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid)
+    WsPurge wid             -> delJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid <> "/purge")
+    WorkspaceReg cw     -> postJSON mgr base mApiKey "/api/v1/workspaces" cw
+    CleanupRun wid      -> postJSON mgr base mApiKey "/api/v1/cleanup/run"
                             (object ["workspace_id" .= wid])
-  MemoryList mwid mt ml mo -> getJSON mgr base ("/api/v1/memories" <> buildQuery
-                            [ ("workspace_id", uuidPath <$> mwid)
-                            , ("type", encodeParam <$> mt)
-                            , ("limit", show <$> ml)
-                            , ("offset", show <$> mo)
+    MemoryList mq -> getJSON mgr base mApiKey ("/api/v1/memories" <> buildQuery
+                            [ ("workspace_id", uuidPath <$> mq.workspaceId)
+                            , ("type", encodeParam <$> mq.memoryType)
+                            , ("created_after", encodeParam <$> mq.createdAfter)
+                            , ("created_before", encodeParam <$> mq.createdBefore)
+                            , ("updated_after", encodeParam <$> mq.updatedAfter)
+                            , ("updated_before", encodeParam <$> mq.updatedBefore)
+                            , ("limit", show <$> mq.limit)
+                            , ("offset", show <$> mq.offset)
                             , ("compact", Just "true")
                             ])
-  MemoryGraphCall mid md -> getJSON mgr base ("/api/v1/memories/" <> uuidPath mid <> "/graph"
+    MemoryGraphCall mid md -> getJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/graph"
                             <> buildQuery [("depth", show <$> md)])
-  MemoryFindByRelation wid rt -> getJSON mgr base ("/api/v1/memories/by-relation" <> buildQuery
+    MemoryFindByRelation wid rt -> getJSON mgr base mApiKey ("/api/v1/memories/by-relation" <> buildQuery
                             [ ("workspace_id", Just $ uuidPath wid)
                             , ("relation_type", Just $ encodeParam rt)
                             ])
-  MemoryAdjustImp mid imp -> putJSON mgr base ("/api/v1/memories/" <> uuidPath mid <> "/importance")
+    MemoryAdjustImp mid imp -> putJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/importance")
                               (object ["importance" .= imp])
-  ProjectListMem pid -> getJSON mgr base ("/api/v1/projects/" <> uuidPath pid <> "/memories")
-  TaskListMem tid -> getJSON mgr base ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
-  MemoryPin mid    -> postJSON mgr base ("/api/v1/memories/" <> uuidPath mid <> "/pin") (object [])
-  MemoryUnpin mid  -> postJSON mgr base ("/api/v1/memories/" <> uuidPath mid <> "/unpin") (object [])
-  WsGroupCreate cg -> postJSON mgr base "/api/v1/groups" cg
-  WsGroupGet gid   -> getJSON  mgr base ("/api/v1/groups/" <> uuidPath gid)
-  WsGroupList ml mo -> getJSON mgr base ("/api/v1/groups" <> buildQuery
+    ProjectListMem pid -> getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
+    TaskListMem tid -> getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
+    MemoryPin mid    -> postJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/pin") (object [])
+    MemoryUnpin mid  -> postJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/unpin") (object [])
+    WsGroupCreate cg -> postJSON mgr base mApiKey "/api/v1/groups" cg
+    WsGroupGet gid   -> getJSON  mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid)
+    WsGroupList ml mo -> getJSON mgr base mApiKey ("/api/v1/groups" <> buildQuery
                             [ ("limit", show <$> ml)
                             , ("offset", show <$> mo)
                             ])
-  WsGroupDelete gid -> delJSON mgr base ("/api/v1/groups/" <> uuidPath gid)
-  WsGroupAddMem gid wsId -> postJSON mgr base ("/api/v1/groups/" <> uuidPath gid <> "/members")
+    WsGroupDelete gid -> delJSON mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid)
+    WsGroupAddMem gid wsId -> postJSON mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid <> "/members")
                               (object ["workspace_id" .= wsId])
-  WsGroupRmMem gid wsId -> delJSON mgr base ("/api/v1/groups/" <> uuidPath gid <> "/members/"
+    WsGroupRmMem gid wsId -> delJSON mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid <> "/members/"
                               <> uuidPath wsId)
-  WsGroupListMem gid -> getJSON mgr base ("/api/v1/groups/" <> uuidPath gid <> "/members")
-  ActivityTimeline mws ml -> getJSON mgr base ("/api/v1/activity" <> buildQuery
+    WsGroupListMem gid -> getJSON mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid <> "/members")
+    ActivityTimeline mws ml -> getJSON mgr base mApiKey ("/api/v1/activity" <> buildQuery
                             [ ("workspace_id", uuidPath <$> mws)
                             , ("limit", show <$> ml)
                             ])
-  MemoryGetTags mid -> getJSON mgr base ("/api/v1/memories/" <> uuidPath mid <> "/tags")
-  MemorySimilar sq -> postJSON mgr base "/api/v1/memories/similar" sq
-  MemorySetEmbedding mid vec -> putJSON mgr base ("/api/v1/memories/" <> uuidPath mid <> "/embedding")
+    MemoryGetTags mid -> getJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/tags")
+    MemorySimilar sq -> postJSON mgr base mApiKey "/api/v1/memories/similar" sq
+    MemorySetEmbedding mid vec -> putJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/embedding")
                                   (toJSON vec)
 
 ------------------------------------------------------------------------
 -- Typed HTTP helpers
 ------------------------------------------------------------------------
 
-postJSON :: ToJSON a => Manager -> String -> String -> a -> IO Value
-postJSON mgr base path body = httpJSON mgr "POST" (base <> path) (Just (encode body))
+postJSON :: ToJSON a => Manager -> String -> Maybe Text -> String -> a -> IO Value
+postJSON mgr base mApiKey path body = httpJSON mgr mApiKey "POST" (base <> path) (Just (encode body))
 
-getJSON :: Manager -> String -> String -> IO Value
-getJSON mgr base path = httpJSON mgr "GET" (base <> path) Nothing
+getJSON :: Manager -> String -> Maybe Text -> String -> IO Value
+getJSON mgr base mApiKey path = httpJSON mgr mApiKey "GET" (base <> path) Nothing
 
-putJSON :: ToJSON a => Manager -> String -> String -> a -> IO Value
-putJSON mgr base path body = httpJSON mgr "PUT" (base <> path) (Just (encode body))
+putJSON :: ToJSON a => Manager -> String -> Maybe Text -> String -> a -> IO Value
+putJSON mgr base mApiKey path body = httpJSON mgr mApiKey "PUT" (base <> path) (Just (encode body))
 
-delJSON :: Manager -> String -> String -> IO Value
-delJSON mgr base path = httpJSON mgr "DELETE" (base <> path) Nothing
+delJSON :: Manager -> String -> Maybe Text -> String -> IO Value
+delJSON mgr base mApiKey path = httpJSON mgr mApiKey "DELETE" (base <> path) Nothing
 
-httpJSON :: Manager -> String -> String -> Maybe BL.ByteString -> IO Value
-httpJSON mgr httpMethod url mbody = do
+httpJSON :: Manager -> Maybe Text -> String -> String -> Maybe BL.ByteString -> IO Value
+httpJSON mgr mApiKey httpMethod url mbody = do
   result <- try $ do
     initReq <- parseRequest url
+    let authHeaders = maybe [] (\key -> [("Authorization", "Bearer " <> TE.encodeUtf8 key)]) mApiKey
     let req = initReq
           { method         = fromString httpMethod
-          , requestHeaders = [("Content-Type", "application/json")]
+        , requestHeaders = [("Content-Type", "application/json")] <> authHeaders
           , requestBody    = maybe (RequestBodyBS mempty) RequestBodyLBS mbody
           }
     resp <- httpLbs req mgr
@@ -1112,6 +1234,13 @@ mkTool name desc inputSchema = object
 
 prop :: Text -> Text -> Value
 prop ty desc = object ["type" .= ty, "description" .= desc]
+
+propMaxLength :: Text -> Text -> Int -> Value
+propMaxLength ty desc maxLen = object
+    [ "type" .= ty
+    , "description" .= desc
+    , "maxLength" .= maxLen
+    ]
 
 propEnum :: Text -> Text -> [Text] -> Value
 propEnum ty desc vals = object ["type" .= ty, "description" .= desc, "enum" .= vals]

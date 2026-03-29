@@ -52,6 +52,12 @@ module HMem.DB.Schema
   , workspaceGroupSchema
   , WorkspaceGroupMemberT(..)
   , workspaceGroupMemberSchema
+  , activeWorkspace
+  , activeMemory
+  , activeProject
+  , activeTask
+  , activeCategory
+  , deletedNow
 
     -- * PostgreSQL full-text search types
   , PgTSVector(..)
@@ -112,6 +118,7 @@ data WorkspaceT f = WorkspaceT
   , wsPath      :: Column f (Maybe Text)
   , wsGhOwner   :: Column f (Maybe Text)
   , wsGhRepo    :: Column f (Maybe Text)
+  , wsDeletedAt :: Column f (Maybe UTCTime)
   , wsCreatedAt :: Column f UTCTime
   , wsUpdatedAt :: Column f UTCTime
   } deriving stock Generic
@@ -127,6 +134,7 @@ workspaceSchema = TableSchema
       , wsPath      = "path"
       , wsGhOwner   = "gh_owner"
       , wsGhRepo    = "gh_repo"
+        , wsDeletedAt = "deleted_at"
       , wsCreatedAt = "created_at"
       , wsUpdatedAt = "updated_at"
       }
@@ -152,6 +160,7 @@ data MemoryT f = MemoryT
   , memAccessCount    :: Column f Int32
   , memFtsLanguage    :: Column f Text
   , memSearchVector   :: Column f PgTSVector
+  , memDeletedAt      :: Column f (Maybe UTCTime)
   , memCreatedAt      :: Column f UTCTime
   , memUpdatedAt      :: Column f UTCTime
   } deriving stock Generic
@@ -176,6 +185,7 @@ memorySchema = TableSchema
       , memAccessCount    = "access_count"
       , memFtsLanguage    = "fts_language"
       , memSearchVector   = "search_vector"
+        , memDeletedAt      = "deleted_at"
       , memCreatedAt      = "created_at"
       , memUpdatedAt      = "updated_at"
       }
@@ -238,6 +248,7 @@ data ProjectT f = ProjectT
   , projStatus      :: Column f ProjectStatus
   , projPriority    :: Column f Int16
   , projMetadata    :: Column f Value
+  , projDeletedAt   :: Column f (Maybe UTCTime)
   , projCreatedAt   :: Column f UTCTime
   , projUpdatedAt   :: Column f UTCTime
   } deriving stock Generic
@@ -255,6 +266,7 @@ projectSchema = TableSchema
       , projStatus      = "status"
       , projPriority    = "priority"
       , projMetadata    = "metadata"
+        , projDeletedAt   = "deleted_at"
       , projCreatedAt   = "created_at"
       , projUpdatedAt   = "updated_at"
       }
@@ -276,6 +288,7 @@ data TaskT f = TaskT
   , taskMetadata    :: Column f Value
   , taskDueAt       :: Column f (Maybe UTCTime)
   , taskCompletedAt :: Column f (Maybe UTCTime)
+  , taskDeletedAt   :: Column f (Maybe UTCTime)
   , taskCreatedAt   :: Column f UTCTime
   , taskUpdatedAt   :: Column f UTCTime
   } deriving stock Generic
@@ -296,6 +309,7 @@ taskSchema = TableSchema
       , taskMetadata    = "metadata"
       , taskDueAt       = "due_at"
       , taskCompletedAt = "completed_at"
+        , taskDeletedAt   = "deleted_at"
       , taskCreatedAt   = "created_at"
       , taskUpdatedAt   = "updated_at"
       }
@@ -401,6 +415,7 @@ data MemoryCategoryT f = MemoryCategoryT
   , mcName        :: Column f Text
   , mcDescription :: Column f (Maybe Text)
   , mcParentId    :: Column f (Maybe UUID)
+  , mcDeletedAt   :: Column f (Maybe UTCTime)
   , mcCreatedAt   :: Column f UTCTime
   } deriving stock Generic
     deriving anyclass Rel8able
@@ -414,6 +429,7 @@ memoryCategorySchema = TableSchema
       , mcName        = "name"
       , mcDescription = "description"
       , mcParentId    = "parent_id"
+        , mcDeletedAt   = "deleted_at"
       , mcCreatedAt   = "created_at"
       }
   }
@@ -482,3 +498,25 @@ workspaceGroupMemberSchema = TableSchema
       , wgmJoinedAt    = "joined_at"
       }
   }
+
+------------------------------------------------------------------------
+-- Soft-delete helpers
+------------------------------------------------------------------------
+
+activeWorkspace :: WorkspaceT Expr -> Expr Bool
+activeWorkspace row = isNull row.wsDeletedAt
+
+activeMemory :: MemoryT Expr -> Expr Bool
+activeMemory row = isNull row.memDeletedAt
+
+activeProject :: ProjectT Expr -> Expr Bool
+activeProject row = isNull row.projDeletedAt
+
+activeTask :: TaskT Expr -> Expr Bool
+activeTask row = isNull row.taskDeletedAt
+
+activeCategory :: MemoryCategoryT Expr -> Expr Bool
+activeCategory row = isNull row.mcDeletedAt
+
+deletedNow :: Expr (Maybe UTCTime)
+deletedNow = unsafeLiteral "now()"

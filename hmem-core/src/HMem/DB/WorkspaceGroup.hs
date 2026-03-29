@@ -136,5 +136,9 @@ listGroupMembers :: Pool Hasql.Connection -> UUID -> IO [UUID]
 listGroupMembers pool gid =
   runSession pool $ Session.statement () $ run $ select $ do
     row <- each workspaceGroupMemberSchema
+    present $ do
+      ws <- each workspaceSchema
+      where_ $ ws.wsId ==. row.wgmWorkspaceId
+      where_ $ activeWorkspace ws
     where_ $ row.wgmGroupId ==. lit gid
     pure row.wgmWorkspaceId

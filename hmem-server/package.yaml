@@ -5,6 +5,8 @@ description:         Single-instance HTTP server for the hmem LLM memory and tas
 license:             MPL-2.0
 author:              hmem contributors
 category:            Web
+data-files:
+  - migrations/*.sql
 
 dependencies:
   - base >= 4.7 && < 5

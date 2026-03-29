@@ -36,6 +36,54 @@ rowToCleanupPolicy r = CleanupPolicy
   , updatedAt     = r.cpUpdatedAt
   }
 
+softDeleteMemoriesS :: [UUID] -> Session.Session Int64
+softDeleteMemoriesS [] = pure 0
+softDeleteMemoriesS ids = do
+  n <- Session.statement () $ runN $
+    update Update
+      { target = memorySchema
+      , from = pure ()
+      , set = \_ row -> row { memDeletedAt = deletedNow }
+      , updateWhere = \_ row -> in_ row.memId (map lit ids) &&. activeMemory row
+      , returning = NoReturning
+      }
+  Session.statement () $ run_ $
+    delete Delete
+      { from = memoryLinkSchema
+      , using = pure ()
+      , deleteWhere = \_ row -> in_ row.mlSourceId (map lit ids) ||. in_ row.mlTargetId (map lit ids)
+      , returning = NoReturning
+      }
+  Session.statement () $ run_ $
+    delete Delete
+      { from = memoryTagSchema
+      , using = pure ()
+      , deleteWhere = \_ row -> in_ row.mtMemoryId (map lit ids)
+      , returning = NoReturning
+      }
+  Session.statement () $ run_ $
+    delete Delete
+      { from = memoryCategoryLinkSchema
+      , using = pure ()
+      , deleteWhere = \_ row -> in_ row.mclMemoryId (map lit ids)
+      , returning = NoReturning
+      }
+  Session.statement () $ run_ $
+    delete Delete
+      { from = projectMemoryLinkSchema
+      , using = pure ()
+      , deleteWhere = \_ row -> in_ row.pmlMemoryId (map lit ids)
+      , returning = NoReturning
+      }
+  Session.statement () $ run_ $
+    delete Delete
+      { from = taskMemoryLinkSchema
+      , using = pure ()
+      , deleteWhere = \_ row -> in_ row.tmlMemoryId (map lit ids)
+      , returning = NoReturning
+      }
+  pure n
+
 ------------------------------------------------------------------------
 -- Run cleanup for a workspace
 ------------------------------------------------------------------------
@@ -73,6 +121,7 @@ cleanByAge pool wsId policy =
           row <- each memorySchema
           where_ $ row.memWorkspaceId ==. lit wsId
           where_ $ row.memMemoryType ==. lit policy.memoryType
+          where_ $ activeMemory row
           where_ $ row.memImportance <. lit imp
           where_ $ row.memCreatedAt <. cutoff
           absent $ do
@@ -81,13 +130,7 @@ cleanByAge pool wsId policy =
           pure row.memId
         case idsToDelete of
           [] -> pure 0
-          _  -> Session.statement () $ runN $
-            delete Delete
-              { from = memorySchema
-              , using = pure ()
-              , deleteWhere = \_ row -> in_ row.memId (map lit idsToDelete)
-              , returning = NoReturning
-              }
+          _  -> softDeleteMemoriesS idsToDelete
 
 -- | If there are more than max_count memories, delete the least important / oldest.
 -- Uses NOT EXISTS to protect linked memories without loading all IDs.
@@ -105,6 +148,7 @@ cleanByCount pool wsId policy =
           row <- each memorySchema
           where_ $ row.memWorkspaceId ==. lit wsId
           where_ $ row.memMemoryType ==. lit policy.memoryType
+          where_ $ activeMemory row
           where_ $ row.memImportance <. lit imp
           -- Exclude memories in the top-N (stays in SQL)
           absent $ do
@@ -113,6 +157,7 @@ cleanByCount pool wsId policy =
                 r <- each memorySchema
                 where_ $ r.memWorkspaceId ==. lit wsId
                 where_ $ r.memMemoryType ==. lit policy.memoryType
+                where_ $ activeMemory r
                 pure r
             where_ $ kept.memId ==. row.memId
           -- Exclude linked memories
@@ -122,13 +167,7 @@ cleanByCount pool wsId policy =
           pure row.memId
         case idsToDelete of
           [] -> pure 0
-          _  -> Session.statement () $ runN $
-            delete Delete
-              { from = memorySchema
-              , using = pure ()
-              , deleteWhere = \_ row -> in_ row.memId (map lit idsToDelete)
-              , returning = NoReturning
-              }
+          _  -> softDeleteMemoriesS idsToDelete
 
 ------------------------------------------------------------------------
 -- Policy CRUD
@@ -142,6 +181,10 @@ getCleanupPolicies pool wsId mlimit moffset = do
     limit (fromIntegral lim) $ offset (fromIntegral off) $ do
       row <- each cleanupPolicySchema
       where_ $ row.cpWorkspaceId ==. lit wsId
+      present $ do
+        ws <- each workspaceSchema
+        where_ $ ws.wsId ==. row.cpWorkspaceId
+        where_ $ activeWorkspace ws
       pure row
   pure $ map rowToCleanupPolicy rows
 
@@ -201,6 +244,7 @@ decayStaleImportance pool wsId policy = case policy.maxAgeHours of
         , updateWhere = \_ row ->
             row.memWorkspaceId ==. lit wsId
             &&. row.memMemoryType ==. lit policy.memoryType
+          &&. activeMemory row
             &&. row.memLastAccessedAt <. cutoff
             &&. row.memImportance >. lit (1 :: Int16)
         , returning = NoReturning

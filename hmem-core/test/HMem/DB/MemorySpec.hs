@@ -152,6 +152,8 @@ spec = around withTestEnv $ do
       ok `shouldBe` True
       got <- getMemory env.pool mem.id
       got `shouldSatisfy` isNothing
+      listed <- listMemories env.pool (Just ws.id) Nothing Nothing Nothing
+      map (.id) listed `shouldNotContain` [mem.id]
 
     it "returns False for nonexistent ID" $ \env -> do
       ok <- deleteMemory env.pool (read "00000000-0000-0000-0000-000000000099")

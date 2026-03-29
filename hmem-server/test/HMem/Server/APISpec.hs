@@ -8,6 +8,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Maybe (isJust)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Time.Format.ISO8601 (iso8601Show)
 import Data.UUID (UUID)
 import Network.HTTP.Types
 import Network.Wai (Application, defaultRequest)
@@ -16,6 +17,7 @@ import Network.Wai.Test (SResponse(..), runSession, srequest, SRequest(..))
 import Test.Hspec
 
 import HMem.Config (CorsConfig(..))
+import HMem.Config qualified as Config
 import HMem.DB.TestHarness
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkApp)
@@ -26,13 +28,40 @@ import HMem.Types
 ------------------------------------------------------------------------
 
 withApp :: (Application -> IO a) -> IO a
-withApp action = withTestEnv $ \env -> do
-  tracker <- newAccessTracker env.pool 3600
-  let corsCfg = CorsConfig { allowedOrigins = ["*"] }
-  action (mkApp id corsCfg env.pool tracker True)
+withApp action = withAppConfig Config.defaultConfig action
 
-runReq :: Application -> Method -> BS.ByteString -> LBS.ByteString -> IO SResponse
-runReq app method fullPath body =
+withAppConfig :: Config.HMemConfig -> (Application -> IO a) -> IO a
+withAppConfig cfg action = withAppEnvConfig cfg (\_ app -> action app)
+
+withAppEnv :: (TestEnv -> Application -> IO a) -> IO a
+withAppEnv = withAppEnvConfig Config.defaultConfig
+
+withAppEnvConfig :: Config.HMemConfig -> (TestEnv -> Application -> IO a) -> IO a
+withAppEnvConfig cfg action = withTestEnv $ \env -> do
+  tracker <- newAccessTracker env.pool 3600
+  let cfg' = cfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
+  app <- mkApp id cfg'.auth cfg'.cors cfg'.rateLimit env.pool tracker True
+  action env app
+
+testAuthCfg :: Config.HMemConfig
+testAuthCfg = Config.defaultConfig
+  { Config.auth = Config.AuthConfig
+      { Config.enabled = True
+      , Config.apiKey = Just "test-secret"
+      }
+  }
+
+testRateLimitCfg :: Config.HMemConfig
+testRateLimitCfg = Config.defaultConfig
+  { Config.rateLimit = Config.RateLimitConfig
+      { Config.rlEnabled = True
+      , Config.rlRequestsPerSecond = 1.0
+      , Config.rlBurst = 1
+      }
+  }
+
+runReqWithHeaders :: Application -> Method -> BS.ByteString -> [(HeaderName, BS.ByteString)] -> LBS.ByteString -> IO SResponse
+runReqWithHeaders app method fullPath headers body =
   runSession (srequest $ SRequest req body) app
   where
     (rawPath, rawQS) = BS.break (== 0x3F) fullPath  -- split on '?'
@@ -43,8 +72,12 @@ runReq app method fullPath body =
                                $ decodeUtf8 rawPath
       , Wai.rawQueryString = rawQS
       , Wai.queryString    = parseQuery rawQS
-      , Wai.requestHeaders = [("Content-Type", "application/json")]
+      , Wai.requestHeaders = [("Content-Type", "application/json")] <> headers
       }
+
+runReq :: Application -> Method -> BS.ByteString -> LBS.ByteString -> IO SResponse
+runReq app method fullPath body =
+  runReqWithHeaders app method fullPath [] body
 
 get_ :: Application -> BS.ByteString -> IO SResponse
 get_ app path = runReq app methodGet path ""
@@ -89,6 +122,11 @@ spec = around withApp $ do
       let Just ws = decode (respBody resp) :: Maybe Workspace
       ws.name `shouldBe` "test-ws"
 
+    it "rejects oversized workspace names" $ \app -> do
+      resp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= T.replicate (maxNameBytes + 1) "a"])
+      respStatus resp `shouldBe` 400
+
   describe "workspace + memory flow" $ do
     it "creates workspace, memory, retrieves, updates, deletes" $ \app -> do
       -- Create workspace
@@ -129,6 +167,9 @@ spec = around withApp $ do
       -- Confirm gone
       getResp2 <- get_ app (uuidPath "/api/v1/memories" mem.id)
       respStatus getResp2 `shouldBe` 404
+
+      purgeResp <- del app (uuidPath "/api/v1/memories" mem.id <> "/purge")
+      respStatus purgeResp `shouldBe` 200
 
   describe "project flow" $ do
     it "creates workspace, project, lists, updates status" $ \app -> do
@@ -234,6 +275,27 @@ spec = around withApp $ do
       resp <- get_ app "/api/v1/memories"
       respStatus resp `shouldBe` 200
 
+    it "sanitizes unique-violation details" $ \app -> do
+      firstResp <- postJSON app "/api/v1/workspaces"
+        (object
+          [ "name" .= ("safe-errors-a" :: T.Text)
+          , "path" .= ("/tmp/same-workspace-path" :: T.Text)
+          ])
+      respStatus firstResp `shouldBe` 200
+
+      secondResp <- postJSON app "/api/v1/workspaces"
+        (object
+          [ "name" .= ("safe-errors-b" :: T.Text)
+          , "path" .= ("/tmp/same-workspace-path" :: T.Text)
+          ])
+      respStatus secondResp `shouldBe` 409
+
+      let bodyText = decodeUtf8 (LBS.toStrict (respBody secondResp))
+      bodyText `shouldSatisfy` T.isInfixOf "Resource already exists"
+      bodyText `shouldSatisfy` T.isInfixOf "\"error\":\"conflict\""
+      bodyText `shouldSatisfy` (not . T.isInfixOf "duplicate key value violates unique constraint")
+      bodyText `shouldSatisfy` (not . T.isInfixOf "uq_workspace")
+
   describe "GET /health" $ do
     it "returns 200 with status ok" $ \app -> do
       resp <- get_ app "/api/v1/health"
@@ -242,6 +304,115 @@ spec = around withApp $ do
       body `shouldSatisfy` \v -> case v of
         Object _ -> True
         _        -> False
+
+  describe "optional bearer auth" $ do
+    it "returns 401 when auth is enabled and the bearer token is missing" $ \_ ->
+      withAppConfig testAuthCfg $ \app -> do
+        resp <- get_ app "/api/v1/health"
+        respStatus resp `shouldBe` 401
+
+    it "allows requests when auth is enabled and the bearer token matches" $ \_ ->
+      withAppConfig testAuthCfg $ \app -> do
+        resp <- runReqWithHeaders app methodGet "/api/v1/health"
+          [("Authorization", "Bearer test-secret")]
+          ""
+        respStatus resp `shouldBe` 200
+
+  describe "rate limiting" $ do
+    it "returns 429 when the configured burst is exceeded" $ \_ ->
+      withAppConfig testRateLimitCfg $ \app -> do
+        firstResp <- get_ app "/api/v1/health"
+        secondResp <- get_ app "/api/v1/health"
+        respStatus firstResp `shouldBe` 200
+        respStatus secondResp `shouldBe` 429
+
+  describe "list filtering" $ do
+    it "filters memories by created_after" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("memory-filter-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      firstMemResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "content" .= ("older memory" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          ])
+      secondMemResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "content" .= ("newer memory" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          ])
+      let Just firstMem = decode (respBody firstMemResp) :: Maybe Memory
+      let Just secondMem = decode (respBody secondMemResp) :: Maybe Memory
+
+      resp <- get_ app
+        ( "/api/v1/memories?workspace_id=" <> encodeUtf8 (T.pack (show ws.id))
+       <> "&created_after=" <> encodeUtf8 (T.pack (iso8601Show secondMem.createdAt))
+        )
+      respStatus resp `shouldBe` 200
+      let Just page = decode (respBody resp) :: Maybe (PaginatedResult Memory)
+      map (\item -> item.id) page.items `shouldBe` [secondMem.id]
+      page.items `shouldNotSatisfy` any ((== firstMem.id) . (\item -> item.id))
+
+    it "filters projects by updated_after" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("project-filter-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      oldProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Old Project" :: T.Text)])
+      newProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Updated Project" :: T.Text)])
+      let Just oldProj = decode (respBody oldProjResp) :: Maybe Project
+      let Just newProj = decode (respBody newProjResp) :: Maybe Project
+      updatedProjResp <- putJSON app (uuidPath "/api/v1/projects" newProj.id)
+        (object ["status" .= ("paused" :: T.Text)])
+      let Just updatedProj = decode (respBody updatedProjResp) :: Maybe Project
+
+      resp <- get_ app
+        ( "/api/v1/projects?workspace_id=" <> encodeUtf8 (T.pack (show ws.id))
+       <> "&updated_after=" <> encodeUtf8 (T.pack (iso8601Show updatedProj.updatedAt))
+        )
+      respStatus resp `shouldBe` 200
+      let Just page = decode (respBody resp) :: Maybe (PaginatedResult Project)
+      map (\item -> item.id) page.items `shouldBe` [updatedProj.id]
+      page.items `shouldNotSatisfy` any ((== oldProj.id) . (\item -> item.id))
+
+    it "filters tasks by priority" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-filter-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Task Filter Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      lowTaskResp <- postJSON app "/api/v1/tasks"
+        (object
+          [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
+          , "title" .= ("Low priority" :: T.Text)
+          , "priority" .= (2 :: Int)
+          ])
+      highTaskResp <- postJSON app "/api/v1/tasks"
+        (object
+          [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
+          , "title" .= ("High priority" :: T.Text)
+          , "priority" .= (8 :: Int)
+          ])
+      let Just lowTask = decode (respBody lowTaskResp) :: Maybe Task
+      let Just highTask = decode (respBody highTaskResp) :: Maybe Task
+
+      resp <- get_ app
+        ( "/api/v1/tasks?workspace_id=" <> encodeUtf8 (T.pack (show ws.id))
+       <> "&priority=8"
+        )
+      respStatus resp `shouldBe` 200
+      let Just page = decode (respBody resp) :: Maybe (PaginatedResult Task)
+      map (\item -> item.id) page.items `shouldBe` [highTask.id]
+      page.items `shouldNotSatisfy` any ((== lowTask.id) . (\item -> item.id))
 
   describe "memory links" $ do
     it "creates and retrieves memory links" $ \app -> do
@@ -298,6 +469,17 @@ spec = around withApp $ do
       let Just mems = decode (respBody batchResp) :: Maybe [Memory]
       length mems `shouldBe` 2
 
+    it "rejects batch items with empty content" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("batch-invalid-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      let items =
+            [ object ["workspace_id" .= ws.id, "content" .= ("   " :: T.Text)
+                     , "memory_type" .= ("short_term" :: T.Text)]
+            ]
+      batchResp <- postJSON app "/api/v1/memories/batch" (toJSON items)
+      respStatus batchResp `shouldBe` 400
+
   describe "task dependencies via API" $ do
     it "adds dependency and rejects cycle" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"
@@ -346,6 +528,64 @@ spec = around withApp $ do
       getResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id)
       respStatus getResp `shouldBe` 404
 
+    it "soft-deletes workspace children and allows recreation with the same path" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object
+          [ "name" .= ("cascade-ws" :: T.Text)
+          , "path" .= ("C:/tmp/cascade-ws" :: T.Text)
+          ])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      memResp <- postJSON app "/api/v1/memories"
+        (object ["workspace_id" .= ws.id, "content" .= ("hidden memory" :: T.Text)
+                , "memory_type" .= ("short_term" :: T.Text)])
+      let Just mem = decode (respBody memResp) :: Maybe Memory
+
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Hidden Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      taskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Hidden Task" :: T.Text)])
+      let Just task = decode (respBody taskResp) :: Maybe Task
+
+      catResp <- postJSON app "/api/v1/categories"
+        (object ["workspace_id" .= ws.id, "name" .= ("hidden-category" :: T.Text)])
+      let Just cat = decode (respBody catResp) :: Maybe MemoryCategory
+
+      delResp <- del app (uuidPath "/api/v1/workspaces" ws.id)
+      respStatus delResp `shouldBe` 200
+
+      getMemResp <- get_ app (uuidPath "/api/v1/memories" mem.id)
+      respStatus getMemResp `shouldBe` 404
+      getProjResp <- get_ app (uuidPath "/api/v1/projects" proj.id)
+      respStatus getProjResp `shouldBe` 404
+      getTaskResp <- get_ app (uuidPath "/api/v1/tasks" task.id)
+      respStatus getTaskResp `shouldBe` 404
+      getCatResp <- get_ app (uuidPath "/api/v1/categories" cat.id)
+      respStatus getCatResp `shouldBe` 404
+
+      recreateResp <- postJSON app "/api/v1/workspaces"
+        (object
+          [ "name" .= ("cascade-ws-recreated" :: T.Text)
+          , "path" .= ("C:/tmp/cascade-ws" :: T.Text)
+          ])
+      respStatus recreateResp `shouldBe` 200
+
+    it "requires soft-delete before purge" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("purge-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      purgeActiveResp <- del app (uuidPath "/api/v1/workspaces" ws.id <> "/purge")
+      respStatus purgeActiveResp `shouldBe` 409
+
+      delResp <- del app (uuidPath "/api/v1/workspaces" ws.id)
+      respStatus delResp `shouldBe` 200
+
+      purgeDeletedResp <- del app (uuidPath "/api/v1/workspaces" ws.id <> "/purge")
+      respStatus purgeDeletedResp `shouldBe` 200
+
   --------------------------------------------------------------------------
   -- Categories
   --------------------------------------------------------------------------
@@ -392,6 +632,31 @@ spec = around withApp $ do
       -- Confirm 404
       getResp2 <- get_ app (uuidPath "/api/v1/categories" cat.id)
       respStatus getResp2 `shouldBe` 404
+
+    it "detaches active child categories when deleting a parent" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("cat-tree-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      parentResp <- postJSON app "/api/v1/categories"
+        (object ["workspace_id" .= ws.id, "name" .= ("parent" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe MemoryCategory
+
+      childResp <- postJSON app "/api/v1/categories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "name" .= ("child" :: T.Text)
+          , "parent_id" .= parent.id
+          ])
+      let Just child = decode (respBody childResp) :: Maybe MemoryCategory
+
+      delResp <- del app (uuidPath "/api/v1/categories" parent.id)
+      respStatus delResp `shouldBe` 200
+
+      getChildResp <- get_ app (uuidPath "/api/v1/categories" child.id)
+      respStatus getChildResp `shouldBe` 200
+      let Just updatedChild = decode (respBody getChildResp) :: Maybe MemoryCategory
+      updatedChild.parentId `shouldBe` Nothing
 
     it "lists global categories" $ \app -> do
       -- Create a global category (no workspace_id)
@@ -570,3 +835,20 @@ spec = around withApp $ do
     it "returns 404 for nonexistent category" $ \app -> do
       resp <- get_ app "/api/v1/categories/00000000-0000-0000-0000-000000000099"
       respStatus resp `shouldBe` 404
+
+  describe "audit log" $ do
+    it "persists the current request id for mutations" $ \_ -> do
+      withAppEnv $ \env app -> do
+        let requestIdHeader = "audit-req-1"
+        resp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("X-Request-Id", requestIdHeader)]
+          (encode (object ["name" .= ("audit-http-ws" :: T.Text)]))
+        respStatus resp `shouldBe` 200
+        lookup "X-Request-Id" resp.simpleHeaders `shouldBe` Just requestIdHeader
+
+        let Just ws = decode (respBody resp) :: Maybe Workspace
+        rows <- getAuditLogRows env.pool "workspace" (T.pack (show ws.id))
+        length rows `shouldBe` 1
+        let [created] = rows
+        created.action `shouldBe` "create"
+        created.requestId `shouldBe` Just "audit-req-1"

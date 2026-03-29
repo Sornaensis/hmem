@@ -23,6 +23,7 @@ library
       HMem.DB.Migration
       HMem.DB.Pool
       HMem.DB.Project
+      HMem.DB.RequestContext
       HMem.DB.Schema
       HMem.DB.Task
       HMem.DB.TestHarness
@@ -120,6 +121,8 @@ test-suite hmem-core-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      HMem.ConfigSpec
+      HMem.DB.AuditSpec
       HMem.DB.CleanupSpec
       HMem.DB.MemorySpec
       HMem.DB.ProjectSpec

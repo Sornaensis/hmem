@@ -117,6 +117,7 @@ test-suite hmem-mcp-test
     , http-client-tls
     , http-types
     , optparse-applicative
+    , scientific
     , stm
     , text
     , time

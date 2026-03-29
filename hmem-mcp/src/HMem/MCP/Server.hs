@@ -77,8 +77,8 @@ maxQueueDepth = 64
 toolsPageSize :: Int
 toolsPageSize = 15
 
-runMCPServer :: String -> IO ()
-runMCPServer serverUrl = do
+runMCPServer :: String -> Maybe Text -> IO ()
+runMCPServer serverUrl mApiKey = do
   hSetBuffering stdin  LineBuffering
   hSetBuffering stdout LineBuffering
   mgr    <- newManager tlsManagerSettings
@@ -88,7 +88,7 @@ runMCPServer serverUrl = do
   active <- newTVarIO (0 :: Int)
   initialized <- newTVarIO False
   -- Spawn fixed worker pool
-  replicateM_ maxConcurrency $ forkIO $ worker mgr lock serverUrl queue active initialized
+  replicateM_ maxConcurrency $ forkIO $ worker mgr lock serverUrl mApiKey queue active initialized
   -- Read stdin → queue
   readLoop lock queue
   -- Drain: wait for queue to empty and all workers to finish
@@ -101,8 +101,8 @@ runMCPServer serverUrl = do
 
 -- | Worker thread: reads from the queue and processes each line.
 -- Atomically dequeues + increments active counter to prevent drain races.
-worker :: Manager -> MVar () -> String -> TBQueue BS8.ByteString -> TVar Int -> TVar Bool -> IO ()
-worker mgr lock url queue active initialized = go
+worker :: Manager -> MVar () -> String -> Maybe Text -> TBQueue BS8.ByteString -> TVar Int -> TVar Bool -> IO ()
+worker mgr lock url mApiKey queue active initialized = go
   where
     go = do
       mline <- try @SomeException $ atomically $ do
@@ -112,7 +112,7 @@ worker mgr lock url queue active initialized = go
       case mline of
         Left _ -> pure ()  -- Worker exits cleanly
         Right line -> do
-          (processLine mgr lock url initialized line `catch` \(_ :: SomeException) -> pure ())
+          (processLine mgr lock url mApiKey initialized line `catch` \(_ :: SomeException) -> pure ())
             `finally` atomically (modifyTVar' active (subtract 1))
           go
 
@@ -139,8 +139,8 @@ readLoop lock queue = do
             else pure ()
           readLoop lock queue
 
-processLine :: Manager -> MVar () -> String -> TVar Bool -> BS8.ByteString -> IO ()
-processLine mgr lock serverUrl initialized line
+processLine :: Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> BS8.ByteString -> IO ()
+processLine mgr lock serverUrl mApiKey initialized line
   | BS8.null line = pure ()
   | otherwise = case eitherDecodeStrict @Value line of
       Left _err ->
@@ -152,7 +152,7 @@ processLine mgr lock serverUrl initialized line
           sendResponse lock $ jsonRpcError (extractId val) (-32600)
             "Invalid Request: missing required 'method' field"
         Right req -> do
-          mresp <- handleRequest mgr serverUrl initialized req
+          mresp <- handleRequest mgr serverUrl mApiKey initialized req
             `catch` \(e :: SomeException) ->
               pure $ Just $ jsonRpcError req.reqId (-32603)
                 ("Internal error: " <> T.pack (show e))
@@ -172,8 +172,8 @@ extractId _          = Nothing
 -- @notifications/initialized@ are accepted before the handshake
 -- completes.  All other methods receive @-32002@ ("Server not
 -- initialized").
-handleRequest :: Manager -> String -> TVar Bool -> JsonRpcRequest -> IO (Maybe Value)
-handleRequest mgr serverUrl initialized req = case req.reqMethod of
+handleRequest :: Manager -> String -> Maybe Text -> TVar Bool -> JsonRpcRequest -> IO (Maybe Value)
+handleRequest mgr serverUrl mApiKey initialized req = case req.reqMethod of
   "initialize" -> do
     atomically $ modifyTVar' initialized (const True)
     pure $ Just $ jsonRpcResponse req.reqId $ object
@@ -203,11 +203,11 @@ handleRequest mgr serverUrl initialized req = case req.reqMethod of
     ready <- atomically $ readTVar initialized
     if not ready
       then pure $ Just $ jsonRpcError req.reqId (-32002) "Server not initialized"
-      else handleMethod mgr serverUrl req
+      else handleMethod mgr serverUrl mApiKey req
 
 -- | Dispatch initialized requests to the appropriate handler.
-handleMethod :: Manager -> String -> JsonRpcRequest -> IO (Maybe Value)
-handleMethod mgr serverUrl req = case req.reqMethod of
+handleMethod :: Manager -> String -> Maybe Text -> JsonRpcRequest -> IO (Maybe Value)
+handleMethod mgr serverUrl mApiKey req = case req.reqMethod of
   "tools/list" -> do
     let allTools = toolDefinitions
         cursorIdx = parseCursor req.reqParams
@@ -222,7 +222,7 @@ handleMethod mgr serverUrl req = case req.reqMethod of
       Nothing -> pure $ Just $ jsonRpcError req.reqId (-32602)
           "Invalid params: tools/call requires 'name' and 'arguments'"
       Just params -> do
-        result <- handleToolCall mgr serverUrl params
+        result <- handleToolCall mgr serverUrl mApiKey params
         pure $ Just $ jsonRpcResponse req.reqId result
 
   method ->

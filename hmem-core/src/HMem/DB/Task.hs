@@ -4,6 +4,7 @@ module HMem.DB.Task
   , updateTask
   , deleteTask
   , listTasks
+  , listTasksWithQuery
   , listTasksByWorkspace
   , addDependency
   , removeDependency
@@ -13,6 +14,7 @@ module HMem.DB.Task
 
 import Control.Exception (throwIO)
 import Data.Aeson (Object, toJSON)
+import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int16)
 import Data.Maybe (fromMaybe)
@@ -20,10 +22,13 @@ import Data.Pool (Pool)
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
+import Hasql.Decoders qualified as Dec
+import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import Rel8
 
-import HMem.DB.Pool (runSession, DBException(..))
+import HMem.DB.Pool (runSession, runTransaction, DBException(..))
 import HMem.DB.Schema
 import HMem.Types
 
@@ -47,6 +52,25 @@ rowToTask r = Task
   , createdAt   = r.taskCreatedAt
   , updatedAt   = r.taskUpdatedAt
   }
+
+taskSubtreeIdsStatement :: Statement.Statement UUID [UUID]
+taskSubtreeIdsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE task_tree AS ("
+      , "  SELECT id"
+      , "  FROM tasks"
+      , "  WHERE id = $1 AND deleted_at IS NULL"
+      , "  UNION ALL"
+      , "  SELECT t.id"
+      , "  FROM tasks t"
+      , "  JOIN task_tree tt ON t.parent_id = tt.id"
+      , "  WHERE t.deleted_at IS NULL"
+      , ")"
+      , "SELECT id FROM task_tree"
+      ]
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
 ------------------------------------------------------------------------
 -- Create
@@ -72,6 +96,7 @@ createTask pool ct = do
               , taskMetadata    = lit meta
               , taskDueAt       = lit ct.dueAt
               , taskCompletedAt = lit (Nothing :: Maybe UTCTime)
+              , taskDeletedAt   = unsafeDefault
               , taskCreatedAt   = unsafeDefault
               , taskUpdatedAt   = unsafeDefault
               }
@@ -92,6 +117,7 @@ getTask pool tid = do
   rows <- runSession pool $ Session.statement () $ run $ select $ do
     row <- each taskSchema
     where_ $ row.taskId ==. lit tid
+    where_ $ activeTask row
     pure row
   case rows of
     []    -> pure Nothing
@@ -117,7 +143,7 @@ updateTask pool tid ut = do
           -- completed_at is managed by the hmem_task_completion trigger
           , taskCompletedAt = row.taskCompletedAt
           }
-      , updateWhere = \_ row -> row.taskId ==. lit tid
+          , updateWhere = \_ row -> row.taskId ==. lit tid &&. activeTask row
       , returning = Returning id
       }
   case rows of
@@ -130,14 +156,34 @@ updateTask pool tid ut = do
 
 deleteTask :: Pool Hasql.Connection -> UUID -> IO Bool
 deleteTask pool tid = do
-  n <- runSession pool $ Session.statement () $ runN $
-    delete Delete
-      { from = taskSchema
-      , using = pure ()
-      , deleteWhere = \_ row -> row.taskId ==. lit tid
-      , returning = NoReturning
-      }
-  pure (n > 0)
+  runTransaction pool $ do
+    ids <- Session.statement tid taskSubtreeIdsStatement
+    case ids of
+      [] -> pure False
+      _ -> do
+        Session.statement () $ run_ $
+          update Update
+            { target = taskSchema
+            , from = pure ()
+            , set = \_ row -> row { taskDeletedAt = deletedNow }
+            , updateWhere = \_ row -> in_ row.taskId (map lit ids) &&. activeTask row
+            , returning = NoReturning
+            }
+        Session.statement () $ run_ $
+          delete Delete
+            { from = taskDependencySchema
+            , using = pure ()
+            , deleteWhere = \_ row -> in_ row.tdTaskId (map lit ids) ||. in_ row.tdDependsOnId (map lit ids)
+            , returning = NoReturning
+            }
+        Session.statement () $ run_ $
+          delete Delete
+            { from = taskMemoryLinkSchema
+            , using = pure ()
+            , deleteWhere = \_ row -> in_ row.tmlTaskId (map lit ids)
+            , returning = NoReturning
+            }
+        pure True
 
 ------------------------------------------------------------------------
 -- List
@@ -150,17 +196,53 @@ listTasks
   -> Maybe Int      -- ^ limit
   -> Maybe Int      -- ^ offset
   -> IO [Task]
-listTasks pool projId mstatus mlimit moffset = do
-  let lim = fromMaybe 50 mlimit
-      off = fromMaybe 0  moffset
+listTasks pool projId mstatus mlimit moffset =
+  listTasksWithQuery pool TaskListQuery
+    { workspaceId = Nothing
+    , projectId = Just projId
+    , status = mstatus
+    , priority = Nothing
+    , createdAfter = Nothing
+    , createdBefore = Nothing
+    , updatedAfter = Nothing
+    , updatedBefore = Nothing
+    , limit = mlimit
+    , offset = moffset
+    }
+
+listTasksWithQuery :: Pool Hasql.Connection -> TaskListQuery -> IO [Task]
+listTasksWithQuery pool tq = do
+  let lim = fromMaybe 50 tq.limit
+      off = fromMaybe 0  tq.offset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $
     orderBy (((\row -> row.taskPriority) >$< desc) <> ((\row -> row.taskCreatedAt) >$< asc)) $ do
       row <- each taskSchema
-      where_ $ row.taskProjectId ==. lit (Just projId)
-      case mstatus of
+      where_ $ activeTask row
+      case tq.workspaceId of
+        Just wsId -> where_ $ row.taskWorkspaceId ==. lit wsId
+        Nothing -> pure ()
+      case tq.projectId of
+        Just projId -> where_ $ row.taskProjectId ==. lit (Just projId)
+        Nothing -> pure ()
+      case tq.status of
         Nothing -> pure ()
         Just s  -> where_ $ row.taskStatus ==. lit s
+      case tq.priority of
+        Just priority -> where_ $ row.taskPriority ==. lit (fromIntegral priority :: Int16)
+        Nothing -> pure ()
+      case tq.createdAfter of
+        Just createdAfter -> where_ $ row.taskCreatedAt >=. lit createdAfter
+        Nothing -> pure ()
+      case tq.createdBefore of
+        Just createdBefore -> where_ $ row.taskCreatedAt <=. lit createdBefore
+        Nothing -> pure ()
+      case tq.updatedAfter of
+        Just updatedAfter -> where_ $ row.taskUpdatedAt >=. lit updatedAfter
+        Nothing -> pure ()
+      case tq.updatedBefore of
+        Just updatedBefore -> where_ $ row.taskUpdatedAt <=. lit updatedBefore
+        Nothing -> pure ()
       pure row
   pure $ map rowToTask rows
 
@@ -173,22 +255,19 @@ listTasksByWorkspace
   -> Maybe Int      -- ^ limit
   -> Maybe Int      -- ^ offset
   -> IO [Task]
-listTasksByWorkspace pool wsId mstatus mprojId mlimit moffset = do
-  let lim = fromMaybe 50 mlimit
-      off = fromMaybe 0  moffset
-  rows <- runSession pool $ Session.statement () $ run $ select $
-    limit (fromIntegral lim) $ offset (fromIntegral off) $
-    orderBy (((\row -> row.taskPriority) >$< desc) <> ((\row -> row.taskCreatedAt) >$< asc)) $ do
-      row <- each taskSchema
-      where_ $ row.taskWorkspaceId ==. lit wsId
-      case mprojId of
-        Just pid -> where_ $ row.taskProjectId ==. lit (Just pid)
-        Nothing  -> pure ()
-      case mstatus of
-        Nothing -> pure ()
-        Just s  -> where_ $ row.taskStatus ==. lit s
-      pure row
-  pure $ map rowToTask rows
+listTasksByWorkspace pool wsId mstatus mprojId mlimit moffset =
+  listTasksWithQuery pool TaskListQuery
+    { workspaceId = Just wsId
+    , projectId = mprojId
+    , status = mstatus
+    , priority = Nothing
+    , createdAfter = Nothing
+    , createdBefore = Nothing
+    , updatedAfter = Nothing
+    , updatedBefore = Nothing
+    , limit = mlimit
+    , offset = moffset
+    }
 
 ------------------------------------------------------------------------
 -- Dependencies

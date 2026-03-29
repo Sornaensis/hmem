@@ -35,6 +35,7 @@ A PostgreSQL-backed memory and task management system for LLMs, written in Haske
 - **Task Management** — Tasks with sub-tasks, dependencies (DAG), and memory references
 - **Workspace Scoping** — Scope by filesystem path or GitHub owner/repo
 - **Configurable Cleanup** — Automatic expiry and pruning by age, count, and importance thresholds
+- **Soft Deletes + Purge** — Delete operations hide entities first; permanent removal is explicit via purge endpoints/tools
 - **MCP Protocol** — JSON-RPC over stdio for direct LLM integration
 
 ## Installation
@@ -69,8 +70,8 @@ This runs `hmem-setup init` followed by `hmem-setup install`, which:
 | Command | Description |
 |---|---|
 | `hmem-setup init` | Initialize `~/.hmem/`, PostgreSQL, and config only |
-| `hmem-setup install` | Register auto-start services + install MCP/agent configs |
-| `hmem-setup start` | Start PostgreSQL and hmem-server |
+| `hmem-setup install` | Register auto-start services + install MCP/agent configs; requires `init` first |
+| `hmem-setup start` | Start PostgreSQL, apply pending migrations, and start hmem-server; requires `init` first |
 | `hmem-setup stop` | Stop hmem-server and PostgreSQL |
 | `hmem-setup status` | Show whether services are running |
 | `hmem-setup uninstall` | Stop services, remove auto-start, delete `~/.hmem/` |
@@ -98,7 +99,7 @@ stack build
 
 # 2. Create database and apply migrations
 createdb hmem
-for f in sql/migrations/V*.sql; do psql hmem < "$f"; done
+for f in hmem-server/migrations/V*.sql; do psql hmem < "$f"; done
 
 # 3. Start the server
 stack exec hmem-server
@@ -108,6 +109,14 @@ stack exec hmem-mcp -- --server-url http://localhost:8420
 ```
 
 The MCP server reads JSON-RPC on stdin and writes responses to stdout.
+
+## Configuration Notes
+
+If you need to override the database password without storing it in `~/.hmem/config.yaml`, set `HMEM_DB_PASSWORD` in the environment before starting `hmem-server` or `hmem-mcp`. When present, it takes precedence over the password value in the YAML config.
+
+Optional Bearer auth is also available. Set `auth.enabled: true` and `auth.api_key: "your-secret"` in `~/.hmem/config.yaml`, or provide the key via `HMEM_API_KEY`. When an API key is configured, `hmem-mcp` will forward it automatically in the `Authorization: Bearer ...` header for requests to `hmem-server`.
+
+Delete operations for workspaces, memories, projects, tasks, and categories are soft deletes. They disappear from normal reads immediately, but remain purgeable until you call the corresponding `.../purge` HTTP endpoint or `*_purge` MCP tool.
 
 ## License
 

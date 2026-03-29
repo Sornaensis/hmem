@@ -13,12 +13,14 @@ import Control.Exception (throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON (..), ToJSON (..), genericToJSON, genericParseJSON, Value, object, (.=))
 import Data.Aeson qualified as Aeson
+import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Functor.Contravariant ((>$<))
 import Data.Maybe (fromMaybe)
 import Data.Pool (Pool, tryWithResource)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
@@ -26,12 +28,14 @@ import GHC.Generics (Generic)
 import Rel8 hiding (Delete)
 import Rel8 qualified (Delete(..))
 import Servant
+import System.IO (stderr)
 
 import HMem.DB.Category qualified as Cat
 import HMem.DB.Cleanup qualified as Cleanup
 import HMem.DB.Memory qualified as Mem
-import HMem.DB.Pool (runSession, DBException(..))
+import HMem.DB.Pool (runSession, runTransaction, DBException(..))
 import HMem.DB.Project qualified as Proj
+import HMem.DB.RequestContext (currentRequestId)
 import HMem.DB.Schema
 import HMem.DB.Task qualified as Task
 import HMem.DB.WorkspaceGroup qualified as WG
@@ -65,11 +69,16 @@ type WorkspaceAPI =
   :<|> Capture "workspaceId" UUID :> Get '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> ReqBody '[JSON] UpdateWorkspace :> Put '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "workspaceId" UUID :> "purge" :> Delete '[JSON] NoContent
 
 -- Memories
 type MemoryAPI =
        QueryParam "workspace_id" UUID
          :> QueryParam "type" MemoryType
+         :> QueryParam "created_after" UTCTime
+         :> QueryParam "created_before" UTCTime
+         :> QueryParam "updated_after" UTCTime
+         :> QueryParam "updated_before" UTCTime
          :> QueryParam "limit" Int
          :> QueryParam "offset" Int
          :> QueryParam "compact" Bool
@@ -83,6 +92,7 @@ type MemoryAPI =
   :<|> Capture "memoryId" UUID :> Get '[JSON] Memory
   :<|> Capture "memoryId" UUID :> ReqBody '[JSON] UpdateMemory :> Put '[JSON] Memory
   :<|> Capture "memoryId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "memoryId" UUID :> "purge" :> Delete '[JSON] NoContent
   :<|> Capture "memoryId" UUID :> "links" :> Get '[JSON] [MemoryLink]
   :<|> Capture "memoryId" UUID :> "links" :> ReqBody '[JSON] CreateMemoryLink
          :> Post '[JSON] NoContent
@@ -105,6 +115,10 @@ type MemoryAPI =
 type ProjectAPI =
        QueryParam "workspace_id" UUID
          :> QueryParam "status" ProjectStatus
+         :> QueryParam "created_after" UTCTime
+         :> QueryParam "created_before" UTCTime
+         :> QueryParam "updated_after" UTCTime
+         :> QueryParam "updated_before" UTCTime
          :> QueryParam "limit" Int
          :> QueryParam "offset" Int
          :> Get '[JSON] (PaginatedResult Project)
@@ -112,6 +126,7 @@ type ProjectAPI =
   :<|> Capture "projectId" UUID :> Get '[JSON] Project
   :<|> Capture "projectId" UUID :> ReqBody '[JSON] UpdateProject :> Put '[JSON] Project
   :<|> Capture "projectId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "projectId" UUID :> "purge" :> Delete '[JSON] NoContent
   :<|> Capture "projectId" UUID :> "memories" :> ReqBody '[JSON] LinkMemory
          :> Post '[JSON] NoContent
   :<|> Capture "projectId" UUID :> "memories" :> Capture "memoryId" UUID
@@ -123,6 +138,11 @@ type TaskAPI =
        QueryParam "workspace_id" UUID
          :> QueryParam "project_id" UUID
          :> QueryParam "status" TaskStatus
+         :> QueryParam "priority" Int
+         :> QueryParam "created_after" UTCTime
+         :> QueryParam "created_before" UTCTime
+         :> QueryParam "updated_after" UTCTime
+         :> QueryParam "updated_before" UTCTime
          :> QueryParam "limit" Int
          :> QueryParam "offset" Int
          :> Get '[JSON] (PaginatedResult Task)
@@ -130,6 +150,7 @@ type TaskAPI =
   :<|> Capture "taskId" UUID :> Get '[JSON] Task
   :<|> Capture "taskId" UUID :> ReqBody '[JSON] UpdateTask :> Put '[JSON] Task
   :<|> Capture "taskId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "taskId" UUID :> "purge" :> Delete '[JSON] NoContent
   :<|> Capture "taskId" UUID :> "memories" :> ReqBody '[JSON] LinkMemory
          :> Post '[JSON] NoContent
   :<|> Capture "taskId" UUID :> "memories" :> Capture "memoryId" UUID
@@ -169,6 +190,7 @@ type CategoryAPI =
   :<|> Capture "categoryId" UUID :> ReqBody '[JSON] UpdateMemoryCategory
          :> Put '[JSON] MemoryCategory
   :<|> Capture "categoryId" UUID :> Delete '[JSON] NoContent
+    :<|> Capture "categoryId" UUID :> "purge" :> Delete '[JSON] NoContent
   :<|> "link" :> ReqBody '[JSON] CategoryLink :> Post '[JSON] NoContent
   :<|> "unlink" :> ReqBody '[JSON] CategoryLink :> Post '[JSON] NoContent
 
@@ -264,24 +286,67 @@ handleDBErrors io = do
   result <- liftIO (try io)
   case result of
     Right a -> pure a
-    Left (DBUniqueViolation detail) -> throwError err409
-      { errBody = Aeson.encode $ errorBody "conflict" "Duplicate entry" detail }
-    Left (DBForeignKeyViolation detail) -> throwError err400
-      { errBody = Aeson.encode $ errorBody "foreign_key" "Referenced entity not found" detail }
-    Left (DBCheckViolation detail) -> throwError err400
-      { errBody = Aeson.encode $ errorBody "check_violation" "Constraint violation" detail }
-    Left (DBCycleDetected detail) -> throwError err409
-      { errBody = Aeson.encode $ errorBody "cycle" "Cycle detected" detail }
-    Left DBStatementTimeout -> throwError err504
-      { errBody = Aeson.encode $ errorBody "timeout" "Statement timeout" "" }
-    Left (DBOtherError detail) -> throwError err500
-      { errBody = Aeson.encode $ errorBody "internal" "Internal database error" detail }
+    Left dbErr -> do
+      liftIO $ logDatabaseError dbErr
+      throwError (dbExceptionToServerError dbErr)
   where
-    errorBody :: Text -> Text -> Text -> Value
-    errorBody errType msg detail = object $
+    errorBody :: Text -> Text -> Value
+    errorBody errType msg = object
       [ "error"   .= errType
       , "message" .= msg
-      ] ++ [ "detail" .= detail | not (T.null detail) ]
+      ]
+
+    dbExceptionToServerError :: DBException -> ServerError
+    dbExceptionToServerError = \case
+      DBUniqueViolation _ -> err409
+        { errBody = Aeson.encode $ errorBody "conflict" "Resource already exists" }
+      DBForeignKeyViolation _ -> err400
+        { errBody = Aeson.encode $ errorBody "invalid_reference" "Referenced resource does not exist" }
+      DBCheckViolation _ -> err400
+        { errBody = Aeson.encode $ errorBody "invalid_request" "Request violates a data constraint" }
+      DBCycleDetected _ -> err409
+        { errBody = Aeson.encode $ errorBody "cycle" "Operation would create a cycle" }
+      DBStatementTimeout -> err504
+        { errBody = Aeson.encode $ errorBody "timeout" "Database request timed out" }
+      DBOtherError _ -> err500
+        { errBody = Aeson.encode $ errorBody "internal" "Internal database error" }
+
+logDatabaseError :: DBException -> IO ()
+logDatabaseError dbErr = do
+  requestId <- currentRequestId
+  LBS8.hPutStrLn stderr $ Aeson.encode $ object $
+    [ "level" .= ("error" :: Text)
+    , "event" .= ("db_error" :: Text)
+    , "error" .= dbErrorLabel dbErr
+    ]
+    ++ [ "request_id" .= rid | Just rid <- [requestId] ]
+    ++ [ "detail" .= detail | Just detail <- [dbErrorDetail dbErr] ]
+
+dbErrorLabel :: DBException -> Text
+dbErrorLabel = \case
+  DBUniqueViolation _ -> "unique_violation"
+  DBForeignKeyViolation _ -> "foreign_key_violation"
+  DBCheckViolation _ -> "check_violation"
+  DBCycleDetected _ -> "cycle_detected"
+  DBStatementTimeout -> "statement_timeout"
+  DBOtherError _ -> "other_error"
+
+dbErrorDetail :: DBException -> Maybe Text
+dbErrorDetail = \case
+  DBUniqueViolation detail -> Just detail
+  DBForeignKeyViolation detail -> Just detail
+  DBCheckViolation detail -> Just detail
+  DBCycleDetected detail -> Just detail
+  DBStatementTimeout -> Nothing
+  DBOtherError detail -> Just detail
+
+purgeConflict :: ServerError
+purgeConflict = err409
+  { errBody = Aeson.encode $ object
+      [ "error" .= ("conflict" :: Text)
+      , "message" .= ("Resource must be soft-deleted before purge" :: Text)
+      ]
+  }
 
 ------------------------------------------------------------------------
 -- Server implementation
@@ -343,6 +408,7 @@ workspaceHandlers pool =
   :<|> getWorkspaceH
   :<|> updateWorkspaceH
   :<|> deleteWorkspaceH
+  :<|> purgeWorkspaceH
   where
     listWorkspacesH :: Maybe Int -> Maybe Int -> Handler (PaginatedResult Workspace)
     listWorkspacesH mlimit moffset = handleDBErrors $ do
@@ -350,39 +416,46 @@ workspaceHandlers pool =
           off = capOffset moffset
       rows <- runSession pool $ Session.statement () $ run $ select $
         limit (fromIntegral lim + 1) $ offset (fromIntegral off) $
-        orderBy ((\row -> row.wsName) >$< asc) $ each workspaceSchema
+        orderBy ((\row -> row.wsName) >$< asc) $ do
+          row <- each workspaceSchema
+          where_ $ activeWorkspace row
+          pure row
       let results = map rowToWorkspace rows
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
     createWorkspaceH :: CreateWorkspace -> Handler Workspace
-    createWorkspaceH cw = handleDBErrors $ do
-      rows <- runSession pool $ Session.statement () $ run $
-        insert Insert
-          { into = workspaceSchema
-          , rows = values
-              [ WorkspaceT
-                  { wsId        = unsafeDefault
-                  , wsName      = lit cw.name
-                  , wsPath      = lit cw.path
-                  , wsGhOwner   = lit cw.ghOwner
-                  , wsGhRepo    = lit cw.ghRepo
-                  , wsType      = lit (fromMaybe WsRepository cw.workspaceType)
-                  , wsCreatedAt = unsafeDefault
-                  , wsUpdatedAt = unsafeDefault
-                  }
-              ]
-          , onConflict = Abort
-          , returning  = Returning id
-          }
-      case rows of
-        (r:_) -> pure $ rowToWorkspace r
-        []    -> throwIO $ DBOtherError "Insert failed"
+    createWorkspaceH cw = do
+      rejectValidationErrors (validateCreateWorkspaceInput cw)
+      handleDBErrors $ do
+        rows <- runSession pool $ Session.statement () $ run $
+          insert Insert
+            { into = workspaceSchema
+            , rows = values
+                [ WorkspaceT
+                    { wsId        = unsafeDefault
+                    , wsName      = lit cw.name
+                    , wsPath      = lit cw.path
+                    , wsGhOwner   = lit cw.ghOwner
+                    , wsGhRepo    = lit cw.ghRepo
+                    , wsType      = lit (fromMaybe WsRepository cw.workspaceType)
+                    , wsDeletedAt = unsafeDefault
+                    , wsCreatedAt = unsafeDefault
+                    , wsUpdatedAt = unsafeDefault
+                    }
+                ]
+            , onConflict = Abort
+            , returning  = Returning id
+            }
+        case rows of
+          (r:_) -> pure $ rowToWorkspace r
+          []    -> throwIO $ DBOtherError "Insert failed"
 
     getWorkspaceH :: UUID -> Handler Workspace
     getWorkspaceH wsId = do
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
         row <- each workspaceSchema
         where_ $ row.wsId ==. lit wsId
+        where_ $ activeWorkspace row
         pure row
       case rows of
         (r:_) -> pure $ rowToWorkspace r
@@ -390,6 +463,7 @@ workspaceHandlers pool =
 
     updateWorkspaceH :: UUID -> UpdateWorkspace -> Handler Workspace
     updateWorkspaceH wsId uw = do
+      rejectValidationErrors (validateUpdateWorkspaceInput uw)
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $
         update Update
           { target = workspaceSchema
@@ -401,7 +475,7 @@ workspaceHandlers pool =
               , wsGhOwner = applyNullableUpdate row.wsGhOwner uw.ghOwner
               , wsGhRepo  = applyNullableUpdate row.wsGhRepo uw.ghRepo
               }
-          , updateWhere = \_ row -> row.wsId ==. lit wsId
+          , updateWhere = \_ row -> row.wsId ==. lit wsId &&. activeWorkspace row
           , returning = Returning id
           }
       case rows of
@@ -410,14 +484,193 @@ workspaceHandlers pool =
 
     deleteWorkspaceH :: UUID -> Handler NoContent
     deleteWorkspaceH wsId = do
-      n <- handleDBErrors $ runSession pool $ Session.statement () $ runN $
-        delete Rel8.Delete
-          { from = workspaceSchema
-          , using = pure ()
-          , deleteWhere = \_ row -> row.wsId ==. lit wsId
-          , returning = NoReturning
-          }
-      if n > 0 then pure NoContent else throwError err404
+      ok <- handleDBErrors $ runTransaction pool $ do
+        n <- Session.statement () $ runN $
+          update Update
+            { target = workspaceSchema
+            , from = pure ()
+            , set = \_ row -> row { wsDeletedAt = deletedNow }
+            , updateWhere = \_ row -> row.wsId ==. lit wsId &&. activeWorkspace row
+            , returning = NoReturning
+            }
+        if n == 0
+          then pure False
+          else do
+            memIds <- Session.statement () $ run $ select $ do
+              row <- each memorySchema
+              where_ $ row.memWorkspaceId ==. lit wsId
+              where_ $ activeMemory row
+              pure row.memId
+            projIds <- Session.statement () $ run $ select $ do
+              row <- each projectSchema
+              where_ $ row.projWorkspaceId ==. lit wsId
+              where_ $ activeProject row
+              pure row.projId
+            taskIds <- Session.statement () $ run $ select $ do
+              row <- each taskSchema
+              where_ $ row.taskWorkspaceId ==. lit wsId
+              where_ $ activeTask row
+              pure row.taskId
+            catIds <- Session.statement () $ run $ select $ do
+              row <- each memoryCategorySchema
+              where_ $ row.mcWorkspaceId ==. lit (Just wsId)
+              where_ $ activeCategory row
+              pure row.mcId
+
+            case memIds of
+              [] -> pure ()
+              _ -> do
+                Session.statement () $ run_ $
+                  delete Rel8.Delete
+                    { from = memoryLinkSchema
+                    , using = pure ()
+                    , deleteWhere = \_ row -> in_ row.mlSourceId (map lit memIds) ||. in_ row.mlTargetId (map lit memIds)
+                    , returning = NoReturning
+                    }
+                Session.statement () $ run_ $
+                  delete Rel8.Delete
+                    { from = memoryTagSchema
+                    , using = pure ()
+                    , deleteWhere = \_ row -> in_ row.mtMemoryId (map lit memIds)
+                    , returning = NoReturning
+                    }
+
+            case memIds of
+              [] -> pure ()
+              _ -> Session.statement () $ run_ $
+                delete Rel8.Delete
+                  { from = memoryCategoryLinkSchema
+                  , using = pure ()
+                  , deleteWhere = \_ row -> in_ row.mclMemoryId (map lit memIds)
+                  , returning = NoReturning
+                  }
+
+            case catIds of
+              [] -> pure ()
+              _ -> Session.statement () $ run_ $
+                delete Rel8.Delete
+                  { from = memoryCategoryLinkSchema
+                  , using = pure ()
+                  , deleteWhere = \_ row -> in_ row.mclCategoryId (map lit catIds)
+                  , returning = NoReturning
+                  }
+
+            case projIds of
+              [] -> pure ()
+              _ -> Session.statement () $ run_ $
+                delete Rel8.Delete
+                  { from = projectMemoryLinkSchema
+                  , using = pure ()
+                  , deleteWhere = \_ row -> in_ row.pmlProjectId (map lit projIds)
+                  , returning = NoReturning
+                  }
+
+            case memIds of
+              [] -> pure ()
+              _ -> Session.statement () $ run_ $
+                delete Rel8.Delete
+                  { from = projectMemoryLinkSchema
+                  , using = pure ()
+                  , deleteWhere = \_ row -> in_ row.pmlMemoryId (map lit memIds)
+                  , returning = NoReturning
+                  }
+
+            case taskIds of
+              [] -> pure ()
+              _ -> do
+                Session.statement () $ run_ $
+                  delete Rel8.Delete
+                    { from = taskMemoryLinkSchema
+                    , using = pure ()
+                    , deleteWhere = \_ row -> in_ row.tmlTaskId (map lit taskIds)
+                    , returning = NoReturning
+                    }
+                Session.statement () $ run_ $
+                  delete Rel8.Delete
+                    { from = taskDependencySchema
+                    , using = pure ()
+                    , deleteWhere = \_ row -> in_ row.tdTaskId (map lit taskIds) ||. in_ row.tdDependsOnId (map lit taskIds)
+                    , returning = NoReturning
+                    }
+
+            case memIds of
+              [] -> pure ()
+              _ -> Session.statement () $ run_ $
+                delete Rel8.Delete
+                  { from = taskMemoryLinkSchema
+                  , using = pure ()
+                  , deleteWhere = \_ row -> in_ row.tmlMemoryId (map lit memIds)
+                  , returning = NoReturning
+                  }
+
+            Session.statement () $ run_ $
+              update Update
+                { target = memorySchema
+                , from = pure ()
+                , set = \_ row -> row { memDeletedAt = deletedNow }
+                , updateWhere = \_ row -> row.memWorkspaceId ==. lit wsId &&. activeMemory row
+                , returning = NoReturning
+                }
+            Session.statement () $ run_ $
+              update Update
+                { target = projectSchema
+                , from = pure ()
+                , set = \_ row -> row { projDeletedAt = deletedNow }
+                , updateWhere = \_ row -> row.projWorkspaceId ==. lit wsId &&. activeProject row
+                , returning = NoReturning
+                }
+            Session.statement () $ run_ $
+              update Update
+                { target = taskSchema
+                , from = pure ()
+                , set = \_ row -> row { taskDeletedAt = deletedNow }
+                , updateWhere = \_ row -> row.taskWorkspaceId ==. lit wsId &&. activeTask row
+                , returning = NoReturning
+                }
+            Session.statement () $ run_ $
+              update Update
+                { target = memoryCategorySchema
+                , from = pure ()
+                , set = \_ row -> row { mcDeletedAt = deletedNow }
+                , updateWhere = \_ row -> row.mcWorkspaceId ==. lit (Just wsId) &&. activeCategory row
+                , returning = NoReturning
+                }
+            Session.statement () $ run_ $
+              delete Rel8.Delete
+                { from = cleanupPolicySchema
+                , using = pure ()
+                , deleteWhere = \_ row -> row.cpWorkspaceId ==. lit wsId
+                , returning = NoReturning
+                }
+            Session.statement () $ run_ $
+              delete Rel8.Delete
+                { from = workspaceGroupMemberSchema
+                , using = pure ()
+                , deleteWhere = \_ row -> row.wgmWorkspaceId ==. lit wsId
+                , returning = NoReturning
+                }
+            pure True
+      if ok then pure NoContent else throwError err404
+
+    purgeWorkspaceH :: UUID -> Handler NoContent
+    purgeWorkspaceH wsId = do
+      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
+        row <- each workspaceSchema
+        where_ $ row.wsId ==. lit wsId
+        pure row
+      case rows of
+        [] -> throwError err404
+        (r:_)
+          | r.wsDeletedAt == Nothing -> throwError purgeConflict
+          | otherwise -> do
+              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
+                delete Rel8.Delete
+                  { from = workspaceSchema
+                  , using = pure ()
+                  , deleteWhere = \_ row -> row.wsId ==. lit wsId
+                  , returning = NoReturning
+                  }
+              pure NoContent
 
 -- Memory handlers --------------------------------------------------
 
@@ -432,6 +685,7 @@ memoryHandlers pool tracker pgvec =
   :<|> getMemoryH
   :<|> updateMemoryH
   :<|> deleteMemoryH
+  :<|> purgeMemoryH
   :<|> getLinksH
   :<|> createLinkH
   :<|> unlinkH
@@ -444,19 +698,36 @@ memoryHandlers pool tracker pgvec =
   :<|> similarH
   :<|> setEmbeddingH
   where
-    listMemoriesH mws mtype mlimit moffset mcompact = do
+    requireMemoryH :: UUID -> Handler Memory
+    requireMemoryH mid = handleDBErrors (Mem.getMemory pool mid) >>= maybe (throwError err404) pure
+
+    listMemoriesH mws mtype mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset mcompact = do
       let lim = capLimit mlimit
           off = capOffset moffset
           compact = mcompact == Just True
-      results <- handleDBErrors $ Mem.listMemories pool mws mtype (Just (lim + 1)) (Just off)
+          query = MemoryListQuery
+            { workspaceId = mws
+            , memoryType = mtype
+            , createdAfter = mcreatedAfter
+            , createdBefore = mcreatedBefore
+            , updatedAfter = mupdatedAfter
+            , updatedBefore = mupdatedBefore
+            , limit = Just (lim + 1)
+            , offset = Just off
+            }
+      rejectValidationErrors (validateMemoryListQuery query)
+      results <- handleDBErrors $ Mem.listMemoriesWithQuery pool query
       let items = (if compact then map compactMemory else Prelude.id) $ take lim results
       pure PaginatedResult { items = items, hasMore = length results > lim }
 
-    createMemoryH cm = handleDBErrors $ Mem.createMemory pool cm
+    createMemoryH cm = do
+      rejectValidationErrors (validateCreateMemoryInput cm)
+      handleDBErrors $ Mem.createMemory pool cm
 
     createMemoryBatchH cms
-      | length cms > 100 = throwError err400 { errBody = "Batch size exceeds maximum of 100" }
-      | otherwise = handleDBErrors $ Mem.createMemoryBatch pool cms
+      | otherwise = do
+          rejectValidationErrors (validateCreateMemoryBatchInput cms)
+          handleDBErrors $ Mem.createMemoryBatch pool cms
 
     searchMemoriesH mcompact sq = do
       let compact = mcompact == Just True
@@ -473,12 +744,12 @@ memoryHandlers pool tracker pgvec =
       handleDBErrors $ Mem.findByRelation pool wsId rt
 
     getMemoryH mid = do
-      -- Buffer access event for periodic batch flush
+      mem <- requireMemoryH mid
       liftIO $ trackAccess tracker mid
-      mm <- handleDBErrors $ Mem.getMemory pool mid
-      maybe (throwError err404) pure mm
+      pure mem
 
     updateMemoryH mid um = do
+      rejectValidationErrors (validateUpdateMemoryInput um)
       mm <- handleDBErrors $ Mem.updateMemory pool mid um
       maybe (throwError err404) pure mm
 
@@ -486,23 +757,51 @@ memoryHandlers pool tracker pgvec =
       ok <- handleDBErrors $ Mem.deleteMemory pool mid
       if ok then pure NoContent else throwError err404
 
-    getLinksH mid = handleDBErrors $ Mem.getMemoryLinks pool mid
+    purgeMemoryH mid = do
+      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
+        row <- each memorySchema
+        where_ $ row.memId ==. lit mid
+        pure row
+      case rows of
+        [] -> throwError err404
+        (r:_)
+          | r.memDeletedAt == Nothing -> throwError purgeConflict
+          | otherwise -> do
+              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
+                delete Rel8.Delete
+                  { from = memorySchema
+                  , using = pure ()
+                  , deleteWhere = \_ row -> row.memId ==. lit mid
+                  , returning = NoReturning
+                  }
+              pure NoContent
+
+    getLinksH mid = do
+      _ <- requireMemoryH mid
+      handleDBErrors $ Mem.getMemoryLinks pool mid
 
     createLinkH mid cml = do
+      _ <- requireMemoryH mid
+      _ <- requireMemoryH cml.targetId
       handleDBErrors $ Mem.linkMemories pool mid cml
       pure NoContent
 
     unlinkH mid tid rt = do
+      _ <- requireMemoryH mid
       ok <- handleDBErrors $ Mem.unlinkMemories pool mid tid rt
       if ok then pure NoContent else throwError err404
 
-    getTagsH mid = handleDBErrors $ Mem.getTags pool mid
+    getTagsH mid = do
+      _ <- requireMemoryH mid
+      handleDBErrors $ Mem.getTags pool mid
 
     setTagsH mid tags = do
+      _ <- requireMemoryH mid
       handleDBErrors $ Mem.setTags pool mid tags
       pure NoContent
 
     graphH mid mdepth = do
+      _ <- requireMemoryH mid
       let depth = fromMaybe 2 mdepth
       handleDBErrors $ Mem.getRelatedGraph pool mid depth
 
@@ -527,6 +826,7 @@ memoryHandlers pool tracker pgvec =
       | not pgvec = throwError err501
           { errBody = "pgvector extension is not installed; embeddings are unavailable" }
       | otherwise = do
+          _ <- requireMemoryH mid
           handleDBErrors $ Mem.setEmbedding pool mid vec
           pure NoContent
 
@@ -539,34 +839,77 @@ projectHandlers pool =
   :<|> getProjectH
   :<|> updateProjectH
   :<|> deleteProjectH
+  :<|> purgeProjectH
   :<|> linkMemoryH
   :<|> unlinkMemoryH
   :<|> getProjectMemoriesH
   where
-    listProjectsH mws mstatus mlimit moffset = do
+    requireProjectH :: UUID -> Handler Project
+    requireProjectH pid = handleDBErrors (Proj.getProject pool pid) >>= maybe (throwError err404) pure
+
+    listProjectsH mws mstatus mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset = do
       wsId <- requireParam "workspace_id" mws
       let lim = capLimit mlimit
           off = capOffset moffset
-      results <- handleDBErrors $ Proj.listProjects pool wsId mstatus (Just (lim + 1)) (Just off)
+          query = ProjectListQuery
+            { workspaceId = wsId
+            , status = mstatus
+            , createdAfter = mcreatedAfter
+            , createdBefore = mcreatedBefore
+            , updatedAfter = mupdatedAfter
+            , updatedBefore = mupdatedBefore
+            , limit = Just (lim + 1)
+            , offset = Just off
+            }
+      rejectValidationErrors (validateProjectListQuery query)
+      results <- handleDBErrors $ Proj.listProjectsWithQuery pool query
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
-    createProjectH cp   = handleDBErrors $ Proj.createProject pool cp
-    getProjectH pid     = handleDBErrors (Proj.getProject pool pid) >>= maybe (throwError err404) pure
-    updateProjectH pid up = handleDBErrors (Proj.updateProject pool pid up) >>= maybe (throwError err404) pure
+    createProjectH cp = do
+      rejectValidationErrors (validateCreateProjectInput cp)
+      handleDBErrors $ Proj.createProject pool cp
+    getProjectH pid     = requireProjectH pid
+    updateProjectH pid up = do
+      rejectValidationErrors (validateUpdateProjectInput up)
+      handleDBErrors (Proj.updateProject pool pid up) >>= maybe (throwError err404) pure
 
     deleteProjectH pid = do
       ok <- handleDBErrors $ Proj.deleteProject pool pid
       if ok then pure NoContent else throwError err404
 
+    purgeProjectH pid = do
+      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
+        row <- each projectSchema
+        where_ $ row.projId ==. lit pid
+        pure row
+      case rows of
+        [] -> throwError err404
+        (r:_)
+          | r.projDeletedAt == Nothing -> throwError purgeConflict
+          | otherwise -> do
+              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
+                delete Rel8.Delete
+                  { from = projectSchema
+                  , using = pure ()
+                  , deleteWhere = \_ row -> row.projId ==. lit pid
+                  , returning = NoReturning
+                  }
+              pure NoContent
+
     linkMemoryH pid lm = do
+      _ <- requireProjectH pid
+      _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
       handleDBErrors $ Proj.linkProjectMemory pool pid lm.memoryId
       pure NoContent
 
     unlinkMemoryH pid mid = do
+      _ <- requireProjectH pid
       handleDBErrors $ Proj.unlinkProjectMemory pool pid mid
       pure NoContent
 
-    getProjectMemoriesH pid = handleDBErrors $ Mem.getProjectMemories pool pid
+    getProjectMemoriesH pid = do
+      _ <- requireProjectH pid
+      handleDBErrors $ Mem.getProjectMemories pool pid
 
 -- Task handlers ----------------------------------------------------
 
@@ -577,47 +920,91 @@ taskHandlers pool =
   :<|> getTaskH
   :<|> updateTaskH
   :<|> deleteTaskH
+  :<|> purgeTaskH
   :<|> linkMemoryH
   :<|> unlinkMemoryH
   :<|> addDepH
   :<|> removeDepH
   :<|> getTaskMemoriesH
   where
-    listTasksH mws mpid mstatus mlimit moffset = do
+    requireTaskH :: UUID -> Handler Task
+    requireTaskH tid = handleDBErrors (Task.getTask pool tid) >>= maybe (throwError err404) pure
+
+    listTasksH mws mpid mstatus mpriority mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset = do
       let lim = capLimit mlimit
           off = capOffset moffset
-      results <- case mws of
-        Just wsId -> handleDBErrors $ Task.listTasksByWorkspace pool wsId mstatus mpid (Just (lim + 1)) (Just off)
-        Nothing -> case mpid of
-          Just pid -> handleDBErrors $ Task.listTasks pool pid mstatus (Just (lim + 1)) (Just off)
-          Nothing  -> throwError $ err400 { errBody = "Either workspace_id or project_id is required" }
+          query = TaskListQuery
+            { workspaceId = mws
+            , projectId = mpid
+            , status = mstatus
+            , priority = mpriority
+            , createdAfter = mcreatedAfter
+            , createdBefore = mcreatedBefore
+            , updatedAfter = mupdatedAfter
+            , updatedBefore = mupdatedBefore
+            , limit = Just (lim + 1)
+            , offset = Just off
+            }
+      rejectValidationErrors (validateTaskListQuery query)
+      results <- handleDBErrors $ Task.listTasksWithQuery pool query
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
-    createTaskH ct   = handleDBErrors $ Task.createTask pool ct
-    getTaskH tid     = handleDBErrors (Task.getTask pool tid) >>= maybe (throwError err404) pure
-    updateTaskH tid ut = handleDBErrors (Task.updateTask pool tid ut) >>= maybe (throwError err404) pure
+    createTaskH ct = do
+      rejectValidationErrors (validateCreateTaskInput ct)
+      handleDBErrors $ Task.createTask pool ct
+    getTaskH tid     = requireTaskH tid
+    updateTaskH tid ut = do
+      rejectValidationErrors (validateUpdateTaskInput ut)
+      handleDBErrors (Task.updateTask pool tid ut) >>= maybe (throwError err404) pure
 
     deleteTaskH tid = do
       ok <- handleDBErrors $ Task.deleteTask pool tid
       if ok then pure NoContent else throwError err404
 
+    purgeTaskH tid = do
+      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
+        row <- each taskSchema
+        where_ $ row.taskId ==. lit tid
+        pure row
+      case rows of
+        [] -> throwError err404
+        (r:_)
+          | r.taskDeletedAt == Nothing -> throwError purgeConflict
+          | otherwise -> do
+              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
+                delete Rel8.Delete
+                  { from = taskSchema
+                  , using = pure ()
+                  , deleteWhere = \_ row -> row.taskId ==. lit tid
+                  , returning = NoReturning
+                  }
+              pure NoContent
+
     linkMemoryH tid lm = do
+      _ <- requireTaskH tid
+      _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
       handleDBErrors $ Task.linkTaskMemory pool tid lm.memoryId
       pure NoContent
 
     unlinkMemoryH tid mid = do
+      _ <- requireTaskH tid
       handleDBErrors $ Task.unlinkTaskMemory pool tid mid
       pure NoContent
 
     addDepH tid ld = do
+      _ <- requireTaskH tid
+      _ <- requireTaskH ld.dependsOnId
       handleDBErrors $ Task.addDependency pool tid ld.dependsOnId
       pure NoContent
 
     removeDepH tid depId = do
+      _ <- requireTaskH tid
       handleDBErrors $ Task.removeDependency pool tid depId
       pure NoContent
 
-    getTaskMemoriesH tid = handleDBErrors $ Mem.getTaskMemories pool tid
+    getTaskMemoriesH tid = do
+      _ <- requireTaskH tid
+      handleDBErrors $ Mem.getTaskMemories pool tid
 
 -- Cleanup handlers -------------------------------------------------
 
@@ -646,9 +1033,13 @@ categoryHandlers pool =
   :<|> getCategoryH
   :<|> updateCategoryH
   :<|> deleteCategoryH
+  :<|> purgeCategoryH
   :<|> linkH
   :<|> unlinkH
   where
+    requireCategoryH :: UUID -> Handler MemoryCategory
+    requireCategoryH cid = handleDBErrors (Cat.getCategory pool cid) >>= maybe (throwError err404) pure
+
     listCategoriesH mws mlimit moffset = do
       let lim = capLimit mlimit
           off = capOffset moffset
@@ -663,19 +1054,45 @@ categoryHandlers pool =
       results <- handleDBErrors $ Cat.listGlobalCategories pool (Just (lim + 1)) (Just off)
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
-    createCategoryH cc = handleDBErrors $ Cat.createCategory pool cc
-    getCategoryH cid   = handleDBErrors (Cat.getCategory pool cid) >>= maybe (throwError err404) pure
-    updateCategoryH cid uc = handleDBErrors (Cat.updateCategory pool cid uc) >>= maybe (throwError err404) pure
+    createCategoryH cc = do
+      rejectValidationErrors (validateCreateMemoryCategoryInput cc)
+      handleDBErrors $ Cat.createCategory pool cc
+    getCategoryH cid   = requireCategoryH cid
+    updateCategoryH cid uc = do
+      rejectValidationErrors (validateUpdateMemoryCategoryInput uc)
+      handleDBErrors (Cat.updateCategory pool cid uc) >>= maybe (throwError err404) pure
 
     deleteCategoryH cid = do
       ok <- handleDBErrors $ Cat.deleteCategory pool cid
       if ok then pure NoContent else throwError err404
 
+    purgeCategoryH cid = do
+      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
+        row <- each memoryCategorySchema
+        where_ $ row.mcId ==. lit cid
+        pure row
+      case rows of
+        [] -> throwError err404
+        (r:_)
+          | r.mcDeletedAt == Nothing -> throwError purgeConflict
+          | otherwise -> do
+              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
+                delete Rel8.Delete
+                  { from = memoryCategorySchema
+                  , using = pure ()
+                  , deleteWhere = \_ row -> row.mcId ==. lit cid
+                  , returning = NoReturning
+                  }
+              pure NoContent
+
     linkH cl = do
+      _ <- requireCategoryH cl.categoryId
+      _ <- handleDBErrors (Mem.getMemory pool cl.memoryId) >>= maybe (throwError err404) pure
       handleDBErrors $ Cat.linkMemoryCategory pool cl.memoryId cl.categoryId
       pure NoContent
 
     unlinkH cl = do
+      _ <- requireCategoryH cl.categoryId
       handleDBErrors $ Cat.unlinkMemoryCategory pool cl.memoryId cl.categoryId
       pure NoContent
 
@@ -697,7 +1114,9 @@ workspaceGroupHandlers pool =
       results <- handleDBErrors $ WG.listGroups pool (Just (lim + 1)) (Just off)
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
-    createGroupH cg = handleDBErrors $ WG.createGroup pool cg
+    createGroupH cg = do
+      rejectValidationErrors (validateCreateWorkspaceGroupInput cg)
+      handleDBErrors $ WG.createGroup pool cg
 
     getGroupH gid = do
       mg <- handleDBErrors $ WG.getGroup pool gid
@@ -732,6 +1151,16 @@ activityHandlers pool mws mlimit = do
 requireParam :: Text -> Maybe a -> Handler a
 requireParam name Nothing  = throwError $ err400 { errBody = fromString ("Missing required parameter: " <> T.unpack name) }
 requireParam _    (Just a) = pure a
+
+rejectValidationErrors :: [Text] -> Handler ()
+rejectValidationErrors [] = pure ()
+rejectValidationErrors errs = throwError err400
+  { errBody = Aeson.encode $ object
+      [ "error" .= ("validation" :: Text)
+      , "message" .= ("Request validation failed" :: Text)
+      , "details" .= errs
+      ]
+  }
 
 -- | Clamp a user-supplied limit to [1, 200], defaulting to 50.
 capLimit :: Maybe Int -> Int

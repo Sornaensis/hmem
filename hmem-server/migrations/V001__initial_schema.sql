@@ -127,14 +127,13 @@ CREATE TABLE IF NOT EXISTS memories (
     -- Requires the 'vector' extension; column is only created if the
     -- extension is available (see DO block at end of schema).
     -- embedding      vector(1536),
-    expires_at        TIMESTAMPTZ,            -- NULL = no expiry
-    source            TEXT,                    -- provenance: user_stated, inferred, tool_output, web_search
+    expires_at        TIMESTAMPTZ,
+    source            TEXT,
     confidence        DOUBLE PRECISION NOT NULL DEFAULT 1.0
                           CHECK (confidence BETWEEN 0.0 AND 1.0),
     pinned            BOOLEAN NOT NULL DEFAULT false,
     last_accessed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     access_count      INTEGER NOT NULL DEFAULT 0,
-    -- Full-text search language (per-memory, e.g. 'english', 'spanish')
     fts_language      TEXT NOT NULL DEFAULT 'english'
                           CHECK (fts_language IN (
                             'simple', 'arabic', 'armenian', 'basque', 'catalan', 'danish',
@@ -144,7 +143,6 @@ CREATE TABLE IF NOT EXISTS memories (
                             'russian', 'serbian', 'spanish', 'swedish', 'tamil', 'turkish',
                             'yiddish'
                           )),
-    -- Full-text search vector (auto-maintained by trigger)
     search_vector     tsvector NOT NULL DEFAULT ''::tsvector,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -152,8 +150,6 @@ CREATE TABLE IF NOT EXISTS memories (
 
 ------------------------------------------------------------------------
 -- Memory tags (many-to-many)
--- Defined here (before triggers) because the search_vector
--- trigger function queries this table.
 ------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS memory_tags (
@@ -162,9 +158,6 @@ CREATE TABLE IF NOT EXISTS memory_tags (
     PRIMARY KEY (memory_id, tag)
 );
 
--- Auto-maintain search_vector using per-memory fts_language.
--- Includes tags (fetched from memory_tags) as weight C so that
--- tag-based FTS works without needing a separate query.
 CREATE OR REPLACE FUNCTION hmem_memories_search_vector()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -185,11 +178,9 @@ CREATE TRIGGER trg_memories_search_vector
     BEFORE INSERT OR UPDATE OF content, summary, fts_language ON memories
     FOR EACH ROW EXECUTE FUNCTION hmem_memories_search_vector();
 
--- Re-index the search_vector when tags change
 CREATE OR REPLACE FUNCTION hmem_memory_tags_reindex()
 RETURNS TRIGGER AS $$
 BEGIN
-  -- Touch the memory row so trg_memories_search_vector fires
   UPDATE memories SET content = content
     WHERE id = coalesce(NEW.memory_id, OLD.memory_id);
   RETURN NULL;
@@ -338,7 +329,6 @@ CREATE TRIGGER trg_cleanup_policies_updated_at
 -- Cycle prevention triggers
 ------------------------------------------------------------------------
 
--- Prevent cycles in task dependency DAG
 CREATE OR REPLACE FUNCTION hmem_check_task_dep_cycle()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -365,7 +355,6 @@ CREATE TRIGGER trg_task_dep_no_cycle
     BEFORE INSERT OR UPDATE ON task_dependencies
     FOR EACH ROW EXECUTE FUNCTION hmem_check_task_dep_cycle();
 
--- Prevent cycles in project hierarchy
 CREATE OR REPLACE FUNCTION hmem_check_project_cycle()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -396,7 +385,6 @@ CREATE TRIGGER trg_project_no_cycle
     BEFORE INSERT OR UPDATE OF parent_id ON projects
     FOR EACH ROW EXECUTE FUNCTION hmem_check_project_cycle();
 
--- Prevent cycles in task hierarchy
 CREATE OR REPLACE FUNCTION hmem_check_task_cycle()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -427,7 +415,6 @@ CREATE TRIGGER trg_task_no_cycle
     BEFORE INSERT OR UPDATE OF parent_id ON tasks
     FOR EACH ROW EXECUTE FUNCTION hmem_check_task_cycle();
 
--- Prevent cycles in memory category hierarchy
 CREATE OR REPLACE FUNCTION hmem_check_category_cycle()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -462,7 +449,6 @@ CREATE TRIGGER trg_category_no_cycle
 -- Task completion consistency
 ------------------------------------------------------------------------
 
--- Auto-manage completed_at based on status transitions
 CREATE OR REPLACE FUNCTION hmem_task_completion()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -508,7 +494,6 @@ CREATE TABLE IF NOT EXISTS workspace_group_members (
 -- Indexes
 ------------------------------------------------------------------------
 
--- Memories
 CREATE INDEX IF NOT EXISTS idx_memories_workspace         ON memories (workspace_id);
 CREATE INDEX IF NOT EXISTS idx_memories_workspace_type    ON memories (workspace_id, memory_type);
 CREATE INDEX IF NOT EXISTS idx_memories_workspace_importance ON memories (workspace_id, importance DESC);
@@ -519,50 +504,38 @@ CREATE INDEX IF NOT EXISTS idx_memories_created           ON memories (workspace
 CREATE INDEX IF NOT EXISTS idx_memories_metadata          ON memories USING gin (metadata);
 CREATE INDEX IF NOT EXISTS idx_memories_search            ON memories USING gin (search_vector);
 
--- Tags
 CREATE INDEX IF NOT EXISTS idx_memory_tags_tag            ON memory_tags (tag);
 CREATE INDEX IF NOT EXISTS idx_memory_tags_covering       ON memory_tags (tag, memory_id);
 
--- Categories
 CREATE INDEX IF NOT EXISTS idx_memory_categories_ws       ON memory_categories (workspace_id);
 CREATE INDEX IF NOT EXISTS idx_memory_categories_parent   ON memory_categories (parent_id)
     WHERE parent_id IS NOT NULL;
 
--- Memory links
 CREATE INDEX IF NOT EXISTS idx_memory_links_target        ON memory_links (target_id);
 
--- Projects
 CREATE INDEX IF NOT EXISTS idx_projects_workspace         ON projects (workspace_id);
 CREATE INDEX IF NOT EXISTS idx_projects_parent            ON projects (parent_id) WHERE parent_id IS NOT NULL;
 
--- Tasks
 CREATE INDEX IF NOT EXISTS idx_tasks_workspace            ON tasks (workspace_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_project              ON tasks (project_id) WHERE project_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_ws_status            ON tasks (workspace_id, status);
 
--- Task dependencies (reverse lookup)
 CREATE INDEX IF NOT EXISTS idx_task_deps_depends_on       ON task_dependencies (depends_on_id);
 
--- Cross-entity memory links (reverse lookup)
 CREATE INDEX IF NOT EXISTS idx_project_mem_links_memory   ON project_memory_links (memory_id);
 CREATE INDEX IF NOT EXISTS idx_task_mem_links_memory      ON task_memory_links (memory_id);
 
--- Workspace group members (reverse lookup)
 CREATE INDEX IF NOT EXISTS idx_ws_group_members_ws        ON workspace_group_members (workspace_id);
 
--- Projects (composite)
 CREATE INDEX IF NOT EXISTS idx_projects_workspace_status  ON projects (workspace_id, status);
 
--- Tasks (additional)
 CREATE INDEX IF NOT EXISTS idx_tasks_project_status       ON tasks (project_id, status) WHERE project_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_parent               ON tasks (parent_id) WHERE parent_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_due                  ON tasks (due_at)
     WHERE due_at IS NOT NULL AND status NOT IN ('done', 'cancelled');
 
--- Pinned memories
 CREATE INDEX IF NOT EXISTS idx_memories_pinned            ON memories (workspace_id) WHERE pinned = true;
 
--- Covering index for workspace-scoped primary key lookups
 CREATE INDEX IF NOT EXISTS idx_memories_workspace_id      ON memories (workspace_id, id);
 
 ------------------------------------------------------------------------

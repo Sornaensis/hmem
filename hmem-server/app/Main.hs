@@ -86,6 +86,8 @@ main = do
   logInfo logger $ "Rotation: " <> T.pack (show cfg.logging.maxSizeMB) <> " MB, "
                                <> T.pack (show cfg.logging.backupCount) <> " backups"
   logInfo logger $ "Log level: " <> cfg.logging.level
+  logInfo logger $ "API auth: " <> if cfg.auth.enabled then "enabled" else "disabled"
+  logInfo logger $ "Rate limiting: " <> if cfg.rateLimit.rlEnabled then "enabled" else "disabled"
   logInfo logger $ "pgvector: " <> if pgvec then "available" else "not installed (similarity search disabled)"
   let settings = setPort port
                $ setTimeout 60
@@ -97,5 +99,6 @@ main = do
           `catch` \(_ :: SomeException) -> logWarn logger "failed to flush access tracker"
         destroyAllResources pool
         cleanupLog
-  runSettings settings (mkApp requestLogger cfg.cors pool tracker pgvec)
+  app <- mkApp requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker pgvec
+  runSettings settings app
     `finally` shutdown

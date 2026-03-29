@@ -2,8 +2,8 @@
 --
 --   @hmem-setup@            – full setup (init + install auto-run)
 --   @hmem-setup init@       – create ~/.hmem/, PostgreSQL data dir, database, schema
---   @hmem-setup install@    – register auto-run services (systemd / Windows Task Scheduler)
---   @hmem-setup start@      – start PostgreSQL + hmem-server
+--   @hmem-setup install@    – register auto-run services (requires init first)
+--   @hmem-setup start@      – start PostgreSQL, apply pending migrations, then start hmem-server
 --   @hmem-setup stop@       – stop hmem-server + PostgreSQL
 --   @hmem-setup status@     – show service status
 --   @hmem-setup uninstall@  – stop services, remove auto-run, delete ~/.hmem/
@@ -38,6 +38,7 @@ import System.Process     (callProcess, readProcess, spawnProcess)
 import HMem.Config
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool qualified as Pool
+import Paths_hmem_server qualified as Paths
 
 ------------------------------------------------------------------------
 -- CLI
@@ -58,9 +59,9 @@ commandParser = subparser
   (  command "init"      (info (pure CmdInit)
       (progDesc "Initialize ~/.hmem/, PostgreSQL, and config"))
   <> command "install"   (info (pure CmdInstall)
-      (progDesc "Set up auto-run services"))
+    (progDesc "Set up auto-run services (requires init first)"))
   <> command "start"     (info (pure CmdStart)
-      (progDesc "Start PostgreSQL and hmem-server"))
+    (progDesc "Start PostgreSQL, apply pending migrations, and start hmem-server"))
   <> command "stop"      (info (pure CmdStop)
       (progDesc "Stop hmem-server and PostgreSQL"))
   <> command "status"    (info (pure CmdStatus)
@@ -165,9 +166,14 @@ doInit = do
     Right () -> putStrLn $ "  Created database '" <> dbName <> "'"
     Left _   -> putStrLn $ "  Database '" <> dbName <> "' already exists"
 
-  -- 6. Run migrations
+  -- 6. Install bundled migrations into ~/.hmem/
+  step "Installing migrations"
+  (migrationsDir, migrationFiles) <- installMigrations dir
+  putStrLn $ "  Installed " <> show (length migrationFiles)
+    <> " migration(s) to " <> migrationsDir
+
+  -- 7. Run migrations
   step "Running database migrations"
-  migrationsDir <- findMigrationsDir dir
   let connStr = connectionString cfg.database
   pool <- Pool.createPool connStr 2 60
   migResult <- Migration.runMigrations pool migrationsDir
@@ -183,22 +189,12 @@ doInit = do
       hPutStrLn stderr $ "  Error: " <> err
       exitFailure
 
-  -- 7. Stop PostgreSQL
+  -- 8. Stop PostgreSQL
   putStrLn ""
   step "Stopping PostgreSQL"
   _ <- try (callProcess "pg_ctl" ["stop", "-D", dataDir, "-m", "fast"])
         :: IO (Either SomeException ())
   pure ()
-
-  -- 8. Copy migrations to ~/.hmem/ for future use
-  step "Installing migrations"
-  let destMigrations = dir </> "migrations"
-  createDirectoryIfMissing True destMigrations
-  srcMigrations <- findMigrationsDir dir
-  srcFiles <- filter (\f -> not (null f) && head f == 'V')
-    <$> listDirectory srcMigrations
-  mapM_ (\f -> copyFile (srcMigrations </> f) (destMigrations </> f)) srcFiles
-  putStrLn $ "  Copied " <> show (length srcFiles) <> " migration(s) to " <> destMigrations
 
   -- 9. Write config
   step "Writing configuration"
@@ -225,6 +221,13 @@ doInstall = do
   putStrLn ""
   putStrLn "=== hmem-setup install ==="
   putStrLn ""
+
+  dir <- ensureInitialized "install"
+
+  step "Refreshing installed migrations"
+  (migrationsDir, migrationFiles) <- installMigrations dir
+  putStrLn $ "  Installed " <> show (length migrationFiles)
+    <> " migration(s) to " <> migrationsDir
 
   if isWindows
     then installWindows
@@ -697,7 +700,7 @@ claudeInstructions = unlines
 
 doStart :: IO ()
 doStart = do
-  dir <- configDir
+  dir <- ensureInitialized "start"
   cfg <- loadConfig
   let dataDir = dir </> "data" </> "postgresql"
       logDir  = dir </> "logs"
@@ -709,6 +712,27 @@ doStart = do
     , "-w", "-t", "30"
     ]
   threadDelay 1000000
+
+  step "Refreshing installed migrations"
+  (migrationsDir, migrationFiles) <- installMigrations dir
+  putStrLn $ "  Installed " <> show (length migrationFiles)
+    <> " migration(s) to " <> migrationsDir
+
+  step "Applying pending migrations"
+  let connStr = connectionString cfg.database
+  pool <- Pool.createPool connStr 2 60
+  migResult <- Migration.runMigrations pool migrationsDir
+  case migResult.applied of
+    [] -> putStrLn "  No new migrations to apply."
+    ms -> do
+      mapM_ (\m -> putStrLn $ "  Applied: " <> m) ms
+      putStrLn $ "  " <> show (length ms) <> " migration(s) applied."
+  case migResult.failed of
+    Nothing -> pure ()
+    Just (f, err) -> do
+      hPutStrLn stderr $ "  Migration failed: " <> f
+      hPutStrLn stderr $ "  Error: " <> err
+      exitFailure
 
   putStrLn "Starting hmem-server..."
   _ <- spawnProcess "hmem-server" []
@@ -887,11 +911,48 @@ findBinary name fallback = do
         "Warning: '" <> name <> "' not found on PATH, using '" <> fallback <> "'"
       pure fallback
 
+ensureInitialized :: String -> IO FilePath
+ensureInitialized commandName = do
+  dir <- configDir
+  configPath <- configFilePath
+  let dataDir = dir </> "data" </> "postgresql"
+      pgVersionFile = dataDir </> "PG_VERSION"
+  configExists <- doesFileExist configPath
+  pgInitialized <- doesFileExist pgVersionFile
+  when (not configExists || not pgInitialized) $ do
+    hPutStrLn stderr "Error: hmem is not initialized."
+    hPutStrLn stderr $
+      "Run 'hmem-setup init' or plain 'hmem-setup' before 'hmem-setup "
+        <> commandName <> "'."
+    exitFailure
+  pure dir
+
+isMigrationFile :: FilePath -> Bool
+isMigrationFile f = not (null f) && head f == 'V'
+
+installMigrations :: FilePath -> IO (FilePath, [FilePath])
+installMigrations hmemDir = do
+  srcMigrations <- findMigrationsDir hmemDir
+  let destMigrations = hmemDir </> "migrations"
+  createDirectoryIfMissing True destMigrations
+  files <- filter isMigrationFile <$> listDirectory srcMigrations
+  mapM_ (copyReplacing srcMigrations destMigrations) files
+  pure (destMigrations, files)
+
+copyReplacing :: FilePath -> FilePath -> FilePath -> IO ()
+copyReplacing srcDir destDir fileName = do
+  let destPath = destDir </> fileName
+  destExists <- doesFileExist destPath
+  when destExists $ removeFile destPath
+  copyFile (srcDir </> fileName) destPath
+
 -- | Search candidate paths for the migrations directory.
 findMigrationsDir :: FilePath -> IO FilePath
 findMigrationsDir hmemDir = do
+  bundledMigrations <- Paths.getDataFileName "migrations"
   let candidates =
-        [ hmemDir </> "migrations"
+        [ bundledMigrations
+        , hmemDir </> "migrations"
         , "sql" </> "migrations"
         , ".." </> "sql" </> "migrations"
         , ".." </> ".." </> "sql" </> "migrations"
@@ -903,5 +964,5 @@ findMigrationsDir hmemDir = do
       hPutStrLn stderr "Error: migrations directory not found."
       hPutStrLn stderr $ "Searched: " <> show candidates
       hPutStrLn stderr
-        "Run from the project root or place migrations/ in ~/.hmem/"
+        "Reinstall hmem-server or run from the project root so the bundled migrations are available."
       exitFailure

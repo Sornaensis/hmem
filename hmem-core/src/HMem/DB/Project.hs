@@ -4,22 +4,27 @@ module HMem.DB.Project
   , updateProject
   , deleteProject
   , listProjects
+  , listProjectsWithQuery
   , linkProjectMemory
   , unlinkProjectMemory
   ) where
 
 import Control.Exception (throwIO)
 import Data.Aeson (Object, toJSON)
+import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int16)
 import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
+import Hasql.Decoders qualified as Dec
+import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import Rel8
 
-import HMem.DB.Pool (runSession, DBException(..))
+import HMem.DB.Pool (runSession, runTransaction, DBException(..))
 import HMem.DB.Schema
 import HMem.Types
 
@@ -40,6 +45,25 @@ rowToProject r = Project
   , createdAt   = r.projCreatedAt
   , updatedAt   = r.projUpdatedAt
   }
+
+projectSubtreeIdsStatement :: Statement.Statement UUID [UUID]
+projectSubtreeIdsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE project_tree AS ("
+      , "  SELECT id"
+      , "  FROM projects"
+      , "  WHERE id = $1 AND deleted_at IS NULL"
+      , "  UNION ALL"
+      , "  SELECT p.id"
+      , "  FROM projects p"
+      , "  JOIN project_tree pt ON p.parent_id = pt.id"
+      , "  WHERE p.deleted_at IS NULL"
+      , ")"
+      , "SELECT id FROM project_tree"
+      ]
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
 ------------------------------------------------------------------------
 -- Create
@@ -62,6 +86,7 @@ createProject pool cp = do
               , projStatus      = unsafeDefault
               , projPriority    = lit pri
               , projMetadata    = lit meta
+              , projDeletedAt   = unsafeDefault
               , projCreatedAt   = unsafeDefault
               , projUpdatedAt   = unsafeDefault
               }
@@ -82,6 +107,7 @@ getProject pool pid = do
   rows <- runSession pool $ Session.statement () $ run $ select $ do
     row <- each projectSchema
     where_ $ row.projId ==. lit pid
+    where_ $ activeProject row
     pure row
   case rows of
     []    -> pure Nothing
@@ -104,7 +130,7 @@ updateProject pool pid up = do
           , projPriority    = maybe row.projPriority    (lit . fromIntegral) up.priority
           , projMetadata    = maybe row.projMetadata    lit up.metadata
           }
-      , updateWhere = \_ row -> row.projId ==. lit pid
+      , updateWhere = \_ row -> row.projId ==. lit pid &&. activeProject row
       , returning = Returning id
       }
   case rows of
@@ -117,14 +143,35 @@ updateProject pool pid up = do
 
 deleteProject :: Pool Hasql.Connection -> UUID -> IO Bool
 deleteProject pool pid = do
-  n <- runSession pool $ Session.statement () $ runN $
-    delete Delete
-      { from = projectSchema
-      , using = pure ()
-      , deleteWhere = \_ row -> row.projId ==. lit pid
-      , returning = NoReturning
-      }
-  pure (n > 0)
+  runTransaction pool $ do
+    ids <- Session.statement pid projectSubtreeIdsStatement
+    case ids of
+      [] -> pure False
+      _ -> do
+        Session.statement () $ run_ $
+          update Update
+            { target = projectSchema
+            , from = pure ()
+            , set = \_ row -> row { projDeletedAt = deletedNow }
+            , updateWhere = \_ row -> in_ row.projId (map lit ids) &&. activeProject row
+            , returning = NoReturning
+            }
+        Session.statement () $ run_ $
+          update Update
+            { target = taskSchema
+            , from = pure ()
+            , set = \_ row -> row { taskProjectId = lit (Nothing :: Maybe UUID) }
+            , updateWhere = \_ row -> in_ row.taskProjectId (map lit (Just <$> ids)) &&. activeTask row
+            , returning = NoReturning
+            }
+        Session.statement () $ run_ $
+          delete Delete
+            { from = projectMemoryLinkSchema
+            , using = pure ()
+            , deleteWhere = \_ row -> in_ row.pmlProjectId (map lit ids)
+            , returning = NoReturning
+            }
+        pure True
 
 ------------------------------------------------------------------------
 -- List
@@ -137,17 +184,43 @@ listProjects
   -> Maybe Int          -- ^ limit
   -> Maybe Int          -- ^ offset
   -> IO [Project]
-listProjects pool wsId mstatus mlimit moffset = do
-  let lim = fromMaybe 50 mlimit
-      off = fromMaybe 0  moffset
+listProjects pool wsId mstatus mlimit moffset =
+  listProjectsWithQuery pool ProjectListQuery
+    { workspaceId = wsId
+    , status = mstatus
+    , createdAfter = Nothing
+    , createdBefore = Nothing
+    , updatedAfter = Nothing
+    , updatedBefore = Nothing
+    , limit = mlimit
+    , offset = moffset
+    }
+
+listProjectsWithQuery :: Pool Hasql.Connection -> ProjectListQuery -> IO [Project]
+listProjectsWithQuery pool pq = do
+  let lim = fromMaybe 50 pq.limit
+      off = fromMaybe 0  pq.offset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $
     orderBy (((\row -> row.projPriority) >$< desc) <> ((\row -> row.projName) >$< asc)) $ do
       row <- each projectSchema
-      where_ $ row.projWorkspaceId ==. lit wsId
-      case mstatus of
+      where_ $ row.projWorkspaceId ==. lit pq.workspaceId
+      where_ $ activeProject row
+      case pq.status of
         Nothing -> pure ()
         Just s  -> where_ $ row.projStatus ==. lit s
+      case pq.createdAfter of
+        Just createdAfter -> where_ $ row.projCreatedAt >=. lit createdAfter
+        Nothing -> pure ()
+      case pq.createdBefore of
+        Just createdBefore -> where_ $ row.projCreatedAt <=. lit createdBefore
+        Nothing -> pure ()
+      case pq.updatedAfter of
+        Just updatedAfter -> where_ $ row.projUpdatedAt >=. lit updatedAfter
+        Nothing -> pure ()
+      case pq.updatedBefore of
+        Just updatedBefore -> where_ $ row.projUpdatedAt <=. lit updatedBefore
+        Nothing -> pure ()
       pure row
   pure $ map rowToProject rows
 

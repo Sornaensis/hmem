@@ -1,0 +1,302 @@
+{-# OPTIONS_GHC -Wno-x-partial -Wno-incomplete-uni-patterns #-}
+
+module HMem.DB.MemorySpec (spec) where
+
+import Data.Maybe (isJust, isNothing)
+import Data.Text qualified as T
+import Test.Hspec
+
+import HMem.DB.Memory
+import HMem.DB.TestHarness
+import HMem.Types
+
+spec :: Spec
+spec = around withTestEnv $ do
+
+  describe "createMemory / getMemory" $ do
+    it "creates a memory and retrieves it by ID" $ \env -> do
+      ws <- createTestWorkspace env "test-ws"
+      let cm = CreateMemory
+            { workspaceId = ws.id
+            , content     = "Remember: Haskell is great"
+            , summary     = Just "Haskell note"
+            , memoryType  = LongTerm
+            , importance  = Just 7
+            , metadata    = Nothing
+            , expiresAt   = Nothing
+            , source      = Nothing
+            , confidence  = Nothing
+            , pinned      = Nothing
+            , tags        = Just ["haskell", "programming"]
+            , ftsLanguage = Nothing
+            }
+      mem <- createMemory env.pool cm
+      mem.content `shouldBe` "Remember: Haskell is great"
+      mem.memoryType `shouldBe` LongTerm
+      mem.importance `shouldBe` 7
+      mem.tags `shouldMatchList` ["haskell", "programming"]
+
+      got <- getMemory env.pool mem.id
+      got `shouldSatisfy` isJust
+      let Just m = got
+      m.content `shouldBe` "Remember: Haskell is great"
+      m.tags `shouldMatchList` ["haskell", "programming"]
+
+    it "returns Nothing for nonexistent ID" $ \env -> do
+      got <- getMemory env.pool (read "00000000-0000-0000-0000-000000000099")
+      got `shouldSatisfy` isNothing
+
+    it "defaults importance to 5 when not specified" $ \env -> do
+      ws <- createTestWorkspace env "defaults-ws"
+      let cm = CreateMemory
+            { workspaceId = ws.id
+            , content     = "default importance"
+            , summary     = Nothing
+            , memoryType  = ShortTerm
+            , importance  = Nothing
+            , metadata    = Nothing
+            , expiresAt   = Nothing
+            , source      = Nothing
+            , confidence  = Nothing
+            , pinned      = Nothing
+            , tags        = Nothing
+            , ftsLanguage = Nothing
+            }
+      mem <- createMemory env.pool cm
+      mem.importance `shouldBe` 5
+
+  describe "updateMemory" $ do
+    it "updates content and importance" $ \env -> do
+      ws <- createTestWorkspace env "update-ws"
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id
+        , content     = "original"
+        , summary     = Nothing
+        , memoryType  = ShortTerm
+        , importance  = Just 3
+        , metadata    = Nothing
+        , expiresAt   = Nothing
+        , source      = Nothing
+        , confidence  = Nothing
+        , pinned      = Nothing
+        , tags        = Nothing
+            , ftsLanguage = Nothing
+        }
+      updated <- updateMemory env.pool mem.id UpdateMemory
+        { content    = Just "updated content"
+        , summary    = Unchanged
+        , memoryType = Nothing
+        , importance = Just 9
+        , metadata   = Nothing
+        , expiresAt  = Unchanged
+        , source     = Unchanged
+        , confidence = Nothing
+        , pinned     = Nothing
+        }
+      updated `shouldSatisfy` isJust
+      let Just u = updated
+      u.content `shouldBe` "updated content"
+      u.importance `shouldBe` 9
+
+    it "returns Nothing for nonexistent ID" $ \env -> do
+      result <- updateMemory env.pool (read "00000000-0000-0000-0000-000000000099") UpdateMemory
+        { content = Just "x", summary = Unchanged, memoryType = Nothing
+        , importance = Nothing, metadata = Nothing, expiresAt = Unchanged
+        , source = Unchanged, confidence = Nothing, pinned = Nothing }
+      result `shouldSatisfy` isNothing
+
+    it "preserves unchanged fields" $ \env -> do
+      ws <- createTestWorkspace env "preserve-ws"
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id
+        , content     = "keep this"
+        , summary     = Just "keep summary"
+        , memoryType  = LongTerm
+        , importance  = Just 8
+        , metadata    = Nothing
+        , expiresAt   = Nothing
+        , source      = Nothing
+        , confidence  = Nothing
+        , pinned      = Nothing
+        , tags        = Nothing
+            , ftsLanguage = Nothing
+        }
+      updated <- updateMemory env.pool mem.id UpdateMemory
+        { content = Nothing, summary = Unchanged, memoryType = Nothing
+        , importance = Nothing, metadata = Nothing, expiresAt = Unchanged
+        , source = Unchanged, confidence = Nothing, pinned = Nothing }
+      let Just u = updated
+      u.content `shouldBe` "keep this"
+      u.summary `shouldBe` Just "keep summary"
+      u.memoryType `shouldBe` LongTerm
+      u.importance `shouldBe` 8
+
+  describe "deleteMemory" $ do
+    it "deletes an existing memory" $ \env -> do
+      ws <- createTestWorkspace env "delete-ws"
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id
+        , content     = "to be deleted"
+        , summary     = Nothing
+        , memoryType  = ShortTerm
+        , importance  = Nothing
+        , metadata    = Nothing
+        , expiresAt   = Nothing
+        , source      = Nothing
+        , confidence  = Nothing
+        , pinned      = Nothing
+        , tags        = Nothing
+            , ftsLanguage = Nothing
+        }
+      ok <- deleteMemory env.pool mem.id
+      ok `shouldBe` True
+      got <- getMemory env.pool mem.id
+      got `shouldSatisfy` isNothing
+
+    it "returns False for nonexistent ID" $ \env -> do
+      ok <- deleteMemory env.pool (read "00000000-0000-0000-0000-000000000099")
+      ok `shouldBe` False
+
+  describe "listMemories" $ do
+    it "lists memories for a workspace" $ \env -> do
+      ws <- createTestWorkspace env "list-ws"
+      _ <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "mem1", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      _ <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "mem2", summary = Nothing
+        , memoryType = LongTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      mems <- listMemories env.pool (Just ws.id) Nothing Nothing Nothing
+      length mems `shouldBe` 2
+
+    it "filters by memory type" $ \env -> do
+      ws <- createTestWorkspace env "filter-ws"
+      _ <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "short", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      _ <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "long", summary = Nothing
+        , memoryType = LongTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      shorts <- listMemories env.pool (Just ws.id) (Just ShortTerm) Nothing Nothing
+      length shorts `shouldBe` 1
+      (head shorts).memoryType `shouldBe` ShortTerm
+
+    it "respects limit and offset" $ \env -> do
+      ws <- createTestWorkspace env "paging-ws"
+      mapM_ (\i -> createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "mem" <> T.pack (show i), summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }) ([1..5] :: [Int])
+      page1 <- listMemories env.pool (Just ws.id) Nothing (Just 2) (Just 0)
+      length page1 `shouldBe` 2
+      page2 <- listMemories env.pool (Just ws.id) Nothing (Just 2) (Just 2)
+      length page2 `shouldBe` 2
+
+  describe "tags" $ do
+    it "setTags replaces all tags" $ \env -> do
+      ws <- createTestWorkspace env "tags-ws"
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "tagged", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Just ["old1", "old2"], ftsLanguage = Nothing }
+      setTags env.pool mem.id ["new1", "new2", "new3"]
+      tags <- getTags env.pool mem.id
+      tags `shouldMatchList` ["new1", "new2", "new3"]
+
+    it "setTags with empty list clears tags" $ \env -> do
+      ws <- createTestWorkspace env "cleartags-ws"
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "will lose tags", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Just ["tag1"], ftsLanguage = Nothing }
+      setTags env.pool mem.id []
+      tags <- getTags env.pool mem.id
+      tags `shouldBe` []
+
+  describe "links" $ do
+    it "creates and retrieves memory links" $ \env -> do
+      ws <- createTestWorkspace env "link-ws"
+      m1 <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "source", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      m2 <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "target", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      linkMemories env.pool m1.id CreateMemoryLink
+        { targetId = m2.id, relationType = Related, strength = Just 0.5 }
+      links <- getMemoryLinks env.pool m1.id
+      length links `shouldBe` 1
+      (head links).relationType `shouldBe` Related
+      (head links).strength `shouldBe` 0.5
+
+    it "link upsert updates strength" $ \env -> do
+      ws <- createTestWorkspace env "upsert-link-ws"
+      m1 <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "src", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      m2 <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "tgt", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      linkMemories env.pool m1.id CreateMemoryLink
+        { targetId = m2.id, relationType = Related, strength = Just 0.25 }
+      linkMemories env.pool m1.id CreateMemoryLink
+        { targetId = m2.id, relationType = Related, strength = Just 0.75 }
+      links <- getMemoryLinks env.pool m1.id
+      length links `shouldBe` 1
+      (head links).strength `shouldBe` 0.75
+
+  describe "searchMemories" $ do
+    it "finds memories by full-text search" $ \env -> do
+      ws <- createTestWorkspace env "search-ws"
+      _ <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "The quick brown fox jumps over the lazy dog"
+        , summary = Nothing, memoryType = ShortTerm, importance = Just 5
+        , metadata = Nothing, expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      _ <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "Haskell is a purely functional programming language"
+        , summary = Nothing, memoryType = ShortTerm, importance = Just 5
+        , metadata = Nothing, expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      results <- searchMemories env.pool SearchQuery
+        { workspaceId = Just ws.id, query = Just "haskell functional"
+        , memoryType = Nothing, tags = Nothing
+        , minImportance = Nothing, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
+      length results `shouldSatisfy` (>= 1)
+      any (\m -> T.isInfixOf "Haskell" m.content) results `shouldBe` True
+
+    it "search without query returns by importance" $ \env -> do
+      ws <- createTestWorkspace env "searchnoq-ws"
+      _ <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "low importance", summary = Nothing
+        , memoryType = ShortTerm, importance = Just 2, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      _ <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "high importance", summary = Nothing
+        , memoryType = ShortTerm, importance = Just 9, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      results <- searchMemories env.pool SearchQuery
+        { workspaceId = Just ws.id, query = Nothing
+        , memoryType = Nothing, tags = Nothing
+        , minImportance = Just 5, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
+      length results `shouldBe` 1
+      (head results).importance `shouldBe` 9
+
+  describe "touchMemory" $ do
+    it "increments access count" $ \env -> do
+      ws <- createTestWorkspace env "touch-ws"
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "touchable", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      mem.accessCount `shouldBe` 0
+      touchMemory env.pool mem.id
+      touchMemory env.pool mem.id
+      Just m <- getMemory env.pool mem.id
+      m.accessCount `shouldBe` 2

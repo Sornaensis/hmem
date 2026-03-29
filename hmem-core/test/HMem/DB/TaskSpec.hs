@@ -1,0 +1,289 @@
+{-# OPTIONS_GHC -Wno-x-partial -Wno-incomplete-uni-patterns #-}
+
+module HMem.DB.TaskSpec (spec) where
+
+import Control.Exception (try)
+import Data.Maybe (isJust, isNothing)
+import Test.Hspec
+
+import HMem.DB.Memory (createMemory)
+import HMem.DB.Pool (DBException(..))
+import HMem.DB.Project (createProject)
+import HMem.DB.Task
+import HMem.DB.TestHarness
+import HMem.Types
+
+spec :: Spec
+spec = around withTestEnv $ do
+
+  describe "createTask / getTask" $ do
+    it "creates and retrieves a task" $ \env -> do
+      ws <- createTestWorkspace env "task-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Task Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      let ct = CreateTask
+            { workspaceId = ws.id
+            , projectId   = Just proj.id
+            , parentId    = Nothing
+            , title       = "Write tests"
+            , description = Just "We need tests"
+            , priority    = Just 9
+            , metadata    = Nothing
+            , dueAt       = Nothing
+            }
+      task <- createTask env.pool ct
+      task.title `shouldBe` "Write tests"
+      task.priority `shouldBe` 9
+      task.status `shouldBe` Todo  -- default
+      task.completedAt `shouldSatisfy` isNothing
+
+      got <- getTask env.pool task.id
+      got `shouldSatisfy` isJust
+      let Just t = got
+      t.title `shouldBe` "Write tests"
+      t.description `shouldBe` Just "We need tests"
+
+    it "returns Nothing for nonexistent ID" $ \env -> do
+      got <- getTask env.pool (read "00000000-0000-0000-0000-000000000099")
+      got `shouldSatisfy` isNothing
+
+    it "defaults priority to 5" $ \env -> do
+      ws <- createTestWorkspace env "taskdef-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "TP"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "default"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      task.priority `shouldBe` 5
+
+  describe "updateTask" $ do
+    it "updates title and status" $ \env -> do
+      ws <- createTestWorkspace env "taskup-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "UP"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Original"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      updated <- updateTask env.pool task.id UpdateTask
+        { title = Just "Updated Title", description = Unchanged
+        , status = Just InProgress, priority = Nothing
+        , metadata = Nothing, dueAt = Unchanged }
+      updated `shouldSatisfy` isJust
+      let Just u = updated
+      u.title `shouldBe` "Updated Title"
+      u.status `shouldBe` InProgress
+
+    it "sets completedAt when status becomes Done" $ \env -> do
+      ws <- createTestWorkspace env "taskdone-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Done"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Finish me"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      task.completedAt `shouldSatisfy` isNothing
+      updated <- updateTask env.pool task.id UpdateTask
+        { title = Nothing, description = Unchanged
+        , status = Just Done, priority = Nothing
+        , metadata = Nothing, dueAt = Unchanged }
+      let Just u = updated
+      u.status `shouldBe` Done
+      u.completedAt `shouldSatisfy` isJust
+
+    it "preserves unchanged fields" $ \env -> do
+      ws <- createTestWorkspace env "taskpres-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Pres"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Keep"
+        , description = Just "keep this", priority = Just 7
+        , metadata = Nothing, dueAt = Nothing }
+      updated <- updateTask env.pool task.id UpdateTask
+        { title = Nothing, description = Unchanged, status = Nothing
+        , priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      let Just u = updated
+      u.title `shouldBe` "Keep"
+      u.description `shouldBe` Just "keep this"
+      u.priority `shouldBe` 7
+
+    it "returns Nothing for nonexistent ID" $ \env -> do
+      result <- updateTask env.pool (read "00000000-0000-0000-0000-000000000099") UpdateTask
+        { title = Just "x", description = Unchanged, status = Nothing
+        , priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      result `shouldSatisfy` isNothing
+
+  describe "deleteTask" $ do
+    it "deletes an existing task" $ \env -> do
+      ws <- createTestWorkspace env "taskdel-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Del"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Doomed"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      ok <- deleteTask env.pool task.id
+      ok `shouldBe` True
+      got <- getTask env.pool task.id
+      got `shouldSatisfy` isNothing
+
+    it "returns False for nonexistent ID" $ \env -> do
+      ok <- deleteTask env.pool (read "00000000-0000-0000-0000-000000000099")
+      ok `shouldBe` False
+
+  describe "listTasks" $ do
+    it "lists tasks for a project ordered by priority" $ \env -> do
+      ws <- createTestWorkspace env "tasklist-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "List"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      _ <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Low"
+        , description = Nothing, priority = Just 2, metadata = Nothing
+        , dueAt = Nothing }
+      _ <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "High"
+        , description = Nothing, priority = Just 9, metadata = Nothing
+        , dueAt = Nothing }
+      tasks <- listTasks env.pool proj.id Nothing Nothing Nothing
+      length tasks `shouldBe` 2
+      (head tasks).priority `shouldBe` 9
+
+    it "filters by status" $ \env -> do
+      ws <- createTestWorkspace env "taskfilt-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Filt"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      t1 <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "todo1"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      _ <- updateTask env.pool t1.id UpdateTask
+        { title = Nothing, description = Unchanged, status = Just Done
+        , priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      _ <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "todo2"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      todos <- listTasks env.pool proj.id (Just Todo) Nothing Nothing
+      length todos `shouldBe` 1
+      (head todos).title `shouldBe` "todo2"
+
+  describe "dependencies" $ do
+    it "adds and removes task dependencies" $ \env -> do
+      ws <- createTestWorkspace env "taskdep-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Dep"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      t1 <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "First"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      t2 <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Second"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      -- Should not throw
+      addDependency env.pool t2.id t1.id
+      -- Adding again should be idempotent (DoNothing)
+      addDependency env.pool t2.id t1.id
+      -- Remove
+      removeDependency env.pool t2.id t1.id
+
+    it "rejects self-referential dependency" $ \env -> do
+      ws <- createTestWorkspace env "taskself-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Self"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      t1 <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Self"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      result <- try @DBException $ addDependency env.pool t1.id t1.id
+      case result of
+        Left (DBCheckViolation _) -> pure ()
+        other -> expectationFailure $ "Expected DBCheckViolation, got: " <> show other
+
+    it "rejects direct 2-node cycle" $ \env -> do
+      ws <- createTestWorkspace env "taskcyc2-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Cyc2"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      t1 <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "A"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      t2 <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "B"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      addDependency env.pool t2.id t1.id  -- B depends on A (OK)
+      result <- try @DBException $ addDependency env.pool t1.id t2.id  -- A depends on B (cycle!)
+      case result of
+        Left (DBCycleDetected _) -> pure ()
+        other -> expectationFailure $ "Expected DBCycleDetected, got: " <> show other
+
+    it "rejects multi-node cycle (A->B->C->A)" $ \env -> do
+      ws <- createTestWorkspace env "taskcyc3-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Cyc3"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      let mkTask title = createTask env.pool CreateTask
+            { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = title
+            , description = Nothing, priority = Nothing, metadata = Nothing
+            , dueAt = Nothing }
+      t1 <- mkTask "A"
+      t2 <- mkTask "B"
+      t3 <- mkTask "C"
+      addDependency env.pool t2.id t1.id  -- B depends on A
+      addDependency env.pool t3.id t2.id  -- C depends on B
+      result <- try @DBException $ addDependency env.pool t1.id t3.id  -- A depends on C (cycle!)
+      case result of
+        Left (DBCycleDetected _) -> pure ()
+        other -> expectationFailure $ "Expected DBCycleDetected, got: " <> show other
+
+    it "allows valid DAG (diamond shape)" $ \env -> do
+      ws <- createTestWorkspace env "taskdag-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "DAG"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      let mkTask title = createTask env.pool CreateTask
+            { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = title
+            , description = Nothing, priority = Nothing, metadata = Nothing
+            , dueAt = Nothing }
+      t1 <- mkTask "Root"
+      t2 <- mkTask "Left"
+      t3 <- mkTask "Right"
+      t4 <- mkTask "Sink"
+      -- Diamond: t2->t1, t3->t1, t4->t2, t4->t3
+      addDependency env.pool t2.id t1.id
+      addDependency env.pool t3.id t1.id
+      addDependency env.pool t4.id t2.id
+      addDependency env.pool t4.id t3.id
+      -- All should succeed -- no cycle in a diamond
+
+  describe "memory links" $ do
+    it "links and unlinks task to memory" $ \env -> do
+      ws <- createTestWorkspace env "taskmem-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Mem"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Linked"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "linked mem", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      linkTaskMemory env.pool task.id mem.id
+      -- Idempotent
+      linkTaskMemory env.pool task.id mem.id
+      unlinkTaskMemory env.pool task.id mem.id

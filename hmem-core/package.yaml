@@ -1,0 +1,85 @@
+name:                hmem-core
+version:             0.1.0.0
+synopsis:            Core types and database operations for hmem
+description:         Shared library for the hmem LLM memory and task management system.
+license:             MPL-2.0
+author:              hmem contributors
+category:            Database
+
+dependencies:
+  - base >= 4.7 && < 5
+  - aeson >= 2.0
+  - containers
+  - text
+  - bytestring
+  - time
+  - uuid
+  - rel8
+  - hasql
+  - hasql-pool
+  - resource-pool >= 0.4
+  - directory
+  - filepath
+  - yaml >= 0.11
+  - process
+  - temporary
+  - random
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Widentities
+  - -Wincomplete-record-updates
+  - -Wincomplete-uni-patterns
+  - -Wredundant-constraints
+
+executables:
+  run-integration-tests:
+    main: RunIntegrationTests.hs
+    source-dirs: app
+    dependencies:
+      - process
+      - temporary
+      - random
+      - filepath
+    ghc-options:
+      - -threaded
+
+library:
+  source-dirs: src
+
+tests:
+  hmem-core-test:
+    main:        Spec.hs
+    source-dirs: test
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - "-with-rtsopts=-N"
+    dependencies:
+      - hmem-core
+      - hspec
+      - hspec-discover
+      - QuickCheck
+      - quickcheck-io
+      - hasql
+      - resource-pool >= 0.4
+
+default-extensions:
+  - OverloadedStrings
+  - DeriveGeneric
+  - DeriveAnyClass
+  - DerivingStrategies
+  - RecordWildCards
+  - LambdaCase
+  - ScopedTypeVariables
+  - FlexibleContexts
+  - DuplicateRecordFields
+  - NoFieldSelectors
+  - OverloadedRecordDot
+  - ImportQualifiedPost
+  - TypeFamilies
+  - StandaloneDeriving
+  - MultiParamTypeClasses
+  - UndecidableInstances
+  - TypeApplications

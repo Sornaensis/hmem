@@ -1,0 +1,124 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.38.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           hmem-mcp
+version:        0.1.0.0
+synopsis:       MCP server bridge for hmem
+description:    Model Context Protocol server that bridges LLMs to the hmem server.
+category:       Web
+author:         hmem contributors
+maintainer:     hmem contributors
+license:        MPL-2.0
+build-type:     Simple
+
+library
+  exposed-modules:
+      HMem.MCP.Server
+      HMem.MCP.Tools
+  other-modules:
+      Paths_hmem_mcp
+  hs-source-dirs:
+      src
+  default-extensions:
+      OverloadedStrings
+      DeriveGeneric
+      RecordWildCards
+      LambdaCase
+      ScopedTypeVariables
+      DuplicateRecordFields
+      NoFieldSelectors
+      OverloadedRecordDot
+      ImportQualifiedPost
+      TypeApplications
+  ghc-options: -Wall -Wcompat -Wredundant-constraints
+  build-depends:
+      aeson >=2.0
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , hmem-core
+    , http-client
+    , http-client-tls
+    , http-types
+    , optparse-applicative
+    , stm
+    , text
+    , time
+    , uuid
+  default-language: Haskell2010
+
+executable hmem-mcp
+  main-is: Main.hs
+  other-modules:
+      Paths_hmem_mcp
+  hs-source-dirs:
+      app
+  default-extensions:
+      OverloadedStrings
+      DeriveGeneric
+      RecordWildCards
+      LambdaCase
+      ScopedTypeVariables
+      DuplicateRecordFields
+      NoFieldSelectors
+      OverloadedRecordDot
+      ImportQualifiedPost
+      TypeApplications
+  ghc-options: -Wall -Wcompat -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      aeson >=2.0
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , hmem-core
+    , hmem-mcp
+    , http-client
+    , http-client-tls
+    , http-types
+    , optparse-applicative
+    , stm
+    , text
+    , time
+    , uuid
+  default-language: Haskell2010
+
+test-suite hmem-mcp-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      HMem.MCP.ToolsSpec
+      Paths_hmem_mcp
+  hs-source-dirs:
+      test
+  default-extensions:
+      OverloadedStrings
+      DeriveGeneric
+      RecordWildCards
+      LambdaCase
+      ScopedTypeVariables
+      DuplicateRecordFields
+      NoFieldSelectors
+      OverloadedRecordDot
+      ImportQualifiedPost
+      TypeApplications
+  ghc-options: -Wall -Wcompat -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      aeson >=2.0
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , hmem-core
+    , hmem-mcp
+    , hspec
+    , http-client
+    , http-client-tls
+    , http-types
+    , optparse-applicative
+    , stm
+    , text
+    , time
+    , uuid
+  default-language: Haskell2010

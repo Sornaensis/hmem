@@ -1,0 +1,484 @@
+module HMem.DB.Schema
+  ( -- * Workspaces
+    WorkspaceT(..)
+  , workspaceSchema
+
+    -- * Memories
+  , MemoryT(..)
+  , memorySchema
+
+    -- * Memory tags
+  , MemoryTagT(..)
+  , memoryTagSchema
+
+    -- * Memory links
+  , MemoryLinkT(..)
+  , memoryLinkSchema
+
+    -- * Projects
+  , ProjectT(..)
+  , projectSchema
+
+    -- * Tasks
+  , TaskT(..)
+  , taskSchema
+
+    -- * Task dependencies
+  , TaskDependencyT(..)
+  , taskDependencySchema
+
+    -- * Project ↔ memory links
+  , ProjectMemoryLinkT(..)
+  , projectMemoryLinkSchema
+
+    -- * Task ↔ memory links
+  , TaskMemoryLinkT(..)
+  , taskMemoryLinkSchema
+
+    -- * Cleanup policies
+  , CleanupPolicyT(..)
+  , cleanupPolicySchema
+
+    -- * Memory categories
+  , MemoryCategoryT(..)
+  , memoryCategorySchema
+
+    -- * Memory ↔ category links
+  , MemoryCategoryLinkT(..)
+  , memoryCategoryLinkSchema
+
+    -- * Workspace groups
+  , WorkspaceGroupT(..)
+  , workspaceGroupSchema
+  , WorkspaceGroupMemberT(..)
+  , workspaceGroupMemberSchema
+
+    -- * PostgreSQL full-text search types
+  , PgTSVector(..)
+  , PgTSQuery(..)
+  , PgRegConfig(..)
+  ) where
+
+import Data.Aeson (Value)
+import Data.ByteString (ByteString)
+import Data.Int (Int16, Int32)
+import Data.Text (Text)
+import Data.Time (UTCTime)
+import Data.UUID (UUID)
+import GHC.Generics (Generic)
+import Rel8
+
+import HMem.Types (MemoryType, ProjectStatus, TaskStatus, RelationType, WorkspaceType)
+
+------------------------------------------------------------------------
+-- PostgreSQL full-text search types (opaque wrappers for Rel8)
+------------------------------------------------------------------------
+
+-- | Phantom type representing PostgreSQL @tsvector@.
+-- Uses ByteString internally because PostgreSQL’s binary wire protocol
+-- sends tsvector in a non-UTF-8 format.  We never inspect the Haskell
+-- value — it is only used at the SQL expression level.
+newtype PgTSVector = PgTSVector ByteString
+
+instance DBType PgTSVector where
+  typeInformation = case mapTypeInformation PgTSVector (\(PgTSVector bs) -> bs) (typeInformation :: TypeInformation ByteString) of
+    TypeInformation enc dec delim _ ->
+      TypeInformation enc dec delim (TypeName (QualifiedName "tsvector" Nothing) [] 0)
+
+-- | Phantom type representing PostgreSQL @tsquery@.
+newtype PgTSQuery = PgTSQuery Text
+
+instance DBType PgTSQuery where
+  typeInformation = case mapTypeInformation PgTSQuery (\(PgTSQuery t) -> t) (typeInformation :: TypeInformation Text) of
+    TypeInformation enc dec delim _ ->
+      TypeInformation enc dec delim (TypeName (QualifiedName "tsquery" Nothing) [] 0)
+
+-- | Phantom type representing PostgreSQL @regconfig@.
+newtype PgRegConfig = PgRegConfig Text
+
+instance DBType PgRegConfig where
+  typeInformation = case mapTypeInformation PgRegConfig (\(PgRegConfig t) -> t) (typeInformation :: TypeInformation Text) of
+    TypeInformation enc dec delim _ ->
+      TypeInformation enc dec delim (TypeName (QualifiedName "regconfig" Nothing) [] 0)
+
+------------------------------------------------------------------------
+-- Workspaces
+------------------------------------------------------------------------
+
+data WorkspaceT f = WorkspaceT
+  { wsId        :: Column f UUID
+  , wsName      :: Column f Text
+  , wsType      :: Column f WorkspaceType
+  , wsPath      :: Column f (Maybe Text)
+  , wsGhOwner   :: Column f (Maybe Text)
+  , wsGhRepo    :: Column f (Maybe Text)
+  , wsCreatedAt :: Column f UTCTime
+  , wsUpdatedAt :: Column f UTCTime
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+workspaceSchema :: TableSchema (WorkspaceT Name)
+workspaceSchema = TableSchema
+  { name    = "workspaces"
+  , columns = WorkspaceT
+      { wsId        = "id"
+      , wsName      = "name"
+      , wsType      = "workspace_type"
+      , wsPath      = "path"
+      , wsGhOwner   = "gh_owner"
+      , wsGhRepo    = "gh_repo"
+      , wsCreatedAt = "created_at"
+      , wsUpdatedAt = "updated_at"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Memories
+------------------------------------------------------------------------
+
+data MemoryT f = MemoryT
+  { memId             :: Column f UUID
+  , memWorkspaceId    :: Column f UUID
+  , memContent        :: Column f Text
+  , memSummary        :: Column f (Maybe Text)
+  , memMemoryType     :: Column f MemoryType
+  , memImportance     :: Column f Int16
+  , memMetadata       :: Column f Value
+  , memExpiresAt      :: Column f (Maybe UTCTime)
+  , memSource         :: Column f (Maybe Text)
+  , memConfidence     :: Column f Double
+  , memPinned         :: Column f Bool
+  , memLastAccessedAt :: Column f UTCTime
+  , memAccessCount    :: Column f Int32
+  , memFtsLanguage    :: Column f Text
+  , memSearchVector   :: Column f PgTSVector
+  , memCreatedAt      :: Column f UTCTime
+  , memUpdatedAt      :: Column f UTCTime
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+memorySchema :: TableSchema (MemoryT Name)
+memorySchema = TableSchema
+  { name    = "memories"
+  , columns = MemoryT
+      { memId             = "id"
+      , memWorkspaceId    = "workspace_id"
+      , memContent        = "content"
+      , memSummary        = "summary"
+      , memMemoryType     = "memory_type"
+      , memImportance     = "importance"
+      , memMetadata       = "metadata"
+      , memExpiresAt      = "expires_at"
+      , memSource         = "source"
+      , memConfidence     = "confidence"
+      , memPinned         = "pinned"
+      , memLastAccessedAt = "last_accessed_at"
+      , memAccessCount    = "access_count"
+      , memFtsLanguage    = "fts_language"
+      , memSearchVector   = "search_vector"
+      , memCreatedAt      = "created_at"
+      , memUpdatedAt      = "updated_at"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Memory tags
+------------------------------------------------------------------------
+
+data MemoryTagT f = MemoryTagT
+  { mtMemoryId :: Column f UUID
+  , mtTag      :: Column f Text
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+memoryTagSchema :: TableSchema (MemoryTagT Name)
+memoryTagSchema = TableSchema
+  { name    = "memory_tags"
+  , columns = MemoryTagT
+      { mtMemoryId = "memory_id"
+      , mtTag      = "tag"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Memory links
+------------------------------------------------------------------------
+
+data MemoryLinkT f = MemoryLinkT
+  { mlSourceId     :: Column f UUID
+  , mlTargetId     :: Column f UUID
+  , mlRelationType :: Column f RelationType
+  , mlStrength     :: Column f Double
+  , mlCreatedAt    :: Column f UTCTime
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+memoryLinkSchema :: TableSchema (MemoryLinkT Name)
+memoryLinkSchema = TableSchema
+  { name    = "memory_links"
+  , columns = MemoryLinkT
+      { mlSourceId     = "source_id"
+      , mlTargetId     = "target_id"
+      , mlRelationType = "relation_type"
+      , mlStrength     = "strength"
+      , mlCreatedAt    = "created_at"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Projects
+------------------------------------------------------------------------
+
+data ProjectT f = ProjectT
+  { projId          :: Column f UUID
+  , projWorkspaceId :: Column f UUID
+  , projParentId    :: Column f (Maybe UUID)
+  , projName        :: Column f Text
+  , projDescription :: Column f (Maybe Text)
+  , projStatus      :: Column f ProjectStatus
+  , projPriority    :: Column f Int16
+  , projMetadata    :: Column f Value
+  , projCreatedAt   :: Column f UTCTime
+  , projUpdatedAt   :: Column f UTCTime
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+projectSchema :: TableSchema (ProjectT Name)
+projectSchema = TableSchema
+  { name    = "projects"
+  , columns = ProjectT
+      { projId          = "id"
+      , projWorkspaceId = "workspace_id"
+      , projParentId    = "parent_id"
+      , projName        = "name"
+      , projDescription = "description"
+      , projStatus      = "status"
+      , projPriority    = "priority"
+      , projMetadata    = "metadata"
+      , projCreatedAt   = "created_at"
+      , projUpdatedAt   = "updated_at"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Tasks
+------------------------------------------------------------------------
+
+data TaskT f = TaskT
+  { taskId          :: Column f UUID
+  , taskWorkspaceId :: Column f UUID
+  , taskProjectId   :: Column f (Maybe UUID)
+  , taskParentId    :: Column f (Maybe UUID)
+  , taskTitle       :: Column f Text
+  , taskDescription :: Column f (Maybe Text)
+  , taskStatus      :: Column f TaskStatus
+  , taskPriority    :: Column f Int16
+  , taskMetadata    :: Column f Value
+  , taskDueAt       :: Column f (Maybe UTCTime)
+  , taskCompletedAt :: Column f (Maybe UTCTime)
+  , taskCreatedAt   :: Column f UTCTime
+  , taskUpdatedAt   :: Column f UTCTime
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+taskSchema :: TableSchema (TaskT Name)
+taskSchema = TableSchema
+  { name    = "tasks"
+  , columns = TaskT
+      { taskId          = "id"
+      , taskWorkspaceId = "workspace_id"
+      , taskProjectId   = "project_id"
+      , taskParentId    = "parent_id"
+      , taskTitle       = "title"
+      , taskDescription = "description"
+      , taskStatus      = "status"
+      , taskPriority    = "priority"
+      , taskMetadata    = "metadata"
+      , taskDueAt       = "due_at"
+      , taskCompletedAt = "completed_at"
+      , taskCreatedAt   = "created_at"
+      , taskUpdatedAt   = "updated_at"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Task dependencies
+------------------------------------------------------------------------
+
+data TaskDependencyT f = TaskDependencyT
+  { tdTaskId      :: Column f UUID
+  , tdDependsOnId :: Column f UUID
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+taskDependencySchema :: TableSchema (TaskDependencyT Name)
+taskDependencySchema = TableSchema
+  { name    = "task_dependencies"
+  , columns = TaskDependencyT
+      { tdTaskId      = "task_id"
+      , tdDependsOnId = "depends_on_id"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Project ↔ memory links
+------------------------------------------------------------------------
+
+data ProjectMemoryLinkT f = ProjectMemoryLinkT
+  { pmlProjectId :: Column f UUID
+  , pmlMemoryId  :: Column f UUID
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+projectMemoryLinkSchema :: TableSchema (ProjectMemoryLinkT Name)
+projectMemoryLinkSchema = TableSchema
+  { name    = "project_memory_links"
+  , columns = ProjectMemoryLinkT
+      { pmlProjectId = "project_id"
+      , pmlMemoryId  = "memory_id"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Task ↔ memory links
+------------------------------------------------------------------------
+
+data TaskMemoryLinkT f = TaskMemoryLinkT
+  { tmlTaskId   :: Column f UUID
+  , tmlMemoryId :: Column f UUID
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+taskMemoryLinkSchema :: TableSchema (TaskMemoryLinkT Name)
+taskMemoryLinkSchema = TableSchema
+  { name    = "task_memory_links"
+  , columns = TaskMemoryLinkT
+      { tmlTaskId   = "task_id"
+      , tmlMemoryId = "memory_id"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Cleanup policies
+------------------------------------------------------------------------
+
+data CleanupPolicyT f = CleanupPolicyT
+  { cpId            :: Column f UUID
+  , cpWorkspaceId   :: Column f UUID
+  , cpMemoryType    :: Column f MemoryType
+  , cpMaxAgeHours   :: Column f (Maybe Int32)
+  , cpMaxCount      :: Column f (Maybe Int32)
+  , cpMinImportance :: Column f Int16
+  , cpEnabled       :: Column f Bool
+  , cpCreatedAt     :: Column f UTCTime
+  , cpUpdatedAt     :: Column f UTCTime
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+cleanupPolicySchema :: TableSchema (CleanupPolicyT Name)
+cleanupPolicySchema = TableSchema
+  { name    = "cleanup_policies"
+  , columns = CleanupPolicyT
+      { cpId            = "id"
+      , cpWorkspaceId   = "workspace_id"
+      , cpMemoryType    = "memory_type"
+      , cpMaxAgeHours   = "max_age_hours"
+      , cpMaxCount      = "max_count"
+      , cpMinImportance = "min_importance"
+      , cpEnabled       = "enabled"
+      , cpCreatedAt     = "created_at"
+      , cpUpdatedAt     = "updated_at"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Memory categories
+------------------------------------------------------------------------
+
+data MemoryCategoryT f = MemoryCategoryT
+  { mcId          :: Column f UUID
+  , mcWorkspaceId :: Column f (Maybe UUID)
+  , mcName        :: Column f Text
+  , mcDescription :: Column f (Maybe Text)
+  , mcParentId    :: Column f (Maybe UUID)
+  , mcCreatedAt   :: Column f UTCTime
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+memoryCategorySchema :: TableSchema (MemoryCategoryT Name)
+memoryCategorySchema = TableSchema
+  { name    = "memory_categories"
+  , columns = MemoryCategoryT
+      { mcId          = "id"
+      , mcWorkspaceId = "workspace_id"
+      , mcName        = "name"
+      , mcDescription = "description"
+      , mcParentId    = "parent_id"
+      , mcCreatedAt   = "created_at"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Memory ↔ category links
+------------------------------------------------------------------------
+
+data MemoryCategoryLinkT f = MemoryCategoryLinkT
+  { mclMemoryId   :: Column f UUID
+  , mclCategoryId :: Column f UUID
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+memoryCategoryLinkSchema :: TableSchema (MemoryCategoryLinkT Name)
+memoryCategoryLinkSchema = TableSchema
+  { name    = "memory_category_links"
+  , columns = MemoryCategoryLinkT
+      { mclMemoryId   = "memory_id"
+      , mclCategoryId = "category_id"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Workspace groups
+------------------------------------------------------------------------
+
+data WorkspaceGroupT f = WorkspaceGroupT
+  { wgId          :: Column f UUID
+  , wgName        :: Column f Text
+  , wgDescription :: Column f (Maybe Text)
+  , wgCreatedAt   :: Column f UTCTime
+  , wgUpdatedAt   :: Column f UTCTime
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+workspaceGroupSchema :: TableSchema (WorkspaceGroupT Name)
+workspaceGroupSchema = TableSchema
+  { name    = "workspace_groups"
+  , columns = WorkspaceGroupT
+      { wgId          = "id"
+      , wgName        = "name"
+      , wgDescription = "description"
+      , wgCreatedAt   = "created_at"
+      , wgUpdatedAt   = "updated_at"
+      }
+  }
+
+------------------------------------------------------------------------
+-- Workspace group members
+------------------------------------------------------------------------
+
+data WorkspaceGroupMemberT f = WorkspaceGroupMemberT
+  { wgmGroupId     :: Column f UUID
+  , wgmWorkspaceId :: Column f UUID
+  , wgmJoinedAt    :: Column f UTCTime
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+workspaceGroupMemberSchema :: TableSchema (WorkspaceGroupMemberT Name)
+workspaceGroupMemberSchema = TableSchema
+  { name    = "workspace_group_members"
+  , columns = WorkspaceGroupMemberT
+      { wgmGroupId     = "group_id"
+      , wgmWorkspaceId = "workspace_id"
+      , wgmJoinedAt    = "joined_at"
+      }
+  }

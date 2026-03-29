@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "hmem": {
+      "type": "stdio",
+      "command": "hmem-mcp",
+      "args": []
+    }
+  }
+}

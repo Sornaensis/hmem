@@ -1,0 +1,117 @@
+name:                hmem-server
+version:             0.1.0.0
+synopsis:            HTTP server for the hmem memory system
+description:         Single-instance HTTP server for the hmem LLM memory and task management system.
+license:             MPL-2.0
+author:              hmem contributors
+category:            Web
+
+dependencies:
+  - base >= 4.7 && < 5
+  - hmem-core
+  - containers
+  - servant-server >= 0.19
+  - warp
+  - wai
+  - wai-cors
+  - wai-extra
+  - fast-logger
+  - http-types
+  - openapi3
+  - servant-openapi3
+  - lens
+  - insert-ordered-containers
+  - aeson >= 2.0
+  - text
+  - bytestring
+  - time
+  - uuid
+  - optparse-applicative
+  - resource-pool >= 0.4
+  - hasql
+  - rel8
+  - directory
+  - filepath
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Wredundant-constraints
+
+library:
+  source-dirs: src
+
+executables:
+  hmem-server:
+    main:        Main.hs
+    source-dirs: app
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - "-with-rtsopts=-N"
+    dependencies:
+      - hmem-server
+
+  hmem-setup:
+    main:        Main.hs
+    source-dirs: setup
+    ghc-options:
+      - -threaded
+    dependencies:
+      - hmem-core
+      - text
+      - bytestring
+      - aeson >= 2.0
+      - optparse-applicative
+      - directory
+      - filepath
+      - process
+      - resource-pool >= 0.4
+      - hasql
+
+tests:
+  hmem-server-test:
+    main:        Spec.hs
+    source-dirs: test
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - "-with-rtsopts=-N"
+    dependencies:
+      - hmem-server
+      - hmem-core
+      - hspec
+      - hspec-discover
+      - QuickCheck
+      - aeson
+      - text
+      - uuid
+      - hasql
+      - resource-pool >= 0.4
+      - wai
+      - wai-extra
+      - bytestring
+      - time
+      - http-types
+      - async
+
+default-extensions:
+  - OverloadedStrings
+  - DeriveGeneric
+  - DeriveAnyClass
+  - DerivingStrategies
+  - RecordWildCards
+  - LambdaCase
+  - ScopedTypeVariables
+  - TypeOperators
+  - DataKinds
+  - FlexibleContexts
+  - TypeApplications
+  - DuplicateRecordFields
+  - NoFieldSelectors
+  - OverloadedRecordDot
+  - ImportQualifiedPost
+  - TypeFamilies
+  - StandaloneDeriving
+  - MultiParamTypeClasses
+  - UndecidableInstances

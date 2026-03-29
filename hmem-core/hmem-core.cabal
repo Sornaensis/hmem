@@ -1,0 +1,174 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.38.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           hmem-core
+version:        0.1.0.0
+synopsis:       Core types and database operations for hmem
+description:    Shared library for the hmem LLM memory and task management system.
+category:       Database
+author:         hmem contributors
+maintainer:     hmem contributors
+license:        MPL-2.0
+build-type:     Simple
+
+library
+  exposed-modules:
+      HMem.Config
+      HMem.DB.Category
+      HMem.DB.Cleanup
+      HMem.DB.Memory
+      HMem.DB.Migration
+      HMem.DB.Pool
+      HMem.DB.Project
+      HMem.DB.Schema
+      HMem.DB.Task
+      HMem.DB.TestHarness
+      HMem.DB.WorkspaceGroup
+      HMem.Types
+  other-modules:
+      Paths_hmem_core
+  hs-source-dirs:
+      src
+  default-extensions:
+      OverloadedStrings
+      DeriveGeneric
+      DeriveAnyClass
+      DerivingStrategies
+      RecordWildCards
+      LambdaCase
+      ScopedTypeVariables
+      FlexibleContexts
+      DuplicateRecordFields
+      NoFieldSelectors
+      OverloadedRecordDot
+      ImportQualifiedPost
+      TypeFamilies
+      StandaloneDeriving
+      MultiParamTypeClasses
+      UndecidableInstances
+      TypeApplications
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints
+  build-depends:
+      aeson >=2.0
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , hasql
+    , hasql-pool
+    , process
+    , random
+    , rel8
+    , resource-pool >=0.4
+    , temporary
+    , text
+    , time
+    , uuid
+    , yaml >=0.11
+  default-language: Haskell2010
+
+executable run-integration-tests
+  main-is: RunIntegrationTests.hs
+  other-modules:
+      Paths_hmem_core
+  hs-source-dirs:
+      app
+  default-extensions:
+      OverloadedStrings
+      DeriveGeneric
+      DeriveAnyClass
+      DerivingStrategies
+      RecordWildCards
+      LambdaCase
+      ScopedTypeVariables
+      FlexibleContexts
+      DuplicateRecordFields
+      NoFieldSelectors
+      OverloadedRecordDot
+      ImportQualifiedPost
+      TypeFamilies
+      StandaloneDeriving
+      MultiParamTypeClasses
+      UndecidableInstances
+      TypeApplications
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -threaded
+  build-depends:
+      aeson >=2.0
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , hasql
+    , hasql-pool
+    , process
+    , random
+    , rel8
+    , resource-pool >=0.4
+    , temporary
+    , text
+    , time
+    , uuid
+    , yaml >=0.11
+  default-language: Haskell2010
+
+test-suite hmem-core-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      HMem.DB.CleanupSpec
+      HMem.DB.MemorySpec
+      HMem.DB.ProjectSpec
+      HMem.DB.TaskSpec
+      HMem.TypesSpec
+      SpecHook
+      Paths_hmem_core
+  hs-source-dirs:
+      test
+  default-extensions:
+      OverloadedStrings
+      DeriveGeneric
+      DeriveAnyClass
+      DerivingStrategies
+      RecordWildCards
+      LambdaCase
+      ScopedTypeVariables
+      FlexibleContexts
+      DuplicateRecordFields
+      NoFieldSelectors
+      OverloadedRecordDot
+      ImportQualifiedPost
+      TypeFamilies
+      StandaloneDeriving
+      MultiParamTypeClasses
+      UndecidableInstances
+      TypeApplications
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      QuickCheck
+    , aeson >=2.0
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , hasql
+    , hasql-pool
+    , hmem-core
+    , hspec
+    , hspec-discover
+    , process
+    , quickcheck-io
+    , random
+    , rel8
+    , resource-pool >=0.4
+    , temporary
+    , text
+    , time
+    , uuid
+    , yaml >=0.11
+  default-language: Haskell2010

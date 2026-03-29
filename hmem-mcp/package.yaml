@@ -1,0 +1,65 @@
+name:                hmem-mcp
+version:             0.1.0.0
+synopsis:            MCP server bridge for hmem
+description:         Model Context Protocol server that bridges LLMs to the hmem server.
+license:             MPL-2.0
+author:              hmem contributors
+category:            Web
+
+dependencies:
+  - base >= 4.7 && < 5
+  - hmem-core
+  - aeson >= 2.0
+  - containers
+  - stm
+  - text
+  - bytestring
+  - time
+  - http-client
+  - http-client-tls
+  - http-types
+  - optparse-applicative
+  - uuid
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Wredundant-constraints
+
+library:
+  source-dirs: src
+
+executables:
+  hmem-mcp:
+    main:        Main.hs
+    source-dirs: app
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - "-with-rtsopts=-N"
+    dependencies:
+      - hmem-mcp
+
+tests:
+  hmem-mcp-test:
+    main:        Spec.hs
+    source-dirs: test
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - "-with-rtsopts=-N"
+    dependencies:
+      - hmem-mcp
+      - hspec
+
+default-extensions:
+  - OverloadedStrings
+  - DeriveGeneric
+  - RecordWildCards
+  - LambdaCase
+  - ScopedTypeVariables
+  - DuplicateRecordFields
+  - NoFieldSelectors
+  - OverloadedRecordDot
+  - ImportQualifiedPost
+  - TypeApplications

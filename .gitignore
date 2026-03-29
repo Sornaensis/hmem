@@ -1,0 +1,66 @@
+# Stack
+.stack-work/
+stack.yaml.lock
+stack*.yaml.lock
+
+# Cabal
+dist/
+dist-newstyle/
+cabal-dev/
+.cabal-sandbox/
+cabal.sandbox.config
+cabal.project.local
+cabal.project.local~
+*.cabal.bak
+
+# Haskell build artifacts
+*.o
+*.hi
+*.dyn_o
+*.dyn_hi
+*.chi
+*.chs.h
+*.hp
+*.prof
+*.aux
+*.eventlog
+*.tix
+.hpc/
+.hsenv/
+.ghc.environment.*
+
+# IDE / Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+tags
+TAGS
+.hie/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+
+# Environment / secrets
+.env
+.envrc
+*.pem
+*.key
+
+# Logs
+*.log
+
+# Database
+*.sql.bak
+
+# Test / coverage
+.coverage/
+test-results/

@@ -1,0 +1,9 @@
+resolver: lts-24.2
+
+packages:
+  - hmem-core
+  - hmem-server
+  - hmem-mcp
+
+extra-deps:
+  - rel8-1.7.0.0

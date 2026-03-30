@@ -40,6 +40,8 @@ toolDefinitions =
           , "summary"      .= propMaxLength "string" "Optional short summary" maxMemorySummaryBytes
           , "memory_type"  .= propEnum "string" "short_term or long_term" ["short_term", "long_term"]
           , "importance"   .= prop "integer" "1-10, default 5"
+          , "metadata"     .= prop "object" "Optional metadata JSON object for structured annotations"
+          , "expires_at"   .= prop "string" "ISO 8601 expiration time"
           , "source"       .= prop "string" "Provenance: user_stated, inferred, tool_output, web_search"
           , "confidence"   .= prop "number" "Confidence level 0.0-1.0, default 1.0"
           , "pinned"       .= prop "boolean" "Pin this memory (default false)"
@@ -66,6 +68,8 @@ toolDefinitions =
                       , "summary"      .= propMaxLength "string" "Optional short summary" maxMemorySummaryBytes
                       , "memory_type"  .= propEnum "string" "short_term or long_term" ["short_term", "long_term"]
                       , "importance"   .= prop "integer" "1-10, default 5"
+                      , "metadata"     .= prop "object" "Optional metadata JSON object"
+                      , "expires_at"   .= prop "string" "ISO 8601 expiration time"
                       , "source"       .= prop "string" "Provenance"
                       , "confidence"   .= prop "number" "Confidence level 0.0-1.0"
                       , "tags"         .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
@@ -156,6 +160,7 @@ toolDefinitions =
           , "description"  .= propMaxLength "string" "Project description" maxDescriptionBytes
           , "parent_id"    .= prop "string" "Parent project UUID for sub-projects"
           , "priority"     .= prop "integer" "1-10, default 5"
+          , "metadata"     .= prop "object" "Optional metadata JSON object"
           ]
       , "required" .= [t "workspace_id", t "name"]
       ]
@@ -185,6 +190,7 @@ toolDefinitions =
           , "description" .= propMaxLength "string" "Task description" maxDescriptionBytes
           , "parent_id"   .= prop "string" "Parent task UUID for sub-tasks"
           , "priority"    .= prop "integer" "1-10, default 5"
+          , "metadata"    .= prop "object" "Optional metadata JSON object"
           , "due_at"      .= prop "string" "ISO 8601 due date"
           ]
       , "required" .= [t "workspace_id", t "title"]
@@ -213,12 +219,14 @@ toolDefinitions =
       , "properties" .= object
           [ "task_id"     .= prop "string" "UUID of the task"
           , "title"       .= propMaxLength "string" "New title" maxNameBytes
-          , "description" .= propMaxLength "string" "New description" maxDescriptionBytes
+          , "description" .= propMaxLength "string" "New description (null to clear)" maxDescriptionBytes
           , "project_id"  .= prop "string" "New project UUID (null to clear)"
           , "parent_id"   .= prop "string" "New parent task UUID (null to clear)"
           , "status"      .= propEnum "string" "New status"
               ["todo", "in_progress", "blocked", "done", "cancelled"]
           , "priority"    .= prop "integer" "New priority (1-10)"
+          , "metadata"    .= prop "object" "New metadata JSON object"
+          , "due_at"      .= prop "string" "ISO 8601 due date (null to clear)"
           ]
       , "required" .= [t "task_id"]
       ]
@@ -356,11 +364,12 @@ toolDefinitions =
       , "properties" .= object
           [ "project_id"  .= prop "string" "UUID of the project"
           , "name"        .= propMaxLength "string" "New name" maxNameBytes
-          , "description" .= propMaxLength "string" "New description" maxDescriptionBytes
+          , "description" .= propMaxLength "string" "New description (null to clear)" maxDescriptionBytes
           , "parent_id"   .= prop "string" "New parent project UUID (null to clear)"
           , "status"      .= propEnum "string" "New status"
               ["active", "paused", "completed", "archived"]
           , "priority"    .= prop "integer" "New priority (1-10)"
+          , "metadata"    .= prop "object" "New metadata JSON object"
           ]
       , "required" .= [t "project_id"]
       ]

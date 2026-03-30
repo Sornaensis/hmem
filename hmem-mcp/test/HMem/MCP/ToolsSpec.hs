@@ -60,6 +60,8 @@ spec = do
             , "memory_type"  .= ("long_term" :: Text)
             , "importance"   .= (8 :: Int)
             , "summary"      .= ("sum" :: Text)
+            , "metadata"     .= object ["source" .= ("unit-test" :: Text)]
+            , "expires_at"   .= ("2026-03-31T10:00:00Z" :: Text)
             , "pinned"       .= True
             , "tags"         .= (["tag1", "tag2"] :: [Text])
             , "fts_language" .= ("spanish" :: Text)
@@ -69,6 +71,8 @@ spec = do
           cm.memoryType `shouldBe` LongTerm
           cm.importance `shouldBe` Just 8
           cm.summary `shouldBe` Just "sum"
+          cm.metadata `shouldBe` Just (object ["source" .= ("unit-test" :: Text)])
+          cm.expiresAt `shouldBe` Just (read "2026-03-31 10:00:00 UTC")
           cm.pinned `shouldBe` Just True
           cm.tags `shouldBe` Just ["tag1", "tag2"]
           cm.ftsLanguage `shouldBe` Just "spanish"
@@ -352,11 +356,13 @@ spec = do
       let args = object
             [ "workspace_id" .= testUUID
             , "name"         .= ("My Project" :: Text)
+            , "metadata"     .= object ["kind" .= ("epic" :: Text)]
             ]
       case parseToolCall "project_create" args of
         Right (ProjectCreate cp) -> do
           cp.workspaceId `shouldBe` parsedUUID
           cp.name `shouldBe` "My Project"
+          cp.metadata `shouldBe` Just (object ["kind" .= ("epic" :: Text)])
         other -> expectationFailure $ "Expected ProjectCreate, got: " <> show other
 
     it "parses project_get" $ do
@@ -370,11 +376,13 @@ spec = do
             [ "project_id" .= testUUID
             , "name"       .= ("Renamed" :: Text)
             , "parent_id"  .= testUUID2
+            , "metadata"   .= object ["lane" .= ("current" :: Text)]
             ]
       case parseToolCall "project_update" args of
         Right (ProjectUpdate pid up) -> do
           pid `shouldBe` parsedUUID
           up.parentId `shouldBe` SetTo parsedUUID2
+          up.metadata `shouldBe` Just (object ["lane" .= ("current" :: Text)])
         other -> expectationFailure $ "Expected ProjectUpdate, got: " <> show other
 
     it "parses project_update with null parent_id to clear hierarchy" $ do
@@ -440,11 +448,13 @@ spec = do
       let args = object
             [ "workspace_id" .= testUUID
             , "title"        .= ("Do something" :: Text)
+            , "metadata"     .= object ["estimate" .= (3 :: Int)]
             ]
       case parseToolCall "task_create" args of
         Right (TaskCreate ct) -> do
           ct.workspaceId `shouldBe` parsedUUID
           ct.title `shouldBe` "Do something"
+          ct.metadata `shouldBe` Just (object ["estimate" .= (3 :: Int)])
         other -> expectationFailure $ "Expected TaskCreate, got: " <> show other
 
     it "parses task_get" $ do
@@ -458,6 +468,8 @@ spec = do
             [ "task_id" .= testUUID
             , "project_id" .= testUUID2
             , "parent_id" .= Null
+            , "metadata" .= object ["owner" .= ("agent" :: Text)]
+            , "due_at" .= Null
             , "status"  .= ("in_progress" :: Text)
             ]
       case parseToolCall "task_update" args of
@@ -465,6 +477,8 @@ spec = do
           tid `shouldBe` parsedUUID
           ut.projectId `shouldBe` SetTo parsedUUID2
           ut.parentId `shouldBe` SetNull
+          ut.metadata `shouldBe` Just (object ["owner" .= ("agent" :: Text)])
+          ut.dueAt `shouldBe` SetNull
         other -> expectationFailure $ "Expected TaskUpdate, got: " <> show other
 
     it "parses task_delete" $ do

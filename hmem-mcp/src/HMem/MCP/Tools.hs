@@ -783,6 +783,72 @@ toolDefinitions =
           ]
       , "required" .= [t "items"]
       ]
+
+  -- Saved views
+  , mkTool "saved_view_create" "Create a saved view that stores a reusable query. Specify entity_type (memory_search, memory_list, project_list, task_list, activity) and query_params matching that entity's query schema. Execute later with saved_view_execute." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "workspace_id" .= prop "string" "UUID of the workspace"
+          , "name"         .= propMaxLength "string" "Name for this saved view" maxNameBytes
+          , "description"  .= prop "string" "Optional description"
+          , "entity_type"  .= propEnum "string" "Which entity this view queries" ["memory_search", "memory_list", "project_list", "task_list", "activity"]
+          , "query_params" .= prop "object" "Query parameters matching the entity_type's query schema (e.g. tags, min_importance for memory_search)"
+          ]
+      , "required" .= [t "workspace_id", t "name", t "entity_type"]
+      ]
+
+  , mkTool "saved_view_list" "List saved views in a workspace. Returns paginated results ordered by name." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "workspace_id" .= prop "string" "UUID of the workspace"
+          , "limit"        .= prop "integer" "Max results (default 50)"
+          , "offset"       .= prop "integer" "Offset for pagination (default 0)"
+          ]
+      , "required" .= [t "workspace_id"]
+      ]
+
+  , mkTool "saved_view_get" "Get a saved view by ID, including its stored query_params." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "view_id" .= prop "string" "UUID of the saved view" ]
+      , "required" .= [t "view_id"]
+      ]
+
+  , mkTool "saved_view_update" "Update a saved view's name, description, or query_params. Pass null for description to clear it." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "view_id"      .= prop "string" "UUID of the saved view"
+          , "name"         .= propMaxLength "string" "New name" maxNameBytes
+          , "description"  .= prop "string" "New description (null to clear)"
+          , "query_params" .= prop "object" "New query parameters"
+          ]
+      , "required" .= [t "view_id"]
+      ]
+
+  , mkTool "saved_view_delete" "Soft-delete a saved view. Can be purged later with saved_view_purge." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "view_id" .= prop "string" "UUID of the saved view to delete" ]
+      , "required" .= [t "view_id"]
+      ]
+
+  , mkTool "saved_view_purge" "Permanently remove a soft-deleted saved view. Must be soft-deleted first." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "view_id" .= prop "string" "UUID of the saved view to purge" ]
+      , "required" .= [t "view_id"]
+      ]
+
+  , mkTool "saved_view_execute" "Execute a saved view, running its stored query with optional limit/offset/detail overrides. Returns the matching entities." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "view_id" .= prop "string" "UUID of the saved view to execute"
+          , "limit"   .= prop "integer" "Override max results (default 50)"
+          , "offset"  .= prop "integer" "Override pagination offset (default 0)"
+          , "detail"  .= prop "boolean" "If true, return full detail instead of compact results (default false)"
+          ]
+      , "required" .= [t "view_id"]
+      ]
   ]
 
 ------------------------------------------------------------------------
@@ -861,6 +927,13 @@ data ToolCall
   | ProjectLinkMemBatch UUID [UUID]       -- project_id, memory_ids
   | TaskLinkMemBatch UUID [UUID]          -- task_id, memory_ids
   | MemorySetTagsBatch [(UUID, [Text])]   -- [(memory_id, tags)]
+  | SavedViewCreate CreateSavedView
+  | SavedViewList UUID (Maybe Int) (Maybe Int) -- workspace_id, limit, offset
+  | SavedViewGet UUID
+  | SavedViewUpdate UUID UpdateSavedView
+  | SavedViewDelete UUID
+  | SavedViewPurge UUID
+  | SavedViewExecute UUID (Maybe Int) (Maybe Int) (Maybe Bool) -- view_id, limit, offset, detail
   deriving (Show, Eq)
 
 -- | Parse raw JSON-RPC params (containing "name" and "arguments") into
@@ -938,6 +1011,13 @@ parseToolCall name args = case name of
     "project_link_memories_batch" -> ProjectLinkMemBatch <$> need "project_id" <*> need "memory_ids"
     "task_link_memories_batch"  -> TaskLinkMemBatch <$> need "task_id" <*> need "memory_ids"
     "memory_set_tags_batch"     -> MemorySetTagsBatch <$> parseBatchSetTags args
+    "saved_view_create"         -> SavedViewCreate <$> parse args
+    "saved_view_list"           -> SavedViewList <$> need "workspace_id" <*> opt "limit" <*> opt "offset"
+    "saved_view_get"            -> SavedViewGet <$> need "view_id"
+    "saved_view_update"         -> SavedViewUpdate <$> need "view_id" <*> parse args
+    "saved_view_delete"         -> SavedViewDelete <$> need "view_id"
+    "saved_view_purge"          -> SavedViewPurge <$> need "view_id"
+    "saved_view_execute"        -> SavedViewExecute <$> need "view_id" <*> opt "limit" <*> opt "offset" <*> opt "detail"
     _                           -> Left $ "Unknown tool: " <> T.unpack name
   where
     parse :: FromJSON a => Value -> Either String a
@@ -1055,6 +1135,10 @@ validateToolCall = \case
         | null items -> Left "memory_set_tags_batch: items must not be empty"
         | length items > 100 -> Left "memory_set_tags_batch: items must contain at most 100 items"
         | otherwise -> Right $ MemorySetTagsBatch items
+    SavedViewCreate csv -> SavedViewCreate csv <$ firstValidationError (validateCreateSavedViewInput csv)
+    SavedViewList wid ml mo -> Right $ SavedViewList wid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
+    SavedViewUpdate vid usv -> SavedViewUpdate vid usv <$ firstValidationError (validateUpdateSavedViewInput usv)
+    SavedViewExecute vid ml mo md -> Right $ SavedViewExecute vid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo) md
     other -> Right other
 
 -- | Whitelist of valid PostgreSQL full-text search configurations.
@@ -1287,6 +1371,22 @@ executeToolCall mgr base mApiKey = \case
                                   (object ["memory_ids" .= mids])
     MemorySetTagsBatch items -> postJSON mgr base mApiKey "/api/v1/memories/batch-set-tags"
                                 (object ["items" .= [object ["memory_id" .= mid, "tags" .= tags] | (mid, tags) <- items]])
+    SavedViewCreate csv -> postJSON mgr base mApiKey "/api/v1/saved-views" csv
+    SavedViewList wid ml mo -> getJSON mgr base mApiKey ("/api/v1/saved-views" <> buildQuery
+                            [ ("workspace_id", Just $ uuidPath wid)
+                            , ("limit", show <$> ml)
+                            , ("offset", show <$> mo)
+                            ])
+    SavedViewGet vid -> getJSON mgr base mApiKey ("/api/v1/saved-views/" <> uuidPath vid)
+    SavedViewUpdate vid usv -> putJSON mgr base mApiKey ("/api/v1/saved-views/" <> uuidPath vid) usv
+    SavedViewDelete vid -> delJSON mgr base mApiKey ("/api/v1/saved-views/" <> uuidPath vid)
+    SavedViewPurge vid -> delJSON mgr base mApiKey ("/api/v1/saved-views/" <> uuidPath vid <> "/purge")
+    SavedViewExecute vid ml mo md -> postJSON mgr base mApiKey ("/api/v1/saved-views/" <> uuidPath vid <> "/execute"
+                            <> buildQuery
+                            [ ("limit", show <$> ml)
+                            , ("offset", show <$> mo)
+                            , ("detail", (\b -> if b then "true" else "false") <$> md)
+                            ]) (object [])
 
 ------------------------------------------------------------------------
 -- Typed HTTP helpers

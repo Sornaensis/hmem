@@ -52,6 +52,12 @@ module HMem.DB.Schema
   , workspaceGroupSchema
   , WorkspaceGroupMemberT(..)
   , workspaceGroupMemberSchema
+
+    -- * Saved views
+  , SavedViewT(..)
+  , savedViewSchema
+  , activeSavedView
+
   , activeWorkspace
   , activeMemory
   , activeProject
@@ -500,6 +506,39 @@ workspaceGroupMemberSchema = TableSchema
   }
 
 ------------------------------------------------------------------------
+-- Saved views
+------------------------------------------------------------------------
+
+data SavedViewT f = SavedViewT
+  { svId          :: Column f UUID
+  , svWorkspaceId :: Column f UUID
+  , svName        :: Column f Text
+  , svDescription :: Column f (Maybe Text)
+  , svEntityType  :: Column f Text
+  , svQueryParams :: Column f Value
+  , svDeletedAt   :: Column f (Maybe UTCTime)
+  , svCreatedAt   :: Column f UTCTime
+  , svUpdatedAt   :: Column f UTCTime
+  } deriving stock Generic
+    deriving anyclass Rel8able
+
+savedViewSchema :: TableSchema (SavedViewT Name)
+savedViewSchema = TableSchema
+  { name    = "saved_views"
+  , columns = SavedViewT
+      { svId          = "id"
+      , svWorkspaceId = "workspace_id"
+      , svName        = "name"
+      , svDescription = "description"
+      , svEntityType  = "entity_type"
+      , svQueryParams = "query_params"
+      , svDeletedAt   = "deleted_at"
+      , svCreatedAt   = "created_at"
+      , svUpdatedAt   = "updated_at"
+      }
+  }
+
+------------------------------------------------------------------------
 -- Soft-delete helpers
 ------------------------------------------------------------------------
 
@@ -517,6 +556,9 @@ activeTask row = isNull row.taskDeletedAt
 
 activeCategory :: MemoryCategoryT Expr -> Expr Bool
 activeCategory row = isNull row.mcDeletedAt
+
+activeSavedView :: SavedViewT Expr -> Expr Bool
+activeSavedView row = isNull row.svDeletedAt
 
 deletedNow :: Expr (Maybe UTCTime)
 deletedNow = unsafeLiteral "now()"

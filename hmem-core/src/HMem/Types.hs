@@ -68,6 +68,12 @@ module HMem.Types
     -- * Activity timeline
   , ActivityEvent(..)
 
+    -- * Saved views
+  , SavedView(..)
+  , CreateSavedView(..)
+  , UpdateSavedView(..)
+  , SavedViewListQuery(..)
+
     -- * Pagination
   , PaginatedResult(..)
 
@@ -119,6 +125,8 @@ module HMem.Types
   , validateCreateMemoryCategoryInput
   , validateUpdateMemoryCategoryInput
   , validateCreateWorkspaceGroupInput
+  , validateCreateSavedViewInput
+  , validateUpdateSavedViewInput
   ) where
 
 import Data.Aeson
@@ -289,6 +297,21 @@ validateUpdateMemoryCategoryInput uc =
 validateCreateWorkspaceGroupInput :: CreateWorkspaceGroup -> [Text]
 validateCreateWorkspaceGroupInput cg =
   validateRequiredText "name" maxNameBytes cg.name
+
+validSavedViewEntityTypes :: [Text]
+validSavedViewEntityTypes = ["memory_search", "memory_list", "project_list", "task_list", "activity"]
+
+validateCreateSavedViewInput :: CreateSavedView -> [Text]
+validateCreateSavedViewInput csv =
+  validateRequiredText "name" maxNameBytes csv.name
+  <> validateOptionalText "description" maxDescriptionBytes csv.description
+  <> ["entity_type must be one of: " <> T.intercalate ", " validSavedViewEntityTypes
+     | csv.entityType `notElem` validSavedViewEntityTypes]
+
+validateUpdateSavedViewInput :: UpdateSavedView -> [Text]
+validateUpdateSavedViewInput usv =
+  maybe [] (validateRequiredText "name" maxNameBytes) usv.name
+  <> validateOptionalFieldText "description" maxDescriptionBytes usv.description
 
 validateRequiredText :: Text -> Int -> Text -> [Text]
 validateRequiredText field maxBytes value =
@@ -1165,6 +1188,70 @@ data ActivityEvent = ActivityEvent
 instance ToJSON ActivityEvent where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON ActivityEvent where
+  parseJSON  = genericParseJSON jsonOptions
+
+------------------------------------------------------------------------
+-- Saved views
+------------------------------------------------------------------------
+
+data SavedView = SavedView
+  { id          :: UUID
+  , workspaceId :: UUID
+  , name        :: Text
+  , description :: Maybe Text
+  , entityType  :: Text
+  , queryParams :: Value
+  , createdAt   :: UTCTime
+  , updatedAt   :: UTCTime
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON SavedView where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON SavedView where
+  parseJSON  = genericParseJSON jsonOptions
+
+data CreateSavedView = CreateSavedView
+  { workspaceId :: UUID
+  , name        :: Text
+  , description :: Maybe Text
+  , entityType  :: Text
+  , queryParams :: Value
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON CreateSavedView where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON CreateSavedView where
+  parseJSON  = genericParseJSON jsonOptions
+
+data UpdateSavedView = UpdateSavedView
+  { name        :: Maybe Text
+  , description :: FieldUpdate Text
+  , queryParams :: Maybe Value
+  } deriving (Show, Eq, Generic)
+
+instance FromJSON UpdateSavedView where
+  parseJSON = withObject "UpdateSavedView" $ \o -> do
+    UpdateSavedView
+      <$> o .:? "name"
+      <*> parseFieldUpdate o "description"
+      <*> o .:? "query_params"
+
+instance ToJSON UpdateSavedView where
+  toJSON uv = object $ catMaybes
+    [ ("name" .=)        <$> uv.name
+    , fieldUpdatePair "description" uv.description
+    , ("query_params" .=) <$> uv.queryParams
+    ]
+
+data SavedViewListQuery = SavedViewListQuery
+  { workspaceId :: UUID
+  , limit       :: Maybe Int
+  , offset      :: Maybe Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON SavedViewListQuery where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON SavedViewListQuery where
   parseJSON  = genericParseJSON jsonOptions
 
 ------------------------------------------------------------------------

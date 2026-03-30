@@ -24,6 +24,7 @@ library
       HMem.DB.Pool
       HMem.DB.Project
       HMem.DB.RequestContext
+      HMem.DB.SavedView
       HMem.DB.Schema
       HMem.DB.Task
       HMem.DB.TestHarness

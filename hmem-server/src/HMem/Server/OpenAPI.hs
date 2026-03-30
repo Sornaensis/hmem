@@ -120,6 +120,9 @@ instance ToSchema BatchMemoryLinkRequest where declareNamedSchema = genericDecla
 instance ToSchema BatchSetTagsItem       where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema BatchSetTagsRequest    where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema BatchResult            where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema SavedView              where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema CreateSavedView        where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema UpdateSavedView        where declareNamedSchema = genericDeclareNamedSchema opts
 
 ------------------------------------------------------------------------
 -- Helper

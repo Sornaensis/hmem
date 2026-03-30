@@ -612,6 +612,107 @@ spec = do
       updatedBeforeType `shouldBe` Just "string"
       priorityType `shouldBe` Just "integer"
 
+  describe "parseToolCall (saved view tools)" $ do
+
+    it "parses saved_view_create" $ do
+      let args = object
+            [ "workspace_id" .= testUUID
+            , "name"         .= ("My View" :: Text)
+            , "entity_type"  .= ("memory_search" :: Text)
+            , "query_params" .= object ["tags" .= (["haskell"] :: [Text])]
+            ]
+      case parseToolCall "saved_view_create" args of
+        Right (SavedViewCreate csv) -> do
+          csv.workspaceId `shouldBe` parsedUUID
+          csv.name `shouldBe` "My View"
+          csv.entityType `shouldBe` "memory_search"
+        other -> expectationFailure $ "Expected SavedViewCreate, got: " <> show other
+
+    it "parses saved_view_list" $ do
+      let args = object
+            [ "workspace_id" .= testUUID
+            , "limit"        .= (20 :: Int)
+            ]
+      case parseToolCall "saved_view_list" args of
+        Right (SavedViewList wid ml _mo) -> do
+          wid `shouldBe` parsedUUID
+          ml `shouldBe` Just 20
+        other -> expectationFailure $ "Expected SavedViewList, got: " <> show other
+
+    it "parses saved_view_get" $ do
+      let args = object [ "view_id" .= testUUID ]
+      case parseToolCall "saved_view_get" args of
+        Right (SavedViewGet vid) -> vid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected SavedViewGet, got: " <> show other
+
+    it "parses saved_view_update" $ do
+      let args = object
+            [ "view_id" .= testUUID
+            , "name"    .= ("Renamed" :: Text)
+            ]
+      case parseToolCall "saved_view_update" args of
+        Right (SavedViewUpdate vid usv) -> do
+          vid `shouldBe` parsedUUID
+          usv.name `shouldBe` Just "Renamed"
+        other -> expectationFailure $ "Expected SavedViewUpdate, got: " <> show other
+
+    it "parses saved_view_delete" $ do
+      let args = object [ "view_id" .= testUUID ]
+      case parseToolCall "saved_view_delete" args of
+        Right (SavedViewDelete vid) -> vid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected SavedViewDelete, got: " <> show other
+
+    it "parses saved_view_purge" $ do
+      let args = object [ "view_id" .= testUUID ]
+      case parseToolCall "saved_view_purge" args of
+        Right (SavedViewPurge vid) -> vid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected SavedViewPurge, got: " <> show other
+
+    it "parses saved_view_execute with optional params" $ do
+      let args = object
+            [ "view_id" .= testUUID
+            , "limit"   .= (10 :: Int)
+            , "detail"  .= True
+            ]
+      case parseToolCall "saved_view_execute" args of
+        Right (SavedViewExecute vid ml _mo md) -> do
+          vid `shouldBe` parsedUUID
+          ml `shouldBe` Just 10
+          md `shouldBe` Just True
+        other -> expectationFailure $ "Expected SavedViewExecute, got: " <> show other
+
+  describe "validateToolCall (saved views)" $ do
+
+    it "clamps saved_view_list limit" $ do
+      case validateToolCall (SavedViewList parsedUUID (Just 500) Nothing) of
+        Right (SavedViewList _ ml _) -> ml `shouldBe` Just 200
+        other -> expectationFailure $ "Expected SavedViewList, got: " <> show other
+
+    it "clamps saved_view_execute limit and offset" $ do
+      case validateToolCall (SavedViewExecute parsedUUID (Just 999) (Just 99999) Nothing) of
+        Right (SavedViewExecute _ ml mo _) -> do
+          ml `shouldBe` Just 200
+          mo `shouldBe` Just 10000
+        other -> expectationFailure $ "Expected SavedViewExecute, got: " <> show other
+
+    it "passes through saved_view_get unchanged" $ do
+      validateToolCall (SavedViewGet parsedUUID) `shouldBe` Right (SavedViewGet parsedUUID)
+
+    it "passes through saved_view_delete unchanged" $ do
+      validateToolCall (SavedViewDelete parsedUUID) `shouldBe` Right (SavedViewDelete parsedUUID)
+
+  describe "toolDefinitions (saved views)" $ do
+
+    it "defines saved_view_create with required fields" $ do
+      let Just schema = inputSchemaFor "saved_view_create"
+          Just properties = objectField "properties" schema
+      objectField "workspace_id" properties `shouldSatisfy` (/= Nothing)
+      objectField "name" properties `shouldSatisfy` (/= Nothing)
+      objectField "entity_type" properties `shouldSatisfy` (/= Nothing)
+
+    it "defines saved_view_execute" $ do
+      inputSchemaFor "saved_view_execute" `shouldSatisfy` (/= Nothing)
+
 inputSchemaFor :: Text -> Maybe Value
 inputSchemaFor toolName = case filter ((== Just toolName) . textField "name") toolDefinitions of
   (Object obj:_) -> KM.lookup "inputSchema" obj

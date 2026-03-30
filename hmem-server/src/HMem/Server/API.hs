@@ -13,6 +13,8 @@ import Control.Exception (throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON (..), ToJSON (..), genericToJSON, genericParseJSON, Value, object, (.=))
 import Data.Aeson qualified as Aeson
+import Data.Aeson.Key qualified as Aeson (fromText)
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Functor.Contravariant ((>$<))
 import Data.Maybe (fromMaybe)
@@ -36,6 +38,7 @@ import HMem.DB.Memory qualified as Mem
 import HMem.DB.Pool (runSession, runTransaction, DBException(..))
 import HMem.DB.Project qualified as Proj
 import HMem.DB.RequestContext (currentRequestId)
+import HMem.DB.SavedView qualified as SV
 import HMem.DB.Schema
 import HMem.DB.Task qualified as Task
 import HMem.DB.WorkspaceGroup qualified as WG
@@ -56,6 +59,7 @@ type HMemAPI = "api" :> "v1" :>
   :<|> "categories"  :> CategoryAPI
   :<|> "groups"      :> WorkspaceGroupAPI
   :<|> "activity"    :> ActivityAPI
+  :<|> "saved-views" :> SavedViewAPI
   )
 
 -- Health check
@@ -218,6 +222,21 @@ type ActivityAPI =
          :> QueryParam "limit" Int
          :> Get '[JSON] (PaginatedResult ActivityEvent)
 
+-- Saved views
+type SavedViewAPI =
+       QueryParam "workspace_id" UUID
+         :> QueryParam "limit" Int
+         :> QueryParam "offset" Int
+         :> Get '[JSON] (PaginatedResult SavedView)
+  :<|> ReqBody '[JSON] CreateSavedView :> Post '[JSON] SavedView
+  :<|> Capture "viewId" UUID :> Get '[JSON] SavedView
+  :<|> Capture "viewId" UUID :> ReqBody '[JSON] UpdateSavedView :> Put '[JSON] SavedView
+  :<|> Capture "viewId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "viewId" UUID :> "purge" :> Delete '[JSON] NoContent
+  :<|> Capture "viewId" UUID :> "execute"
+         :> QueryParam "limit" Int :> QueryParam "offset" Int :> QueryParam "detail" Bool
+         :> Post '[JSON] Value
+
 -- Request body for group member operations
 newtype GroupMemberReq = GroupMemberReq { workspaceId :: UUID }
   deriving (Show, Eq, Generic)
@@ -368,6 +387,7 @@ server pool tracker pgvec =
   :<|> categoryHandlers pool
   :<|> workspaceGroupHandlers pool
   :<|> activityHandlers pool
+  :<|> savedViewHandlers pool
 
 -- Health handler ---------------------------------------------------
 
@@ -1185,6 +1205,125 @@ activityHandlers pool mws mEntityType mlimit = do
   let lim = capLimit mlimit
   results <- handleDBErrors $ Mem.getRecentActivity pool mws mEntityType (Just (lim + 1))
   pure PaginatedResult { items = take lim results, hasMore = length results > lim }
+
+-- Saved view handlers ------------------------------------------------
+
+savedViewHandlers :: Pool Hasql.Connection -> Server SavedViewAPI
+savedViewHandlers pool =
+       listViewsH
+  :<|> createViewH
+  :<|> getViewH
+  :<|> updateViewH
+  :<|> deleteViewH
+  :<|> purgeViewH
+  :<|> executeViewH
+  where
+    requireViewH :: UUID -> Handler SavedView
+    requireViewH vid = handleDBErrors (SV.getSavedView pool vid) >>= maybe (throwError err404) pure
+
+    listViewsH mws mlimit moffset = do
+      wsId <- requireParam "workspace_id" mws
+      let lim = capLimit mlimit
+          off = capOffset moffset
+      results <- handleDBErrors $ SV.listSavedViews pool wsId (Just (lim + 1)) (Just off)
+      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
+
+    createViewH csv = do
+      rejectValidationErrors (validateCreateSavedViewInput csv)
+      handleDBErrors $ SV.createSavedView pool csv
+
+    getViewH vid = requireViewH vid
+
+    updateViewH vid usv = do
+      rejectValidationErrors (validateUpdateSavedViewInput usv)
+      handleDBErrors (SV.updateSavedView pool vid usv) >>= maybe (throwError err404) pure
+
+    deleteViewH vid = do
+      ok <- handleDBErrors $ SV.deleteSavedView pool vid
+      if ok then pure NoContent else throwError err404
+
+    purgeViewH vid = do
+      ok <- handleDBErrors $ SV.purgeSavedView pool vid
+      if ok then pure NoContent else throwError err409
+        { errBody = Aeson.encode $ object
+            [ "error" .= ("conflict" :: Text)
+            , "message" .= ("Saved view must be soft-deleted before purge, or does not exist" :: Text)
+            ]
+        }
+
+    executeViewH vid mlimit' moffset' mdetail = do
+      view <- requireViewH vid
+      let lim = capLimit mlimit'
+          off = capOffset moffset'
+          compact = mdetail /= Just True
+      case view.entityType of
+        "memory_search" -> do
+          case Aeson.fromJSON @SearchQuery view.queryParams of
+            Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
+            Aeson.Success sq -> do
+              let sq' = SearchQuery
+                    { workspaceId = sq.workspaceId, query = sq.query
+                    , memoryType = sq.memoryType, tags = sq.tags
+                    , minImportance = sq.minImportance, categoryId = sq.categoryId
+                    , pinnedOnly = sq.pinnedOnly, searchLanguage = sq.searchLanguage
+                    , limit = Just lim, offset = Just off }
+              results <- handleDBErrors $ Mem.searchMemories pool sq'
+              pure $ Aeson.toJSON $ if compact then map compactMemory results else results
+        "memory_list" -> do
+          case Aeson.fromJSON @MemoryListQuery view.queryParams of
+            Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
+            Aeson.Success mq -> do
+              let mq' = MemoryListQuery
+                    { workspaceId = mq.workspaceId, memoryType = mq.memoryType
+                    , createdAfter = mq.createdAfter, createdBefore = mq.createdBefore
+                    , updatedAfter = mq.updatedAfter, updatedBefore = mq.updatedBefore
+                    , limit = Just (lim + 1), offset = Just off }
+              results <- handleDBErrors $ Mem.listMemoriesWithQuery pool mq'
+              let items = (if compact then map compactMemory else Prelude.id) $ take lim results
+              pure $ Aeson.toJSON PaginatedResult { items = items, hasMore = length results > lim }
+        "project_list" -> do
+          case Aeson.fromJSON @ProjectListQuery view.queryParams of
+            Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
+            Aeson.Success pq -> do
+              let pq' = ProjectListQuery
+                    { workspaceId = pq.workspaceId, status = pq.status
+                    , createdAfter = pq.createdAfter, createdBefore = pq.createdBefore
+                    , updatedAfter = pq.updatedAfter, updatedBefore = pq.updatedBefore
+                    , limit = Just (lim + 1), offset = Just off }
+              results <- handleDBErrors $ Proj.listProjectsWithQuery pool pq'
+              pure $ Aeson.toJSON PaginatedResult { items = take lim results, hasMore = length results > lim }
+        "task_list" -> do
+          case Aeson.fromJSON @TaskListQuery view.queryParams of
+            Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
+            Aeson.Success tq -> do
+              let tq' = TaskListQuery
+                    { workspaceId = tq.workspaceId, projectId = tq.projectId
+                    , status = tq.status, priority = tq.priority
+                    , createdAfter = tq.createdAfter, createdBefore = tq.createdBefore
+                    , updatedAfter = tq.updatedAfter, updatedBefore = tq.updatedBefore
+                    , limit = Just (lim + 1), offset = Just off }
+              results <- handleDBErrors $ Task.listTasksWithQuery pool tq'
+              pure $ Aeson.toJSON PaginatedResult { items = take lim results, hasMore = length results > lim }
+        "activity" -> do
+          let parseField :: FromJSON a => Text -> Maybe a
+              parseField key = case view.queryParams of
+                Aeson.Object o -> case KeyMap.lookup (Aeson.fromText key) o of
+                  Just v  -> case Aeson.fromJSON v of
+                    Aeson.Success a -> Just a
+                    _               -> Nothing
+                  Nothing -> Nothing
+                _ -> Nothing
+              mws = parseField "workspace_id"
+              met = parseField "entity_type"
+          results <- handleDBErrors $ Mem.getRecentActivity pool mws met (Just (lim + 1))
+          pure $ Aeson.toJSON PaginatedResult { items = take lim results, hasMore = length results > lim }
+        other -> throwError err400
+          { errBody = Aeson.encode $ object
+              [ "error" .= ("invalid_entity_type" :: Text)
+              , "message" .= ("Unknown entity_type: " <> other)
+              ]
+          }
+
 
 ------------------------------------------------------------------------
 -- Helpers

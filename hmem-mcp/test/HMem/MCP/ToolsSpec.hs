@@ -122,7 +122,7 @@ spec = do
             , "offset"       .= (5 :: Int)
             ]
       case parseToolCall "memory_search" args of
-        Right (MemorySearch sq) -> do
+        Right (MemorySearch sq _detail) -> do
           sq.workspaceId `shouldBe` Just parsedUUID
           sq.query `shouldBe` Just "find this"
           sq.memoryType `shouldBe` Just LongTerm
@@ -137,7 +137,7 @@ spec = do
             , "created_after" .= ("2026-03-30T10:00:00Z" :: Text)
             ]
       case parseToolCall "memory_list" args of
-        Right (MemoryList mq) -> do
+        Right (MemoryList mq _detail) -> do
           mq.workspaceId `shouldBe` Just parsedUUID
           mq.memoryType `shouldBe` Just LongTerm
           mq.createdAfter `shouldBe` Just (read "2026-03-30 10:00:00 UTC")
@@ -307,8 +307,8 @@ spec = do
             , pinnedOnly = Nothing, searchLanguage = Nothing
             , limit = Just 999, offset = Just 0
             }
-      case validateToolCall (MemorySearch sq) of
-        Right (MemorySearch sq') -> sq'.limit `shouldBe` Just 200
+      case validateToolCall (MemorySearch sq False) of
+        Right (MemorySearch sq' _) -> sq'.limit `shouldBe` Just 200
         other -> expectationFailure $ "Expected MemorySearch, got: " <> show other
 
     it "rejects empty embedding vector" $ do
@@ -417,7 +417,7 @@ spec = do
             ]
       case parseToolCall "project_list" args of
         Right (ProjectList pq) -> do
-          pq.workspaceId `shouldBe` parsedUUID
+          pq.workspaceId `shouldBe` Just parsedUUID
           pq.status `shouldBe` Just ProjActive
           pq.limit `shouldBe` Just 10
           pq.updatedBefore `shouldBe` Just (read "2026-03-30 12:00:00 UTC")
@@ -547,7 +547,7 @@ spec = do
 
     it "clamps project_list limit to 1-200" $ do
       case validateToolCall (ProjectList ProjectListQuery
-        { workspaceId = parsedUUID
+        { workspaceId = Just parsedUUID
         , status = Nothing
         , createdAfter = Nothing
         , createdBefore = Nothing

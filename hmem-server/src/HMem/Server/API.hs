@@ -214,6 +214,7 @@ type WorkspaceGroupAPI =
 -- Activity timeline
 type ActivityAPI =
        QueryParam "workspace_id" UUID
+         :> QueryParam "entity_type" Text
          :> QueryParam "limit" Int
          :> Get '[JSON] (PaginatedResult ActivityEvent)
 
@@ -865,11 +866,10 @@ projectHandlers pool =
     requireProjectH pid = handleDBErrors (Proj.getProject pool pid) >>= maybe (throwError err404) pure
 
     listProjectsH mws mstatus mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset = do
-      wsId <- requireParam "workspace_id" mws
       let lim = capLimit mlimit
           off = capOffset moffset
           query = ProjectListQuery
-            { workspaceId = wsId
+            { workspaceId = mws
             , status = mstatus
             , createdAfter = mcreatedAfter
             , createdBefore = mcreatedBefore
@@ -1181,9 +1181,9 @@ workspaceGroupHandlers pool =
 -- Activity handlers ------------------------------------------------
 
 activityHandlers :: Pool Hasql.Connection -> Server ActivityAPI
-activityHandlers pool mws mlimit = do
+activityHandlers pool mws mEntityType mlimit = do
   let lim = capLimit mlimit
-  results <- handleDBErrors $ Mem.getRecentActivity pool mws (Just (lim + 1))
+  results <- handleDBErrors $ Mem.getRecentActivity pool mws mEntityType (Just (lim + 1))
   pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
 ------------------------------------------------------------------------

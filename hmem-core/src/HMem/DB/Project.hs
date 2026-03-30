@@ -207,7 +207,7 @@ listProjects
   -> IO [Project]
 listProjects pool wsId mstatus mlimit moffset =
   listProjectsWithQuery pool ProjectListQuery
-    { workspaceId = wsId
+    { workspaceId = Just wsId
     , status = mstatus
     , createdAfter = Nothing
     , createdBefore = Nothing
@@ -225,7 +225,9 @@ listProjectsWithQuery pool pq = do
     limit (fromIntegral lim) $ offset (fromIntegral off) $
     orderBy (((\row -> row.projPriority) >$< desc) <> ((\row -> row.projName) >$< asc)) $ do
       row <- each projectSchema
-      where_ $ row.projWorkspaceId ==. lit pq.workspaceId
+      case pq.workspaceId of
+        Just wid -> where_ $ row.projWorkspaceId ==. lit wid
+        Nothing  -> pure ()
       where_ $ activeProject row
       case pq.status of
         Nothing -> pure ()

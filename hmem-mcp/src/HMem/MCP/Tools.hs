@@ -84,7 +84,7 @@ toolDefinitions =
       , "required" .= [t "memories"]
       ]
 
-    , mkTool "memory_search" "Preferred discovery step before create, update, or linking work. Use 'query' for keyword search, or combine filters (workspace_id, memory_type, tags, min_importance, category_id, pinned_only) to narrow results. All parameters are optional; omit workspace_id for cross-workspace search." $ object
+    , mkTool "memory_search" "Preferred discovery step before create, update, or linking work. Use 'query' for keyword search, or combine filters (workspace_id, memory_type, tags, min_importance, category_id, pinned_only) to narrow results. All parameters are optional; omit workspace_id for cross-workspace search. Returns compact results by default; set detail=true for full content and metadata." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id"   .= prop "string" "UUID of the workspace (omit for cross-workspace search)"
@@ -96,6 +96,7 @@ toolDefinitions =
           , "category_id"    .= prop "string" "Filter by category UUID"
           , "pinned_only"    .= prop "boolean" "If true, only return pinned memories"
           , "search_language" .= prop "string" "Language for query stemming (default 'english'). Use a PostgreSQL regconfig name."
+          , "detail"         .= prop "boolean" "If true, return full content and metadata instead of compact summaries (default false)"
           , "limit"          .= prop "integer" "Max results (default 50)"
           , "offset"         .= prop "integer" "Offset for pagination (default 0)"
           ]
@@ -165,10 +166,10 @@ toolDefinitions =
       , "required" .= [t "workspace_id", t "name"]
       ]
 
-    , mkTool "project_list" "Browse or filter projects in a workspace to find IDs before update, linking, deletion, or task creation." $ object
+    , mkTool "project_list" "Browse or filter projects to find IDs before update, linking, deletion, or task creation. Omit workspace_id for cross-workspace browsing." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "workspace_id" .= prop "string" "UUID of the workspace"
+          [ "workspace_id" .= prop "string" "UUID of the workspace (omit for cross-workspace browsing)"
           , "status"       .= propEnum "string" "Filter by status"
               ["active", "paused", "completed", "archived"]
           , "created_after"  .= prop "string" "Filter for projects created on or after this ISO 8601 timestamp"
@@ -178,7 +179,7 @@ toolDefinitions =
           , "limit"        .= prop "integer" "Max results (default 50)"
           , "offset"       .= prop "integer" "Offset for pagination (default 0)"
           ]
-      , "required" .= [t "workspace_id"]
+      , "required" .= ([] :: [Text])
       ]
 
     , mkTool "task_create" "Create a workspace- or project-scoped task. Use parent_id for subtasks; when parent_id is set, project_id should match the parent task's project." $ object
@@ -287,7 +288,7 @@ toolDefinitions =
       , "required" .= [t "workspace_id"]
       ]
 
-    , mkTool "memory_list" "Browse memories and collect IDs. Use memory_search instead when you need keyword or filtered retrieval." $ object
+    , mkTool "memory_list" "Browse memories and collect IDs. Returns compact results by default; set detail=true for full content and metadata. Use memory_search instead when you need keyword or filtered retrieval." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (omit for all workspaces)"
@@ -296,6 +297,7 @@ toolDefinitions =
           , "created_before" .= prop "string" "Filter for memories created on or before this ISO 8601 timestamp"
           , "updated_after"  .= prop "string" "Filter for memories updated on or after this ISO 8601 timestamp"
           , "updated_before" .= prop "string" "Filter for memories updated on or before this ISO 8601 timestamp"
+          , "detail"       .= prop "boolean" "If true, return full content and metadata instead of compact summaries (default false)"
           , "limit"        .= prop "integer" "Max results (default 50)"
           , "offset"       .= prop "integer" "Offset for pagination (default 0)"
           ]
@@ -668,10 +670,11 @@ toolDefinitions =
       ]
 
   -- Activity timeline
-    , mkTool "activity_timeline" "Browse recent changes across the system or within one workspace. Useful for audits and timeline-style review." $ object
+    , mkTool "activity_timeline" "Browse recent changes across the system or within one workspace. Filter by entity_type to see only memory, project, or task events. Useful for audits and timeline-style review." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (omit for all)"
+          , "entity_type"  .= propEnum "string" "Filter to one entity type" ["memory", "project", "task"]
           , "limit"        .= prop "integer" "Max events to return (default 50)"
           ]
       , "required" .= ([] :: [Text])
@@ -789,7 +792,7 @@ toolDefinitions =
 data ToolCall
   = MemoryCreate   CreateMemory
   | MemoryCreateBatch [CreateMemory]
-  | MemorySearch   SearchQuery
+  | MemorySearch   SearchQuery Bool         -- query, detail
   | MemoryGet      UUID
   | MemoryUpdate   UUID UpdateMemory
   | MemoryDelete   UUID
@@ -833,7 +836,7 @@ data ToolCall
   | CleanupPolicyUpsert UpsertCleanupPolicy
   | WorkspaceReg   CreateWorkspace
   | CleanupRun     UUID
-    | MemoryList     MemoryListQuery
+    | MemoryList     MemoryListQuery Bool      -- query, detail
   | MemoryGraphCall UUID (Maybe Int)
   | MemoryFindByRelation UUID RelationType
   | MemoryAdjustImp UUID Int
@@ -848,7 +851,7 @@ data ToolCall
   | WsGroupAddMem  UUID UUID  -- group_id, workspace_id
   | WsGroupRmMem   UUID UUID  -- group_id, workspace_id
   | WsGroupListMem UUID
-  | ActivityTimeline (Maybe UUID) (Maybe Int)
+  | ActivityTimeline (Maybe UUID) (Maybe Text) (Maybe Int)
   | MemoryGetTags UUID
   | MemorySimilar SimilarQuery
   | MemorySetEmbedding UUID [Double]
@@ -866,7 +869,7 @@ parseToolCall :: Text -> Value -> Either String ToolCall
 parseToolCall name args = case name of
     "memory_create"            -> MemoryCreate <$> parse args
     "memory_create_batch"      -> MemoryCreateBatch <$> need "memories"
-    "memory_search"            -> MemorySearch <$> parse args
+    "memory_search"            -> MemorySearch <$> parse args <*> (maybe False id <$> opt "detail")
     "memory_get"               -> MemoryGet <$> need "memory_id"
     "memory_update"            -> MemoryUpdate <$> need "memory_id" <*> parse args
     "memory_delete"            -> MemoryDelete <$> need "memory_id"
@@ -910,7 +913,7 @@ parseToolCall name args = case name of
     "workspace_purge"          -> WsPurge <$> need "workspace_id"
     "workspace_register"       -> WorkspaceReg <$> parse args
     "cleanup_run"              -> CleanupRun <$> need "workspace_id"
-    "memory_list"              -> MemoryList <$> parse args
+    "memory_list"              -> MemoryList <$> parse args <*> (maybe False id <$> opt "detail")
     "memory_graph"             -> MemoryGraphCall <$> need "memory_id" <*> opt "depth"
     "memory_find_by_relation"  -> MemoryFindByRelation <$> need "workspace_id" <*> need "relation_type"
     "memory_adjust_importance" -> MemoryAdjustImp <$> need "memory_id" <*> need "importance"
@@ -925,7 +928,7 @@ parseToolCall name args = case name of
     "workspace_group_add_member" -> WsGroupAddMem <$> need "group_id" <*> need "workspace_id"
     "workspace_group_remove_member" -> WsGroupRmMem <$> need "group_id" <*> need "workspace_id"
     "workspace_group_list_members" -> WsGroupListMem <$> need "group_id"
-    "activity_timeline"        -> ActivityTimeline <$> opt "workspace_id" <*> opt "limit"
+    "activity_timeline"        -> ActivityTimeline <$> opt "workspace_id" <*> opt "entity_type" <*> opt "limit"
     "memory_get_tags"          -> MemoryGetTags <$> need "memory_id"
     "memory_similar"           -> MemorySimilar <$> parse args
     "memory_set_embedding"     -> MemorySetEmbedding <$> need "memory_id" <*> need "embedding"
@@ -1001,21 +1004,21 @@ validateToolCall = \case
         | otherwise ->
                 let cms' = [clampCreateMemory cm | cm <- cms]
                 in MemoryCreateBatch cms' <$ firstValidationError (validateCreateMemoryBatchInput cms')
-    MemorySearch sq
+    MemorySearch sq detail
         | not (validFtsLanguage sq.searchLanguage) -> Left $ "Invalid search_language: " <> show sq.searchLanguage
         | otherwise -> Right $ MemorySearch sq
                 { limit = clampMaybe 1 200 <$> sq.limit
                 , offset = clampMaybe 0 10000 <$> sq.offset
                 , minImportance = clampMaybe 1 10 <$> sq.minImportance
-                }
+                } detail
     MemoryUpdate mid um ->
         let um' = clampUpdateMemory um
         in MemoryUpdate mid um' <$ firstValidationError (validateUpdateMemoryInput um')
     MemoryAdjustImp mid imp -> Right $ MemoryAdjustImp mid (clamp 1 10 imp)
     MemoryGraphCall mid md -> Right $ MemoryGraphCall mid (clampMaybe 1 5 <$> md)
-    MemoryList mq ->
+    MemoryList mq detail ->
         let mq' = clampMemoryListQuery mq
-        in MemoryList mq' <$ firstValidationError (validateMemoryListQuery mq')
+        in MemoryList mq' detail <$ firstValidationError (validateMemoryListQuery mq')
     ProjectCreate cp -> ProjectCreate cp <$ firstValidationError (validateCreateProjectInput cp)
     ProjectList pq ->
         let pq' = clampProjectListQuery pq
@@ -1035,7 +1038,7 @@ validateToolCall = \case
     WorkspaceList ml mo -> Right $ WorkspaceList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
     WsUpdate wid uw -> WsUpdate wid uw <$ firstValidationError (validateUpdateWorkspaceInput uw)
     CleanupPoliciesList wid ml mo -> Right $ CleanupPoliciesList wid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
-    ActivityTimeline mws ml -> Right $ ActivityTimeline mws (clampMaybe 1 200 <$> ml)
+    ActivityTimeline mws met ml -> Right $ ActivityTimeline mws met (clampMaybe 1 200 <$> ml)
     MemorySimilar sq -> Right $ MemorySimilar sq
         { limit = clampMaybe 1 200 <$> sq.limit
         , minSimilarity = clampMaybe 0.0 1.0 <$> sq.minSimilarity
@@ -1142,7 +1145,7 @@ executeToolCall :: Manager -> String -> Maybe Text -> ToolCall -> IO Value
 executeToolCall mgr base mApiKey = \case
     MemoryCreate cm     -> postJSON mgr base mApiKey "/api/v1/memories" cm
     MemoryCreateBatch cms -> postJSON mgr base mApiKey "/api/v1/memories/batch" cms
-    MemorySearch sq     -> postJSON mgr base mApiKey "/api/v1/memories/search?compact=true" sq
+    MemorySearch sq detail -> postJSON mgr base mApiKey ("/api/v1/memories/search?compact=" <> if detail then "false" else "true") sq
     MemoryGet mid       -> getJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
     MemoryUpdate mid um -> putJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid) um
     MemoryDelete mid    -> delJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
@@ -1155,7 +1158,7 @@ executeToolCall mgr base mApiKey = \case
     ProjectDelete pid   -> delJSON  mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
     ProjectPurge pid    -> delJSON  mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/purge")
     ProjectList pq -> getJSON mgr base mApiKey ("/api/v1/projects" <> buildQuery
-                            [ ("workspace_id", Just $ uuidPath pq.workspaceId)
+                            [ ("workspace_id", uuidPath <$> pq.workspaceId)
                             , ("status", encodeParam <$> pq.status)
                             , ("created_after", encodeParam <$> pq.createdAfter)
                             , ("created_before", encodeParam <$> pq.createdBefore)
@@ -1228,7 +1231,7 @@ executeToolCall mgr base mApiKey = \case
     WorkspaceReg cw     -> postJSON mgr base mApiKey "/api/v1/workspaces" cw
     CleanupRun wid      -> postJSON mgr base mApiKey "/api/v1/cleanup/run"
                             (object ["workspace_id" .= wid])
-    MemoryList mq -> getJSON mgr base mApiKey ("/api/v1/memories" <> buildQuery
+    MemoryList mq detail -> getJSON mgr base mApiKey ("/api/v1/memories" <> buildQuery
                             [ ("workspace_id", uuidPath <$> mq.workspaceId)
                             , ("type", encodeParam <$> mq.memoryType)
                             , ("created_after", encodeParam <$> mq.createdAfter)
@@ -1237,7 +1240,7 @@ executeToolCall mgr base mApiKey = \case
                             , ("updated_before", encodeParam <$> mq.updatedBefore)
                             , ("limit", show <$> mq.limit)
                             , ("offset", show <$> mq.offset)
-                            , ("compact", Just "true")
+                            , ("compact", Just $ if detail then "false" else "true")
                             ])
     MemoryGraphCall mid md -> getJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/graph"
                             <> buildQuery [("depth", show <$> md)])
@@ -1263,8 +1266,9 @@ executeToolCall mgr base mApiKey = \case
     WsGroupRmMem gid wsId -> delJSON mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid <> "/members/"
                               <> uuidPath wsId)
     WsGroupListMem gid -> getJSON mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid <> "/members")
-    ActivityTimeline mws ml -> getJSON mgr base mApiKey ("/api/v1/activity" <> buildQuery
+    ActivityTimeline mws met ml -> getJSON mgr base mApiKey ("/api/v1/activity" <> buildQuery
                             [ ("workspace_id", uuidPath <$> mws)
+                            , ("entity_type", T.unpack <$> met)
                             , ("limit", show <$> ml)
                             ])
     MemoryGetTags mid -> getJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/tags")

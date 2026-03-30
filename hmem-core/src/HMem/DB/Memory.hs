@@ -926,15 +926,16 @@ togglePin pool mid pinVal = do
 getRecentActivity
   :: Pool Hasql.Connection
   -> Maybe UUID      -- ^ workspace_id (Nothing = global)
+  -> Maybe Text      -- ^ entity_type filter (Nothing = all)
   -> Maybe Int       -- ^ limit (default 50)
   -> IO [ActivityEvent]
-getRecentActivity pool mWsId mlimit = do
+getRecentActivity pool mWsId mEntityType mlimit = do
   let lim = fromMaybe 50 mlimit
-  runSession pool $ Session.statement (mWsId, fromIntegral lim :: Int32) activityUnionStatement
+  runSession pool $ Session.statement (mWsId, mEntityType, fromIntegral lim :: Int32) activityUnionStatement
 
 -- | Raw SQL statement that performs UNION ALL across memories, projects,
 -- and tasks, ordering by timestamp and applying LIMIT in the database.
-activityUnionStatement :: Statement.Statement (Maybe UUID, Int32) [ActivityEvent]
+activityUnionStatement :: Statement.Statement (Maybe UUID, Maybe Text, Int32) [ActivityEvent]
 activityUnionStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
@@ -972,12 +973,14 @@ activityUnionStatement = Statement.Statement sql encoder decoder True
       , "  WHERE ($1::uuid IS NULL OR t.workspace_id = $1)"
       , "    AND t.deleted_at IS NULL"
       , ") sub"
+      , "WHERE ($2::text IS NULL OR entity_type = $2)"
       , "ORDER BY ts DESC"
-      , "LIMIT $2"
+      , "LIMIT $3"
       ]
     encoder =
-      contramap fst (Enc.param (Enc.nullable Enc.uuid)) <>
-      contramap snd (Enc.param (Enc.nonNullable Enc.int4))
+      contramap (\(a,_,_) -> a) (Enc.param (Enc.nullable Enc.uuid)) <>
+      contramap (\(_,b,_) -> b) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.int4))
     decoder = Dec.rowList $ ActivityEvent
       <$> Dec.column (Dec.nonNullable Dec.text)
       <*> Dec.column (Dec.nonNullable Dec.text)

@@ -755,7 +755,7 @@ instance FromJSON MemoryListQuery where
   parseJSON  = genericParseJSON jsonOptions
 
 data ProjectListQuery = ProjectListQuery
-  { workspaceId   :: UUID
+  { workspaceId   :: Maybe UUID
   , status        :: Maybe ProjectStatus
   , createdAfter  :: Maybe UTCTime
   , createdBefore :: Maybe UTCTime

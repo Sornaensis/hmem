@@ -32,7 +32,7 @@ import HMem.Types
 
 toolDefinitions :: [Value]
 toolDefinitions =
-  [ mkTool "memory_create" "Create a new memory in a workspace" $ object
+    [ mkTool "memory_create" "Create a new memory in a workspace. Use this for initial capture, then refine later with updates, tags, links, or categories." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
@@ -52,7 +52,7 @@ toolDefinitions =
       , "required" .= [t "workspace_id", t "content", t "memory_type"]
       ]
 
-  , mkTool "memory_create_batch" "Create multiple memories in a single transaction. Max 100 items per batch." $ object
+    , mkTool "memory_create_batch" "Create multiple related memories in a single transaction. Prefer this when capturing several items from one source or conversation. Max 100 items per batch." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memories" .= object
@@ -84,7 +84,7 @@ toolDefinitions =
       , "required" .= [t "memories"]
       ]
 
-  , mkTool "memory_search" "Search memories using full-text search and/or filters. Use 'query' for keyword search, or combine filters (workspace_id, memory_type, tags, min_importance, category_id, pinned_only) to narrow results. All parameters are optional; omit workspace_id for cross-workspace search." $ object
+    , mkTool "memory_search" "Preferred discovery step before create, update, or linking work. Use 'query' for keyword search, or combine filters (workspace_id, memory_type, tags, min_importance, category_id, pinned_only) to narrow results. All parameters are optional; omit workspace_id for cross-workspace search." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id"   .= prop "string" "UUID of the workspace (omit for cross-workspace search)"
@@ -102,14 +102,14 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-  , mkTool "memory_get" "Get a specific memory by ID" $ object
+    , mkTool "memory_get" "Get a memory by ID with full detail: content, summary, metadata, tags, importance, timestamps, and source. Use memory_search or memory_list to discover IDs first." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id" .= prop "string" "UUID of the memory" ]
       , "required" .= [t "memory_id"]
       ]
 
-  , mkTool "memory_update" "Update an existing memory" $ object
+    , mkTool "memory_update" "Enrich or correct an existing memory. Use null to clear nullable fields such as summary, expires_at, or source." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id"   .= prop "string" "UUID of the memory to update"
@@ -126,21 +126,21 @@ toolDefinitions =
       , "required" .= [t "memory_id"]
       ]
 
-  , mkTool "memory_delete" "Soft-delete a memory" $ object
+    , mkTool "memory_delete" "Soft-delete a memory, hiding it from all list and search results. Recoverable until permanently removed with memory_purge." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id" .= prop "string" "UUID of the memory to delete" ]
       , "required" .= [t "memory_id"]
       ]
 
-  , mkTool "memory_purge" "Permanently purge a soft-deleted memory" $ object
+    , mkTool "memory_purge" "Permanently and irreversibly remove a soft-deleted memory. The memory must be soft-deleted first via memory_delete." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id" .= prop "string" "UUID of the soft-deleted memory to purge" ]
       , "required" .= [t "memory_id"]
       ]
 
-  , mkTool "memory_link" "Create a typed link between two memories" $ object
+    , mkTool "memory_link" "Create a typed link between two existing memories by ID. Use after discovery with memory_search or memory_get." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "source_id"     .= prop "string" "Source memory UUID"
@@ -152,7 +152,7 @@ toolDefinitions =
       , "required" .= [t "source_id", t "target_id", t "relation_type"]
       ]
 
-  , mkTool "project_create" "Create a new project in a workspace" $ object
+    , mkTool "project_create" "Create a top-level or child project in a workspace. Start minimal, then refine status, priority, metadata, or hierarchy later with project_update." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
@@ -165,7 +165,7 @@ toolDefinitions =
       , "required" .= [t "workspace_id", t "name"]
       ]
 
-  , mkTool "project_list" "List projects in a workspace" $ object
+    , mkTool "project_list" "Browse or filter projects in a workspace to find IDs before update, linking, deletion, or task creation." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
@@ -181,7 +181,7 @@ toolDefinitions =
       , "required" .= [t "workspace_id"]
       ]
 
-  , mkTool "task_create" "Create a new task in a workspace (optionally in a project)" $ object
+    , mkTool "task_create" "Create a workspace- or project-scoped task. Use parent_id for subtasks; when parent_id is set, project_id should match the parent task's project." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
@@ -196,7 +196,7 @@ toolDefinitions =
       , "required" .= [t "workspace_id", t "title"]
       ]
 
-  , mkTool "task_list" "List tasks. Requires at least workspace_id or project_id." $ object
+    , mkTool "task_list" "Browse or filter tasks to find IDs before update, linking, dependency changes, or deletion. Use workspace_id for workspace-wide listing or project_id for project-scoped listing; both are optional." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (use this or project_id)"
@@ -214,7 +214,7 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-  , mkTool "task_update" "Update an existing task" $ object
+    , mkTool "task_update" "Edit, move, or reparent an existing task. Use project_id and/or parent_id to reorganize it; null clears those fields. Moving a task across projects also moves its task subtree." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id"     .= prop "string" "UUID of the task"
@@ -231,7 +231,7 @@ toolDefinitions =
       , "required" .= [t "task_id"]
       ]
 
-  , mkTool "workspace_register" "Register a new workspace" $ object
+    , mkTool "workspace_register" "Register a new workspace — the top-level container for memories, projects, and tasks. Use type 'repository' for code repos (set path), 'planning' for cross-repo coordination, 'personal' for individual notes, or 'organization' for team scope." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "name"           .= propMaxLength "string" "Workspace name" maxNameBytes
@@ -244,7 +244,7 @@ toolDefinitions =
       , "required" .= [t "name"]
       ]
 
-  , mkTool "workspace_list" "List all registered workspaces" $ object
+    , mkTool "workspace_list" "List registered workspaces to find IDs before updates, grouping, cleanup, or cross-workspace search." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "limit"  .= prop "integer" "Max results (default 50)"
@@ -252,14 +252,14 @@ toolDefinitions =
           ]
       ]
 
-  , mkTool "workspace_get" "Get a workspace by ID" $ object
+    , mkTool "workspace_get" "Get a workspace by ID with full detail: name, type, path, GitHub info, and timestamps." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace" ]
       , "required" .= [t "workspace_id"]
       ]
 
-  , mkTool "workspace_update" "Update a workspace" $ object
+    , mkTool "workspace_update" "Update workspace identity or scoping fields. Use null to clear path or GitHub fields when needed." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id"   .= prop "string" "UUID of the workspace"
@@ -273,21 +273,21 @@ toolDefinitions =
       , "required" .= [t "workspace_id"]
       ]
 
-  , mkTool "workspace_delete" "Soft-delete a workspace" $ object
+  , mkTool "workspace_delete" "Soft-delete a workspace, hiding it and its contents from active views. Recoverable until permanently removed with workspace_purge." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace to delete" ]
       , "required" .= [t "workspace_id"]
       ]
 
-  , mkTool "workspace_purge" "Permanently purge a soft-deleted workspace" $ object
+  , mkTool "workspace_purge" "Permanently and irreversibly remove a soft-deleted workspace and all its data. Must be soft-deleted first via workspace_delete." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the soft-deleted workspace to purge" ]
       , "required" .= [t "workspace_id"]
       ]
 
-  , mkTool "memory_list" "List memories (optionally filtered by workspace)" $ object
+    , mkTool "memory_list" "Browse memories and collect IDs. Use memory_search instead when you need keyword or filtered retrieval." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (omit for all workspaces)"
@@ -302,7 +302,7 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-  , mkTool "memory_graph" "Get a graph of related memories reachable from a source memory" $ object
+  , mkTool "memory_graph" "Get the subgraph of memories reachable from a source memory via links, up to a configurable depth. Returns all nodes and edges in the connected neighborhood." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id" .= prop "string" "UUID of the source memory"
@@ -311,7 +311,7 @@ toolDefinitions =
       , "required" .= [t "memory_id"]
       ]
 
-  , mkTool "memory_find_by_relation" "Find all memory links of a specific relation type in a workspace" $ object
+  , mkTool "memory_find_by_relation" "Find all memory links of a specific relation type in a workspace. Useful for discovering dependency chains (depends_on), contradiction clusters (contradicts), or knowledge threads (elaborates)." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id"  .= prop "string" "UUID of the workspace"
@@ -321,7 +321,7 @@ toolDefinitions =
       , "required" .= [t "workspace_id", t "relation_type"]
       ]
 
-  , mkTool "memory_adjust_importance" "Adjust the importance of a memory (1-10)" $ object
+  , mkTool "memory_adjust_importance" "Set a memory's importance to a new value (1-10). Higher importance protects against cleanup policy pruning and raises the memory in search relevance." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id"  .= prop "string" "UUID of the memory"
@@ -330,21 +330,21 @@ toolDefinitions =
       , "required" .= [t "memory_id", t "importance"]
       ]
 
-  , mkTool "project_list_memories" "List memories linked to a project" $ object
+  , mkTool "project_list_memories" "List all memories linked to a project. Use project_link_memory and project_unlink_memory to manage these associations." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project" ]
       , "required" .= [t "project_id"]
       ]
 
-  , mkTool "task_list_memories" "List memories linked to a task" $ object
+  , mkTool "task_list_memories" "List all memories linked to a task. Use task_link_memory and task_unlink_memory to manage these associations." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the task" ]
       , "required" .= [t "task_id"]
       ]
 
-  , mkTool "cleanup_run" "Run memory cleanup for a workspace" $ object
+    , mkTool "cleanup_run" "Run cleanup policies for a workspace immediately. Use after reviewing policies or when you want explicit pruning now." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace" ]
@@ -352,14 +352,14 @@ toolDefinitions =
       ]
 
   -- Issue 1: Missing project get/update/delete
-  , mkTool "project_get" "Get a project by ID" $ object
+    , mkTool "project_get" "Get a project by ID with full detail: name, description, status, priority, parent_id, metadata, and timestamps. Use project_list to discover IDs." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project" ]
       , "required" .= [t "project_id"]
       ]
 
-  , mkTool "project_update" "Update an existing project" $ object
+    , mkTool "project_update" "Rename, reprioritize, reparent, or detach an existing project. Use parent_id=null to move it back to the top level." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id"  .= prop "string" "UUID of the project"
@@ -374,14 +374,14 @@ toolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
-  , mkTool "project_delete" "Soft-delete a project" $ object
+  , mkTool "project_delete" "Soft-delete a project and its entire subtree of child projects. Recoverable until permanently removed with project_purge." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project to delete" ]
       , "required" .= [t "project_id"]
       ]
 
-  , mkTool "project_purge" "Permanently purge a soft-deleted project" $ object
+  , mkTool "project_purge" "Permanently and irreversibly remove a soft-deleted project. Must be soft-deleted first via project_delete." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the soft-deleted project to purge" ]
@@ -389,21 +389,21 @@ toolDefinitions =
       ]
 
   -- Issue 1: Missing task get/delete
-  , mkTool "task_get" "Get a task by ID" $ object
+    , mkTool "task_get" "Get a task by ID with full detail: title, description, status, priority, project_id, parent_id, due_at, metadata, and timestamps. Use task_list to discover IDs." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the task" ]
       , "required" .= [t "task_id"]
       ]
 
-  , mkTool "task_delete" "Soft-delete a task" $ object
+  , mkTool "task_delete" "Soft-delete a task and its subtask tree. Recoverable until permanently removed with task_purge." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the task to delete" ]
       , "required" .= [t "task_id"]
       ]
 
-  , mkTool "task_purge" "Permanently purge a soft-deleted task" $ object
+  , mkTool "task_purge" "Permanently and irreversibly remove a soft-deleted task. Must be soft-deleted first via task_delete." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the soft-deleted task to purge" ]
@@ -411,7 +411,7 @@ toolDefinitions =
       ]
 
   -- Issue 2: Memory categories
-  , mkTool "category_create" "Create a memory category (optionally in a workspace; omit for global)" $ object
+  , mkTool "category_create" "Create a category for organizing memories. Set workspace_id to scope it to one workspace, or omit for a global category. Use parent_id for nested sub-categories." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (omit for a global category)"
@@ -422,14 +422,14 @@ toolDefinitions =
       , "required" .= [t "name"]
       ]
 
-  , mkTool "category_get" "Get a memory category by ID" $ object
+  , mkTool "category_get" "Get a category by ID with full detail: name, description, parent_id, workspace_id, and timestamps." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "category_id" .= prop "string" "UUID of the category" ]
       , "required" .= [t "category_id"]
       ]
 
-  , mkTool "category_list" "List memory categories. When workspace_id is provided, returns categories for that workspace. When workspace_id is omitted, returns global (cross-workspace) categories." $ object
+    , mkTool "category_list" "List categories for a workspace, or omit workspace_id to browse global categories. Use this to find IDs before category updates or memory linking." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (omit for global categories)"
@@ -439,7 +439,7 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-  , mkTool "category_update" "Update a memory category" $ object
+  , mkTool "category_update" "Update a category's name, description, or parent. Use category_list to find IDs first." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "category_id" .= prop "string" "UUID of the category"
@@ -450,14 +450,14 @@ toolDefinitions =
       , "required" .= [t "category_id"]
       ]
 
-  , mkTool "category_delete" "Soft-delete a memory category" $ object
+  , mkTool "category_delete" "Soft-delete a category. Does not unlink already-linked memories. Recoverable until permanently removed with category_purge." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "category_id" .= prop "string" "UUID of the category to delete" ]
       , "required" .= [t "category_id"]
       ]
 
-  , mkTool "category_purge" "Permanently purge a soft-deleted memory category" $ object
+  , mkTool "category_purge" "Permanently and irreversibly remove a soft-deleted category. Must be soft-deleted first via category_delete." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "category_id" .= prop "string" "UUID of the soft-deleted category to purge" ]
@@ -483,7 +483,7 @@ toolDefinitions =
       ]
 
   -- Issue 3: Task dependencies
-  , mkTool "task_dependency_add" "Add a dependency between tasks" $ object
+    , mkTool "task_dependency_add" "Add an ordering dependency between two existing tasks. Use this for sequencing, not for parent/child hierarchy." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id"       .= prop "string" "UUID of the task"
@@ -492,7 +492,7 @@ toolDefinitions =
       , "required" .= [t "task_id", t "depends_on_id"]
       ]
 
-  , mkTool "task_dependency_remove" "Remove a dependency between tasks" $ object
+    , mkTool "task_dependency_remove" "Remove an ordering dependency between tasks without changing hierarchy." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id"       .= prop "string" "UUID of the task"
@@ -539,7 +539,7 @@ toolDefinitions =
       ]
 
   -- Issue 5: Memory link listing
-  , mkTool "memory_links_list" "List all links for a memory" $ object
+  , mkTool "memory_links_list" "List all outgoing and incoming links for a memory, including relation types and connected memory IDs." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id" .= prop "string" "UUID of the memory" ]
@@ -547,7 +547,7 @@ toolDefinitions =
       ]
 
   -- Issue 7: Set tags on a memory
-  , mkTool "memory_set_tags" "Set tags on a memory (replaces existing tags)" $ object
+    , mkTool "memory_set_tags" "Set tags on a memory, replacing the existing tag set. Use memory_get_tags first if you need to merge manually." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id" .= prop "string" "UUID of the memory"
@@ -570,7 +570,7 @@ toolDefinitions =
       ]
 
   -- Issue 10: Cleanup policy CRUD
-  , mkTool "cleanup_policies_list" "List cleanup policies for a workspace" $ object
+    , mkTool "cleanup_policies_list" "List cleanup policies for a workspace before changing them or running cleanup." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
@@ -580,7 +580,7 @@ toolDefinitions =
       , "required" .= [t "workspace_id"]
       ]
 
-  , mkTool "cleanup_policy_upsert" "Create or update a cleanup policy" $ object
+    , mkTool "cleanup_policy_upsert" "Create or update a cleanup policy for one memory type within a workspace." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id"   .= prop "string" "UUID of the workspace"
@@ -610,7 +610,7 @@ toolDefinitions =
       ]
 
   -- Workspace groups
-  , mkTool "workspace_group_create" "Create a workspace group (portfolio)" $ object
+  , mkTool "workspace_group_create" "Create a workspace group to organize related workspaces into a portfolio for cross-repo coordination or team organization." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "name"        .= propMaxLength "string" "Group name" maxNameBytes
@@ -619,14 +619,14 @@ toolDefinitions =
       , "required" .= [t "name"]
       ]
 
-  , mkTool "workspace_group_get" "Get a workspace group by ID" $ object
+  , mkTool "workspace_group_get" "Get a workspace group by ID with full detail: name, description, and timestamps." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "group_id" .= prop "string" "UUID of the workspace group" ]
       , "required" .= [t "group_id"]
       ]
 
-  , mkTool "workspace_group_list" "List all workspace groups" $ object
+  , mkTool "workspace_group_list" "List all workspace groups. Use this to find group IDs before adding or removing members." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "limit"  .= prop "integer" "Max results (default 50)"
@@ -635,14 +635,14 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-  , mkTool "workspace_group_delete" "Delete a workspace group" $ object
+  , mkTool "workspace_group_delete" "Delete a workspace group. Does not affect member workspaces themselves." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "group_id" .= prop "string" "UUID of the workspace group to delete" ]
       , "required" .= [t "group_id"]
       ]
 
-  , mkTool "workspace_group_add_member" "Add a workspace to a group" $ object
+  , mkTool "workspace_group_add_member" "Add a workspace to a group. A workspace can belong to multiple groups simultaneously." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "group_id"     .= prop "string" "UUID of the workspace group"
@@ -651,7 +651,7 @@ toolDefinitions =
       , "required" .= [t "group_id", t "workspace_id"]
       ]
 
-  , mkTool "workspace_group_remove_member" "Remove a workspace from a group" $ object
+  , mkTool "workspace_group_remove_member" "Remove a workspace from a group without affecting the workspace itself." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "group_id"     .= prop "string" "UUID of the workspace group"
@@ -660,7 +660,7 @@ toolDefinitions =
       , "required" .= [t "group_id", t "workspace_id"]
       ]
 
-  , mkTool "workspace_group_list_members" "List workspaces in a group" $ object
+  , mkTool "workspace_group_list_members" "List all workspaces belonging to a group." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "group_id" .= prop "string" "UUID of the workspace group" ]
@@ -668,7 +668,7 @@ toolDefinitions =
       ]
 
   -- Activity timeline
-  , mkTool "activity_timeline" "Get recent activity across the system" $ object
+    , mkTool "activity_timeline" "Browse recent changes across the system or within one workspace. Useful for audits and timeline-style review." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (omit for all)"
@@ -678,7 +678,7 @@ toolDefinitions =
       ]
 
   -- Tags
-  , mkTool "memory_get_tags" "Get the tags for a specific memory" $ object
+    , mkTool "memory_get_tags" "Get the current tags for a memory before replacing them with memory_set_tags." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id" .= prop "string" "UUID of the memory" ]

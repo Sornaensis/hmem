@@ -214,6 +214,8 @@ toolDefinitions =
           [ "task_id"     .= prop "string" "UUID of the task"
           , "title"       .= propMaxLength "string" "New title" maxNameBytes
           , "description" .= propMaxLength "string" "New description" maxDescriptionBytes
+          , "project_id"  .= prop "string" "New project UUID (null to clear)"
+          , "parent_id"   .= prop "string" "New parent task UUID (null to clear)"
           , "status"      .= propEnum "string" "New status"
               ["todo", "in_progress", "blocked", "done", "cancelled"]
           , "priority"    .= prop "integer" "New priority (1-10)"

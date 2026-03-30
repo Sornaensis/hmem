@@ -965,6 +965,8 @@ instance FromJSON CreateTask where
 data UpdateTask = UpdateTask
   { title       :: Maybe Text
   , description :: FieldUpdate Text
+  , projectId   :: FieldUpdate UUID
+  , parentId    :: FieldUpdate UUID
   , status      :: Maybe TaskStatus
   , priority    :: Maybe Int
   , metadata    :: Maybe Value
@@ -975,6 +977,8 @@ instance ToJSON UpdateTask where
   toJSON ut = object $ catMaybes
     [ ("title" .=)    <$> ut.title
     , fieldUpdatePair "description" ut.description
+    , fieldUpdatePair "project_id" ut.projectId
+    , fieldUpdatePair "parent_id" ut.parentId
     , ("status" .=)   <$> ut.status
     , ("priority" .=) <$> ut.priority
     , ("metadata" .=) <$> ut.metadata
@@ -984,6 +988,8 @@ instance FromJSON UpdateTask where
   parseJSON = withObject "UpdateTask" $ \o -> UpdateTask
     <$> o .:? "title"
     <*> parseFieldUpdate o "description"
+    <*> parseFieldUpdate o "project_id"
+    <*> parseFieldUpdate o "parent_id"
     <*> o .:? "status"
     <*> o .:? "priority"
     <*> o .:? "metadata"

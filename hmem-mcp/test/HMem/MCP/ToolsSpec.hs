@@ -456,10 +456,15 @@ spec = do
     it "parses task_update" $ do
       let args = object
             [ "task_id" .= testUUID
+            , "project_id" .= testUUID2
+            , "parent_id" .= Null
             , "status"  .= ("in_progress" :: Text)
             ]
       case parseToolCall "task_update" args of
-        Right (TaskUpdate tid _ut) -> tid `shouldBe` parsedUUID
+        Right (TaskUpdate tid ut) -> do
+          tid `shouldBe` parsedUUID
+          ut.projectId `shouldBe` SetTo parsedUUID2
+          ut.parentId `shouldBe` SetNull
         other -> expectationFailure $ "Expected TaskUpdate, got: " <> show other
 
     it "parses task_delete" $ do

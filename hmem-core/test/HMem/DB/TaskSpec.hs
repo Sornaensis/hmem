@@ -71,6 +71,7 @@ spec = around withTestEnv $ do
         , dueAt = Nothing }
       updated <- updateTask env.pool task.id UpdateTask
         { title = Just "Updated Title", description = Unchanged
+        , projectId = Unchanged, parentId = Unchanged
         , status = Just InProgress, priority = Nothing
         , metadata = Nothing, dueAt = Unchanged }
       updated `shouldSatisfy` isJust
@@ -90,6 +91,7 @@ spec = around withTestEnv $ do
       task.completedAt `shouldSatisfy` isNothing
       updated <- updateTask env.pool task.id UpdateTask
         { title = Nothing, description = Unchanged
+        , projectId = Unchanged, parentId = Unchanged
         , status = Just Done, priority = Nothing
         , metadata = Nothing, dueAt = Unchanged }
       let Just u = updated
@@ -106,16 +108,132 @@ spec = around withTestEnv $ do
         , description = Just "keep this", priority = Just 7
         , metadata = Nothing, dueAt = Nothing }
       updated <- updateTask env.pool task.id UpdateTask
-        { title = Nothing, description = Unchanged, status = Nothing
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged, status = Nothing
         , priority = Nothing, metadata = Nothing, dueAt = Unchanged }
       let Just u = updated
       u.title `shouldBe` "Keep"
       u.description `shouldBe` Just "keep this"
       u.priority `shouldBe` 7
 
+    it "moves a task between projects and cascades descendants" $ \env -> do
+      ws <- createTestWorkspace env "taskmove-ws"
+      sourceProj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Source"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      targetProj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Target"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      _ <- updateTask env.pool parent.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+
+      moved <- updateTask env.pool parent.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = SetTo targetProj.id, parentId = Unchanged
+        , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+
+      let Just updatedParent = moved
+      updatedParent.projectId `shouldBe` Just targetProj.id
+      updatedParent.status `shouldBe` Done
+      updatedParent.completedAt `shouldSatisfy` isJust
+
+      descendant <- getTask env.pool child.id
+      let Just updatedChild = descendant
+      updatedChild.projectId `shouldBe` Just targetProj.id
+
+    it "reparents a task within a project" $ \env -> do
+      ws <- createTestWorkspace env "taskreparent-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      leftParent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Left"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      rightParent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Right"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just leftParent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      updated <- updateTask env.pool child.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = SetTo rightParent.id
+        , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+
+      let Just moved = updated
+      moved.parentId `shouldBe` Just rightParent.id
+      moved.projectId `shouldBe` Just proj.id
+
+    it "moves a task to workspace scope" $ \env -> do
+      ws <- createTestWorkspace env "taskdetach-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Scoped"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      updated <- updateTask env.pool task.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = SetNull, parentId = SetNull
+        , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+
+      let Just detached = updated
+      detached.projectId `shouldBe` Nothing
+      detached.parentId `shouldBe` Nothing
+
+    it "rejects mismatched parent and project placement" $ \env -> do
+      ws <- createTestWorkspace env "taskmismatch-ws"
+      leftProj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Left"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      rightProj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Right"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just leftProj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just leftProj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      result <- try @DBException $ updateTask env.pool child.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = SetTo rightProj.id, parentId = Unchanged
+        , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      case result of
+        Left (DBCheckViolation _) -> pure ()
+        other -> expectationFailure $ "Expected DBCheckViolation, got: " <> show other
+
+    it "rejects cycles when reparenting tasks" $ \env -> do
+      ws <- createTestWorkspace env "taskcyclehier-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      root <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Root"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just root.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      grandchild <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just child.id, title = "Grandchild"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      result <- try @DBException $ updateTask env.pool root.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = SetTo grandchild.id
+        , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      case result of
+        Left (DBCycleDetected _) -> pure ()
+        other -> expectationFailure $ "Expected DBCycleDetected, got: " <> show other
+
     it "returns Nothing for nonexistent ID" $ \env -> do
       result <- updateTask env.pool (read "00000000-0000-0000-0000-000000000099") UpdateTask
-        { title = Just "x", description = Unchanged, status = Nothing
+        { title = Just "x", description = Unchanged, projectId = Unchanged, parentId = Unchanged, status = Nothing
         , priority = Nothing, metadata = Nothing, dueAt = Unchanged }
       result `shouldSatisfy` isNothing
 
@@ -184,7 +302,7 @@ spec = around withTestEnv $ do
         , description = Nothing, priority = Nothing, metadata = Nothing
         , dueAt = Nothing }
       _ <- updateTask env.pool t1.id UpdateTask
-        { title = Nothing, description = Unchanged, status = Just Done
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged, status = Just Done
         , priority = Nothing, metadata = Nothing, dueAt = Unchanged }
       _ <- createTask env.pool CreateTask
         { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "todo2"

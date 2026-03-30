@@ -13,6 +13,7 @@ module HMem.DB.Task
   ) where
 
 import Control.Exception (throwIO)
+import Control.Monad (when)
 import Data.Aeson (Object, toJSON)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant ((>$<))
@@ -29,6 +30,7 @@ import Hasql.Statement qualified as Statement
 import Rel8
 
 import HMem.DB.Pool (runSession, runTransaction, DBException(..))
+import HMem.DB.Project qualified as Proj
 import HMem.DB.Schema
 import HMem.Types
 
@@ -72,12 +74,48 @@ taskSubtreeIdsStatement = Statement.Statement sql encoder decoder True
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
+applyFieldUpdateMaybe :: Maybe a -> FieldUpdate a -> Maybe a
+applyFieldUpdateMaybe oldValue = \case
+  Unchanged -> oldValue
+  SetNull -> Nothing
+  SetTo value -> Just value
+
+ensureTaskProject :: Pool Hasql.Connection -> UUID -> Maybe UUID -> IO ()
+ensureTaskProject _ _ Nothing = pure ()
+ensureTaskProject pool workspaceId (Just projectId) = do
+  project <- Proj.getProject pool projectId >>= maybe
+    (throwIO $ DBForeignKeyViolation "Referenced project does not exist")
+    pure
+  when (project.workspaceId /= workspaceId) $
+    throwIO $ DBCheckViolation "Task project must belong to the same workspace"
+
+ensureTaskParent :: Pool Hasql.Connection -> UUID -> Maybe UUID -> IO (Maybe Task)
+ensureTaskParent _ _ Nothing = pure Nothing
+ensureTaskParent pool workspaceId (Just parentId) = do
+  parent <- getTask pool parentId >>= maybe
+    (throwIO $ DBForeignKeyViolation "Referenced parent task does not exist")
+    pure
+  when (parent.workspaceId /= workspaceId) $
+    throwIO $ DBCheckViolation "Parent task must belong to the same workspace"
+  pure (Just parent)
+
+ensureTaskPlacement :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Maybe UUID -> IO ()
+ensureTaskPlacement pool workspaceId projectId parentId = do
+  ensureTaskProject pool workspaceId projectId
+  mParent <- ensureTaskParent pool workspaceId parentId
+  case mParent of
+    Nothing -> pure ()
+    Just parent ->
+      when (parent.projectId /= projectId) $
+        throwIO $ DBCheckViolation "Task and parent task must belong to the same project"
+
 ------------------------------------------------------------------------
 -- Create
 ------------------------------------------------------------------------
 
 createTask :: Pool Hasql.Connection -> CreateTask -> IO Task
 createTask pool ct = do
+  ensureTaskPlacement pool ct.workspaceId ct.projectId ct.parentId
   let pri  = maybe 5 fromIntegral (ct.priority) :: Int16
       meta = fromMaybe (toJSON (mempty :: Object)) (ct.metadata)
   rows <- runSession pool $ Session.statement () $ run $
@@ -129,26 +167,47 @@ getTask pool tid = do
 
 updateTask :: Pool Hasql.Connection -> UUID -> UpdateTask -> IO (Maybe Task)
 updateTask pool tid ut = do
-  rows <- runSession pool $ Session.statement () $ run $
-    update Update
-      { target = taskSchema
-      , from = pure ()
-      , set = \_ row -> row
-          { taskTitle       = maybe row.taskTitle       lit ut.title
-          , taskDescription = applyNullableUpdate row.taskDescription ut.description
-          , taskStatus      = maybe row.taskStatus      lit ut.status
-          , taskPriority    = maybe row.taskPriority    (lit . fromIntegral) ut.priority
-          , taskMetadata    = maybe row.taskMetadata    lit ut.metadata
-          , taskDueAt       = applyNullableUpdate row.taskDueAt ut.dueAt
-          -- completed_at is managed by the hmem_task_completion trigger
-          , taskCompletedAt = row.taskCompletedAt
-          }
-          , updateWhere = \_ row -> row.taskId ==. lit tid &&. activeTask row
-      , returning = Returning id
-      }
-  case rows of
-    []    -> pure Nothing
-    (r:_) -> pure . Just $ rowToTask r
+  current <- getTask pool tid
+  case current of
+    Nothing -> pure Nothing
+    Just task -> do
+      let targetProjectId = applyFieldUpdateMaybe task.projectId ut.projectId
+          targetParentId = applyFieldUpdateMaybe task.parentId ut.parentId
+      ensureTaskPlacement pool task.workspaceId targetProjectId targetParentId
+      runTransaction pool $ do
+        when (task.projectId /= targetProjectId) $ do
+          ids <- Session.statement tid taskSubtreeIdsStatement
+          Session.statement () $ run_ $
+            update Update
+              { target = taskSchema
+              , from = pure ()
+              , set = \_ row -> row { taskProjectId = lit targetProjectId }
+              , updateWhere = \_ row -> in_ row.taskId (map lit ids) &&. activeTask row
+              , returning = NoReturning
+              }
+
+        rows <- Session.statement () $ run $
+          update Update
+            { target = taskSchema
+            , from = pure ()
+            , set = \_ row -> row
+                { taskTitle       = maybe row.taskTitle       lit ut.title
+                , taskDescription = applyNullableUpdate row.taskDescription ut.description
+                , taskProjectId   = applyNullableUpdate row.taskProjectId ut.projectId
+                , taskParentId    = applyNullableUpdate row.taskParentId ut.parentId
+                , taskStatus      = maybe row.taskStatus      lit ut.status
+                , taskPriority    = maybe row.taskPriority    (lit . fromIntegral) ut.priority
+                , taskMetadata    = maybe row.taskMetadata    lit ut.metadata
+                , taskDueAt       = applyNullableUpdate row.taskDueAt ut.dueAt
+                -- completed_at is managed by the hmem_task_completion trigger
+                , taskCompletedAt = row.taskCompletedAt
+                }
+            , updateWhere = \_ row -> row.taskId ==. lit tid &&. activeTask row
+            , returning = Returning id
+            }
+        case rows of
+          []    -> pure Nothing
+          (r:_) -> pure . Just $ rowToTask r
 
 ------------------------------------------------------------------------
 -- Delete

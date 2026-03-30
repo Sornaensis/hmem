@@ -286,6 +286,79 @@ spec = around withApp $ do
       done.status `shouldBe` Done
       done.completedAt `shouldSatisfy` isJust
 
+    it "moves and reparents a task while preserving status" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-move-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      leftProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Left" :: T.Text)])
+      let Just leftProj = decode (respBody leftProjResp) :: Maybe Project
+
+      rightProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Right" :: T.Text)])
+      let Just rightProj = decode (respBody rightProjResp) :: Maybe Project
+
+      leftParentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "title" .= ("Left Parent" :: T.Text)])
+      let Just leftParent = decode (respBody leftParentResp) :: Maybe Task
+
+      rightParentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= rightProj.id, "title" .= ("Right Parent" :: T.Text)])
+      let Just rightParent = decode (respBody rightParentResp) :: Maybe Task
+
+      childResp <- postJSON app "/api/v1/tasks"
+        (object
+          [ "workspace_id" .= ws.id
+          , "project_id" .= leftProj.id
+          , "parent_id" .= leftParent.id
+          , "title" .= ("Child" :: T.Text)
+          ])
+      let Just child = decode (respBody childResp) :: Maybe Task
+
+      progressResp <- putJSON app (uuidPath "/api/v1/tasks" child.id)
+        (object ["status" .= ("in_progress" :: T.Text)])
+      respStatus progressResp `shouldBe` 200
+
+      moveResp <- putJSON app (uuidPath "/api/v1/tasks" child.id)
+        (object ["project_id" .= rightProj.id, "parent_id" .= rightParent.id])
+      respStatus moveResp `shouldBe` 200
+      let Just moved = decode (respBody moveResp) :: Maybe Task
+      moved.projectId `shouldBe` Just rightProj.id
+      moved.parentId `shouldBe` Just rightParent.id
+      moved.status `shouldBe` InProgress
+
+      detachResp <- putJSON app (uuidPath "/api/v1/tasks" child.id)
+        (object ["project_id" .= Null, "parent_id" .= Null])
+      respStatus detachResp `shouldBe` 200
+      let Just detached = decode (respBody detachResp) :: Maybe Task
+      detached.projectId `shouldBe` Nothing
+      detached.parentId `shouldBe` Nothing
+
+    it "rejects task hierarchy cycles" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-cycle-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Tree" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      rootResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Root" :: T.Text)])
+      let Just root = decode (respBody rootResp) :: Maybe Task
+
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= root.id, "title" .= ("Child" :: T.Text)])
+      let Just child = decode (respBody childResp) :: Maybe Task
+
+      grandchildResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= child.id, "title" .= ("Grandchild" :: T.Text)])
+      let Just grandchild = decode (respBody grandchildResp) :: Maybe Task
+
+      cycleResp <- putJSON app (uuidPath "/api/v1/tasks" root.id)
+        (object ["parent_id" .= grandchild.id])
+      respStatus cycleResp `shouldBe` 409
+
   describe "search" $ do
     it "full-text search finds matching memories" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"

@@ -202,6 +202,60 @@ spec = around withApp $ do
       let Just updated = decode (respBody upResp) :: Maybe Project
       updated.status `shouldBe` ProjCompleted
 
+    it "reparents a project and clears its parent" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("proj-move-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      leftResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Left" :: T.Text)])
+      let Just leftParent = decode (respBody leftResp) :: Maybe Project
+
+      rightResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Right" :: T.Text)])
+      let Just rightParent = decode (respBody rightResp) :: Maybe Project
+
+      childResp <- postJSON app "/api/v1/projects"
+        (object
+          [ "workspace_id" .= ws.id
+          , "name" .= ("Child" :: T.Text)
+          , "parent_id" .= leftParent.id
+          ])
+      let Just child = decode (respBody childResp) :: Maybe Project
+
+      moveResp <- putJSON app (uuidPath "/api/v1/projects" child.id)
+        (object ["parent_id" .= rightParent.id])
+      respStatus moveResp `shouldBe` 200
+      let Just moved = decode (respBody moveResp) :: Maybe Project
+      moved.parentId `shouldBe` Just rightParent.id
+
+      clearResp <- putJSON app (uuidPath "/api/v1/projects" child.id)
+        (object ["parent_id" .= Null])
+      respStatus clearResp `shouldBe` 200
+      let Just detached = decode (respBody clearResp) :: Maybe Project
+      detached.parentId `shouldBe` Nothing
+
+    it "rejects project hierarchy cycles" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("proj-cycle-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      rootResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Root" :: T.Text)])
+      let Just root = decode (respBody rootResp) :: Maybe Project
+
+      childResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Child" :: T.Text), "parent_id" .= root.id])
+      let Just child = decode (respBody childResp) :: Maybe Project
+
+      grandchildResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Grandchild" :: T.Text), "parent_id" .= child.id])
+      let Just grandchild = decode (respBody grandchildResp) :: Maybe Project
+
+      cycleResp <- putJSON app (uuidPath "/api/v1/projects" root.id)
+        (object ["parent_id" .= grandchild.id])
+      respStatus cycleResp `shouldBe` 409
+
   describe "task flow" $ do
     it "creates project, task, marks done" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"

@@ -355,6 +355,7 @@ toolDefinitions =
           [ "project_id"  .= prop "string" "UUID of the project"
           , "name"        .= propMaxLength "string" "New name" maxNameBytes
           , "description" .= propMaxLength "string" "New description" maxDescriptionBytes
+          , "parent_id"   .= prop "string" "New parent project UUID (null to clear)"
           , "status"      .= propEnum "string" "New status"
               ["active", "paused", "completed", "archived"]
           , "priority"    .= prop "integer" "New priority (1-10)"

@@ -369,9 +369,23 @@ spec = do
       let args = object
             [ "project_id" .= testUUID
             , "name"       .= ("Renamed" :: Text)
+            , "parent_id"  .= testUUID2
             ]
       case parseToolCall "project_update" args of
-        Right (ProjectUpdate pid _up) -> pid `shouldBe` parsedUUID
+        Right (ProjectUpdate pid up) -> do
+          pid `shouldBe` parsedUUID
+          up.parentId `shouldBe` SetTo parsedUUID2
+        other -> expectationFailure $ "Expected ProjectUpdate, got: " <> show other
+
+    it "parses project_update with null parent_id to clear hierarchy" $ do
+      let args = object
+            [ "project_id" .= testUUID
+            , "parent_id"  .= Null
+            ]
+      case parseToolCall "project_update" args of
+        Right (ProjectUpdate pid up) -> do
+          pid `shouldBe` parsedUUID
+          up.parentId `shouldBe` SetNull
         other -> expectationFailure $ "Expected ProjectUpdate, got: " <> show other
 
     it "parses project_delete" $ do

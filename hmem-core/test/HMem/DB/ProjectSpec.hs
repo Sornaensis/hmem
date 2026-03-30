@@ -2,9 +2,11 @@
 
 module HMem.DB.ProjectSpec (spec) where
 
+import Control.Exception (try)
 import Data.Maybe (isJust, isNothing)
 import Test.Hspec
 
+import HMem.DB.Pool (DBException(..))
 import HMem.DB.Memory (createMemory)
 import HMem.DB.Project
 import HMem.DB.Task (createTask, getTask, listTasksByWorkspace)
@@ -55,6 +57,7 @@ spec = around withTestEnv $ do
         , description = Nothing, priority = Nothing, metadata = Nothing }
       updated <- updateProject env.pool proj.id UpdateProject
         { name = Just "Renamed", description = Unchanged
+        , parentId = Unchanged
         , status = Just ProjPaused, priority = Nothing, metadata = Nothing }
       updated `shouldSatisfy` isJust
       let Just u = updated
@@ -68,15 +71,91 @@ spec = around withTestEnv $ do
         , description = Just "keep this", priority = Just 7, metadata = Nothing }
       updated <- updateProject env.pool proj.id UpdateProject
         { name = Nothing, description = Unchanged
+        , parentId = Unchanged
         , status = Nothing, priority = Nothing, metadata = Nothing }
       let Just u = updated
       u.name `shouldBe` "Keep"
       u.description `shouldBe` Just "keep this"
       u.priority `shouldBe` 7
 
+    it "reparents a project" $ \env -> do
+      ws <- createTestWorkspace env "projmove-ws"
+      leftParent <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Left"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      rightParent <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Right"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      child <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Just leftParent.id, name = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+
+      updated <- updateProject env.pool child.id UpdateProject
+        { name = Nothing, description = Unchanged
+        , parentId = SetTo rightParent.id
+        , status = Nothing, priority = Nothing, metadata = Nothing }
+
+      let Just moved = updated
+      moved.parentId `shouldBe` Just rightParent.id
+
+    it "clears a project's parent" $ \env -> do
+      ws <- createTestWorkspace env "projclear-ws"
+      parent <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      child <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Just parent.id, name = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+
+      updated <- updateProject env.pool child.id UpdateProject
+        { name = Nothing, description = Unchanged
+        , parentId = SetNull
+        , status = Nothing, priority = Nothing, metadata = Nothing }
+
+      let Just detached = updated
+      detached.parentId `shouldBe` Nothing
+
+    it "rejects cycles when reparenting" $ \env -> do
+      ws <- createTestWorkspace env "projcycle-ws"
+      root <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Root"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      child <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Just root.id, name = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      grandchild <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Just child.id, name = "Grandchild"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+
+      result <- try @DBException $ updateProject env.pool root.id UpdateProject
+        { name = Nothing, description = Unchanged
+        , parentId = SetTo grandchild.id
+        , status = Nothing, priority = Nothing, metadata = Nothing }
+      case result of
+        Left (DBCycleDetected _) -> pure ()
+        other -> expectationFailure $ "Expected DBCycleDetected, got: " <> show other
+
+    it "rejects parents from a different workspace" $ \env -> do
+      leftWs <- createTestWorkspace env "projscope-left"
+      rightWs <- createTestWorkspace env "projscope-right"
+      foreignParent <- createProject env.pool CreateProject
+        { workspaceId = leftWs.id, parentId = Nothing, name = "Foreign"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      proj <- createProject env.pool CreateProject
+        { workspaceId = rightWs.id, parentId = Nothing, name = "Local"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+
+      result <- try @DBException $ updateProject env.pool proj.id UpdateProject
+        { name = Nothing, description = Unchanged
+        , parentId = SetTo foreignParent.id
+        , status = Nothing, priority = Nothing, metadata = Nothing }
+      case result of
+        Left (DBCheckViolation _) -> pure ()
+        other -> expectationFailure $ "Expected DBCheckViolation, got: " <> show other
+
     it "returns Nothing for nonexistent ID" $ \env -> do
       result <- updateProject env.pool (read "00000000-0000-0000-0000-000000000099") UpdateProject
-        { name = Just "x", description = Unchanged, status = Nothing
+        { name = Just "x", description = Unchanged, parentId = Unchanged, status = Nothing
         , priority = Nothing, metadata = Nothing }
       result `shouldSatisfy` isNothing
 
@@ -135,7 +214,7 @@ spec = around withTestEnv $ do
         { workspaceId = ws.id, parentId = Nothing, name = "Active"
         , description = Nothing, priority = Nothing, metadata = Nothing }
       _ <- updateProject env.pool p1.id UpdateProject
-        { name = Nothing, description = Unchanged, status = Just ProjCompleted
+        { name = Nothing, description = Unchanged, parentId = Unchanged, status = Just ProjCompleted
         , priority = Nothing, metadata = Nothing }
       _ <- createProject env.pool CreateProject
         { workspaceId = ws.id, parentId = Nothing, name = "StillActive"

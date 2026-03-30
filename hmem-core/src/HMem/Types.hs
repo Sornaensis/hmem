@@ -897,6 +897,7 @@ instance FromJSON CreateProject where
 data UpdateProject = UpdateProject
   { name        :: Maybe Text
   , description :: FieldUpdate Text
+  , parentId    :: FieldUpdate UUID
   , status      :: Maybe ProjectStatus
   , priority    :: Maybe Int
   , metadata    :: Maybe Value
@@ -906,6 +907,7 @@ instance ToJSON UpdateProject where
   toJSON up = object $ catMaybes
     [ ("name" .=)     <$> up.name
     , fieldUpdatePair "description" up.description
+    , fieldUpdatePair "parent_id" up.parentId
     , ("status" .=)   <$> up.status
     , ("priority" .=) <$> up.priority
     , ("metadata" .=) <$> up.metadata
@@ -914,6 +916,7 @@ instance FromJSON UpdateProject where
   parseJSON = withObject "UpdateProject" $ \o -> UpdateProject
     <$> o .:? "name"
     <*> parseFieldUpdate o "description"
+    <*> parseFieldUpdate o "parent_id"
     <*> o .:? "status"
     <*> o .:? "priority"
     <*> o .:? "metadata"

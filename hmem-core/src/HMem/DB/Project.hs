@@ -10,6 +10,7 @@ module HMem.DB.Project
   ) where
 
 import Control.Exception (throwIO)
+import Control.Monad (when)
 import Data.Aeson (Object, toJSON)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant ((>$<))
@@ -65,12 +66,22 @@ projectSubtreeIdsStatement = Statement.Statement sql encoder decoder True
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
+ensureParentProject :: Pool Hasql.Connection -> UUID -> Maybe UUID -> IO ()
+ensureParentProject _ _ Nothing = pure ()
+ensureParentProject pool workspaceId (Just parentId) = do
+  parent <- getProject pool parentId >>= maybe
+    (throwIO $ DBForeignKeyViolation "Referenced parent project does not exist")
+    pure
+  when (parent.workspaceId /= workspaceId) $
+    throwIO $ DBCheckViolation "Parent project must belong to the same workspace"
+
 ------------------------------------------------------------------------
 -- Create
 ------------------------------------------------------------------------
 
 createProject :: Pool Hasql.Connection -> CreateProject -> IO Project
 createProject pool cp = do
+  ensureParentProject pool cp.workspaceId cp.parentId
   let pri  = maybe 5 fromIntegral (cp.priority) :: Int16
       meta = fromMaybe (toJSON (mempty :: Object)) (cp.metadata)
   rows <- runSession pool $ Session.statement () $ run $
@@ -119,23 +130,32 @@ getProject pool pid = do
 
 updateProject :: Pool Hasql.Connection -> UUID -> UpdateProject -> IO (Maybe Project)
 updateProject pool pid up = do
-  rows <- runSession pool $ Session.statement () $ run $
-    update Update
-      { target = projectSchema
-      , from = pure ()
-      , set = \_ row -> row
-          { projName        = maybe row.projName        lit up.name
-          , projDescription = applyNullableUpdate row.projDescription up.description
-          , projStatus      = maybe row.projStatus      lit up.status
-          , projPriority    = maybe row.projPriority    (lit . fromIntegral) up.priority
-          , projMetadata    = maybe row.projMetadata    lit up.metadata
+  current <- getProject pool pid
+  case current of
+    Nothing -> pure Nothing
+    Just project -> do
+      case up.parentId of
+        Unchanged   -> pure ()
+        SetNull     -> pure ()
+        SetTo newId -> ensureParentProject pool project.workspaceId (Just newId)
+      rows <- runSession pool $ Session.statement () $ run $
+        update Update
+          { target = projectSchema
+          , from = pure ()
+          , set = \_ row -> row
+              { projName        = maybe row.projName        lit up.name
+              , projDescription = applyNullableUpdate row.projDescription up.description
+              , projParentId    = applyNullableUpdate row.projParentId up.parentId
+              , projStatus      = maybe row.projStatus      lit up.status
+              , projPriority    = maybe row.projPriority    (lit . fromIntegral) up.priority
+              , projMetadata    = maybe row.projMetadata    lit up.metadata
+              }
+          , updateWhere = \_ row -> row.projId ==. lit pid &&. activeProject row
+          , returning = Returning id
           }
-      , updateWhere = \_ row -> row.projId ==. lit pid &&. activeProject row
-      , returning = Returning id
-      }
-  case rows of
-    []    -> pure Nothing
-    (r:_) -> pure . Just $ rowToProject r
+      case rows of
+        []    -> pure Nothing
+        (r:_) -> pure . Just $ rowToProject r
 
 ------------------------------------------------------------------------
 -- Delete

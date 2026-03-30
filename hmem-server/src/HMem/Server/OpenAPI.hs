@@ -114,6 +114,12 @@ instance ToSchema LinkMemory           where declareNamedSchema = genericDeclare
 instance ToSchema LinkDependency       where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema a => ToSchema (PaginatedResult a) where
   declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema BatchDeleteRequest     where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema BatchMoveTasksRequest  where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema BatchMemoryLinkRequest where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema BatchSetTagsItem       where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema BatchSetTagsRequest    where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema BatchResult            where declareNamedSchema = genericDeclareNamedSchema opts
 
 ------------------------------------------------------------------------
 -- Helper

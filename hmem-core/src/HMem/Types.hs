@@ -71,6 +71,18 @@ module HMem.Types
     -- * Pagination
   , PaginatedResult(..)
 
+    -- * Batch operations
+  , BatchDeleteRequest(..)
+  , BatchMoveTasksRequest(..)
+  , BatchMemoryLinkRequest(..)
+  , BatchSetTagsItem(..)
+  , BatchSetTagsRequest(..)
+  , BatchResult(..)
+  , validateBatchDeleteRequest
+  , validateBatchMoveTasksRequest
+  , validateBatchMemoryLinkRequest
+  , validateBatchSetTagsRequest
+
     -- * Enum text conversion helpers
   , memoryTypeToText
   , memoryTypeFromText
@@ -1170,3 +1182,83 @@ instance ToJSON a => ToJSON (PaginatedResult a) where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON a => FromJSON (PaginatedResult a) where
   parseJSON  = genericParseJSON jsonOptions
+
+------------------------------------------------------------------------
+-- Batch operations
+------------------------------------------------------------------------
+
+newtype BatchDeleteRequest = BatchDeleteRequest
+  { ids :: [UUID]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchDeleteRequest where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON BatchDeleteRequest where
+  parseJSON  = genericParseJSON jsonOptions
+
+data BatchMoveTasksRequest = BatchMoveTasksRequest
+  { taskIds   :: [UUID]
+  , projectId :: Maybe UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchMoveTasksRequest where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON BatchMoveTasksRequest where
+  parseJSON  = genericParseJSON jsonOptions
+
+newtype BatchMemoryLinkRequest = BatchMemoryLinkRequest
+  { memoryIds :: [UUID]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchMemoryLinkRequest where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON BatchMemoryLinkRequest where
+  parseJSON  = genericParseJSON jsonOptions
+
+data BatchSetTagsItem = BatchSetTagsItem
+  { memoryId :: UUID
+  , tags     :: [Text]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchSetTagsItem where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON BatchSetTagsItem where
+  parseJSON  = genericParseJSON jsonOptions
+
+newtype BatchSetTagsRequest = BatchSetTagsRequest
+  { items :: [BatchSetTagsItem]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchSetTagsRequest where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON BatchSetTagsRequest where
+  parseJSON  = genericParseJSON jsonOptions
+
+newtype BatchResult = BatchResult
+  { affected :: Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchResult where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON BatchResult where
+  parseJSON  = genericParseJSON jsonOptions
+
+validateBatchDeleteRequest :: BatchDeleteRequest -> [Text]
+validateBatchDeleteRequest br =
+  ["ids must contain at least one item" | null br.ids]
+  <> ["ids must contain at most 100 items" | length br.ids > 100]
+
+validateBatchMoveTasksRequest :: BatchMoveTasksRequest -> [Text]
+validateBatchMoveTasksRequest bm =
+  ["task_ids must contain at least one item" | null bm.taskIds]
+  <> ["task_ids must contain at most 100 items" | length bm.taskIds > 100]
+
+validateBatchMemoryLinkRequest :: BatchMemoryLinkRequest -> [Text]
+validateBatchMemoryLinkRequest bl =
+  ["memory_ids must contain at least one item" | null bl.memoryIds]
+  <> ["memory_ids must contain at most 100 items" | length bl.memoryIds > 100]
+
+validateBatchSetTagsRequest :: BatchSetTagsRequest -> [Text]
+validateBatchSetTagsRequest bs =
+  ["items must contain at least one item" | null bs.items]
+  <> ["items must contain at most 100 items" | length bs.items > 100]

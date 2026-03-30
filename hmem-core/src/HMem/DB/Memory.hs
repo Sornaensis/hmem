@@ -5,6 +5,7 @@ module HMem.DB.Memory
   , getMemory
   , updateMemory
   , deleteMemory
+  , deleteMemoryBatch
 
     -- * Querying
   , listMemories
@@ -14,6 +15,7 @@ module HMem.DB.Memory
     -- * Tags
   , setTags
   , getTags
+  , setTagsBatch
 
     -- * Links
   , linkMemories
@@ -327,6 +329,59 @@ deleteMemory pool mid = do
             }
         pure True
 
+-- | Soft-delete multiple memories by ID in a single statement.
+-- Returns the number of memories actually deleted (already-deleted
+-- or non-existent IDs are silently skipped).
+deleteMemoryBatch :: Pool Hasql.Connection -> [UUID] -> IO Int
+deleteMemoryBatch _pool [] = pure 0
+deleteMemoryBatch pool mids = do
+  runTransaction pool $ do
+    n <- Session.statement () $ runN $
+      update Update
+        { target = memorySchema
+        , from = pure ()
+        , set = \_ row -> row { memDeletedAt = deletedNow }
+        , updateWhere = \_ row -> in_ row.memId (map lit mids) &&. activeMemory row
+        , returning = NoReturning
+        }
+    -- Cascade link cleanup for all affected memories
+    Session.statement () $ run_ $
+      delete Delete
+        { from = memoryLinkSchema
+        , using = pure ()
+        , deleteWhere = \_ row -> in_ row.mlSourceId (map lit mids) ||. in_ row.mlTargetId (map lit mids)
+        , returning = NoReturning
+        }
+    Session.statement () $ run_ $
+      delete Delete
+        { from = memoryTagSchema
+        , using = pure ()
+        , deleteWhere = \_ row -> in_ row.mtMemoryId (map lit mids)
+        , returning = NoReturning
+        }
+    Session.statement () $ run_ $
+      delete Delete
+        { from = memoryCategoryLinkSchema
+        , using = pure ()
+        , deleteWhere = \_ row -> in_ row.mclMemoryId (map lit mids)
+        , returning = NoReturning
+        }
+    Session.statement () $ run_ $
+      delete Delete
+        { from = projectMemoryLinkSchema
+        , using = pure ()
+        , deleteWhere = \_ row -> in_ row.pmlMemoryId (map lit mids)
+        , returning = NoReturning
+        }
+    Session.statement () $ run_ $
+      delete Delete
+        { from = taskMemoryLinkSchema
+        , using = pure ()
+        , deleteWhere = \_ row -> in_ row.tmlMemoryId (map lit mids)
+        , returning = NoReturning
+        }
+    pure (fromIntegral n)
+
 ------------------------------------------------------------------------
 -- List
 ------------------------------------------------------------------------
@@ -472,6 +527,37 @@ setTags pool mid tags = runTransaction pool $ do
         , onConflict = DoNothing
         , returning = NoReturning
         }
+
+-- | Set tags on multiple memories at once, each with its own tag list.
+-- Replaces the entire tag set for each memory.
+-- Returns the number of memories processed.
+setTagsBatch :: Pool Hasql.Connection -> [(UUID, [Text])] -> IO Int
+setTagsBatch _pool [] = pure 0
+setTagsBatch pool items = runTransaction pool $ do
+  let mids = map fst items
+  -- Delete existing tags for all affected memories
+  Session.statement () $ run_ $
+    delete Delete
+      { from = memoryTagSchema
+      , using = pure ()
+      , deleteWhere = \_ row -> in_ row.mtMemoryId (map lit mids)
+      , returning = NoReturning
+      }
+  -- Insert all new tags in one batch
+  let allTags = [ MemoryTagT { mtMemoryId = lit mid, mtTag = lit tg }
+                | (mid, tags) <- items
+                , tg <- tags
+                ]
+  case allTags of
+    [] -> pure ()
+    _  -> Session.statement () $ run_ $
+      insert Insert
+        { into = memoryTagSchema
+        , rows = values allTags
+        , onConflict = DoNothing
+        , returning = NoReturning
+        }
+  pure (length items)
 
 getTags :: Pool Hasql.Connection -> UUID -> IO [Text]
 getTags = fetchTags

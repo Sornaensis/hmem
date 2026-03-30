@@ -7,6 +7,7 @@ module HMem.DB.Project
   , listProjectsWithQuery
   , linkProjectMemory
   , unlinkProjectMemory
+  , linkProjectMemoryBatch
   ) where
 
 import Control.Exception (throwIO)
@@ -272,3 +273,22 @@ unlinkProjectMemory pool pid mid =
       , deleteWhere = \_ row -> row.pmlProjectId ==. lit pid &&. row.pmlMemoryId ==. lit mid
       , returning = NoReturning
       }
+
+-- | Link multiple memories to a project in a single insert.
+-- Idempotent: already-linked pairs are silently skipped.
+-- Returns the number of memory IDs submitted.
+linkProjectMemoryBatch :: Pool Hasql.Connection -> UUID -> [UUID] -> IO Int
+linkProjectMemoryBatch _pool _ [] = pure 0
+linkProjectMemoryBatch pool pid mids =
+  runSession pool $ do
+    Session.statement () $ run_ $
+      insert Insert
+        { into = projectMemoryLinkSchema
+        , rows = values
+            [ ProjectMemoryLinkT { pmlProjectId = lit pid, pmlMemoryId = lit mid }
+            | mid <- mids
+            ]
+        , onConflict = DoNothing
+        , returning = NoReturning
+        }
+    pure (length mids)

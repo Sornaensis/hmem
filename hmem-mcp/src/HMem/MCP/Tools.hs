@@ -9,7 +9,7 @@ module HMem.MCP.Tools
 
 import Control.Exception (SomeException, try)
 import Data.Aeson
-import Data.Aeson.Types (parseEither)
+import Data.Aeson.Types (Parser, parseEither)
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.List (intercalate)
@@ -707,6 +707,79 @@ toolDefinitions =
           ]
       , "required" .= [t "memory_id", t "embedding"]
       ]
+
+  -- Batch operations
+  , mkTool "memory_delete_batch" "Soft-delete multiple memories at once. Max 100 IDs per call. Returns the number actually deleted (already-deleted or missing IDs are skipped)." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                              "description" .= t "Array of memory UUIDs to soft-delete",
+                              "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
+          ]
+      , "required" .= [t "ids"]
+      ]
+
+  , mkTool "task_delete_batch" "Soft-delete multiple tasks at once. Max 100 IDs per call. Does not cascade to subtasks. Returns the number actually deleted." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                              "description" .= t "Array of task UUIDs to soft-delete",
+                              "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
+          ]
+      , "required" .= [t "ids"]
+      ]
+
+  , mkTool "task_move_batch" "Move multiple tasks to a different project (or detach from all projects by passing null for project_id). Max 100 tasks per call." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "task_ids"   .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                                     "description" .= t "Array of task UUIDs to move",
+                                     "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
+          , "project_id" .= prop "string" "Target project UUID (null to detach tasks from any project)"
+          ]
+      , "required" .= [t "task_ids"]
+      ]
+
+  , mkTool "project_link_memories_batch" "Link multiple memories to a single project at once. Idempotent: already-linked pairs are silently skipped. Max 100 memory IDs." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "project_id" .= prop "string" "UUID of the project"
+          , "memory_ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                                     "description" .= t "Array of memory UUIDs to link",
+                                     "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
+          ]
+      , "required" .= [t "project_id", t "memory_ids"]
+      ]
+
+  , mkTool "task_link_memories_batch" "Link multiple memories to a single task at once. Idempotent: already-linked pairs are silently skipped. Max 100 memory IDs." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "task_id"    .= prop "string" "UUID of the task"
+          , "memory_ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                                     "description" .= t "Array of memory UUIDs to link",
+                                     "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
+          ]
+      , "required" .= [t "task_id", t "memory_ids"]
+      ]
+
+  , mkTool "memory_set_tags_batch" "Set tags on multiple memories at once, each with its own tag list. Replaces existing tags for each memory. Max 100 items." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "items" .= object ["type" .= t "array",
+                                "description" .= t "Array of {memory_id, tags} objects",
+                                "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
+                                "items" .= object
+                                    [ "type" .= t "object"
+                                    , "properties" .= object
+                                        [ "memory_id" .= prop "string" "UUID of the memory"
+                                        , "tags" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                                                             "description" .= t "New tags for this memory"]
+                                        ]
+                                    , "required" .= [t "memory_id", t "tags"]
+                                    ]]
+          ]
+      , "required" .= [t "items"]
+      ]
   ]
 
 ------------------------------------------------------------------------
@@ -779,6 +852,12 @@ data ToolCall
   | MemoryGetTags UUID
   | MemorySimilar SimilarQuery
   | MemorySetEmbedding UUID [Double]
+  | MemoryDeleteBatch [UUID]
+  | TaskDeleteBatch [UUID]
+  | TaskMoveBatch [UUID] (Maybe UUID)     -- task_ids, project_id
+  | ProjectLinkMemBatch UUID [UUID]       -- project_id, memory_ids
+  | TaskLinkMemBatch UUID [UUID]          -- task_id, memory_ids
+  | MemorySetTagsBatch [(UUID, [Text])]   -- [(memory_id, tags)]
   deriving (Show, Eq)
 
 -- | Parse raw JSON-RPC params (containing "name" and "arguments") into
@@ -850,6 +929,12 @@ parseToolCall name args = case name of
     "memory_get_tags"          -> MemoryGetTags <$> need "memory_id"
     "memory_similar"           -> MemorySimilar <$> parse args
     "memory_set_embedding"     -> MemorySetEmbedding <$> need "memory_id" <*> need "embedding"
+    "memory_delete_batch"       -> MemoryDeleteBatch <$> need "ids"
+    "task_delete_batch"         -> TaskDeleteBatch <$> need "ids"
+    "task_move_batch"           -> TaskMoveBatch <$> need "task_ids" <*> opt "project_id"
+    "project_link_memories_batch" -> ProjectLinkMemBatch <$> need "project_id" <*> need "memory_ids"
+    "task_link_memories_batch"  -> TaskLinkMemBatch <$> need "task_id" <*> need "memory_ids"
+    "memory_set_tags_batch"     -> MemorySetTagsBatch <$> parseBatchSetTags args
     _                           -> Left $ "Unknown tool: " <> T.unpack name
   where
     parse :: FromJSON a => Value -> Either String a
@@ -860,6 +945,17 @@ parseToolCall name args = case name of
 
     opt :: FromJSON a => Key -> Either String (Maybe a)
     opt k = parseEither (withObject "args" (.:? k)) args
+
+-- | Parse the batch set-tags items array into [(UUID, [Text])].
+parseBatchSetTags :: Value -> Either String [(UUID, [Text])]
+parseBatchSetTags = parseEither $ withObject "args" $ \o -> do
+  items <- o .: "items" :: Parser [Value]
+  mapM parseItem items
+  where
+    parseItem = withObject "BatchSetTagsItem" $ \o -> do
+      mid  <- o .: "memory_id"
+      tags <- o .: "tags"
+      pure (mid, tags)
 
 ------------------------------------------------------------------------
 -- Tool call dispatch
@@ -947,6 +1043,15 @@ validateToolCall = \case
     MemorySetEmbedding mid vec
         | null vec  -> Left "memory_set_embedding: embedding must not be empty"
         | otherwise -> Right $ MemorySetEmbedding mid vec
+    MemoryDeleteBatch ids -> validateBatchIds "memory_delete_batch" ids (MemoryDeleteBatch ids)
+    TaskDeleteBatch ids -> validateBatchIds "task_delete_batch" ids (TaskDeleteBatch ids)
+    TaskMoveBatch ids pid -> validateBatchIds "task_move_batch" ids (TaskMoveBatch ids pid)
+    ProjectLinkMemBatch pid mids -> validateBatchIds "project_link_memories_batch" mids (ProjectLinkMemBatch pid mids)
+    TaskLinkMemBatch tid mids -> validateBatchIds "task_link_memories_batch" mids (TaskLinkMemBatch tid mids)
+    MemorySetTagsBatch items
+        | null items -> Left "memory_set_tags_batch: items must not be empty"
+        | length items > 100 -> Left "memory_set_tags_batch: items must contain at most 100 items"
+        | otherwise -> Right $ MemorySetTagsBatch items
     other -> Right other
 
 -- | Whitelist of valid PostgreSQL full-text search configurations.
@@ -964,6 +1069,13 @@ validFtsLanguages = Set.fromList
 validFtsLanguage :: Maybe Text -> Bool
 validFtsLanguage Nothing  = True
 validFtsLanguage (Just l) = Set.member l validFtsLanguages
+
+-- | Validate a batch ID list (1-100 items).
+validateBatchIds :: String -> [a] -> ToolCall -> Either String ToolCall
+validateBatchIds toolName ids result
+  | null ids  = Left $ toolName <> ": ids must not be empty"
+  | length ids > 100 = Left $ toolName <> ": ids must contain at most 100 items"
+  | otherwise = Right result
 
 clamp :: Ord a => a -> a -> a -> a
 clamp lo hi = Prelude.max lo . Prelude.min hi
@@ -1159,6 +1271,18 @@ executeToolCall mgr base mApiKey = \case
     MemorySimilar sq -> postJSON mgr base mApiKey "/api/v1/memories/similar" sq
     MemorySetEmbedding mid vec -> putJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/embedding")
                                   (toJSON vec)
+    MemoryDeleteBatch ids -> postJSON mgr base mApiKey "/api/v1/memories/batch-delete"
+                              (object ["ids" .= ids])
+    TaskDeleteBatch ids -> postJSON mgr base mApiKey "/api/v1/tasks/batch-delete"
+                            (object ["ids" .= ids])
+    TaskMoveBatch ids pid -> postJSON mgr base mApiKey "/api/v1/tasks/batch-move"
+                              (object ["task_ids" .= ids, "project_id" .= pid])
+    ProjectLinkMemBatch pid mids -> postJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories/batch")
+                                    (object ["memory_ids" .= mids])
+    TaskLinkMemBatch tid mids -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories/batch")
+                                  (object ["memory_ids" .= mids])
+    MemorySetTagsBatch items -> postJSON mgr base mApiKey "/api/v1/memories/batch-set-tags"
+                                (object ["items" .= [object ["memory_id" .= mid, "tags" .= tags] | (mid, tags) <- items]])
 
 ------------------------------------------------------------------------
 -- Typed HTTP helpers

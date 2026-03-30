@@ -3,6 +3,8 @@ module HMem.DB.Task
   , getTask
   , updateTask
   , deleteTask
+  , deleteTaskBatch
+  , moveTasksBatch
   , listTasks
   , listTasksWithQuery
   , listTasksByWorkspace
@@ -10,6 +12,7 @@ module HMem.DB.Task
   , removeDependency
   , linkTaskMemory
   , unlinkTaskMemory
+  , linkTaskMemoryBatch
   ) where
 
 import Control.Exception (throwIO)
@@ -244,6 +247,53 @@ deleteTask pool tid = do
             }
         pure True
 
+-- | Soft-delete multiple tasks by ID in a single transaction.
+-- Does NOT cascade to subtasks (unlike deleteTask).
+-- Returns the number of tasks actually deleted.
+deleteTaskBatch :: Pool Hasql.Connection -> [UUID] -> IO Int
+deleteTaskBatch _pool [] = pure 0
+deleteTaskBatch pool ids = do
+  runTransaction pool $ do
+    n <- Session.statement () $ runN $
+      update Update
+        { target = taskSchema
+        , from = pure ()
+        , set = \_ row -> row { taskDeletedAt = deletedNow }
+        , updateWhere = \_ row -> in_ row.taskId (map lit ids) &&. activeTask row
+        , returning = NoReturning
+        }
+    -- Cascade dependency and link cleanup
+    Session.statement () $ run_ $
+      delete Delete
+        { from = taskDependencySchema
+        , using = pure ()
+        , deleteWhere = \_ row -> in_ row.tdTaskId (map lit ids) ||. in_ row.tdDependsOnId (map lit ids)
+        , returning = NoReturning
+        }
+    Session.statement () $ run_ $
+      delete Delete
+        { from = taskMemoryLinkSchema
+        , using = pure ()
+        , deleteWhere = \_ row -> in_ row.tmlTaskId (map lit ids)
+        , returning = NoReturning
+        }
+    pure (fromIntegral n)
+
+-- | Move multiple tasks to a new project (or detach from all projects
+-- when projectId is Nothing). Returns the number of tasks actually moved.
+moveTasksBatch :: Pool Hasql.Connection -> [UUID] -> Maybe UUID -> IO Int
+moveTasksBatch _pool [] _ = pure 0
+moveTasksBatch pool ids projectId = do
+  n <- runSession pool $ Session.statement () $ runN $
+    update Update
+      { target = taskSchema
+      , from = pure ()
+      , set = \_ row -> row { taskProjectId = lit projectId }
+      , updateWhere = \_ row -> in_ row.taskId (map lit ids) &&. activeTask row
+      , returning = NoReturning
+      }
+  pure (fromIntegral n)
+
 ------------------------------------------------------------------------
 -- List
 ------------------------------------------------------------------------
@@ -385,3 +435,22 @@ unlinkTaskMemory pool tid mid =
       , deleteWhere = \_ row -> row.tmlTaskId ==. lit tid &&. row.tmlMemoryId ==. lit mid
       , returning = NoReturning
       }
+
+-- | Link multiple memories to a task in a single insert.
+-- Idempotent: already-linked pairs are silently skipped.
+-- Returns the number of memory IDs submitted.
+linkTaskMemoryBatch :: Pool Hasql.Connection -> UUID -> [UUID] -> IO Int
+linkTaskMemoryBatch _pool _ [] = pure 0
+linkTaskMemoryBatch pool tid mids =
+  runSession pool $ do
+    Session.statement () $ run_ $
+      insert Insert
+        { into = taskMemoryLinkSchema
+        , rows = values
+            [ TaskMemoryLinkT { tmlTaskId = lit tid, tmlMemoryId = lit mid }
+            | mid <- mids
+            ]
+        , onConflict = DoNothing
+        , returning = NoReturning
+        }
+    pure (length mids)

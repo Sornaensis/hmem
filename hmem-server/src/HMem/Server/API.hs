@@ -110,6 +110,8 @@ type MemoryAPI =
   :<|> "similar" :> ReqBody '[JSON] SimilarQuery :> Post '[JSON] [SimilarMemory]
   :<|> Capture "memoryId" UUID :> "embedding" :> ReqBody '[JSON] [Double]
          :> Put '[JSON] NoContent
+  :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
+  :<|> "batch-set-tags" :> ReqBody '[JSON] BatchSetTagsRequest :> Post '[JSON] BatchResult
 
 -- Projects
 type ProjectAPI =
@@ -132,8 +134,8 @@ type ProjectAPI =
   :<|> Capture "projectId" UUID :> "memories" :> Capture "memoryId" UUID
          :> Delete '[JSON] NoContent
   :<|> Capture "projectId" UUID :> "memories" :> Get '[JSON] [Memory]
-
--- Tasks
+  :<|> Capture "projectId" UUID :> "memories" :> "batch"
+         :> ReqBody '[JSON] BatchMemoryLinkRequest :> Post '[JSON] BatchResult
 type TaskAPI =
        QueryParam "workspace_id" UUID
          :> QueryParam "project_id" UUID
@@ -160,8 +162,10 @@ type TaskAPI =
   :<|> Capture "taskId" UUID :> "dependencies" :> Capture "dependsOnId" UUID
          :> Delete '[JSON] NoContent
   :<|> Capture "taskId" UUID :> "memories" :> Get '[JSON] [Memory]
-
--- Cleanup
+  :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
+  :<|> "batch-move" :> ReqBody '[JSON] BatchMoveTasksRequest :> Post '[JSON] BatchResult
+  :<|> Capture "taskId" UUID :> "memories" :> "batch"
+         :> ReqBody '[JSON] BatchMemoryLinkRequest :> Post '[JSON] BatchResult
 type CleanupAPI =
        "run" :> ReqBody '[JSON] CleanupRunReq :> Post '[JSON] CleanupResult
   :<|> "policies" :> QueryParam "workspace_id" UUID
@@ -697,6 +701,8 @@ memoryHandlers pool tracker pgvec =
   :<|> unpinH
   :<|> similarH
   :<|> setEmbeddingH
+  :<|> batchDeleteH
+  :<|> batchSetTagsH
   where
     requireMemoryH :: UUID -> Handler Memory
     requireMemoryH mid = handleDBErrors (Mem.getMemory pool mid) >>= maybe (throwError err404) pure
@@ -830,6 +836,16 @@ memoryHandlers pool tracker pgvec =
           handleDBErrors $ Mem.setEmbedding pool mid vec
           pure NoContent
 
+    batchDeleteH br = do
+      rejectValidationErrors (validateBatchDeleteRequest br)
+      n <- handleDBErrors $ Mem.deleteMemoryBatch pool br.ids
+      pure BatchResult { affected = n }
+
+    batchSetTagsH bst = do
+      rejectValidationErrors (validateBatchSetTagsRequest bst)
+      n <- handleDBErrors $ Mem.setTagsBatch pool [(item.memoryId, item.tags) | item <- bst.items]
+      pure BatchResult { affected = n }
+
 -- Project handlers -------------------------------------------------
 
 projectHandlers :: Pool Hasql.Connection -> Server ProjectAPI
@@ -843,6 +859,7 @@ projectHandlers pool =
   :<|> linkMemoryH
   :<|> unlinkMemoryH
   :<|> getProjectMemoriesH
+  :<|> batchLinkMemoriesH
   where
     requireProjectH :: UUID -> Handler Project
     requireProjectH pid = handleDBErrors (Proj.getProject pool pid) >>= maybe (throwError err404) pure
@@ -911,6 +928,12 @@ projectHandlers pool =
       _ <- requireProjectH pid
       handleDBErrors $ Mem.getProjectMemories pool pid
 
+    batchLinkMemoriesH pid blr = do
+      _ <- requireProjectH pid
+      rejectValidationErrors (validateBatchMemoryLinkRequest blr)
+      n <- handleDBErrors $ Proj.linkProjectMemoryBatch pool pid blr.memoryIds
+      pure BatchResult { affected = n }
+
 -- Task handlers ----------------------------------------------------
 
 taskHandlers :: Pool Hasql.Connection -> Server TaskAPI
@@ -926,6 +949,9 @@ taskHandlers pool =
   :<|> addDepH
   :<|> removeDepH
   :<|> getTaskMemoriesH
+  :<|> batchDeleteH
+  :<|> batchMoveH
+  :<|> batchLinkMemoriesH
   where
     requireTaskH :: UUID -> Handler Task
     requireTaskH tid = handleDBErrors (Task.getTask pool tid) >>= maybe (throwError err404) pure
@@ -1005,6 +1031,22 @@ taskHandlers pool =
     getTaskMemoriesH tid = do
       _ <- requireTaskH tid
       handleDBErrors $ Mem.getTaskMemories pool tid
+
+    batchDeleteH br = do
+      rejectValidationErrors (validateBatchDeleteRequest br)
+      n <- handleDBErrors $ Task.deleteTaskBatch pool br.ids
+      pure BatchResult { affected = n }
+
+    batchMoveH bmr = do
+      rejectValidationErrors (validateBatchMoveTasksRequest bmr)
+      n <- handleDBErrors $ Task.moveTasksBatch pool bmr.taskIds bmr.projectId
+      pure BatchResult { affected = n }
+
+    batchLinkMemoriesH tid blr = do
+      _ <- requireTaskH tid
+      rejectValidationErrors (validateBatchMemoryLinkRequest blr)
+      n <- handleDBErrors $ Task.linkTaskMemoryBatch pool tid blr.memoryIds
+      pure BatchResult { affected = n }
 
 -- Cleanup handlers -------------------------------------------------
 

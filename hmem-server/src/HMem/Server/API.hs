@@ -35,7 +35,7 @@ import System.IO (stderr)
 import HMem.DB.Category qualified as Cat
 import HMem.DB.Cleanup qualified as Cleanup
 import HMem.DB.Memory qualified as Mem
-import HMem.DB.Pool (runSession, runTransaction, DBException(..))
+import HMem.DB.Pool (runSession, runTransaction, DBException(..), PoolMetrics(..), getPoolMetrics)
 import HMem.DB.Project qualified as Proj
 import HMem.DB.RequestContext (currentRequestId)
 import HMem.DB.SavedView qualified as SV
@@ -398,15 +398,25 @@ healthHandler pool tracker = do
   mResult <- liftIO $ tryWithResource pool $ \conn ->
     Session.run (Session.sql "SELECT 1") conn
   bufSz <- liftIO $ bufferSize tracker
+  metrics <- liftIO getPoolMetrics
   let (dbStatus, overallStatus) = case mResult of
         Just (Right _) -> ("connected" :: Text, "ok" :: Text)
         Just (Left _)  -> ("error",             "degraded")
         Nothing        -> ("pool_exhausted",    "degraded")
+      utilPct | metrics.maxConnections > 0 =
+                metrics.activeConnections * 100 `div` metrics.maxConnections
+              | otherwise = 0
   pure $ object
     [ "status"  .= overallStatus
     , "version" .= ("0.1.0.0" :: Text)
     , "database" .= object
         [ "status" .= dbStatus
+        ]
+    , "pool" .= object
+        [ "active_connections" .= metrics.activeConnections
+        , "max_connections"    .= metrics.maxConnections
+        , "idle_connections"   .= Prelude.max 0 (metrics.maxConnections - metrics.activeConnections)
+        , "utilization_pct"    .= utilPct
         ]
     , "access_tracker" .= object
         [ "buffered_count" .= bufSz

@@ -5,10 +5,13 @@ module HMem.DB.Pool
   , runTransaction
   , DBException(..)
   , checkPgvector
+  , PoolMetrics(..)
+  , getPoolMetrics
   ) where
 
-import Control.Exception (Exception, SomeException, throwIO, try)
-import Control.Monad (void)
+import Control.Exception (Exception, SomeException, bracket_, throwIO, try)
+import Control.Monad (void, when)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Pool (Pool, newPool, defaultPoolConfig, setNumStripes, withResource)
 import Data.Text.Encoding qualified as TE
 import Data.Text (Text)
@@ -21,8 +24,34 @@ import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
+import System.IO (hPutStrLn, stderr)
+import System.IO.Unsafe (unsafePerformIO)
 
 import HMem.DB.RequestContext (currentRequestId)
+
+------------------------------------------------------------------------
+-- Pool metrics (process-wide)
+------------------------------------------------------------------------
+
+-- | Snapshot of connection pool utilisation.
+data PoolMetrics = PoolMetrics
+  { activeConnections :: !Int
+  , maxConnections    :: !Int
+  } deriving (Show, Eq)
+
+-- | Process-wide counter of connections currently checked out of the pool.
+{-# NOINLINE activeConnectionsRef #-}
+activeConnectionsRef :: IORef Int
+activeConnectionsRef = unsafePerformIO (newIORef 0)
+
+-- | Configured maximum number of connections (set once in 'createPool').
+{-# NOINLINE maxConnectionsRef #-}
+maxConnectionsRef :: IORef Int
+maxConnectionsRef = unsafePerformIO (newIORef 0)
+
+-- | Read the current pool metrics.
+getPoolMetrics :: IO PoolMetrics
+getPoolMetrics = PoolMetrics <$> readIORef activeConnectionsRef <*> readIORef maxConnectionsRef
 
 ------------------------------------------------------------------------
 -- Structured database exceptions
@@ -70,6 +99,7 @@ createPool
   -> Int             -- ^ Statement timeout in milliseconds
   -> IO (Pool Hasql.Connection)
 createPool connStr maxConns idleTimeout stmtTimeoutMs = do
+  atomicModifyIORef' maxConnectionsRef $ \_ -> (maxConns, ())
   caps <- getNumCapabilities
   let stripes = max 1 (min maxConns caps)
   newPool $ setNumStripes (Just stripes) $ defaultPoolConfig
@@ -95,8 +125,19 @@ createPool connStr maxConns idleTimeout stmtTimeoutMs = do
 -- The pool already validates connections on checkout (via the
 -- @SET statement_timeout@ in 'acquire'); stale connections throw
 -- on first use and are automatically discarded by resource-pool.
+-- Active-connection metrics are updated atomically on checkout/return.
 withConn :: Pool Hasql.Connection -> (Hasql.Connection -> IO a) -> IO a
-withConn pool action = withResource pool action
+withConn pool action = withResource pool $ \conn ->
+  bracket_
+    (do active <- atomicModifyIORef' activeConnectionsRef $ \n ->
+                    let n' = n + 1 in (n', n')
+        maxC <- readIORef maxConnectionsRef
+        when (maxC > 0 && active * 100 >= maxC * 80) $
+          hPutStrLn stderr $ "Warning: pool utilisation at "
+            <> show (active * 100 `div` maxC) <> "% ("
+            <> show active <> "/" <> show maxC <> ")")
+    (atomicModifyIORef' activeConnectionsRef $ \n -> (max 0 (n - 1), ()))
+    (action conn)
 
 -- | Run a Hasql Session via a connection pool, throwing a structured
 -- 'DBException' on error.

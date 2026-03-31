@@ -30,6 +30,7 @@ module HMem.Types
   , CreateProject(..)
   , UpdateProject(..)
   , ProjectListQuery(..)
+  , ProjectOverview(..)
 
     -- * Task types
   , TaskStatus(..)
@@ -792,6 +793,17 @@ instance ToJSON ProjectListQuery where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON ProjectListQuery where
   parseJSON  = genericParseJSON jsonOptions
+
+-- | Aggregated view of a project for planning workflows.
+data ProjectOverview = ProjectOverview
+  { project        :: Project
+  , tasks          :: [Task]
+  , subprojects    :: [Project]
+  , linkedMemories :: [Memory]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ProjectOverview where
+  toJSON     = genericToJSON jsonOptions
 
 data TaskListQuery = TaskListQuery
   { workspaceId   :: Maybe UUID

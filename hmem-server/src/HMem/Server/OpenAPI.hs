@@ -123,6 +123,7 @@ instance ToSchema BatchResult            where declareNamedSchema = genericDecla
 instance ToSchema SavedView              where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CreateSavedView        where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema UpdateSavedView        where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ProjectOverview        where declareNamedSchema = genericDeclareNamedSchema opts
 
 ------------------------------------------------------------------------
 -- Helper

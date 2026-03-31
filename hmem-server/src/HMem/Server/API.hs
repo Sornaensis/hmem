@@ -140,6 +140,7 @@ type ProjectAPI =
   :<|> Capture "projectId" UUID :> "memories" :> Get '[JSON] [Memory]
   :<|> Capture "projectId" UUID :> "memories" :> "batch"
          :> ReqBody '[JSON] BatchMemoryLinkRequest :> Post '[JSON] BatchResult
+  :<|> Capture "projectId" UUID :> "overview" :> Get '[JSON] ProjectOverview
 type TaskAPI =
        QueryParam "workspace_id" UUID
          :> QueryParam "project_id" UUID
@@ -881,6 +882,7 @@ projectHandlers pool =
   :<|> unlinkMemoryH
   :<|> getProjectMemoriesH
   :<|> batchLinkMemoriesH
+  :<|> projectOverviewH
   where
     requireProjectH :: UUID -> Handler Project
     requireProjectH pid = handleDBErrors (Proj.getProject pool pid) >>= maybe (throwError err404) pure
@@ -953,6 +955,27 @@ projectHandlers pool =
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
       n <- handleDBErrors $ Proj.linkProjectMemoryBatch pool pid blr.memoryIds
       pure BatchResult { affected = n }
+
+    projectOverviewH pid = do
+      proj <- requireProjectH pid
+      tasks <- handleDBErrors $ Task.listTasksWithQuery pool TaskListQuery
+        { workspaceId = Nothing, projectId = Just pid, status = Nothing
+        , priority = Nothing, createdAfter = Nothing, createdBefore = Nothing
+        , updatedAfter = Nothing, updatedBefore = Nothing
+        , limit = Just 200, offset = Just 0 }
+      allProjects <- handleDBErrors $ Proj.listProjectsWithQuery pool ProjectListQuery
+        { workspaceId = Just proj.workspaceId, status = Nothing
+        , createdAfter = Nothing, createdBefore = Nothing
+        , updatedAfter = Nothing, updatedBefore = Nothing
+        , limit = Just 200, offset = Just 0 }
+      let childProjects = Prelude.filter (\p -> p.parentId == Just pid) allProjects
+      mems <- handleDBErrors $ Mem.getProjectMemories pool pid
+      pure ProjectOverview
+        { project = proj
+        , tasks = tasks
+        , subprojects = childProjects
+        , linkedMemories = mems
+        }
 
 -- Task handlers ----------------------------------------------------
 

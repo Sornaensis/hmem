@@ -141,7 +141,7 @@ toolDefinitions =
       , "required" .= [t "memory_id"]
       ]
 
-    , mkTool "memory_link" "Create a typed link between two existing memories by ID. Use after discovery with memory_search or memory_get." $ object
+    , mkTool "memory_link" "Create a typed link between two existing memories by ID. Relation types: related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to. Use after discovery with memory_search. Remove with memory_unlink." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "source_id"     .= prop "string" "Source memory UUID"
@@ -153,7 +153,7 @@ toolDefinitions =
       , "required" .= [t "source_id", t "target_id", t "relation_type"]
       ]
 
-    , mkTool "project_create" "Create a top-level or child project in a workspace. Start minimal, then refine status, priority, metadata, or hierarchy later with project_update." $ object
+    , mkTool "project_create" "Create a top-level or child project in a workspace. Set parent_id to create a subproject under an existing project. After creating, add tasks with task_create and link relevant memories with project_link_memory. Use project_overview to inspect the result." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
@@ -182,7 +182,7 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "task_create" "Create a workspace- or project-scoped task. Use parent_id for subtasks; when parent_id is set, project_id should match the parent task's project." $ object
+    , mkTool "task_create" "Create a workspace- or project-scoped task. Use parent_id for subtasks; when parent_id is set, project_id should match the parent task's project. After creating, add ordering constraints with task_dependency_add, and attach relevant context with task_link_memory." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
@@ -390,6 +390,13 @@ toolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
+  , mkTool "project_overview" "Get a project with its tasks, subprojects, and linked memories in one call. Use this to understand the full scope of a project before making changes, instead of calling project_get, task_list, and project_list_memories separately." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "project_id" .= prop "string" "UUID of the project" ]
+      , "required" .= [t "project_id"]
+      ]
+
   -- Issue 1: Missing task get/delete
     , mkTool "task_get" "Get a task by ID with full detail: title, description, status, priority, project_id, parent_id, due_at, metadata, and timestamps. Use task_list to discover IDs." $ object
       [ "type" .= t "object"
@@ -485,7 +492,7 @@ toolDefinitions =
       ]
 
   -- Issue 3: Task dependencies
-    , mkTool "task_dependency_add" "Add an ordering dependency between two existing tasks. Use this for sequencing, not for parent/child hierarchy." $ object
+    , mkTool "task_dependency_add" "Add an ordering dependency: the first task depends on the second (must complete before it). Use this for sequencing work, not for parent/child hierarchy (use parent_id in task_create for that). Remove with task_dependency_remove." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id"       .= prop "string" "UUID of the task"
@@ -504,7 +511,7 @@ toolDefinitions =
       ]
 
   -- Issue 4: Cross-entity memory links
-  , mkTool "project_link_memory" "Link a memory to a project" $ object
+  , mkTool "project_link_memory" "Link a memory to a project so it appears in project_overview and project_list_memories. Use this to attach context, decisions, or research findings to the project they inform. For bulk linking, prefer project_link_memories_batch." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project"
@@ -522,7 +529,7 @@ toolDefinitions =
       , "required" .= [t "project_id", t "memory_id"]
       ]
 
-  , mkTool "task_link_memory" "Link a memory to a task" $ object
+  , mkTool "task_link_memory" "Link a memory to a task so it appears in task_list_memories. Use this to attach implementation notes, requirements, or decisions to specific work items. For bulk linking, prefer task_link_memories_batch." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id"   .= prop "string" "UUID of the task"
@@ -934,6 +941,7 @@ data ToolCall
   | SavedViewDelete UUID
   | SavedViewPurge UUID
   | SavedViewExecute UUID (Maybe Int) (Maybe Int) (Maybe Bool) -- view_id, limit, offset, detail
+  | ProjectOverviewCall UUID
   deriving (Show, Eq)
 
 -- | Parse raw JSON-RPC params (containing "name" and "arguments") into
@@ -1018,6 +1026,7 @@ parseToolCall name args = case name of
     "saved_view_delete"         -> SavedViewDelete <$> need "view_id"
     "saved_view_purge"          -> SavedViewPurge <$> need "view_id"
     "saved_view_execute"        -> SavedViewExecute <$> need "view_id" <*> opt "limit" <*> opt "offset" <*> opt "detail"
+    "project_overview"          -> ProjectOverviewCall <$> need "project_id"
     _                           -> Left $ "Unknown tool: " <> T.unpack name
   where
     parse :: FromJSON a => Value -> Either String a
@@ -1387,6 +1396,7 @@ executeToolCall mgr base mApiKey = \case
                             , ("offset", show <$> mo)
                             , ("detail", (\b -> if b then "true" else "false") <$> md)
                             ]) (object [])
+    ProjectOverviewCall pid -> getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/overview")
 
 ------------------------------------------------------------------------
 -- Typed HTTP helpers

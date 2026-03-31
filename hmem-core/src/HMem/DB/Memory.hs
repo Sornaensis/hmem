@@ -4,6 +4,7 @@ module HMem.DB.Memory
   , createMemoryBatch
   , getMemory
   , updateMemory
+  , updateMemoryBatch
   , deleteMemory
   , deleteMemoryBatch
 
@@ -277,6 +278,14 @@ updateMemory pool mid um = do
 ------------------------------------------------------------------------
 -- Delete
 ------------------------------------------------------------------------
+
+-- | Batch-update multiple memories. Each item is updated individually.
+-- Returns the count of successfully updated memories.
+updateMemoryBatch :: Pool Hasql.Connection -> [(UUID, UpdateMemory)] -> IO Int
+updateMemoryBatch _pool [] = pure 0
+updateMemoryBatch pool items = do
+  results <- mapM (\(mid, um) -> updateMemory pool mid um) items
+  pure $ length [() | Just _ <- results]
 
 deleteMemory :: Pool Hasql.Connection -> UUID -> IO Bool
 deleteMemory pool mid = do

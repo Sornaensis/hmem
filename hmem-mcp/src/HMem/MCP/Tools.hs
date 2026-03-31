@@ -9,6 +9,7 @@ module HMem.MCP.Tools
 
 import Control.Exception (SomeException, try)
 import Data.Aeson
+import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, parseEither)
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
@@ -791,6 +792,58 @@ toolDefinitions =
       , "required" .= [t "items"]
       ]
 
+  , mkTool "memory_update_batch" "Update multiple memories at once. Each item specifies a memory ID and the fields to update (same fields as memory_update). Missing or non-existent IDs are skipped. Max 100 items." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "items" .= object ["type" .= t "array",
+                                "description" .= t "Array of memory update objects",
+                                "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
+                                "items" .= object
+                                    [ "type" .= t "object"
+                                    , "properties" .= object
+                                        [ "id"          .= prop "string" "UUID of the memory to update"
+                                        , "content"     .= propMaxLength "string" "New content" maxMemoryContentBytes
+                                        , "summary"     .= propMaxLength "string" "New summary (null to clear)" maxMemorySummaryBytes
+                                        , "importance"  .= prop "integer" "New importance (1-10)"
+                                        , "memory_type" .= propEnum "string" "New type" ["short_term", "long_term"]
+                                        , "metadata"    .= prop "object" "New metadata JSON object"
+                                        , "expires_at"  .= prop "string" "ISO 8601 expiration time (null to clear)"
+                                        , "source"      .= prop "string" "Provenance (null to clear)"
+                                        , "confidence"  .= prop "number" "Confidence level 0.0-1.0"
+                                        , "pinned"      .= prop "boolean" "Pin or unpin this memory"
+                                        ]
+                                    , "required" .= [t "id"]
+                                    ]]
+          ]
+      , "required" .= [t "items"]
+      ]
+
+  , mkTool "task_update_batch" "Update multiple tasks at once. Each item specifies a task ID and the fields to update (same fields as task_update). Missing or non-existent IDs are skipped. Max 100 items." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "items" .= object ["type" .= t "array",
+                                "description" .= t "Array of task update objects",
+                                "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
+                                "items" .= object
+                                    [ "type" .= t "object"
+                                    , "properties" .= object
+                                        [ "id"          .= prop "string" "UUID of the task to update"
+                                        , "title"       .= propMaxLength "string" "New title" maxNameBytes
+                                        , "description" .= propMaxLength "string" "New description (null to clear)" maxDescriptionBytes
+                                        , "project_id"  .= prop "string" "New project UUID (null to clear)"
+                                        , "parent_id"   .= prop "string" "New parent task UUID (null to clear)"
+                                        , "status"      .= propEnum "string" "New status"
+                                            ["todo", "in_progress", "blocked", "done", "cancelled"]
+                                        , "priority"    .= prop "integer" "New priority (1-10)"
+                                        , "metadata"    .= prop "object" "New metadata JSON object"
+                                        , "due_at"      .= prop "string" "ISO 8601 due date (null to clear)"
+                                        ]
+                                    , "required" .= [t "id"]
+                                    ]]
+          ]
+      , "required" .= [t "items"]
+      ]
+
   -- Saved views
   , mkTool "saved_view_create" "Create a saved view that stores a reusable query. Specify entity_type (memory_search, memory_list, project_list, task_list, activity) and query_params matching that entity's query schema. Execute later with saved_view_execute." $ object
       [ "type" .= t "object"
@@ -934,6 +987,8 @@ data ToolCall
   | ProjectLinkMemBatch UUID [UUID]       -- project_id, memory_ids
   | TaskLinkMemBatch UUID [UUID]          -- task_id, memory_ids
   | MemorySetTagsBatch [(UUID, [Text])]   -- [(memory_id, tags)]
+  | MemoryUpdateBatch [(UUID, UpdateMemory)]  -- [(memory_id, update)]
+  | TaskUpdateBatch [(UUID, UpdateTask)]      -- [(task_id, update)]
   | SavedViewCreate CreateSavedView
   | SavedViewList UUID (Maybe Int) (Maybe Int) -- workspace_id, limit, offset
   | SavedViewGet UUID
@@ -1019,6 +1074,8 @@ parseToolCall name args = case name of
     "project_link_memories_batch" -> ProjectLinkMemBatch <$> need "project_id" <*> need "memory_ids"
     "task_link_memories_batch"  -> TaskLinkMemBatch <$> need "task_id" <*> need "memory_ids"
     "memory_set_tags_batch"     -> MemorySetTagsBatch <$> parseBatchSetTags args
+    "memory_update_batch"       -> MemoryUpdateBatch <$> parseBatchUpdateItems args
+    "task_update_batch"         -> TaskUpdateBatch <$> parseBatchUpdateItems args
     "saved_view_create"         -> SavedViewCreate <$> parse args
     "saved_view_list"           -> SavedViewList <$> need "workspace_id" <*> opt "limit" <*> opt "offset"
     "saved_view_get"            -> SavedViewGet <$> need "view_id"
@@ -1048,6 +1105,17 @@ parseBatchSetTags = parseEither $ withObject "args" $ \o -> do
       mid  <- o .: "memory_id"
       tags <- o .: "tags"
       pure (mid, tags)
+
+-- | Parse batch update items array into [(UUID, a)] where a is FromJSON.
+parseBatchUpdateItems :: FromJSON a => Value -> Either String [(UUID, a)]
+parseBatchUpdateItems = parseEither $ withObject "args" $ \o -> do
+  items <- o .: "items" :: Parser [Value]
+  mapM parseItem items
+  where
+    parseItem = withObject "BatchUpdateItem" $ \o -> do
+      uid <- o .: "id"
+      upd <- parseJSON (Object o)
+      pure (uid, upd)
 
 ------------------------------------------------------------------------
 -- Tool call dispatch
@@ -1144,6 +1212,19 @@ validateToolCall = \case
         | null items -> Left "memory_set_tags_batch: items must not be empty"
         | length items > 100 -> Left "memory_set_tags_batch: items must contain at most 100 items"
         | otherwise -> Right $ MemorySetTagsBatch items
+    MemoryUpdateBatch items
+        | null items -> Left "memory_update_batch: items must not be empty"
+        | length items > 100 -> Left "memory_update_batch: items must contain at most 100 items"
+        | otherwise ->
+            let items' = [(uid, clampUpdateMemory um) | (uid, um) <- items]
+                errs = concat [validateUpdateMemoryInput um | (_, um) <- items']
+            in MemoryUpdateBatch items' <$ firstValidationError errs
+    TaskUpdateBatch items
+        | null items -> Left "task_update_batch: items must not be empty"
+        | length items > 100 -> Left "task_update_batch: items must contain at most 100 items"
+        | otherwise ->
+            let errs = concat [validateUpdateTaskInput ut | (_, ut) <- items]
+            in TaskUpdateBatch items <$ firstValidationError errs
     SavedViewCreate csv -> SavedViewCreate csv <$ firstValidationError (validateCreateSavedViewInput csv)
     SavedViewList wid ml mo -> Right $ SavedViewList wid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
     SavedViewUpdate vid usv -> SavedViewUpdate vid usv <$ firstValidationError (validateUpdateSavedViewInput usv)
@@ -1380,6 +1461,16 @@ executeToolCall mgr base mApiKey = \case
                                   (object ["memory_ids" .= mids])
     MemorySetTagsBatch items -> postJSON mgr base mApiKey "/api/v1/memories/batch-set-tags"
                                 (object ["items" .= [object ["memory_id" .= mid, "tags" .= tags] | (mid, tags) <- items]])
+    MemoryUpdateBatch items -> postJSON mgr base mApiKey "/api/v1/memories/batch-update"
+                                (object ["items" .= [case toJSON um of
+                                    Object o -> Object (KM.insert "id" (toJSON uid) o)
+                                    v        -> v
+                                  | (uid, um) <- items]])
+    TaskUpdateBatch items -> postJSON mgr base mApiKey "/api/v1/tasks/batch-update"
+                              (object ["items" .= [case toJSON ut of
+                                    Object o -> Object (KM.insert "id" (toJSON uid) o)
+                                    v        -> v
+                                  | (uid, ut) <- items]])
     SavedViewCreate csv -> postJSON mgr base mApiKey "/api/v1/saved-views" csv
     SavedViewList wid ml mo -> getJSON mgr base mApiKey ("/api/v1/saved-views" <> buildQuery
                             [ ("workspace_id", Just $ uuidPath wid)

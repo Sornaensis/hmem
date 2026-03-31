@@ -2,6 +2,7 @@ module HMem.DB.Task
   ( createTask
   , getTask
   , updateTask
+  , updateTaskBatch
   , deleteTask
   , deleteTaskBatch
   , moveTasksBatch
@@ -215,6 +216,14 @@ updateTask pool tid ut = do
 ------------------------------------------------------------------------
 -- Delete
 ------------------------------------------------------------------------
+
+-- | Batch-update multiple tasks. Each item is updated individually.
+-- Returns the count of successfully updated tasks.
+updateTaskBatch :: Pool Hasql.Connection -> [(UUID, UpdateTask)] -> IO Int
+updateTaskBatch _pool [] = pure 0
+updateTaskBatch pool items = do
+  results <- mapM (\(tid, ut) -> updateTask pool tid ut) items
+  pure $ length [() | Just _ <- results]
 
 deleteTask :: Pool Hasql.Connection -> UUID -> IO Bool
 deleteTask pool tid = do

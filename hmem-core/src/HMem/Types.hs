@@ -85,10 +85,16 @@ module HMem.Types
   , BatchSetTagsItem(..)
   , BatchSetTagsRequest(..)
   , BatchResult(..)
+  , BatchUpdateMemoryItem(..)
+  , BatchUpdateMemoryRequest(..)
+  , BatchUpdateTaskItem(..)
+  , BatchUpdateTaskRequest(..)
   , validateBatchDeleteRequest
   , validateBatchMoveTasksRequest
   , validateBatchMemoryLinkRequest
   , validateBatchSetTagsRequest
+  , validateBatchUpdateMemoryRequest
+  , validateBatchUpdateTaskRequest
 
     -- * Enum text conversion helpers
   , memoryTypeToText
@@ -1381,3 +1387,69 @@ validateBatchSetTagsRequest :: BatchSetTagsRequest -> [Text]
 validateBatchSetTagsRequest bs =
   ["items must contain at least one item" | null bs.items]
   <> ["items must contain at most 100 items" | length bs.items > 100]
+
+data BatchUpdateMemoryItem = BatchUpdateMemoryItem
+  { id     :: UUID
+  , update :: UpdateMemory
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchUpdateMemoryItem where
+  toJSON item = case toJSON item.update of
+    Object o -> Object (KM.insert "id" (toJSON item.id) o)
+    v        -> v
+
+instance FromJSON BatchUpdateMemoryItem where
+  parseJSON = withObject "BatchUpdateMemoryItem" $ \o ->
+    BatchUpdateMemoryItem <$> o .: "id" <*> parseJSON (Object o)
+
+newtype BatchUpdateMemoryRequest = BatchUpdateMemoryRequest
+  { items :: [BatchUpdateMemoryItem]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchUpdateMemoryRequest where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON BatchUpdateMemoryRequest where
+  parseJSON  = genericParseJSON jsonOptions
+
+data BatchUpdateTaskItem = BatchUpdateTaskItem
+  { id     :: UUID
+  , update :: UpdateTask
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchUpdateTaskItem where
+  toJSON item = case toJSON item.update of
+    Object o -> Object (KM.insert "id" (toJSON item.id) o)
+    v        -> v
+
+instance FromJSON BatchUpdateTaskItem where
+  parseJSON = withObject "BatchUpdateTaskItem" $ \o ->
+    BatchUpdateTaskItem <$> o .: "id" <*> parseJSON (Object o)
+
+newtype BatchUpdateTaskRequest = BatchUpdateTaskRequest
+  { items :: [BatchUpdateTaskItem]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchUpdateTaskRequest where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON BatchUpdateTaskRequest where
+  parseJSON  = genericParseJSON jsonOptions
+
+validateBatchUpdateMemoryRequest :: BatchUpdateMemoryRequest -> [Text]
+validateBatchUpdateMemoryRequest br =
+  ["items must contain at least one item" | null br.items]
+  <> ["items must contain at most 100 items" | length br.items > 100]
+  <> concat
+      [ prefixIssues ("items[" <> T.pack (show idx) <> "].")
+                     (validateUpdateMemoryInput item.update)
+      | (idx, item) <- zip [(0 :: Int) ..] br.items
+      ]
+
+validateBatchUpdateTaskRequest :: BatchUpdateTaskRequest -> [Text]
+validateBatchUpdateTaskRequest br =
+  ["items must contain at least one item" | null br.items]
+  <> ["items must contain at most 100 items" | length br.items > 100]
+  <> concat
+      [ prefixIssues ("items[" <> T.pack (show idx) <> "].")
+                     (validateUpdateTaskInput item.update)
+      | (idx, item) <- zip [(0 :: Int) ..] br.items
+      ]

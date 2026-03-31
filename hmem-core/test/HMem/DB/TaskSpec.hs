@@ -16,7 +16,7 @@ import HMem.Types
 import Data.UUID (UUID)
 
 spec :: Spec
-spec = around withTestEnv $ do
+spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
   describe "createTask / getTask" $ do
     it "creates and retrieves a task" $ \env -> do

@@ -6,12 +6,13 @@ module HMem.DB.Pool
   , DBException(..)
   , checkPgvector
   , PoolMetrics(..)
+  , setTestTransactionMode
   , getPoolMetrics
   ) where
 
 import Control.Exception (Exception, SomeException, bracket_, throwIO, try)
 import Control.Monad (void, when)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Pool (Pool, newPool, defaultPoolConfig, setNumStripes, withResource)
 import Data.Text.Encoding qualified as TE
 import Data.Text (Text)
@@ -52,6 +53,26 @@ maxConnectionsRef = unsafePerformIO (newIORef 0)
 -- | Read the current pool metrics.
 getPoolMetrics :: IO PoolMetrics
 getPoolMetrics = PoolMetrics <$> readIORef activeConnectionsRef <*> readIORef maxConnectionsRef
+
+------------------------------------------------------------------------
+-- Test transaction mode
+------------------------------------------------------------------------
+
+-- | When enabled, 'runManagedSession' uses SAVEPOINT\/RELEASE instead
+-- of BEGIN\/COMMIT so that an outer transaction can wrap an entire
+-- test case and roll back all changes at the end.
+{-# NOINLINE testTransactionModeRef #-}
+testTransactionModeRef :: IORef Bool
+testTransactionModeRef = unsafePerformIO (newIORef False)
+
+-- | Counter for generating unique savepoint names.
+{-# NOINLINE savepointCounterRef #-}
+savepointCounterRef :: IORef Int
+savepointCounterRef = unsafePerformIO (newIORef 0)
+
+-- | Enable or disable test transaction mode.
+setTestTransactionMode :: Bool -> IO ()
+setTestTransactionMode = writeIORef testTransactionModeRef
 
 ------------------------------------------------------------------------
 -- Structured database exceptions
@@ -132,7 +153,7 @@ withConn pool action = withResource pool $ \conn ->
     (do active <- atomicModifyIORef' activeConnectionsRef $ \n ->
                     let n' = n + 1 in (n', n')
         maxC <- readIORef maxConnectionsRef
-        when (maxC > 0 && active * 100 >= maxC * 80) $
+        when (maxC > 1 && active * 100 >= maxC * 80) $
           hPutStrLn stderr $ "Warning: pool utilisation at "
             <> show (active * 100 `div` maxC) <> "% ("
             <> show active <> "/" <> show maxC <> ")")
@@ -151,7 +172,14 @@ runTransaction = runManagedSession
 
 runManagedSession :: Pool Hasql.Connection -> Session.Session a -> IO a
 runManagedSession pool sess = withConn pool $ \conn -> do
+  testMode <- readIORef testTransactionModeRef
   mRequestId <- currentRequestId
+  if testMode
+    then runWithSavepoint conn mRequestId sess
+    else runWithTransaction conn mRequestId sess
+
+runWithTransaction :: Hasql.Connection -> Maybe Text -> Session.Session a -> IO a
+runWithTransaction conn mRequestId sess = do
   let txn = do
         Session.sql "BEGIN"
         applyRequestIdContext mRequestId
@@ -166,6 +194,23 @@ runManagedSession pool sess = withConn pool $ \conn -> do
       -- the original error.  withResource will destroy the connection
       -- when throwIO propagates out.
       _ <- try @SomeException $ Session.run (Session.sql "ROLLBACK") conn
+      throwIO (classifyError err)
+
+runWithSavepoint :: Hasql.Connection -> Maybe Text -> Session.Session a -> IO a
+runWithSavepoint conn mRequestId sess = do
+  spId <- atomicModifyIORef' savepointCounterRef $ \n -> let n' = n + 1 in (n', n')
+  let spName = "sp_" <> TE.encodeUtf8 (T.pack (show spId))
+      txn = do
+        Session.sql $ "SAVEPOINT " <> spName
+        applyRequestIdContext mRequestId
+        a <- sess
+        Session.sql $ "RELEASE SAVEPOINT " <> spName
+        pure a
+  result <- Session.run txn conn
+  case result of
+    Right a  -> pure a
+    Left err -> do
+      _ <- try @SomeException $ Session.run (Session.sql $ "ROLLBACK TO SAVEPOINT " <> spName) conn
       throwIO (classifyError err)
 
 applyRequestIdContext :: Maybe Text -> Session.Session ()

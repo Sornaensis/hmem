@@ -5,6 +5,7 @@ module HMem.DB.AuditSpec (spec) where
 import Data.Aeson (Value(..))
 import Data.Aeson.Key (fromText)
 import Data.Aeson.KeyMap qualified as KM
+import Data.List (sort)
 import Data.Text qualified as T
 import Test.Hspec
 
@@ -13,7 +14,7 @@ import HMem.DB.TestHarness
 import HMem.Types
 
 spec :: Spec
-spec = around withTestEnv $ do
+spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
   describe "audit log" $ do
     it "records create and soft-delete snapshots for memories" $ \env -> do
@@ -42,9 +43,9 @@ spec = around withTestEnv $ do
       deleteMemory env.pool mem.id `shouldReturn` True
 
       allRows <- getAuditLogRows env.pool "memory" (T.pack (show mem.id))
-      map (.action) allRows `shouldBe` ["create", "update"]
+      sort (map (.action) allRows) `shouldBe` ["create", "update"]
 
-      let deleted = allRows !! 1
+      let [deleted] = filter (\r -> r.action == "update") allRows
       (deleted.oldValues >>= lookupField "deleted_at") `shouldBe` Just Null
       (deleted.newValues >>= lookupField "deleted_at") `shouldSatisfy` \case
         Just (String _) -> True

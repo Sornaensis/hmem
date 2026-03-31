@@ -14,7 +14,7 @@ import HMem.DB.TestHarness
 import HMem.Types
 
 spec :: Spec
-spec = around withTestEnv $ do
+spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
   describe "createProject / getProject" $ do
     it "creates and retrieves a project" $ \env -> do

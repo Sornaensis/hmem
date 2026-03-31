@@ -3,6 +3,9 @@ module HMem.DB.TestHarness
     TestEnv(..)
   , AuditLogRow(..)
   , withTestEnv
+    -- * Transaction-based test isolation
+  , setupTestPool
+  , withTestTransaction
     -- * Ephemeral PostgreSQL
   , withEphemeralPg
     -- * DB utilities
@@ -14,7 +17,8 @@ module HMem.DB.TestHarness
   ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (SomeException, bracket, try)
+import Control.Exception (SomeException, bracket, finally, try)
+import Control.Monad (void)
 import Data.Aeson (Value)
 import Data.ByteString qualified as BS
 import Data.Functor.Contravariant (contramap)
@@ -37,7 +41,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Rel8
 
-import HMem.DB.Pool (createPool, runSession, withConn)
+import HMem.DB.Pool (createPool, runSession, setTestTransactionMode, withConn)
 import HMem.DB.Schema
 import HMem.Types
 
@@ -86,6 +90,48 @@ withTestEnv action = do
   ensureSchema env
   cleanDB env
   action env
+
+------------------------------------------------------------------------
+-- Transaction-based test isolation
+------------------------------------------------------------------------
+
+-- | Create a shared test pool with a single connection.  Call once
+-- per test suite via @beforeAll@, then pair with 'withTestTransaction'
+-- via @aroundWith@ so each test runs inside a transaction that is
+-- rolled back on completion.
+--
+-- @
+-- spec :: Spec
+-- spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
+--   it "does something" $ \\env -> …
+-- @
+setupTestPool :: IO TestEnv
+setupTestPool = do
+  connStr <- getTestConnStr
+  p <- createPool connStr 1 5.0 30000
+  let env = TestEnv { pool = p }
+  ensureSchema env
+  cleanDB env
+  pure env
+
+-- | Wrap a single test case in a database transaction that is always
+-- rolled back, regardless of success or failure.  Requires a pool of
+-- size 1 (from 'setupTestPool') so that all operations within the
+-- test share the same connection and transaction context.
+withTestTransaction :: (TestEnv -> IO a) -> TestEnv -> IO a
+withTestTransaction action env = do
+  -- Open an outer transaction on the single pooled connection.
+  withConn env.pool $ \conn -> do
+    result <- Session.run (Session.sql "BEGIN") conn
+    case result of
+      Left err -> fail $ "Failed to BEGIN test transaction: " <> show err
+      Right _  -> pure ()
+  setTestTransactionMode True
+  action env `finally` do
+    setTestTransactionMode False
+    -- Roll back – undoes all data written by the test.
+    withConn env.pool $ \conn ->
+      void $ Session.run (Session.sql "ROLLBACK") conn
 
 -- | Check whether the schema has been applied and apply it if not.
 -- Looks for @hmem-server/migrations/@ relative to the working directory.

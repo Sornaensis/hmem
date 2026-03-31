@@ -14,7 +14,7 @@ import HMem.DB.TestHarness
 import HMem.Types
 
 spec :: Spec
-spec = around withTestEnv $ do
+spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
   describe "createMemory / getMemory" $ do
     it "creates a memory and retrieves it by ID" $ \env -> do

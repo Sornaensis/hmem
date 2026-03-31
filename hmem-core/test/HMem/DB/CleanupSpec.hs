@@ -56,7 +56,7 @@ backdateMemory env mid hours = do
 ------------------------------------------------------------------------
 
 spec :: Spec
-spec = around withTestEnv $ do
+spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
   describe "upsertCleanupPolicy + getCleanupPolicies" $ do
     it "creates and lists a policy" $ \env -> do

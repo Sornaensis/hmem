@@ -321,8 +321,7 @@ listTasks pool projId mstatus mlimit moffset =
 
 listTasksWithQuery :: Pool Hasql.Connection -> TaskListQuery -> IO [Task]
 listTasksWithQuery pool tq = do
-  let lim = fromMaybe 50 tq.limit
-      off = fromMaybe 0  tq.offset
+  let (lim, off) = capPagination tq.limit tq.offset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $
     orderBy (((\row -> row.taskPriority) >$< desc) <> ((\row -> row.taskCreatedAt) >$< asc)) $ do

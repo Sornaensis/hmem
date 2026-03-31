@@ -10,7 +10,6 @@ module HMem.DB.Category
   ) where
 
 import Control.Exception (throwIO)
-import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
@@ -140,8 +139,7 @@ deleteCategory pool cid = do
 
 listCategories :: Pool Hasql.Connection -> UUID -> Maybe Int -> Maybe Int -> IO [MemoryCategory]
 listCategories pool wsId mlimit moffset = do
-  let lim = fromMaybe 50 mlimit
-      off = fromMaybe 0  moffset
+  let (lim, off) = capPagination mlimit moffset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $ do
       row <- each memoryCategorySchema
@@ -153,8 +151,7 @@ listCategories pool wsId mlimit moffset = do
 -- | List global categories (no workspace).
 listGlobalCategories :: Pool Hasql.Connection -> Maybe Int -> Maybe Int -> IO [MemoryCategory]
 listGlobalCategories pool mlimit moffset = do
-  let lim = fromMaybe 50 mlimit
-      off = fromMaybe 0  moffset
+  let (lim, off) = capPagination mlimit moffset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $ do
       row <- each memoryCategorySchema

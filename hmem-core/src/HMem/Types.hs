@@ -111,6 +111,9 @@ module HMem.Types
   , maxMemorySummaryBytes
   , maxNameBytes
   , maxDescriptionBytes
+  , maxPaginationOffset
+  , maxPaginationLimit
+  , capPagination
   , validateCreateWorkspaceInput
   , validateUpdateWorkspaceInput
   , validateCreateMemoryInput
@@ -135,7 +138,7 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, Pair)
 import Data.ByteString qualified as BS
 import Data.Char (isLower, isUpper, toLower)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -222,6 +225,23 @@ maxNameBytes = 1024
 
 maxDescriptionBytes :: Int
 maxDescriptionBytes = 100 * 1024
+
+-- | Maximum allowed pagination offset (default: 100,000).
+maxPaginationOffset :: Int
+maxPaginationOffset = 100000
+
+-- | Maximum allowed pagination limit (default: 200).
+maxPaginationLimit :: Int
+maxPaginationLimit = 200
+
+-- | Cap limit and offset to safe ranges, applying defaults.
+-- Limit defaults to 50, capped at 'maxPaginationLimit'.
+-- Offset defaults to 0, capped at 'maxPaginationOffset'.
+capPagination :: Maybe Int -> Maybe Int -> (Int, Int)
+capPagination mlimit moffset =
+  ( min maxPaginationLimit  (max 1 (fromMaybe 50 mlimit))
+  , min maxPaginationOffset (max 0 (fromMaybe 0  moffset))
+  )
 
 validateCreateWorkspaceInput :: CreateWorkspace -> [Text]
 validateCreateWorkspaceInput cw =

@@ -10,7 +10,6 @@ module HMem.DB.WorkspaceGroup
 
 import Control.Exception (throwIO)
 import Data.Functor.Contravariant ((>$<))
-import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
@@ -94,8 +93,7 @@ deleteGroup pool gid = do
 
 listGroups :: Pool Hasql.Connection -> Maybe Int -> Maybe Int -> IO [WorkspaceGroup]
 listGroups pool mlimit moffset = do
-  let lim = fromMaybe 50 mlimit
-      off = fromMaybe 0  moffset
+  let (lim, off) = capPagination mlimit moffset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $
     orderBy ((\row -> row.wgName) >$< asc) $

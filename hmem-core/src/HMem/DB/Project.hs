@@ -219,8 +219,7 @@ listProjects pool wsId mstatus mlimit moffset =
 
 listProjectsWithQuery :: Pool Hasql.Connection -> ProjectListQuery -> IO [Project]
 listProjectsWithQuery pool pq = do
-  let lim = fromMaybe 50 pq.limit
-      off = fromMaybe 0  pq.offset
+  let (lim, off) = capPagination pq.limit pq.offset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $
     orderBy (((\row -> row.projPriority) >$< desc) <> ((\row -> row.projName) >$< asc)) $ do

@@ -9,7 +9,6 @@ module HMem.DB.SavedView
 
 import Control.Exception (throwIO)
 import Data.Functor.Contravariant ((>$<))
-import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
@@ -150,8 +149,7 @@ purgeSavedView pool sid = do
 
 listSavedViews :: Pool Hasql.Connection -> UUID -> Maybe Int -> Maybe Int -> IO [SavedView]
 listSavedViews pool wsId mlimit moffset = do
-  let lim = fromMaybe 50 mlimit
-      off = fromMaybe 0  moffset
+  let (lim, off) = capPagination mlimit moffset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $
     orderBy ((\row -> row.svName) >$< asc) $ do

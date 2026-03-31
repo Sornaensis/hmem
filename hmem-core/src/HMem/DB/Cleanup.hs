@@ -7,7 +7,6 @@ module HMem.DB.Cleanup
 import Control.Exception (throwIO)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int16, Int32, Int64)
-import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
@@ -175,8 +174,7 @@ cleanByCount pool wsId policy =
 
 getCleanupPolicies :: Pool Hasql.Connection -> UUID -> Maybe Int -> Maybe Int -> IO [CleanupPolicy]
 getCleanupPolicies pool wsId mlimit moffset = do
-  let lim = fromMaybe 50 mlimit
-      off = fromMaybe 0  moffset
+  let (lim, off) = capPagination mlimit moffset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $ do
       row <- each cleanupPolicySchema

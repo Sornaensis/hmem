@@ -407,8 +407,7 @@ listMemories pool mWsId mtype mlimit moffset =
 
 listMemoriesWithQuery :: Pool Hasql.Connection -> MemoryListQuery -> IO [Memory]
 listMemoriesWithQuery pool mq = do
-  let lim = fromMaybe 50 mq.limit
-      off = fromMaybe 0  mq.offset
+  let (lim, off) = capPagination mq.limit mq.offset
   runSession pool $ do
     rows <- Session.statement () $ run $ select $
       limit (fromIntegral lim) $ offset (fromIntegral off) $
@@ -445,8 +444,7 @@ listMemoriesWithQuery pool mq = do
 -- it has /at least one/ of the supplied tags, not necessarily all of them.
 searchMemories :: Pool Hasql.Connection -> SearchQuery -> IO [Memory]
 searchMemories pool sq = do
-  let lim = fromMaybe 50 (sq.limit)
-      off = fromMaybe 0  (sq.offset)
+  let (lim, off) = capPagination sq.limit sq.offset
       imp = maybe 1 fromIntegral (sq.minImportance) :: Int16
       applyFilters row = do
         where_ $ activeMemory row

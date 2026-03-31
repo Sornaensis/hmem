@@ -1,10 +1,12 @@
 module Main where
 
 import Data.Maybe (fromMaybe)
+import Data.String (fromString)
 import Data.Text qualified as T
 import Control.Exception (SomeException, catch, finally)
+import Control.Monad (when)
 import Data.Pool (destroyAllResources)
-import Network.Wai.Handler.Warp (defaultSettings, runSettings, setPort, setTimeout, setGracefulShutdownTimeout)
+import Network.Wai.Handler.Warp (defaultSettings, runSettings, setHost, setPort, setTimeout, setGracefulShutdownTimeout)
 import Network.Wai.Handler.WarpTLS (runTLS, tlsSettings)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing)
@@ -94,7 +96,7 @@ main = do
   let logger = newLogger logAction (parseLogLevel cfg.logging.level)
   requestLogger <- jsonRequestLogger logAction
 
-  logInfo logger $ "hmem-server listening on port " <> T.pack (show port)
+  logInfo logger $ "hmem-server listening on " <> cfg.server.host <> ":" <> T.pack (show port)
   logInfo logger $ "Logging to: " <> T.pack logPath
   logInfo logger $ "Rotation: " <> T.pack (show cfg.logging.maxSizeMB) <> " MB, "
                                <> T.pack (show cfg.logging.backupCount) <> " backups"
@@ -102,7 +104,18 @@ main = do
   logInfo logger $ "API auth: " <> if cfg.auth.enabled then "enabled" else "disabled"
   logInfo logger $ "Rate limiting: " <> if cfg.rateLimit.rlEnabled then "enabled" else "disabled"
   logInfo logger $ "pgvector: " <> if pgvec then "available" else "not installed (similarity search disabled)"
-  let settings = setPort port
+
+  -- Warn when CORS origins are localhost-only but server is network-accessible
+  let isLoopback h = h `elem` ["127.0.0.1", "localhost", "::1"]
+      originsAreLocal = not (null cfg.cors.allowedOrigins)
+                     && "*" `notElem` cfg.cors.allowedOrigins
+                     && all (\o -> any (`T.isInfixOf` o) ["localhost", "127.0.0.1", "::1"]) cfg.cors.allowedOrigins
+  when (not (isLoopback cfg.server.host) && originsAreLocal) $
+    logWarn logger $ "CORS allowedOrigins are localhost-only but server is bound to "
+                  <> cfg.server.host <> " — remote clients will be rejected by CORS"
+
+  let settings = setHost (fromString (T.unpack cfg.server.host))
+               $ setPort port
                $ setTimeout 60
                $ setGracefulShutdownTimeout (Just 30)
                $ defaultSettings

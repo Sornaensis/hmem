@@ -3,6 +3,9 @@ module HMem.DB.Project
   , getProject
   , updateProject
   , deleteProject
+  , deleteProjectBatch
+  , updateProjectBatch
+  , restoreProject
   , listProjects
   , listProjectsWithQuery
   , linkProjectMemory
@@ -14,10 +17,11 @@ import Control.Exception (throwIO)
 import Control.Monad (when)
 import Data.Aeson (Object, toJSON)
 import Data.ByteString.Char8 qualified as BS8
-import Data.Functor.Contravariant ((>$<))
+import Data.Functor.Contravariant ((>$<), contramap)
 import Data.Int (Int16)
 import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
+import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as Dec
@@ -65,6 +69,27 @@ projectSubtreeIdsStatement = Statement.Statement sql encoder decoder True
       , "SELECT id FROM project_tree"
       ]
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+deletedProjectSubtreeIdsStatement :: Statement.Statement (UUID, UTCTime) [UUID]
+deletedProjectSubtreeIdsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE project_tree AS ("
+      , "  SELECT id"
+      , "  FROM projects"
+      , "  WHERE id = $1 AND deleted_at = $2"
+      , "  UNION ALL"
+      , "  SELECT p.id"
+      , "  FROM projects p"
+      , "  JOIN project_tree pt ON p.parent_id = pt.id"
+      , "  WHERE p.deleted_at = $2"
+      , ")"
+      , "SELECT id FROM project_tree"
+      ]
+    encoder =
+      contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap snd (Enc.param (Enc.nonNullable Enc.timestamptz))
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
 ensureParentProject :: Pool Hasql.Connection -> UUID -> Maybe UUID -> IO ()
@@ -193,6 +218,73 @@ deleteProject pool pid = do
             , returning = NoReturning
             }
         pure True
+
+-- | Soft-delete multiple projects by ID in a single transaction.
+-- Does NOT cascade to subtrees (unlike deleteProject).
+-- Returns the number of projects actually deleted.
+deleteProjectBatch :: Pool Hasql.Connection -> [UUID] -> IO Int
+deleteProjectBatch _pool [] = pure 0
+deleteProjectBatch pool ids = do
+  runTransaction pool $ do
+    n <- Session.statement () $ runN $
+      update Update
+        { target = projectSchema
+        , from = pure ()
+        , set = \_ row -> row { projDeletedAt = deletedNow }
+        , updateWhere = \_ row -> in_ row.projId (map lit ids) &&. activeProject row
+        , returning = NoReturning
+        }
+    -- Detach tasks from deleted projects
+    Session.statement () $ run_ $
+      update Update
+        { target = taskSchema
+        , from = pure ()
+        , set = \_ row -> row { taskProjectId = lit (Nothing :: Maybe UUID) }
+        , updateWhere = \_ row -> in_ row.taskProjectId (map lit (Just <$> ids)) &&. activeTask row
+        , returning = NoReturning
+        }
+    -- Cleanup memory links
+    Session.statement () $ run_ $
+      delete Delete
+        { from = projectMemoryLinkSchema
+        , using = pure ()
+        , deleteWhere = \_ row -> in_ row.pmlProjectId (map lit ids)
+        , returning = NoReturning
+        }
+    pure (fromIntegral n)
+
+-- | Batch-update multiple projects. Each item is updated individually.
+-- Returns the count of successfully updated projects.
+updateProjectBatch :: Pool Hasql.Connection -> [(UUID, UpdateProject)] -> IO Int
+updateProjectBatch _pool [] = pure 0
+updateProjectBatch pool items = do
+  results <- mapM (\(pid, up) -> updateProject pool pid up) items
+  pure $ length [() | Just _ <- results]
+
+-- | Restore a soft-deleted project by clearing its deleted_at timestamp.
+-- Returns True if the project was restored, False if not found or not deleted.
+restoreProject :: Pool Hasql.Connection -> UUID -> IO Bool
+restoreProject pool pid = do
+  runTransaction pool $ do
+    rows <- Session.statement () $ run $ select $ do
+      row <- each projectSchema
+      where_ $ row.projId ==. lit pid
+      pure row
+    case rows of
+      [] -> pure False
+      (row:_)
+        | Just deletedAt <- row.projDeletedAt -> do
+            ids <- Session.statement (pid, deletedAt) deletedProjectSubtreeIdsStatement
+            n <- Session.statement () $ runN $
+              update Update
+                { target = projectSchema
+                , from = pure ()
+                , set = \_ project -> project { projDeletedAt = lit (Nothing :: Maybe UTCTime) }
+                , updateWhere = \_ project -> in_ project.projId (map lit ids) &&. not_ (isNull project.projDeletedAt)
+                , returning = NoReturning
+                }
+            pure (n > 0)
+        | otherwise -> pure False
 
 ------------------------------------------------------------------------
 -- List

@@ -3,6 +3,7 @@ module HMem.DB.SavedView
   , getSavedView
   , updateSavedView
   , deleteSavedView
+  , restoreSavedView
   , purgeSavedView
   , listSavedViews
   ) where
@@ -10,6 +11,7 @@ module HMem.DB.SavedView
 import Control.Exception (throwIO)
 import Data.Functor.Contravariant ((>$<))
 import Data.Pool (Pool)
+import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
@@ -114,6 +116,19 @@ deleteSavedView pool sid = do
       , from = pure ()
       , set = \_ row -> row { svDeletedAt = deletedNow }
       , updateWhere = \_ row -> row.svId ==. lit sid &&. activeSavedView row
+      , returning = NoReturning
+      }
+  pure (n > 0)
+
+-- | Restore a soft-deleted saved view by clearing its deleted_at timestamp.
+restoreSavedView :: Pool Hasql.Connection -> UUID -> IO Bool
+restoreSavedView pool sid = do
+  n <- runSession pool $ Session.statement () $ runN $
+    update Update
+      { target = savedViewSchema
+      , from = pure ()
+      , set = \_ row -> row { svDeletedAt = lit (Nothing :: Maybe UTCTime) }
+      , updateWhere = \_ row -> row.svId ==. lit sid &&. not_ (isNull row.svDeletedAt)
       , returning = NoReturning
       }
   pure (n > 0)

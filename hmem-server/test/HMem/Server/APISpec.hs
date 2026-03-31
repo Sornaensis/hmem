@@ -680,6 +680,15 @@ spec = around withApp $ do
         (object ["workspace_id" .= ws.id, "name" .= ("hidden-category" :: T.Text)])
       let Just cat = decode (respBody catResp) :: Maybe MemoryCategory
 
+      viewResp <- postJSON app "/api/v1/saved-views"
+        (object
+          [ "workspace_id" .= ws.id
+          , "name" .= ("hidden-view" :: T.Text)
+          , "entity_type" .= ("memory_list" :: T.Text)
+          , "query_params" .= object ["workspace_id" .= ws.id]
+          ])
+      let Just view = decode (respBody viewResp) :: Maybe SavedView
+
       delResp <- del app (uuidPath "/api/v1/workspaces" ws.id)
       respStatus delResp `shouldBe` 200
 
@@ -691,6 +700,8 @@ spec = around withApp $ do
       respStatus getTaskResp `shouldBe` 404
       getCatResp <- get_ app (uuidPath "/api/v1/categories" cat.id)
       respStatus getCatResp `shouldBe` 404
+      getViewResp <- get_ app (uuidPath "/api/v1/saved-views" view.id)
+      respStatus getViewResp `shouldBe` 404
 
       recreateResp <- postJSON app "/api/v1/workspaces"
         (object
@@ -704,6 +715,15 @@ spec = around withApp $ do
         (object ["name" .= ("purge-ws" :: T.Text)])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
 
+      viewResp <- postJSON app "/api/v1/saved-views"
+        (object
+          [ "workspace_id" .= ws.id
+          , "name" .= ("purge-view" :: T.Text)
+          , "entity_type" .= ("memory_list" :: T.Text)
+          , "query_params" .= object ["workspace_id" .= ws.id]
+          ])
+      respStatus viewResp `shouldBe` 200
+
       purgeActiveResp <- del app (uuidPath "/api/v1/workspaces" ws.id <> "/purge")
       respStatus purgeActiveResp `shouldBe` 409
 
@@ -712,6 +732,195 @@ spec = around withApp $ do
 
       purgeDeletedResp <- del app (uuidPath "/api/v1/workspaces" ws.id <> "/purge")
       respStatus purgeDeletedResp `shouldBe` 200
+
+  describe "restore endpoints" $ do
+    it "restores a soft-deleted memory" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("restore-memory-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      memResp <- postJSON app "/api/v1/memories"
+        (object ["workspace_id" .= ws.id, "content" .= ("restore me" :: T.Text)
+                , "memory_type" .= ("short_term" :: T.Text)])
+      let Just mem = decode (respBody memResp) :: Maybe Memory
+
+      delResp <- del app (uuidPath "/api/v1/memories" mem.id)
+      respStatus delResp `shouldBe` 200
+      getDeletedResp <- get_ app (uuidPath "/api/v1/memories" mem.id)
+      respStatus getDeletedResp `shouldBe` 404
+
+      restoreResp <- postJSON app (uuidPath "/api/v1/memories" mem.id <> "/restore") (object [])
+      respStatus restoreResp `shouldBe` 200
+      getRestoredResp <- get_ app (uuidPath "/api/v1/memories" mem.id)
+      respStatus getRestoredResp `shouldBe` 200
+
+    it "restores a soft-deleted project subtree" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("restore-project-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      parentResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Parent Project" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Project
+
+      childResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Child Project" :: T.Text)
+                , "parent_id" .= parent.id])
+      let Just child = decode (respBody childResp) :: Maybe Project
+
+      delResp <- del app (uuidPath "/api/v1/projects" parent.id)
+      respStatus delResp `shouldBe` 200
+      getParentResp <- get_ app (uuidPath "/api/v1/projects" parent.id)
+      respStatus getParentResp `shouldBe` 404
+      getChildResp <- get_ app (uuidPath "/api/v1/projects" child.id)
+      respStatus getChildResp `shouldBe` 404
+
+      restoreResp <- postJSON app (uuidPath "/api/v1/projects" parent.id <> "/restore") (object [])
+      respStatus restoreResp `shouldBe` 200
+
+      restoredParentResp <- get_ app (uuidPath "/api/v1/projects" parent.id)
+      respStatus restoredParentResp `shouldBe` 200
+      restoredChildResp <- get_ app (uuidPath "/api/v1/projects" child.id)
+      respStatus restoredChildResp `shouldBe` 200
+      let Just restoredChild = decode (respBody restoredChildResp) :: Maybe Project
+      restoredChild.parentId `shouldBe` Just parent.id
+
+    it "restores a soft-deleted task subtree" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("restore-task-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Task Restore Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id
+                , "title" .= ("Parent Task" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Task
+
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id
+                , "parent_id" .= parent.id
+                , "title" .= ("Child Task" :: T.Text)])
+      let Just child = decode (respBody childResp) :: Maybe Task
+
+      delResp <- del app (uuidPath "/api/v1/tasks" parent.id)
+      respStatus delResp `shouldBe` 200
+      getParentResp <- get_ app (uuidPath "/api/v1/tasks" parent.id)
+      respStatus getParentResp `shouldBe` 404
+      getChildResp <- get_ app (uuidPath "/api/v1/tasks" child.id)
+      respStatus getChildResp `shouldBe` 404
+
+      restoreResp <- postJSON app (uuidPath "/api/v1/tasks" parent.id <> "/restore") (object [])
+      respStatus restoreResp `shouldBe` 200
+
+      restoredParentResp <- get_ app (uuidPath "/api/v1/tasks" parent.id)
+      respStatus restoredParentResp `shouldBe` 200
+      restoredChildResp <- get_ app (uuidPath "/api/v1/tasks" child.id)
+      respStatus restoredChildResp `shouldBe` 200
+      let Just restoredChild = decode (respBody restoredChildResp) :: Maybe Task
+      restoredChild.parentId `shouldBe` Just parent.id
+
+    it "restores a soft-deleted workspace and its children" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object
+          [ "name" .= ("restore-workspace-ws" :: T.Text)
+          , "path" .= ("C:/tmp/restore-workspace" :: T.Text)
+          ])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      memResp <- postJSON app "/api/v1/memories"
+        (object ["workspace_id" .= ws.id, "content" .= ("workspace child memory" :: T.Text)
+                , "memory_type" .= ("short_term" :: T.Text)])
+      let Just mem = decode (respBody memResp) :: Maybe Memory
+
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Workspace Child Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      taskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id
+                , "title" .= ("Workspace Child Task" :: T.Text)])
+      let Just task = decode (respBody taskResp) :: Maybe Task
+
+      catResp <- postJSON app "/api/v1/categories"
+        (object ["workspace_id" .= ws.id, "name" .= ("workspace-child-category" :: T.Text)])
+      let Just cat = decode (respBody catResp) :: Maybe MemoryCategory
+
+      viewResp <- postJSON app "/api/v1/saved-views"
+        (object
+          [ "workspace_id" .= ws.id
+          , "name" .= ("workspace-child-view" :: T.Text)
+          , "entity_type" .= ("memory_list" :: T.Text)
+          , "query_params" .= object ["workspace_id" .= ws.id]
+          ])
+      let Just view = decode (respBody viewResp) :: Maybe SavedView
+
+      delResp <- del app (uuidPath "/api/v1/workspaces" ws.id)
+      respStatus delResp `shouldBe` 200
+
+      getDeletedViewResp <- get_ app (uuidPath "/api/v1/saved-views" view.id)
+      respStatus getDeletedViewResp `shouldBe` 404
+
+      restoreResp <- postJSON app (uuidPath "/api/v1/workspaces" ws.id <> "/restore") (object [])
+      respStatus restoreResp `shouldBe` 200
+
+      getWsResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id)
+      respStatus getWsResp `shouldBe` 200
+      getMemResp <- get_ app (uuidPath "/api/v1/memories" mem.id)
+      respStatus getMemResp `shouldBe` 200
+      getProjResp <- get_ app (uuidPath "/api/v1/projects" proj.id)
+      respStatus getProjResp `shouldBe` 200
+      getTaskResp <- get_ app (uuidPath "/api/v1/tasks" task.id)
+      respStatus getTaskResp `shouldBe` 200
+      getCatResp <- get_ app (uuidPath "/api/v1/categories" cat.id)
+      respStatus getCatResp `shouldBe` 200
+      getViewResp <- get_ app (uuidPath "/api/v1/saved-views" view.id)
+      respStatus getViewResp `shouldBe` 200
+
+    it "restores a soft-deleted category" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("restore-category-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      catResp <- postJSON app "/api/v1/categories"
+        (object ["workspace_id" .= ws.id, "name" .= ("restore-category" :: T.Text)])
+      let Just cat = decode (respBody catResp) :: Maybe MemoryCategory
+
+      delResp <- del app (uuidPath "/api/v1/categories" cat.id)
+      respStatus delResp `shouldBe` 200
+      getDeletedResp <- get_ app (uuidPath "/api/v1/categories" cat.id)
+      respStatus getDeletedResp `shouldBe` 404
+
+      restoreResp <- postJSON app (uuidPath "/api/v1/categories" cat.id <> "/restore") (object [])
+      respStatus restoreResp `shouldBe` 200
+      getRestoredResp <- get_ app (uuidPath "/api/v1/categories" cat.id)
+      respStatus getRestoredResp `shouldBe` 200
+
+    it "restores a soft-deleted saved view" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("restore-view-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      viewResp <- postJSON app "/api/v1/saved-views"
+        (object
+          [ "workspace_id" .= ws.id
+          , "name" .= ("restore-view" :: T.Text)
+          , "entity_type" .= ("memory_list" :: T.Text)
+          , "query_params" .= object ["workspace_id" .= ws.id]
+          ])
+      let Just view = decode (respBody viewResp) :: Maybe SavedView
+
+      delResp <- del app (uuidPath "/api/v1/saved-views" view.id)
+      respStatus delResp `shouldBe` 200
+      getDeletedResp <- get_ app (uuidPath "/api/v1/saved-views" view.id)
+      respStatus getDeletedResp `shouldBe` 404
+
+      restoreResp <- postJSON app (uuidPath "/api/v1/saved-views" view.id <> "/restore") (object [])
+      respStatus restoreResp `shouldBe` 200
+      getRestoredResp <- get_ app (uuidPath "/api/v1/saved-views" view.id)
+      respStatus getRestoredResp `shouldBe` 200
 
   --------------------------------------------------------------------------
   -- Categories
@@ -839,6 +1048,98 @@ spec = around withApp $ do
         (object ["workspace_id" .= ws.id, "name" .= ("unique-name" :: T.Text)
                 , "parent_id" .= parent.id])
       respStatus catResp2 `shouldBe` 409
+
+  describe "project and category batch endpoints" $ do
+    it "batch-updates and batch-deletes projects" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("project-batch-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      p1Resp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Batch Project One" :: T.Text)])
+      let Just p1 = decode (respBody p1Resp) :: Maybe Project
+
+      p2Resp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Batch Project Two" :: T.Text)])
+      let Just p2 = decode (respBody p2Resp) :: Maybe Project
+
+      updateResp <- postJSON app "/api/v1/projects/batch-update"
+        (object
+          [ "items" .=
+              [ object ["id" .= p1.id, "name" .= ("Renamed One" :: T.Text), "status" .= ("completed" :: T.Text)]
+              , object ["id" .= p2.id, "priority" .= (9 :: Int)]
+              ]
+          ])
+      respStatus updateResp `shouldBe` 200
+      let Just updateResult = decode (respBody updateResp) :: Maybe BatchResult
+      updateResult.affected `shouldBe` 2
+
+      getP1Resp <- get_ app (uuidPath "/api/v1/projects" p1.id)
+      respStatus getP1Resp `shouldBe` 200
+      let Just updatedP1 = decode (respBody getP1Resp) :: Maybe Project
+      updatedP1.name `shouldBe` "Renamed One"
+      updatedP1.status `shouldBe` ProjCompleted
+
+      getP2Resp <- get_ app (uuidPath "/api/v1/projects" p2.id)
+      respStatus getP2Resp `shouldBe` 200
+      let Just updatedP2 = decode (respBody getP2Resp) :: Maybe Project
+      updatedP2.priority `shouldBe` 9
+
+      deleteResp <- postJSON app "/api/v1/projects/batch-delete"
+        (object ["ids" .= [p1.id, p2.id]])
+      respStatus deleteResp `shouldBe` 200
+      let Just deleteResult = decode (respBody deleteResp) :: Maybe BatchResult
+      deleteResult.affected `shouldBe` 2
+
+      getDeletedP1Resp <- get_ app (uuidPath "/api/v1/projects" p1.id)
+      respStatus getDeletedP1Resp `shouldBe` 404
+      getDeletedP2Resp <- get_ app (uuidPath "/api/v1/projects" p2.id)
+      respStatus getDeletedP2Resp `shouldBe` 404
+
+    it "batch-links category memories, lists them, and batch-deletes categories" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("category-batch-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      cat1Resp <- postJSON app "/api/v1/categories"
+        (object ["workspace_id" .= ws.id, "name" .= ("batch-category-one" :: T.Text)])
+      let Just cat1 = decode (respBody cat1Resp) :: Maybe MemoryCategory
+
+      cat2Resp <- postJSON app "/api/v1/categories"
+        (object ["workspace_id" .= ws.id, "name" .= ("batch-category-two" :: T.Text)])
+      let Just cat2 = decode (respBody cat2Resp) :: Maybe MemoryCategory
+
+      mem1Resp <- postJSON app "/api/v1/memories"
+        (object ["workspace_id" .= ws.id, "content" .= ("batch category memory one" :: T.Text)
+                , "memory_type" .= ("short_term" :: T.Text)])
+      let Just mem1 = decode (respBody mem1Resp) :: Maybe Memory
+
+      mem2Resp <- postJSON app "/api/v1/memories"
+        (object ["workspace_id" .= ws.id, "content" .= ("batch category memory two" :: T.Text)
+                , "memory_type" .= ("short_term" :: T.Text)])
+      let Just mem2 = decode (respBody mem2Resp) :: Maybe Memory
+
+      linkResp <- postJSON app (uuidPath "/api/v1/categories" cat1.id <> "/memories/batch")
+        (object ["memory_ids" .= [mem1.id, mem2.id]])
+      respStatus linkResp `shouldBe` 200
+      let Just linkResult = decode (respBody linkResp) :: Maybe BatchResult
+      linkResult.affected `shouldBe` 2
+
+      listResp <- get_ app (uuidPath "/api/v1/categories" cat1.id <> "/memories")
+      respStatus listResp `shouldBe` 200
+      let Just memories = decode (respBody listResp) :: Maybe [Memory]
+      map (\memory -> memory.id) memories `shouldMatchList` [mem1.id, mem2.id]
+
+      deleteResp <- postJSON app "/api/v1/categories/batch-delete"
+        (object ["ids" .= [cat1.id, cat2.id]])
+      respStatus deleteResp `shouldBe` 200
+      let Just deleteResult = decode (respBody deleteResp) :: Maybe BatchResult
+      deleteResult.affected `shouldBe` 2
+
+      getDeletedCat1Resp <- get_ app (uuidPath "/api/v1/categories" cat1.id)
+      respStatus getDeletedCat1Resp `shouldBe` 404
+      getDeletedCat2Resp <- get_ app (uuidPath "/api/v1/categories" cat2.id)
+      respStatus getDeletedCat2Resp `shouldBe` 404
 
   --------------------------------------------------------------------------
   -- Workspace groups

@@ -87,6 +87,8 @@ module HMem.Types
   , BatchResult(..)
   , BatchUpdateMemoryItem(..)
   , BatchUpdateMemoryRequest(..)
+  , BatchUpdateProjectItem(..)
+  , BatchUpdateProjectRequest(..)
   , BatchUpdateTaskItem(..)
   , BatchUpdateTaskRequest(..)
   , validateBatchDeleteRequest
@@ -94,6 +96,7 @@ module HMem.Types
   , validateBatchMemoryLinkRequest
   , validateBatchSetTagsRequest
   , validateBatchUpdateMemoryRequest
+  , validateBatchUpdateProjectRequest
   , validateBatchUpdateTaskRequest
 
     -- * Enum text conversion helpers
@@ -1411,6 +1414,29 @@ instance ToJSON BatchUpdateMemoryRequest where
 instance FromJSON BatchUpdateMemoryRequest where
   parseJSON  = genericParseJSON jsonOptions
 
+data BatchUpdateProjectItem = BatchUpdateProjectItem
+  { id     :: UUID
+  , update :: UpdateProject
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchUpdateProjectItem where
+  toJSON item = case toJSON item.update of
+    Object o -> Object (KM.insert "id" (toJSON item.id) o)
+    v        -> v
+
+instance FromJSON BatchUpdateProjectItem where
+  parseJSON = withObject "BatchUpdateProjectItem" $ \o ->
+    BatchUpdateProjectItem <$> o .: "id" <*> parseJSON (Object o)
+
+newtype BatchUpdateProjectRequest = BatchUpdateProjectRequest
+  { items :: [BatchUpdateProjectItem]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON BatchUpdateProjectRequest where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON BatchUpdateProjectRequest where
+  parseJSON  = genericParseJSON jsonOptions
+
 data BatchUpdateTaskItem = BatchUpdateTaskItem
   { id     :: UUID
   , update :: UpdateTask
@@ -1441,6 +1467,16 @@ validateBatchUpdateMemoryRequest br =
   <> concat
       [ prefixIssues ("items[" <> T.pack (show idx) <> "].")
                      (validateUpdateMemoryInput item.update)
+      | (idx, item) <- zip [(0 :: Int) ..] br.items
+      ]
+
+validateBatchUpdateProjectRequest :: BatchUpdateProjectRequest -> [Text]
+validateBatchUpdateProjectRequest br =
+  ["items must contain at least one item" | null br.items]
+  <> ["items must contain at most 100 items" | length br.items > 100]
+  <> concat
+      [ prefixIssues ("items[" <> T.pack (show idx) <> "].")
+                     (validateUpdateProjectInput item.update)
       | (idx, item) <- zip [(0 :: Int) ..] br.items
       ]
 

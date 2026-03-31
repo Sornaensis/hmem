@@ -7,6 +7,7 @@ module HMem.DB.Memory
   , updateMemoryBatch
   , deleteMemory
   , deleteMemoryBatch
+  , restoreMemory
 
     -- * Querying
   , listMemories
@@ -40,6 +41,7 @@ module HMem.DB.Memory
     -- * Cross-entity memory lists
   , getProjectMemories
   , getTaskMemories
+  , getCategoryMemories
 
     -- * Activity timeline
   , getRecentActivity
@@ -390,6 +392,20 @@ deleteMemoryBatch pool mids = do
         , returning = NoReturning
         }
     pure (fromIntegral n)
+
+-- | Restore a soft-deleted memory by clearing its deleted_at timestamp.
+-- Returns True if the memory was restored, False if not found or not deleted.
+restoreMemory :: Pool Hasql.Connection -> UUID -> IO Bool
+restoreMemory pool mid = do
+  n <- runSession pool $ Session.statement () $ runN $
+    update Update
+      { target = memorySchema
+      , from = pure ()
+      , set = \_ row -> row { memDeletedAt = lit (Nothing :: Maybe UTCTime) }
+      , updateWhere = \_ row -> row.memId ==. lit mid &&. not_ (isNull row.memDeletedAt)
+      , returning = NoReturning
+      }
+  pure (n > 0)
 
 ------------------------------------------------------------------------
 -- List
@@ -891,6 +907,23 @@ getTaskMemories pool taskId =
       where_ $ tml.tmlTaskId ==. lit taskId
       mem <- each memorySchema
       where_ $ mem.memId ==. tml.tmlMemoryId
+      where_ $ activeMemory mem
+      pure mem
+    enrichRowsS rows
+
+-- | List all memories linked to a category.
+getCategoryMemories :: Pool Hasql.Connection -> UUID -> IO [Memory]
+getCategoryMemories pool categoryId =
+  runSession pool $ do
+    rows <- Session.statement () $ run $ select $ limit 200 $ do
+      present $ do
+        category <- each memoryCategorySchema
+        where_ $ category.mcId ==. lit categoryId
+        where_ $ activeCategory category
+      link <- each memoryCategoryLinkSchema
+      where_ $ link.mclCategoryId ==. lit categoryId
+      mem <- each memorySchema
+      where_ $ mem.memId ==. link.mclMemoryId
       where_ $ activeMemory mem
       pure mem
     enrichRowsS rows

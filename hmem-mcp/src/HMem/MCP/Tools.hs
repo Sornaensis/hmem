@@ -135,6 +135,13 @@ toolDefinitions =
       , "required" .= [t "memory_id"]
       ]
 
+        , mkTool "memory_restore" "Restore a soft-deleted memory so it becomes visible in active views again." $ object
+            [ "type" .= t "object"
+            , "properties" .= object
+                    [ "memory_id" .= prop "string" "UUID of the soft-deleted memory to restore" ]
+            , "required" .= [t "memory_id"]
+            ]
+
     , mkTool "memory_purge" "Permanently and irreversibly remove a soft-deleted memory. The memory must be soft-deleted first via memory_delete." $ object
       [ "type" .= t "object"
       , "properties" .= object
@@ -282,6 +289,13 @@ toolDefinitions =
       , "required" .= [t "workspace_id"]
       ]
 
+  , mkTool "workspace_restore" "Restore a soft-deleted workspace. This also restores child rows deleted in the same workspace delete operation." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "workspace_id" .= prop "string" "UUID of the soft-deleted workspace to restore" ]
+      , "required" .= [t "workspace_id"]
+      ]
+
   , mkTool "workspace_purge" "Permanently and irreversibly remove a soft-deleted workspace and all its data. Must be soft-deleted first via workspace_delete." $ object
       [ "type" .= t "object"
       , "properties" .= object
@@ -340,6 +354,13 @@ toolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
+  , mkTool "category_list_memories" "List all memories linked to a category." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "category_id" .= prop "string" "UUID of the category" ]
+      , "required" .= [t "category_id"]
+      ]
+
   , mkTool "task_list_memories" "List all memories linked to a task. Use task_link_memory and task_unlink_memory to manage these associations." $ object
       [ "type" .= t "object"
       , "properties" .= object
@@ -384,6 +405,13 @@ toolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
+  , mkTool "project_restore" "Restore a soft-deleted project subtree. Child projects deleted in the same delete operation are restored together." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "project_id" .= prop "string" "UUID of the soft-deleted project to restore" ]
+      , "required" .= [t "project_id"]
+      ]
+
   , mkTool "project_purge" "Permanently and irreversibly remove a soft-deleted project. Must be soft-deleted first via project_delete." $ object
       [ "type" .= t "object"
       , "properties" .= object
@@ -410,6 +438,13 @@ toolDefinitions =
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the task to delete" ]
+      , "required" .= [t "task_id"]
+      ]
+
+  , mkTool "task_restore" "Restore a soft-deleted task subtree. Child tasks deleted in the same delete operation are restored together." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "task_id" .= prop "string" "UUID of the soft-deleted task to restore" ]
       , "required" .= [t "task_id"]
       ]
 
@@ -460,10 +495,17 @@ toolDefinitions =
       , "required" .= [t "category_id"]
       ]
 
-  , mkTool "category_delete" "Soft-delete a category. Does not unlink already-linked memories. Recoverable until permanently removed with category_purge." $ object
+  , mkTool "category_delete" "Soft-delete a category. Existing category-memory links are removed as part of deletion. Recoverable until permanently removed with category_purge." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "category_id" .= prop "string" "UUID of the category to delete" ]
+      , "required" .= [t "category_id"]
+      ]
+
+  , mkTool "category_restore" "Restore a soft-deleted category so it becomes visible in active views again." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "category_id" .= prop "string" "UUID of the soft-deleted category to restore" ]
       , "required" .= [t "category_id"]
       ]
 
@@ -740,6 +782,26 @@ toolDefinitions =
       , "required" .= [t "ids"]
       ]
 
+  , mkTool "project_delete_batch" "Soft-delete multiple projects at once. Max 100 IDs per call. Does not cascade to child project subtrees. Returns the number actually deleted." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                              "description" .= t "Array of project UUIDs to soft-delete",
+                              "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
+          ]
+      , "required" .= [t "ids"]
+      ]
+
+  , mkTool "category_delete_batch" "Soft-delete multiple categories at once. Max 100 IDs per call. Does not cascade to child categories. Returns the number actually deleted." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                              "description" .= t "Array of category UUIDs to soft-delete",
+                              "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
+          ]
+      , "required" .= [t "ids"]
+      ]
+
   , mkTool "task_move_batch" "Move multiple tasks to a different project (or detach from all projects by passing null for project_id). Max 100 tasks per call." $ object
       [ "type" .= t "object"
       , "properties" .= object
@@ -760,6 +822,17 @@ toolDefinitions =
                                      "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
           ]
       , "required" .= [t "project_id", t "memory_ids"]
+      ]
+
+  , mkTool "category_link_memories_batch" "Link multiple memories to a single category at once. Idempotent: already-linked pairs are silently skipped. Max 100 memory IDs." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "category_id" .= prop "string" "UUID of the category"
+          , "memory_ids"  .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                                      "description" .= t "Array of memory UUIDs to link",
+                                      "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
+          ]
+      , "required" .= [t "category_id", t "memory_ids"]
       ]
 
   , mkTool "task_link_memories_batch" "Link multiple memories to a single task at once. Idempotent: already-linked pairs are silently skipped. Max 100 memory IDs." $ object
@@ -811,6 +884,30 @@ toolDefinitions =
                                         , "source"      .= prop "string" "Provenance (null to clear)"
                                         , "confidence"  .= prop "number" "Confidence level 0.0-1.0"
                                         , "pinned"      .= prop "boolean" "Pin or unpin this memory"
+                                        ]
+                                    , "required" .= [t "id"]
+                                    ]]
+          ]
+      , "required" .= [t "items"]
+      ]
+
+  , mkTool "project_update_batch" "Update multiple projects at once. Each item specifies a project ID and the fields to update (same fields as project_update). Missing or non-existent IDs are skipped. Max 100 items." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "items" .= object ["type" .= t "array",
+                                "description" .= t "Array of project update objects",
+                                "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
+                                "items" .= object
+                                    [ "type" .= t "object"
+                                    , "properties" .= object
+                                        [ "id"          .= prop "string" "UUID of the project to update"
+                                        , "name"        .= propMaxLength "string" "New name" maxNameBytes
+                                        , "description" .= propMaxLength "string" "New description (null to clear)" maxDescriptionBytes
+                                        , "parent_id"   .= prop "string" "New parent project UUID (null to clear)"
+                                        , "status"      .= propEnum "string" "New status"
+                                            ["active", "paused", "completed", "archived"]
+                                        , "priority"    .= prop "integer" "New priority (1-10)"
+                                        , "metadata"    .= prop "object" "New metadata JSON object"
                                         ]
                                     , "required" .= [t "id"]
                                     ]]
@@ -892,6 +989,13 @@ toolDefinitions =
       , "required" .= [t "view_id"]
       ]
 
+  , mkTool "saved_view_restore" "Restore a soft-deleted saved view so it becomes visible in active views again." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "view_id" .= prop "string" "UUID of the soft-deleted saved view to restore" ]
+      , "required" .= [t "view_id"]
+      ]
+
   , mkTool "saved_view_purge" "Permanently remove a soft-deleted saved view. Must be soft-deleted first." $ object
       [ "type" .= t "object"
       , "properties" .= object
@@ -922,6 +1026,7 @@ data ToolCall
   | MemoryGet      UUID
   | MemoryUpdate   UUID UpdateMemory
   | MemoryDelete   UUID
+    | MemoryRestore  UUID
     | MemoryPurge    UUID
   | LinkMemories   UUID CreateMemoryLink   -- source_id, link body
   | MemoryLinksList UUID
@@ -929,6 +1034,7 @@ data ToolCall
   | ProjectGet     UUID
   | ProjectUpdate  UUID UpdateProject
   | ProjectDelete  UUID
+    | ProjectRestore UUID
     | ProjectPurge   UUID
     | ProjectList    ProjectListQuery
   | ProjectLinkMem UUID UUID               -- project_id, memory_id
@@ -936,6 +1042,7 @@ data ToolCall
   | TaskCreate     CreateTask
   | TaskGet        UUID
   | TaskDelete     UUID
+    | TaskRestore    UUID
     | TaskPurge      UUID
     | TaskList       TaskListQuery
   | TaskUpdate     UUID UpdateTask
@@ -947,12 +1054,14 @@ data ToolCall
   | WorkspaceGet   UUID
   | WsUpdate       UUID UpdateWorkspace
   | WsDelete       UUID
+    | WsRestore      UUID
     | WsPurge        UUID
   | CategoryCreate CreateMemoryCategory
   | CategoryGet    UUID
   | CategoryList   (Maybe UUID) (Maybe Int) (Maybe Int) -- maybe workspace_id, limit, offset
   | CategoryUpdate UUID UpdateMemoryCategory
   | CategoryDelete UUID
+    | CategoryRestore UUID
     | CategoryPurge  UUID
   | CategoryLinkMem   UUID UUID            -- memory_id, category_id
   | CategoryUnlinkMem UUID UUID            -- memory_id, category_id
@@ -967,6 +1076,7 @@ data ToolCall
   | MemoryFindByRelation UUID RelationType
   | MemoryAdjustImp UUID Int
   | ProjectListMem UUID
+    | CategoryListMem UUID
   | TaskListMem    UUID
   | MemoryPin      UUID
   | MemoryUnpin    UUID
@@ -983,17 +1093,22 @@ data ToolCall
   | MemorySetEmbedding UUID [Double]
   | MemoryDeleteBatch [UUID]
   | TaskDeleteBatch [UUID]
+    | ProjectDeleteBatch [UUID]
+    | CategoryDeleteBatch [UUID]
   | TaskMoveBatch [UUID] (Maybe UUID)     -- task_ids, project_id
   | ProjectLinkMemBatch UUID [UUID]       -- project_id, memory_ids
+    | CategoryLinkMemBatch UUID [UUID]      -- category_id, memory_ids
   | TaskLinkMemBatch UUID [UUID]          -- task_id, memory_ids
   | MemorySetTagsBatch [(UUID, [Text])]   -- [(memory_id, tags)]
   | MemoryUpdateBatch [(UUID, UpdateMemory)]  -- [(memory_id, update)]
+    | ProjectUpdateBatch [(UUID, UpdateProject)] -- [(project_id, update)]
   | TaskUpdateBatch [(UUID, UpdateTask)]      -- [(task_id, update)]
   | SavedViewCreate CreateSavedView
   | SavedViewList UUID (Maybe Int) (Maybe Int) -- workspace_id, limit, offset
   | SavedViewGet UUID
   | SavedViewUpdate UUID UpdateSavedView
   | SavedViewDelete UUID
+    | SavedViewRestore UUID
   | SavedViewPurge UUID
   | SavedViewExecute UUID (Maybe Int) (Maybe Int) (Maybe Bool) -- view_id, limit, offset, detail
   | ProjectOverviewCall UUID
@@ -1009,6 +1124,7 @@ parseToolCall name args = case name of
     "memory_get"               -> MemoryGet <$> need "memory_id"
     "memory_update"            -> MemoryUpdate <$> need "memory_id" <*> parse args
     "memory_delete"            -> MemoryDelete <$> need "memory_id"
+    "memory_restore"           -> MemoryRestore <$> need "memory_id"
     "memory_purge"             -> MemoryPurge <$> need "memory_id"
     "memory_link"              -> LinkMemories <$> need "source_id" <*> parse args
     "memory_links_list"        -> MemoryLinksList <$> need "memory_id"
@@ -1016,6 +1132,7 @@ parseToolCall name args = case name of
     "project_get"              -> ProjectGet <$> need "project_id"
     "project_update"           -> ProjectUpdate <$> need "project_id" <*> parse args
     "project_delete"           -> ProjectDelete <$> need "project_id"
+    "project_restore"          -> ProjectRestore <$> need "project_id"
     "project_purge"            -> ProjectPurge <$> need "project_id"
     "project_list"             -> ProjectList <$> parse args
     "project_link_memory"      -> ProjectLinkMem <$> need "project_id" <*> need "memory_id"
@@ -1023,6 +1140,7 @@ parseToolCall name args = case name of
     "task_create"              -> TaskCreate <$> parse args
     "task_get"                 -> TaskGet <$> need "task_id"
     "task_delete"              -> TaskDelete <$> need "task_id"
+    "task_restore"             -> TaskRestore <$> need "task_id"
     "task_purge"               -> TaskPurge <$> need "task_id"
     "task_list"                -> TaskList <$> parse args
     "task_update"              -> TaskUpdate <$> need "task_id" <*> parse args
@@ -1035,6 +1153,7 @@ parseToolCall name args = case name of
     "category_list"            -> CategoryList <$> opt "workspace_id" <*> opt "limit" <*> opt "offset"
     "category_update"          -> CategoryUpdate <$> need "category_id" <*> parse args
     "category_delete"          -> CategoryDelete <$> need "category_id"
+    "category_restore"         -> CategoryRestore <$> need "category_id"
     "category_purge"           -> CategoryPurge <$> need "category_id"
     "category_link_memory"     -> CategoryLinkMem <$> need "memory_id" <*> need "category_id"
     "category_unlink_memory"   -> CategoryUnlinkMem <$> need "memory_id" <*> need "category_id"
@@ -1046,6 +1165,7 @@ parseToolCall name args = case name of
     "workspace_get"            -> WorkspaceGet <$> need "workspace_id"
     "workspace_update"         -> WsUpdate <$> need "workspace_id" <*> parse args
     "workspace_delete"         -> WsDelete <$> need "workspace_id"
+    "workspace_restore"        -> WsRestore <$> need "workspace_id"
     "workspace_purge"          -> WsPurge <$> need "workspace_id"
     "workspace_register"       -> WorkspaceReg <$> parse args
     "cleanup_run"              -> CleanupRun <$> need "workspace_id"
@@ -1054,6 +1174,7 @@ parseToolCall name args = case name of
     "memory_find_by_relation"  -> MemoryFindByRelation <$> need "workspace_id" <*> need "relation_type"
     "memory_adjust_importance" -> MemoryAdjustImp <$> need "memory_id" <*> need "importance"
     "project_list_memories"    -> ProjectListMem <$> need "project_id"
+    "category_list_memories"   -> CategoryListMem <$> need "category_id"
     "task_list_memories"       -> TaskListMem <$> need "task_id"
     "memory_pin"               -> MemoryPin <$> need "memory_id"
     "memory_unpin"             -> MemoryUnpin <$> need "memory_id"
@@ -1070,17 +1191,22 @@ parseToolCall name args = case name of
     "memory_set_embedding"     -> MemorySetEmbedding <$> need "memory_id" <*> need "embedding"
     "memory_delete_batch"       -> MemoryDeleteBatch <$> need "ids"
     "task_delete_batch"         -> TaskDeleteBatch <$> need "ids"
+    "project_delete_batch"      -> ProjectDeleteBatch <$> need "ids"
+    "category_delete_batch"     -> CategoryDeleteBatch <$> need "ids"
     "task_move_batch"           -> TaskMoveBatch <$> need "task_ids" <*> opt "project_id"
     "project_link_memories_batch" -> ProjectLinkMemBatch <$> need "project_id" <*> need "memory_ids"
+    "category_link_memories_batch" -> CategoryLinkMemBatch <$> need "category_id" <*> need "memory_ids"
     "task_link_memories_batch"  -> TaskLinkMemBatch <$> need "task_id" <*> need "memory_ids"
     "memory_set_tags_batch"     -> MemorySetTagsBatch <$> parseBatchSetTags args
     "memory_update_batch"       -> MemoryUpdateBatch <$> parseBatchUpdateItems args
+    "project_update_batch"      -> ProjectUpdateBatch <$> parseBatchUpdateItems args
     "task_update_batch"         -> TaskUpdateBatch <$> parseBatchUpdateItems args
     "saved_view_create"         -> SavedViewCreate <$> parse args
     "saved_view_list"           -> SavedViewList <$> need "workspace_id" <*> opt "limit" <*> opt "offset"
     "saved_view_get"            -> SavedViewGet <$> need "view_id"
     "saved_view_update"         -> SavedViewUpdate <$> need "view_id" <*> parse args
     "saved_view_delete"         -> SavedViewDelete <$> need "view_id"
+    "saved_view_restore"        -> SavedViewRestore <$> need "view_id"
     "saved_view_purge"          -> SavedViewPurge <$> need "view_id"
     "saved_view_execute"        -> SavedViewExecute <$> need "view_id" <*> opt "limit" <*> opt "offset" <*> opt "detail"
     "project_overview"          -> ProjectOverviewCall <$> need "project_id"
@@ -1205,8 +1331,11 @@ validateToolCall = \case
         | otherwise -> Right $ MemorySetEmbedding mid vec
     MemoryDeleteBatch ids -> validateBatchIds "memory_delete_batch" ids (MemoryDeleteBatch ids)
     TaskDeleteBatch ids -> validateBatchIds "task_delete_batch" ids (TaskDeleteBatch ids)
+    ProjectDeleteBatch ids -> validateBatchIds "project_delete_batch" ids (ProjectDeleteBatch ids)
+    CategoryDeleteBatch ids -> validateBatchIds "category_delete_batch" ids (CategoryDeleteBatch ids)
     TaskMoveBatch ids pid -> validateBatchIds "task_move_batch" ids (TaskMoveBatch ids pid)
     ProjectLinkMemBatch pid mids -> validateBatchIds "project_link_memories_batch" mids (ProjectLinkMemBatch pid mids)
+    CategoryLinkMemBatch cid mids -> validateBatchIds "category_link_memories_batch" mids (CategoryLinkMemBatch cid mids)
     TaskLinkMemBatch tid mids -> validateBatchIds "task_link_memories_batch" mids (TaskLinkMemBatch tid mids)
     MemorySetTagsBatch items
         | null items -> Left "memory_set_tags_batch: items must not be empty"
@@ -1219,6 +1348,12 @@ validateToolCall = \case
             let items' = [(uid, clampUpdateMemory um) | (uid, um) <- items]
                 errs = concat [validateUpdateMemoryInput um | (_, um) <- items']
             in MemoryUpdateBatch items' <$ firstValidationError errs
+    ProjectUpdateBatch items
+        | null items -> Left "project_update_batch: items must not be empty"
+        | length items > 100 -> Left "project_update_batch: items must contain at most 100 items"
+        | otherwise ->
+            let errs = concat [validateUpdateProjectInput up | (_, up) <- items]
+            in ProjectUpdateBatch items <$ firstValidationError errs
     TaskUpdateBatch items
         | null items -> Left "task_update_batch: items must not be empty"
         | length items > 100 -> Left "task_update_batch: items must contain at most 100 items"
@@ -1323,6 +1458,7 @@ executeToolCall mgr base mApiKey = \case
     MemoryGet mid       -> getJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
     MemoryUpdate mid um -> putJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid) um
     MemoryDelete mid    -> delJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
+    MemoryRestore mid   -> postJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/restore") (object [])
     MemoryPurge mid     -> delJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/purge")
     LinkMemories sid cl -> postJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath sid <> "/links") cl
     MemoryLinksList mid -> getJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/links")
@@ -1330,6 +1466,7 @@ executeToolCall mgr base mApiKey = \case
     ProjectGet pid      -> getJSON  mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
     ProjectUpdate pid up -> putJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid) up
     ProjectDelete pid   -> delJSON  mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
+    ProjectRestore pid  -> postJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/restore") (object [])
     ProjectPurge pid    -> delJSON  mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/purge")
     ProjectList pq -> getJSON mgr base mApiKey ("/api/v1/projects" <> buildQuery
                             [ ("workspace_id", uuidPath <$> pq.workspaceId)
@@ -1348,6 +1485,7 @@ executeToolCall mgr base mApiKey = \case
     TaskCreate ct       -> postJSON mgr base mApiKey "/api/v1/tasks" ct
     TaskGet tid         -> getJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
     TaskDelete tid      -> delJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+    TaskRestore tid     -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/restore") (object [])
     TaskPurge tid       -> delJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/purge")
     TaskList tq -> getJSON mgr base mApiKey ("/api/v1/tasks" <> buildQuery
                             [ ("workspace_id", uuidPath <$> tq.workspaceId)
@@ -1379,6 +1517,7 @@ executeToolCall mgr base mApiKey = \case
                             ])
     CategoryUpdate cid uc -> putJSON mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid) uc
     CategoryDelete cid  -> delJSON  mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid)
+    CategoryRestore cid -> postJSON mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid <> "/restore") (object [])
     CategoryPurge cid   -> delJSON  mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid <> "/purge")
     CategoryLinkMem mid cid -> postJSON mgr base mApiKey "/api/v1/categories/link"
                                (object ["memory_id" .= mid, "category_id" .= cid])
@@ -1401,6 +1540,7 @@ executeToolCall mgr base mApiKey = \case
     WorkspaceGet wid        -> getJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid)
     WsUpdate wid uw         -> putJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid) uw
     WsDelete wid            -> delJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid)
+    WsRestore wid           -> postJSON mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid <> "/restore") (object [])
     WsPurge wid             -> delJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid <> "/purge")
     WorkspaceReg cw     -> postJSON mgr base mApiKey "/api/v1/workspaces" cw
     CleanupRun wid      -> postJSON mgr base mApiKey "/api/v1/cleanup/run"
@@ -1425,6 +1565,7 @@ executeToolCall mgr base mApiKey = \case
     MemoryAdjustImp mid imp -> putJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/importance")
                               (object ["importance" .= imp])
     ProjectListMem pid -> getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
+    CategoryListMem cid -> getJSON mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid <> "/memories")
     TaskListMem tid -> getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
     MemoryPin mid    -> postJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/pin") (object [])
     MemoryUnpin mid  -> postJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/unpin") (object [])
@@ -1453,10 +1594,16 @@ executeToolCall mgr base mApiKey = \case
                               (object ["ids" .= ids])
     TaskDeleteBatch ids -> postJSON mgr base mApiKey "/api/v1/tasks/batch-delete"
                             (object ["ids" .= ids])
+    ProjectDeleteBatch ids -> postJSON mgr base mApiKey "/api/v1/projects/batch-delete"
+                               (object ["ids" .= ids])
+    CategoryDeleteBatch ids -> postJSON mgr base mApiKey "/api/v1/categories/batch-delete"
+                                (object ["ids" .= ids])
     TaskMoveBatch ids pid -> postJSON mgr base mApiKey "/api/v1/tasks/batch-move"
                               (object ["task_ids" .= ids, "project_id" .= pid])
     ProjectLinkMemBatch pid mids -> postJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories/batch")
                                     (object ["memory_ids" .= mids])
+    CategoryLinkMemBatch cid mids -> postJSON mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid <> "/memories/batch")
+                                      (object ["memory_ids" .= mids])
     TaskLinkMemBatch tid mids -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories/batch")
                                   (object ["memory_ids" .= mids])
     MemorySetTagsBatch items -> postJSON mgr base mApiKey "/api/v1/memories/batch-set-tags"
@@ -1466,6 +1613,16 @@ executeToolCall mgr base mApiKey = \case
                                     Object o -> Object (KM.insert "id" (toJSON uid) o)
                                     v        -> v
                                   | (uid, um) <- items]])
+    ProjectUpdateBatch items ->
+        let payload = object
+              [ "items" .=
+                  [ case toJSON up of
+                      Object o -> Object (KM.insert "id" (toJSON uid) o)
+                      v        -> v
+                  | (uid, up) <- items
+                  ]
+              ]
+        in postJSON mgr base mApiKey "/api/v1/projects/batch-update" payload
     TaskUpdateBatch items -> postJSON mgr base mApiKey "/api/v1/tasks/batch-update"
                               (object ["items" .= [case toJSON ut of
                                     Object o -> Object (KM.insert "id" (toJSON uid) o)
@@ -1480,6 +1637,7 @@ executeToolCall mgr base mApiKey = \case
     SavedViewGet vid -> getJSON mgr base mApiKey ("/api/v1/saved-views/" <> uuidPath vid)
     SavedViewUpdate vid usv -> putJSON mgr base mApiKey ("/api/v1/saved-views/" <> uuidPath vid) usv
     SavedViewDelete vid -> delJSON mgr base mApiKey ("/api/v1/saved-views/" <> uuidPath vid)
+    SavedViewRestore vid -> postJSON mgr base mApiKey ("/api/v1/saved-views/" <> uuidPath vid <> "/restore") (object [])
     SavedViewPurge vid -> delJSON mgr base mApiKey ("/api/v1/saved-views/" <> uuidPath vid <> "/purge")
     SavedViewExecute vid ml mo md -> postJSON mgr base mApiKey ("/api/v1/saved-views/" <> uuidPath vid <> "/execute"
                             <> buildQuery

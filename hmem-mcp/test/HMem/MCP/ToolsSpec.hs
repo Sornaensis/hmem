@@ -94,6 +94,12 @@ spec = do
         Right (MemoryDelete mid) -> mid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected MemoryDelete, got: " <> show other
 
+    it "parses memory_restore" $ do
+      let args = object [ "memory_id" .= testUUID ]
+      case parseToolCall "memory_restore" args of
+        Right (MemoryRestore mid) -> mid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected MemoryRestore, got: " <> show other
+
     it "parses memory_purge" $ do
       let args = object [ "memory_id" .= testUUID ]
       case parseToolCall "memory_purge" args of
@@ -348,6 +354,7 @@ spec = do
     it "passes through simple tool calls unchanged" $ do
       validateToolCall (MemoryGet parsedUUID) `shouldBe` Right (MemoryGet parsedUUID)
       validateToolCall (MemoryDelete parsedUUID) `shouldBe` Right (MemoryDelete parsedUUID)
+      validateToolCall (MemoryRestore parsedUUID) `shouldBe` Right (MemoryRestore parsedUUID)
       validateToolCall (MemoryPurge parsedUUID) `shouldBe` Right (MemoryPurge parsedUUID)
 
   describe "parseToolCall (project tools)" $ do
@@ -402,6 +409,12 @@ spec = do
         Right (ProjectDelete pid) -> pid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected ProjectDelete, got: " <> show other
 
+    it "parses project_restore" $ do
+      let args = object [ "project_id" .= testUUID ]
+      case parseToolCall "project_restore" args of
+        Right (ProjectRestore pid) -> pid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected ProjectRestore, got: " <> show other
+
     it "parses project_purge" $ do
       let args = object [ "project_id" .= testUUID ]
       case parseToolCall "project_purge" args of
@@ -441,6 +454,18 @@ spec = do
       case parseToolCall "project_list_memories" args of
         Right (ProjectListMem pid) -> pid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected ProjectListMem, got: " <> show other
+
+    it "parses project_delete_batch and project_update_batch" $ do
+      let deleteArgs = object [ "ids" .= ([testUUID, testUUID2] :: [Text]) ]
+          updateArgs = object
+            [ "items" .= [ object [ "id" .= testUUID, "name" .= ("Renamed" :: Text) ] ]
+            ]
+      case parseToolCall "project_delete_batch" deleteArgs of
+        Right (ProjectDeleteBatch ids) -> ids `shouldBe` [parsedUUID, parsedUUID2]
+        other -> expectationFailure $ "Expected ProjectDeleteBatch, got: " <> show other
+      case parseToolCall "project_update_batch" updateArgs of
+        Right (ProjectUpdateBatch items) -> length items `shouldBe` 1
+        other -> expectationFailure $ "Expected ProjectUpdateBatch, got: " <> show other
 
   describe "parseToolCall (task tools)" $ do
 
@@ -486,6 +511,12 @@ spec = do
       case parseToolCall "task_delete" args of
         Right (TaskDelete tid) -> tid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected TaskDelete, got: " <> show other
+
+    it "parses task_restore" $ do
+      let args = object [ "task_id" .= testUUID ]
+      case parseToolCall "task_restore" args of
+        Right (TaskRestore tid) -> tid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected TaskRestore, got: " <> show other
 
     it "parses task_purge" $ do
       let args = object [ "task_id" .= testUUID ]
@@ -543,6 +574,38 @@ spec = do
         Right (TaskListMem tid) -> tid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected TaskListMem, got: " <> show other
 
+  describe "parseToolCall (workspace and category restore/batch tools)" $ do
+
+    it "parses workspace_restore" $ do
+      let args = object [ "workspace_id" .= testUUID ]
+      case parseToolCall "workspace_restore" args of
+        Right (WsRestore wid) -> wid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected WsRestore, got: " <> show other
+
+    it "parses category_restore and category_list_memories" $ do
+      let args = object [ "category_id" .= testUUID ]
+      case parseToolCall "category_restore" args of
+        Right (CategoryRestore cid) -> cid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected CategoryRestore, got: " <> show other
+      case parseToolCall "category_list_memories" args of
+        Right (CategoryListMem cid) -> cid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected CategoryListMem, got: " <> show other
+
+    it "parses category_delete_batch and category_link_memories_batch" $ do
+      let deleteArgs = object [ "ids" .= ([testUUID, testUUID2] :: [Text]) ]
+          linkArgs = object
+            [ "category_id" .= testUUID
+            , "memory_ids" .= ([testUUID, testUUID2] :: [Text])
+            ]
+      case parseToolCall "category_delete_batch" deleteArgs of
+        Right (CategoryDeleteBatch ids) -> ids `shouldBe` [parsedUUID, parsedUUID2]
+        other -> expectationFailure $ "Expected CategoryDeleteBatch, got: " <> show other
+      case parseToolCall "category_link_memories_batch" linkArgs of
+        Right (CategoryLinkMemBatch cid mids) -> do
+          cid `shouldBe` parsedUUID
+          mids `shouldBe` [parsedUUID, parsedUUID2]
+        other -> expectationFailure $ "Expected CategoryLinkMemBatch, got: " <> show other
+
   describe "validateToolCall (list clamping)" $ do
 
     it "clamps project_list limit to 1-200" $ do
@@ -583,6 +646,11 @@ spec = do
         Right (WorkspaceList _ mo) -> mo `shouldBe` Just 10000
         other -> expectationFailure $ "Expected WorkspaceList, got: " <> show other
 
+    it "validates project and category batch operations" $ do
+      validateToolCall (ProjectDeleteBatch []) `shouldSatisfy` isLeft
+      validateToolCall (CategoryDeleteBatch [parsedUUID]) `shouldBe` Right (CategoryDeleteBatch [parsedUUID])
+      validateToolCall (CategoryLinkMemBatch parsedUUID []) `shouldSatisfy` isLeft
+
   describe "toolDefinitions" $ do
 
     it "advertises maxLength for memory content" $ do
@@ -611,6 +679,14 @@ spec = do
       createdAfterType `shouldBe` Just "string"
       updatedBeforeType `shouldBe` Just "string"
       priorityType `shouldBe` Just "integer"
+
+    it "defines restore and new batch/category tools" $ do
+      inputSchemaFor "memory_restore" `shouldSatisfy` (/= Nothing)
+      inputSchemaFor "workspace_restore" `shouldSatisfy` (/= Nothing)
+      inputSchemaFor "project_delete_batch" `shouldSatisfy` (/= Nothing)
+      inputSchemaFor "project_update_batch" `shouldSatisfy` (/= Nothing)
+      inputSchemaFor "category_list_memories" `shouldSatisfy` (/= Nothing)
+      inputSchemaFor "category_link_memories_batch" `shouldSatisfy` (/= Nothing)
 
   describe "parseToolCall (saved view tools)" $ do
 
@@ -661,6 +737,12 @@ spec = do
       case parseToolCall "saved_view_delete" args of
         Right (SavedViewDelete vid) -> vid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected SavedViewDelete, got: " <> show other
+
+    it "parses saved_view_restore" $ do
+      let args = object [ "view_id" .= testUUID ]
+      case parseToolCall "saved_view_restore" args of
+        Right (SavedViewRestore vid) -> vid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected SavedViewRestore, got: " <> show other
 
     it "parses saved_view_purge" $ do
       let args = object [ "view_id" .= testUUID ]

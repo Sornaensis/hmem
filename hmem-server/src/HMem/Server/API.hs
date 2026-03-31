@@ -73,6 +73,7 @@ type WorkspaceAPI =
   :<|> Capture "workspaceId" UUID :> Get '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> ReqBody '[JSON] UpdateWorkspace :> Put '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "workspaceId" UUID :> "restore" :> Post '[JSON] NoContent
   :<|> Capture "workspaceId" UUID :> "purge" :> Delete '[JSON] NoContent
 
 -- Memories
@@ -96,6 +97,7 @@ type MemoryAPI =
   :<|> Capture "memoryId" UUID :> Get '[JSON] Memory
   :<|> Capture "memoryId" UUID :> ReqBody '[JSON] UpdateMemory :> Put '[JSON] Memory
   :<|> Capture "memoryId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "memoryId" UUID :> "restore" :> Post '[JSON] NoContent
   :<|> Capture "memoryId" UUID :> "purge" :> Delete '[JSON] NoContent
   :<|> Capture "memoryId" UUID :> "links" :> Get '[JSON] [MemoryLink]
   :<|> Capture "memoryId" UUID :> "links" :> ReqBody '[JSON] CreateMemoryLink
@@ -133,6 +135,7 @@ type ProjectAPI =
   :<|> Capture "projectId" UUID :> Get '[JSON] Project
   :<|> Capture "projectId" UUID :> ReqBody '[JSON] UpdateProject :> Put '[JSON] Project
   :<|> Capture "projectId" UUID :> Delete '[JSON] NoContent
+    :<|> Capture "projectId" UUID :> "restore" :> Post '[JSON] NoContent
   :<|> Capture "projectId" UUID :> "purge" :> Delete '[JSON] NoContent
   :<|> Capture "projectId" UUID :> "memories" :> ReqBody '[JSON] LinkMemory
          :> Post '[JSON] NoContent
@@ -141,6 +144,8 @@ type ProjectAPI =
   :<|> Capture "projectId" UUID :> "memories" :> Get '[JSON] [Memory]
   :<|> Capture "projectId" UUID :> "memories" :> "batch"
          :> ReqBody '[JSON] BatchMemoryLinkRequest :> Post '[JSON] BatchResult
+    :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
+    :<|> "batch-update" :> ReqBody '[JSON] BatchUpdateProjectRequest :> Post '[JSON] BatchResult
   :<|> Capture "projectId" UUID :> "overview" :> Get '[JSON] ProjectOverview
 type TaskAPI =
        QueryParam "workspace_id" UUID
@@ -158,6 +163,7 @@ type TaskAPI =
   :<|> Capture "taskId" UUID :> Get '[JSON] Task
   :<|> Capture "taskId" UUID :> ReqBody '[JSON] UpdateTask :> Put '[JSON] Task
   :<|> Capture "taskId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "taskId" UUID :> "restore" :> Post '[JSON] NoContent
   :<|> Capture "taskId" UUID :> "purge" :> Delete '[JSON] NoContent
   :<|> Capture "taskId" UUID :> "memories" :> ReqBody '[JSON] LinkMemory
          :> Post '[JSON] NoContent
@@ -201,7 +207,12 @@ type CategoryAPI =
   :<|> Capture "categoryId" UUID :> ReqBody '[JSON] UpdateMemoryCategory
          :> Put '[JSON] MemoryCategory
   :<|> Capture "categoryId" UUID :> Delete '[JSON] NoContent
+    :<|> Capture "categoryId" UUID :> "restore" :> Post '[JSON] NoContent
     :<|> Capture "categoryId" UUID :> "purge" :> Delete '[JSON] NoContent
+    :<|> Capture "categoryId" UUID :> "memories" :> Get '[JSON] [Memory]
+    :<|> Capture "categoryId" UUID :> "memories" :> "batch"
+      :> ReqBody '[JSON] BatchMemoryLinkRequest :> Post '[JSON] BatchResult
+    :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
   :<|> "link" :> ReqBody '[JSON] CategoryLink :> Post '[JSON] NoContent
   :<|> "unlink" :> ReqBody '[JSON] CategoryLink :> Post '[JSON] NoContent
 
@@ -235,6 +246,7 @@ type SavedViewAPI =
   :<|> Capture "viewId" UUID :> Get '[JSON] SavedView
   :<|> Capture "viewId" UUID :> ReqBody '[JSON] UpdateSavedView :> Put '[JSON] SavedView
   :<|> Capture "viewId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "viewId" UUID :> "restore" :> Post '[JSON] NoContent
   :<|> Capture "viewId" UUID :> "purge" :> Delete '[JSON] NoContent
   :<|> Capture "viewId" UUID :> "execute"
          :> QueryParam "limit" Int :> QueryParam "offset" Int :> QueryParam "detail" Bool
@@ -446,6 +458,7 @@ workspaceHandlers pool =
   :<|> getWorkspaceH
   :<|> updateWorkspaceH
   :<|> deleteWorkspaceH
+  :<|> restoreWorkspaceH
   :<|> purgeWorkspaceH
   where
     listWorkspacesH :: Maybe Int -> Maybe Int -> Handler (PaginatedResult Workspace)
@@ -674,6 +687,14 @@ workspaceHandlers pool =
                 , returning = NoReturning
                 }
             Session.statement () $ run_ $
+              update Update
+                { target = savedViewSchema
+                , from = pure ()
+                , set = \_ row -> row { svDeletedAt = deletedNow }
+                , updateWhere = \_ row -> row.svWorkspaceId ==. lit wsId &&. activeSavedView row
+                , returning = NoReturning
+                }
+            Session.statement () $ run_ $
               delete Rel8.Delete
                 { from = cleanupPolicySchema
                 , using = pure ()
@@ -690,6 +711,69 @@ workspaceHandlers pool =
             pure True
       if ok then pure NoContent else throwError err404
 
+    restoreWorkspaceH :: UUID -> Handler NoContent
+    restoreWorkspaceH wsId = do
+      ok <- handleDBErrors $ runTransaction pool $ do
+        rows <- Session.statement () $ run $ select $ do
+          row <- each workspaceSchema
+          where_ $ row.wsId ==. lit wsId
+          pure row
+        case rows of
+          [] -> pure False
+          (row:_)
+            | Just deletedAt <- row.wsDeletedAt -> do
+                Session.statement () $ run_ $
+                  update Update
+                    { target = workspaceSchema
+                    , from = pure ()
+                    , set = \_ workspace -> workspace { wsDeletedAt = lit (Nothing :: Maybe UTCTime) }
+                    , updateWhere = \_ workspace -> workspace.wsId ==. lit wsId &&. workspace.wsDeletedAt ==. lit (Just deletedAt)
+                    , returning = NoReturning
+                    }
+                Session.statement () $ run_ $
+                  update Update
+                    { target = memorySchema
+                    , from = pure ()
+                    , set = \_ memory -> memory { memDeletedAt = lit (Nothing :: Maybe UTCTime) }
+                    , updateWhere = \_ memory -> memory.memWorkspaceId ==. lit wsId &&. memory.memDeletedAt ==. lit (Just deletedAt)
+                    , returning = NoReturning
+                    }
+                Session.statement () $ run_ $
+                  update Update
+                    { target = projectSchema
+                    , from = pure ()
+                    , set = \_ project -> project { projDeletedAt = lit (Nothing :: Maybe UTCTime) }
+                    , updateWhere = \_ project -> project.projWorkspaceId ==. lit wsId &&. project.projDeletedAt ==. lit (Just deletedAt)
+                    , returning = NoReturning
+                    }
+                Session.statement () $ run_ $
+                  update Update
+                    { target = taskSchema
+                    , from = pure ()
+                    , set = \_ task -> task { taskDeletedAt = lit (Nothing :: Maybe UTCTime) }
+                    , updateWhere = \_ task -> task.taskWorkspaceId ==. lit wsId &&. task.taskDeletedAt ==. lit (Just deletedAt)
+                    , returning = NoReturning
+                    }
+                Session.statement () $ run_ $
+                  update Update
+                    { target = memoryCategorySchema
+                    , from = pure ()
+                    , set = \_ category -> category { mcDeletedAt = lit (Nothing :: Maybe UTCTime) }
+                    , updateWhere = \_ category -> category.mcWorkspaceId ==. lit (Just wsId) &&. category.mcDeletedAt ==. lit (Just deletedAt)
+                    , returning = NoReturning
+                    }
+                Session.statement () $ run_ $
+                  update Update
+                    { target = savedViewSchema
+                    , from = pure ()
+                    , set = \_ view -> view { svDeletedAt = lit (Nothing :: Maybe UTCTime) }
+                    , updateWhere = \_ view -> view.svWorkspaceId ==. lit wsId &&. view.svDeletedAt ==. lit (Just deletedAt)
+                    , returning = NoReturning
+                    }
+                pure True
+            | otherwise -> pure False
+      if ok then pure NoContent else throwError err404
+
     purgeWorkspaceH :: UUID -> Handler NoContent
     purgeWorkspaceH wsId = do
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
@@ -701,6 +785,13 @@ workspaceHandlers pool =
         (r:_)
           | r.wsDeletedAt == Nothing -> throwError purgeConflict
           | otherwise -> do
+              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
+                delete Rel8.Delete
+                  { from = savedViewSchema
+                  , using = pure ()
+                  , deleteWhere = \_ row -> row.svWorkspaceId ==. lit wsId
+                  , returning = NoReturning
+                  }
               handleDBErrors $ runSession pool $ Session.statement () $ run_ $
                 delete Rel8.Delete
                   { from = workspaceSchema
@@ -723,6 +814,7 @@ memoryHandlers pool tracker pgvec =
   :<|> getMemoryH
   :<|> updateMemoryH
   :<|> deleteMemoryH
+  :<|> restoreMemoryH
   :<|> purgeMemoryH
   :<|> getLinksH
   :<|> createLinkH
@@ -795,6 +887,10 @@ memoryHandlers pool tracker pgvec =
 
     deleteMemoryH mid = do
       ok <- handleDBErrors $ Mem.deleteMemory pool mid
+      if ok then pure NoContent else throwError err404
+
+    restoreMemoryH mid = do
+      ok <- handleDBErrors $ Mem.restoreMemory pool mid
       if ok then pure NoContent else throwError err404
 
     purgeMemoryH mid = do
@@ -894,11 +990,14 @@ projectHandlers pool =
   :<|> getProjectH
   :<|> updateProjectH
   :<|> deleteProjectH
+  :<|> restoreProjectH
   :<|> purgeProjectH
   :<|> linkMemoryH
   :<|> unlinkMemoryH
   :<|> getProjectMemoriesH
   :<|> batchLinkMemoriesH
+  :<|> batchDeleteH
+  :<|> batchUpdateH
   :<|> projectOverviewH
   where
     requireProjectH :: UUID -> Handler Project
@@ -931,6 +1030,10 @@ projectHandlers pool =
 
     deleteProjectH pid = do
       ok <- handleDBErrors $ Proj.deleteProject pool pid
+      if ok then pure NoContent else throwError err404
+
+    restoreProjectH pid = do
+      ok <- handleDBErrors $ Proj.restoreProject pool pid
       if ok then pure NoContent else throwError err404
 
     purgeProjectH pid = do
@@ -973,6 +1076,16 @@ projectHandlers pool =
       n <- handleDBErrors $ Proj.linkProjectMemoryBatch pool pid blr.memoryIds
       pure BatchResult { affected = n }
 
+    batchDeleteH br = do
+      rejectValidationErrors (validateBatchDeleteRequest br)
+      n <- handleDBErrors $ Proj.deleteProjectBatch pool br.ids
+      pure BatchResult { affected = n }
+
+    batchUpdateH bur = do
+      rejectValidationErrors (validateBatchUpdateProjectRequest bur)
+      n <- handleDBErrors $ Proj.updateProjectBatch pool [(item.id, item.update) | item <- bur.items]
+      pure BatchResult { affected = n }
+
     projectOverviewH pid = do
       proj <- requireProjectH pid
       tasks <- handleDBErrors $ Task.listTasksWithQuery pool TaskListQuery
@@ -1003,6 +1116,7 @@ taskHandlers pool =
   :<|> getTaskH
   :<|> updateTaskH
   :<|> deleteTaskH
+  :<|> restoreTaskH
   :<|> purgeTaskH
   :<|> linkMemoryH
   :<|> unlinkMemoryH
@@ -1046,6 +1160,10 @@ taskHandlers pool =
 
     deleteTaskH tid = do
       ok <- handleDBErrors $ Task.deleteTask pool tid
+      if ok then pure NoContent else throwError err404
+
+    restoreTaskH tid = do
+      ok <- handleDBErrors $ Task.restoreTask pool tid
       if ok then pure NoContent else throwError err404
 
     purgeTaskH tid = do
@@ -1141,7 +1259,11 @@ categoryHandlers pool =
   :<|> getCategoryH
   :<|> updateCategoryH
   :<|> deleteCategoryH
+  :<|> restoreCategoryH
   :<|> purgeCategoryH
+  :<|> getCategoryMemoriesH
+  :<|> batchLinkMemoriesH
+  :<|> batchDeleteH
   :<|> linkH
   :<|> unlinkH
   where
@@ -1174,6 +1296,10 @@ categoryHandlers pool =
       ok <- handleDBErrors $ Cat.deleteCategory pool cid
       if ok then pure NoContent else throwError err404
 
+    restoreCategoryH cid = do
+      ok <- handleDBErrors $ Cat.restoreCategory pool cid
+      if ok then pure NoContent else throwError err404
+
     purgeCategoryH cid = do
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
         row <- each memoryCategorySchema
@@ -1192,6 +1318,21 @@ categoryHandlers pool =
                   , returning = NoReturning
                   }
               pure NoContent
+
+    getCategoryMemoriesH cid = do
+      _ <- requireCategoryH cid
+      handleDBErrors $ Mem.getCategoryMemories pool cid
+
+    batchLinkMemoriesH cid blr = do
+      _ <- requireCategoryH cid
+      rejectValidationErrors (validateBatchMemoryLinkRequest blr)
+      n <- handleDBErrors $ Cat.linkMemoryCategoryBatch pool cid blr.memoryIds
+      pure BatchResult { affected = n }
+
+    batchDeleteH br = do
+      rejectValidationErrors (validateBatchDeleteRequest br)
+      n <- handleDBErrors $ Cat.deleteCategoryBatch pool br.ids
+      pure BatchResult { affected = n }
 
     linkH cl = do
       _ <- requireCategoryH cl.categoryId
@@ -1261,6 +1402,7 @@ savedViewHandlers pool =
   :<|> getViewH
   :<|> updateViewH
   :<|> deleteViewH
+  :<|> restoreViewH
   :<|> purgeViewH
   :<|> executeViewH
   where
@@ -1286,6 +1428,10 @@ savedViewHandlers pool =
 
     deleteViewH vid = do
       ok <- handleDBErrors $ SV.deleteSavedView pool vid
+      if ok then pure NoContent else throwError err404
+
+    restoreViewH vid = do
+      ok <- handleDBErrors $ SV.restoreSavedView pool vid
       if ok then pure NoContent else throwError err404
 
     purgeViewH vid = do

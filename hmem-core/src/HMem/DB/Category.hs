@@ -3,14 +3,18 @@ module HMem.DB.Category
   , getCategory
   , updateCategory
   , deleteCategory
+  , deleteCategoryBatch
+  , restoreCategory
   , listCategories
   , listGlobalCategories
   , linkMemoryCategory
   , unlinkMemoryCategory
+  , linkMemoryCategoryBatch
   ) where
 
 import Control.Exception (throwIO)
 import Data.Pool (Pool)
+import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
@@ -133,6 +137,54 @@ deleteCategory pool cid = do
             }
         pure True
 
+-- | Soft-delete multiple categories by ID in a single transaction.
+-- Does NOT cascade to sub-categories (unlike deleteCategory).
+-- Returns the number of categories actually deleted.
+deleteCategoryBatch :: Pool Hasql.Connection -> [UUID] -> IO Int
+deleteCategoryBatch _pool [] = pure 0
+deleteCategoryBatch pool ids = do
+  runTransaction pool $ do
+    n <- Session.statement () $ runN $
+      update Update
+        { target = memoryCategorySchema
+        , from = pure ()
+        , set = \_ row -> row { mcDeletedAt = deletedNow }
+        , updateWhere = \_ row -> in_ row.mcId (map lit ids) &&. activeCategory row
+        , returning = NoReturning
+        }
+    -- Clear parent references to deleted categories
+    Session.statement () $ run_ $
+      update Update
+        { target = memoryCategorySchema
+        , from = pure ()
+        , set = \_ row -> row { mcParentId = lit (Nothing :: Maybe UUID) }
+        , updateWhere = \_ row -> in_ row.mcParentId (map lit (Just <$> ids)) &&. activeCategory row
+        , returning = NoReturning
+        }
+    -- Cleanup category-memory links
+    Session.statement () $ run_ $
+      delete Delete
+        { from = memoryCategoryLinkSchema
+        , using = pure ()
+        , deleteWhere = \_ row -> in_ row.mclCategoryId (map lit ids)
+        , returning = NoReturning
+        }
+    pure (fromIntegral n)
+
+-- | Restore a soft-deleted category by clearing its deleted_at timestamp.
+-- Returns True if the category was restored, False if not found or not deleted.
+restoreCategory :: Pool Hasql.Connection -> UUID -> IO Bool
+restoreCategory pool cid = do
+  n <- runSession pool $ Session.statement () $ runN $
+    update Update
+      { target = memoryCategorySchema
+      , from = pure ()
+      , set = \_ row -> row { mcDeletedAt = lit (Nothing :: Maybe UTCTime) }
+      , updateWhere = \_ row -> row.mcId ==. lit cid &&. not_ (isNull row.mcDeletedAt)
+      , returning = NoReturning
+      }
+  pure (n > 0)
+
 ------------------------------------------------------------------------
 -- List
 ------------------------------------------------------------------------
@@ -188,3 +240,23 @@ unlinkMemoryCategory pool memId catId =
       , deleteWhere = \_ row -> row.mclMemoryId ==. lit memId &&. row.mclCategoryId ==. lit catId
       , returning = NoReturning
       }
+
+-- | Link multiple memories to a category in a single insert.
+-- Idempotent: already-linked pairs are silently skipped.
+-- Returns the number of memory IDs submitted.
+linkMemoryCategoryBatch :: Pool Hasql.Connection -> UUID -> [UUID] -> IO Int
+linkMemoryCategoryBatch _pool _ [] = pure 0
+linkMemoryCategoryBatch pool catId mids =
+  runSession pool $ do
+    Session.statement () $ run_ $
+      insert Insert
+        { into = memoryCategoryLinkSchema
+        , rows = values
+            [ MemoryCategoryLinkT { mclMemoryId = lit mid, mclCategoryId = lit catId }
+            | mid <- mids
+            ]
+        , onConflict = DoNothing
+        , returning = NoReturning
+        }
+    pure (length mids)
+

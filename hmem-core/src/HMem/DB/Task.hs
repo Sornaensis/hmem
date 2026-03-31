@@ -5,6 +5,7 @@ module HMem.DB.Task
   , updateTaskBatch
   , deleteTask
   , deleteTaskBatch
+  , restoreTask
   , moveTasksBatch
   , listTasks
   , listTasksWithQuery
@@ -20,7 +21,7 @@ import Control.Exception (throwIO)
 import Control.Monad (when)
 import Data.Aeson (Object, toJSON)
 import Data.ByteString.Char8 qualified as BS8
-import Data.Functor.Contravariant ((>$<))
+import Data.Functor.Contravariant ((>$<), contramap)
 import Data.Int (Int16)
 import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
@@ -76,6 +77,27 @@ taskSubtreeIdsStatement = Statement.Statement sql encoder decoder True
       , "SELECT id FROM task_tree"
       ]
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+deletedTaskSubtreeIdsStatement :: Statement.Statement (UUID, UTCTime) [UUID]
+deletedTaskSubtreeIdsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE task_tree AS ("
+      , "  SELECT id"
+      , "  FROM tasks"
+      , "  WHERE id = $1 AND deleted_at = $2"
+      , "  UNION ALL"
+      , "  SELECT t.id"
+      , "  FROM tasks t"
+      , "  JOIN task_tree tt ON t.parent_id = tt.id"
+      , "  WHERE t.deleted_at = $2"
+      , ")"
+      , "SELECT id FROM task_tree"
+      ]
+    encoder =
+      contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap snd (Enc.param (Enc.nonNullable Enc.timestamptz))
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
 applyFieldUpdateMaybe :: Maybe a -> FieldUpdate a -> Maybe a
@@ -287,6 +309,31 @@ deleteTaskBatch pool ids = do
         , returning = NoReturning
         }
     pure (fromIntegral n)
+
+-- | Restore a soft-deleted task by clearing its deleted_at timestamp.
+-- Returns True if the task was restored, False if not found or not deleted.
+restoreTask :: Pool Hasql.Connection -> UUID -> IO Bool
+restoreTask pool tid = do
+  runTransaction pool $ do
+    rows <- Session.statement () $ run $ select $ do
+      row <- each taskSchema
+      where_ $ row.taskId ==. lit tid
+      pure row
+    case rows of
+      [] -> pure False
+      (row:_)
+        | Just deletedAt <- row.taskDeletedAt -> do
+            ids <- Session.statement (tid, deletedAt) deletedTaskSubtreeIdsStatement
+            n <- Session.statement () $ runN $
+              update Update
+                { target = taskSchema
+                , from = pure ()
+                , set = \_ task -> task { taskDeletedAt = lit (Nothing :: Maybe UTCTime) }
+                , updateWhere = \_ task -> in_ task.taskId (map lit ids) &&. not_ (isNull task.taskDeletedAt)
+                , returning = NoReturning
+                }
+            pure (n > 0)
+        | otherwise -> pure False
 
 -- | Move multiple tasks to a new project (or detach from all projects
 -- when projectId is Nothing). Returns the number of tasks actually moved.

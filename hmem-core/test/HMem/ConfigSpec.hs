@@ -11,24 +11,24 @@ spec = do
       let cfg = defaultConfig
             { database = defaultConfig.database { password = Just "from-config" }
             }
-          overridden = applyEnvOverrides (Just "from-env") Nothing cfg
+          overridden = applyEnvOverrides (Just "from-env") Nothing Nothing cfg
       overridden.database.password `shouldBe` Just "from-env"
 
     it "keeps config password when env var is absent" $ do
       let cfg = defaultConfig
             { database = defaultConfig.database { password = Just "from-config" }
             }
-          overridden = applyEnvOverrides Nothing Nothing cfg
+          overridden = applyEnvOverrides Nothing Nothing Nothing cfg
       overridden.database.password `shouldBe` Just "from-config"
 
     it "leaves password unset when neither source provides one" $ do
-      let overridden = applyEnvOverrides Nothing Nothing defaultConfig
+      let overridden = applyEnvOverrides Nothing Nothing Nothing defaultConfig
       overridden.database.password `shouldBe` Nothing
 
     it "uses HMEM_API_KEY when present" $ do
       let cfg = defaultConfig
             { auth = AuthConfig { enabled = True, apiKey = Just "from-config" } }
-          overridden = applyEnvOverrides Nothing (Just "from-env") cfg
+          overridden = applyEnvOverrides Nothing (Just "from-env") Nothing cfg
       overridden.auth.apiKey `shouldBe` Just "from-env"
 
   describe "validateConfig" $ do

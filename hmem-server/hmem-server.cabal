@@ -76,6 +76,7 @@ library
     , wai-cors
     , wai-extra
     , warp
+    , warp-tls
   default-language: Haskell2010
 
 executable hmem-server
@@ -132,6 +133,7 @@ executable hmem-server
     , wai-cors
     , wai-extra
     , warp
+    , warp-tls
   default-language: Haskell2010
 
 executable hmem-setup
@@ -188,6 +190,7 @@ executable hmem-setup
     , wai-cors
     , wai-extra
     , warp
+    , warp-tls
   default-language: Haskell2010
 
 test-suite hmem-server-test
@@ -252,4 +255,5 @@ test-suite hmem-server-test
     , wai-cors
     , wai-extra
     , warp
+    , warp-tls
   default-language: Haskell2010

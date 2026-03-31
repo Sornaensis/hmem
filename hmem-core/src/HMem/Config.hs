@@ -8,6 +8,7 @@ module HMem.Config
   , CorsConfig(..)
   , AuthConfig(..)
   , RateLimitConfig(..)
+  , TlsConfig(..)
     -- * Defaults
   , defaultConfig
     -- * Load / Save
@@ -51,6 +52,7 @@ data DatabaseConfig = DatabaseConfig
   , name     :: !Text
   , user     :: !(Maybe Text)
   , password :: !(Maybe Text)
+  , sslmode  :: !(Maybe Text)
   } deriving stock (Show, Eq)
 
 data PoolConfig = PoolConfig
@@ -79,6 +81,11 @@ data RateLimitConfig = RateLimitConfig
   , rlBurst             :: !Int
   } deriving stock (Show, Eq)
 
+data TlsConfig = TlsConfig
+  { tlsCertFile :: !(Maybe FilePath)
+  , tlsKeyFile  :: !(Maybe FilePath)
+  } deriving stock (Show, Eq)
+
 data HMemConfig = HMemConfig
   { server   :: !ServerConfig
   , database :: !DatabaseConfig
@@ -87,6 +94,7 @@ data HMemConfig = HMemConfig
   , cors     :: !CorsConfig
   , auth     :: !AuthConfig
   , rateLimit :: !RateLimitConfig
+  , tls      :: !TlsConfig
   } deriving stock (Show, Eq)
 
 ------------------------------------------------------------------------
@@ -108,6 +116,7 @@ instance FromJSON DatabaseConfig where
     <*> o .:? "name" .!= "hmem"
     <*> o .:? "user"
     <*> o .:? "password"
+    <*> o .:? "sslmode"
 
 instance ToJSON DatabaseConfig where
   toJSON dc = Aeson.object $ concat
@@ -117,6 +126,7 @@ instance ToJSON DatabaseConfig where
       ]
     , maybe [] (\u -> ["user" .= u]) dc.user
     , maybe [] (\p -> ["password" .= p]) dc.password
+    , maybe [] (\s -> ["sslmode" .= s]) dc.sslmode
     ]
 
 instance FromJSON PoolConfig where
@@ -175,6 +185,17 @@ instance ToJSON RateLimitConfig where
     , "burst" .= rl.rlBurst
     ]
 
+instance FromJSON TlsConfig where
+  parseJSON = Aeson.withObject "TlsConfig" $ \o -> TlsConfig
+    <$> o .:? "cert_file"
+    <*> o .:? "key_file"
+
+instance ToJSON TlsConfig where
+  toJSON tc = Aeson.object $ concat
+    [ maybe [] (\c -> ["cert_file" .= c]) tc.tlsCertFile
+    , maybe [] (\k -> ["key_file" .= k]) tc.tlsKeyFile
+    ]
+
 instance FromJSON HMemConfig where
   parseJSON = Aeson.withObject "HMemConfig" $ \o -> HMemConfig
     <$> o .:? "server"   .!= defServer
@@ -184,6 +205,7 @@ instance FromJSON HMemConfig where
     <*> o .:? "cors"     .!= defCors
     <*> o .:? "auth"     .!= defAuth
     <*> o .:? "rate_limit" .!= defRateLimit
+    <*> o .:? "tls"      .!= defTls
 
 instance ToJSON HMemConfig where
   toJSON cfg = Aeson.object
@@ -194,6 +216,7 @@ instance ToJSON HMemConfig where
     , "cors"     .= cfg.cors
     , "auth"     .= cfg.auth
     , "rate_limit" .= cfg.rateLimit
+    , "tls"      .= cfg.tls
     ]
 
 ------------------------------------------------------------------------
@@ -204,7 +227,7 @@ defServer :: ServerConfig
 defServer = ServerConfig { port = 8420, host = "127.0.0.1" }
 
 defDatabase :: DatabaseConfig
-defDatabase = DatabaseConfig { host = "127.0.0.1", port = 54320, name = "hmem", user = Nothing, password = Nothing }
+defDatabase = DatabaseConfig { host = "127.0.0.1", port = 54320, name = "hmem", user = Nothing, password = Nothing, sslmode = Nothing }
 
 defPool :: PoolConfig
 defPool = PoolConfig { size = 10, idleTimeout = 60 }
@@ -228,6 +251,9 @@ defRateLimit = RateLimitConfig
   , rlBurst = 20
   }
 
+defTls :: TlsConfig
+defTls = TlsConfig { tlsCertFile = Nothing, tlsKeyFile = Nothing }
+
 defaultConfig :: HMemConfig
 defaultConfig = HMemConfig
   { server   = defServer
@@ -237,6 +263,7 @@ defaultConfig = HMemConfig
   , cors     = defCors
   , auth     = defAuth
   , rateLimit = defRateLimit
+  , tls      = defTls
   }
 
 ------------------------------------------------------------------------
@@ -277,7 +304,8 @@ loadConfig = do
     else pure defaultConfig
   envPassword <- fmap T.pack <$> lookupEnv "HMEM_DB_PASSWORD"
   envApiKey   <- fmap T.pack <$> lookupEnv "HMEM_API_KEY"
-  let cfg' = applyEnvOverrides envPassword envApiKey cfg
+  envSslMode  <- fmap T.pack <$> lookupEnv "HMEM_DB_SSLMODE"
+  let cfg' = applyEnvOverrides envPassword envApiKey envSslMode cfg
       (warnings, validated) = validateConfig cfg'
   mapM_ (\w -> hPutStrLn stderr $ "Config warning: " <> w) warnings
   pure validated
@@ -291,13 +319,15 @@ saveConfig cfg = do
   Yaml.encodeFile path cfg
 
 -- | Apply environment-driven overrides after loading the file config.
--- Supports @HMEM_DB_PASSWORD@ and @HMEM_API_KEY@, each taking
--- precedence over the corresponding value in @config.yaml@ when set.
-applyEnvOverrides :: Maybe Text -> Maybe Text -> HMemConfig -> HMemConfig
-applyEnvOverrides mDbPassword mApiKey cfg =
+-- Supports @HMEM_DB_PASSWORD@, @HMEM_API_KEY@, and @HMEM_DB_SSLMODE@,
+-- each taking precedence over the corresponding value in @config.yaml@
+-- when set.
+applyEnvOverrides :: Maybe Text -> Maybe Text -> Maybe Text -> HMemConfig -> HMemConfig
+applyEnvOverrides mDbPassword mApiKey mDbSslMode cfg =
   cfg
     { database = cfg.database
         { password = mDbPassword <|> cfg.database.password
+        , sslmode  = mDbSslMode  <|> cfg.database.sslmode
         }
     , auth = cfg.auth
         { apiKey = mApiKey <|> cfg.auth.apiKey
@@ -336,6 +366,7 @@ validateConfig cfg = (warnings, corrected)
                   , name     = if T.null d.name then "hmem" else d.name
                   , user     = d.user
                   , password = d.password
+                  , sslmode  = d.sslmode
                   }
       in  (ws1 <> ws2 <> ws3, d')
 
@@ -392,6 +423,7 @@ connectionString dc = T.intercalate " " $ concat
     ]
   , maybe [] (\u -> ["user='" <> escPq u <> "'"]) dc.user
   , maybe [] (\p -> ["password='" <> escPq p <> "'"]) dc.password
+  , maybe [] (\s -> ["sslmode='" <> escPq s <> "'"]) dc.sslmode
   ]
   where
     escPq = T.replace "\\" "\\\\" . T.replace "'" "\\'"

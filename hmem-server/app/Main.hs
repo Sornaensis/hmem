@@ -5,6 +5,7 @@ import Data.Text qualified as T
 import Control.Exception (SomeException, catch, finally)
 import Data.Pool (destroyAllResources)
 import Network.Wai.Handler.Warp (defaultSettings, runSettings, setPort, setTimeout, setGracefulShutdownTimeout)
+import Network.Wai.Handler.WarpTLS (runTLS, tlsSettings)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
@@ -21,9 +22,11 @@ import HMem.Server.Logging (newLogger, parseLogLevel, logInfo, logWarn, jsonRequ
 ------------------------------------------------------------------------
 
 data Opts = Opts
-  { optPort   :: Maybe Int
-  , optDbConn :: Maybe String
-  , optPool   :: Maybe Int
+  { optPort    :: Maybe Int
+  , optDbConn  :: Maybe String
+  , optPool    :: Maybe Int
+  , optTlsCert :: Maybe FilePath
+  , optTlsKey  :: Maybe FilePath
   }
 
 optsParser :: Parser Opts
@@ -44,6 +47,16 @@ optsParser = Opts
       ( long "pool-size"
      <> metavar "N"
      <> help "Maximum database connections (default: from config or 10)"
+      ))
+  <*> optional (strOption
+      ( long "tls-cert"
+     <> metavar "FILE"
+     <> help "Path to TLS certificate file (enables HTTPS when used with --tls-key)"
+      ))
+  <*> optional (strOption
+      ( long "tls-key"
+     <> metavar "FILE"
+     <> help "Path to TLS private key file (enables HTTPS when used with --tls-cert)"
       ))
 
 ------------------------------------------------------------------------
@@ -99,6 +112,27 @@ main = do
           `catch` \(_ :: SomeException) -> logWarn logger "failed to flush access tracker"
         destroyAllResources pool
         cleanupLog
+
+  -- Resolve TLS config: CLI flags override config.yaml
+  let mTlsCert = opts.optTlsCert <|> cfg.tls.tlsCertFile
+      mTlsKey  = opts.optTlsKey  <|> cfg.tls.tlsKeyFile
+
   app <- mkApp requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker pgvec
-  runSettings settings app
-    `finally` shutdown
+  case (mTlsCert, mTlsKey) of
+    (Just cert, Just key) -> do
+      logInfo logger $ "TLS enabled: cert=" <> T.pack cert <> " key=" <> T.pack key
+      let tls = tlsSettings cert key
+      runTLS tls settings app
+        `finally` shutdown
+    (Just _, Nothing) -> do
+      logWarn logger "--tls-cert provided without --tls-key; running plain HTTP"
+      runSettings settings app
+        `finally` shutdown
+    (Nothing, Just _) -> do
+      logWarn logger "--tls-key provided without --tls-cert; running plain HTTP"
+      runSettings settings app
+        `finally` shutdown
+    (Nothing, Nothing) -> do
+      logInfo logger "TLS disabled (no cert/key configured)"
+      runSettings settings app
+        `finally` shutdown

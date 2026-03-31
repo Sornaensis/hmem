@@ -118,6 +118,98 @@ Optional Bearer auth is also available. Set `auth.enabled: true` and `auth.api_k
 
 Delete operations for workspaces, memories, projects, tasks, and categories are soft deletes. They disappear from normal reads immediately, but remain purgeable until you call the corresponding `.../purge` HTTP endpoint or `*_purge` MCP tool.
 
+## Deployment
+
+### Local Development (default)
+
+Out of the box, hmem runs on `localhost:8420` with a local PostgreSQL instance, no authentication, and no TLS. This is the recommended setup for single-user workstations.
+
+### Network / Production Deployment
+
+For shared servers, cloud VMs, or container deployments, see [SECURITY.md](SECURITY.md) for full details. Key steps:
+
+1. **Enable authentication** — set `auth.enabled: true` and provide `HMEM_API_KEY` via environment variable
+2. **Enable TLS** — provide cert/key to hmem-server directly, or terminate TLS at a reverse proxy
+3. **Secure the database** — use `sslmode: require` (or stricter) and `HMEM_DB_PASSWORD` for remote PostgreSQL
+
+### Remote Database
+
+hmem supports connecting to a remote PostgreSQL instance instead of the local one:
+
+```yaml
+# ~/.hmem/config.yaml
+database:
+  host: pg.example.com
+  port: 5432
+  name: hmem
+  user: hmem_app
+  password: ~              # prefer HMEM_DB_PASSWORD env var
+  sslmode: verify-full
+```
+
+Set `HMEM_DB_PASSWORD` and `HMEM_DB_SSLMODE` in the environment to avoid storing secrets in the config file.
+
+### Reverse Proxy
+
+When running behind nginx, Caddy, or similar:
+
+- Forward to `http://localhost:8420` (or the configured port)
+- Terminate TLS at the proxy
+- Pass `X-Forwarded-For` header for accurate rate limiting per client IP
+- Configure CORS at the proxy or set `cors.allowed_origins` in hmem to match your frontend origins
+
+Example nginx location block:
+
+```nginx
+location /hmem/ {
+    proxy_pass http://127.0.0.1:8420/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+### Backup & Recovery
+
+hmem uses PostgreSQL, so standard `pg_dump` / `pg_restore` workflows apply:
+
+```bash
+# Backup
+pg_dump -h localhost -p 54320 -U hmem -Fc hmem > hmem_backup.dump
+
+# Restore
+pg_restore -h localhost -p 54320 -U hmem -d hmem --clean hmem_backup.dump
+```
+
+For continuous backup, configure PostgreSQL WAL archiving or use a managed database service with automated snapshots.
+
+### Database Sizing
+
+Typical memory footprint per entity:
+
+| Entity | Approximate Row Size |
+|--------|---------------------|
+| Memory | 1–4 KB (varies with content length) |
+| Task | 0.5–2 KB |
+| Category | ~200 bytes |
+| Project | ~300 bytes |
+
+The `tsvector` full-text search index adds ~20–40% overhead per memory. A workspace with 10,000 memories and 1,000 tasks typically occupies 50–100 MB including indexes.
+
+PostgreSQL's `VACUUM` runs automatically. For large deployments, monitor table bloat and tune `autovacuum` settings as needed.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the full security guide, including:
+
+- Threat model and trust boundaries
+- Authentication (optional Bearer token)
+- TLS configuration (optional HTTPS)
+- Database SSL for remote connections
+- CORS and rate limiting
+- Secrets handling via environment variables
+- Hardening checklist
+
 ## License
 
 This project is licensed under the Mozilla Public License 2.0. See the `LICENSE` file for the full text.

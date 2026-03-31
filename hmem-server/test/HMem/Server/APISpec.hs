@@ -818,6 +818,28 @@ spec = around withApp $ do
         (object ["memory_id" .= mem.id, "category_id" .= cat.id])
       respStatus unlinkResp `shouldBe` 200
 
+    it "rejects duplicate category name in same workspace under same parent" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("catdup-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      -- Create a parent category
+      parentResp <- postJSON app "/api/v1/categories"
+        (object ["workspace_id" .= ws.id, "name" .= ("parent-cat" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe MemoryCategory
+
+      -- Create first child category
+      catResp1 <- postJSON app "/api/v1/categories"
+        (object ["workspace_id" .= ws.id, "name" .= ("unique-name" :: T.Text)
+                , "parent_id" .= parent.id])
+      respStatus catResp1 `shouldBe` 200
+
+      -- Attempt duplicate name under same parent in same workspace
+      catResp2 <- postJSON app "/api/v1/categories"
+        (object ["workspace_id" .= ws.id, "name" .= ("unique-name" :: T.Text)
+                , "parent_id" .= parent.id])
+      respStatus catResp2 `shouldBe` 409
+
   --------------------------------------------------------------------------
   -- Workspace groups
   --------------------------------------------------------------------------

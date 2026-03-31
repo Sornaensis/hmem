@@ -13,6 +13,8 @@ import HMem.DB.Task
 import HMem.DB.TestHarness
 import HMem.Types
 
+import Data.UUID (UUID)
+
 spec :: Spec
 spec = around withTestEnv $ do
 
@@ -423,3 +425,21 @@ spec = around withTestEnv $ do
       -- Idempotent
       linkTaskMemory env.pool task.id mem.id
       unlinkTaskMemory env.pool task.id mem.id
+
+  describe "batch update" $ do
+    it "batch update with nonexistent ID returns partial success count" $ \env -> do
+      ws <- createTestWorkspace env "taskbatchup-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "BatchUp"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Real"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      let bogusId = read "00000000-0000-0000-0000-ffffffffffff" :: UUID
+          upd = UpdateTask
+            { title = Just "updated", description = Unchanged, projectId = Unchanged
+            , parentId = Unchanged, status = Nothing, priority = Nothing
+            , metadata = Nothing, dueAt = Unchanged }
+      count <- updateTaskBatch env.pool [(task.id, upd), (bogusId, upd)]
+      count `shouldBe` 1

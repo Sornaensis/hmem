@@ -288,6 +288,26 @@ spec = do
         , "updated_after must be earlier than or equal to updated_before"
         ]
 
+  describe "capPagination properties" $ do
+    prop "limit is always between 1 and maxPaginationLimit" $
+      \(ml :: Maybe (Positive Int)) ->
+        let (lim, _) = capPagination (getPositive <$> ml) Nothing
+        in lim >= 1 && lim <= maxPaginationLimit
+
+    prop "offset is always between 0 and maxPaginationOffset" $
+      \(mo :: Maybe (NonNegative Int)) ->
+        let (_, off) = capPagination Nothing (getNonNegative <$> mo)
+        in off >= 0 && off <= maxPaginationOffset
+
+    it "defaults limit to 50 and offset to 0" $
+      capPagination Nothing Nothing `shouldBe` (50, 0)
+
+    it "caps extreme values" $
+      capPagination (Just 999999) (Just 999999) `shouldBe` (maxPaginationLimit, maxPaginationOffset)
+
+    it "clamps negative limit to 1" $
+      fst (capPagination (Just (-5)) Nothing) `shouldBe` 1
+
 ------------------------------------------------------------------------
 -- Helpers
 ------------------------------------------------------------------------

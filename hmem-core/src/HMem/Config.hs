@@ -56,8 +56,9 @@ data DatabaseConfig = DatabaseConfig
   } deriving stock (Show, Eq)
 
 data PoolConfig = PoolConfig
-  { size        :: !Int
-  , idleTimeout :: !Double
+  { size               :: !Int
+  , idleTimeout        :: !Double
+  , statementTimeoutMs :: !Int
   } deriving stock (Show, Eq)
 
 data LogConfig = LogConfig
@@ -133,11 +134,13 @@ instance FromJSON PoolConfig where
   parseJSON = Aeson.withObject "PoolConfig" $ \o -> PoolConfig
     <$> o .:? "size" .!= 10
     <*> o .:? "idle_timeout" .!= 60
+    <*> o .:? "statement_timeout_ms" .!= 30000
 
 instance ToJSON PoolConfig where
   toJSON pc = Aeson.object
     [ "size" .= pc.size
     , "idle_timeout" .= pc.idleTimeout
+    , "statement_timeout_ms" .= pc.statementTimeoutMs
     ]
 
 instance FromJSON LogConfig where
@@ -230,7 +233,7 @@ defDatabase :: DatabaseConfig
 defDatabase = DatabaseConfig { host = "127.0.0.1", port = 54320, name = "hmem", user = Nothing, password = Nothing, sslmode = Nothing }
 
 defPool :: PoolConfig
-defPool = PoolConfig { size = 10, idleTimeout = 60 }
+defPool = PoolConfig { size = 10, idleTimeout = 60, statementTimeoutMs = 30000 }
 
 defLogging :: LogConfig
 defLogging = LogConfig { level = "info", maxSizeMB = 10, backupCount = 5 }
@@ -373,7 +376,8 @@ validateConfig cfg = (warnings, corrected)
     validatePool p =
       let (ws1, sz) = clampField "pool.size" 1 1000 p.size
           (ws2, it) = clampFieldD "pool.idle_timeout" 1.0 3600.0 p.idleTimeout
-      in  (ws1 <> ws2, PoolConfig { size = sz, idleTimeout = it })
+          (ws3, st) = clampField "pool.statement_timeout_ms" 1000 300000 p.statementTimeoutMs
+      in  (ws1 <> ws2 <> ws3, PoolConfig { size = sz, idleTimeout = it, statementTimeoutMs = st })
 
     validateLog l =
       let (ws1, ms) = clampField "logging.max_size_mb" 1 10000 l.maxSizeMB

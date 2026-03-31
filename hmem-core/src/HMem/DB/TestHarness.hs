@@ -81,7 +81,7 @@ getTestConnStr = do
 withTestEnv :: (TestEnv -> IO a) -> IO a
 withTestEnv action = do
   connStr <- getTestConnStr
-  p <- createPool connStr 10 5.0
+  p <- createPool connStr 10 5.0 30000
   let env = TestEnv { pool = p }
   ensureSchema env
   cleanDB env

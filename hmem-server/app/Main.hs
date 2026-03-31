@@ -77,7 +77,7 @@ main = do
       connStr = maybe (Config.connectionString cfg.database) T.pack opts.optDbConn
       poolSz  = fromMaybe cfg.pool.size opts.optPool
 
-  pool <- Pool.createPool connStr poolSz cfg.pool.idleTimeout
+  pool <- Pool.createPool connStr poolSz cfg.pool.idleTimeout cfg.pool.statementTimeoutMs
   tracker <- newAccessTracker pool 5  -- flush access counts every 5 seconds
   pgvec <- Pool.checkPgvector pool
 

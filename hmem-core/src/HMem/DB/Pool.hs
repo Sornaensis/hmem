@@ -67,8 +67,9 @@ createPool
   :: Text            -- ^ Connection string, e.g. @"host=localhost dbname=hmem"@
   -> Int             -- ^ Maximum number of connections
   -> Double          -- ^ Idle timeout in seconds
+  -> Int             -- ^ Statement timeout in milliseconds
   -> IO (Pool Hasql.Connection)
-createPool connStr maxConns idleTimeout = do
+createPool connStr maxConns idleTimeout stmtTimeoutMs = do
   caps <- getNumCapabilities
   let stripes = max 1 (min maxConns caps)
   newPool $ setNumStripes (Just stripes) $ defaultPoolConfig
@@ -82,8 +83,8 @@ createPool connStr maxConns idleTimeout = do
       case result of
         Left err   -> fail $ "Failed to connect to PostgreSQL: " <> show err
         Right conn -> do
-          -- Set a 30-second statement timeout on this connection
-          r <- Session.run (Session.sql "SET statement_timeout = '30s'") conn
+          let timeoutSql = "SET statement_timeout = '" <> T.pack (show stmtTimeoutMs) <> "ms'"
+          r <- Session.run (Session.sql (TE.encodeUtf8 timeoutSql)) conn
           case r of
             Left _  -> do
               Hasql.release conn

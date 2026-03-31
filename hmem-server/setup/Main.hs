@@ -175,7 +175,7 @@ doInit = do
   -- 7. Run migrations
   step "Running database migrations"
   let connStr = connectionString cfg.database
-  pool <- Pool.createPool connStr 2 60
+  pool <- Pool.createPool connStr 2 60 30000
   migResult <- Migration.runMigrations pool migrationsDir
   case migResult.applied of
     [] -> putStrLn "  No new migrations to apply."
@@ -723,7 +723,7 @@ doStart = do
 
   step "Applying pending migrations"
   let connStr = connectionString cfg.database
-  pool <- Pool.createPool connStr 2 60
+  pool <- Pool.createPool connStr 2 60 30000
   migResult <- Migration.runMigrations pool migrationsDir
   case migResult.applied of
     [] -> putStrLn "  No new migrations to apply."

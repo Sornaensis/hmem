@@ -126,7 +126,7 @@ Out of the box, hmem runs on `localhost:8420` with a local PostgreSQL instance, 
 
 ### Network / Production Deployment
 
-For shared servers, cloud VMs, or container deployments, see [SECURITY.md](SECURITY.md) for full details. Key steps:
+For shared servers, cloud VMs, or container deployments. Key steps:
 
 1. **Enable authentication** — set `auth.enabled: true` and provide `HMEM_API_KEY` via environment variable
 2. **Enable TLS** — provide cert/key to hmem-server directly, or terminate TLS at a reverse proxy
@@ -197,18 +197,6 @@ Typical memory footprint per entity:
 The `tsvector` full-text search index adds ~20–40% overhead per memory. A workspace with 10,000 memories and 1,000 tasks typically occupies 50–100 MB including indexes.
 
 PostgreSQL's `VACUUM` runs automatically. For large deployments, monitor table bloat and tune `autovacuum` settings as needed.
-
-## Security
-
-See [SECURITY.md](SECURITY.md) for the full security guide, including:
-
-- Threat model and trust boundaries
-- Authentication (optional Bearer token)
-- TLS configuration (optional HTTPS)
-- Database SSL for remote connections
-- CORS and rate limiting
-- Secrets handling via environment variables
-- Hardening checklist
 
 ## License
 

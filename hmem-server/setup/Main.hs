@@ -29,11 +29,12 @@ import System.Directory   (createDirectoryIfMissing, copyFile,
                            findExecutable, getHomeDirectory,
                            listDirectory,
                            removeDirectoryRecursive, removeFile)
-import System.Exit        (exitFailure)
+import System.Exit        (ExitCode(..), exitFailure)
 import System.FilePath    ((</>))
-import System.IO          (hFlush, hPutStrLn, stderr, stdout)
+import System.IO          (IOMode(..), hFlush, hPutStrLn, openFile, stderr, stdout)
 import System.Info        (os)
-import System.Process     (callProcess, readProcess, spawnProcess)
+import System.Process     (CreateProcess(..), StdStream(..), callProcess,
+                           createProcess, proc, readProcess, waitForProcess)
 
 import HMem.Config
 import HMem.DB.Migration qualified as Migration
@@ -305,20 +306,20 @@ installWindows :: IO ()
 installWindows = do
   dir <- configDir
   let dataDir = dir </> "data" </> "postgresql"
-      logDir  = dir </> "logs"
 
-  pgCtlBin  <- findBinary "pg_ctl" "pg_ctl"
-  serverBin <- findBinary "hmem-server" "hmem-server"
+  pgCtlBin <- findBinary "pg_ctl" "pg_ctl"
+  setupBin <- findBinary "hmem-setup" "hmem-setup"
 
   -- Write startup script
+  -- `hmem-setup start` handles: pg_ctl start (graceful if already
+  -- running), migration refresh, and launching hmem-server as a
+  -- detached process (detach_console + create_group).  The bat
+  -- therefore exits quickly and Task Scheduler marks the task complete.
   step "Writing startup scripts"
   let startScript = dir </> "start-hmem.bat"
   writeFile startScript $ unlines
     [ "@echo off"
-    , "\"" <> pgCtlBin <> "\" start -D \"" <> dataDir
-        <> "\" -l \"" <> logDir </> "postgresql.log" <> "\" -w"
-    , "timeout /t 2 /nobreak >nul"
-    , "start /b \"hmem-server\" \"" <> serverBin <> "\""
+    , "\"" <> setupBin <> "\" start"
     ]
 
   let stopScript = dir </> "stop-hmem.bat"
@@ -708,12 +709,25 @@ doStart = do
   let dataDir = dir </> "data" </> "postgresql"
       logDir  = dir </> "logs"
 
+  pgCtlBin <- findBinary "pg_ctl" "pg_ctl"
+
   putStrLn "Starting PostgreSQL..."
-  callProcess "pg_ctl"
+  pgResult <- try (runHidden pgCtlBin
     [ "start", "-D", dataDir
     , "-l", logDir </> "postgresql.log"
     , "-w", "-t", "30"
-    ]
+    ]) :: IO (Either SomeException ())
+  case pgResult of
+    Right () -> pure ()
+    Left _ -> do
+      status <- try (readProcess pgCtlBin ["status", "-D", dataDir] "")
+        :: IO (Either SomeException String)
+      case status of
+        Right s | "server is running" `isInfixOf` s ->
+          putStrLn "  PostgreSQL already running."
+        _ -> do
+          hPutStrLn stderr "  Failed to start PostgreSQL."
+          exitFailure
   threadDelay 1000000
 
   step "Refreshing installed migrations"
@@ -738,8 +752,19 @@ doStart = do
       exitFailure
 
   putStrLn "Starting hmem-server..."
-  _ <- spawnProcess "hmem-server" []
+  serverBin <- findBinary "hmem-server" "hmem-server"
+  let serverLog = logDir </> "hmem-server.log"
+  logH <- openFile serverLog AppendMode
+  _ <- createProcess (proc serverBin [])
+    { std_in           = NoStream
+    , std_out          = UseHandle logH
+    , std_err          = UseHandle logH
+    , detach_console   = True
+    , use_process_jobs = False
+    }
+  threadDelay 500000
   putStrLn $ "hmem-server running on port " <> show cfg.server.port
+  putStrLn $ "  Log: " <> serverLog
 
 doStop :: IO ()
 doStop = do
@@ -883,6 +908,38 @@ removeIfExists path = do
 
 isWindows :: Bool
 isWindows = os == "mingw32"
+
+-- | On Windows, run a command with a hidden console window via a
+-- temporary VBScript stub.  @WshShell.Run@ with window style 0
+-- (@SW_HIDE@) creates the process with @STARTF_USESHOWWINDOW@ so
+-- the console window is never visible.  Child processes (e.g.
+-- postgres spawned by pg_ctl) inherit the hidden console rather
+-- than allocating a new visible one.
+--
+-- Waits for the command to finish and propagates the exit code.
+-- On non-Windows, falls back to 'callProcess'.
+runHidden :: FilePath -> [String] -> IO ()
+runHidden bin args
+  | isWindows = do
+      dir <- configDir
+      let vbsFile = dir </> ".run-hidden.vbs"
+          quote s = "\"" <> s <> "\""
+          cmdLine = unwords $ map quote (bin : args)
+          -- In VBS string literals, \" is escaped as \"\"
+          vbsEsc  = concatMap (\c -> if c == '"' then "\"\"" else [c]) cmdLine
+      writeFile vbsFile $ unlines
+        [ "Set ws = CreateObject(\"WScript.Shell\")"
+        , "rc = ws.Run(\"" <> vbsEsc <> "\", 0, True)"
+        , "WScript.Quit rc"
+        ]
+      (_, _, _, ph) <- createProcess (proc "wscript" ["//B", "//nologo", vbsFile])
+        { use_process_jobs = False }
+      ec <- waitForProcess ph
+      removeIfExists vbsFile
+      case ec of
+        ExitSuccess   -> pure ()
+        ExitFailure c -> fail $ bin <> " exited with code " <> show c
+  | otherwise = callProcess bin args
 
 step :: String -> IO ()
 step msg = do

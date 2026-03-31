@@ -76,3 +76,8 @@ spec = do
         (concurrently_ (go uuid2 100) (go uuid3 100))
       sz <- bufferSize tracker
       sz `shouldBe` 3
+
+  describe "droppedEvents" $ do
+    it "starts at zero" $ withTracker $ \_env tracker -> do
+      dropped <- droppedEvents tracker
+      dropped `shouldBe` 0

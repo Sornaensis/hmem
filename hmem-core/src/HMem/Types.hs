@@ -955,6 +955,8 @@ data WorkspaceVisualizationQuery = WorkspaceVisualizationQuery
   , excludeProjectIds :: Maybe [UUID]
   , taskStatuses      :: Maybe [TaskStatus]
   , memoryFilter      :: Maybe WorkspaceVisualizationMemoryFilter
+  , showTasks         :: Maybe Bool
+  , showTaskStatusSummary :: Maybe Bool
   } deriving (Show, Eq, Generic)
 
 instance ToJSON WorkspaceVisualizationQuery where

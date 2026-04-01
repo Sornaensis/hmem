@@ -4,6 +4,7 @@ module HMem.MCP.Tools
   -- * Testing
   , parseToolCall
   , validateToolCall
+    , WorkspaceVisualizationFormat(..)
   , ToolCall(..)
   ) where
 
@@ -22,6 +23,7 @@ import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Network.HTTP.Client
+import Network.HTTP.Types.Header (hAccept)
 import Network.HTTP.Types.Status (statusCode)
 import Network.HTTP.Types.URI (urlEncode)
 
@@ -268,10 +270,13 @@ toolDefinitions =
       , "required" .= [t "workspace_id"]
       ]
 
-    , mkTool "workspace_visualization" "Get a workspace visualization payload for graphing projects, tasks, memories, and their links. Supports project inclusion/exclusion, task status filtering, and memory filtering." $ object
+    , mkTool "workspace_visualization" "Generate a workspace visualization as SVG by default, or return the raw JSON graph with format=json. Supports project inclusion/exclusion, task status filtering for task-derived memory links, memory filtering, and SVG-only task rendering options. Task status summaries are shown in SVG by default unless disabled." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
+          , "format" .= propEnum "string" "Output format (default svg)" ["svg", "json"]
+          , "show_tasks" .= prop "boolean" "If true, include task nodes in SVG output (ignored for JSON)"
+          , "show_task_status_summary" .= prop "boolean" "If false, suppress task status count summaries in SVG output (defaults to true)"
           , "include_project_ids" .= object
               [ "type" .= t "array"
               , "items" .= object ["type" .= t "string"]
@@ -1064,6 +1069,18 @@ toolDefinitions =
 -- Typed tool calls
 ------------------------------------------------------------------------
 
+data WorkspaceVisualizationFormat
+    = WorkspaceVisualizationSvg
+    | WorkspaceVisualizationJson
+    deriving (Show, Eq)
+
+instance FromJSON WorkspaceVisualizationFormat where
+    parseJSON = withText "WorkspaceVisualizationFormat" $ \formatName ->
+        case formatName of
+            "svg" -> pure WorkspaceVisualizationSvg
+            "json" -> pure WorkspaceVisualizationJson
+            _ -> fail ("Unknown workspace visualization format: " <> T.unpack formatName)
+
 data ToolCall
   = MemoryCreate   CreateMemory
   | MemoryCreateBatch [CreateMemory]
@@ -1098,7 +1115,7 @@ data ToolCall
   | TaskDepRemove  UUID UUID               -- task_id, depends_on_id
   | WorkspaceList (Maybe Int) (Maybe Int)
   | WorkspaceGet   UUID
-    | WorkspaceVisualizationCall UUID WorkspaceVisualizationQuery
+        | WorkspaceVisualizationCall UUID WorkspaceVisualizationQuery WorkspaceVisualizationFormat
   | WsUpdate       UUID UpdateWorkspace
   | WsDelete       UUID
     | WsRestore      UUID
@@ -1211,7 +1228,7 @@ parseToolCall name args = case name of
     "cleanup_policy_upsert"    -> CleanupPolicyUpsert <$> parse args
     "workspace_list"           -> WorkspaceList <$> opt "limit" <*> opt "offset"
     "workspace_get"            -> WorkspaceGet <$> need "workspace_id"
-    "workspace_visualization"  -> WorkspaceVisualizationCall <$> need "workspace_id" <*> parse args
+    "workspace_visualization"  -> WorkspaceVisualizationCall <$> need "workspace_id" <*> parse args <*> (maybe WorkspaceVisualizationSvg id <$> opt "format")
     "workspace_update"         -> WsUpdate <$> need "workspace_id" <*> parse args
     "workspace_delete"         -> WsDelete <$> need "workspace_id"
     "workspace_restore"        -> WsRestore <$> need "workspace_id"
@@ -1369,9 +1386,9 @@ validateToolCall = \case
     WsGroupList ml mo -> Right $ WsGroupList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
     WorkspaceReg cw -> WorkspaceReg cw <$ firstValidationError (validateCreateWorkspaceInput cw)
     WorkspaceList ml mo -> Right $ WorkspaceList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
-    WorkspaceVisualizationCall wid query ->
+    WorkspaceVisualizationCall wid query format ->
         let query' = clampWorkspaceVisualizationQuery query
-        in WorkspaceVisualizationCall wid query' <$ firstValidationError (validateWorkspaceVisualizationQuery query')
+        in WorkspaceVisualizationCall wid query' format <$ firstValidationError (validateWorkspaceVisualizationQuery query')
     WsUpdate wid uw -> WsUpdate wid uw <$ firstValidationError (validateUpdateWorkspaceInput uw)
     CleanupPoliciesList wid ml mo -> Right $ CleanupPoliciesList wid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
     ActivityTimeline mws met ml -> Right $ ActivityTimeline mws met (clampMaybe 1 200 <$> ml)
@@ -1508,11 +1525,15 @@ clampWorkspaceVisualizationQuery WorkspaceVisualizationQuery
     , excludeProjectIds = excludeIds
     , taskStatuses = statuses
     , memoryFilter = memoryFilterValue
+    , showTasks = showTasksValue
+    , showTaskStatusSummary = showTaskStatusSummaryValue
     } = WorkspaceVisualizationQuery
         { includeProjectIds = includeIds
         , excludeProjectIds = excludeIds
         , taskStatuses = statuses
         , memoryFilter = fmap clampWorkspaceVisualizationMemoryFilter memoryFilterValue
+        , showTasks = showTasksValue
+        , showTaskStatusSummary = showTaskStatusSummaryValue
         }
 
 clampWorkspaceVisualizationMemoryFilter :: WorkspaceVisualizationMemoryFilter -> WorkspaceVisualizationMemoryFilter
@@ -1620,8 +1641,8 @@ executeToolCall mgr base mApiKey = \case
                             , ("offset", show <$> mo)
                             ])
     WorkspaceGet wid        -> getJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid)
-    WorkspaceVisualizationCall wid query ->
-        postJSON mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid <> "/visualization") query
+    WorkspaceVisualizationCall wid query format ->
+        postAcceptedText (workspaceVisualizationAccept format) mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid <> "/visualization") query
     WsUpdate wid uw         -> putJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid) uw
     WsDelete wid            -> delJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid)
     WsRestore wid           -> postJSON mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid <> "/restore") (object [])
@@ -1747,6 +1768,9 @@ putJSON mgr base mApiKey path body = httpJSON mgr mApiKey "PUT" (base <> path) (
 delJSON :: Manager -> String -> Maybe Text -> String -> IO Value
 delJSON mgr base mApiKey path = httpJSON mgr mApiKey "DELETE" (base <> path) Nothing
 
+postAcceptedText :: ToJSON a => BS8.ByteString -> Manager -> String -> Maybe Text -> String -> a -> IO Value
+postAcceptedText acceptHeader mgr base mApiKey path body = httpText mgr mApiKey acceptHeader "POST" (base <> path) (Just (encode body))
+
 httpJSON :: Manager -> Maybe Text -> String -> String -> Maybe BL.ByteString -> IO Value
 httpJSON mgr mApiKey httpMethod url mbody = do
   result <- try $ do
@@ -1768,6 +1792,33 @@ httpJSON mgr mApiKey httpMethod url mbody = do
   case result of
     Right v  -> pure v
     Left (e :: SomeException) -> pure $ mcpErrorCode "CONNECTION_ERROR" (T.pack $ show e)
+
+httpText :: Manager -> Maybe Text -> BS8.ByteString -> String -> String -> Maybe BL.ByteString -> IO Value
+httpText mgr mApiKey acceptHeader httpMethod url mbody = do
+    result <- try $ do
+        initReq <- parseRequest url
+        let authHeaders = maybe [] (\key -> [("Authorization", "Bearer " <> TE.encodeUtf8 key)]) mApiKey
+        let req = initReq
+                    { method         = fromString httpMethod
+                    , requestHeaders = [("Content-Type", "application/json"), (hAccept, acceptHeader)] <> authHeaders
+                    , requestBody    = maybe (RequestBodyBS mempty) RequestBodyLBS mbody
+                    }
+        resp <- httpLbs req mgr
+        let code = statusCode (responseStatus resp)
+        let body = responseBody resp
+        if code >= 200 && code < 300
+            then pure $ mcpResult body
+            else pure $ mcpErrorCode
+                ("HTTP_" <> T.pack (show code))
+                (decodeUtf8 body)
+    case result of
+        Right v  -> pure v
+        Left (e :: SomeException) -> pure $ mcpErrorCode "CONNECTION_ERROR" (T.pack $ show e)
+
+workspaceVisualizationAccept :: WorkspaceVisualizationFormat -> BS8.ByteString
+workspaceVisualizationAccept format = case format of
+    WorkspaceVisualizationSvg -> "image/svg+xml"
+    WorkspaceVisualizationJson -> "application/json"
 
 ------------------------------------------------------------------------
 -- MCP content helpers

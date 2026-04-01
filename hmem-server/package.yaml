@@ -12,6 +12,7 @@ dependencies:
   - base >= 4.7 && < 5
   - hmem-core
   - containers
+  - http-media
   - servant-server >= 0.19
   - warp
   - warp-tls

@@ -85,6 +85,9 @@ get_ app path = runReq app methodGet path ""
 postJSON :: Application -> BS.ByteString -> Value -> IO SResponse
 postJSON app path body = runReq app methodPost path (encode body)
 
+postJSONWithHeaders :: Application -> BS.ByteString -> [(HeaderName, BS.ByteString)] -> Value -> IO SResponse
+postJSONWithHeaders app path headers body = runReqWithHeaders app methodPost path headers (encode body)
+
 putJSON :: Application -> BS.ByteString -> Value -> IO SResponse
 putJSON app path body = runReq app methodPut path (encode body)
 
@@ -711,7 +714,7 @@ spec = around withApp $ do
       map (.id) extraOverview.connectedMemories `shouldBe` [taskMem.id, projectMem.id, workspaceMem.id]
 
   describe "workspace visualization endpoint" $ do
-    it "applies project, task, and memory filters" $ \app -> do
+    it "shows task status summaries by default and supports opt-in task rendering in SVG" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("viz-ws" :: T.Text)])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
@@ -728,6 +731,10 @@ spec = around withApp $ do
         (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "title" .= ("Keep Task" :: T.Text)])
       let Just todoTask = decode (respBody todoTaskResp) :: Maybe Task
 
+      doneKeepTaskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "title" .= ("Done Task" :: T.Text)])
+      let Just doneKeepTask = decode (respBody doneKeepTaskResp) :: Maybe Task
+
       doneTaskResp <- postJSON app "/api/v1/tasks"
         (object
           [ "workspace_id" .= ws.id
@@ -735,6 +742,10 @@ spec = around withApp $ do
           , "title" .= ("Drop Task" :: T.Text)
           ])
       let Just doneTask = decode (respBody doneTaskResp) :: Maybe Task
+
+      markDoneKeepResp <- putJSON app (uuidPath "/api/v1/tasks" doneKeepTask.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus markDoneKeepResp `shouldBe` 200
 
       markDoneResp <- putJSON app (uuidPath "/api/v1/tasks" doneTask.id)
         (object ["status" .= ("done" :: T.Text)])
@@ -778,20 +789,71 @@ spec = around withApp $ do
         (object ["memory_id" .= dropMem.id])
       respStatus linkDropTaskResp `shouldBe` 200
 
-      vizResp <- postJSON app (uuidPath "/api/v1/workspaces" ws.id <> "/visualization")
+      let vizRequest = object
+            [ "include_project_ids" .= [leftProj.id]
+            , "memory_filter" .= object
+                [ "tags" .= (["keep"] :: [T.Text])
+                , "min_importance" .= (7 :: Int)
+                ]
+            ]
+
+      let taskVizRequest = object
+            [ "include_project_ids" .= [leftProj.id]
+            , "memory_filter" .= object
+                [ "tags" .= (["keep"] :: [T.Text])
+                , "min_importance" .= (7 :: Int)
+                ]
+            , "show_tasks" .= True
+            , "show_task_status_summary" .= True
+            ]
+
+      svgResp <- postJSON app (uuidPath "/api/v1/workspaces" ws.id <> "/visualization") vizRequest
+      respStatus svgResp `shouldBe` 200
+      lookup hContentType (simpleHeaders svgResp) `shouldBe` Just "image/svg+xml;charset=utf-8"
+      let svg = decodeUtf8 (LBS.toStrict (respBody svgResp))
+      svg `shouldSatisfy` T.isPrefixOf "<svg"
+      svg `shouldSatisfy` T.isInfixOf "viz-ws"
+      svg `shouldSatisfy` T.isInfixOf "Included"
+      svg `shouldSatisfy` T.isInfixOf "Keep memory"
+      svg `shouldSatisfy` T.isInfixOf "via tasks"
+      svg `shouldSatisfy` T.isInfixOf "1 todo | 1 completed"
+      svg `shouldSatisfy` (not . T.isInfixOf "Keep Task")
+      svg `shouldSatisfy` (not . T.isInfixOf "Done Task")
+      svg `shouldSatisfy` (not . T.isInfixOf "Excluded")
+      svg `shouldSatisfy` (not . T.isInfixOf "Drop memory")
+
+      svgTaskResp <- postJSON app (uuidPath "/api/v1/workspaces" ws.id <> "/visualization") taskVizRequest
+      respStatus svgTaskResp `shouldBe` 200
+      lookup hContentType (simpleHeaders svgTaskResp) `shouldBe` Just "image/svg+xml;charset=utf-8"
+      let svgWithTasks = decodeUtf8 (LBS.toStrict (respBody svgTaskResp))
+      svgWithTasks `shouldSatisfy` T.isInfixOf "Tasks"
+      svgWithTasks `shouldSatisfy` T.isInfixOf "Keep Task"
+      svgWithTasks `shouldSatisfy` T.isInfixOf "Done Task"
+      svgWithTasks `shouldSatisfy` T.isInfixOf "1 todo | 1 completed"
+
+      svgNoSummaryResp <- postJSON app (uuidPath "/api/v1/workspaces" ws.id <> "/visualization")
         (object
           [ "include_project_ids" .= [leftProj.id]
-          , "task_statuses" .= (["todo"] :: [T.Text])
           , "memory_filter" .= object
               [ "tags" .= (["keep"] :: [T.Text])
               , "min_importance" .= (7 :: Int)
               ]
+          , "show_task_status_summary" .= False
           ])
-      respStatus vizResp `shouldBe` 200
-      let Just visualization = decode (respBody vizResp) :: Maybe WorkspaceVisualization
-      map (.id) visualization.projects `shouldBe` [leftProj.id]
-      map (.id) visualization.tasks `shouldBe` [todoTask.id]
-      map (.id) visualization.memories `shouldBe` [keepMem.id]
+      respStatus svgNoSummaryResp `shouldBe` 200
+      let svgWithoutSummary = decodeUtf8 (LBS.toStrict (respBody svgNoSummaryResp))
+      svgWithoutSummary `shouldSatisfy` (not . T.isInfixOf "1 todo | 1 completed")
+
+      jsonResp <- postJSONWithHeaders app (uuidPath "/api/v1/workspaces" ws.id <> "/visualization")
+        [(hAccept, "application/json")]
+        taskVizRequest
+      respStatus jsonResp `shouldBe` 200
+      lookup hContentType (simpleHeaders jsonResp) `shouldBe` Just "application/json;charset=utf-8"
+      let Just visualization = decode (respBody jsonResp) :: Maybe WorkspaceVisualization
+      visualization.workspace.id `shouldBe` ws.id
+      [project.id | project <- visualization.projects] `shouldBe` [leftProj.id]
+      [task.id | task <- visualization.tasks] `shouldMatchList` [todoTask.id, doneKeepTask.id]
+      [memory.id | memory <- visualization.memories] `shouldBe` [keepMem.id]
       visualization.projectMemoryLinks `shouldBe`
         [VisualizationProjectMemoryLink { projectId = leftProj.id, memoryId = keepMem.id }]
       visualization.taskMemoryLinks `shouldBe`

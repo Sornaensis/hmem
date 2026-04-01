@@ -595,6 +595,8 @@ spec = do
             [ "workspace_id" .= testUUID
             , "include_project_ids" .= ([testUUID2] :: [Text])
             , "task_statuses" .= (["todo", "in_progress"] :: [Text])
+            , "show_tasks" .= True
+            , "show_task_status_summary" .= True
             , "memory_filter" .= object
                 [ "memory_type" .= ("long_term" :: Text)
                 , "min_importance" .= (8 :: Int)
@@ -602,15 +604,37 @@ spec = do
                 ]
             ]
       case parseToolCall "workspace_visualization" args of
-        Right (WorkspaceVisualizationCall wid query) -> do
+        Right (WorkspaceVisualizationCall wid query format) -> do
           wid `shouldBe` parsedUUID
+          format `shouldBe` WorkspaceVisualizationSvg
           query.includeProjectIds `shouldBe` Just [parsedUUID2]
           query.taskStatuses `shouldBe` Just [Todo, InProgress]
+          query.showTasks `shouldBe` Just True
+          query.showTaskStatusSummary `shouldBe` Just True
           query.memoryFilter `shouldBe` Just WorkspaceVisualizationMemoryFilter
             { memoryType = Just LongTerm
             , tags = Nothing
             , minImportance = Just 8
             , pinnedOnly = Just True
+            }
+        other -> expectationFailure $ "Expected WorkspaceVisualizationCall, got: " <> show other
+
+    it "parses workspace_visualization with json format" $ do
+      let args = object
+            [ "workspace_id" .= testUUID
+            , "format" .= ("json" :: Text)
+            ]
+      case parseToolCall "workspace_visualization" args of
+        Right (WorkspaceVisualizationCall wid query format) -> do
+          wid `shouldBe` parsedUUID
+          format `shouldBe` WorkspaceVisualizationJson
+          query `shouldBe` WorkspaceVisualizationQuery
+            { includeProjectIds = Nothing
+            , excludeProjectIds = Nothing
+            , taskStatuses = Nothing
+            , memoryFilter = Nothing
+            , showTasks = Nothing
+            , showTaskStatusSummary = Nothing
             }
         other -> expectationFailure $ "Expected WorkspaceVisualizationCall, got: " <> show other
 
@@ -689,8 +713,13 @@ spec = do
             , minImportance = Just 42
             , pinnedOnly = Nothing
             }
-        }) of
-        Right (WorkspaceVisualizationCall _ query) ->
+        , showTasks = Just True
+        , showTaskStatusSummary = Just True
+        } WorkspaceVisualizationSvg) of
+        Right (WorkspaceVisualizationCall _ query format) -> do
+          format `shouldBe` WorkspaceVisualizationSvg
+          query.showTasks `shouldBe` Just True
+          query.showTaskStatusSummary `shouldBe` Just True
           query.memoryFilter `shouldBe` Just WorkspaceVisualizationMemoryFilter
             { memoryType = Nothing
             , tags = Nothing
@@ -705,7 +734,9 @@ spec = do
         , excludeProjectIds = Just [parsedUUID]
         , taskStatuses = Nothing
         , memoryFilter = Nothing
-        }) `shouldSatisfy` isLeft
+        , showTasks = Nothing
+        , showTaskStatusSummary = Nothing
+        } WorkspaceVisualizationJson) `shouldSatisfy` isLeft
 
     it "validates project and category batch operations" $ do
       validateToolCall (ProjectDeleteBatch []) `shouldSatisfy` isLeft
@@ -752,14 +783,20 @@ spec = do
     it "defines task_overview and workspace_visualization" $ do
       let Just taskOverviewSchema = inputSchemaFor "task_overview"
           Just taskOverviewProps = objectField "properties" taskOverviewSchema
+          Just workspaceVizTool = toolDefinitionFor "workspace_visualization"
           Just workspaceVizSchema = inputSchemaFor "workspace_visualization"
           Just workspaceVizProps = objectField "properties" workspaceVizSchema
           Just memoryFilterSchema = objectField "memory_filter" workspaceVizProps
           Just memoryFilterProps = objectField "properties" memoryFilterSchema
       objectField "extra_context" taskOverviewProps `shouldSatisfy` (/= Nothing)
+      objectField "format" workspaceVizProps `shouldSatisfy` (/= Nothing)
+      objectField "show_tasks" workspaceVizProps `shouldSatisfy` (/= Nothing)
+      objectField "show_task_status_summary" workspaceVizProps `shouldSatisfy` (/= Nothing)
       objectField "include_project_ids" workspaceVizProps `shouldSatisfy` (/= Nothing)
       objectField "task_statuses" workspaceVizProps `shouldSatisfy` (/= Nothing)
       objectField "min_importance" memoryFilterProps `shouldSatisfy` (/= Nothing)
+      textField "description" workspaceVizTool `shouldSatisfy` maybe False (T.isInfixOf "SVG")
+      textField "description" workspaceVizTool `shouldSatisfy` maybe False (T.isInfixOf "JSON")
 
   describe "parseToolCall (saved view tools)" $ do
 
@@ -872,6 +909,11 @@ inputSchemaFor :: Text -> Maybe Value
 inputSchemaFor toolName = case filter ((== Just toolName) . textField "name") toolDefinitions of
   (Object obj:_) -> KM.lookup "inputSchema" obj
   _              -> Nothing
+
+toolDefinitionFor :: Text -> Maybe Value
+toolDefinitionFor toolName = case filter ((== Just toolName) . textField "name") toolDefinitions of
+  (tool:_) -> Just tool
+  _        -> Nothing
 
 objectField :: Key -> Value -> Maybe Value
 objectField key (Object obj) = KM.lookup key obj

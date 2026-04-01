@@ -44,6 +44,7 @@ import HMem.DB.Schema
 import HMem.DB.Task qualified as Task
 import HMem.DB.WorkspaceGroup qualified as WG
 import HMem.Server.AccessTracker (AccessTracker, trackAccess, bufferSize)
+import HMem.Server.VisualizationSvg (SVG, WorkspaceVisualizationResponse(..))
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -77,7 +78,8 @@ type WorkspaceAPI =
   :<|> Capture "workspaceId" UUID :> "restore" :> Post '[JSON] NoContent
   :<|> Capture "workspaceId" UUID :> "purge" :> Delete '[JSON] NoContent
   :<|> Capture "workspaceId" UUID :> "visualization"
-    :> ReqBody '[JSON] WorkspaceVisualizationQuery :> Post '[JSON] WorkspaceVisualization
+    :> ReqBody '[JSON] WorkspaceVisualizationQuery
+    :> Post '[SVG, JSON] WorkspaceVisualizationResponse
 
 -- Memories
 type MemoryAPI =
@@ -807,10 +809,14 @@ workspaceHandlers pool =
                   }
               pure NoContent
 
-    workspaceVisualizationH :: UUID -> WorkspaceVisualizationQuery -> Handler WorkspaceVisualization
+    workspaceVisualizationH :: UUID -> WorkspaceVisualizationQuery -> Handler WorkspaceVisualizationResponse
     workspaceVisualizationH wsId query = do
       rejectValidationErrors (validateWorkspaceVisualizationQuery query)
-      handleDBErrors (Overview.getWorkspaceVisualization pool wsId query) >>= maybe (throwError err404) pure
+      visualization <- handleDBErrors (Overview.getWorkspaceVisualization pool wsId query) >>= maybe (throwError err404) pure
+      pure WorkspaceVisualizationResponse
+        { responseQuery = query
+        , responseVisualization = visualization
+        }
 
 -- Memory handlers --------------------------------------------------
 

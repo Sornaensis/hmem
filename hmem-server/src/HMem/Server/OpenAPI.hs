@@ -12,6 +12,7 @@ import Data.Proxy (Proxy (..))
 import Servant.OpenApi (toOpenApi)
 
 import HMem.Server.API (HMemAPI, CleanupRunReq, GroupMemberReq, CategoryLink)
+import HMem.Server.VisualizationSvg (WorkspaceVisualizationResponse)
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -145,6 +146,7 @@ instance ToSchema VisualizationTaskDependency where declareNamedSchema = generic
 instance ToSchema VisualizationProjectMemoryLink where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema VisualizationTaskMemoryLink where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WorkspaceVisualization where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema WorkspaceVisualizationResponse where declareNamedSchema _ = declareNamedSchema (Proxy @WorkspaceVisualization)
 
 ------------------------------------------------------------------------
 -- Helper

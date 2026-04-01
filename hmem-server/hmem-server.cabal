@@ -25,6 +25,7 @@ library
       HMem.Server.App
       HMem.Server.Logging
       HMem.Server.OpenAPI
+      HMem.Server.VisualizationSvg
   other-modules:
       Paths_hmem_server
   hs-source-dirs:
@@ -60,6 +61,7 @@ library
     , filepath
     , hasql
     , hmem-core
+    , http-media
     , http-types
     , insert-ordered-containers
     , lens
@@ -117,6 +119,7 @@ executable hmem-server
     , hasql
     , hmem-core
     , hmem-server
+    , http-media
     , http-types
     , insert-ordered-containers
     , lens
@@ -173,6 +176,7 @@ executable hmem-setup
     , filepath
     , hasql
     , hmem-core
+    , http-media
     , http-types
     , insert-ordered-containers
     , lens
@@ -239,6 +243,7 @@ test-suite hmem-server-test
     , hmem-server
     , hspec
     , hspec-discover
+    , http-media
     , http-types
     , insert-ordered-containers
     , lens

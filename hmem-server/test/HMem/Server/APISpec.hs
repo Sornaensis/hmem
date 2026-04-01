@@ -637,6 +637,168 @@ spec = around withApp $ do
                           <> encodeUtf8 (T.pack (show t1.id)))
       respStatus delResp `shouldBe` 200
 
+  describe "task overview endpoint" $ do
+    it "returns dependency summaries and optional extra-context memories" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-overview-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Overview Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      depResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependency" :: T.Text)])
+      let Just depTask = decode (respBody depResp) :: Maybe Task
+
+      taskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Target" :: T.Text)])
+      let Just task = decode (respBody taskResp) :: Maybe Task
+
+      addDepResp <- postJSON app (uuidPath "/api/v1/tasks" task.id <> "/dependencies")
+        (object ["depends_on_id" .= depTask.id])
+      respStatus addDepResp `shouldBe` 200
+
+      taskMemResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "content" .= ("Task memory content" :: T.Text)
+          , "summary" .= ("Task memory" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          , "importance" .= (9 :: Int)
+          ])
+      let Just taskMem = decode (respBody taskMemResp) :: Maybe Memory
+
+      projectMemResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "content" .= ("Project memory content" :: T.Text)
+          , "summary" .= ("Project memory" :: T.Text)
+          , "memory_type" .= ("long_term" :: T.Text)
+          , "importance" .= (7 :: Int)
+          ])
+      let Just projectMem = decode (respBody projectMemResp) :: Maybe Memory
+
+      workspaceMemResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "content" .= ("Workspace memory content" :: T.Text)
+          , "summary" .= ("Workspace memory" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          , "importance" .= (5 :: Int)
+          ])
+      let Just workspaceMem = decode (respBody workspaceMemResp) :: Maybe Memory
+
+      linkTaskMemResp <- postJSON app (uuidPath "/api/v1/tasks" task.id <> "/memories")
+        (object ["memory_id" .= taskMem.id])
+      respStatus linkTaskMemResp `shouldBe` 200
+
+      linkProjectMemResp <- postJSON app (uuidPath "/api/v1/projects" proj.id <> "/memories")
+        (object ["memory_id" .= projectMem.id])
+      respStatus linkProjectMemResp `shouldBe` 200
+
+      overviewResp <- get_ app (uuidPath "/api/v1/tasks" task.id <> "/overview")
+      respStatus overviewResp `shouldBe` 200
+      let Just overview = decode (respBody overviewResp) :: Maybe TaskOverview
+      map (.name) overview.dependencies `shouldBe` ["Dependency"]
+      map (.scope) overview.connectedMemories `shouldBe` [ScopeTask]
+      map (.id) overview.connectedMemories `shouldBe` [taskMem.id]
+
+      extraResp <- get_ app (uuidPath "/api/v1/tasks" task.id <> "/overview?extra_context=true")
+      respStatus extraResp `shouldBe` 200
+      let Just extraOverview = decode (respBody extraResp) :: Maybe TaskOverview
+      map (.scope) extraOverview.connectedMemories `shouldBe` [ScopeTask, ScopeProject, ScopeWorkspace]
+      map (.id) extraOverview.connectedMemories `shouldBe` [taskMem.id, projectMem.id, workspaceMem.id]
+
+  describe "workspace visualization endpoint" $ do
+    it "applies project, task, and memory filters" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("viz-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      leftProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Included" :: T.Text)])
+      let Just leftProj = decode (respBody leftProjResp) :: Maybe Project
+
+      rightProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Excluded" :: T.Text)])
+      let Just rightProj = decode (respBody rightProjResp) :: Maybe Project
+
+      todoTaskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "title" .= ("Keep Task" :: T.Text)])
+      let Just todoTask = decode (respBody todoTaskResp) :: Maybe Task
+
+      doneTaskResp <- postJSON app "/api/v1/tasks"
+        (object
+          [ "workspace_id" .= ws.id
+          , "project_id" .= rightProj.id
+          , "title" .= ("Drop Task" :: T.Text)
+          ])
+      let Just doneTask = decode (respBody doneTaskResp) :: Maybe Task
+
+      markDoneResp <- putJSON app (uuidPath "/api/v1/tasks" doneTask.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus markDoneResp `shouldBe` 200
+
+      keepMemResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "content" .= ("Keep memory content" :: T.Text)
+          , "summary" .= ("Keep memory" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          , "importance" .= (8 :: Int)
+          , "tags" .= (["keep"] :: [T.Text])
+          ])
+      let Just keepMem = decode (respBody keepMemResp) :: Maybe Memory
+
+      dropMemResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "content" .= ("Drop memory content" :: T.Text)
+          , "summary" .= ("Drop memory" :: T.Text)
+          , "memory_type" .= ("long_term" :: T.Text)
+          , "importance" .= (4 :: Int)
+          , "tags" .= (["drop"] :: [T.Text])
+          ])
+      let Just dropMem = decode (respBody dropMemResp) :: Maybe Memory
+
+      linkKeepProjectResp <- postJSON app (uuidPath "/api/v1/projects" leftProj.id <> "/memories")
+        (object ["memory_id" .= keepMem.id])
+      respStatus linkKeepProjectResp `shouldBe` 200
+
+      linkKeepTaskResp <- postJSON app (uuidPath "/api/v1/tasks" todoTask.id <> "/memories")
+        (object ["memory_id" .= keepMem.id])
+      respStatus linkKeepTaskResp `shouldBe` 200
+
+      linkDropProjectResp <- postJSON app (uuidPath "/api/v1/projects" rightProj.id <> "/memories")
+        (object ["memory_id" .= dropMem.id])
+      respStatus linkDropProjectResp `shouldBe` 200
+
+      linkDropTaskResp <- postJSON app (uuidPath "/api/v1/tasks" doneTask.id <> "/memories")
+        (object ["memory_id" .= dropMem.id])
+      respStatus linkDropTaskResp `shouldBe` 200
+
+      vizResp <- postJSON app (uuidPath "/api/v1/workspaces" ws.id <> "/visualization")
+        (object
+          [ "include_project_ids" .= [leftProj.id]
+          , "task_statuses" .= (["todo"] :: [T.Text])
+          , "memory_filter" .= object
+              [ "tags" .= (["keep"] :: [T.Text])
+              , "min_importance" .= (7 :: Int)
+              ]
+          ])
+      respStatus vizResp `shouldBe` 200
+      let Just visualization = decode (respBody vizResp) :: Maybe WorkspaceVisualization
+      map (.id) visualization.projects `shouldBe` [leftProj.id]
+      map (.id) visualization.tasks `shouldBe` [todoTask.id]
+      map (.id) visualization.memories `shouldBe` [keepMem.id]
+      visualization.projectMemoryLinks `shouldBe`
+        [VisualizationProjectMemoryLink { projectId = leftProj.id, memoryId = keepMem.id }]
+      visualization.taskMemoryLinks `shouldBe`
+        [VisualizationTaskMemoryLink { taskId = todoTask.id, memoryId = keepMem.id }]
+      visualization.taskDependencies `shouldBe` []
+      visualization.memoryLinks `shouldBe` []
+
   describe "workspace update and delete" $ do
     it "updates and deletes a workspace" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"

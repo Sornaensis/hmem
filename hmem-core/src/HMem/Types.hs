@@ -31,6 +31,10 @@ module HMem.Types
   , UpdateProject(..)
   , ProjectListQuery(..)
   , ProjectOverview(..)
+  , TaskDependencySummary(..)
+  , ContextMemoryScope(..)
+  , ConnectedMemorySummary(..)
+  , TaskOverview(..)
 
     -- * Task types
   , TaskStatus(..)
@@ -38,6 +42,15 @@ module HMem.Types
   , CreateTask(..)
   , UpdateTask(..)
   , TaskListQuery(..)
+
+    -- * Visualization types
+  , WorkspaceVisualizationMemoryFilter(..)
+  , WorkspaceVisualizationQuery(..)
+  , VisualizationMemory(..)
+  , VisualizationTaskDependency(..)
+  , VisualizationProjectMemoryLink(..)
+  , VisualizationTaskMemoryLink(..)
+  , WorkspaceVisualization(..)
 
     -- * Cleanup types
   , CleanupPolicy(..)
@@ -135,6 +148,7 @@ module HMem.Types
   , validateCreateTaskInput
   , validateUpdateTaskInput
   , validateTaskListQuery
+  , validateWorkspaceVisualizationQuery
   , validateCreateMemoryCategoryInput
   , validateUpdateMemoryCategoryInput
   , validateCreateWorkspaceGroupInput
@@ -315,6 +329,23 @@ validateTaskListQuery tq =
   <> validateOptionalIntRange "priority" 1 10 tq.priority
   <> validateTimeRange "created_after" tq.createdAfter "created_before" tq.createdBefore
   <> validateTimeRange "updated_after" tq.updatedAfter "updated_before" tq.updatedBefore
+
+validateWorkspaceVisualizationQuery :: WorkspaceVisualizationQuery -> [Text]
+validateWorkspaceVisualizationQuery wv =
+  validateProjectOverlap wv.includeProjectIds wv.excludeProjectIds
+  <> maybe [] validateWorkspaceVisualizationMemoryFilter wv.memoryFilter
+
+validateWorkspaceVisualizationMemoryFilter :: WorkspaceVisualizationMemoryFilter -> [Text]
+validateWorkspaceVisualizationMemoryFilter mf =
+  validateOptionalIntRange "memory_filter.min_importance" 1 10 mf.minImportance
+
+validateProjectOverlap :: Maybe [UUID] -> Maybe [UUID] -> [Text]
+validateProjectOverlap Nothing _ = []
+validateProjectOverlap _ Nothing = []
+validateProjectOverlap (Just includeIds) (Just excludeIds) =
+  ["include_project_ids and exclude_project_ids must not overlap"
+  | any (`elem` excludeIds) includeIds
+  ]
 
 validateCreateMemoryCategoryInput :: CreateMemoryCategory -> [Text]
 validateCreateMemoryCategoryInput cc =
@@ -850,6 +881,144 @@ data TaskListQuery = TaskListQuery
 instance ToJSON TaskListQuery where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON TaskListQuery where
+  parseJSON  = genericParseJSON jsonOptions
+
+------------------------------------------------------------------------
+-- Task overview
+------------------------------------------------------------------------
+
+data TaskDependencySummary = TaskDependencySummary
+  { id   :: UUID
+  , name :: Text
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TaskDependencySummary where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON TaskDependencySummary where
+  parseJSON  = genericParseJSON jsonOptions
+
+data ContextMemoryScope = ScopeTask | ScopeProject | ScopeWorkspace
+  deriving (Show, Eq, Ord, Bounded, Enum, Generic)
+
+instance ToJSON ContextMemoryScope where
+  toJSON ScopeTask      = String "task"
+  toJSON ScopeProject   = String "project"
+  toJSON ScopeWorkspace = String "workspace"
+
+instance FromJSON ContextMemoryScope where
+  parseJSON = withText "ContextMemoryScope" $ \case
+    "task"      -> pure ScopeTask
+    "project"   -> pure ScopeProject
+    "workspace" -> pure ScopeWorkspace
+    _            -> fail "Invalid context memory scope"
+
+data ConnectedMemorySummary = ConnectedMemorySummary
+  { id      :: UUID
+  , summary :: Text
+  , scope   :: ContextMemoryScope
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ConnectedMemorySummary where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON ConnectedMemorySummary where
+  parseJSON  = genericParseJSON jsonOptions
+
+data TaskOverview = TaskOverview
+  { task              :: Task
+  , dependencies      :: [TaskDependencySummary]
+  , connectedMemories :: [ConnectedMemorySummary]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TaskOverview where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON TaskOverview where
+  parseJSON  = genericParseJSON jsonOptions
+
+------------------------------------------------------------------------
+-- Workspace visualization
+------------------------------------------------------------------------
+
+data WorkspaceVisualizationMemoryFilter = WorkspaceVisualizationMemoryFilter
+  { memoryType    :: Maybe MemoryType
+  , tags          :: Maybe [Text]
+  , minImportance :: Maybe Int
+  , pinnedOnly    :: Maybe Bool
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspaceVisualizationMemoryFilter where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON WorkspaceVisualizationMemoryFilter where
+  parseJSON  = genericParseJSON jsonOptions
+
+data WorkspaceVisualizationQuery = WorkspaceVisualizationQuery
+  { includeProjectIds :: Maybe [UUID]
+  , excludeProjectIds :: Maybe [UUID]
+  , taskStatuses      :: Maybe [TaskStatus]
+  , memoryFilter      :: Maybe WorkspaceVisualizationMemoryFilter
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspaceVisualizationQuery where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON WorkspaceVisualizationQuery where
+  parseJSON  = genericParseJSON jsonOptions
+
+data VisualizationMemory = VisualizationMemory
+  { id           :: UUID
+  , summary      :: Text
+  , memoryType   :: MemoryType
+  , importance   :: Int
+  , pinned       :: Bool
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON VisualizationMemory where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON VisualizationMemory where
+  parseJSON  = genericParseJSON jsonOptions
+
+data VisualizationTaskDependency = VisualizationTaskDependency
+  { taskId      :: UUID
+  , dependsOnId :: UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON VisualizationTaskDependency where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON VisualizationTaskDependency where
+  parseJSON  = genericParseJSON jsonOptions
+
+data VisualizationProjectMemoryLink = VisualizationProjectMemoryLink
+  { projectId :: UUID
+  , memoryId  :: UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON VisualizationProjectMemoryLink where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON VisualizationProjectMemoryLink where
+  parseJSON  = genericParseJSON jsonOptions
+
+data VisualizationTaskMemoryLink = VisualizationTaskMemoryLink
+  { taskId   :: UUID
+  , memoryId :: UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON VisualizationTaskMemoryLink where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON VisualizationTaskMemoryLink where
+  parseJSON  = genericParseJSON jsonOptions
+
+data WorkspaceVisualization = WorkspaceVisualization
+  { workspace          :: Workspace
+  , projects           :: [Project]
+  , tasks              :: [Task]
+  , taskDependencies   :: [VisualizationTaskDependency]
+  , memories           :: [VisualizationMemory]
+  , projectMemoryLinks :: [VisualizationProjectMemoryLink]
+  , taskMemoryLinks    :: [VisualizationTaskMemoryLink]
+  , memoryLinks        :: [MemoryLink]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspaceVisualization where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON WorkspaceVisualization where
   parseJSON  = genericParseJSON jsonOptions
 
 ------------------------------------------------------------------------

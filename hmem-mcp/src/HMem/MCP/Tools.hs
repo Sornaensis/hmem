@@ -268,6 +268,42 @@ toolDefinitions =
       , "required" .= [t "workspace_id"]
       ]
 
+    , mkTool "workspace_visualization" "Get a workspace visualization payload for graphing projects, tasks, memories, and their links. Supports project inclusion/exclusion, task status filtering, and memory filtering." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "workspace_id" .= prop "string" "UUID of the workspace"
+          , "include_project_ids" .= object
+              [ "type" .= t "array"
+              , "items" .= object ["type" .= t "string"]
+              , "description" .= t "If provided, only include these project IDs"
+              ]
+          , "exclude_project_ids" .= object
+              [ "type" .= t "array"
+              , "items" .= object ["type" .= t "string"]
+              , "description" .= t "Project IDs to exclude"
+              ]
+          , "task_statuses" .= object
+              [ "type" .= t "array"
+              , "items" .= object
+                  [ "type" .= t "string"
+                  , "enum" .= ([t "todo", t "in_progress", t "blocked", t "done", t "cancelled"] :: [Text])
+                  ]
+              , "description" .= t "Optional task statuses to include"
+              ]
+          , "memory_filter" .= object
+              [ "type" .= t "object"
+              , "description" .= t "Optional memory filter applied to returned memories and memory edges"
+              , "properties" .= object
+                  [ "memory_type" .= propEnum "string" "Filter by memory type" ["short_term", "long_term"]
+                  , "tags" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"], "description" .= t "Require at least one matching tag"]
+                  , "min_importance" .= prop "integer" "Minimum importance (1-10)"
+                  , "pinned_only" .= prop "boolean" "If true, only include pinned memories"
+                  ]
+              ]
+          ]
+      , "required" .= [t "workspace_id"]
+      ]
+
     , mkTool "workspace_update" "Update workspace identity or scoping fields. Use null to clear path or GitHub fields when needed." $ object
       [ "type" .= t "object"
       , "properties" .= object
@@ -433,6 +469,15 @@ toolDefinitions =
           [ "task_id" .= prop "string" "UUID of the task" ]
       , "required" .= [t "task_id"]
       ]
+
+    , mkTool "task_overview" "Get a task with dependency summaries and connected memories. Set extra_context=true to also pull in project- and workspace-linked memories for broader LLM context." $ object
+            [ "type" .= t "object"
+            , "properties" .= object
+                    [ "task_id" .= prop "string" "UUID of the task"
+                    , "extra_context" .= prop "boolean" "If true, include project and workspace memories in addition to task-linked memories"
+                    ]
+            , "required" .= [t "task_id"]
+            ]
 
   , mkTool "task_delete" "Soft-delete a task and its subtask tree. Recoverable until permanently removed with task_purge." $ object
       [ "type" .= t "object"
@@ -1041,6 +1086,7 @@ data ToolCall
   | ProjectUnlinkMem UUID UUID             -- project_id, memory_id
   | TaskCreate     CreateTask
   | TaskGet        UUID
+    | TaskOverviewCall UUID Bool
   | TaskDelete     UUID
     | TaskRestore    UUID
     | TaskPurge      UUID
@@ -1052,6 +1098,7 @@ data ToolCall
   | TaskDepRemove  UUID UUID               -- task_id, depends_on_id
   | WorkspaceList (Maybe Int) (Maybe Int)
   | WorkspaceGet   UUID
+    | WorkspaceVisualizationCall UUID WorkspaceVisualizationQuery
   | WsUpdate       UUID UpdateWorkspace
   | WsDelete       UUID
     | WsRestore      UUID
@@ -1139,6 +1186,7 @@ parseToolCall name args = case name of
     "project_unlink_memory"    -> ProjectUnlinkMem <$> need "project_id" <*> need "memory_id"
     "task_create"              -> TaskCreate <$> parse args
     "task_get"                 -> TaskGet <$> need "task_id"
+    "task_overview"            -> TaskOverviewCall <$> need "task_id" <*> (maybe False id <$> opt "extra_context")
     "task_delete"              -> TaskDelete <$> need "task_id"
     "task_restore"             -> TaskRestore <$> need "task_id"
     "task_purge"               -> TaskPurge <$> need "task_id"
@@ -1163,6 +1211,7 @@ parseToolCall name args = case name of
     "cleanup_policy_upsert"    -> CleanupPolicyUpsert <$> parse args
     "workspace_list"           -> WorkspaceList <$> opt "limit" <*> opt "offset"
     "workspace_get"            -> WorkspaceGet <$> need "workspace_id"
+    "workspace_visualization"  -> WorkspaceVisualizationCall <$> need "workspace_id" <*> parse args
     "workspace_update"         -> WsUpdate <$> need "workspace_id" <*> parse args
     "workspace_delete"         -> WsDelete <$> need "workspace_id"
     "workspace_restore"        -> WsRestore <$> need "workspace_id"
@@ -1311,6 +1360,7 @@ validateToolCall = \case
     TaskList tq ->
         let tq' = clampTaskListQuery tq
         in TaskList tq' <$ firstValidationError (validateTaskListQuery tq')
+    TaskOverviewCall tid extraContext -> Right $ TaskOverviewCall tid extraContext
     TaskUpdate tid ut -> TaskUpdate tid ut <$ firstValidationError (validateUpdateTaskInput ut)
     CategoryCreate cc -> CategoryCreate cc <$ firstValidationError (validateCreateMemoryCategoryInput cc)
     CategoryList mwid ml mo -> Right $ CategoryList mwid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
@@ -1319,6 +1369,9 @@ validateToolCall = \case
     WsGroupList ml mo -> Right $ WsGroupList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
     WorkspaceReg cw -> WorkspaceReg cw <$ firstValidationError (validateCreateWorkspaceInput cw)
     WorkspaceList ml mo -> Right $ WorkspaceList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
+    WorkspaceVisualizationCall wid query ->
+        let query' = clampWorkspaceVisualizationQuery query
+        in WorkspaceVisualizationCall wid query' <$ firstValidationError (validateWorkspaceVisualizationQuery query')
     WsUpdate wid uw -> WsUpdate wid uw <$ firstValidationError (validateUpdateWorkspaceInput uw)
     CleanupPoliciesList wid ml mo -> Right $ CleanupPoliciesList wid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
     ActivityTimeline mws met ml -> Right $ ActivityTimeline mws met (clampMaybe 1 200 <$> ml)
@@ -1449,6 +1502,32 @@ clampTaskListQuery tq = tq
     , offset = clampMaybe 0 10000 <$> tq.offset
     }
 
+clampWorkspaceVisualizationQuery :: WorkspaceVisualizationQuery -> WorkspaceVisualizationQuery
+clampWorkspaceVisualizationQuery WorkspaceVisualizationQuery
+    { includeProjectIds = includeIds
+    , excludeProjectIds = excludeIds
+    , taskStatuses = statuses
+    , memoryFilter = memoryFilterValue
+    } = WorkspaceVisualizationQuery
+        { includeProjectIds = includeIds
+        , excludeProjectIds = excludeIds
+        , taskStatuses = statuses
+        , memoryFilter = fmap clampWorkspaceVisualizationMemoryFilter memoryFilterValue
+        }
+
+clampWorkspaceVisualizationMemoryFilter :: WorkspaceVisualizationMemoryFilter -> WorkspaceVisualizationMemoryFilter
+clampWorkspaceVisualizationMemoryFilter WorkspaceVisualizationMemoryFilter
+    { memoryType = memoryTypeValue
+    , tags = tagFilter
+    , minImportance = minImportanceValue
+    , pinnedOnly = pinnedOnlyValue
+    } = WorkspaceVisualizationMemoryFilter
+        { memoryType = memoryTypeValue
+        , tags = tagFilter
+        , minImportance = clampMaybe 1 10 <$> minImportanceValue
+        , pinnedOnly = pinnedOnlyValue
+        }
+
 -- | Execute a typed tool call against the hmem-server HTTP API.
 executeToolCall :: Manager -> String -> Maybe Text -> ToolCall -> IO Value
 executeToolCall mgr base mApiKey = \case
@@ -1484,6 +1563,9 @@ executeToolCall mgr base mApiKey = \case
                                 <> uuidPath mid)
     TaskCreate ct       -> postJSON mgr base mApiKey "/api/v1/tasks" ct
     TaskGet tid         -> getJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+    TaskOverviewCall tid extraContext ->
+        getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/overview" <>
+          buildQuery [("extra_context", Just $ if extraContext then "true" else "false")])
     TaskDelete tid      -> delJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
     TaskRestore tid     -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/restore") (object [])
     TaskPurge tid       -> delJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/purge")
@@ -1538,6 +1620,8 @@ executeToolCall mgr base mApiKey = \case
                             , ("offset", show <$> mo)
                             ])
     WorkspaceGet wid        -> getJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid)
+    WorkspaceVisualizationCall wid query ->
+        postJSON mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid <> "/visualization") query
     WsUpdate wid uw         -> putJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid) uw
     WsDelete wid            -> delJSON  mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid)
     WsRestore wid           -> postJSON mgr base mApiKey ("/api/v1/workspaces/" <> uuidPath wid <> "/restore") (object [])

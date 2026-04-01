@@ -35,6 +35,7 @@ import System.IO (stderr)
 import HMem.DB.Category qualified as Cat
 import HMem.DB.Cleanup qualified as Cleanup
 import HMem.DB.Memory qualified as Mem
+import HMem.DB.Overview qualified as Overview
 import HMem.DB.Pool (runSession, runTransaction, DBException(..), PoolMetrics(..), getPoolMetrics)
 import HMem.DB.Project qualified as Proj
 import HMem.DB.RequestContext (currentRequestId)
@@ -75,6 +76,8 @@ type WorkspaceAPI =
   :<|> Capture "workspaceId" UUID :> Delete '[JSON] NoContent
   :<|> Capture "workspaceId" UUID :> "restore" :> Post '[JSON] NoContent
   :<|> Capture "workspaceId" UUID :> "purge" :> Delete '[JSON] NoContent
+  :<|> Capture "workspaceId" UUID :> "visualization"
+    :> ReqBody '[JSON] WorkspaceVisualizationQuery :> Post '[JSON] WorkspaceVisualization
 
 -- Memories
 type MemoryAPI =
@@ -174,6 +177,8 @@ type TaskAPI =
   :<|> Capture "taskId" UUID :> "dependencies" :> Capture "dependsOnId" UUID
          :> Delete '[JSON] NoContent
   :<|> Capture "taskId" UUID :> "memories" :> Get '[JSON] [Memory]
+    :<|> Capture "taskId" UUID :> "overview"
+      :> QueryParam "extra_context" Bool :> Get '[JSON] TaskOverview
   :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
   :<|> "batch-move" :> ReqBody '[JSON] BatchMoveTasksRequest :> Post '[JSON] BatchResult
   :<|> "batch-update" :> ReqBody '[JSON] BatchUpdateTaskRequest :> Post '[JSON] BatchResult
@@ -460,6 +465,7 @@ workspaceHandlers pool =
   :<|> deleteWorkspaceH
   :<|> restoreWorkspaceH
   :<|> purgeWorkspaceH
+  :<|> workspaceVisualizationH
   where
     listWorkspacesH :: Maybe Int -> Maybe Int -> Handler (PaginatedResult Workspace)
     listWorkspacesH mlimit moffset = handleDBErrors $ do
@@ -801,6 +807,11 @@ workspaceHandlers pool =
                   }
               pure NoContent
 
+    workspaceVisualizationH :: UUID -> WorkspaceVisualizationQuery -> Handler WorkspaceVisualization
+    workspaceVisualizationH wsId query = do
+      rejectValidationErrors (validateWorkspaceVisualizationQuery query)
+      handleDBErrors (Overview.getWorkspaceVisualization pool wsId query) >>= maybe (throwError err404) pure
+
 -- Memory handlers --------------------------------------------------
 
 memoryHandlers :: Pool Hasql.Connection -> AccessTracker -> Bool -> Server MemoryAPI
@@ -1123,6 +1134,7 @@ taskHandlers pool =
   :<|> addDepH
   :<|> removeDepH
   :<|> getTaskMemoriesH
+  :<|> taskOverviewH
   :<|> batchDeleteH
   :<|> batchMoveH
   :<|> batchUpdateH
@@ -1210,6 +1222,10 @@ taskHandlers pool =
     getTaskMemoriesH tid = do
       _ <- requireTaskH tid
       handleDBErrors $ Mem.getTaskMemories pool tid
+
+    taskOverviewH tid mExtraContext = do
+      let extraContext = fromMaybe False mExtraContext
+      handleDBErrors (Overview.getTaskOverview pool tid extraContext) >>= maybe (throwError err404) pure
 
     batchDeleteH br = do
       rejectValidationErrors (validateBatchDeleteRequest br)

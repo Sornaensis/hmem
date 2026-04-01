@@ -488,6 +488,14 @@ spec = do
         Right (TaskGet tid) -> tid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected TaskGet, got: " <> show other
 
+    it "parses task_overview with extra_context" $ do
+      let args = object [ "task_id" .= testUUID, "extra_context" .= True ]
+      case parseToolCall "task_overview" args of
+        Right (TaskOverviewCall tid extraContext) -> do
+          tid `shouldBe` parsedUUID
+          extraContext `shouldBe` True
+        other -> expectationFailure $ "Expected TaskOverviewCall, got: " <> show other
+
     it "parses task_update" $ do
       let args = object
             [ "task_id" .= testUUID
@@ -582,6 +590,30 @@ spec = do
         Right (WsRestore wid) -> wid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected WsRestore, got: " <> show other
 
+    it "parses workspace_visualization" $ do
+      let args = object
+            [ "workspace_id" .= testUUID
+            , "include_project_ids" .= ([testUUID2] :: [Text])
+            , "task_statuses" .= (["todo", "in_progress"] :: [Text])
+            , "memory_filter" .= object
+                [ "memory_type" .= ("long_term" :: Text)
+                , "min_importance" .= (8 :: Int)
+                , "pinned_only" .= True
+                ]
+            ]
+      case parseToolCall "workspace_visualization" args of
+        Right (WorkspaceVisualizationCall wid query) -> do
+          wid `shouldBe` parsedUUID
+          query.includeProjectIds `shouldBe` Just [parsedUUID2]
+          query.taskStatuses `shouldBe` Just [Todo, InProgress]
+          query.memoryFilter `shouldBe` Just WorkspaceVisualizationMemoryFilter
+            { memoryType = Just LongTerm
+            , tags = Nothing
+            , minImportance = Just 8
+            , pinnedOnly = Just True
+            }
+        other -> expectationFailure $ "Expected WorkspaceVisualizationCall, got: " <> show other
+
     it "parses category_restore and category_list_memories" $ do
       let args = object [ "category_id" .= testUUID ]
       case parseToolCall "category_restore" args of
@@ -646,6 +678,35 @@ spec = do
         Right (WorkspaceList _ mo) -> mo `shouldBe` Just 10000
         other -> expectationFailure $ "Expected WorkspaceList, got: " <> show other
 
+    it "clamps workspace_visualization memory filter importance" $ do
+      case validateToolCall (WorkspaceVisualizationCall parsedUUID WorkspaceVisualizationQuery
+        { includeProjectIds = Nothing
+        , excludeProjectIds = Nothing
+        , taskStatuses = Nothing
+        , memoryFilter = Just WorkspaceVisualizationMemoryFilter
+            { memoryType = Nothing
+            , tags = Nothing
+            , minImportance = Just 42
+            , pinnedOnly = Nothing
+            }
+        }) of
+        Right (WorkspaceVisualizationCall _ query) ->
+          query.memoryFilter `shouldBe` Just WorkspaceVisualizationMemoryFilter
+            { memoryType = Nothing
+            , tags = Nothing
+            , minImportance = Just 10
+            , pinnedOnly = Nothing
+            }
+        other -> expectationFailure $ "Expected WorkspaceVisualizationCall, got: " <> show other
+
+    it "rejects overlapping workspace_visualization project filters" $ do
+      validateToolCall (WorkspaceVisualizationCall parsedUUID WorkspaceVisualizationQuery
+        { includeProjectIds = Just [parsedUUID]
+        , excludeProjectIds = Just [parsedUUID]
+        , taskStatuses = Nothing
+        , memoryFilter = Nothing
+        }) `shouldSatisfy` isLeft
+
     it "validates project and category batch operations" $ do
       validateToolCall (ProjectDeleteBatch []) `shouldSatisfy` isLeft
       validateToolCall (CategoryDeleteBatch [parsedUUID]) `shouldBe` Right (CategoryDeleteBatch [parsedUUID])
@@ -687,6 +748,18 @@ spec = do
       inputSchemaFor "project_update_batch" `shouldSatisfy` (/= Nothing)
       inputSchemaFor "category_list_memories" `shouldSatisfy` (/= Nothing)
       inputSchemaFor "category_link_memories_batch" `shouldSatisfy` (/= Nothing)
+
+    it "defines task_overview and workspace_visualization" $ do
+      let Just taskOverviewSchema = inputSchemaFor "task_overview"
+          Just taskOverviewProps = objectField "properties" taskOverviewSchema
+          Just workspaceVizSchema = inputSchemaFor "workspace_visualization"
+          Just workspaceVizProps = objectField "properties" workspaceVizSchema
+          Just memoryFilterSchema = objectField "memory_filter" workspaceVizProps
+          Just memoryFilterProps = objectField "properties" memoryFilterSchema
+      objectField "extra_context" taskOverviewProps `shouldSatisfy` (/= Nothing)
+      objectField "include_project_ids" workspaceVizProps `shouldSatisfy` (/= Nothing)
+      objectField "task_statuses" workspaceVizProps `shouldSatisfy` (/= Nothing)
+      objectField "min_importance" memoryFilterProps `shouldSatisfy` (/= Nothing)
 
   describe "parseToolCall (saved view tools)" $ do
 

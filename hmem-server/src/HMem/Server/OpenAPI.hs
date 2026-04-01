@@ -74,6 +74,11 @@ instance ToSchema WorkspaceType where
 instance ToParamSchema WorkspaceType where
   toParamSchema _ = mempty & type_ ?~ OpenApiString & enum_ ?~ ["repository", "planning", "personal", "organization"]
 
+instance ToSchema ContextMemoryScope where
+  declareNamedSchema _ = pure $ NamedSchema (Just "ContextMemoryScope") $ mempty
+    & type_ ?~ OpenApiString
+    & enum_ ?~ ["task", "project", "workspace"]
+
 -- FieldUpdate: in JSON it's just the inner type or null
 instance ToSchema a => ToSchema (FieldUpdate a) where
   declareNamedSchema _ = declareNamedSchema (Proxy @a)
@@ -130,6 +135,16 @@ instance ToSchema SavedView              where declareNamedSchema = genericDecla
 instance ToSchema CreateSavedView        where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema UpdateSavedView        where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ProjectOverview        where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TaskDependencySummary  where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ConnectedMemorySummary where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TaskOverview           where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema WorkspaceVisualizationMemoryFilter where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema WorkspaceVisualizationQuery where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema VisualizationMemory where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema VisualizationTaskDependency where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema VisualizationProjectMemoryLink where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema VisualizationTaskMemoryLink where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema WorkspaceVisualization where declareNamedSchema = genericDeclareNamedSchema opts
 
 ------------------------------------------------------------------------
 -- Helper

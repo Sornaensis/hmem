@@ -21,6 +21,7 @@ library
       HMem.DB.Cleanup
       HMem.DB.Memory
       HMem.DB.Migration
+      HMem.DB.Overview
       HMem.DB.Pool
       HMem.DB.Project
       HMem.DB.RequestContext

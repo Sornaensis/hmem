@@ -42,10 +42,10 @@ Build and install the executables, then run the setup tool:
 
 ```bash
 stack install
-hmem-setup
+hmem-ctl
 ```
 
-This runs `hmem-setup init` followed by `hmem-setup install`, which:
+This runs `hmem-ctl init` followed by `hmem-ctl install`, which:
 
 1. **Initializes `~/.hmem/`** — creates config, data, and log directories
 2. **Sets up PostgreSQL** — initializes a local data directory, starts PG temporarily, creates the `hmem` database, and runs all migrations

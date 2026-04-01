@@ -56,13 +56,14 @@ executables:
     dependencies:
       - hmem-server
 
-  hmem-setup:
+  hmem-ctl:
     main:        Main.hs
     source-dirs: setup
     ghc-options:
       - -threaded
     dependencies:
       - hmem-core
+      - hmem-server
       - text
       - bytestring
       - aeson >= 2.0
@@ -72,6 +73,8 @@ executables:
       - process
       - resource-pool >= 0.4
       - hasql
+      - http-client
+      - http-types
 
 tests:
   hmem-server-test:

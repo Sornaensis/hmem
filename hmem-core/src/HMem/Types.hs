@@ -957,6 +957,7 @@ data WorkspaceVisualizationQuery = WorkspaceVisualizationQuery
   , memoryFilter      :: Maybe WorkspaceVisualizationMemoryFilter
   , showTasks         :: Maybe Bool
   , showTaskStatusSummary :: Maybe Bool
+  , showDescriptions  :: Maybe Bool
   } deriving (Show, Eq, Generic)
 
 instance ToJSON WorkspaceVisualizationQuery where

@@ -277,6 +277,7 @@ toolDefinitions =
           , "format" .= propEnum "string" "Output format (default svg)" ["svg", "json"]
           , "show_tasks" .= prop "boolean" "If true, include task nodes in SVG output (ignored for JSON)"
           , "show_task_status_summary" .= prop "boolean" "If false, suppress task status count summaries in SVG output (defaults to true)"
+          , "show_descriptions" .= prop "boolean" "If true, show project/task descriptions in SVG cards (defaults to false)"
           , "include_project_ids" .= object
               [ "type" .= t "array"
               , "items" .= object ["type" .= t "string"]

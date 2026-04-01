@@ -4,6 +4,7 @@ module HMem.Server.VisualizationSvg
   , WorkspaceVisualizationResponse(..)
   , renderWorkspaceVisualizationSvg
   , svgAttachmentName
+  , wrapText
   ) where
 
 import Data.Aeson (ToJSON(..))
@@ -112,18 +113,23 @@ renderWorkspaceVisualizationSvg query visualization = SvgDocument $ T.unlines
   where
     showTasks = fromMaybe False query.showTasks
     showTaskStatusSummary = fromMaybe True query.showTaskStatusSummary
+    showDescriptions = fromMaybe False query.showDescriptions
     padding = 40
     headerBoxHeight = if showTaskStatusSummary then 104 else 84
     headerHeight = if showTaskStatusSummary then 136 else 116
     projectBoxWidth = 280
-    projectBoxHeight = if showTaskStatusSummary then 92 else 74
     taskBoxWidth = 292
-    taskBoxHeight = 66
     memoryBoxWidth = 296
-    memoryBoxHeight = 72
     rowGap = 18
     depthGap = 24
     columnGap = 64
+
+    -- Approximate chars per line for each column (based on font sizes and padding)
+    projectNameCharsPerLine = 30 :: Int   -- 15px bold, ~8.4px/char, 280-36=244px usable
+    projectDescCharsPerLine = 36 :: Int   -- 12px regular, ~6.7px/char, 244px usable
+    taskTitleCharsPerLine = 32 :: Int     -- 14px bold, ~8px/char, 292-32=260px usable
+    taskDescCharsPerLine = 38 :: Int      -- 12px regular, ~6.7px/char, 260px usable
+    memorySummaryCharsPerLine = 28 :: Int -- 13px semibold, ~7.5px/char, 296-36-70=190px usable (badge)
 
     projectMap = Map.fromList [(projectKey project.id, project) | project <- visualization.projects]
     childMap = Map.fromListWith (<>)
@@ -138,21 +144,24 @@ renderWorkspaceVisualizationSvg query visualization = SvgDocument $ T.unlines
       , maybe True (\parentId -> Map.notMember (projectKey parentId) projectMap) project.parentId
       ]
     orderedProjects = concatMap (flattenProjectTree childMap 0) rootProjects
-    maxDepth = maximumOrZero [placement.placementDepth | placement <- placements]
-    projectAreaRight = padding + fromIntegral maxDepth * (projectBoxWidth + depthGap) + projectBoxWidth
-    placements =
-      [ ProjectPlacement
-          { placementProject = project
-          , placementDepth = depth
-          , placementBox = NodeBox
-              { boxX = padding + fromIntegral depth * (projectBoxWidth + depthGap)
-              , boxY = headerHeight + 28 + fromIntegral index * (projectBoxHeight + rowGap)
-              , boxWidth = projectBoxWidth
-              , boxHeight = projectBoxHeight
-              }
-          }
-      | (index, (project, depth)) <- zip [(0 :: Int) ..] orderedProjects
+    maxDepth = maximumOrZero [depth | (_, depth) <- orderedProjects]
+
+    -- Compute dynamic project box heights
+    projectHeights =
+      [ let nameLines = length (wrapText projectNameCharsPerLine project.name)
+            descLines = if showDescriptions
+                        then maybe 0 (length . wrapText projectDescCharsPerLine) project.description
+                        else 0
+            statusSummaryLine = if showTaskStatusSummary then 1 else 0
+            -- Title lines + meta line + task/memory line + optional status summary + optional description
+            baseHeight = fromIntegral nameLines * 18 + 21 + 18 + fromIntegral statusSummaryLine * 18 + fromIntegral descLines * 16
+        in (project, depth, max 74 (baseHeight + 28))
+      | (project, depth) <- orderedProjects
       ]
+
+    projectAreaRight = padding + fromIntegral maxDepth * (projectBoxWidth + depthGap) + projectBoxWidth
+    placements = placementsFromHeights headerHeight padding projectBoxWidth depthGap rowGap
+      [ (project, depth, h) | (project, depth, h) <- projectHeights ]
     projectBoxes = Map.fromList
       [ (projectKey placement.placementProject.id, placement.placementBox)
       | placement <- placements
@@ -181,19 +190,21 @@ renderWorkspaceVisualizationSvg query visualization = SvgDocument $ T.unlines
       ]
       <> sortTasks [task | task <- visualization.tasks, task.projectId == Nothing]
     taskColumnX = if showTasks then projectAreaRight + columnGap else projectAreaRight + columnGap
-    taskPlacements =
-      [ TaskPlacement
-          { placementTask = task
-          , placementBox = NodeBox
-              { boxX = taskColumnX
-              , boxY = headerHeight + 28 + fromIntegral index * (taskBoxHeight + rowGap)
-              , boxWidth = taskBoxWidth
-              , boxHeight = taskBoxHeight
-              }
-          }
-      | showTasks
-      , (index, task) <- zip [(0 :: Int) ..] orderedTasks
+
+    -- Compute dynamic task box heights
+    taskHeights =
+      [ let titleLines = length (wrapText taskTitleCharsPerLine task.title)
+            descLines = if showDescriptions
+                        then maybe 0 (length . wrapText taskDescCharsPerLine) task.description
+                        else 0
+            baseHeight = fromIntegral titleLines * 17 + 22 + fromIntegral descLines * 16
+        in (task, max 66 (baseHeight + 24))
+      | task <- orderedTasks
       ]
+
+    taskPlacements = if showTasks
+      then taskPlacementsFromHeights headerHeight taskColumnX taskBoxWidth rowGap taskHeights
+      else []
     taskBoxes = Map.fromList
       [ (taskKey placement.placementTask.id, placement.placementBox)
       | placement <- taskPlacements
@@ -236,20 +247,17 @@ renderWorkspaceVisualizationSvg query visualization = SvgDocument $ T.unlines
         [ (memory, Set.member (memoryKey memory.id) linkedMemoryIds)
         | memory <- sortOn memorySortKey visualization.memories
         ]
-    orderedMemories =
-      [ MemoryPlacement
-          { placementMemory = memory
-          , placementLinked = linked
-          , placementBox = NodeBox
-              { boxX = memoryColumnX
-              , boxY = headerHeight + 28 + fromIntegral index * (memoryBoxHeight + rowGap)
-              , boxWidth = memoryBoxWidth
-              , boxHeight = memoryBoxHeight
-              }
-          }
-      | (index, (memory, linked)) <- zip [(0 :: Int) ..] sortedMemoryEntries
+
+    -- Compute dynamic memory box heights
+    memoryHeights =
+      [ let summaryLines = length (wrapText memorySummaryCharsPerLine memory.summary)
+            baseHeight = fromIntegral summaryLines * 16 + 21 + 12
+        in (memory, linked, max 72 (baseHeight + 24))
+      | (memory, linked) <- sortedMemoryEntries
       ]
+
     memoryColumnX = if showTasks then taskColumnX + taskBoxWidth + columnGap else projectAreaRight + columnGap
+    orderedMemories = memoryPlacementsFromHeights headerHeight memoryColumnX memoryBoxWidth rowGap memoryHeights
     memoryBoxes = Map.fromList
       [ (memoryKey placement.placementMemory.id, placement.placementBox)
       | placement <- orderedMemories
@@ -263,14 +271,14 @@ renderWorkspaceVisualizationSvg query visualization = SvgDocument $ T.unlines
     headerWidth = canvasWidth - 48
 
     renderedProjects =
-      [ renderProjectNode showTaskStatusSummary placement (Map.findWithDefault 0 (projectKey placement.placementProject.id) taskCounts) (countProjectMemories (projectKey placement.placementProject.id) effectiveEdges) (Map.lookup (projectKey placement.placementProject.id) projectStatusSummaries)
+      [ renderProjectNode showTaskStatusSummary showDescriptions projectNameCharsPerLine projectDescCharsPerLine placement (Map.findWithDefault 0 (projectKey placement.placementProject.id) taskCounts) (countProjectMemories (projectKey placement.placementProject.id) effectiveEdges) (Map.lookup (projectKey placement.placementProject.id) projectStatusSummaries)
       | placement <- placements
       ]
     renderedTasks =
-      [ renderTaskNode placement (Map.findWithDefault 0 (taskKey placement.placementTask.id) taskMemoryCounts)
+      [ renderTaskNode showDescriptions taskTitleCharsPerLine taskDescCharsPerLine placement (Map.findWithDefault 0 (taskKey placement.placementTask.id) taskMemoryCounts)
       | placement <- taskPlacements
       ]
-    renderedMemories = [renderMemoryNode placement | placement <- orderedMemories]
+    renderedMemories = [renderMemoryNode memorySummaryCharsPerLine placement | placement <- orderedMemories]
     projectStatusSummaries = fmap formatTaskStatusSummary tasksByProject
 
     projectHierarchyEdges =
@@ -319,6 +327,51 @@ renderWorkspaceVisualizationSvg query visualization = SvgDocument $ T.unlines
     directLinkCount = length [() | edge <- effectiveEdges, edge.edgeKind == DirectProjectMemory]
     derivedLinkCount = length [() | edge <- effectiveEdges, edge.edgeKind == TaskDerivedMemory]
     memoryRelationCount = length memoryRelationEdges
+
+-- | Lay out project boxes with variable heights, accumulating Y positions
+placementsFromHeights :: Double -> Double -> Double -> Double -> Double -> [(Project, Int, Double)] -> [ProjectPlacement]
+placementsFromHeights headerH pad boxW dGap rGap items = go (headerH + 28) items
+  where
+    go _   [] = []
+    go curY ((project, depth, h):rest) =
+      let box = NodeBox
+            { boxX = pad + fromIntegral depth * (boxW + dGap)
+            , boxY = curY
+            , boxWidth = boxW
+            , boxHeight = h
+            }
+      in ProjectPlacement { placementProject = project, placementDepth = depth, placementBox = box }
+         : go (curY + h + rGap) rest
+
+-- | Lay out task boxes with variable heights
+taskPlacementsFromHeights :: Double -> Double -> Double -> Double -> [(Task, Double)] -> [TaskPlacement]
+taskPlacementsFromHeights headerH colX boxW rGap items = go (headerH + 28) items
+  where
+    go _   [] = []
+    go curY ((task, h):rest) =
+      let box = NodeBox
+            { boxX = colX
+            , boxY = curY
+            , boxWidth = boxW
+            , boxHeight = h
+            }
+      in TaskPlacement { placementTask = task, placementBox = box }
+         : go (curY + h + rGap) rest
+
+-- | Lay out memory boxes with variable heights
+memoryPlacementsFromHeights :: Double -> Double -> Double -> Double -> [(VisualizationMemory, Bool, Double)] -> [MemoryPlacement]
+memoryPlacementsFromHeights headerH colX boxW rGap items = go (headerH + 28) items
+  where
+    go _   [] = []
+    go curY ((memory, linked, h):rest) =
+      let box = NodeBox
+            { boxX = colX
+            , boxY = curY
+            , boxWidth = boxW
+            , boxHeight = h
+            }
+      in MemoryPlacement { placementMemory = memory, placementLinked = linked, placementBox = box }
+         : go (curY + h + rGap) rest
 
 flattenProjectTree :: Map.Map Text [Project] -> Int -> Project -> [(Project, Int)]
 flattenProjectTree childMap depth project =
@@ -378,34 +431,55 @@ sectionLabel :: Double -> Double -> Text -> Text
 sectionLabel x y label =
   T.concat ["  <text x=\"", svgNumber x, "\" y=\"", svgNumber y, "\" class=\"section-label\">", escapeXml label, "</text>"]
 
-renderProjectNode :: Bool -> ProjectPlacement -> Int -> Int -> Maybe Text -> Text
-renderProjectNode showTaskStatusSummary placement taskCount memoryCount mStatusSummary = T.unlines $
+renderProjectNode :: Bool -> Bool -> Int -> Int -> ProjectPlacement -> Int -> Int -> Maybe Text -> Text
+renderProjectNode showTaskStatusSummary showDescriptions nameCharsPerLine descCharsPerLine placement taskCount memoryCount mStatusSummary = T.unlines $
   [ T.concat ["  <rect x=\"", svgNumber box.boxX, "\" y=\"", svgNumber box.boxY, "\" width=\"", svgNumber box.boxWidth, "\" height=\"", svgNumber box.boxHeight, "\" rx=\"20\" ry=\"20\" fill=\"#ffffff\" stroke=\"#9fb3c8\" stroke-width=\"1.2\" filter=\"url(#shadow)\"/>"]
-  , T.concat ["  <text x=\"", svgNumber (box.boxX + 18), "\" y=\"", svgNumber (box.boxY + 28), "\" class=\"project-name\">", escapeXml project.name, "</text>"]
-  , T.concat ["  <text x=\"", svgNumber (box.boxX + 18), "\" y=\"", svgNumber (box.boxY + 49), "\" class=\"project-meta\">", escapeXml (projectStatusToText project.status), " | priority ", T.pack (show project.priority), " | depth ", T.pack (show placement.placementDepth), "</text>"]
-  , T.concat ["  <text x=\"", svgNumber (box.boxX + 18), "\" y=\"", svgNumber (box.boxY + 67), "\" class=\"project-meta\">", T.pack (show taskCount), " tasks | ", T.pack (show memoryCount), " memory links</text>"]
-  ] <> [T.concat ["  <text x=\"", svgNumber (box.boxX + 18), "\" y=\"", svgNumber (box.boxY + 85), "\" class=\"project-meta\">", escapeXml (truncateLabel 42 summaryText), "</text>"] | showTaskStatusSummary, Just summaryText <- [mStatusSummary]]
+  ]
+  <> svgTextLines "project-name" (box.boxX + 18) (box.boxY + 22) 18 (wrapText nameCharsPerLine project.name)
+  <> let nameLines = length (wrapText nameCharsPerLine project.name)
+         metaY = box.boxY + 22 + fromIntegral nameLines * 18 + 5
+     in [ T.concat ["  <text x=\"", svgNumber (box.boxX + 18), "\" y=\"", svgNumber metaY, "\" class=\"project-meta\">", escapeXml (projectStatusToText project.status), " | priority ", T.pack (show project.priority), " | depth ", T.pack (show placement.placementDepth), "</text>"]
+        , T.concat ["  <text x=\"", svgNumber (box.boxX + 18), "\" y=\"", svgNumber (metaY + 18), "\" class=\"project-meta\">", T.pack (show taskCount), " tasks | ", T.pack (show memoryCount), " memory links</text>"]
+        ]
+  <> let nameLines = length (wrapText nameCharsPerLine project.name)
+         summaryY = box.boxY + 22 + fromIntegral nameLines * 18 + 5 + 36
+     in [T.concat ["  <text x=\"", svgNumber (box.boxX + 18), "\" y=\"", svgNumber summaryY, "\" class=\"project-meta\">", escapeXml summaryText, "</text>"] | showTaskStatusSummary, Just summaryText <- [mStatusSummary]]
+  <> let nameLines = length (wrapText nameCharsPerLine project.name)
+         prevLines = if showTaskStatusSummary && mStatusSummary /= Nothing then 3 else 2
+         descStartY = box.boxY + 22 + fromIntegral nameLines * 18 + 5 + fromIntegral prevLines * 18 + 2
+     in if showDescriptions
+        then maybe [] (\desc -> svgTextLines "project-meta" (box.boxX + 18) descStartY 16 (wrapText descCharsPerLine desc)) project.description
+        else []
   where
     box = placement.placementBox
     project = placement.placementProject
 
-renderTaskNode :: TaskPlacement -> Int -> Text
-renderTaskNode placement memoryCount = T.unlines
+renderTaskNode :: Bool -> Int -> Int -> TaskPlacement -> Int -> Text
+renderTaskNode showDescriptions titleCharsPerLine descCharsPerLine placement memoryCount = T.unlines $
   [ T.concat ["  <rect x=\"", svgNumber box.boxX, "\" y=\"", svgNumber box.boxY, "\" width=\"", svgNumber box.boxWidth, "\" height=\"", svgNumber box.boxHeight, "\" rx=\"18\" ry=\"18\" fill=\"#ffffff\" stroke=\"", taskStatusColor task.status, "\" stroke-width=\"1.8\" filter=\"url(#shadow)\"/>"]
-  , T.concat ["  <text x=\"", svgNumber (box.boxX + 16), "\" y=\"", svgNumber (box.boxY + 26), "\" class=\"task-name\">", escapeXml (truncateLabel 40 task.title), "</text>"]
-  , T.concat ["  <text x=\"", svgNumber (box.boxX + 16), "\" y=\"", svgNumber (box.boxY + 48), "\" class=\"task-meta\">", escapeXml (formatTaskMeta task memoryCount), "</text>"]
   ]
+  <> svgTextLines "task-name" (box.boxX + 16) (box.boxY + 22) 17 (wrapText titleCharsPerLine task.title)
+  <> let titleLines = length (wrapText titleCharsPerLine task.title)
+         metaY = box.boxY + 22 + fromIntegral titleLines * 17 + 5
+     in [ T.concat ["  <text x=\"", svgNumber (box.boxX + 16), "\" y=\"", svgNumber metaY, "\" class=\"task-meta\">", escapeXml (formatTaskMeta task memoryCount), "</text>"] ]
+  <> let titleLines = length (wrapText titleCharsPerLine task.title)
+         descStartY = box.boxY + 22 + fromIntegral titleLines * 17 + 5 + 18 + 2
+     in if showDescriptions
+        then maybe [] (\desc -> svgTextLines "task-meta" (box.boxX + 16) descStartY 16 (wrapText descCharsPerLine desc)) task.description
+        else []
   where
     box = placement.placementBox
     task = placement.placementTask
 
-renderMemoryNode :: MemoryPlacement -> Text
-renderMemoryNode placement = T.unlines
+renderMemoryNode :: Int -> MemoryPlacement -> Text
+renderMemoryNode summaryCharsPerLine placement = T.unlines $
   [ T.concat ["  <rect x=\"", svgNumber box.boxX, "\" y=\"", svgNumber box.boxY, "\" width=\"", svgNumber box.boxWidth, "\" height=\"", svgNumber box.boxHeight, "\" rx=\"18\" ry=\"18\" fill=\"", fillColor, "\" stroke=\"", strokeColor, "\" stroke-width=\"", strokeWidth, "\" filter=\"url(#shadow)\"/>"]
-  , T.concat ["  <text x=\"", svgNumber (box.boxX + 18), "\" y=\"", svgNumber (box.boxY + 28), "\" class=\"memory-summary\">", escapeXml (truncateLabel 46 memory.summary), "</text>"]
-  , T.concat ["  <text x=\"", svgNumber (box.boxX + 18), "\" y=\"", svgNumber (box.boxY + 49), "\" class=\"memory-meta\">", escapeXml (memoryTypeToText memory.memoryType), " | importance ", T.pack (show memory.importance), if memory.pinned then " | pinned" else "", "</text>"]
   , T.concat ["  <text x=\"", svgNumber (box.boxX + box.boxWidth - 70), "\" y=\"", svgNumber (box.boxY + 20), "\" class=\"badge\">", if placement.placementLinked then "linked" else "workspace", "</text>"]
   ]
+  <> svgTextLines "memory-summary" (box.boxX + 18) (box.boxY + 22) 16 (wrapText summaryCharsPerLine memory.summary)
+  <> let summaryLines = length (wrapText summaryCharsPerLine memory.summary)
+         metaY = box.boxY + 22 + fromIntegral summaryLines * 16 + 5
+     in [ T.concat ["  <text x=\"", svgNumber (box.boxX + 18), "\" y=\"", svgNumber metaY, "\" class=\"memory-meta\">", escapeXml (memoryTypeToText memory.memoryType), " | importance ", T.pack (show memory.importance), if memory.pinned then " | pinned" else "", "</text>"] ]
   where
     box = placement.placementBox
     memory = placement.placementMemory
@@ -577,11 +651,44 @@ maximumOr :: Double -> [Double] -> Double
 maximumOr fallback [] = fallback
 maximumOr _ xs = maximum xs
 
-truncateLabel :: Int -> Text -> Text
-truncateLabel maxChars label
-  | T.length label <= maxChars = label
-  | maxChars <= 3 = T.take maxChars label
-  | otherwise = T.take (maxChars - 3) label <> "..."
+-- | Wrap text into lines that fit within the given character width.
+-- Breaks on word boundaries when possible; forces a break mid-word
+-- only when a single word exceeds the limit.
+wrapText :: Int -> Text -> [Text]
+wrapText maxChars text
+  | T.null text = [""]
+  | otherwise = concatMap wrapLine (T.lines text)
+  where
+    wrapLine line
+      | T.null line = [""]
+      | otherwise = go [] (T.words line)
+    go acc [] = [T.unwords (reverse acc) | not (null acc)]
+    go acc (w:ws)
+      | null acc = -- first word on line
+          if T.length w > maxChars
+            then T.take maxChars w : go [] (T.drop maxChars w `consIfNonEmpty` ws)
+            else go [w] ws
+      | currentLen + 1 + T.length w > maxChars =
+          T.unwords (reverse acc) : go [] (w:ws)
+      | otherwise = go (w:acc) ws
+      where
+        currentLen = sum (map T.length acc) + length acc - 1
+    consIfNonEmpty t ws
+      | T.null t = ws
+      | otherwise = t : ws
+
+-- | Render a list of wrapped text lines as SVG <text> elements.
+svgTextLines :: Text -> Double -> Double -> Double -> [Text] -> [Text]
+svgTextLines cssClass startX startY lineHeight wrappedLines =
+  [ T.concat
+    [ "  <text x=\"", svgNumber startX
+    , "\" y=\"", svgNumber (startY + fromIntegral i * lineHeight)
+    , "\" class=\"", cssClass, "\">"
+    , escapeXml line
+    , "</text>"
+    ]
+  | (i, line) <- zip [(0 :: Int) ..] wrappedLines
+  ]
 
 escapeXml :: Text -> Text
 escapeXml = T.concatMap escapeChar

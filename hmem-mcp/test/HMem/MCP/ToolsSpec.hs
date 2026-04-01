@@ -635,6 +635,7 @@ spec = do
             , memoryFilter = Nothing
             , showTasks = Nothing
             , showTaskStatusSummary = Nothing
+            , showDescriptions = Nothing
             }
         other -> expectationFailure $ "Expected WorkspaceVisualizationCall, got: " <> show other
 

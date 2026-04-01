@@ -1,13 +1,16 @@
--- | One-shot setup tool for the hmem environment.
+-- | hmem-ctl — control tool for the hmem environment.
 --
---   @hmem-setup@            – full setup (init + install auto-run)
---   @hmem-setup init@       – create ~/.hmem/, PostgreSQL data dir, database, schema
---   @hmem-setup install@    – register auto-run services (requires init first)
---   @hmem-setup start@      – start PostgreSQL, apply pending migrations, then start hmem-server
---   @hmem-setup stop@       – stop hmem-server + PostgreSQL
---   @hmem-setup status@     – show service status
---   @hmem-setup uninstall@  – stop services, remove auto-run, delete ~/.hmem/
---   @hmem-setup reinstall@  – uninstall + full setup
+--   @hmem-ctl@               – full setup (init + install auto-run)
+--   @hmem-ctl init@          – create ~/.hmem/, PostgreSQL data dir, database, schema
+--   @hmem-ctl install@       – register auto-run services (requires init first)
+--   @hmem-ctl start@         – start PostgreSQL, apply pending migrations, then start hmem-server
+--   @hmem-ctl stop@          – stop hmem-server + PostgreSQL
+--   @hmem-ctl status@        – show service status
+--   @hmem-ctl uninstall@     – stop services, remove auto-run, delete ~/.hmem/
+--   @hmem-ctl reinstall@     – uninstall + full setup
+--   @hmem-ctl workspaces@    – list workspaces (with optional name search)
+--   @hmem-ctl projects@      – list projects (with optional name/workspace filter)
+--   @hmem-ctl visualize@     – generate SVG workspace visualization
 --
 --   Requires: initdb, pg_ctl, createdb, psql on PATH (ships with PostgreSQL).
 
@@ -20,9 +23,14 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
+import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Char          (isSpace)
-import Data.List          (isInfixOf, dropWhileEnd)
+import Data.List          (isInfixOf, dropWhileEnd, isPrefixOf)
+import Data.Maybe         (catMaybes, fromMaybe)
 import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
+import Network.HTTP.Client qualified as HTTP
+import Network.HTTP.Types.Status (statusCode)
 import Options.Applicative
 import System.Directory   (createDirectoryIfMissing, copyFile,
                            doesDirectoryExist, doesFileExist,
@@ -39,6 +47,8 @@ import System.Process     (CreateProcess(..), StdStream(..), callProcess,
 import HMem.Config
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool qualified as Pool
+import HMem.Server.VisualizationSvg (renderWorkspaceVisualizationSvg, SvgDocument(..))
+import HMem.Types
 import Paths_hmem_server qualified as Paths
 
 ------------------------------------------------------------------------
@@ -54,6 +64,27 @@ data Command
   | CmdStatus
   | CmdUninstall
   | CmdReinstall
+  | CmdWorkspaces WorkspacesOpts
+  | CmdProjects   ProjectsOpts
+  | CmdVisualize  VisualizeOpts
+
+data WorkspacesOpts = WorkspacesOpts
+  { wsName :: Maybe String
+  }
+
+data ProjectsOpts = ProjectsOpts
+  { projName      :: Maybe String
+  , projWorkspace :: Maybe String
+  , projStatus    :: Maybe String
+  }
+
+data VisualizeOpts = VisualizeOpts
+  { vizWorkspace  :: String
+  , vizShowTasks  :: Bool
+  , vizShowSummary :: Bool
+  , vizShowDescs  :: Bool
+  , vizOutput     :: Maybe FilePath
+  }
 
 commandParser :: Parser Command
 commandParser = subparser
@@ -71,15 +102,39 @@ commandParser = subparser
       (progDesc "Stop services, remove auto-run, and delete ~/.hmem/"))
   <> command "reinstall" (info (pure CmdReinstall)
       (progDesc "Uninstall everything, then re-setup from scratch"))
+  <> command "workspaces" (info (CmdWorkspaces <$> workspacesParser)
+      (progDesc "List workspaces (optionally filter by name)"))
+  <> command "projects"   (info (CmdProjects <$> projectsParser)
+      (progDesc "List projects (optionally filter by name or workspace)"))
+  <> command "visualize"  (info (CmdVisualize <$> visualizeParser)
+      (progDesc "Generate SVG workspace visualization"))
   )
   <|> pure CmdSetup
+
+workspacesParser :: Parser WorkspacesOpts
+workspacesParser = WorkspacesOpts
+  <$> optional (strOption (long "name" <> short 'n' <> metavar "PATTERN" <> help "Filter workspaces by name (case-insensitive substring)"))
+
+projectsParser :: Parser ProjectsOpts
+projectsParser = ProjectsOpts
+  <$> optional (strOption (long "name" <> short 'n' <> metavar "PATTERN" <> help "Filter projects by name (case-insensitive substring)"))
+  <*> optional (strOption (long "workspace" <> short 'w' <> metavar "NAME" <> help "Filter by workspace name (case-insensitive substring)"))
+  <*> optional (strOption (long "status" <> short 's' <> metavar "STATUS" <> help "Filter by status (active, paused, completed, archived)"))
+
+visualizeParser :: Parser VisualizeOpts
+visualizeParser = VisualizeOpts
+  <$> strOption (long "workspace" <> short 'w' <> metavar "NAME" <> help "Workspace name (case-insensitive substring match)")
+  <*> switch (long "tasks" <> short 't' <> help "Include task nodes in SVG")
+  <*> (not <$> switch (long "no-summary" <> help "Suppress task status summaries"))
+  <*> switch (long "descriptions" <> short 'd' <> help "Show project/task descriptions")
+  <*> optional (strOption (long "output" <> short 'o' <> metavar "FILE" <> help "Output file path (default: stdout)"))
 
 main :: IO ()
 main = do
   cmd <- execParser $ info (commandParser <**> helper)
     ( fullDesc
-   <> progDesc "hmem-setup - Initialize and manage the hmem environment"
-   <> header "hmem-setup"
+   <> progDesc "hmem-ctl - Initialize and manage the hmem environment"
+   <> header "hmem-ctl"
     )
   case cmd of
     CmdSetup     -> doInit >> doInstall
@@ -90,6 +145,9 @@ main = do
     CmdStatus    -> doStatus
     CmdUninstall -> doUninstall
     CmdReinstall -> doUninstall >> doInit >> doInstall
+    CmdWorkspaces opts -> doWorkspaces opts
+    CmdProjects opts   -> doProjects opts
+    CmdVisualize opts  -> doVisualize opts
 
 ------------------------------------------------------------------------
 -- Init
@@ -97,7 +155,7 @@ main = do
 
 doInit :: IO ()
 doInit = do
-  putStrLn "=== hmem-setup init ==="
+  putStrLn "=== hmem-ctl init ==="
   putStrLn ""
 
   dir <- configDir
@@ -220,7 +278,7 @@ doInit = do
 doInstall :: IO ()
 doInstall = do
   putStrLn ""
-  putStrLn "=== hmem-setup install ==="
+  putStrLn "=== hmem-ctl install ==="
   putStrLn ""
 
   dir <- ensureInitialized "install"
@@ -308,10 +366,10 @@ installWindows = do
   let dataDir = dir </> "data" </> "postgresql"
 
   pgCtlBin <- findBinary "pg_ctl" "pg_ctl"
-  setupBin <- findBinary "hmem-setup" "hmem-setup"
+  setupBin <- findBinary "hmem-ctl" "hmem-ctl"
 
   -- Write startup script
-  -- `hmem-setup start` handles: pg_ctl start (graceful if already
+  -- `hmem-ctl start` handles: pg_ctl start (graceful if already
   -- running), migration refresh, and launching hmem-server as a
   -- detached process (detach_console + create_group).  The bat
   -- therefore exits quickly and Task Scheduler marks the task complete.
@@ -824,7 +882,7 @@ doStatus = do
 
 doUninstall :: IO ()
 doUninstall = do
-  putStrLn "=== hmem-setup uninstall ==="
+  putStrLn "=== hmem-ctl uninstall ==="
   putStrLn ""
 
   dir <- configDir
@@ -901,6 +959,165 @@ removeIfExists :: FilePath -> IO ()
 removeIfExists path = do
   exists <- doesFileExist path
   when exists $ removeFile path
+
+------------------------------------------------------------------------
+-- Query commands (workspaces, projects, visualize)
+------------------------------------------------------------------------
+
+-- | Create an HTTP manager and build the base URL from config.
+withApiClient :: (HTTP.Manager -> String -> IO a) -> IO a
+withApiClient action = do
+  cfg <- loadConfig
+  mgr <- HTTP.newManager HTTP.defaultManagerSettings
+  let base = "http://" <> T.unpack cfg.server.host <> ":" <> show cfg.server.port
+  action mgr base
+
+apiGet :: HTTP.Manager -> String -> String -> IO BL.ByteString
+apiGet mgr base path = do
+  req <- HTTP.parseRequest (base <> path)
+  resp <- HTTP.httpLbs req mgr
+  let code = statusCode (HTTP.responseStatus resp)
+  when (code >= 400) $ do
+    hPutStrLn stderr $ "Error: API returned status " <> show code
+    hPutStrLn stderr $ BL8.unpack (HTTP.responseBody resp)
+    exitFailure
+  pure (HTTP.responseBody resp)
+
+apiPostJson :: Aeson.ToJSON a => HTTP.Manager -> String -> String -> a -> IO BL.ByteString
+apiPostJson mgr base path body = do
+  initReq <- HTTP.parseRequest (base <> path)
+  let req = initReq
+        { HTTP.method = "POST"
+        , HTTP.requestBody = HTTP.RequestBodyLBS (Aeson.encode body)
+        , HTTP.requestHeaders = [("Content-Type", "application/json"), ("Accept", "application/json")]
+        }
+  resp <- HTTP.httpLbs req mgr
+  let code = statusCode (HTTP.responseStatus resp)
+  when (code >= 400) $ do
+    hPutStrLn stderr $ "Error: API returned status " <> show code
+    hPutStrLn stderr $ BL8.unpack (HTTP.responseBody resp)
+    exitFailure
+  pure (HTTP.responseBody resp)
+
+doWorkspaces :: WorkspacesOpts -> IO ()
+doWorkspaces opts = withApiClient $ \mgr base -> do
+  body <- apiGet mgr base "/api/v1/workspaces?limit=100"
+  case Aeson.decode body :: Maybe (PaginatedResult Workspace) of
+    Nothing -> do
+      hPutStrLn stderr "Error: could not parse workspace list"
+      exitFailure
+    Just result -> do
+      let filtered = case opts.wsName of
+            Nothing -> result.items
+            Just pat -> filter (matchName pat . T.unpack . (.name)) result.items
+      if null filtered
+        then putStrLn "No matching workspaces found."
+        else do
+          putStrLn $ padRight 38 "ID" <> padRight 30 "NAME" <> padRight 14 "TYPE" <> "PATH"
+          putStrLn $ replicate 100 '-'
+          mapM_ printWorkspace filtered
+  where
+    printWorkspace ws =
+      putStrLn $ padRight 38 (show ws.id) <> padRight 30 (T.unpack ws.name) <> padRight 14 (T.unpack (workspaceTypeToText ws.workspaceType)) <> maybe "" T.unpack ws.path
+
+doProjects :: ProjectsOpts -> IO ()
+doProjects opts = withApiClient $ \mgr base -> do
+  -- First get workspaces to map IDs to names and optionally filter
+  wsBody <- apiGet mgr base "/api/v1/workspaces?limit=100"
+  let allWorkspaces = case Aeson.decode wsBody :: Maybe (PaginatedResult Workspace) of
+        Nothing -> []
+        Just r  -> r.items
+      targetWorkspaces = case opts.projWorkspace of
+        Nothing -> allWorkspaces
+        Just pat -> filter (matchName pat . T.unpack . (.name)) allWorkspaces
+      wsNames = [(show ws.id, T.unpack ws.name) | ws <- allWorkspaces]
+      wsNameLookup wsId = fromMaybe (show wsId) (lookup (show wsId) wsNames)
+  when (null targetWorkspaces) $ do
+    putStrLn "No matching workspaces found."
+    exitFailure
+  -- Gather projects from each workspace
+  allProjects <- concat <$> mapM (\ws -> do
+    let statusParam = maybe "" (\s -> "&status=" <> s) opts.projStatus
+        url = "/api/v1/projects?limit=100&workspace_id=" <> show ws.id <> statusParam
+    projBody <- apiGet mgr base url
+    case Aeson.decode projBody :: Maybe (PaginatedResult Project) of
+      Nothing -> pure []
+      Just r  -> pure r.items
+    ) targetWorkspaces
+  let filtered = case opts.projName of
+        Nothing -> allProjects
+        Just pat -> filter (matchName pat . T.unpack . (.name)) allProjects
+  if null filtered
+    then putStrLn "No matching projects found."
+    else do
+      putStrLn $ padRight 38 "ID" <> padRight 28 "NAME" <> padRight 12 "STATUS" <> padRight 5 "PRI" <> "WORKSPACE"
+      putStrLn $ replicate 100 '-'
+      mapM_ (\p ->
+        putStrLn $ padRight 38 (show p.id) <> padRight 28 (ellipsis 26 $ T.unpack p.name) <> padRight 12 (T.unpack (projectStatusToText p.status)) <> padRight 5 (show p.priority) <> wsNameLookup p.workspaceId
+        ) filtered
+
+doVisualize :: VisualizeOpts -> IO ()
+doVisualize opts = withApiClient $ \mgr base -> do
+  -- Find workspace by name
+  wsBody <- apiGet mgr base "/api/v1/workspaces?limit=100"
+  case Aeson.decode wsBody :: Maybe (PaginatedResult Workspace) of
+    Nothing -> do
+      hPutStrLn stderr "Error: could not parse workspace list"
+      exitFailure
+    Just result -> do
+      let matching = filter (matchName opts.vizWorkspace . T.unpack . (.name)) result.items
+      case matching of
+        [] -> do
+          hPutStrLn stderr $ "No workspace matching '" <> opts.vizWorkspace <> "' found."
+          exitFailure
+        [ws] -> generateVisualization mgr base ws opts
+        multiple -> do
+          hPutStrLn stderr $ "Multiple workspaces match '" <> opts.vizWorkspace <> "':"
+          mapM_ (\ws -> hPutStrLn stderr $ "  " <> show ws.id <> "  " <> T.unpack ws.name) multiple
+          hPutStrLn stderr "Please refine your search."
+          exitFailure
+
+generateVisualization :: HTTP.Manager -> String -> Workspace -> VisualizeOpts -> IO ()
+generateVisualization mgr base ws opts = do
+  let vizQuery = WorkspaceVisualizationQuery
+        { includeProjectIds = Nothing
+        , excludeProjectIds = Nothing
+        , taskStatuses = Nothing
+        , memoryFilter = Nothing
+        , showTasks = Just opts.vizShowTasks
+        , showTaskStatusSummary = Just opts.vizShowSummary
+        , showDescriptions = Just opts.vizShowDescs
+        }
+  body <- apiPostJson mgr base ("/api/v1/workspaces/" <> show ws.id <> "/visualization") vizQuery
+  case Aeson.decode body :: Maybe WorkspaceVisualization of
+    Nothing -> do
+      hPutStrLn stderr "Error: could not parse visualization response"
+      exitFailure
+    Just viz -> do
+      let SvgDocument svgText = renderWorkspaceVisualizationSvg vizQuery viz
+      case opts.vizOutput of
+        Nothing -> TIO.putStr svgText
+        Just path -> do
+          TIO.writeFile path svgText
+          putStrLn $ "Wrote SVG to: " <> path
+
+-- Helpers for the query commands
+
+matchName :: String -> String -> Bool
+matchName pattern str = map toLowerAscii pattern `isInfixOf` map toLowerAscii str
+  where
+    toLowerAscii c
+      | c >= 'A' && c <= 'Z' = toEnum (fromEnum c + 32)
+      | otherwise = c
+
+padRight :: Int -> String -> String
+padRight n s = take n (s <> replicate n ' ')
+
+ellipsis :: Int -> String -> String
+ellipsis n s
+  | length s <= n = s
+  | n <= 3 = take n s
+  | otherwise = take (n - 2) s <> ".."
 
 ------------------------------------------------------------------------
 -- Helpers
@@ -982,7 +1199,7 @@ ensureInitialized commandName = do
   when (not configExists || not pgInitialized) $ do
     hPutStrLn stderr "Error: hmem is not initialized."
     hPutStrLn stderr $
-      "Run 'hmem-setup init' or plain 'hmem-setup' before 'hmem-setup "
+      "Run 'hmem-ctl init' or plain 'hmem-ctl' before 'hmem-ctl "
         <> commandName <> "'."
     exitFailure
   pure dir

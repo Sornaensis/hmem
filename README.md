@@ -45,18 +45,4 @@ stack install
 hmem-ctl
 ```
 
-This runs `hmem-ctl init` followed by `hmem-ctl install`, which:
-
-1. **Initializes `~/.hmem/`** — creates config, data, and log directories
-2. **Sets up PostgreSQL** — initializes a local data directory, starts PG temporarily, creates the `hmem` database, and runs all migrations
-3. **Writes `~/.hmem/config.yaml`** — default configuration (DB credentials, server port, CORS origins)
-4. **Copies migrations** to `~/.hmem/migrations/` for future upgrades
-5. **Registers auto-start services**:
-   - **Linux**: systemd user services (`hmem-postgres`, `hmem-server`)
-   - **Windows**: scheduled task + start/stop `.bat` scripts
-6. **Installs MCP server configs**:
-   - **VS Code**: merges `hmem` entry into `~/.config/Code/User/mcp.json` (or `AppData/Roaming/Code/User/mcp.json` on Windows)
-   - **Claude Desktop**: merges into `claude_desktop_config.json`
-7. **Installs agent definitions** to `~/.hmem/agents/` (Copilot `.agent.md` files and Claude instructions)
-
 **Prerequisites**: PostgreSQL must be installed with `initdb`, `pg_ctl`, `createdb`, and `psql` on PATH.

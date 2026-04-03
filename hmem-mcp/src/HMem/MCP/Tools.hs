@@ -130,25 +130,14 @@ toolDefinitions =
       , "required" .= [t "memory_id"]
       ]
 
-    , mkTool "memory_delete" "Soft-delete a memory, hiding it from all list and search results. Recoverable until permanently removed with memory_purge." $ object
+    , mkTool "entity_lifecycle" "Soft-delete, restore, or permanently purge any entity. Use action 'delete' to soft-delete (hides from views, recoverable). Use 'restore' to undo a soft-delete. Use 'purge' to permanently and irreversibly remove (must be soft-deleted first). For projects and tasks, delete/restore cascades to child subtrees." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "memory_id" .= prop "string" "UUID of the memory to delete" ]
-      , "required" .= [t "memory_id"]
-      ]
-
-        , mkTool "memory_restore" "Restore a soft-deleted memory so it becomes visible in active views again." $ object
-            [ "type" .= t "object"
-            , "properties" .= object
-                    [ "memory_id" .= prop "string" "UUID of the soft-deleted memory to restore" ]
-            , "required" .= [t "memory_id"]
-            ]
-
-    , mkTool "memory_purge" "Permanently and irreversibly remove a soft-deleted memory. The memory must be soft-deleted first via memory_delete." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "memory_id" .= prop "string" "UUID of the soft-deleted memory to purge" ]
-      , "required" .= [t "memory_id"]
+          [ "entity_type" .= propEnum "string" "Type of entity" ["memory", "project", "task", "category", "workspace", "saved_view"]
+          , "entity_id"   .= prop "string" "UUID of the entity"
+          , "action"       .= propEnum "string" "Lifecycle action" ["delete", "restore", "purge"]
+          ]
+      , "required" .= [t "entity_type", t "entity_id", t "action"]
       ]
 
     , mkTool "memory_link" "Create or remove a typed link between two memories. Relation types: related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to. Use action 'create' to add a link, 'remove' to delete one." $ object
@@ -325,26 +314,7 @@ toolDefinitions =
       , "required" .= [t "workspace_id"]
       ]
 
-  , mkTool "workspace_delete" "Soft-delete a workspace, hiding it and its contents from active views. Recoverable until permanently removed with workspace_purge." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "workspace_id" .= prop "string" "UUID of the workspace to delete" ]
-      , "required" .= [t "workspace_id"]
-      ]
 
-  , mkTool "workspace_restore" "Restore a soft-deleted workspace. This also restores child rows deleted in the same workspace delete operation." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "workspace_id" .= prop "string" "UUID of the soft-deleted workspace to restore" ]
-      , "required" .= [t "workspace_id"]
-      ]
-
-  , mkTool "workspace_purge" "Permanently and irreversibly remove a soft-deleted workspace and all its data. Must be soft-deleted first via workspace_delete." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "workspace_id" .= prop "string" "UUID of the soft-deleted workspace to purge" ]
-      , "required" .= [t "workspace_id"]
-      ]
 
     , mkTool "memory_list" "Browse memories and collect IDs. Returns compact results by default; set detail=true for full content and metadata. Use memory_search instead when you need keyword or filtered retrieval." $ object
       [ "type" .= t "object"
@@ -381,25 +351,13 @@ toolDefinitions =
       , "required" .= [t "workspace_id", t "relation_type"]
       ]
 
-  , mkTool "project_list_memories" "List all memories linked to a project. Use project_link_memory and project_unlink_memory to manage these associations." $ object
+  , mkTool "list_entity_memories" "List all memories linked to a project, task, or category." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "project_id" .= prop "string" "UUID of the project" ]
-      , "required" .= [t "project_id"]
-      ]
-
-  , mkTool "category_list_memories" "List all memories linked to a category." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "category_id" .= prop "string" "UUID of the category" ]
-      , "required" .= [t "category_id"]
-      ]
-
-  , mkTool "task_list_memories" "List all memories linked to a task. Use task_link_memory and task_unlink_memory to manage these associations." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "task_id" .= prop "string" "UUID of the task" ]
-      , "required" .= [t "task_id"]
+          [ "entity_type" .= propEnum "string" "Type of entity" ["project", "task", "category"]
+          , "entity_id"   .= prop "string" "UUID of the entity"
+          ]
+      , "required" .= [t "entity_type", t "entity_id"]
       ]
 
     , mkTool "cleanup_run" "Run cleanup policies for a workspace immediately. Use after reviewing policies or when you want explicit pruning now." $ object
@@ -432,26 +390,7 @@ toolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
-  , mkTool "project_delete" "Soft-delete a project and its entire subtree of child projects. Recoverable until permanently removed with project_purge." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "project_id" .= prop "string" "UUID of the project to delete" ]
-      , "required" .= [t "project_id"]
-      ]
 
-  , mkTool "project_restore" "Restore a soft-deleted project subtree. Child projects deleted in the same delete operation are restored together." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "project_id" .= prop "string" "UUID of the soft-deleted project to restore" ]
-      , "required" .= [t "project_id"]
-      ]
-
-  , mkTool "project_purge" "Permanently and irreversibly remove a soft-deleted project. Must be soft-deleted first via project_delete." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "project_id" .= prop "string" "UUID of the soft-deleted project to purge" ]
-      , "required" .= [t "project_id"]
-      ]
 
   , mkTool "project_overview" "Get a project with its tasks, subprojects, and linked memories in one call. Use this to understand the full scope of a project before making changes, instead of calling project_get, task_list, and project_list_memories separately." $ object
       [ "type" .= t "object"
@@ -477,26 +416,7 @@ toolDefinitions =
             , "required" .= [t "task_id"]
             ]
 
-  , mkTool "task_delete" "Soft-delete a task and its subtask tree. Recoverable until permanently removed with task_purge." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "task_id" .= prop "string" "UUID of the task to delete" ]
-      , "required" .= [t "task_id"]
-      ]
 
-  , mkTool "task_restore" "Restore a soft-deleted task subtree. Child tasks deleted in the same delete operation are restored together." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "task_id" .= prop "string" "UUID of the soft-deleted task to restore" ]
-      , "required" .= [t "task_id"]
-      ]
-
-  , mkTool "task_purge" "Permanently and irreversibly remove a soft-deleted task. Must be soft-deleted first via task_delete." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "task_id" .= prop "string" "UUID of the soft-deleted task to purge" ]
-      , "required" .= [t "task_id"]
-      ]
 
   -- Issue 2: Memory categories
   , mkTool "category_create" "Create a category for organizing memories. Set workspace_id to scope it to one workspace, or omit for a global category. Use parent_id for nested sub-categories." $ object
@@ -538,44 +458,9 @@ toolDefinitions =
       , "required" .= [t "category_id"]
       ]
 
-  , mkTool "category_delete" "Soft-delete a category. Existing category-memory links are removed as part of deletion. Recoverable until permanently removed with category_purge." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "category_id" .= prop "string" "UUID of the category to delete" ]
-      , "required" .= [t "category_id"]
-      ]
 
-  , mkTool "category_restore" "Restore a soft-deleted category so it becomes visible in active views again." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "category_id" .= prop "string" "UUID of the soft-deleted category to restore" ]
-      , "required" .= [t "category_id"]
-      ]
 
-  , mkTool "category_purge" "Permanently and irreversibly remove a soft-deleted category. Must be soft-deleted first via category_delete." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "category_id" .= prop "string" "UUID of the soft-deleted category to purge" ]
-      , "required" .= [t "category_id"]
-      ]
 
-  , mkTool "category_link_memory" "Link a memory to a category" $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "memory_id"   .= prop "string" "UUID of the memory"
-          , "category_id" .= prop "string" "UUID of the category"
-          ]
-      , "required" .= [t "memory_id", t "category_id"]
-      ]
-
-  , mkTool "category_unlink_memory" "Unlink a memory from a category" $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "memory_id"   .= prop "string" "UUID of the memory"
-          , "category_id" .= prop "string" "UUID of the category"
-          ]
-      , "required" .= [t "memory_id", t "category_id"]
-      ]
 
   -- Issue 3: Task dependencies
     , mkTool "task_dependency" "Add or remove an ordering dependency between tasks. Use action 'add' to declare that the first task depends on the second (must complete before it). Use action 'remove' to delete the constraint. For parent/child hierarchy, use parent_id in task_create instead." $ object
@@ -588,41 +473,17 @@ toolDefinitions =
       , "required" .= [t "action", t "task_id", t "depends_on_id"]
       ]
 
-  -- Issue 4: Cross-entity memory links
-  , mkTool "project_link_memory" "Link a memory to a project so it appears in project_overview and project_list_memories. Use this to attach context, decisions, or research findings to the project they inform. For bulk linking, prefer project_link_memories_batch." $ object
+  , mkTool "link_memory" "Link or unlink memories to/from a project, task, or category. Use action 'link' to attach memories, 'unlink' to detach. Supports single or batch operations via memory_ids array (max 100). For categories, link/unlink always operates on a single memory_id." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "project_id" .= prop "string" "UUID of the project"
-          , "memory_id"  .= prop "string" "UUID of the memory"
+          [ "entity_type" .= propEnum "string" "Type of entity to link memories to" ["project", "task", "category"]
+          , "entity_id"   .= prop "string" "UUID of the entity"
+          , "action"       .= propEnum "string" "Whether to link or unlink" ["link", "unlink"]
+          , "memory_ids"   .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                                       "description" .= t "Array of memory UUIDs (max 100)",
+                                       "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
           ]
-      , "required" .= [t "project_id", t "memory_id"]
-      ]
-
-  , mkTool "project_unlink_memory" "Unlink a memory from a project" $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "project_id" .= prop "string" "UUID of the project"
-          , "memory_id"  .= prop "string" "UUID of the memory"
-          ]
-      , "required" .= [t "project_id", t "memory_id"]
-      ]
-
-  , mkTool "task_link_memory" "Link a memory to a task so it appears in task_list_memories. Use this to attach implementation notes, requirements, or decisions to specific work items. For bulk linking, prefer task_link_memories_batch." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "task_id"   .= prop "string" "UUID of the task"
-          , "memory_id" .= prop "string" "UUID of the memory"
-          ]
-      , "required" .= [t "task_id", t "memory_id"]
-      ]
-
-  , mkTool "task_unlink_memory" "Unlink a memory from a task" $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "task_id"   .= prop "string" "UUID of the task"
-          , "memory_id" .= prop "string" "UUID of the memory"
-          ]
-      , "required" .= [t "task_id", t "memory_id"]
+      , "required" .= [t "entity_type", t "entity_id", t "action", t "memory_ids"]
       ]
 
   -- Issue 5: Memory link listing
@@ -663,61 +524,19 @@ toolDefinitions =
       ]
 
   -- Workspace groups
-  , mkTool "workspace_group_create" "Create a workspace group to organize related workspaces into a portfolio for cross-repo coordination or team organization." $ object
+  , mkTool "workspace_group" "Manage workspace groups — organize related workspaces into portfolios. Actions: 'create' (name, description), 'get' (group_id), 'list' (limit, offset), 'delete' (group_id), 'add_member' (group_id, workspace_id), 'remove_member' (group_id, workspace_id), 'list_members' (group_id)." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "name"        .= propMaxLength "string" "Group name" maxNameBytes
-          , "description" .= prop "string" "Group description"
+          [ "action"       .= propEnum "string" "Operation to perform"
+              ["create", "get", "list", "delete", "add_member", "remove_member", "list_members"]
+          , "group_id"     .= prop "string" "UUID of the workspace group (required for get, delete, add_member, remove_member, list_members)"
+          , "workspace_id" .= prop "string" "UUID of the workspace (required for add_member, remove_member)"
+          , "name"         .= propMaxLength "string" "Group name (required for create)" maxNameBytes
+          , "description"  .= prop "string" "Group description (for create)"
+          , "limit"        .= prop "integer" "Max results for list (default 50)"
+          , "offset"       .= prop "integer" "Offset for list pagination (default 0)"
           ]
-      , "required" .= [t "name"]
-      ]
-
-  , mkTool "workspace_group_get" "Get a workspace group by ID with full detail: name, description, and timestamps." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "group_id" .= prop "string" "UUID of the workspace group" ]
-      , "required" .= [t "group_id"]
-      ]
-
-  , mkTool "workspace_group_list" "List all workspace groups. Use this to find group IDs before adding or removing members." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "limit"  .= prop "integer" "Max results (default 50)"
-          , "offset" .= prop "integer" "Offset for pagination (default 0)"
-          ]
-      , "required" .= ([] :: [Text])
-      ]
-
-  , mkTool "workspace_group_delete" "Delete a workspace group. Does not affect member workspaces themselves." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "group_id" .= prop "string" "UUID of the workspace group to delete" ]
-      , "required" .= [t "group_id"]
-      ]
-
-  , mkTool "workspace_group_add_member" "Add a workspace to a group. A workspace can belong to multiple groups simultaneously." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "group_id"     .= prop "string" "UUID of the workspace group"
-          , "workspace_id" .= prop "string" "UUID of the workspace to add"
-          ]
-      , "required" .= [t "group_id", t "workspace_id"]
-      ]
-
-  , mkTool "workspace_group_remove_member" "Remove a workspace from a group without affecting the workspace itself." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "group_id"     .= prop "string" "UUID of the workspace group"
-          , "workspace_id" .= prop "string" "UUID of the workspace to remove"
-          ]
-      , "required" .= [t "group_id", t "workspace_id"]
-      ]
-
-  , mkTool "workspace_group_list_members" "List all workspaces belonging to a group." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "group_id" .= prop "string" "UUID of the workspace group" ]
-      , "required" .= [t "group_id"]
+      , "required" .= [t "action"]
       ]
 
   -- Activity timeline
@@ -755,44 +574,15 @@ toolDefinitions =
       ]
 
   -- Batch operations
-  , mkTool "memory_delete_batch" "Soft-delete multiple memories at once. Max 100 IDs per call. Returns the number actually deleted (already-deleted or missing IDs are skipped)." $ object
+  , mkTool "batch_delete" "Soft-delete multiple entities of the same type at once. Max 100 IDs per call. Returns the number actually deleted (already-deleted or missing IDs are skipped)." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                              "description" .= t "Array of memory UUIDs to soft-delete",
+          [ "entity_type" .= propEnum "string" "Type of entities to delete" ["memory", "project", "task", "category"]
+          , "ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                              "description" .= t "Array of entity UUIDs to soft-delete",
                               "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
           ]
-      , "required" .= [t "ids"]
-      ]
-
-  , mkTool "task_delete_batch" "Soft-delete multiple tasks at once. Max 100 IDs per call. Does not cascade to subtasks. Returns the number actually deleted." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                              "description" .= t "Array of task UUIDs to soft-delete",
-                              "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
-          ]
-      , "required" .= [t "ids"]
-      ]
-
-  , mkTool "project_delete_batch" "Soft-delete multiple projects at once. Max 100 IDs per call. Does not cascade to child project subtrees. Returns the number actually deleted." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                              "description" .= t "Array of project UUIDs to soft-delete",
-                              "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
-          ]
-      , "required" .= [t "ids"]
-      ]
-
-  , mkTool "category_delete_batch" "Soft-delete multiple categories at once. Max 100 IDs per call. Does not cascade to child categories. Returns the number actually deleted." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                              "description" .= t "Array of category UUIDs to soft-delete",
-                              "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
-          ]
-      , "required" .= [t "ids"]
+      , "required" .= [t "entity_type", t "ids"]
       ]
 
   , mkTool "task_move_batch" "Move multiple tasks to a different project (or detach from all projects by passing null for project_id). Max 100 tasks per call." $ object
@@ -806,38 +596,7 @@ toolDefinitions =
       , "required" .= [t "task_ids"]
       ]
 
-  , mkTool "project_link_memories_batch" "Link multiple memories to a single project at once. Idempotent: already-linked pairs are silently skipped. Max 100 memory IDs." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "project_id" .= prop "string" "UUID of the project"
-          , "memory_ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                                     "description" .= t "Array of memory UUIDs to link",
-                                     "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
-          ]
-      , "required" .= [t "project_id", t "memory_ids"]
-      ]
 
-  , mkTool "category_link_memories_batch" "Link multiple memories to a single category at once. Idempotent: already-linked pairs are silently skipped. Max 100 memory IDs." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "category_id" .= prop "string" "UUID of the category"
-          , "memory_ids"  .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                                      "description" .= t "Array of memory UUIDs to link",
-                                      "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
-          ]
-      , "required" .= [t "category_id", t "memory_ids"]
-      ]
-
-  , mkTool "task_link_memories_batch" "Link multiple memories to a single task at once. Idempotent: already-linked pairs are silently skipped. Max 100 memory IDs." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "task_id"    .= prop "string" "UUID of the task"
-          , "memory_ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                                     "description" .= t "Array of memory UUIDs to link",
-                                     "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
-          ]
-      , "required" .= [t "task_id", t "memory_ids"]
-      ]
 
   , mkTool "memory_set_tags_batch" "Set tags on multiple memories at once, each with its own tag list. Replaces existing tags for each memory. Max 100 items." $ object
       [ "type" .= t "object"
@@ -975,26 +734,7 @@ toolDefinitions =
       , "required" .= [t "view_id"]
       ]
 
-  , mkTool "saved_view_delete" "Soft-delete a saved view. Can be purged later with saved_view_purge." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "view_id" .= prop "string" "UUID of the saved view to delete" ]
-      , "required" .= [t "view_id"]
-      ]
 
-  , mkTool "saved_view_restore" "Restore a soft-deleted saved view so it becomes visible in active views again." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "view_id" .= prop "string" "UUID of the soft-deleted saved view to restore" ]
-      , "required" .= [t "view_id"]
-      ]
-
-  , mkTool "saved_view_purge" "Permanently remove a soft-deleted saved view. Must be soft-deleted first." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "view_id" .= prop "string" "UUID of the saved view to purge" ]
-      , "required" .= [t "view_id"]
-      ]
 
   , mkTool "saved_view_execute" "Execute a saved view, running its stored query with optional limit/offset/detail overrides. Returns the matching entities." $ object
       [ "type" .= t "object"
@@ -1126,9 +866,30 @@ parseToolCall name args = case name of
     "memory_search"            -> MemorySearch <$> parse args <*> (maybe False id <$> opt "detail")
     "memory_get"               -> MemoryGet <$> need "memory_id"
     "memory_update"            -> MemoryUpdate <$> need "memory_id" <*> parse args
-    "memory_delete"            -> MemoryDelete <$> need "memory_id"
-    "memory_restore"           -> MemoryRestore <$> need "memory_id"
-    "memory_purge"             -> MemoryPurge <$> need "memory_id"
+    "entity_lifecycle"          -> do
+        entityType <- need "entity_type" :: Either String Text
+        eid <- need "entity_id"
+        action <- need "action" :: Either String Text
+        case (entityType, action) of
+            ("memory",     "delete")  -> Right $ MemoryDelete eid
+            ("memory",     "restore") -> Right $ MemoryRestore eid
+            ("memory",     "purge")   -> Right $ MemoryPurge eid
+            ("project",    "delete")  -> Right $ ProjectDelete eid
+            ("project",    "restore") -> Right $ ProjectRestore eid
+            ("project",    "purge")   -> Right $ ProjectPurge eid
+            ("task",       "delete")  -> Right $ TaskDelete eid
+            ("task",       "restore") -> Right $ TaskRestore eid
+            ("task",       "purge")   -> Right $ TaskPurge eid
+            ("category",   "delete")  -> Right $ CategoryDelete eid
+            ("category",   "restore") -> Right $ CategoryRestore eid
+            ("category",   "purge")   -> Right $ CategoryPurge eid
+            ("workspace",  "delete")  -> Right $ WsDelete eid
+            ("workspace",  "restore") -> Right $ WsRestore eid
+            ("workspace",  "purge")   -> Right $ WsPurge eid
+            ("saved_view", "delete")  -> Right $ SavedViewDelete eid
+            ("saved_view", "restore") -> Right $ SavedViewRestore eid
+            ("saved_view", "purge")   -> Right $ SavedViewPurge eid
+            _ -> Left $ "entity_lifecycle: invalid entity_type/action: " <> T.unpack entityType <> "/" <> T.unpack action
     "memory_link"              -> do
         action <- need "action" :: Either String Text
         case action of
@@ -1139,22 +900,45 @@ parseToolCall name args = case name of
     "project_create"           -> ProjectCreate <$> parse args
     "project_get"              -> ProjectGet <$> need "project_id"
     "project_update"           -> ProjectUpdate <$> need "project_id" <*> parse args
-    "project_delete"           -> ProjectDelete <$> need "project_id"
-    "project_restore"          -> ProjectRestore <$> need "project_id"
-    "project_purge"            -> ProjectPurge <$> need "project_id"
     "project_list"             -> ProjectList <$> parse args
-    "project_link_memory"      -> ProjectLinkMem <$> need "project_id" <*> need "memory_id"
-    "project_unlink_memory"    -> ProjectUnlinkMem <$> need "project_id" <*> need "memory_id"
+    "link_memory"              -> do
+        entityType <- need "entity_type" :: Either String Text
+        eid <- need "entity_id"
+        action <- need "action" :: Either String Text
+        mids <- need "memory_ids" :: Either String [UUID]
+        case (entityType, action) of
+            ("project",  "link")   -> case mids of
+                [mid] -> Right $ ProjectLinkMem eid mid
+                _     -> Right $ ProjectLinkMemBatch eid mids
+            ("project",  "unlink") -> case mids of
+                [mid] -> Right $ ProjectUnlinkMem eid mid
+                _     -> Left "link_memory: project unlink only supports one memory_id at a time"
+            ("task",     "link")   -> case mids of
+                [mid] -> Right $ TaskLinkMem eid mid
+                _     -> Right $ TaskLinkMemBatch eid mids
+            ("task",     "unlink") -> case mids of
+                [mid] -> Right $ TaskUnlinkMem eid mid
+                _     -> Left "link_memory: task unlink only supports one memory_id at a time"
+            ("category", "link")   -> case mids of
+                [mid] -> Right $ CategoryLinkMem mid eid
+                _     -> Right $ CategoryLinkMemBatch eid mids
+            ("category", "unlink") -> case mids of
+                [mid] -> Right $ CategoryUnlinkMem mid eid
+                _     -> Left "link_memory: category unlink only supports one memory_id at a time"
+            _ -> Left $ "link_memory: invalid entity_type/action: " <> T.unpack entityType <> "/" <> T.unpack action
+    "list_entity_memories"     -> do
+        entityType <- need "entity_type" :: Either String Text
+        eid <- need "entity_id"
+        case entityType of
+            "project"  -> Right $ ProjectListMem eid
+            "task"     -> Right $ TaskListMem eid
+            "category" -> Right $ CategoryListMem eid
+            _          -> Left $ "list_entity_memories: invalid entity_type: " <> T.unpack entityType
     "task_create"              -> TaskCreate <$> parse args
     "task_get"                 -> TaskGet <$> need "task_id"
     "task_overview"            -> TaskOverviewCall <$> need "task_id" <*> (maybe False id <$> opt "extra_context")
-    "task_delete"              -> TaskDelete <$> need "task_id"
-    "task_restore"             -> TaskRestore <$> need "task_id"
-    "task_purge"               -> TaskPurge <$> need "task_id"
     "task_list"                -> TaskList <$> parse args
     "task_update"              -> TaskUpdate <$> need "task_id" <*> parse args
-    "task_link_memory"         -> TaskLinkMem <$> need "task_id" <*> need "memory_id"
-    "task_unlink_memory"       -> TaskUnlinkMem <$> need "task_id" <*> need "memory_id"
     "task_dependency"          -> do
         action <- need "action" :: Either String Text
         case action of
@@ -1165,11 +949,6 @@ parseToolCall name args = case name of
     "category_get"             -> CategoryGet <$> need "category_id"
     "category_list"            -> CategoryList <$> opt "workspace_id" <*> opt "limit" <*> opt "offset"
     "category_update"          -> CategoryUpdate <$> need "category_id" <*> parse args
-    "category_delete"          -> CategoryDelete <$> need "category_id"
-    "category_restore"         -> CategoryRestore <$> need "category_id"
-    "category_purge"           -> CategoryPurge <$> need "category_id"
-    "category_link_memory"     -> CategoryLinkMem <$> need "memory_id" <*> need "category_id"
-    "category_unlink_memory"   -> CategoryUnlinkMem <$> need "memory_id" <*> need "category_id"
     "memory_set_tags"          -> MemorySetTags <$> need "memory_id" <*> need "tags"
     "cleanup_policy"           -> do
         action <- need "action" :: Either String Text
@@ -1181,36 +960,37 @@ parseToolCall name args = case name of
     "workspace_get"            -> WorkspaceGet <$> need "workspace_id"
     "workspace_visualization"  -> WorkspaceVisualizationCall <$> need "workspace_id" <*> parse args <*> (maybe WorkspaceVisualizationSvg id <$> opt "format")
     "workspace_update"         -> WsUpdate <$> need "workspace_id" <*> parse args
-    "workspace_delete"         -> WsDelete <$> need "workspace_id"
-    "workspace_restore"        -> WsRestore <$> need "workspace_id"
-    "workspace_purge"          -> WsPurge <$> need "workspace_id"
     "workspace_register"       -> WorkspaceReg <$> parse args
     "cleanup_run"              -> CleanupRun <$> need "workspace_id"
     "memory_list"              -> MemoryList <$> parse args <*> (maybe False id <$> opt "detail")
     "memory_graph"             -> MemoryGraphCall <$> need "memory_id" <*> opt "depth"
     "memory_find_by_relation"  -> MemoryFindByRelation <$> need "workspace_id" <*> need "relation_type"
-    "project_list_memories"    -> ProjectListMem <$> need "project_id"
-    "category_list_memories"   -> CategoryListMem <$> need "category_id"
-    "task_list_memories"       -> TaskListMem <$> need "task_id"
 
-    "workspace_group_create"   -> WsGroupCreate <$> parse args
-    "workspace_group_get"      -> WsGroupGet <$> need "group_id"
-    "workspace_group_list"     -> WsGroupList <$> opt "limit" <*> opt "offset"
-    "workspace_group_delete"   -> WsGroupDelete <$> need "group_id"
-    "workspace_group_add_member" -> WsGroupAddMem <$> need "group_id" <*> need "workspace_id"
-    "workspace_group_remove_member" -> WsGroupRmMem <$> need "group_id" <*> need "workspace_id"
-    "workspace_group_list_members" -> WsGroupListMem <$> need "group_id"
+    "workspace_group"          -> do
+        action <- need "action" :: Either String Text
+        case action of
+            "create"        -> WsGroupCreate <$> parse args
+            "get"           -> WsGroupGet <$> need "group_id"
+            "list"          -> WsGroupList <$> opt "limit" <*> opt "offset"
+            "delete"        -> WsGroupDelete <$> need "group_id"
+            "add_member"    -> WsGroupAddMem <$> need "group_id" <*> need "workspace_id"
+            "remove_member" -> WsGroupRmMem <$> need "group_id" <*> need "workspace_id"
+            "list_members"  -> WsGroupListMem <$> need "group_id"
+            _               -> Left $ "workspace_group: invalid action: " <> T.unpack action
     "activity_timeline"        -> ActivityTimeline <$> opt "workspace_id" <*> opt "entity_type" <*> opt "limit"
     "memory_similar"           -> MemorySimilar <$> parse args
     "memory_set_embedding"     -> MemorySetEmbedding <$> need "memory_id" <*> need "embedding"
-    "memory_delete_batch"       -> MemoryDeleteBatch <$> need "ids"
-    "task_delete_batch"         -> TaskDeleteBatch <$> need "ids"
-    "project_delete_batch"      -> ProjectDeleteBatch <$> need "ids"
-    "category_delete_batch"     -> CategoryDeleteBatch <$> need "ids"
+    "batch_delete"             -> do
+        entityType <- need "entity_type" :: Either String Text
+        ids <- need "ids"
+        case entityType of
+            "memory"   -> Right $ MemoryDeleteBatch ids
+            "project"  -> Right $ ProjectDeleteBatch ids
+            "task"     -> Right $ TaskDeleteBatch ids
+            "category" -> Right $ CategoryDeleteBatch ids
+            _          -> Left $ "batch_delete: invalid entity_type: " <> T.unpack entityType
     "task_move_batch"           -> TaskMoveBatch <$> need "task_ids" <*> opt "project_id"
-    "project_link_memories_batch" -> ProjectLinkMemBatch <$> need "project_id" <*> need "memory_ids"
-    "category_link_memories_batch" -> CategoryLinkMemBatch <$> need "category_id" <*> need "memory_ids"
-    "task_link_memories_batch"  -> TaskLinkMemBatch <$> need "task_id" <*> need "memory_ids"
+
     "memory_set_tags_batch"     -> MemorySetTagsBatch <$> parseBatchSetTags args
     "memory_update_batch"       -> MemoryUpdateBatch <$> parseBatchUpdateItems args
     "project_update_batch"      -> ProjectUpdateBatch <$> parseBatchUpdateItems args
@@ -1219,9 +999,6 @@ parseToolCall name args = case name of
     "saved_view_list"           -> SavedViewList <$> need "workspace_id" <*> opt "limit" <*> opt "offset"
     "saved_view_get"            -> SavedViewGet <$> need "view_id"
     "saved_view_update"         -> SavedViewUpdate <$> need "view_id" <*> parse args
-    "saved_view_delete"         -> SavedViewDelete <$> need "view_id"
-    "saved_view_restore"        -> SavedViewRestore <$> need "view_id"
-    "saved_view_purge"          -> SavedViewPurge <$> need "view_id"
     "saved_view_execute"        -> SavedViewExecute <$> need "view_id" <*> opt "limit" <*> opt "offset" <*> opt "detail"
     "project_overview"          -> ProjectOverviewCall <$> need "project_id"
     _                           -> Left $ "Unknown tool: " <> T.unpack name
@@ -1799,7 +1576,7 @@ t = Prelude.id
 -- (new required fields, renamed tools, changed semantics).
 -- Adding new optional fields or new tools does not require a bump.
 toolApiVersion :: Text
-toolApiVersion = "0.2.0"
+toolApiVersion = "0.3.0"
 
 mkTool :: Text -> Text -> Value -> Value
 mkTool name desc inputSchema = object

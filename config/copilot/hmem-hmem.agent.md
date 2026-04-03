@@ -16,36 +16,38 @@ Use this agent when the user wants to interact with hmem without specifying whet
 
 ### Workspaces
 Workspaces scope all data. Every memory, project, and task belongs to a workspace.
-- CRUD: `workspace_register`, `workspace_list`, `workspace_get`, `workspace_update`, `workspace_delete`
-- Lifecycle: `workspace_restore`, `workspace_purge`
-- Groups: `workspace_group_create`, `workspace_group_get`, `workspace_group_list`, `workspace_group_delete`, `workspace_group_add_member`, `workspace_group_remove_member`, `workspace_group_list_members`
+- CRUD: `workspace_register`, `workspace_list`, `workspace_get`, `workspace_update`
+- Lifecycle: `entity_lifecycle` (entity_type: workspace, action: delete/restore/purge)
+- Groups: `workspace_group` (action: create/get/list/delete/add_member/remove_member/list_members)
 - Visualization: `workspace_visualization` — renders SVG (default) or JSON workspace graph showing projects, tasks, memories, and relationships. Supports `show_tasks` (opt-in) and `show_task_status_summary` (opt-out).
 
 ### Memories
 Store and retrieve knowledge. Supports full-text search, tags, categories, typed links, and importance scoring.
-- CRUD: `memory_create`, `memory_create_batch`, `memory_get`, `memory_list`, `memory_update`, `memory_update_batch`, `memory_delete`, `memory_delete_batch`
+- CRUD: `memory_create`, `memory_create_batch`, `memory_get`, `memory_list`, `memory_update`, `memory_update_batch`
+- Lifecycle: `entity_lifecycle` (entity_type: memory, action: delete/restore/purge), `batch_delete` (entity_type: memory)
 - Search: `memory_search` (FTS with filters), `memory_similar` (embedding similarity)
 - Tags: `memory_set_tags`, `memory_set_tags_batch`
 - Links: `memory_link` (action: create/remove), `memory_links_list`, `memory_graph`, `memory_find_by_relation`
 - Organization: use `memory_update` for pin/unpin and importance adjustments
 - Embeddings: `memory_set_embedding`
-- Lifecycle: `memory_restore`, `memory_purge`
-- Categories: `category_create`, `category_get`, `category_list`, `category_update`, `category_delete`, `category_delete_batch`, `category_link_memory`, `category_link_memories_batch`, `category_unlink_memory`, `category_list_memories`, `category_restore`, `category_purge`
+- Categories: `category_create`, `category_get`, `category_list`, `category_update`, `entity_lifecycle` (entity_type: category), `batch_delete` (entity_type: category), `link_memory` (entity_type: category), `list_entity_memories` (entity_type: category)
 
 ### Projects & Tasks
 Plan and track work with hierarchical projects, tasks, dependencies, and memory links.
-- Projects: `project_create`, `project_get`, `project_list`, `project_update`, `project_update_batch`, `project_delete`, `project_delete_batch`, `project_link_memory`, `project_link_memories_batch`, `project_unlink_memory`, `project_list_memories`
+- Projects: `project_create`, `project_get`, `project_list`, `project_update`, `project_update_batch`
+- Project lifecycle: `entity_lifecycle` (entity_type: project, action: delete/restore/purge), `batch_delete` (entity_type: project)
+- Project memories: `link_memory` (entity_type: project), `list_entity_memories` (entity_type: project)
 - Project overview: `project_overview` — single-call summary of a project with tasks, subprojects, and linked memories
-- Lifecycle: `project_restore`, `project_purge`
-- Tasks: `task_create`, `task_get`, `task_list`, `task_update`, `task_update_batch`, `task_delete`, `task_delete_batch`, `task_link_memory`, `task_link_memories_batch`, `task_unlink_memory`, `task_list_memories`, `task_move_batch`
+- Tasks: `task_create`, `task_get`, `task_list`, `task_update`, `task_update_batch`, `task_move_batch`
+- Task lifecycle: `entity_lifecycle` (entity_type: task, action: delete/restore/purge), `batch_delete` (entity_type: task)
+- Task memories: `link_memory` (entity_type: task), `list_entity_memories` (entity_type: task)
 - Task overview: `task_overview` — single-call summary of a task with dependencies, linked memories, and optional extra context
 - Dependencies: `task_dependency` (action: add/remove)
-- Lifecycle: `task_restore`, `task_purge`
 
 ### Saved Views
 Reusable filtered queries over workspace data.
-- `saved_view_create`, `saved_view_get`, `saved_view_list`, `saved_view_update`, `saved_view_delete`, `saved_view_execute`
-- Lifecycle: `saved_view_restore`, `saved_view_purge`
+- `saved_view_create`, `saved_view_get`, `saved_view_list`, `saved_view_update`, `saved_view_execute`
+- Lifecycle: `entity_lifecycle` (entity_type: saved_view, action: delete/restore/purge)
 
 ### Cleanup & Activity
 - `cleanup_run`, `cleanup_policy` (action: list/upsert)
@@ -57,7 +59,7 @@ Reusable filtered queries over workspace data.
 1. Ensure a workspace exists (`workspace_list` / `workspace_register`)
 2. Create the project (`project_create`)
 3. Break work into tasks (`task_create` with project_id)
-4. Add any relevant existing memories (`project_link_memory`)
+4. Add any relevant existing memories (`link_memory` with entity_type: project)
 
 ### Capturing knowledge during work
 1. Search for existing related memories (`memory_search`)

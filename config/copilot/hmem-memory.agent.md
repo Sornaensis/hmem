@@ -15,9 +15,8 @@ You manage memories through these MCP tools:
 ### Storage
 - **memory_create** / **memory_create_batch** — Store new memories (short_term or long_term). Always include meaningful tags and set importance (1-10) based on how critical the information is.
 - **memory_update** / **memory_update_batch** — Modify existing memory content, importance, type, or metadata.
-- **memory_delete** / **memory_delete_batch** — Remove memories that are no longer relevant.
-- **memory_restore** — Restore a soft-deleted memory.
-- **memory_purge** — Permanently delete a soft-deleted memory.
+- **entity_lifecycle** (entity_type: memory, action: delete/restore/purge) — Soft-delete, restore, or permanently purge memories.
+- **batch_delete** (entity_type: memory) — Remove multiple memories by ID in one call.
 
 ### Retrieval
 - **memory_get** — Fetch a specific memory by ID.
@@ -33,20 +32,22 @@ You manage memories through these MCP tools:
 - **memory_find_by_relation** — Find all links of a specific type in a workspace.
 
 ### Categories
-- **category_create** / **category_get** / **category_list** / **category_update** / **category_delete** / **category_delete_batch** — Manage hierarchical categories.
-- **category_link_memory** / **category_link_memories_batch** / **category_unlink_memory** / **category_list_memories** — Assign memories to categories.
-- **category_restore** / **category_purge** — Soft-delete lifecycle for categories.
+- **category_create** / **category_get** / **category_list** / **category_update** — Manage hierarchical categories.
+- **entity_lifecycle** (entity_type: category, action: delete/restore/purge) — Soft-delete, restore, or purge categories.
+- **batch_delete** (entity_type: category) — Remove multiple categories by ID.
+- **link_memory** (entity_type: category) — Link or unlink memories to/from a category.
+- **list_entity_memories** (entity_type: category) — List memories linked to a category.
 
 ### Saved Views
 Reusable filtered queries over workspace data.
-- **saved_view_create** / **saved_view_get** / **saved_view_list** / **saved_view_update** / **saved_view_delete** — CRUD for saved view definitions.
+- **saved_view_create** / **saved_view_get** / **saved_view_list** / **saved_view_update** — CRUD for saved view definitions.
 - **saved_view_execute** — Run a saved view to retrieve its filtered results.
-- **saved_view_restore** / **saved_view_purge** — Soft-delete lifecycle for saved views.
+- **entity_lifecycle** (entity_type: saved_view, action: delete/restore/purge) — Soft-delete lifecycle for saved views.
 
 ### Workspaces
-- **workspace_register** / **workspace_list** / **workspace_get** / **workspace_update** / **workspace_delete** — Manage workspaces that scope memories.
-- **workspace_restore** / **workspace_purge** — Soft-delete lifecycle for workspaces.
-- **workspace_group_create** / **workspace_group_list** / **workspace_group_add_member** / **workspace_group_remove_member** — Organize workspaces into groups.
+- **workspace_register** / **workspace_list** / **workspace_get** / **workspace_update** — Manage workspaces that scope memories.
+- **entity_lifecycle** (entity_type: workspace, action: delete/restore/purge) — Soft-delete lifecycle for workspaces.
+- **workspace_group** (action: create/list/add_member/remove_member/...) — Organize workspaces into groups.
 - **workspace_visualization** — Render SVG or JSON workspace graph showing projects, tasks, memories, and relationships.
 
 ## Guidelines

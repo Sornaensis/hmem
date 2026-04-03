@@ -88,21 +88,15 @@ spec = do
         Right (MemoryGet mid) -> mid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected MemoryGet, got: " <> show other
 
-    it "parses memory_delete" $ do
-      let args = object [ "memory_id" .= testUUID ]
-      case parseToolCall "memory_delete" args of
+    it "parses entity_lifecycle for memory delete/restore/purge" $ do
+      let args action = object [ "entity_type" .= ("memory" :: Text), "entity_id" .= testUUID, "action" .= (action :: Text) ]
+      case parseToolCall "entity_lifecycle" (args "delete") of
         Right (MemoryDelete mid) -> mid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected MemoryDelete, got: " <> show other
-
-    it "parses memory_restore" $ do
-      let args = object [ "memory_id" .= testUUID ]
-      case parseToolCall "memory_restore" args of
+      case parseToolCall "entity_lifecycle" (args "restore") of
         Right (MemoryRestore mid) -> mid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected MemoryRestore, got: " <> show other
-
-    it "parses memory_purge" $ do
-      let args = object [ "memory_id" .= testUUID ]
-      case parseToolCall "memory_purge" args of
+      case parseToolCall "entity_lifecycle" (args "purge") of
         Right (MemoryPurge mid) -> mid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected MemoryPurge, got: " <> show other
 
@@ -395,21 +389,15 @@ spec = do
           up.parentId `shouldBe` SetNull
         other -> expectationFailure $ "Expected ProjectUpdate, got: " <> show other
 
-    it "parses project_delete" $ do
-      let args = object [ "project_id" .= testUUID ]
-      case parseToolCall "project_delete" args of
+    it "parses entity_lifecycle for project delete/restore/purge" $ do
+      let args action = object [ "entity_type" .= ("project" :: Text), "entity_id" .= testUUID, "action" .= (action :: Text) ]
+      case parseToolCall "entity_lifecycle" (args "delete") of
         Right (ProjectDelete pid) -> pid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected ProjectDelete, got: " <> show other
-
-    it "parses project_restore" $ do
-      let args = object [ "project_id" .= testUUID ]
-      case parseToolCall "project_restore" args of
+      case parseToolCall "entity_lifecycle" (args "restore") of
         Right (ProjectRestore pid) -> pid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected ProjectRestore, got: " <> show other
-
-    it "parses project_purge" $ do
-      let args = object [ "project_id" .= testUUID ]
-      case parseToolCall "project_purge" args of
+      case parseToolCall "entity_lifecycle" (args "purge") of
         Right (ProjectPurge pid) -> pid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected ProjectPurge, got: " <> show other
 
@@ -428,31 +416,32 @@ spec = do
           pq.updatedBefore `shouldBe` Just (read "2026-03-30 12:00:00 UTC")
         other -> expectationFailure $ "Expected ProjectList, got: " <> show other
 
-    it "parses project_link_memory and project_unlink_memory" $ do
-      let args = object [ "project_id" .= testUUID, "memory_id" .= testUUID2 ]
-      case parseToolCall "project_link_memory" args of
+    it "parses link_memory for project link/unlink" $ do
+      let linkArgs = object [ "entity_type" .= ("project" :: Text), "entity_id" .= testUUID, "action" .= ("link" :: Text), "memory_ids" .= [testUUID2 :: Text] ]
+      case parseToolCall "link_memory" linkArgs of
         Right (ProjectLinkMem pid mid) -> do
           pid `shouldBe` parsedUUID
           mid `shouldBe` parsedUUID2
         other -> expectationFailure $ "Expected ProjectLinkMem, got: " <> show other
-      case parseToolCall "project_unlink_memory" args of
+      let unlinkArgs = object [ "entity_type" .= ("project" :: Text), "entity_id" .= testUUID, "action" .= ("unlink" :: Text), "memory_ids" .= [testUUID2 :: Text] ]
+      case parseToolCall "link_memory" unlinkArgs of
         Right (ProjectUnlinkMem pid mid) -> do
           pid `shouldBe` parsedUUID
           mid `shouldBe` parsedUUID2
         other -> expectationFailure $ "Expected ProjectUnlinkMem, got: " <> show other
 
-    it "parses project_list_memories" $ do
-      let args = object [ "project_id" .= testUUID ]
-      case parseToolCall "project_list_memories" args of
+    it "parses list_entity_memories for project" $ do
+      let args = object [ "entity_type" .= ("project" :: Text), "entity_id" .= testUUID ]
+      case parseToolCall "list_entity_memories" args of
         Right (ProjectListMem pid) -> pid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected ProjectListMem, got: " <> show other
 
-    it "parses project_delete_batch and project_update_batch" $ do
-      let deleteArgs = object [ "ids" .= ([testUUID, testUUID2] :: [Text]) ]
+    it "parses batch_delete for project" $ do
+      let deleteArgs = object [ "entity_type" .= ("project" :: Text), "ids" .= ([testUUID, testUUID2] :: [Text]) ]
           updateArgs = object
             [ "items" .= [ object [ "id" .= testUUID, "name" .= ("Renamed" :: Text) ] ]
             ]
-      case parseToolCall "project_delete_batch" deleteArgs of
+      case parseToolCall "batch_delete" deleteArgs of
         Right (ProjectDeleteBatch ids) -> ids `shouldBe` [parsedUUID, parsedUUID2]
         other -> expectationFailure $ "Expected ProjectDeleteBatch, got: " <> show other
       case parseToolCall "project_update_batch" updateArgs of
@@ -506,21 +495,15 @@ spec = do
           ut.dueAt `shouldBe` SetNull
         other -> expectationFailure $ "Expected TaskUpdate, got: " <> show other
 
-    it "parses task_delete" $ do
-      let args = object [ "task_id" .= testUUID ]
-      case parseToolCall "task_delete" args of
+    it "parses entity_lifecycle for task delete/restore/purge" $ do
+      let args action = object [ "entity_type" .= ("task" :: Text), "entity_id" .= testUUID, "action" .= (action :: Text) ]
+      case parseToolCall "entity_lifecycle" (args "delete") of
         Right (TaskDelete tid) -> tid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected TaskDelete, got: " <> show other
-
-    it "parses task_restore" $ do
-      let args = object [ "task_id" .= testUUID ]
-      case parseToolCall "task_restore" args of
+      case parseToolCall "entity_lifecycle" (args "restore") of
         Right (TaskRestore tid) -> tid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected TaskRestore, got: " <> show other
-
-    it "parses task_purge" $ do
-      let args = object [ "task_id" .= testUUID ]
-      case parseToolCall "task_purge" args of
+      case parseToolCall "entity_lifecycle" (args "purge") of
         Right (TaskPurge tid) -> tid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected TaskPurge, got: " <> show other
 
@@ -555,30 +538,31 @@ spec = do
           did `shouldBe` parsedUUID2
         other -> expectationFailure $ "Expected TaskDepRemove, got: " <> show other
 
-    it "parses task_link_memory and task_unlink_memory" $ do
-      let args = object [ "task_id" .= testUUID, "memory_id" .= testUUID2 ]
-      case parseToolCall "task_link_memory" args of
+    it "parses link_memory for task link/unlink" $ do
+      let linkArgs = object [ "entity_type" .= ("task" :: Text), "entity_id" .= testUUID, "action" .= ("link" :: Text), "memory_ids" .= [testUUID2 :: Text] ]
+      case parseToolCall "link_memory" linkArgs of
         Right (TaskLinkMem tid mid) -> do
           tid `shouldBe` parsedUUID
           mid `shouldBe` parsedUUID2
         other -> expectationFailure $ "Expected TaskLinkMem, got: " <> show other
-      case parseToolCall "task_unlink_memory" args of
+      let unlinkArgs = object [ "entity_type" .= ("task" :: Text), "entity_id" .= testUUID, "action" .= ("unlink" :: Text), "memory_ids" .= [testUUID2 :: Text] ]
+      case parseToolCall "link_memory" unlinkArgs of
         Right (TaskUnlinkMem tid mid) -> do
           tid `shouldBe` parsedUUID
           mid `shouldBe` parsedUUID2
         other -> expectationFailure $ "Expected TaskUnlinkMem, got: " <> show other
 
-    it "parses task_list_memories" $ do
-      let args = object [ "task_id" .= testUUID ]
-      case parseToolCall "task_list_memories" args of
+    it "parses list_entity_memories for task" $ do
+      let args = object [ "entity_type" .= ("task" :: Text), "entity_id" .= testUUID ]
+      case parseToolCall "list_entity_memories" args of
         Right (TaskListMem tid) -> tid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected TaskListMem, got: " <> show other
 
   describe "parseToolCall (workspace and category restore/batch tools)" $ do
 
-    it "parses workspace_restore" $ do
-      let args = object [ "workspace_id" .= testUUID ]
-      case parseToolCall "workspace_restore" args of
+    it "parses entity_lifecycle for workspace restore" $ do
+      let args = object [ "entity_type" .= ("workspace" :: Text), "entity_id" .= testUUID, "action" .= ("restore" :: Text) ]
+      case parseToolCall "entity_lifecycle" args of
         Right (WsRestore wid) -> wid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected WsRestore, got: " <> show other
 
@@ -631,25 +615,28 @@ spec = do
             }
         other -> expectationFailure $ "Expected WorkspaceVisualizationCall, got: " <> show other
 
-    it "parses category_restore and category_list_memories" $ do
-      let args = object [ "category_id" .= testUUID ]
-      case parseToolCall "category_restore" args of
+    it "parses entity_lifecycle for category restore and list_entity_memories for category" $ do
+      let restoreArgs = object [ "entity_type" .= ("category" :: Text), "entity_id" .= testUUID, "action" .= ("restore" :: Text) ]
+      case parseToolCall "entity_lifecycle" restoreArgs of
         Right (CategoryRestore cid) -> cid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected CategoryRestore, got: " <> show other
-      case parseToolCall "category_list_memories" args of
+      let listArgs = object [ "entity_type" .= ("category" :: Text), "entity_id" .= testUUID ]
+      case parseToolCall "list_entity_memories" listArgs of
         Right (CategoryListMem cid) -> cid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected CategoryListMem, got: " <> show other
 
-    it "parses category_delete_batch and category_link_memories_batch" $ do
-      let deleteArgs = object [ "ids" .= ([testUUID, testUUID2] :: [Text]) ]
+    it "parses batch_delete for category and link_memory batch for category" $ do
+      let deleteArgs = object [ "entity_type" .= ("category" :: Text), "ids" .= ([testUUID, testUUID2] :: [Text]) ]
           linkArgs = object
-            [ "category_id" .= testUUID
+            [ "entity_type" .= ("category" :: Text)
+            , "entity_id" .= testUUID
+            , "action" .= ("link" :: Text)
             , "memory_ids" .= ([testUUID, testUUID2] :: [Text])
             ]
-      case parseToolCall "category_delete_batch" deleteArgs of
+      case parseToolCall "batch_delete" deleteArgs of
         Right (CategoryDeleteBatch ids) -> ids `shouldBe` [parsedUUID, parsedUUID2]
         other -> expectationFailure $ "Expected CategoryDeleteBatch, got: " <> show other
-      case parseToolCall "category_link_memories_batch" linkArgs of
+      case parseToolCall "link_memory" linkArgs of
         Right (CategoryLinkMemBatch cid mids) -> do
           cid `shouldBe` parsedUUID
           mids `shouldBe` [parsedUUID, parsedUUID2]
@@ -765,13 +752,13 @@ spec = do
       updatedBeforeType `shouldBe` Just "string"
       priorityType `shouldBe` Just "integer"
 
-    it "defines restore and new batch/category tools" $ do
-      inputSchemaFor "memory_restore" `shouldSatisfy` (/= Nothing)
-      inputSchemaFor "workspace_restore" `shouldSatisfy` (/= Nothing)
-      inputSchemaFor "project_delete_batch" `shouldSatisfy` (/= Nothing)
+    it "defines entity_lifecycle and new unified tools" $ do
+      inputSchemaFor "entity_lifecycle" `shouldSatisfy` (/= Nothing)
+      inputSchemaFor "link_memory" `shouldSatisfy` (/= Nothing)
+      inputSchemaFor "list_entity_memories" `shouldSatisfy` (/= Nothing)
+      inputSchemaFor "batch_delete" `shouldSatisfy` (/= Nothing)
+      inputSchemaFor "workspace_group" `shouldSatisfy` (/= Nothing)
       inputSchemaFor "project_update_batch" `shouldSatisfy` (/= Nothing)
-      inputSchemaFor "category_list_memories" `shouldSatisfy` (/= Nothing)
-      inputSchemaFor "category_link_memories_batch" `shouldSatisfy` (/= Nothing)
 
     it "defines task_overview and workspace_visualization" $ do
       let Just taskOverviewSchema = inputSchemaFor "task_overview"
@@ -835,21 +822,15 @@ spec = do
           usv.name `shouldBe` Just "Renamed"
         other -> expectationFailure $ "Expected SavedViewUpdate, got: " <> show other
 
-    it "parses saved_view_delete" $ do
-      let args = object [ "view_id" .= testUUID ]
-      case parseToolCall "saved_view_delete" args of
+    it "parses entity_lifecycle for saved_view delete/restore/purge" $ do
+      let args action = object [ "entity_type" .= ("saved_view" :: Text), "entity_id" .= testUUID, "action" .= (action :: Text) ]
+      case parseToolCall "entity_lifecycle" (args "delete") of
         Right (SavedViewDelete vid) -> vid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected SavedViewDelete, got: " <> show other
-
-    it "parses saved_view_restore" $ do
-      let args = object [ "view_id" .= testUUID ]
-      case parseToolCall "saved_view_restore" args of
+      case parseToolCall "entity_lifecycle" (args "restore") of
         Right (SavedViewRestore vid) -> vid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected SavedViewRestore, got: " <> show other
-
-    it "parses saved_view_purge" $ do
-      let args = object [ "view_id" .= testUUID ]
-      case parseToolCall "saved_view_purge" args of
+      case parseToolCall "entity_lifecycle" (args "purge") of
         Right (SavedViewPurge vid) -> vid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected SavedViewPurge, got: " <> show other
 

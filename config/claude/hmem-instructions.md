@@ -23,7 +23,7 @@ You have access to the hmem MCP server which provides persistent memory storage 
 - `memory_set_tags` — Manage tags (use `memory_get` to see current tags).
 - Use `memory_update` with pinned=true/false to pin/unpin. Use `memory_update` with importance=N to adjust importance.
 - `memory_graph` — Explore relationship networks from a starting memory.
-- Categories: `category_create`, `category_list`, `category_link_memory`, `category_unlink_memory`.
+- Categories: `category_create`, `category_list`, `link_memory` (entity_type: category), `list_entity_memories` (entity_type: category).
 
 ## Task & Project Management
 
@@ -31,24 +31,27 @@ You have access to the hmem MCP server which provides persistent memory storage 
 - `project_create` — Create with name, description, priority. Supports sub-projects via parent_id.
 - `project_list` — Filter by status: active, paused, completed, archived.
 - `project_update` — Change status, priority, description.
-- `project_link_memory` — Attach relevant knowledge to projects.
+- `link_memory` (entity_type: project) — Attach relevant knowledge to projects.
+- `entity_lifecycle` (entity_type: project) — Delete, restore, or purge projects.
 
 ### Tasks
 - `task_create` — Create with title, description, priority, optional due_at (ISO 8601), optional project_id.
 - `task_list` — Filter by workspace, project, or status: todo, in_progress, blocked, done, cancelled.
 - `task_update` — Move through statuses. Setting `done` auto-records completion time.
-- `task_dependency_add` / `task_dependency_remove` — Define task ordering.
-- `task_link_memory` — Attach context to tasks.
+- `task_dependency` (action: add/remove) — Define task ordering.
+- `link_memory` (entity_type: task) — Attach context to tasks.
+- `entity_lifecycle` (entity_type: task) — Delete, restore, or purge tasks.
 
 ### Workspaces
 All data is scoped to workspaces. Common operations:
 - `workspace_register` — Create a workspace (name required; optionally set path, gh_owner, gh_repo, type).
 - `workspace_list` / `workspace_get` — Browse and retrieve workspaces.
-- `workspace_group_create` / `workspace_group_add_member` — Organize workspaces into groups.
+- `workspace_group` (action: create/add_member/...) — Organize workspaces into groups.
+- `entity_lifecycle` (entity_type: workspace) — Delete, restore, or purge workspaces.
 
 ## Cleanup
 - `cleanup_run` — Run cleanup on a workspace (applies configured policies).
-- `cleanup_policy_upsert` — Configure auto-cleanup rules (max age, max count, min importance thresholds).
+- `cleanup_policy` (action: list/upsert) — Configure auto-cleanup rules (max age, max count, min importance thresholds).
 
 ## Activity
 - `activity_timeline` — View recent activity across the system or within a workspace.

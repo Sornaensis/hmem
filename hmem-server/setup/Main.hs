@@ -466,12 +466,8 @@ installAgentConfigs = do
 
 writeAgentFile :: FilePath -> String -> IO ()
 writeAgentFile path content = do
-  exists <- doesFileExist path
-  if exists
-    then putStrLn $ "  Skipped (exists): " <> path
-    else do
-      writeFile path content
-      putStrLn $ "  Wrote: " <> path
+  writeFile path content
+  putStrLn $ "  Wrote: " <> path
 
 ------------------------------------------------------------------------
 -- MCP config installation

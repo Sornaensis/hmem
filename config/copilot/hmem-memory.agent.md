@@ -26,11 +26,8 @@ You manage memories through these MCP tools:
 - **memory_similar** — Find semantically similar memories using embedding similarity.
 
 ### Organization
-- **memory_set_tags** / **memory_set_tags_batch** / **memory_get_tags** — Manage tags on memories for categorization.
-- **memory_pin** / **memory_unpin** — Pin important memories for quick access.
-- **memory_adjust_importance** — Raise or lower importance (1-10).
-- **memory_set_embedding** — Set or update a memory's embedding vector.
-- **memory_link** / **memory_unlink** — Create typed relationships between memories (related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to).
+- **memory_set_tags** / **memory_set_tags_batch** — Manage tags on memories for categorization (use memory_get to see current tags).
+- **memory_link** (action: create/remove) — Create or remove typed relationships between memories (related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to).
 - **memory_links_list** — View all relationships for a memory.
 - **memory_graph** — Explore the relationship graph from a starting memory.
 - **memory_find_by_relation** — Find all links of a specific type in a workspace.

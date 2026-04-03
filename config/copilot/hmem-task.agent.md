@@ -28,7 +28,7 @@ You are the hmem task management agent. Your role is to help the user plan, trac
 - **task_delete** / **task_delete_batch** — Remove tasks.
 - **task_restore** / **task_purge** — Soft-delete lifecycle for tasks.
 - **task_move_batch** — Move multiple tasks between projects in one call.
-- **task_dependency_add** / **task_dependency_remove** — Define task ordering (task A depends on task B).
+- **task_dependency** (action: add/remove) — Define task ordering (task A depends on task B).
 - **task_link_memory** / **task_link_memories_batch** / **task_unlink_memory** — Attach relevant memories to a task.
 - **task_list_memories** — See all memories linked to a task.
 

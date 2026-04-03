@@ -19,10 +19,9 @@ You have access to the hmem MCP server which provides persistent memory storage 
 - Use `memory_list` to browse memories in a workspace.
 
 ### Organizing Memories
-- `memory_link` / `memory_unlink` — Create typed relationships: related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to.
-- `memory_set_tags` / `memory_get_tags` — Manage tags.
-- `memory_pin` / `memory_unpin` — Pin critical memories.
-- `memory_adjust_importance` — Re-score based on relevance.
+- `memory_link` (action: create/remove) — Create or remove typed relationships: related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to.
+- `memory_set_tags` — Manage tags (use `memory_get` to see current tags).
+- Use `memory_update` with pinned=true/false to pin/unpin. Use `memory_update` with importance=N to adjust importance.
 - `memory_graph` — Explore relationship networks from a starting memory.
 - Categories: `category_create`, `category_list`, `category_link_memory`, `category_unlink_memory`.
 

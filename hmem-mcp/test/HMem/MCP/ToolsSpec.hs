@@ -181,22 +181,19 @@ spec = do
         Right (MemoryCreateBatch cms) -> length cms `shouldBe` 2
         other -> expectationFailure $ "Expected MemoryCreateBatch, got: " <> show other
 
-    it "parses memory_pin and memory_unpin" $ do
-      let args = object [ "memory_id" .= testUUID ]
-      case parseToolCall "memory_pin" args of
-        Right (MemoryPin mid) -> mid `shouldBe` parsedUUID
-        other -> expectationFailure $ "Expected MemoryPin, got: " <> show other
-      case parseToolCall "memory_unpin" args of
-        Right (MemoryUnpin mid) -> mid `shouldBe` parsedUUID
-        other -> expectationFailure $ "Expected MemoryUnpin, got: " <> show other
+    it "parses memory_link with action=create" $ do
+      let args = object [ "action" .= ("create" :: Text), "source_id" .= testUUID, "target_id" .= testUUID2, "relation_type" .= ("related_to" :: Text) ]
+      case parseToolCall "memory_link" args of
+        Right (LinkMemories sid _) -> sid `shouldBe` parsedUUID
+        other -> expectationFailure $ "Expected LinkMemories, got: " <> show other
 
-    it "parses memory_adjust_importance" $ do
-      let args = object [ "memory_id" .= testUUID, "importance" .= (7 :: Int) ]
-      case parseToolCall "memory_adjust_importance" args of
-        Right (MemoryAdjustImp mid imp) -> do
-          mid `shouldBe` parsedUUID
-          imp `shouldBe` 7
-        other -> expectationFailure $ "Expected MemoryAdjustImp, got: " <> show other
+    it "parses memory_link with action=remove" $ do
+      let args = object [ "action" .= ("remove" :: Text), "source_id" .= testUUID, "target_id" .= testUUID2, "relation_type" .= ("related_to" :: Text) ]
+      case parseToolCall "memory_link" args of
+        Right (MemoryUnlink sid tid _) -> do
+          sid `shouldBe` parsedUUID
+          tid `shouldBe` parsedUUID2
+        other -> expectationFailure $ "Expected MemoryUnlink, got: " <> show other
 
     it "rejects unknown tool name" $ do
       parseToolCall "nonexistent_tool" (object []) `shouldSatisfy` isLeft
@@ -299,11 +296,6 @@ spec = do
             , metadata = Nothing
             }
       validateToolCall (ProjectCreate cp) `shouldSatisfy` isLeft
-
-    it "clamps memory_adjust_importance to 1-10" $ do
-      case validateToolCall (MemoryAdjustImp parsedUUID 50) of
-        Right (MemoryAdjustImp _ imp) -> imp `shouldBe` 10
-        other -> expectationFailure $ "Expected MemoryAdjustImp, got: " <> show other
 
     it "clamps search limit to 1-200" $ do
       let sq = SearchQuery
@@ -547,17 +539,17 @@ spec = do
           tq.limit `shouldBe` Just 25
         other -> expectationFailure $ "Expected TaskList, got: " <> show other
 
-    it "parses task_dependency_add" $ do
-      let args = object [ "task_id" .= testUUID, "depends_on_id" .= testUUID2 ]
-      case parseToolCall "task_dependency_add" args of
+    it "parses task_dependency with action=add" $ do
+      let args = object [ "action" .= ("add" :: Text), "task_id" .= testUUID, "depends_on_id" .= testUUID2 ]
+      case parseToolCall "task_dependency" args of
         Right (TaskDepAdd tid did) -> do
           tid `shouldBe` parsedUUID
           did `shouldBe` parsedUUID2
         other -> expectationFailure $ "Expected TaskDepAdd, got: " <> show other
 
-    it "parses task_dependency_remove" $ do
-      let args = object [ "task_id" .= testUUID, "depends_on_id" .= testUUID2 ]
-      case parseToolCall "task_dependency_remove" args of
+    it "parses task_dependency with action=remove" $ do
+      let args = object [ "action" .= ("remove" :: Text), "task_id" .= testUUID, "depends_on_id" .= testUUID2 ]
+      case parseToolCall "task_dependency" args of
         Right (TaskDepRemove tid did) -> do
           tid `shouldBe` parsedUUID
           did `shouldBe` parsedUUID2

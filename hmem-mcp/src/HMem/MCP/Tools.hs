@@ -106,14 +106,14 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "memory_get" "Get a memory by ID with full detail: content, summary, metadata, tags, importance, timestamps, and source. Use memory_search or memory_list to discover IDs first." $ object
+    , mkTool "memory_get" "Get a memory by ID with full detail: content, summary, metadata, tags, importance, timestamps, source, and pinned status. Use memory_search or memory_list to discover IDs first. Tags are included in the response; no separate tag retrieval is needed." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id" .= prop "string" "UUID of the memory" ]
       , "required" .= [t "memory_id"]
       ]
 
-    , mkTool "memory_update" "Enrich or correct an existing memory. Use null to clear nullable fields such as summary, expires_at, or source." $ object
+    , mkTool "memory_update" "Enrich or correct an existing memory. Use null to clear nullable fields such as summary, expires_at, or source. Also use this to pin/unpin (set pinned=true/false) or adjust importance (set importance=1-10)." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id"   .= prop "string" "UUID of the memory to update"
@@ -151,16 +151,17 @@ toolDefinitions =
       , "required" .= [t "memory_id"]
       ]
 
-    , mkTool "memory_link" "Create a typed link between two existing memories by ID. Relation types: related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to. Use after discovery with memory_search. Remove with memory_unlink." $ object
+    , mkTool "memory_link" "Create or remove a typed link between two memories. Relation types: related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to. Use action 'create' to add a link, 'remove' to delete one." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "source_id"     .= prop "string" "Source memory UUID"
+          [ "action"        .= propEnum "string" "Whether to create or remove the link" ["create", "remove"]
+          , "source_id"     .= prop "string" "Source memory UUID"
           , "target_id"     .= prop "string" "Target memory UUID"
           , "relation_type" .= propEnum "string" "Relation type"
               ["related", "supersedes", "contradicts", "elaborates", "inspires", "depends_on", "derived_from", "alternative_to"]
-          , "strength"      .= prop "number" "Link strength 0.0-1.0, default 1.0"
+          , "strength"      .= prop "number" "Link strength 0.0-1.0, default 1.0 (only used with action=create)"
           ]
-      , "required" .= [t "source_id", t "target_id", t "relation_type"]
+      , "required" .= [t "action", t "source_id", t "target_id", t "relation_type"]
       ]
 
     , mkTool "project_create" "Create a top-level or child project in a workspace. Set parent_id to create a subproject under an existing project. After creating, add tasks with task_create and link relevant memories with project_link_memory. Use project_overview to inspect the result." $ object
@@ -192,7 +193,7 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "task_create" "Create a workspace- or project-scoped task. Use parent_id for subtasks; when parent_id is set, project_id should match the parent task's project. After creating, add ordering constraints with task_dependency_add, and attach relevant context with task_link_memory." $ object
+    , mkTool "task_create" "Create a workspace- or project-scoped task. Use parent_id for subtasks; when parent_id is set, project_id should match the parent task's project. After creating, add ordering constraints with task_dependency, and attach relevant context with task_link_memory." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
@@ -378,15 +379,6 @@ toolDefinitions =
               ["related", "supersedes", "contradicts", "elaborates", "inspires", "depends_on", "derived_from", "alternative_to"]
           ]
       , "required" .= [t "workspace_id", t "relation_type"]
-      ]
-
-  , mkTool "memory_adjust_importance" "Set a memory's importance to a new value (1-10). Higher importance protects against cleanup policy pruning and raises the memory in search relevance." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "memory_id"  .= prop "string" "UUID of the memory"
-          , "importance" .= prop "integer" "New importance value (1-10)"
-          ]
-      , "required" .= [t "memory_id", t "importance"]
       ]
 
   , mkTool "project_list_memories" "List all memories linked to a project. Use project_link_memory and project_unlink_memory to manage these associations." $ object
@@ -586,22 +578,14 @@ toolDefinitions =
       ]
 
   -- Issue 3: Task dependencies
-    , mkTool "task_dependency_add" "Add an ordering dependency: the first task depends on the second (must complete before it). Use this for sequencing work, not for parent/child hierarchy (use parent_id in task_create for that). Remove with task_dependency_remove." $ object
+    , mkTool "task_dependency" "Add or remove an ordering dependency between tasks. Use action 'add' to declare that the first task depends on the second (must complete before it). Use action 'remove' to delete the constraint. For parent/child hierarchy, use parent_id in task_create instead." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "task_id"       .= prop "string" "UUID of the task"
+          [ "action"        .= propEnum "string" "Whether to add or remove the dependency" ["add", "remove"]
+          , "task_id"       .= prop "string" "UUID of the task"
           , "depends_on_id" .= prop "string" "UUID of the task it depends on"
           ]
-      , "required" .= [t "task_id", t "depends_on_id"]
-      ]
-
-    , mkTool "task_dependency_remove" "Remove an ordering dependency between tasks without changing hierarchy." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "task_id"       .= prop "string" "UUID of the task"
-          , "depends_on_id" .= prop "string" "UUID of the dependency to remove"
-          ]
-      , "required" .= [t "task_id", t "depends_on_id"]
+      , "required" .= [t "action", t "task_id", t "depends_on_id"]
       ]
 
   -- Issue 4: Cross-entity memory links
@@ -650,7 +634,7 @@ toolDefinitions =
       ]
 
   -- Issue 7: Set tags on a memory
-    , mkTool "memory_set_tags" "Set tags on a memory, replacing the existing tag set. Use memory_get_tags first if you need to merge manually." $ object
+    , mkTool "memory_set_tags" "Set tags on a memory, replacing the existing tag set. Use memory_get with the memory ID first if you need to merge with existing tags." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id" .= prop "string" "UUID of the memory"
@@ -660,56 +644,22 @@ toolDefinitions =
       , "required" .= [t "memory_id", t "tags"]
       ]
 
-  -- Issue 8: Unlink memories
-  , mkTool "memory_unlink" "Remove a link between two memories" $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "source_id"     .= prop "string" "Source memory UUID"
-          , "target_id"     .= prop "string" "Target memory UUID"
-          , "relation_type" .= propEnum "string" "Relation type of the link to remove"
-              ["related", "supersedes", "contradicts", "elaborates", "inspires", "depends_on", "derived_from", "alternative_to"]
-          ]
-      , "required" .= [t "source_id", t "target_id", t "relation_type"]
-      ]
-
   -- Issue 10: Cleanup policy CRUD
-    , mkTool "cleanup_policies_list" "List cleanup policies for a workspace before changing them or running cleanup." $ object
+    , mkTool "cleanup_policy" "List or upsert cleanup policies for a workspace. Use action 'list' to see existing policies, or 'upsert' to create or update a policy for a specific memory type." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "workspace_id" .= prop "string" "UUID of the workspace"
-          , "limit"        .= prop "integer" "Max results (default 50)"
-          , "offset"       .= prop "integer" "Offset for pagination (default 0)"
-          ]
-      , "required" .= [t "workspace_id"]
-      ]
-
-    , mkTool "cleanup_policy_upsert" "Create or update a cleanup policy for one memory type within a workspace." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "workspace_id"   .= prop "string" "UUID of the workspace"
-          , "memory_type"    .= propEnum "string" "Memory type to clean"
+          [ "action"         .= propEnum "string" "Whether to list or upsert policies" ["list", "upsert"]
+          , "workspace_id"   .= prop "string" "UUID of the workspace"
+          , "memory_type"    .= propEnum "string" "Memory type to clean (required for upsert)"
               ["short_term", "long_term"]
-          , "max_age_hours"  .= prop "integer" "Max age in hours before cleanup"
-          , "max_count"      .= prop "integer" "Max memory count before cleanup"
-          , "min_importance" .= prop "integer" "Minimum importance to keep (1-10)"
-          , "enabled"        .= prop "boolean" "Whether the policy is active"
+          , "max_age_hours"  .= prop "integer" "Max age in hours before cleanup (upsert only)"
+          , "max_count"      .= prop "integer" "Max memory count before cleanup (upsert only)"
+          , "min_importance" .= prop "integer" "Minimum importance to keep, 1-10 (required for upsert)"
+          , "enabled"        .= prop "boolean" "Whether the policy is active (required for upsert)"
+          , "limit"          .= prop "integer" "Max results for list (default 50)"
+          , "offset"         .= prop "integer" "Offset for list pagination (default 0)"
           ]
-      , "required" .= [t "workspace_id", t "memory_type", t "min_importance", t "enabled"]
-      ]
-
-  -- Pin / unpin
-  , mkTool "memory_pin" "Pin a memory for quick access" $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "memory_id" .= prop "string" "UUID of the memory to pin" ]
-      , "required" .= [t "memory_id"]
-      ]
-
-  , mkTool "memory_unpin" "Unpin a memory" $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "memory_id" .= prop "string" "UUID of the memory to unpin" ]
-      , "required" .= [t "memory_id"]
+      , "required" .= [t "action", t "workspace_id"]
       ]
 
   -- Workspace groups
@@ -779,14 +729,6 @@ toolDefinitions =
           , "limit"        .= prop "integer" "Max events to return (default 50)"
           ]
       , "required" .= ([] :: [Text])
-      ]
-
-  -- Tags
-    , mkTool "memory_get_tags" "Get the current tags for a memory before replacing them with memory_set_tags." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "memory_id" .= prop "string" "UUID of the memory" ]
-      , "required" .= [t "memory_id"]
       ]
 
   -- Embedding / vector similarity (requires pgvector extension)
@@ -1139,12 +1081,9 @@ data ToolCall
     | MemoryList     MemoryListQuery Bool      -- query, detail
   | MemoryGraphCall UUID (Maybe Int)
   | MemoryFindByRelation UUID RelationType
-  | MemoryAdjustImp UUID Int
   | ProjectListMem UUID
     | CategoryListMem UUID
   | TaskListMem    UUID
-  | MemoryPin      UUID
-  | MemoryUnpin    UUID
   | WsGroupCreate  CreateWorkspaceGroup
   | WsGroupGet     UUID
   | WsGroupList    (Maybe Int) (Maybe Int)
@@ -1153,7 +1092,6 @@ data ToolCall
   | WsGroupRmMem   UUID UUID  -- group_id, workspace_id
   | WsGroupListMem UUID
   | ActivityTimeline (Maybe UUID) (Maybe Text) (Maybe Int)
-  | MemoryGetTags UUID
   | MemorySimilar SimilarQuery
   | MemorySetEmbedding UUID [Double]
   | MemoryDeleteBatch [UUID]
@@ -1191,7 +1129,12 @@ parseToolCall name args = case name of
     "memory_delete"            -> MemoryDelete <$> need "memory_id"
     "memory_restore"           -> MemoryRestore <$> need "memory_id"
     "memory_purge"             -> MemoryPurge <$> need "memory_id"
-    "memory_link"              -> LinkMemories <$> need "source_id" <*> parse args
+    "memory_link"              -> do
+        action <- need "action" :: Either String Text
+        case action of
+            "create" -> LinkMemories <$> need "source_id" <*> parse args
+            "remove" -> MemoryUnlink <$> need "source_id" <*> need "target_id" <*> need "relation_type"
+            _        -> Left "memory_link: action must be 'create' or 'remove'"
     "memory_links_list"        -> MemoryLinksList <$> need "memory_id"
     "project_create"           -> ProjectCreate <$> parse args
     "project_get"              -> ProjectGet <$> need "project_id"
@@ -1212,8 +1155,12 @@ parseToolCall name args = case name of
     "task_update"              -> TaskUpdate <$> need "task_id" <*> parse args
     "task_link_memory"         -> TaskLinkMem <$> need "task_id" <*> need "memory_id"
     "task_unlink_memory"       -> TaskUnlinkMem <$> need "task_id" <*> need "memory_id"
-    "task_dependency_add"      -> TaskDepAdd <$> need "task_id" <*> need "depends_on_id"
-    "task_dependency_remove"   -> TaskDepRemove <$> need "task_id" <*> need "depends_on_id"
+    "task_dependency"          -> do
+        action <- need "action" :: Either String Text
+        case action of
+            "add"    -> TaskDepAdd <$> need "task_id" <*> need "depends_on_id"
+            "remove" -> TaskDepRemove <$> need "task_id" <*> need "depends_on_id"
+            _        -> Left "task_dependency: action must be 'add' or 'remove'"
     "category_create"          -> CategoryCreate <$> parse args
     "category_get"             -> CategoryGet <$> need "category_id"
     "category_list"            -> CategoryList <$> opt "workspace_id" <*> opt "limit" <*> opt "offset"
@@ -1224,9 +1171,12 @@ parseToolCall name args = case name of
     "category_link_memory"     -> CategoryLinkMem <$> need "memory_id" <*> need "category_id"
     "category_unlink_memory"   -> CategoryUnlinkMem <$> need "memory_id" <*> need "category_id"
     "memory_set_tags"          -> MemorySetTags <$> need "memory_id" <*> need "tags"
-    "memory_unlink"            -> MemoryUnlink <$> need "source_id" <*> need "target_id" <*> need "relation_type"
-    "cleanup_policies_list"    -> CleanupPoliciesList <$> need "workspace_id" <*> opt "limit" <*> opt "offset"
-    "cleanup_policy_upsert"    -> CleanupPolicyUpsert <$> parse args
+    "cleanup_policy"           -> do
+        action <- need "action" :: Either String Text
+        case action of
+            "list"   -> CleanupPoliciesList <$> need "workspace_id" <*> opt "limit" <*> opt "offset"
+            "upsert" -> CleanupPolicyUpsert <$> parse args
+            _        -> Left "cleanup_policy: action must be 'list' or 'upsert'"
     "workspace_list"           -> WorkspaceList <$> opt "limit" <*> opt "offset"
     "workspace_get"            -> WorkspaceGet <$> need "workspace_id"
     "workspace_visualization"  -> WorkspaceVisualizationCall <$> need "workspace_id" <*> parse args <*> (maybe WorkspaceVisualizationSvg id <$> opt "format")
@@ -1239,12 +1189,10 @@ parseToolCall name args = case name of
     "memory_list"              -> MemoryList <$> parse args <*> (maybe False id <$> opt "detail")
     "memory_graph"             -> MemoryGraphCall <$> need "memory_id" <*> opt "depth"
     "memory_find_by_relation"  -> MemoryFindByRelation <$> need "workspace_id" <*> need "relation_type"
-    "memory_adjust_importance" -> MemoryAdjustImp <$> need "memory_id" <*> need "importance"
     "project_list_memories"    -> ProjectListMem <$> need "project_id"
     "category_list_memories"   -> CategoryListMem <$> need "category_id"
     "task_list_memories"       -> TaskListMem <$> need "task_id"
-    "memory_pin"               -> MemoryPin <$> need "memory_id"
-    "memory_unpin"             -> MemoryUnpin <$> need "memory_id"
+
     "workspace_group_create"   -> WsGroupCreate <$> parse args
     "workspace_group_get"      -> WsGroupGet <$> need "group_id"
     "workspace_group_list"     -> WsGroupList <$> opt "limit" <*> opt "offset"
@@ -1253,7 +1201,6 @@ parseToolCall name args = case name of
     "workspace_group_remove_member" -> WsGroupRmMem <$> need "group_id" <*> need "workspace_id"
     "workspace_group_list_members" -> WsGroupListMem <$> need "group_id"
     "activity_timeline"        -> ActivityTimeline <$> opt "workspace_id" <*> opt "entity_type" <*> opt "limit"
-    "memory_get_tags"          -> MemoryGetTags <$> need "memory_id"
     "memory_similar"           -> MemorySimilar <$> parse args
     "memory_set_embedding"     -> MemorySetEmbedding <$> need "memory_id" <*> need "embedding"
     "memory_delete_batch"       -> MemoryDeleteBatch <$> need "ids"
@@ -1364,7 +1311,6 @@ validateToolCall = \case
     MemoryUpdate mid um ->
         let um' = clampUpdateMemory um
         in MemoryUpdate mid um' <$ firstValidationError (validateUpdateMemoryInput um')
-    MemoryAdjustImp mid imp -> Right $ MemoryAdjustImp mid (clamp 1 10 imp)
     MemoryGraphCall mid md -> Right $ MemoryGraphCall mid (clampMaybe 1 5 <$> md)
     MemoryList mq detail ->
         let mq' = clampMemoryListQuery mq
@@ -1670,13 +1616,9 @@ executeToolCall mgr base mApiKey = \case
                             [ ("workspace_id", Just $ uuidPath wid)
                             , ("relation_type", Just $ encodeParam rt)
                             ])
-    MemoryAdjustImp mid imp -> putJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/importance")
-                              (object ["importance" .= imp])
     ProjectListMem pid -> getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
     CategoryListMem cid -> getJSON mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid <> "/memories")
     TaskListMem tid -> getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
-    MemoryPin mid    -> postJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/pin") (object [])
-    MemoryUnpin mid  -> postJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/unpin") (object [])
     WsGroupCreate cg -> postJSON mgr base mApiKey "/api/v1/groups" cg
     WsGroupGet gid   -> getJSON  mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid)
     WsGroupList ml mo -> getJSON mgr base mApiKey ("/api/v1/groups" <> buildQuery
@@ -1694,7 +1636,6 @@ executeToolCall mgr base mApiKey = \case
                             , ("entity_type", T.unpack <$> met)
                             , ("limit", show <$> ml)
                             ])
-    MemoryGetTags mid -> getJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/tags")
     MemorySimilar sq -> postJSON mgr base mApiKey "/api/v1/memories/similar" sq
     MemorySetEmbedding mid vec -> putJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/embedding")
                                   (toJSON vec)
@@ -1858,7 +1799,7 @@ t = Prelude.id
 -- (new required fields, renamed tools, changed semantics).
 -- Adding new optional fields or new tools does not require a bump.
 toolApiVersion :: Text
-toolApiVersion = "0.1.0"
+toolApiVersion = "0.2.0"
 
 mkTool :: Text -> Text -> Value -> Value
 mkTool name desc inputSchema = object

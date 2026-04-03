@@ -25,9 +25,9 @@ Workspaces scope all data. Every memory, project, and task belongs to a workspac
 Store and retrieve knowledge. Supports full-text search, tags, categories, typed links, and importance scoring.
 - CRUD: `memory_create`, `memory_create_batch`, `memory_get`, `memory_list`, `memory_update`, `memory_update_batch`, `memory_delete`, `memory_delete_batch`
 - Search: `memory_search` (FTS with filters), `memory_similar` (embedding similarity)
-- Tags: `memory_set_tags`, `memory_set_tags_batch`, `memory_get_tags`
-- Links: `memory_link`, `memory_unlink`, `memory_links_list`, `memory_graph`, `memory_find_by_relation`
-- Organization: `memory_pin`, `memory_unpin`, `memory_adjust_importance`
+- Tags: `memory_set_tags`, `memory_set_tags_batch`
+- Links: `memory_link` (action: create/remove), `memory_links_list`, `memory_graph`, `memory_find_by_relation`
+- Organization: use `memory_update` for pin/unpin and importance adjustments
 - Embeddings: `memory_set_embedding`
 - Lifecycle: `memory_restore`, `memory_purge`
 - Categories: `category_create`, `category_get`, `category_list`, `category_update`, `category_delete`, `category_delete_batch`, `category_link_memory`, `category_link_memories_batch`, `category_unlink_memory`, `category_list_memories`, `category_restore`, `category_purge`
@@ -39,7 +39,7 @@ Plan and track work with hierarchical projects, tasks, dependencies, and memory 
 - Lifecycle: `project_restore`, `project_purge`
 - Tasks: `task_create`, `task_get`, `task_list`, `task_update`, `task_update_batch`, `task_delete`, `task_delete_batch`, `task_link_memory`, `task_link_memories_batch`, `task_unlink_memory`, `task_list_memories`, `task_move_batch`
 - Task overview: `task_overview` — single-call summary of a task with dependencies, linked memories, and optional extra context
-- Dependencies: `task_dependency_add`, `task_dependency_remove`
+- Dependencies: `task_dependency` (action: add/remove)
 - Lifecycle: `task_restore`, `task_purge`
 
 ### Saved Views
@@ -48,7 +48,7 @@ Reusable filtered queries over workspace data.
 - Lifecycle: `saved_view_restore`, `saved_view_purge`
 
 ### Cleanup & Activity
-- `cleanup_run`, `cleanup_policies_list`, `cleanup_policy_upsert`
+- `cleanup_run`, `cleanup_policy` (action: list/upsert)
 - `activity_timeline`
 
 ## Workflow Patterns

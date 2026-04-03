@@ -1528,6 +1528,7 @@ clampWorkspaceVisualizationQuery WorkspaceVisualizationQuery
     , memoryFilter = memoryFilterValue
     , showTasks = showTasksValue
     , showTaskStatusSummary = showTaskStatusSummaryValue
+    , showDescriptions = showDescriptionsValue
     } = WorkspaceVisualizationQuery
         { includeProjectIds = includeIds
         , excludeProjectIds = excludeIds
@@ -1535,6 +1536,7 @@ clampWorkspaceVisualizationQuery WorkspaceVisualizationQuery
         , memoryFilter = fmap clampWorkspaceVisualizationMemoryFilter memoryFilterValue
         , showTasks = showTasksValue
         , showTaskStatusSummary = showTaskStatusSummaryValue
+        , showDescriptions = showDescriptionsValue
         }
 
 clampWorkspaceVisualizationMemoryFilter :: WorkspaceVisualizationMemoryFilter -> WorkspaceVisualizationMemoryFilter

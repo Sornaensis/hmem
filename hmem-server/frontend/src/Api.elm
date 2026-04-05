@@ -1026,8 +1026,12 @@ workspaceVisualizationDecoder =
 
 fetchVisualization : String -> String -> (Result Http.Error WorkspaceVisualization -> msg) -> Cmd msg
 fetchVisualization apiUrl wsId toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/visualization"
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "Accept" "application/json" ]
+        , url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/visualization"
         , body = Http.jsonBody (E.object [])
-        , expect = Http.expectJson toMsg (D.field "visualization" workspaceVisualizationDecoder)
+        , expect = Http.expectJson toMsg workspaceVisualizationDecoder
+        , timeout = Nothing
+        , tracker = Nothing
         }

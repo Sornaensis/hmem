@@ -1068,8 +1068,26 @@ update msg model =
                     in
                     ( newModel, initCytoscapeGraph newModel )
 
-                Err _ ->
-                    addToast Error "Failed to load graph data" model
+                Err err ->
+                    let
+                        errorMsg =
+                            case err of
+                                Http.BadBody body ->
+                                    "Decode error: " ++ body
+
+                                Http.BadStatus code ->
+                                    "HTTP " ++ String.fromInt code
+
+                                Http.BadUrl u ->
+                                    "Bad URL: " ++ u
+
+                                Http.Timeout ->
+                                    "Request timed out"
+
+                                Http.NetworkError ->
+                                    "Network error"
+                    in
+                    addToast Error ("Graph load failed: " ++ errorMsg) model
 
         -- Mutation responses
         MutationDone entityType result ->

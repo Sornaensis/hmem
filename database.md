@@ -27,15 +27,16 @@
     ║    path            TEXT (UNIQUE)                               ║
     ║    gh_owner        TEXT ─┐                                     ║
     ║    gh_repo         TEXT ─┘ (UNIQUE together)                   ║
+    ║    deleted_at      TIMESTAMPTZ                                 ║
     ║    created_at      TIMESTAMPTZ                                 ║
     ║    updated_at      TIMESTAMPTZ                                 ║
-    ╚═══╤═══════════╤════════════╤══════════════════╤════════════════╝
-        │           │            │                  │
-        │ 1         │ 1          │ 1                │ 1
-        │           │            │                  │
-   ┌────┘     ┌─────┘      ┌─────┘                  └──────────────────┐
-   │          │            │                                           │
-   ▼ *        ▼ *          ▼ *                                         ▼ *
+    ╚═══╤═══════════╤════════════╤═══════════════╤══════╤════════════╝
+        │           │            │               │      │
+        │ 1         │ 1          │ 1             │ 1    │ 1
+        │           │            │               │      │
+   ┌────┘     ┌─────┘      ┌─────┘         ┌─────┘      └─────────────┐
+   │          │            │               │                          │
+   ▼ *        ▼ *          ▼ *             ▼ *                        ▼ *
 ╔══════════════════╗  ╔═══════════════════════════════════╗  ╔═══════════════════════════╗
 ║ memory_categories║  ║            memories               ║  ║    cleanup_policies       ║
 ╠══════════════════╣  ╠═══════════════════════════════════╣  ╠═══════════════════════════╣
@@ -44,9 +45,9 @@
 ║   name           ║  ║    content           TEXT         ║  ║    memory_type    ENUM    ║
 ║   description    ║  ║    summary           TEXT         ║  ║    max_age_hours  INT     ║
 ║FK parent_id ─────╫──╫──► (self)            UUID         ║  ║    max_count      INT     ║
-║   created_at     ║  ║    memory_type       ENUM         ║  ║    min_importance  SMALL  ║
-╚════════╤═════════╝  ║    importance        SMALLINT     ║  ║    enabled        BOOL    ║
-         │            ║    metadata          JSONB        ║  ║    created_at     TSTZ    ║
+║   deleted_at     ║  ║    memory_type       ENUM         ║  ║    min_importance SMALLINT║
+║   created_at     ║  ║    importance        SMALLINT     ║  ║    enabled        BOOL    ║
+╚════════╤═════════╝  ║    metadata          JSONB        ║  ║    created_at     TSTZ    ║
          │            ║    embedding?        vector(1536) ║  ║    updated_at     TSTZ    ║
          │            ║    expires_at        TIMESTAMPTZ  ║  ╚═══════════════════════════╝
          │            ║    source            TEXT         ║
@@ -56,9 +57,10 @@
          │            ║    access_count      INTEGER      ║
          │            ║    fts_language      TEXT         ║
          │            ║    search_vector     TSVECTOR     ║
+         │            ║    deleted_at        TIMESTAMPTZ  ║
          │            ║    created_at        TIMESTAMPTZ  ║
          │            ║    updated_at        TIMESTAMPTZ  ║
-         │            ╚═╤═══════╤═══════════╤════════════╝
+         │            ╚═╤═══════╤═══════════╤═════════════╝
          │              │       │           │
          │              │       │           │
          │     ┌────────┘       │           └───────────────────────────────┐
@@ -96,6 +98,7 @@
                                               ║    status       ENUM    ║   │
                                               ║    priority  SMALLINT   ║   │
                                               ║    metadata    JSONB    ║   │
+                                              ║    deleted_at   TSTZ    ║   │
                                               ║    created_at   TSTZ    ║   │
                                               ║    updated_at   TSTZ    ║   │
                                               ╚══╤════════╤═════════════╝   │
@@ -118,6 +121,7 @@
                                               ║    metadata     JSONB     ║ │
                                               ║    due_at        TSTZ     ║ │
                                               ║    completed_at  TSTZ     ║ │
+                                              ║    deleted_at    TSTZ     ║ │
                                               ║    created_at    TSTZ     ║ │
                                               ║    updated_at    TSTZ     ║ │
                                               ╚═╤═════════════╤═══════════╝ │
@@ -137,22 +141,56 @@
                           └─────────────────────────────────────────────────┘
                                             (FK to memories)
 
+
+   From workspaces ─────────────────────────┐
+                                            │
+                                            │ 1
+                                            ▼ *
+                              ╔══════════════════════════════════╗
+                              ║          saved_views             ║
+                              ╠══════════════════════════════════╣
+                              ║ PK id            UUID            ║
+                              ║ FK workspace_id  UUID            ║
+                              ║    name          TEXT            ║
+                              ║    description   TEXT            ║
+                              ║    entity_type   TEXT            ║
+                              ║    query_params  JSONB           ║
+                              ║    deleted_at    TSTZ            ║
+                              ║    created_at    TSTZ            ║
+                              ║    updated_at    TSTZ            ║
+                              ╚══════════════════════════════════╝
+
+
+ ╔══════════════════════════════════╗
+ ║           audit_log              ║
+ ╠══════════════════════════════════╣
+ ║ PK id           UUID             ║
+ ║    entity_type  TEXT             ║
+ ║    entity_id    TEXT             ║
+ ║    action       audit_action     ║
+ ║    old_values   JSONB            ║
+ ║    new_values   JSONB            ║
+ ║    request_id   TEXT             ║
+ ║    changed_at   TSTZ             ║
+ ╚══════════════════════════════════╝
+
  ╔══════════════════════════╗
- ║    schema_migrations     ║     ┌──────────────────────────────────────────────┐
- ╠══════════════════════════╣     │           ENUM TYPES                         │
- ║ PK version    INTEGER    ║     ├──────────────────────────────────────────────┤
- ║    name       TEXT       ║     │ workspace_type_enum:                         │
- ║    applied_at TIMESTAMPTZ║     │   repository │ planning │ personal │ org     │
- ╚══════════════════════════╝     │ memory_type_enum:                            │
-                                  │   short_term │ long_term                     │
-                                  │ project_status_enum:                         │
-                                  │   active │ paused │ completed │ archived     │
-                                  │ task_status_enum:                            │
-                                  │   todo │ in_progress │ blocked │ done │      │
-                                  │   cancelled                                  │
-                                  │ relation_type_enum:                          │
-                                  │   related │ supersedes │ contradicts │       │
-                                  │   elaborates │ inspires │ depends_on │       │
-                                  │   derived_from │ alternative_to              │
-                                  └──────────────────────────────────────────────┘
+ ║    schema_migrations     ║     ┌───────────────────────────────────────────────────────┐
+ ╠══════════════════════════╣     │           ENUM TYPES                                  │
+ ║ PK version    INTEGER    ║     ├───────────────────────────────────────────────────────┤
+ ║    name       TEXT       ║     │ workspace_type_enum:                                  │
+ ║    applied_at TIMESTAMPTZ║     │   repository │ planning │ personal │ organization     │
+ ╚══════════════════════════╝     │ memory_type_enum:                                     │
+                                  │   short_term │ long_term                              │
+                                  │ project_status_enum:                                  │
+                                  │   active │ paused │ completed │ archived              │
+                                  │ task_status_enum:                                     │
+                                  │   todo │ in_progress │ blocked │ done │ cancelled     │
+                                  │ relation_type_enum:                                   │
+                                  │   related │ supersedes │ contradicts │ elaborates │   │
+                                  │   inspires │ depends_on │ derived_from │              │
+                                  │   alternative_to                                      │
+                                  │ audit_action_enum:                                    │
+                                  │   create │ update │ delete                            │
+                                  └───────────────────────────────────────────────────────┘
 ```

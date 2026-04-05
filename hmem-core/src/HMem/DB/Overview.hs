@@ -397,6 +397,8 @@ rowToTask row = Task
   , metadata = row.taskMetadata
   , dueAt = row.taskDueAt
   , completedAt = row.taskCompletedAt
+  , dependencyCount = 0
+  , memoryLinkCount = 0
   , createdAt = row.taskCreatedAt
   , updatedAt = row.taskUpdatedAt
   }

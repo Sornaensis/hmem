@@ -5,7 +5,6 @@ module HMem.Server.App
   ) where
 
 import Data.IORef (atomicModifyIORef', newIORef)
-import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Aeson (encode, object, (.=))
 import Data.ByteString.Char8 qualified as BS8
@@ -30,12 +29,23 @@ import HMem.DB.RequestContext (withRequestIdContext)
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Server.API (HMemAPI, server)
 import HMem.Server.OpenAPI (openApiSpec)
+import HMem.Server.Static (staticMiddleware)
+import HMem.Server.WebSocket (WSState, broadcast, wsMiddleware)
 
 -- | Build the WAI Application.
-mkApp :: Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> Bool -> IO Application
-mkApp logger authCfg corsCfg rateLimitCfg pool tracker pgvec = do
+mkApp :: Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
+mkApp logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
   rateLimit <- rateLimitMiddleware rateLimitCfg
-  pure $ requestIdMiddleware $ logger $ corsMiddleware corsCfg $ rateLimit $ authMiddleware authCfg $ openApiMiddleware $ serve (Proxy @HMemAPI) (server pool tracker pgvec)
+  let bc = broadcast wsState
+  pure $ requestIdMiddleware
+       $ logger
+       $ wsMiddleware authCfg wsState
+       $ staticMiddleware mStaticDir
+       $ corsMiddleware corsCfg
+       $ rateLimit
+       $ authMiddleware authCfg
+       $ openApiMiddleware
+       $ serve (Proxy @HMemAPI) (server pool tracker bc pgvec)
 
 -- | Middleware that assigns a unique X-Request-Id to every request.
 -- If the incoming request already has an X-Request-Id header, it is

@@ -7,7 +7,11 @@ module HMem.DB.TestHarness
   , setupTestPool
   , withTestTransaction
     -- * Ephemeral PostgreSQL
+  , EphemeralPg(..)
   , withEphemeralPg
+  , startEphemeralPg
+  , stopEphemeralPg
+  , checkPgTools
     -- * DB utilities
   , cleanDB
   , ensureSchema

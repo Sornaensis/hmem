@@ -9,6 +9,7 @@ module HMem.Config
   , AuthConfig(..)
   , RateLimitConfig(..)
   , TlsConfig(..)
+  , WebConfig(..)
     -- * Defaults
   , defaultConfig
     -- * Load / Save
@@ -87,6 +88,11 @@ data TlsConfig = TlsConfig
   , tlsKeyFile  :: !(Maybe FilePath)
   } deriving stock (Show, Eq)
 
+data WebConfig = WebConfig
+  { webEnabled  :: !Bool
+  , webStaticDir :: !(Maybe FilePath)
+  } deriving stock (Show, Eq)
+
 data HMemConfig = HMemConfig
   { server   :: !ServerConfig
   , database :: !DatabaseConfig
@@ -96,6 +102,7 @@ data HMemConfig = HMemConfig
   , auth     :: !AuthConfig
   , rateLimit :: !RateLimitConfig
   , tls      :: !TlsConfig
+  , web      :: !WebConfig
   } deriving stock (Show, Eq)
 
 ------------------------------------------------------------------------
@@ -199,6 +206,16 @@ instance ToJSON TlsConfig where
     , maybe [] (\k -> ["key_file" .= k]) tc.tlsKeyFile
     ]
 
+instance FromJSON WebConfig where
+  parseJSON = Aeson.withObject "WebConfig" $ \o -> WebConfig
+    <$> o .:? "enabled"    .!= True
+    <*> o .:? "static_dir"
+
+instance ToJSON WebConfig where
+  toJSON wc = Aeson.object $
+    [ "enabled" .= wc.webEnabled ]
+    <> maybe [] (\d -> ["static_dir" .= d]) wc.webStaticDir
+
 instance FromJSON HMemConfig where
   parseJSON = Aeson.withObject "HMemConfig" $ \o -> HMemConfig
     <$> o .:? "server"   .!= defServer
@@ -209,6 +226,7 @@ instance FromJSON HMemConfig where
     <*> o .:? "auth"     .!= defAuth
     <*> o .:? "rate_limit" .!= defRateLimit
     <*> o .:? "tls"      .!= defTls
+    <*> o .:? "web"      .!= defWeb
 
 instance ToJSON HMemConfig where
   toJSON cfg = Aeson.object
@@ -220,6 +238,7 @@ instance ToJSON HMemConfig where
     , "auth"     .= cfg.auth
     , "rate_limit" .= cfg.rateLimit
     , "tls"      .= cfg.tls
+    , "web"      .= cfg.web
     ]
 
 ------------------------------------------------------------------------
@@ -257,6 +276,9 @@ defRateLimit = RateLimitConfig
 defTls :: TlsConfig
 defTls = TlsConfig { tlsCertFile = Nothing, tlsKeyFile = Nothing }
 
+defWeb :: WebConfig
+defWeb = WebConfig { webEnabled = True, webStaticDir = Nothing }
+
 defaultConfig :: HMemConfig
 defaultConfig = HMemConfig
   { server   = defServer
@@ -267,6 +289,7 @@ defaultConfig = HMemConfig
   , auth     = defAuth
   , rateLimit = defRateLimit
   , tls      = defTls
+  , web      = defWeb
   }
 
 ------------------------------------------------------------------------

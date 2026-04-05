@@ -1,0 +1,18 @@
+{
+  "name": "hmem-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "cytoscape": "^3.30.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "vite-plugin-elm": "^3.0.0"
+  }
+}

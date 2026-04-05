@@ -19,6 +19,8 @@ dependencies:
   - wai
   - wai-cors
   - wai-extra
+  - wai-websockets
+  - websockets
   - fast-logger
   - http-types
   - openapi3
@@ -30,6 +32,7 @@ dependencies:
   - bytestring
   - time
   - uuid
+  - stm
   - optparse-applicative
   - resource-pool >= 0.4
   - hasql
@@ -75,6 +78,16 @@ executables:
       - hasql
       - http-client
       - http-types
+
+  build-frontend:
+    main:        BuildFrontend.hs
+    source-dirs: app-build
+    ghc-options:
+      - -threaded
+    dependencies:
+      - directory
+      - filepath
+      - process
 
 tests:
   hmem-server-test:

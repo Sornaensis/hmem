@@ -1174,19 +1174,21 @@ instance FromJSON UpdateProject where
 ------------------------------------------------------------------------
 
 data Task = Task
-  { id          :: UUID
-  , workspaceId :: UUID
-  , projectId   :: Maybe UUID
-  , parentId    :: Maybe UUID
-  , title       :: Text
-  , description :: Maybe Text
-  , status      :: TaskStatus
-  , priority    :: Int
-  , metadata    :: Value
-  , dueAt       :: Maybe UTCTime
-  , completedAt :: Maybe UTCTime
-  , createdAt   :: UTCTime
-  , updatedAt   :: UTCTime
+  { id              :: UUID
+  , workspaceId     :: UUID
+  , projectId       :: Maybe UUID
+  , parentId        :: Maybe UUID
+  , title           :: Text
+  , description     :: Maybe Text
+  , status          :: TaskStatus
+  , priority        :: Int
+  , metadata        :: Value
+  , dueAt           :: Maybe UTCTime
+  , completedAt     :: Maybe UTCTime
+  , dependencyCount :: Int
+  , memoryLinkCount :: Int
+  , createdAt       :: UTCTime
+  , updatedAt       :: UTCTime
   } deriving (Show, Eq, Generic)
 
 instance ToJSON Task where

@@ -22,7 +22,7 @@ import Data.Pool (Pool, tryWithResource)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (UTCTime)
+import Data.Time (UTCTime, getCurrentTime)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
@@ -44,6 +44,7 @@ import HMem.DB.Schema
 import HMem.DB.Task qualified as Task
 import HMem.DB.WorkspaceGroup qualified as WG
 import HMem.Server.AccessTracker (AccessTracker, trackAccess, bufferSize)
+import HMem.Server.Event (Broadcast, ChangeEvent(..), ChangeType(..), EntityType(..))
 import HMem.Server.VisualizationSvg (SVG, WorkspaceVisualizationResponse(..))
 import HMem.Types
 
@@ -99,6 +100,7 @@ type MemoryAPI =
   :<|> "contradictions" :> QueryParam "workspace_id" UUID :> Get '[JSON] [MemoryLink]
   :<|> "by-relation" :> QueryParam "workspace_id" UUID
          :> QueryParam "relation_type" RelationType :> Get '[JSON] [MemoryLink]
+  :<|> "workspace-links" :> QueryParam "workspace_id" UUID :> Get '[JSON] [MemoryLink]
   :<|> Capture "memoryId" UUID :> Get '[JSON] Memory
   :<|> Capture "memoryId" UUID :> ReqBody '[JSON] UpdateMemory :> Put '[JSON] Memory
   :<|> Capture "memoryId" UUID :> Delete '[JSON] NoContent
@@ -398,18 +400,24 @@ purgeConflict = err409
 -- Server implementation
 ------------------------------------------------------------------------
 
-server :: Pool Hasql.Connection -> AccessTracker -> Bool -> Server HMemAPI
-server pool tracker pgvec =
+server :: Pool Hasql.Connection -> AccessTracker -> Broadcast -> Bool -> Server HMemAPI
+server pool tracker bc pgvec =
        healthHandler pool tracker
-  :<|> workspaceHandlers pool
-  :<|> memoryHandlers pool tracker pgvec
-  :<|> projectHandlers pool
-  :<|> taskHandlers pool
-  :<|> cleanupHandlers pool
-  :<|> categoryHandlers pool
-  :<|> workspaceGroupHandlers pool
+  :<|> workspaceHandlers pool bc
+  :<|> memoryHandlers pool tracker bc pgvec
+  :<|> projectHandlers pool bc
+  :<|> taskHandlers pool bc
+  :<|> cleanupHandlers pool bc
+  :<|> categoryHandlers pool bc
+  :<|> workspaceGroupHandlers pool bc
   :<|> activityHandlers pool
-  :<|> savedViewHandlers pool
+  :<|> savedViewHandlers pool bc
+
+-- | Emit a change event to all connected WebSocket clients.
+emit :: Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
+emit bc ct et eid mpayload = liftIO $ do
+  now <- getCurrentTime
+  bc ChangeEvent { changeType = ct, entityType = et, entityId = eid, timestamp = now, payload = mpayload }
 
 -- Health handler ---------------------------------------------------
 
@@ -458,8 +466,8 @@ rowToWorkspace r = Workspace
   , updatedAt     = r.wsUpdatedAt
   }
 
-workspaceHandlers :: Pool Hasql.Connection -> Server WorkspaceAPI
-workspaceHandlers pool =
+workspaceHandlers :: Pool Hasql.Connection -> Broadcast -> Server WorkspaceAPI
+workspaceHandlers pool bc =
        listWorkspacesH
   :<|> createWorkspaceH
   :<|> getWorkspaceH
@@ -485,7 +493,7 @@ workspaceHandlers pool =
     createWorkspaceH :: CreateWorkspace -> Handler Workspace
     createWorkspaceH cw = do
       rejectValidationErrors (validateCreateWorkspaceInput cw)
-      handleDBErrors $ do
+      ws <- handleDBErrors $ do
         rows <- runSession pool $ Session.statement () $ run $
           insert Insert
             { into = workspaceSchema
@@ -508,6 +516,8 @@ workspaceHandlers pool =
         case rows of
           (r:_) -> pure $ rowToWorkspace r
           []    -> throwIO $ DBOtherError "Insert failed"
+      emit bc Created ETWorkspace ws.id (Just $ toJSON ws)
+      pure ws
 
     getWorkspaceH :: UUID -> Handler Workspace
     getWorkspaceH wsId = do
@@ -538,7 +548,9 @@ workspaceHandlers pool =
           , returning = Returning id
           }
       case rows of
-        (r:_) -> pure $ rowToWorkspace r
+        (r:_) -> do
+          emit bc Updated ETWorkspace wsId (Just $ toJSON $ rowToWorkspace r)
+          pure $ rowToWorkspace r
         []    -> throwError err404
 
     deleteWorkspaceH :: UUID -> Handler NoContent
@@ -717,7 +729,7 @@ workspaceHandlers pool =
                 , returning = NoReturning
                 }
             pure True
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Deleted ETWorkspace wsId Nothing; pure NoContent else throwError err404
 
     restoreWorkspaceH :: UUID -> Handler NoContent
     restoreWorkspaceH wsId = do
@@ -780,7 +792,7 @@ workspaceHandlers pool =
                     }
                 pure True
             | otherwise -> pure False
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Updated ETWorkspace wsId Nothing; pure NoContent else throwError err404
 
     purgeWorkspaceH :: UUID -> Handler NoContent
     purgeWorkspaceH wsId = do
@@ -820,14 +832,15 @@ workspaceHandlers pool =
 
 -- Memory handlers --------------------------------------------------
 
-memoryHandlers :: Pool Hasql.Connection -> AccessTracker -> Bool -> Server MemoryAPI
-memoryHandlers pool tracker pgvec =
+memoryHandlers :: Pool Hasql.Connection -> AccessTracker -> Broadcast -> Bool -> Server MemoryAPI
+memoryHandlers pool tracker bc pgvec =
        listMemoriesH
   :<|> createMemoryH
   :<|> createMemoryBatchH
   :<|> searchMemoriesH
   :<|> contradictionsH
   :<|> byRelationH
+  :<|> workspaceLinksH
   :<|> getMemoryH
   :<|> updateMemoryH
   :<|> deleteMemoryH
@@ -871,7 +884,9 @@ memoryHandlers pool tracker pgvec =
 
     createMemoryH cm = do
       rejectValidationErrors (validateCreateMemoryInput cm)
-      handleDBErrors $ Mem.createMemory pool cm
+      mem <- handleDBErrors $ Mem.createMemory pool cm
+      emit bc Created ETMemory mem.id (Just $ toJSON mem)
+      pure mem
 
     createMemoryBatchH cms
       | otherwise = do
@@ -892,6 +907,10 @@ memoryHandlers pool tracker pgvec =
       rt   <- requireParam "relation_type" mrt
       handleDBErrors $ Mem.findByRelation pool wsId rt
 
+    workspaceLinksH mws = do
+      wsId <- requireParam "workspace_id" mws
+      handleDBErrors $ Mem.findLinksForWorkspace pool wsId
+
     getMemoryH mid = do
       mem <- requireMemoryH mid
       liftIO $ trackAccess tracker mid
@@ -900,15 +919,19 @@ memoryHandlers pool tracker pgvec =
     updateMemoryH mid um = do
       rejectValidationErrors (validateUpdateMemoryInput um)
       mm <- handleDBErrors $ Mem.updateMemory pool mid um
-      maybe (throwError err404) pure mm
+      case mm of
+        Nothing -> throwError err404
+        Just mem -> do
+          emit bc Updated ETMemory mid (Just $ toJSON mem)
+          pure mem
 
     deleteMemoryH mid = do
       ok <- handleDBErrors $ Mem.deleteMemory pool mid
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Deleted ETMemory mid Nothing; pure NoContent else throwError err404
 
     restoreMemoryH mid = do
       ok <- handleDBErrors $ Mem.restoreMemory pool mid
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Updated ETMemory mid Nothing; pure NoContent else throwError err404
 
     purgeMemoryH mid = do
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
@@ -960,7 +983,11 @@ memoryHandlers pool tracker pgvec =
 
     adjustImportanceH mid adj = do
       mm <- handleDBErrors $ Mem.adjustImportance pool mid adj.importance
-      maybe (throwError err404) pure mm
+      case mm of
+        Nothing -> throwError err404
+        Just mem -> do
+          emit bc Updated ETMemory mid (Just $ toJSON mem)
+          pure mem
 
     pinH mid = do
       mm <- handleDBErrors $ Mem.togglePin pool mid True
@@ -1000,8 +1027,8 @@ memoryHandlers pool tracker pgvec =
 
 -- Project handlers -------------------------------------------------
 
-projectHandlers :: Pool Hasql.Connection -> Server ProjectAPI
-projectHandlers pool =
+projectHandlers :: Pool Hasql.Connection -> Broadcast -> Server ProjectAPI
+projectHandlers pool bc =
        listProjectsH
   :<|> createProjectH
   :<|> getProjectH
@@ -1039,19 +1066,26 @@ projectHandlers pool =
 
     createProjectH cp = do
       rejectValidationErrors (validateCreateProjectInput cp)
-      handleDBErrors $ Proj.createProject pool cp
+      proj <- handleDBErrors $ Proj.createProject pool cp
+      emit bc Created ETProject proj.id (Just $ toJSON proj)
+      pure proj
     getProjectH pid     = requireProjectH pid
     updateProjectH pid up = do
       rejectValidationErrors (validateUpdateProjectInput up)
-      handleDBErrors (Proj.updateProject pool pid up) >>= maybe (throwError err404) pure
+      mp <- handleDBErrors (Proj.updateProject pool pid up)
+      case mp of
+        Nothing -> throwError err404
+        Just proj -> do
+          emit bc Updated ETProject pid (Just $ toJSON proj)
+          pure proj
 
     deleteProjectH pid = do
       ok <- handleDBErrors $ Proj.deleteProject pool pid
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Deleted ETProject pid Nothing; pure NoContent else throwError err404
 
     restoreProjectH pid = do
       ok <- handleDBErrors $ Proj.restoreProject pool pid
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Updated ETProject pid Nothing; pure NoContent else throwError err404
 
     purgeProjectH pid = do
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
@@ -1126,8 +1160,8 @@ projectHandlers pool =
 
 -- Task handlers ----------------------------------------------------
 
-taskHandlers :: Pool Hasql.Connection -> Server TaskAPI
-taskHandlers pool =
+taskHandlers :: Pool Hasql.Connection -> Broadcast -> Server TaskAPI
+taskHandlers pool bc =
        listTasksH
   :<|> createTaskH
   :<|> getTaskH
@@ -1170,19 +1204,26 @@ taskHandlers pool =
 
     createTaskH ct = do
       rejectValidationErrors (validateCreateTaskInput ct)
-      handleDBErrors $ Task.createTask pool ct
+      task <- handleDBErrors $ Task.createTask pool ct
+      emit bc Created ETTask task.id (Just $ toJSON task)
+      pure task
     getTaskH tid     = requireTaskH tid
     updateTaskH tid ut = do
       rejectValidationErrors (validateUpdateTaskInput ut)
-      handleDBErrors (Task.updateTask pool tid ut) >>= maybe (throwError err404) pure
+      mt <- handleDBErrors (Task.updateTask pool tid ut)
+      case mt of
+        Nothing -> throwError err404
+        Just task -> do
+          emit bc Updated ETTask tid (Just $ toJSON task)
+          pure task
 
     deleteTaskH tid = do
       ok <- handleDBErrors $ Task.deleteTask pool tid
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Deleted ETTask tid Nothing; pure NoContent else throwError err404
 
     restoreTaskH tid = do
       ok <- handleDBErrors $ Task.restoreTask pool tid
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Updated ETTask tid Nothing; pure NoContent else throwError err404
 
     purgeTaskH tid = do
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
@@ -1256,8 +1297,8 @@ taskHandlers pool =
 
 -- Cleanup handlers -------------------------------------------------
 
-cleanupHandlers :: Pool Hasql.Connection -> Server CleanupAPI
-cleanupHandlers pool =
+cleanupHandlers :: Pool Hasql.Connection -> Broadcast -> Server CleanupAPI
+cleanupHandlers pool _bc =
        runCleanupH
   :<|> getPoliciesH
   :<|> upsertPolicyH
@@ -1273,8 +1314,8 @@ cleanupHandlers pool =
 
 -- Category handlers ------------------------------------------------
 
-categoryHandlers :: Pool Hasql.Connection -> Server CategoryAPI
-categoryHandlers pool =
+categoryHandlers :: Pool Hasql.Connection -> Broadcast -> Server CategoryAPI
+categoryHandlers pool bc =
        listCategoriesH
   :<|> listGlobalCategoriesH
   :<|> createCategoryH
@@ -1308,19 +1349,26 @@ categoryHandlers pool =
 
     createCategoryH cc = do
       rejectValidationErrors (validateCreateMemoryCategoryInput cc)
-      handleDBErrors $ Cat.createCategory pool cc
+      cat <- handleDBErrors $ Cat.createCategory pool cc
+      emit bc Created ETCategory cat.id (Just $ toJSON cat)
+      pure cat
     getCategoryH cid   = requireCategoryH cid
     updateCategoryH cid uc = do
       rejectValidationErrors (validateUpdateMemoryCategoryInput uc)
-      handleDBErrors (Cat.updateCategory pool cid uc) >>= maybe (throwError err404) pure
+      mc <- handleDBErrors (Cat.updateCategory pool cid uc)
+      case mc of
+        Nothing -> throwError err404
+        Just cat -> do
+          emit bc Updated ETCategory cid (Just $ toJSON cat)
+          pure cat
 
     deleteCategoryH cid = do
       ok <- handleDBErrors $ Cat.deleteCategory pool cid
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Deleted ETCategory cid Nothing; pure NoContent else throwError err404
 
     restoreCategoryH cid = do
       ok <- handleDBErrors $ Cat.restoreCategory pool cid
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Updated ETCategory cid Nothing; pure NoContent else throwError err404
 
     purgeCategoryH cid = do
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
@@ -1369,8 +1417,8 @@ categoryHandlers pool =
 
 -- Workspace group handlers -----------------------------------------
 
-workspaceGroupHandlers :: Pool Hasql.Connection -> Server WorkspaceGroupAPI
-workspaceGroupHandlers pool =
+workspaceGroupHandlers :: Pool Hasql.Connection -> Broadcast -> Server WorkspaceGroupAPI
+workspaceGroupHandlers pool bc =
        listGroupsH
   :<|> createGroupH
   :<|> getGroupH
@@ -1387,7 +1435,9 @@ workspaceGroupHandlers pool =
 
     createGroupH cg = do
       rejectValidationErrors (validateCreateWorkspaceGroupInput cg)
-      handleDBErrors $ WG.createGroup pool cg
+      grp <- handleDBErrors $ WG.createGroup pool cg
+      emit bc Created ETWorkspaceGroup grp.id (Just $ toJSON grp)
+      pure grp
 
     getGroupH gid = do
       mg <- handleDBErrors $ WG.getGroup pool gid
@@ -1395,7 +1445,7 @@ workspaceGroupHandlers pool =
 
     deleteGroupH gid = do
       ok <- handleDBErrors $ WG.deleteGroup pool gid
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Deleted ETWorkspaceGroup gid Nothing; pure NoContent else throwError err404
 
     addMemberH gid req = do
       handleDBErrors $ WG.addMember pool gid req.workspaceId
@@ -1417,8 +1467,8 @@ activityHandlers pool mws mEntityType mlimit = do
 
 -- Saved view handlers ------------------------------------------------
 
-savedViewHandlers :: Pool Hasql.Connection -> Server SavedViewAPI
-savedViewHandlers pool =
+savedViewHandlers :: Pool Hasql.Connection -> Broadcast -> Server SavedViewAPI
+savedViewHandlers pool bc =
        listViewsH
   :<|> createViewH
   :<|> getViewH
@@ -1440,21 +1490,28 @@ savedViewHandlers pool =
 
     createViewH csv = do
       rejectValidationErrors (validateCreateSavedViewInput csv)
-      handleDBErrors $ SV.createSavedView pool csv
+      sv <- handleDBErrors $ SV.createSavedView pool csv
+      emit bc Created ETSavedView sv.id (Just $ toJSON sv)
+      pure sv
 
     getViewH vid = requireViewH vid
 
     updateViewH vid usv = do
       rejectValidationErrors (validateUpdateSavedViewInput usv)
-      handleDBErrors (SV.updateSavedView pool vid usv) >>= maybe (throwError err404) pure
+      msv <- handleDBErrors (SV.updateSavedView pool vid usv)
+      case msv of
+        Nothing -> throwError err404
+        Just sv -> do
+          emit bc Updated ETSavedView vid (Just $ toJSON sv)
+          pure sv
 
     deleteViewH vid = do
       ok <- handleDBErrors $ SV.deleteSavedView pool vid
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Deleted ETSavedView vid Nothing; pure NoContent else throwError err404
 
     restoreViewH vid = do
       ok <- handleDBErrors $ SV.restoreSavedView pool vid
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Updated ETSavedView vid Nothing; pure NoContent else throwError err404
 
     purgeViewH vid = do
       ok <- handleDBErrors $ SV.purgeSavedView pool vid

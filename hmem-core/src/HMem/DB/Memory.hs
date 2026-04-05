@@ -37,6 +37,7 @@ module HMem.DB.Memory
     -- * Graph traversal
   , getRelatedGraph
   , findByRelation
+  , findLinksForWorkspace
 
     -- * Cross-entity memory lists
   , getProjectMemories
@@ -849,6 +850,27 @@ fetchMemoriesByIds pool ids =
       where_ $ activeMemory row
       pure row
     enrichRowsS rows
+
+-- | Find all memory links within a workspace (any relation type).
+findLinksForWorkspace :: Pool Hasql.Connection -> UUID -> IO [MemoryLink]
+findLinksForWorkspace pool wsId = do
+  rows <- runSession pool $ Session.statement () $ run $ select $ do
+    link <- each memoryLinkSchema
+    present $ do
+      src <- each memorySchema
+      where_ $ src.memId ==. link.mlSourceId
+      where_ $ activeMemory src
+    present $ do
+      tgt <- each memorySchema
+      where_ $ tgt.memId ==. link.mlTargetId
+      where_ $ activeMemory tgt
+    present $ do
+      mem <- each memorySchema
+      where_ $ mem.memWorkspaceId ==. lit wsId
+      where_ $ activeMemory mem
+      where_ $ mem.memId ==. link.mlSourceId ||. mem.memId ==. link.mlTargetId
+    pure link
+  pure $ map linkRowToMemoryLink rows
 
 -- | Find all memory links of a given relation type within a workspace.
 findByRelation :: Pool Hasql.Connection -> UUID -> RelationType -> IO [MemoryLink]

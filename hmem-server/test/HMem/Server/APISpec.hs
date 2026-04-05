@@ -21,6 +21,7 @@ import HMem.Config qualified as Config
 import HMem.DB.TestHarness
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkApp)
+import HMem.Server.WebSocket (newWSState)
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -39,8 +40,9 @@ withAppEnv = withAppEnvConfig Config.defaultConfig
 withAppEnvConfig :: Config.HMemConfig -> (TestEnv -> Application -> IO a) -> IO a
 withAppEnvConfig cfg action = withTestEnv $ \env -> do
   tracker <- newAccessTracker env.pool 3600
+  wsState <- newWSState
   let cfg' = cfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
-  app <- mkApp id cfg'.auth cfg'.cors cfg'.rateLimit env.pool tracker True
+  app <- mkApp id cfg'.auth cfg'.cors cfg'.rateLimit env.pool tracker wsState Nothing True
   action env app
 
 testAuthCfg :: Config.HMemConfig

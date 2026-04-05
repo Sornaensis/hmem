@@ -10,6 +10,7 @@ module HMem.DB.Task
   , listTasks
   , listTasksWithQuery
   , listTasksByWorkspace
+  , enrichTaskCounts
   , addDependency
   , removeDependency
   , linkTaskMemory
@@ -22,7 +23,8 @@ import Control.Monad (when)
 import Data.Aeson (Object, toJSON)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant ((>$<), contramap)
-import Data.Int (Int16)
+import Data.Int (Int16, Int64)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
 import Data.Time (UTCTime)
@@ -45,20 +47,68 @@ import HMem.Types
 
 rowToTask :: TaskT Result -> Task
 rowToTask r = Task
-  { id          = r.taskId
-  , workspaceId = r.taskWorkspaceId
-  , projectId   = r.taskProjectId
-  , parentId    = r.taskParentId
-  , title       = r.taskTitle
-  , description = r.taskDescription
-  , status      = r.taskStatus
-  , priority    = fromIntegral r.taskPriority
-  , metadata    = r.taskMetadata
-  , dueAt       = r.taskDueAt
-  , completedAt = r.taskCompletedAt
-  , createdAt   = r.taskCreatedAt
-  , updatedAt   = r.taskUpdatedAt
+  { id              = r.taskId
+  , workspaceId     = r.taskWorkspaceId
+  , projectId       = r.taskProjectId
+  , parentId        = r.taskParentId
+  , title           = r.taskTitle
+  , description     = r.taskDescription
+  , status          = r.taskStatus
+  , priority        = fromIntegral r.taskPriority
+  , metadata        = r.taskMetadata
+  , dueAt           = r.taskDueAt
+  , completedAt     = r.taskCompletedAt
+  , dependencyCount = 0
+  , memoryLinkCount = 0
+  , createdAt       = r.taskCreatedAt
+  , updatedAt       = r.taskUpdatedAt
   }
+
+-- | Enrich a list of tasks with dependency and memory-link counts.
+-- Uses two GROUP BY queries across all task IDs in a single round-trip each.
+enrichTaskCounts :: Pool Hasql.Connection -> [Task] -> IO [Task]
+enrichTaskCounts _ [] = pure []
+enrichTaskCounts pool tasks = do
+  let taskIds = map (.id) tasks
+  depCounts <- getCountMap pool depCountStatement taskIds
+  memCounts <- getCountMap pool memLinkCountStatement taskIds
+  pure $ map (\t -> t { dependencyCount = Map.findWithDefault 0 t.id depCounts
+                      , memoryLinkCount = Map.findWithDefault 0 t.id memCounts
+                      }) tasks
+
+getCountMap :: Pool Hasql.Connection -> Statement.Statement [UUID] [(UUID, Int64)] -> [UUID] -> IO (Map.Map UUID Int)
+getCountMap pool stmt uuids = do
+  rows <- runSession pool $ Session.statement uuids stmt
+  pure $ Map.fromList [ (uid, fromIntegral cnt) | (uid, cnt) <- rows ]
+
+depCountStatement :: Statement.Statement [UUID] [(UUID, Int64)]
+depCountStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "SELECT task_id, COUNT(*)"
+      , "FROM task_dependencies"
+      , "WHERE task_id = ANY($1)"
+      , "GROUP BY task_id"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowList $
+      (,) <$> Dec.column (Dec.nonNullable Dec.uuid)
+          <*> Dec.column (Dec.nonNullable Dec.int8)
+
+memLinkCountStatement :: Statement.Statement [UUID] [(UUID, Int64)]
+memLinkCountStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "SELECT tml.task_id, COUNT(*)"
+      , "FROM task_memory_links tml"
+      , "JOIN memories m ON m.id = tml.memory_id AND m.deleted_at IS NULL"
+      , "WHERE tml.task_id = ANY($1)"
+      , "GROUP BY tml.task_id"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowList $
+      (,) <$> Dec.column (Dec.nonNullable Dec.uuid)
+          <*> Dec.column (Dec.nonNullable Dec.int8)
 
 taskSubtreeIdsStatement :: Statement.Statement UUID [UUID]
 taskSubtreeIdsStatement = Statement.Statement sql encoder decoder True
@@ -185,7 +235,9 @@ getTask pool tid = do
     pure row
   case rows of
     []    -> pure Nothing
-    (r:_) -> pure . Just $ rowToTask r
+    (r:_) -> do
+      enriched <- enrichTaskCounts pool [rowToTask r]
+      pure $ Just (head enriched)
 
 ------------------------------------------------------------------------
 -- Update
@@ -200,7 +252,7 @@ updateTask pool tid ut = do
       let targetProjectId = applyFieldUpdateMaybe task.projectId ut.projectId
           targetParentId = applyFieldUpdateMaybe task.parentId ut.parentId
       ensureTaskPlacement pool task.workspaceId targetProjectId targetParentId
-      runTransaction pool $ do
+      mTask <- runTransaction pool $ do
         when (task.projectId /= targetProjectId) $ do
           ids <- Session.statement tid taskSubtreeIdsStatement
           Session.statement () $ run_ $
@@ -234,6 +286,11 @@ updateTask pool tid ut = do
         case rows of
           []    -> pure Nothing
           (r:_) -> pure . Just $ rowToTask r
+      case mTask of
+        Nothing -> pure Nothing
+        Just t -> do
+          enriched <- enrichTaskCounts pool [t]
+          pure $ Just (head enriched)
 
 ------------------------------------------------------------------------
 -- Delete
@@ -408,7 +465,7 @@ listTasksWithQuery pool tq = do
         Just updatedBefore -> where_ $ row.taskUpdatedAt <=. lit updatedBefore
         Nothing -> pure ()
       pure row
-  pure $ map rowToTask rows
+  enrichTaskCounts pool $ map rowToTask rows
 
 -- | List tasks by workspace (including workspace-level tasks without a project).
 listTasksByWorkspace

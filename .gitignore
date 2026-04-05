@@ -58,6 +58,9 @@ Desktop.ini
 # Logs
 *.log
 
+# Frontend build output
+hmem-server/static/
+
 # Database
 *.sql.bak
 

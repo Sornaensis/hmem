@@ -1,8 +1,9 @@
 -- | Build the Elm/Vite frontend, outputting to hmem-server\/static\/.
 --
 -- Usage:
---   stack run build-frontend            -- install deps + build
---   stack run build-frontend -- --clean  -- remove node_modules & elm-stuff first
+--   stack run build-frontend              -- install deps + build
+--   stack run build-frontend -- --clean    -- remove node_modules & elm-stuff first
+--   stack run build-frontend -- --install  -- build + copy to ~/.hmem/static/
 --
 -- Requires: npm on PATH (ships with Node.js).
 -- If npm is not found the tool prints a warning and exits successfully
@@ -12,12 +13,13 @@
 module Main where
 
 import Control.Exception (SomeException, try)
-import Control.Monad    (when)
-import System.Directory (doesDirectoryExist, getCurrentDirectory,
+import Control.Monad    (when, forM_)
+import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist,
+                         getCurrentDirectory, getHomeDirectory, listDirectory,
                          removeDirectoryRecursive)
 import System.Environment (getArgs)
 import System.Exit      (ExitCode (..), exitWith)
-import System.FilePath  ((</>))
+import System.FilePath  ((</>), takeDirectory)
 import System.IO        (hFlush, hPutStrLn, stderr, stdout)
 import System.Process   (CreateProcess(..), shell, readCreateProcessWithExitCode,
                          readProcessWithExitCode)
@@ -25,7 +27,8 @@ import System.Process   (CreateProcess(..), shell, readCreateProcessWithExitCode
 main :: IO ()
 main = do
   args <- getArgs
-  let clean = "--clean" `elem` args
+  let clean   = "--clean" `elem` args
+      install = "--install" `elem` args
 
   -- Locate the frontend directory relative to the working directory.
   -- We expect to be invoked from the project root (stack default).
@@ -65,6 +68,17 @@ main = do
           hFlush stdout
           runInDir frontendDir "npm" ["run", "build"]
           putStrLn "Frontend built -> hmem-server/static/"
+
+          -- Optionally install to ~/.hmem/static/
+          when install $ do
+            home <- getHomeDirectory
+            let targetDir = home </> ".hmem" </> "static"
+                staticDir = cwd </> "hmem-server" </> "static"
+            putStrLn $ "Installing frontend to " ++ targetDir ++ " ..."
+            targetExists <- doesDirectoryExist targetDir
+            when targetExists $ removeDirectoryRecursive targetDir
+            copyDirRecursive staticDir targetDir
+            putStrLn "Done."
 
 -- | Check whether an executable is on PATH.
 hasExecutable :: String -> IO Bool
@@ -108,3 +122,18 @@ quoteArg :: String -> String
 quoteArg s
   | any (== ' ') s = "\"" ++ s ++ "\""
   | otherwise      = s
+
+-- | Recursively copy a directory.
+copyDirRecursive :: FilePath -> FilePath -> IO ()
+copyDirRecursive src dst = do
+  createDirectoryIfMissing True dst
+  entries <- listDirectory src
+  forM_ entries $ \entry -> do
+    let srcPath = src </> entry
+        dstPath = dst </> entry
+    isDir <- doesDirectoryExist srcPath
+    if isDir
+      then copyDirRecursive srcPath dstPath
+      else do
+        createDirectoryIfMissing True (takeDirectory dstPath)
+        copyFile srcPath dstPath

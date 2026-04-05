@@ -1,6 +1,7 @@
 module Api exposing
     ( Workspace, Project, Task, Memory, MemoryLink
     , TaskDependencySummary, TaskOverview
+    , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
     , PaginatedResult
     , MemoryType(..), ProjectStatus(..), TaskStatus(..), WorkspaceType(..)
     , ChangeEvent, ChangeType(..), EntityType(..)
@@ -14,6 +15,7 @@ module Api exposing
     , linkProjectMemory, unlinkProjectMemory
     , linkTaskMemory, unlinkTaskMemory
     , fetchTaskOverview
+    , fetchVisualization
     , addTaskDependency, removeTaskDependency
     , searchMemories
     , createProject, createProjectWithParent
@@ -935,3 +937,97 @@ taskOverviewDecoder =
     D.succeed TaskOverview
         |> required "task" taskDecoder
         |> required "dependencies" (D.list taskDependencySummaryDecoder)
+
+
+
+-- WORKSPACE VISUALIZATION
+
+
+type alias VisualizationMemory =
+    { id : String
+    , summary : String
+    , memoryType : MemoryType
+    , importance : Int
+    , pinned : Bool
+    }
+
+
+type alias VisualizationProjectMemoryLink =
+    { projectId : String
+    , memoryId : String
+    }
+
+
+type alias VisualizationTaskMemoryLink =
+    { taskId : String
+    , memoryId : String
+    }
+
+
+type alias VisualizationTaskDependency =
+    { taskId : String
+    , dependsOnId : String
+    }
+
+
+type alias WorkspaceVisualization =
+    { projects : List Project
+    , tasks : List Task
+    , memories : List VisualizationMemory
+    , projectMemoryLinks : List VisualizationProjectMemoryLink
+    , taskMemoryLinks : List VisualizationTaskMemoryLink
+    , taskDependencies : List VisualizationTaskDependency
+    , memoryLinks : List MemoryLink
+    }
+
+
+visualizationMemoryDecoder : Decoder VisualizationMemory
+visualizationMemoryDecoder =
+    D.succeed VisualizationMemory
+        |> required "id" D.string
+        |> required "summary" D.string
+        |> required "memory_type" memoryTypeDecoder
+        |> required "importance" D.int
+        |> required "pinned" D.bool
+
+
+visualizationProjectMemoryLinkDecoder : Decoder VisualizationProjectMemoryLink
+visualizationProjectMemoryLinkDecoder =
+    D.succeed VisualizationProjectMemoryLink
+        |> required "project_id" D.string
+        |> required "memory_id" D.string
+
+
+visualizationTaskMemoryLinkDecoder : Decoder VisualizationTaskMemoryLink
+visualizationTaskMemoryLinkDecoder =
+    D.succeed VisualizationTaskMemoryLink
+        |> required "task_id" D.string
+        |> required "memory_id" D.string
+
+
+visualizationTaskDependencyDecoder : Decoder VisualizationTaskDependency
+visualizationTaskDependencyDecoder =
+    D.succeed VisualizationTaskDependency
+        |> required "task_id" D.string
+        |> required "depends_on_id" D.string
+
+
+workspaceVisualizationDecoder : Decoder WorkspaceVisualization
+workspaceVisualizationDecoder =
+    D.succeed WorkspaceVisualization
+        |> required "projects" (D.list projectDecoder)
+        |> required "tasks" (D.list taskDecoder)
+        |> required "memories" (D.list visualizationMemoryDecoder)
+        |> required "project_memory_links" (D.list visualizationProjectMemoryLinkDecoder)
+        |> required "task_memory_links" (D.list visualizationTaskMemoryLinkDecoder)
+        |> required "task_dependencies" (D.list visualizationTaskDependencyDecoder)
+        |> required "memory_links" (D.list memoryLinkDecoder)
+
+
+fetchVisualization : String -> String -> (Result Http.Error WorkspaceVisualization -> msg) -> Cmd msg
+fetchVisualization apiUrl wsId toMsg =
+    Http.post
+        { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/visualization"
+        , body = Http.jsonBody (E.object [])
+        , expect = Http.expectJson toMsg (D.field "visualization" workspaceVisualizationDecoder)
+        }

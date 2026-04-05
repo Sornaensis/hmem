@@ -143,6 +143,16 @@ const defaultStyle = [
     }
   },
   {
+    selector: 'edge.entity-memory',
+    style: {
+      'line-color': '#64748b',
+      'target-arrow-color': '#64748b',
+      'target-arrow-shape': 'none',
+      'line-style': 'dotted',
+      'width': 1.5
+    }
+  },
+  {
     selector: ':selected',
     style: {
       'border-width': 3,
@@ -150,6 +160,8 @@ const defaultStyle = [
     }
   }
 ]
+
+let currentPositionsKey = null
 
 app.ports.initCytoscape.subscribe(function (config) {
   // Delay to ensure Elm has rendered the container into the DOM
@@ -160,22 +172,87 @@ app.ports.initCytoscape.subscribe(function (config) {
 
 app.ports.destroyCytoscape.subscribe(function () {
   if (cy) {
+    saveGraphPositions()
     cy.destroy()
     cy = null
   }
 })
 
+function saveGraphPositions() {
+  if (!cy || !currentPositionsKey) return
+  try {
+    const positions = {}
+    cy.nodes().forEach(function (node) {
+      const pos = node.position()
+      positions[node.id()] = { x: pos.x, y: pos.y }
+    })
+    localStorage.setItem(currentPositionsKey, JSON.stringify(positions))
+  } catch (e) {
+    // localStorage may be full or unavailable
+  }
+}
+
+function loadGraphPositions(key) {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : null
+  } catch (e) {
+    return null
+  }
+}
+
 function initCytoscapeGraph(config) {
   const container = document.getElementById(config.containerId)
   if (!container) return
 
-  if (cy) { cy.destroy() }
+  if (cy) {
+    saveGraphPositions()
+    cy.destroy()
+  }
+
+  currentPositionsKey = config.positionsKey || null
+  const savedPositions = currentPositionsKey ? loadGraphPositions(currentPositionsKey) : null
+  const hasSavedPositions = savedPositions && Object.keys(savedPositions).length > 0
 
   cy = cytoscape({
     container: container,
     elements: config.elements || [],
     style: config.style || defaultStyle,
-    layout: config.layout || { name: 'cose', animate: true, animationDuration: 500 }
+    layout: { name: 'preset' } // start with no layout, apply below
+  })
+
+  if (hasSavedPositions) {
+    // Apply saved positions to nodes that have them
+    let hasUnsaved = false
+    cy.nodes().forEach(function (node) {
+      const saved = savedPositions[node.id()]
+      if (saved) {
+        node.position(saved)
+      } else {
+        hasUnsaved = true
+      }
+    })
+    // Run layout only for nodes without saved positions
+    if (hasUnsaved) {
+      const unsavedNodes = cy.nodes().filter(function (node) {
+        return !savedPositions[node.id()]
+      })
+      unsavedNodes.layout({
+        name: 'cose',
+        animate: true,
+        animationDuration: 300,
+        fit: false
+      }).run()
+    }
+    cy.fit(undefined, 30)
+  } else {
+    // No saved positions, run full cose layout
+    cy.layout({ name: 'cose', animate: true, animationDuration: 500 }).run()
+  }
+
+  // Save positions on node drag end
+  cy.on('dragfree', 'node', function () {
+    saveGraphPositions()
   })
 
   cy.on('tap', 'node', function (evt) {

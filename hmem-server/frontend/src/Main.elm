@@ -135,7 +135,7 @@ type alias Model =
     , projects : Dict String Api.Project
     , tasks : Dict String Api.Task
     , memories : Dict String Api.Memory
-    , memoryLinks : List Api.MemoryLink
+    , graphVisualization : Maybe Api.WorkspaceVisualization
     , entityMemories : Dict String (List Api.Memory)
 
     -- Loading states
@@ -194,6 +194,9 @@ type alias Model =
 
     -- Focus mode
     , focusedEntity : Maybe ( String, String )
+    , breadcrumbAnchor : Maybe ( String, String )
+    , focusHistory : List ( String, String )
+    , focusHistoryIndex : Int
 
     -- Delete confirmation
     , deleteConfirmation : Maybe ( String, String )
@@ -339,7 +342,7 @@ init rawFlags url key =
             , projects = Dict.empty
             , tasks = Dict.empty
             , memories = Dict.empty
-            , memoryLinks = []
+            , graphVisualization = Nothing
             , entityMemories = Dict.empty
             , loadingWorkspaces = True
             , loadingWorkspaceData = False
@@ -368,6 +371,15 @@ init rawFlags url key =
             , dragOver = Nothing
             , dropActionModal = Nothing
             , focusedEntity = frag.focus
+            , breadcrumbAnchor = frag.focus
+            , focusHistory =
+                case frag.focus of
+                    Just f ->
+                        [ f ]
+
+                    Nothing ->
+                        []
+            , focusHistoryIndex = 0
             , deleteConfirmation = Nothing
             }
 
@@ -713,7 +725,7 @@ type Msg
     | GotProjects (Result Http.Error (Api.PaginatedResult Api.Project))
     | GotTasks (Result Http.Error (Api.PaginatedResult Api.Task))
     | GotMemories (Result Http.Error (Api.PaginatedResult Api.Memory))
-    | GotMemoryLinks (Result Http.Error (List Api.MemoryLink))
+    | GotVisualization (Result Http.Error Api.WorkspaceVisualization)
       -- Mutation responses
     | MutationDone String (Result Http.Error ())
     | ProjectCreated (Result Http.Error Api.Project)
@@ -791,6 +803,8 @@ type Msg
     | ToggleCardExpand String
       -- Tree collapse
     | ToggleTreeNode String
+    | ExpandAllNodes
+    | CollapseAllNodes
       -- Expand + edit in one click
     | ExpandAndEdit String String String String String
       -- Drag and drop
@@ -815,6 +829,8 @@ type Msg
     | LoadGraphForWorkspace String
       -- Focus mode
     | FocusEntity String String
+    | FocusEntityKeepForward String String
+    | FocusBreadcrumbNav Int
     | ClearFocus
     | GlobalKeyDown Int
     | NoOp
@@ -849,14 +865,44 @@ update msg model =
                     in
                     if isCurrentWorkspace then
                         -- Same workspace, just a hash change
+                        -- Note: Nav.replaceUrl triggers onUrlChange in Elm,
+                        -- so this fires after every replaceFragment call.
+                        -- Only reset focusHistory when the focus actually changed
+                        -- externally (browser back/forward), not from our own handlers.
                         let
                             frag =
                                 parseFragment url.fragment
+
+                            focusChangedExternally =
+                                frag.focus /= model.focusedEntity
                         in
                         ( { model
                             | url = url
                             , activeTab = frag.tab
                             , focusedEntity = frag.focus
+                            , breadcrumbAnchor =
+                                if focusChangedExternally then
+                                    frag.focus
+
+                                else
+                                    model.breadcrumbAnchor
+                            , focusHistory =
+                                if focusChangedExternally then
+                                    case frag.focus of
+                                        Just f ->
+                                            [ f ]
+
+                                        Nothing ->
+                                            []
+
+                                else
+                                    model.focusHistory
+                            , focusHistoryIndex =
+                                if focusChangedExternally then
+                                    0
+
+                                else
+                                    model.focusHistoryIndex
                             , createForm = Nothing
                             , editing = Nothing
                             , inlineCreate = Nothing
@@ -885,6 +931,15 @@ update msg model =
                             , loadingWorkspaceData = True
                             , activeTab = frag.tab
                             , focusedEntity = frag.focus
+                            , breadcrumbAnchor = frag.focus
+                            , focusHistory =
+                                case frag.focus of
+                                    Just f ->
+                                        [ f ]
+
+                                    Nothing ->
+                                        []
+                            , focusHistoryIndex = 0
                             , projects = Dict.empty
                             , tasks = Dict.empty
                             , memories = Dict.empty
@@ -916,13 +971,10 @@ update msg model =
                         )
 
                 MemoryGraphPage ->
-                    ( { model | url = url, page = page, graphLoaded = False, memoryLinks = [] }
+                    ( { model | url = url, page = page, graphLoaded = False, graphVisualization = Nothing }
                     , case model.selectedWorkspaceId of
                         Just wsId ->
-                            Cmd.batch
-                                [ Api.fetchMemories model.flags.apiUrl wsId GotMemories
-                                , Api.fetchWorkspaceLinks model.flags.apiUrl wsId GotMemoryLinks
-                                ]
+                            Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
 
                         Nothing ->
                             Cmd.none
@@ -1002,48 +1054,22 @@ update msg model =
         GotMemories result ->
             case result of
                 Ok paginated ->
-                    let
-                        newModel =
-                            { model | memories = indexBy .id paginated.items }
-                    in
-                    case model.page of
-                        MemoryGraphPage ->
-                            if not (List.isEmpty newModel.memoryLinks) || newModel.graphLoaded then
-                                ( { newModel | graphLoaded = True }
-                                , initCytoscapeGraph newModel
-                                )
-
-                            else
-                                ( newModel, Cmd.none )
-
-                        _ ->
-                            ( newModel, Cmd.none )
+                    ( { model | memories = indexBy .id paginated.items }, Cmd.none )
 
                 Err _ ->
                     addToast Error "Failed to load memories" model
 
-        GotMemoryLinks result ->
+        GotVisualization result ->
             case result of
-                Ok links ->
+                Ok viz ->
                     let
                         newModel =
-                            { model | memoryLinks = links }
+                            { model | graphVisualization = Just viz, graphLoaded = True }
                     in
-                    case model.page of
-                        MemoryGraphPage ->
-                            if not (Dict.isEmpty newModel.memories) then
-                                ( { newModel | graphLoaded = True }
-                                , initCytoscapeGraph newModel
-                                )
-
-                            else
-                                ( newModel, Cmd.none )
-
-                        _ ->
-                            ( newModel, Cmd.none )
+                    ( newModel, initCytoscapeGraph newModel )
 
                 Err _ ->
-                    addToast Error "Failed to load memory links" model
+                    addToast Error "Failed to load graph data" model
 
         -- Mutation responses
         MutationDone entityType result ->
@@ -1460,6 +1486,35 @@ update msg model =
             in
             ( newModel, saveFiltersCmd newModel )
 
+        ExpandAllNodes ->
+            let
+                newModel =
+                    { model | collapsedNodes = Dict.empty }
+            in
+            ( newModel, saveFiltersCmd newModel )
+
+        CollapseAllNodes ->
+            let
+                allProjects =
+                    Dict.values model.projects
+
+                allTasks =
+                    Dict.values model.tasks
+
+                projectNodes =
+                    allProjects
+                        |> List.map (\p -> ( "proj-" ++ p.id, True ))
+
+                taskNodes =
+                    allTasks
+                        |> List.filter (\t -> List.any (\t2 -> t2.parentId == Just t.id) allTasks)
+                        |> List.map (\t -> ( "task-" ++ t.id, True ))
+
+                newModel =
+                    { model | collapsedNodes = Dict.fromList (projectNodes ++ taskNodes) }
+            in
+            ( newModel, saveFiltersCmd newModel )
+
         -- Delete
         ConfirmDelete entityType entityId ->
             ( { model | deleteConfirmation = Just ( entityType, entityId ) }, Cmd.none )
@@ -1504,13 +1559,9 @@ update msg model =
             ( { model
                 | selectedWorkspaceId = Just wsId
                 , graphLoaded = False
-                , memories = Dict.empty
-                , memoryLinks = []
+                , graphVisualization = Nothing
               }
-            , Cmd.batch
-                [ Api.fetchMemories model.flags.apiUrl wsId GotMemories
-                , Api.fetchWorkspaceLinks model.flags.apiUrl wsId GotMemoryLinks
-                ]
+            , Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
             )
 
         ExpandAndEdit cardId entityType entityId field currentValue ->
@@ -1960,15 +2011,62 @@ update msg model =
 
         FocusEntity entityType entityId ->
             let
+                entry =
+                    ( entityType, entityId )
+
+                -- Truncate any forward history, then append
+                newHistory =
+                    List.take (model.focusHistoryIndex + 1) model.focusHistory ++ [ entry ]
+
+                newIndex =
+                    List.length newHistory - 1
+
                 newModel =
-                    { model | focusedEntity = Just ( entityType, entityId ) }
+                    { model
+                        | focusedEntity = Just entry
+                        , breadcrumbAnchor = Just entry
+                        , focusHistory = newHistory
+                        , focusHistoryIndex = newIndex
+                    }
+            in
+            ( newModel, replaceFragment newModel )
+
+        FocusEntityKeepForward entityType entityId ->
+            let
+                entry =
+                    ( entityType, entityId )
+
+                -- Only change what's focused, don't modify history
+                newModel =
+                    { model | focusedEntity = Just entry }
+            in
+            ( newModel, replaceFragment newModel )
+
+        FocusBreadcrumbNav idx ->
+            let
+                entry =
+                    model.focusHistory
+                        |> List.drop idx
+                        |> List.head
+
+                newModel =
+                    { model
+                        | focusedEntity = entry
+                        , breadcrumbAnchor = entry
+                        , focusHistoryIndex = idx
+                    }
             in
             ( newModel, replaceFragment newModel )
 
         ClearFocus ->
             let
                 newModel =
-                    { model | focusedEntity = Nothing }
+                    { model
+                        | focusedEntity = Nothing
+                        , breadcrumbAnchor = Nothing
+                        , focusHistory = []
+                        , focusHistoryIndex = 0
+                    }
             in
             ( newModel, replaceFragment newModel )
 
@@ -2418,56 +2516,146 @@ editingValue model entityId field =
 -- CYTOSCAPE GRAPH
 
 
+graphPositionsKey : String -> String
+graphPositionsKey wsId =
+    "hmem-graph-positions-" ++ wsId
+
+
 initCytoscapeGraph : Model -> Cmd Msg
 initCytoscapeGraph model =
-    let
-        memNodes =
-            model.memories
-                |> Dict.values
-                |> List.map
-                    (\m ->
-                        Encode.object
-                            [ ( "data"
-                              , Encode.object
-                                    [ ( "id", Encode.string m.id )
-                                    , ( "label"
-                                      , Encode.string
-                                            (case m.summary of
-                                                Just s ->
-                                                    truncate 40 s
+    case model.graphVisualization of
+        Nothing ->
+            Cmd.none
 
-                                                Nothing ->
-                                                    truncate 40 m.content
-                                            )
+        Just viz ->
+            let
+                projectNodes =
+                    viz.projects
+                        |> List.map
+                            (\p ->
+                                Encode.object
+                                    [ ( "data"
+                                      , Encode.object
+                                            [ ( "id", Encode.string p.id )
+                                            , ( "label", Encode.string (truncate 40 p.name) )
+                                            ]
+                                      )
+                                    , ( "classes", Encode.string "project" )
+                                    ]
+                            )
+
+                taskNodes =
+                    viz.tasks
+                        |> List.map
+                            (\t ->
+                                Encode.object
+                                    [ ( "data"
+                                      , Encode.object
+                                            [ ( "id", Encode.string t.id )
+                                            , ( "label", Encode.string (truncate 40 t.title) )
+                                            ]
+                                      )
+                                    , ( "classes", Encode.string "task" )
+                                    ]
+                            )
+
+                memNodes =
+                    viz.memories
+                        |> List.map
+                            (\m ->
+                                Encode.object
+                                    [ ( "data"
+                                      , Encode.object
+                                            [ ( "id", Encode.string m.id )
+                                            , ( "label", Encode.string (truncate 40 m.summary) )
+                                            ]
+                                      )
+                                    , ( "classes", Encode.string "memory" )
+                                    ]
+                            )
+
+                memoryLinkEdges =
+                    viz.memoryLinks
+                        |> List.map
+                            (\link ->
+                                Encode.object
+                                    [ ( "data"
+                                      , Encode.object
+                                            [ ( "id", Encode.string ("ml-" ++ link.sourceId ++ "-" ++ link.targetId) )
+                                            , ( "source", Encode.string link.sourceId )
+                                            , ( "target", Encode.string link.targetId )
+                                            , ( "label", Encode.string link.relationType )
+                                            ]
                                       )
                                     ]
-                              )
-                            , ( "classes", Encode.string "memory" )
-                            ]
-                    )
+                            )
 
-        linkEdges =
-            model.memoryLinks
-                |> List.map
-                    (\link ->
-                        Encode.object
-                            [ ( "data"
-                              , Encode.object
-                                    [ ( "id", Encode.string (link.sourceId ++ "-" ++ link.targetId) )
-                                    , ( "source", Encode.string link.sourceId )
-                                    , ( "target", Encode.string link.targetId )
-                                    , ( "label", Encode.string link.relationType )
+                projectMemoryEdges =
+                    viz.projectMemoryLinks
+                        |> List.map
+                            (\link ->
+                                Encode.object
+                                    [ ( "data"
+                                      , Encode.object
+                                            [ ( "id", Encode.string ("pm-" ++ link.projectId ++ "-" ++ link.memoryId) )
+                                            , ( "source", Encode.string link.projectId )
+                                            , ( "target", Encode.string link.memoryId )
+                                            ]
+                                      )
+                                    , ( "classes", Encode.string "entity-memory" )
                                     ]
-                              )
-                            ]
-                    )
-    in
-    initCytoscape
-        (Encode.object
-            [ ( "containerId", Encode.string "cytoscape-container" )
-            , ( "elements", Encode.list identity (memNodes ++ linkEdges) )
-            ]
-        )
+                            )
+
+                taskMemoryEdges =
+                    viz.taskMemoryLinks
+                        |> List.map
+                            (\link ->
+                                Encode.object
+                                    [ ( "data"
+                                      , Encode.object
+                                            [ ( "id", Encode.string ("tm-" ++ link.taskId ++ "-" ++ link.memoryId) )
+                                            , ( "source", Encode.string link.taskId )
+                                            , ( "target", Encode.string link.memoryId )
+                                            ]
+                                      )
+                                    , ( "classes", Encode.string "entity-memory" )
+                                    ]
+                            )
+
+                taskDependencyEdges =
+                    viz.taskDependencies
+                        |> List.map
+                            (\dep ->
+                                Encode.object
+                                    [ ( "data"
+                                      , Encode.object
+                                            [ ( "id", Encode.string ("td-" ++ dep.taskId ++ "-" ++ dep.dependsOnId) )
+                                            , ( "source", Encode.string dep.taskId )
+                                            , ( "target", Encode.string dep.dependsOnId )
+                                            ]
+                                      )
+                                    , ( "classes", Encode.string "dependency" )
+                                    ]
+                            )
+
+                allElements =
+                    projectNodes ++ taskNodes ++ memNodes ++ memoryLinkEdges ++ projectMemoryEdges ++ taskMemoryEdges ++ taskDependencyEdges
+
+                positionsKey =
+                    case model.selectedWorkspaceId of
+                        Just wsId ->
+                            graphPositionsKey wsId
+
+                        Nothing ->
+                            ""
+            in
+            initCytoscape
+                (Encode.object
+                    [ ( "containerId", Encode.string "cytoscape-container" )
+                    , ( "elements", Encode.list identity allElements )
+                    , ( "positionsKey", Encode.string positionsKey )
+                    ]
+                )
 
 
 
@@ -2676,22 +2864,24 @@ viewWorkspacePage wsId model =
                 activeProjects =
                     wsProjects |> List.filter (\p -> p.status == Api.ProjActive || p.status == Api.ProjPaused) |> List.length
 
-                completedProjects =
-                    List.length wsProjects - activeProjects
-
                 activeTasks =
                     wsTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length
-
-                completedTasks =
-                    List.length wsTasks - activeTasks
 
                 memoryCount =
                     List.length wsMemories
 
                 summaryParts =
                     List.filterMap identity
-                        [ countLabel activeProjects completedProjects "project" "projects"
-                        , countLabel activeTasks completedTasks "task" "tasks"
+                        [ if activeProjects > 0 then
+                            Just (String.fromInt activeProjects ++ " open " ++ (if activeProjects > 1 then "projects" else "project"))
+
+                          else
+                            Nothing
+                        , if activeTasks > 0 then
+                            Just (String.fromInt activeTasks ++ " open " ++ (if activeTasks > 1 then "tasks" else "task"))
+
+                          else
+                            Nothing
                         , if memoryCount > 0 then
                             Just (String.fromInt memoryCount ++ " memor" ++ (if memoryCount > 1 then "ies" else "y"))
 
@@ -3127,17 +3317,27 @@ viewProjectsTree wsId model =
                 && passesStatusFilter model.filterTaskStatuses (Api.taskStatusToString t.status)
                 && passesPriorityFilter model.filterPriority t.priority
 
+        allCollapsed =
+            not (Dict.isEmpty model.collapsedNodes)
+
+        expandCollapseBar =
+            div [ class "tree-toolbar" ]
+                [ button [ class "btn-small btn-ghost", onClick ExpandAllNodes ] [ text "Expand All" ]
+                , button [ class "btn-small btn-ghost", onClick CollapseAllNodes ] [ text "Collapse All" ]
+                ]
+
         inlineCreateView =
             viewInlineCreateInput model Nothing "project"
 
         focusBreadcrumbBar =
-            case model.focusedEntity of
-                Just ( eType, eId ) ->
+            case model.breadcrumbAnchor of
+                Just ( aType, aId ) ->
                     let
-                        crumbs =
-                            case eType of
+                        -- Tree-based parent chain for the breadcrumb anchor (deepest focused entity)
+                        treeCrumbs =
+                            case aType of
                                 "project" ->
-                                    case Dict.get eId model.projects of
+                                    case Dict.get aId model.projects of
                                         Just proj ->
                                             buildProjectBreadcrumb model proj []
 
@@ -3145,7 +3345,7 @@ viewProjectsTree wsId model =
                                             []
 
                                 "task" ->
-                                    case Dict.get eId model.tasks of
+                                    case Dict.get aId model.tasks of
                                         Just task ->
                                             buildTaskBreadcrumb model task []
 
@@ -3155,27 +3355,91 @@ viewProjectsTree wsId model =
                                 _ ->
                                     []
 
-                        crumbLinks =
-                            crumbs
+                        currentFocusId =
+                            model.focusedEntity |> Maybe.map Tuple.second |> Maybe.withDefault ""
+
+                        treeCrumbLinks =
+                            treeCrumbs
                                 |> List.map
                                     (\( cId, cName, cType ) ->
-                                        if cId == eId then
+                                        if cId == currentFocusId then
                                             span [ class "focus-crumb focus-crumb-current" ] [ text cName ]
 
                                         else
                                             span
                                                 [ class "focus-crumb focus-crumb-link"
-                                                , onClick (FocusEntity cType cId)
+                                                , onClick (FocusEntityKeepForward cType cId)
                                                 ]
                                                 [ text cName ]
                                     )
                                 |> List.intersperse (span [ class "focus-crumb-sep" ] [ text " › " ])
+
+                        -- Forward history entries
+                        -- If the user navigated to a parent (focusedEntity differs from history entry),
+                        -- include the history entry at the current index as part of forward crumbs
+                        historyEntry =
+                            model.focusHistory
+                                |> List.drop model.focusHistoryIndex
+                                |> List.head
+
+                        isOnParent =
+                            historyEntry /= model.focusedEntity
+
+                        forwardStartIdx =
+                            if isOnParent then
+                                model.focusHistoryIndex
+
+                            else
+                                model.focusHistoryIndex + 1
+
+                        forwardCrumbs =
+                            model.focusHistory
+                                |> List.drop forwardStartIdx
+                                |> List.indexedMap
+                                    (\i ( fType, fId ) ->
+                                        let
+                                            name =
+                                                case fType of
+                                                    "project" ->
+                                                        Dict.get fId model.projects |> Maybe.map .name |> Maybe.withDefault "Project"
+
+                                                    "task" ->
+                                                        Dict.get fId model.tasks |> Maybe.map .title |> Maybe.withDefault "Task"
+
+                                                    _ ->
+                                                        "Entity"
+
+                                            -- Skip forward entries that are already in the tree crumbs
+                                            isDuplicate =
+                                                List.any (\( cId, _, _ ) -> cId == fId) treeCrumbs
+                                        in
+                                        if isDuplicate then
+                                            Nothing
+
+                                        else
+                                            Just
+                                                ( span
+                                                    [ class "focus-crumb focus-crumb-forward"
+                                                    , onClick (FocusBreadcrumbNav (forwardStartIdx + i))
+                                                    ]
+                                                    [ text name ]
+                                                )
+                                    )
+                                |> List.filterMap identity
+                                |> List.intersperse (span [ class "focus-crumb-sep" ] [ text " › " ])
+
+                        forwardSection =
+                            if List.isEmpty forwardCrumbs then
+                                []
+
+                            else
+                                span [ class "focus-crumb-sep" ] [ text " › " ] :: forwardCrumbs
                     in
                     div [ class "focus-breadcrumb-bar" ]
                         (button [ class "focus-clear-btn", onClick ClearFocus, title "Exit focus mode" ] [ text "✕" ]
                             :: span [ class "focus-crumb focus-crumb-link", onClick ClearFocus ] [ text "All" ]
-                            :: (if not (List.isEmpty crumbLinks) then
-                                    span [ class "focus-crumb-sep" ] [ text " › " ] :: crumbLinks
+                            :: (if not (List.isEmpty treeCrumbLinks) then
+                                    span [ class "focus-crumb-sep" ] [ text " › " ] :: treeCrumbLinks ++ forwardSection
 
                                 else
                                     []
@@ -3219,7 +3483,7 @@ viewProjectsTree wsId model =
                                         identity
                                    )
                                 |> (if hasActiveFilters then
-                                        List.filter (\p -> projectTreePassesFilters p wsProjects wsTasks projectPassesFilters taskPassesFilters)
+                                        List.filter (\p -> projectTreePassesFilters (\pp -> passesStatusFilter model.filterProjectStatuses (Api.projectStatusToString pp.status)) p wsProjects wsTasks projectPassesFilters taskPassesFilters)
 
                                     else
                                         identity
@@ -3259,7 +3523,8 @@ viewProjectsTree wsId model =
                            )
     in
     div [ class "tree-view" ]
-        (inlineCreateView
+        (expandCollapseBar
+            :: inlineCreateView
             :: focusBreadcrumbBar
             :: treeContent
         )
@@ -3298,7 +3563,7 @@ viewProjectNode allProjects model depth project hasSearch query =
                         identity
                    )
                 |> (if hasActiveFilters then
-                        List.filter (\p -> projectTreePassesFilters p allProjects allTasks projectPassesFilters taskPassesFilters)
+                        List.filter (\p -> projectTreePassesFilters (\pp -> passesStatusFilter model.filterProjectStatuses (Api.projectStatusToString pp.status)) p allProjects allTasks projectPassesFilters taskPassesFilters)
 
                     else
                         identity
@@ -3375,14 +3640,18 @@ viewProjectNode allProjects model depth project hasSearch query =
                 isTaskRemaining t =
                     t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked
 
-                remainingSubprojects =
-                    List.filter isProjectRemaining children |> List.length
-
-                completedSubprojects =
-                    List.length children - remainingSubprojects
-
                 allDescendantProjectIds =
                     collectDescendantProjectIds allProjects project.id
+
+                allDescendantProjects =
+                    allProjects
+                        |> List.filter (\p -> p.id /= project.id && List.member p.id allDescendantProjectIds)
+
+                remainingSubprojects =
+                    List.filter isProjectRemaining allDescendantProjects |> List.length
+
+                completedSubprojects =
+                    List.length allDescendantProjects - remainingSubprojects
 
                 allProjectTasks =
                     model.tasks
@@ -3951,7 +4220,7 @@ viewMemoryLinkedEntities model memoryId projects tasks =
                 (\p ->
                     div [ class "linked-entity-item" ]
                         [ span [ class "entity-type-label entity-type-project" ] [ text "PRJ" ]
-                        , span [ class "linked-entity-name", onClick (ScrollToEntity p.id) ] [ text p.name ]
+                        , span [ class "linked-entity-name", onClick (FocusEntity "project" p.id) ] [ text p.name ]
                         , button
                             [ class "btn-icon btn-danger"
                             , onClick (PerformUnlinkEntity "project" p.id memoryId)
@@ -3965,7 +4234,7 @@ viewMemoryLinkedEntities model memoryId projects tasks =
                     (\t ->
                         div [ class "linked-entity-item" ]
                             [ span [ class "entity-type-label entity-type-task" ] [ text "TSK" ]
-                            , span [ class "linked-entity-name", onClick (ScrollToEntity t.id) ] [ text t.title ]
+                            , span [ class "linked-entity-name", onClick (FocusEntity "task" t.id) ] [ text t.title ]
                             , button
                                 [ class "btn-icon btn-danger"
                                 , onClick (PerformUnlinkEntity "task" t.id memoryId)
@@ -4247,12 +4516,21 @@ viewEditableTextarea : Model -> String -> String -> String -> String -> Html Msg
 viewEditableTextarea model entityType entityId field currentValue =
     case editingValue model entityId field of
         Just val ->
+            let
+                lineCount =
+                    val
+                        |> String.split "\n"
+                        |> List.length
+
+                rowCount =
+                    Basics.max 10 (lineCount + 1)
+            in
             textarea
                 [ class "inline-edit-textarea"
                 , value val
                 , onInput EditInput
                 , onBlur (SaveEdit entityId field)
-                , rows 4
+                , rows rowCount
                 , Html.Attributes.id (editElementId entityId field)
                 ]
                 []
@@ -4449,7 +4727,7 @@ viewTaskBreadcrumb model task =
                     (\( eid, label, etype ) ->
                         span
                             [ class ("breadcrumb-item breadcrumb-" ++ etype)
-                            , onClick (ScrollToEntity eid)
+                            , onClick (FocusEntity etype eid)
                             , title ("Jump to " ++ label)
                             ]
                             [ text label ]
@@ -4695,7 +4973,7 @@ viewDependencyItem model taskId dep =
                     , div [ class "dep-item-actions" ]
                         [ button
                             [ class "btn-icon btn-jump"
-                            , onClick (ScrollToEntity dep.id)
+                            , onClick (FocusEntity "task" dep.id)
                             , title "Jump to task"
                             ]
                             [ text "↗" ]
@@ -4735,7 +5013,7 @@ viewDependencyItem model taskId dep =
                     , div [ class "dep-item-actions" ]
                         [ button
                             [ class "btn-icon btn-jump"
-                            , onClick (ScrollToEntity dep.id)
+                            , onClick (FocusEntity "task" dep.id)
                             , title "Jump to task"
                             ]
                             [ text "↗" ]
@@ -5181,13 +5459,16 @@ passesPriorityFilter filter priority =
             priority <= v
 
 
-projectTreePassesFilters : Api.Project -> List Api.Project -> List Api.Task -> (Api.Project -> Bool) -> (Api.Task -> Bool) -> Bool
-projectTreePassesFilters project allProjects allTasks projFilter taskFilter =
-    projFilter project
-        || List.any (\c -> projectTreePassesFilters c allProjects allTasks projFilter taskFilter)
-            (List.filter (\p -> p.parentId == Just project.id) allProjects)
-        || List.any (\t -> taskTreePassesFilters t allTasks taskFilter)
-            (List.filter (\t -> t.projectId == Just project.id) allTasks)
+projectTreePassesFilters : (Api.Project -> Bool) -> Api.Project -> List Api.Project -> List Api.Task -> (Api.Project -> Bool) -> (Api.Task -> Bool) -> Bool
+projectTreePassesFilters projStatusGate project allProjects allTasks projFilter taskFilter =
+    -- Project must pass the status gate to be visible at all
+    projStatusGate project
+        && (projFilter project
+                || List.any (\c -> projectTreePassesFilters projStatusGate c allProjects allTasks projFilter taskFilter)
+                    (List.filter (\p -> p.parentId == Just project.id) allProjects)
+                || List.any (\t -> taskTreePassesFilters t allTasks taskFilter)
+                    (List.filter (\t -> t.projectId == Just project.id) allTasks)
+           )
 
 
 taskTreePassesFilters : Api.Task -> List Api.Task -> (Api.Task -> Bool) -> Bool
@@ -5208,16 +5489,21 @@ viewGraphPage model =
             [ h2 [] [ text "Knowledge Graph" ]
             , viewGraphWorkspaceSelector model
             ]
-        , if Dict.isEmpty model.memories then
-            case model.selectedWorkspaceId of
-                Nothing ->
-                    div [ class "empty-state" ] [ text "Select a workspace to view its memory graph." ]
+        , case model.graphVisualization of
+            Nothing ->
+                case model.selectedWorkspaceId of
+                    Nothing ->
+                        div [ class "empty-state" ] [ text "Select a workspace to view its knowledge graph." ]
 
-                Just _ ->
-                    div [ class "loading-indicator" ] [ text "Loading memories..." ]
+                    Just _ ->
+                        if model.graphLoaded then
+                            div [ class "empty-state" ] [ text "No data found for this workspace." ]
 
-          else
-            div [ id "cytoscape-container", style "width" "100%", style "height" "calc(100vh - 8rem)" ] []
+                        else
+                            div [ class "loading-indicator" ] [ text "Loading graph..." ]
+
+            Just _ ->
+                div [ id "cytoscape-container", style "width" "100%", style "height" "calc(100vh - 8rem)" ] []
         ]
 
 

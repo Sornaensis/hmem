@@ -41,8 +41,10 @@ A PostgreSQL-backed memory and task management system for LLMs, written in Haske
 Build and install the executables, then run the setup tool:
 
 ```bash
-stack install
-hmem-ctl
+stack install                              # installs hmem-server, hmem-mcp, hmem-ctl to ~/.local/bin
+stack run build-frontend -- --install      # builds + installs frontend to ~/.hmem/static/
+hmem-ctl                                   # initial setup and install
+hmem-ctl start                             # start the server
 ```
 
 **Prerequisites**: PostgreSQL must be installed with `initdb`, `pg_ctl`, `createdb`, and `psql` on PATH.

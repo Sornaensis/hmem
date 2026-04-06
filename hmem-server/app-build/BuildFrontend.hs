@@ -56,12 +56,10 @@ main = do
             removeIfExists (frontendDir </> "elm-stuff")
             removeIfExists (cwd </> "hmem-server" </> "static")
 
-          -- Install dependencies if needed
-          hasNodeModules <- doesDirectoryExist (frontendDir </> "node_modules")
-          when (not hasNodeModules) $ do
-            putStrLn "Installing frontend dependencies..."
-            hFlush stdout
-            runInDir frontendDir "npm" ["install"]
+          -- Always run npm install to ensure dependencies are up to date
+          putStrLn "Installing frontend dependencies..."
+          hFlush stdout
+          runInDir frontendDir "npm" ["install"]
 
           -- Build
           putStrLn "Building frontend..."

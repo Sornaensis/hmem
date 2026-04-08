@@ -62,3 +62,22 @@ All data is scoped to workspaces. Common operations:
 3. **Keep workspaces organized** — One workspace per project/repo. Use groups for related workspaces.
 4. **Structure tasks** — Use projects -> tasks -> sub-tasks. Add dependencies for ordering.
 5. **Batch operations** — Use `memory_create_batch` for bulk storage.
+
+## Workflow Tools
+
+These composite tools streamline common multi-step operations. Prefer them over manually chaining individual tools.
+
+### Specification
+- `project_spec` — Create a project and its initial tasks in one call. Provide workspace_id, project name/description/priority, and an array of task stubs (title, description, priority). Returns the created project and all tasks.
+
+### Implementation
+- `task_start` — Begin work on a task: sets status to `in_progress` and loads relevant context (task-linked, project-ancestor, and workspace memories). Returns context grouped by scope. Use `detail_level` to control how many memories per scope (light=2, medium=5, heavy=10).
+- `task_finish` — Finish working on a task: optionally records notes as a linked `long_term` memory, then updates task status. Use status `done` for completion, `blocked` when stuck, `cancelled` to abandon.
+
+### Review
+- `context_get` — Load context for any task without changing its status. Returns memories grouped by scope (task, project ancestors, workspace).
+- `project_overview` — Get a project with its tasks, subprojects, and linked memories in one call.
+- `task_overview` — Get a task with dependency summaries and connected memories.
+
+### Cleanup / Archive
+- `project_archive` — Archive a completed project: sets status to `archived`, optionally records a summary as a linked `long_term` memory.

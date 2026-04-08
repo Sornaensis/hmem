@@ -80,6 +80,13 @@ instance ToSchema ContextMemoryScope where
     & type_ ?~ OpenApiString
     & enum_ ?~ ["task", "project", "workspace"]
 
+instance ToSchema ContextDetailLevel where
+  declareNamedSchema _ = pure $ NamedSchema (Just "ContextDetailLevel") $ mempty
+    & type_ ?~ OpenApiString
+    & enum_ ?~ ["light", "medium", "heavy"]
+instance ToParamSchema ContextDetailLevel where
+  toParamSchema _ = mempty & type_ ?~ OpenApiString & enum_ ?~ ["light", "medium", "heavy"]
+
 -- FieldUpdate: in JSON it's just the inner type or null
 instance ToSchema a => ToSchema (FieldUpdate a) where
   declareNamedSchema _ = declareNamedSchema (Proxy @a)
@@ -139,6 +146,7 @@ instance ToSchema ProjectOverview        where declareNamedSchema = genericDecla
 instance ToSchema TaskDependencySummary  where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ConnectedMemorySummary where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema TaskOverview           where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ContextInfo            where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WorkspaceVisualizationMemoryFilter where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WorkspaceVisualizationQuery where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema VisualizationMemory where declareNamedSchema = genericDeclareNamedSchema opts

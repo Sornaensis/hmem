@@ -183,6 +183,8 @@ type TaskAPI =
   :<|> Capture "taskId" UUID :> "memories" :> Get '[JSON] [Memory]
     :<|> Capture "taskId" UUID :> "overview"
       :> QueryParam "extra_context" Bool :> Get '[JSON] TaskOverview
+  :<|> Capture "taskId" UUID :> "context"
+      :> QueryParam "detail_level" ContextDetailLevel :> Get '[JSON] ContextInfo
   :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
   :<|> "batch-move" :> ReqBody '[JSON] BatchMoveTasksRequest :> Post '[JSON] BatchResult
   :<|> "batch-update" :> ReqBody '[JSON] BatchUpdateTaskRequest :> Post '[JSON] BatchResult
@@ -322,6 +324,12 @@ instance FromHttpApiData WorkspaceType where
   parseQueryParam "personal"     = Right WsPersonal
   parseQueryParam "organization" = Right WsOrganization
   parseQueryParam t              = Left ("Invalid workspace type: " <> t)
+
+instance FromHttpApiData ContextDetailLevel where
+  parseQueryParam "light"  = Right ContextLight
+  parseQueryParam "medium" = Right ContextMedium
+  parseQueryParam "heavy"  = Right ContextHeavy
+  parseQueryParam t        = Left ("Invalid detail level: " <> t <> " (expected light, medium, or heavy)")
 
 ------------------------------------------------------------------------
 -- Structured error handling
@@ -1175,6 +1183,7 @@ taskHandlers pool bc =
   :<|> removeDepH
   :<|> getTaskMemoriesH
   :<|> taskOverviewH
+  :<|> contextInfoH
   :<|> batchDeleteH
   :<|> batchMoveH
   :<|> batchUpdateH
@@ -1273,6 +1282,10 @@ taskHandlers pool bc =
     taskOverviewH tid mExtraContext = do
       let extraContext = fromMaybe False mExtraContext
       handleDBErrors (Overview.getTaskOverview pool tid extraContext) >>= maybe (throwError err404) pure
+
+    contextInfoH tid mDetailLevel = do
+      let level = fromMaybe ContextMedium mDetailLevel
+      handleDBErrors (Overview.getContextInfo pool tid level) >>= maybe (throwError err404) pure
 
     batchDeleteH br = do
       rejectValidationErrors (validateBatchDeleteRequest br)

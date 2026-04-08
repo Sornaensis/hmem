@@ -9,11 +9,13 @@ module HMem.MCP.Tools
   ) where
 
 import Control.Exception (SomeException, try)
+import Control.Monad (void)
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, parseEither)
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
+import Data.Int (Int32)
 import Data.List (intercalate)
 import Data.Set qualified as Set
 import Data.String (fromString)
@@ -42,7 +44,7 @@ toolDefinitions =
           , "content"      .= propMaxLength "string" "The memory content" maxMemoryContentBytes
           , "summary"      .= propMaxLength "string" "Optional short summary" maxMemorySummaryBytes
           , "memory_type"  .= propEnum "string" "short_term or long_term" ["short_term", "long_term"]
-          , "importance"   .= prop "integer" "1-10, default 5"
+          , "importance"   .= prop "integer" "1 (lowest) to 10 (highest), default 5"
           , "metadata"     .= prop "object" "Optional metadata JSON object for structured annotations"
           , "expires_at"   .= prop "string" "ISO 8601 expiration time"
           , "source"       .= prop "string" "Provenance: user_stated, inferred, tool_output, web_search"
@@ -70,7 +72,7 @@ toolDefinitions =
                       , "content"      .= propMaxLength "string" "The memory content" maxMemoryContentBytes
                       , "summary"      .= propMaxLength "string" "Optional short summary" maxMemorySummaryBytes
                       , "memory_type"  .= propEnum "string" "short_term or long_term" ["short_term", "long_term"]
-                      , "importance"   .= prop "integer" "1-10, default 5"
+                      , "importance"   .= prop "integer" "1 (lowest) to 10 (highest), default 5"
                       , "metadata"     .= prop "object" "Optional metadata JSON object"
                       , "expires_at"   .= prop "string" "ISO 8601 expiration time"
                       , "source"       .= prop "string" "Provenance"
@@ -95,7 +97,7 @@ toolDefinitions =
           , "memory_type"    .= propEnum "string" "Filter by type" ["short_term", "long_term"]
           , "tags"           .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
                                          "description" .= t "Filter by tags (any-match: returns memories with at least one of the given tags)"]
-          , "min_importance" .= prop "integer" "Minimum importance (1-10)"
+          , "min_importance" .= prop "integer" "Minimum importance threshold (1-10, where 10 is highest)"
           , "category_id"    .= prop "string" "Filter by category UUID"
           , "pinned_only"    .= prop "boolean" "If true, only return pinned memories"
           , "search_language" .= prop "string" "Language for query stemming (default 'english'). Use a PostgreSQL regconfig name."
@@ -119,7 +121,7 @@ toolDefinitions =
           [ "memory_id"   .= prop "string" "UUID of the memory to update"
           , "content"     .= propMaxLength "string" "New content" maxMemoryContentBytes
           , "summary"     .= propMaxLength "string" "New summary (null to clear)" maxMemorySummaryBytes
-          , "importance"  .= prop "integer" "New importance (1-10)"
+          , "importance"  .= prop "integer" "New importance, 1 (lowest) to 10 (highest)"
           , "memory_type" .= propEnum "string" "New type" ["short_term", "long_term"]
           , "metadata"    .= prop "object" "New metadata JSON object"
           , "expires_at"  .= prop "string" "ISO 8601 expiration time (null to clear)"
@@ -160,7 +162,7 @@ toolDefinitions =
           , "name"         .= propMaxLength "string" "Project name" maxNameBytes
           , "description"  .= propMaxLength "string" "Project description" maxDescriptionBytes
           , "parent_id"    .= prop "string" "Parent project UUID for sub-projects"
-          , "priority"     .= prop "integer" "1-10, default 5"
+          , "priority"     .= prop "integer" "1 (lowest) to 10 (highest), default 5"
           , "metadata"     .= prop "object" "Optional metadata JSON object"
           ]
       , "required" .= [t "workspace_id", t "name"]
@@ -190,7 +192,7 @@ toolDefinitions =
           , "title"       .= propMaxLength "string" "Task title" maxNameBytes
           , "description" .= propMaxLength "string" "Task description" maxDescriptionBytes
           , "parent_id"   .= prop "string" "Parent task UUID for sub-tasks"
-          , "priority"    .= prop "integer" "1-10, default 5"
+          , "priority"    .= prop "integer" "1 (lowest) to 10 (highest), default 5"
           , "metadata"    .= prop "object" "Optional metadata JSON object"
           , "due_at"      .= prop "string" "ISO 8601 due date"
           ]
@@ -204,7 +206,7 @@ toolDefinitions =
           , "project_id" .= prop "string" "UUID of the project (use this or workspace_id)"
           , "status"     .= propEnum "string" "Filter by status"
               ["todo", "in_progress", "blocked", "done", "cancelled"]
-          , "priority"   .= prop "integer" "Filter by priority (1-10)"
+          , "priority"   .= prop "integer" "Filter by exact priority value (1-10, where 10 is highest)"
           , "created_after"  .= prop "string" "Filter for tasks created on or after this ISO 8601 timestamp"
           , "created_before" .= prop "string" "Filter for tasks created on or before this ISO 8601 timestamp"
           , "updated_after"  .= prop "string" "Filter for tasks updated on or after this ISO 8601 timestamp"
@@ -225,7 +227,7 @@ toolDefinitions =
           , "parent_id"   .= prop "string" "New parent task UUID (null to clear)"
           , "status"      .= propEnum "string" "New status"
               ["todo", "in_progress", "blocked", "done", "cancelled"]
-          , "priority"    .= prop "integer" "New priority (1-10)"
+          , "priority"    .= prop "integer" "New priority, 1 (lowest) to 10 (highest)"
           , "metadata"    .= prop "object" "New metadata JSON object"
           , "due_at"      .= prop "string" "ISO 8601 due date (null to clear)"
           ]
@@ -292,7 +294,7 @@ toolDefinitions =
               , "properties" .= object
                   [ "memory_type" .= propEnum "string" "Filter by memory type" ["short_term", "long_term"]
                   , "tags" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"], "description" .= t "Require at least one matching tag"]
-                  , "min_importance" .= prop "integer" "Minimum importance (1-10)"
+                  , "min_importance" .= prop "integer" "Minimum importance threshold (1-10, where 10 is highest)"
                   , "pinned_only" .= prop "boolean" "If true, only include pinned memories"
                   ]
               ]
@@ -384,7 +386,7 @@ toolDefinitions =
           , "parent_id"   .= prop "string" "New parent project UUID (null to clear)"
           , "status"      .= propEnum "string" "New status"
               ["active", "paused", "completed", "archived"]
-          , "priority"    .= prop "integer" "New priority (1-10)"
+          , "priority"    .= prop "integer" "New priority, 1 (lowest) to 10 (highest)"
           , "metadata"    .= prop "object" "New metadata JSON object"
           ]
       , "required" .= [t "project_id"]
@@ -412,6 +414,15 @@ toolDefinitions =
             , "properties" .= object
                     [ "task_id" .= prop "string" "UUID of the task"
                     , "extra_context" .= prop "boolean" "If true, include project and workspace memories in addition to task-linked memories"
+                    ]
+            , "required" .= [t "task_id"]
+            ]
+
+    , mkTool "context_get" "Get relevant memories for a task, automatically collecting from the task itself, all ancestor projects, and the workspace. Use detail_level to control how many memories per scope: light (2 each), medium (5 each, default), heavy (10 each). Returns memories grouped by scope, ranked by importance. Use this before starting work on a task to load relevant context." $ object
+            [ "type" .= t "object"
+            , "properties" .= object
+                    [ "task_id"      .= prop "string" "UUID of the task"
+                    , "detail_level" .= propEnum "string" "How many memories per scope: light=2, medium=5 (default), heavy=10" ["light", "medium", "heavy"]
                     ]
             , "required" .= [t "task_id"]
             ]
@@ -515,7 +526,7 @@ toolDefinitions =
               ["short_term", "long_term"]
           , "max_age_hours"  .= prop "integer" "Max age in hours before cleanup (upsert only)"
           , "max_count"      .= prop "integer" "Max memory count before cleanup (upsert only)"
-          , "min_importance" .= prop "integer" "Minimum importance to keep, 1-10 (required for upsert)"
+          , "min_importance" .= prop "integer" "Minimum importance to keep, 1 (lowest) to 10 (highest) (required for upsert)"
           , "enabled"        .= prop "boolean" "Whether the policy is active (required for upsert)"
           , "limit"          .= prop "integer" "Max results for list (default 50)"
           , "offset"         .= prop "integer" "Offset for list pagination (default 0)"
@@ -629,7 +640,7 @@ toolDefinitions =
                                         [ "id"          .= prop "string" "UUID of the memory to update"
                                         , "content"     .= propMaxLength "string" "New content" maxMemoryContentBytes
                                         , "summary"     .= propMaxLength "string" "New summary (null to clear)" maxMemorySummaryBytes
-                                        , "importance"  .= prop "integer" "New importance (1-10)"
+                                        , "importance"  .= prop "integer" "New importance, 1 (lowest) to 10 (highest)"
                                         , "memory_type" .= propEnum "string" "New type" ["short_term", "long_term"]
                                         , "metadata"    .= prop "object" "New metadata JSON object"
                                         , "expires_at"  .= prop "string" "ISO 8601 expiration time (null to clear)"
@@ -658,7 +669,7 @@ toolDefinitions =
                                         , "parent_id"   .= prop "string" "New parent project UUID (null to clear)"
                                         , "status"      .= propEnum "string" "New status"
                                             ["active", "paused", "completed", "archived"]
-                                        , "priority"    .= prop "integer" "New priority (1-10)"
+                                        , "priority"    .= prop "integer" "New priority, 1 (lowest) to 10 (highest)"
                                         , "metadata"    .= prop "object" "New metadata JSON object"
                                         ]
                                     , "required" .= [t "id"]
@@ -683,7 +694,7 @@ toolDefinitions =
                                         , "parent_id"   .= prop "string" "New parent task UUID (null to clear)"
                                         , "status"      .= propEnum "string" "New status"
                                             ["todo", "in_progress", "blocked", "done", "cancelled"]
-                                        , "priority"    .= prop "integer" "New priority (1-10)"
+                                        , "priority"    .= prop "integer" "New priority, 1 (lowest) to 10 (highest)"
                                         , "metadata"    .= prop "object" "New metadata JSON object"
                                         , "due_at"      .= prop "string" "ISO 8601 due date (null to clear)"
                                         ]
@@ -746,6 +757,66 @@ toolDefinitions =
           ]
       , "required" .= [t "view_id"]
       ]
+
+  -- ================================================================
+  -- WORKFLOW TOOLS — composite operations for common task/project flows
+  -- ================================================================
+
+  , mkTool "task_start" "Begin work on a task: sets status to in_progress and loads relevant context (task-linked, project-ancestor, and workspace memories). Use this at the start of every work session on a task instead of manually calling task_update + context_get." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "task_id"      .= prop "string" "UUID of the task to start"
+          , "detail_level" .= propEnum "string" "How many memories per scope: light=2, medium=5 (default), heavy=10" ["light", "medium", "heavy"]
+          ]
+      , "required" .= [t "task_id"]
+      ]
+
+  , mkTool "task_finish" "Finish working on a task: optionally records notes as a linked memory, then updates task status. Use status 'done' for completion, 'blocked' when stuck, 'cancelled' to abandon. Notes are stored as a long_term memory linked to the task." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "task_id" .= prop "string" "UUID of the task"
+          , "status"  .= propEnum "string" "New task status" ["done", "blocked", "cancelled"]
+          , "notes"   .= prop "string" "Optional work notes to save as a linked memory (findings, decisions, blockers)"
+          , "tags"    .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                                  "description" .= t "Tags for the notes memory (e.g. decision, blocker, finding)"]
+          ]
+      , "required" .= [t "task_id", t "status"]
+      ]
+
+  , mkTool "project_spec" "Create a project and its initial tasks in one call. Use this to set up a structured work plan from a specification. Tasks are created under the new project in the order given." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "workspace_id" .= prop "string" "UUID of the workspace"
+          , "name"         .= propMaxLength "string" "Project name" maxNameBytes
+          , "description"  .= propMaxLength "string" "Project description" maxDescriptionBytes
+          , "priority"     .= prop "integer" "Project priority, 1 (lowest) to 10 (highest), default 5"
+          , "tasks"        .= object
+              [ "type" .= t "array"
+              , "description" .= t "Tasks to create under the project"
+              , "minItems" .= (1 :: Int)
+              , "maxItems" .= (50 :: Int)
+              , "items" .= object
+                  [ "type" .= t "object"
+                  , "properties" .= object
+                      [ "title"       .= propMaxLength "string" "Task title" maxNameBytes
+                      , "description" .= propMaxLength "string" "Task description" maxDescriptionBytes
+                      , "priority"    .= prop "integer" "Task priority, 1 (lowest) to 10 (highest), default 5"
+                      ]
+                  , "required" .= [t "title"]
+                  ]
+              ]
+          ]
+      , "required" .= [t "workspace_id", t "name", t "tasks"]
+      ]
+
+  , mkTool "project_archive" "Archive a completed project: sets status to archived, optionally records a summary as a linked long_term memory. Use this when a project is done and you want to preserve a concise record of outcomes." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "project_id" .= prop "string" "UUID of the project to archive"
+          , "summary"    .= prop "string" "Optional project summary to save as a linked long_term memory"
+          ]
+      , "required" .= [t "project_id"]
+      ]
   ]
 
 ------------------------------------------------------------------------
@@ -787,6 +858,7 @@ data ToolCall
   | TaskCreate     CreateTask
   | TaskGet        UUID
     | TaskOverviewCall UUID Bool
+    | ContextGetCall UUID ContextDetailLevel
   | TaskDelete     UUID
     | TaskRestore    UUID
     | TaskPurge      UUID
@@ -855,7 +927,19 @@ data ToolCall
   | SavedViewPurge UUID
   | SavedViewExecute UUID (Maybe Int) (Maybe Int) (Maybe Bool) -- view_id, limit, offset, detail
   | ProjectOverviewCall UUID
+  -- Workflow composite tools
+  | TaskStartCall UUID ContextDetailLevel
+  | TaskFinishCall UUID TaskStatus (Maybe Text) (Maybe [Text])   -- task_id, status, notes, tags
+  | ProjectSpecCall UUID Text (Maybe Text) (Maybe Int32) [SpecTask] -- ws_id, name, desc, priority, tasks
+  | ProjectArchiveCall UUID (Maybe Text)                         -- project_id, summary
   deriving (Show, Eq)
+
+-- | A task stub for project_spec — just the fields needed to create a task.
+data SpecTask = SpecTask
+  { stTitle       :: Text
+  , stDescription :: Maybe Text
+  , stPriority    :: Maybe Int32
+  } deriving (Show, Eq)
 
 -- | Parse raw JSON-RPC params (containing "name" and "arguments") into
 -- a typed ToolCall, validating all fields against HMem.Types.
@@ -937,6 +1021,7 @@ parseToolCall name args = case name of
     "task_create"              -> TaskCreate <$> parse args
     "task_get"                 -> TaskGet <$> need "task_id"
     "task_overview"            -> TaskOverviewCall <$> need "task_id" <*> (maybe False id <$> opt "extra_context")
+    "context_get"              -> ContextGetCall <$> need "task_id" <*> (maybe ContextMedium id <$> opt "detail_level")
     "task_list"                -> TaskList <$> parse args
     "task_update"              -> TaskUpdate <$> need "task_id" <*> parse args
     "task_dependency"          -> do
@@ -1001,6 +1086,17 @@ parseToolCall name args = case name of
     "saved_view_update"         -> SavedViewUpdate <$> need "view_id" <*> parse args
     "saved_view_execute"        -> SavedViewExecute <$> need "view_id" <*> opt "limit" <*> opt "offset" <*> opt "detail"
     "project_overview"          -> ProjectOverviewCall <$> need "project_id"
+    -- Workflow composite tools
+    "task_start"                -> TaskStartCall <$> need "task_id" <*> (maybe ContextMedium id <$> opt "detail_level")
+    "task_finish"               -> TaskFinishCall <$> need "task_id" <*> need "status" <*> opt "notes" <*> opt "tags"
+    "project_spec"              -> do
+        wsId <- need "workspace_id"
+        pName <- need "name"
+        pDesc <- opt "description"
+        pPri  <- opt "priority"
+        tasks <- parseSpecTasks args
+        Right $ ProjectSpecCall wsId pName pDesc pPri tasks
+    "project_archive"           -> ProjectArchiveCall <$> need "project_id" <*> opt "summary"
     _                           -> Left $ "Unknown tool: " <> T.unpack name
   where
     parse :: FromJSON a => Value -> Either String a
@@ -1033,6 +1129,18 @@ parseBatchUpdateItems = parseEither $ withObject "args" $ \o -> do
       uid <- o .: "id"
       upd <- parseJSON (Object o)
       pure (uid, upd)
+
+-- | Parse the tasks array from project_spec arguments.
+parseSpecTasks :: Value -> Either String [SpecTask]
+parseSpecTasks = parseEither $ withObject "args" $ \o -> do
+  items <- o .: "tasks" :: Parser [Value]
+  mapM parseTask items
+  where
+    parseTask = withObject "SpecTask" $ \o -> do
+      title <- o .: "title"
+      desc  <- o .:? "description"
+      pri   <- o .:? "priority"
+      pure SpecTask { stTitle = title, stDescription = desc, stPriority = pri }
 
 ------------------------------------------------------------------------
 -- Tool call dispatch
@@ -1102,6 +1210,7 @@ validateToolCall = \case
         let tq' = clampTaskListQuery tq
         in TaskList tq' <$ firstValidationError (validateTaskListQuery tq')
     TaskOverviewCall tid extraContext -> Right $ TaskOverviewCall tid extraContext
+    ContextGetCall tid level -> Right $ ContextGetCall tid level
     TaskUpdate tid ut -> TaskUpdate tid ut <$ firstValidationError (validateUpdateTaskInput ut)
     CategoryCreate cc -> CategoryCreate cc <$ firstValidationError (validateCreateMemoryCategoryInput cc)
     CategoryList mwid ml mo -> Right $ CategoryList mwid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
@@ -1158,6 +1267,17 @@ validateToolCall = \case
     SavedViewList wid ml mo -> Right $ SavedViewList wid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
     SavedViewUpdate vid usv -> SavedViewUpdate vid usv <$ firstValidationError (validateUpdateSavedViewInput usv)
     SavedViewExecute vid ml mo md -> Right $ SavedViewExecute vid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo) md
+    -- Workflow composite tools — lightweight validation
+    TaskStartCall tid level -> Right $ TaskStartCall tid level
+    TaskFinishCall tid status mNotes mTags -> Right $ TaskFinishCall tid status mNotes mTags
+    ProjectSpecCall wsId pName pDesc pPri tasks
+        | null tasks -> Left "project_spec: tasks must not be empty"
+        | length tasks > 50 -> Left "project_spec: tasks must contain at most 50 items"
+        | T.null (T.strip pName) -> Left "project_spec: name must not be blank"
+        | any (T.null . T.strip . (.stTitle)) tasks -> Left "project_spec: all tasks must have non-blank titles"
+        | otherwise -> Right $ ProjectSpecCall wsId pName pDesc (clampMaybe 1 10 <$> pPri)
+            [st { stPriority = clampMaybe 1 10 <$> st.stPriority } | st <- tasks]
+    ProjectArchiveCall pid mSummary -> Right $ ProjectArchiveCall pid mSummary
     other -> Right other
 
 -- | Whitelist of valid PostgreSQL full-text search configurations.
@@ -1313,6 +1433,13 @@ executeToolCall mgr base mApiKey = \case
     TaskOverviewCall tid extraContext ->
         getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/overview" <>
           buildQuery [("extra_context", Just $ if extraContext then "true" else "false")])
+    ContextGetCall tid level ->
+        let levelStr = case level of
+              ContextLight  -> "light"
+              ContextMedium -> "medium"
+              ContextHeavy  -> "heavy"
+        in getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/context" <>
+             buildQuery [("detail_level", Just levelStr)])
     TaskDelete tid      -> delJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
     TaskRestore tid     -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/restore") (object [])
     TaskPurge tid       -> delJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/purge")
@@ -1473,6 +1600,156 @@ executeToolCall mgr base mApiKey = \case
                             ]) (object [])
     ProjectOverviewCall pid -> getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/overview")
 
+    -- ================================================================
+    -- WORKFLOW COMPOSITE TOOLS
+    -- These chain multiple HTTP calls to implement common task/project
+    -- workflows in a single MCP tool invocation.
+    -- ================================================================
+
+    TaskStartCall tid level -> do
+      -- 1. Update task status to in_progress (best-effort; may already be in_progress)
+      _ <- rawPutJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+             (object ["status" .= ("in_progress" :: Text)])
+      -- 2. Load context for the task
+      let levelStr = case level of
+            ContextLight  -> "light"
+            ContextMedium -> "medium"
+            ContextHeavy  -> "heavy"
+      getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/context" <>
+        buildQuery [("detail_level", Just levelStr)])
+
+    TaskFinishCall tid status mNotes mTags -> do
+      -- 1. If notes provided, create a linked memory
+      case mNotes of
+        Just notes | not (T.null (T.strip notes)) -> do
+          -- First get the task to find workspace_id
+          taskResult <- rawGetJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+          case taskResult of
+            Right taskVal -> do
+              let mWsId = case taskVal of
+                    Object o -> case KM.lookup "workspace_id" o of
+                      Just (String ws) -> Just ws
+                      _                -> Nothing
+                    _ -> Nothing
+              case mWsId of
+                Just wsId -> do
+                  -- Create the notes memory
+                  let memBody = object
+                        [ "workspace_id" .= wsId
+                        , "content"      .= notes
+                        , "memory_type"  .= ("long_term" :: Text)
+                        , "importance"   .= (6 :: Int)
+                        , "source"       .= ("inferred" :: Text)
+                        , "tags"         .= maybe ["task-notes" :: Text] id mTags
+                        ]
+                  memResult <- rawPostJSON mgr base mApiKey "/api/v1/memories" memBody
+                  -- Link memory to task
+                  case memResult of
+                    Right memVal -> do
+                      let mMemId = case memVal of
+                            Object o -> case KM.lookup "id" o of
+                              Just (String mid) -> Just mid
+                              _                 -> Nothing
+                            _ -> Nothing
+                      case mMemId of
+                        Just memId ->
+                          void $ rawPostJSON mgr base mApiKey
+                            ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
+                            (object ["memory_id" .= memId])
+                        Nothing -> pure ()
+                    Left _ -> pure ()  -- memory creation failed; still update status
+                Nothing -> pure ()  -- couldn't find workspace_id; still update status
+            Left _ -> pure ()  -- task fetch failed; still update status
+        _ -> pure ()
+      -- 2. Update task status
+      putJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+        (object ["status" .= status])
+
+    ProjectSpecCall wsId pName pDesc pPri tasks -> do
+      -- 1. Create the project
+      let projBody = object $ filter ((/= Null) . snd)
+            [ "workspace_id" .= wsId
+            , "name"         .= pName
+            , "description"  .= pDesc
+            , "priority"     .= pPri
+            ]
+      projResult <- rawPostJSON mgr base mApiKey "/api/v1/projects" projBody
+      case projResult of
+        Left err -> pure $ mcpErrorCode "PROJECT_CREATE_FAILED" err
+        Right projVal -> do
+          let mProjId = case projVal of
+                Object o -> case KM.lookup "id" o of
+                  Just (String pid) -> Just pid
+                  _                 -> Nothing
+                _ -> Nothing
+          case mProjId of
+            Nothing -> pure $ mcpErrorCode "PROJECT_CREATE_FAILED" "Could not extract project ID"
+            Just projId -> do
+              -- 2. Create each task under the project
+              taskResults <- mapM (\st -> do
+                let taskBody = object $ filter ((/= Null) . snd)
+                      [ "workspace_id" .= wsId
+                      , "project_id"   .= projId
+                      , "title"        .= st.stTitle
+                      , "description"  .= st.stDescription
+                      , "priority"     .= st.stPriority
+                      ]
+                rawPostJSON mgr base mApiKey "/api/v1/tasks" taskBody
+                ) tasks
+              let createdTasks = [v | Right v <- taskResults]
+                  failedCount  = length [() | Left _ <- taskResults]
+                  result = object
+                    [ "project" .= projVal
+                    , "tasks"   .= createdTasks
+                    , "tasks_failed" .= failedCount
+                    ]
+              pure $ mcpResult (encode result)
+
+    ProjectArchiveCall pid mSummary -> do
+      -- 1. Get project to find workspace_id
+      projResult <- rawGetJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
+      case projResult of
+        Left err -> pure $ mcpErrorCode "PROJECT_NOT_FOUND" err
+        Right projVal -> do
+          -- 2. If summary provided, create a linked memory
+          case mSummary of
+            Just summary | not (T.null (T.strip summary)) -> do
+              let mWsId = case projVal of
+                    Object o -> case KM.lookup "workspace_id" o of
+                      Just (String ws) -> Just ws
+                      _                -> Nothing
+                    _ -> Nothing
+              case mWsId of
+                Just wsId -> do
+                  let memBody = object
+                        [ "workspace_id" .= wsId
+                        , "content"      .= summary
+                        , "memory_type"  .= ("long_term" :: Text)
+                        , "importance"   .= (7 :: Int)
+                        , "source"       .= ("inferred" :: Text)
+                        , "tags"         .= (["project-summary" :: Text])
+                        ]
+                  memResult <- rawPostJSON mgr base mApiKey "/api/v1/memories" memBody
+                  case memResult of
+                    Right memVal -> do
+                      let mMemId = case memVal of
+                            Object o -> case KM.lookup "id" o of
+                              Just (String mid) -> Just mid
+                              _                 -> Nothing
+                            _ -> Nothing
+                      case mMemId of
+                        Just memId ->
+                          void $ rawPostJSON mgr base mApiKey
+                            ("/api/v1/projects/" <> uuidPath pid <> "/memories")
+                            (object ["memory_id" .= memId])
+                        Nothing -> pure ()
+                    Left _ -> pure ()
+                Nothing -> pure ()
+            _ -> pure ()
+          -- 3. Archive the project
+          putJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
+            (object ["status" .= ("archived" :: Text)])
+
 ------------------------------------------------------------------------
 -- Typed HTTP helpers
 ------------------------------------------------------------------------
@@ -1536,6 +1813,39 @@ httpText mgr mApiKey acceptHeader httpMethod url mbody = do
         Right v  -> pure v
         Left (e :: SomeException) -> pure $ mcpErrorCode "CONNECTION_ERROR" (T.pack $ show e)
 
+-- | Raw HTTP helpers for composite tools — return Either instead of MCP-wrapped values.
+-- These allow workflow handlers to chain calls and build combined responses.
+rawHttpJSON' :: Manager -> Maybe Text -> String -> String -> Maybe BL.ByteString -> IO (Either Text Value)
+rawHttpJSON' mgr mApiKey httpMethod url mbody = do
+  result <- try $ do
+    initReq <- parseRequest url
+    let authHeaders = maybe [] (\key -> [("Authorization", "Bearer " <> TE.encodeUtf8 key)]) mApiKey
+    let req = initReq
+          { method         = fromString httpMethod
+          , requestHeaders = [("Content-Type", "application/json")] <> authHeaders
+          , requestBody    = maybe (RequestBodyBS mempty) RequestBodyLBS mbody
+          }
+    resp <- httpLbs req mgr
+    let code = statusCode (responseStatus resp)
+        body = responseBody resp
+    if code >= 200 && code < 300
+      then case eitherDecode body of
+        Right v  -> pure (Right v)
+        Left _   -> pure (Right (String (decodeUtf8 body)))
+      else pure (Left (decodeUtf8 body))
+  case result of
+    Right v  -> pure v
+    Left (e :: SomeException) -> pure (Left (T.pack $ show e))
+
+rawGetJSON :: Manager -> String -> Maybe Text -> String -> IO (Either Text Value)
+rawGetJSON mgr base mApiKey path = rawHttpJSON' mgr mApiKey "GET" (base <> path) Nothing
+
+rawPostJSON :: ToJSON a => Manager -> String -> Maybe Text -> String -> a -> IO (Either Text Value)
+rawPostJSON mgr base mApiKey path body = rawHttpJSON' mgr mApiKey "POST" (base <> path) (Just (encode body))
+
+rawPutJSON :: ToJSON a => Manager -> String -> Maybe Text -> String -> a -> IO (Either Text Value)
+rawPutJSON mgr base mApiKey path body = rawHttpJSON' mgr mApiKey "PUT" (base <> path) (Just (encode body))
+
 workspaceVisualizationAccept :: WorkspaceVisualizationFormat -> BS8.ByteString
 workspaceVisualizationAccept format = case format of
     WorkspaceVisualizationSvg -> "image/svg+xml"
@@ -1545,9 +1855,34 @@ workspaceVisualizationAccept format = case format of
 -- MCP content helpers
 ------------------------------------------------------------------------
 
+-- | Wrap an API response for MCP, stripping verbose fields to reduce
+-- LLM context consumption.
 mcpResult :: BL.ByteString -> Value
-mcpResult body = object
-  [ "content" .= [object ["type" .= ("text" :: Text), "text" .= decodeUtf8 body]] ]
+mcpResult body =
+  let trimmed = case eitherDecode body of
+        Right v  -> encode (trimForLLM v)
+        Left _   -> body   -- not JSON; pass through as-is
+  in object
+       [ "content" .= [object ["type" .= ("text" :: Text), "text" .= decodeUtf8 trimmed]] ]
+
+-- | Strip fields that are noisy for LLM context but not actionable.
+-- Removes: workspace_id, created_at, updated_at, last_accessed_at,
+-- access_count, fts_language, metadata (when empty {}), confidence
+-- (when null), source (when null), expires_at (when null),
+-- dependency_count, memory_link_count.
+trimForLLM :: Value -> Value
+trimForLLM (Object o) =
+  let cleaned = KM.filterWithKey keepField o
+      keepField k v = not $ k `elem` dropKeys || isNullDrop k v || isEmptyMetadata k v
+      dropKeys =
+        [ "workspace_id", "created_at", "updated_at", "last_accessed_at"
+        , "access_count", "fts_language", "dependency_count", "memory_link_count"
+        ]
+      isNullDrop k v = v == Null && k `elem` ["confidence", "source", "expires_at", "completed_at", "due_at", "parent_id", "project_id", "description", "gh_owner", "gh_repo", "path"]
+      isEmptyMetadata k v = k == "metadata" && v == Object mempty
+  in Object (KM.map trimForLLM cleaned)
+trimForLLM (Array arr) = Array (fmap trimForLLM arr)
+trimForLLM v = v
 
 mcpError :: Text -> Value
 mcpError msg = object
@@ -1576,7 +1911,7 @@ t = Prelude.id
 -- (new required fields, renamed tools, changed semantics).
 -- Adding new optional fields or new tools does not require a bump.
 toolApiVersion :: Text
-toolApiVersion = "0.3.0"
+toolApiVersion = "0.4.0"
 
 mkTool :: Text -> Text -> Value -> Value
 mkTool name desc inputSchema = object

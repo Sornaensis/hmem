@@ -35,6 +35,9 @@ module HMem.Types
   , ContextMemoryScope(..)
   , ConnectedMemorySummary(..)
   , TaskOverview(..)
+  , ContextDetailLevel(..)
+  , contextDetailLimit
+  , ContextInfo(..)
 
     -- * Task types
   , TaskStatus(..)
@@ -932,6 +935,47 @@ data TaskOverview = TaskOverview
 instance ToJSON TaskOverview where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON TaskOverview where
+  parseJSON  = genericParseJSON jsonOptions
+
+------------------------------------------------------------------------
+-- Context info (light / medium / heavy memory retrieval)
+------------------------------------------------------------------------
+
+-- | Detail level controlling how many memories per scope are returned.
+data ContextDetailLevel = ContextLight | ContextMedium | ContextHeavy
+  deriving (Show, Eq, Ord, Bounded, Enum, Generic)
+
+instance ToJSON ContextDetailLevel where
+  toJSON ContextLight  = String "light"
+  toJSON ContextMedium = String "medium"
+  toJSON ContextHeavy  = String "heavy"
+
+instance FromJSON ContextDetailLevel where
+  parseJSON = withText "ContextDetailLevel" $ \case
+    "light"  -> pure ContextLight
+    "medium" -> pure ContextMedium
+    "heavy"  -> pure ContextHeavy
+    _        -> fail "Invalid context detail level (expected light, medium, or heavy)"
+
+-- | How many memories per scope for each detail level.
+contextDetailLimit :: ContextDetailLevel -> Int
+contextDetailLimit ContextLight  = 2
+contextDetailLimit ContextMedium = 5
+contextDetailLimit ContextHeavy  = 10
+
+-- | Aggregated context information for a task, with memories grouped
+-- by scope and limited according to the detail level.
+data ContextInfo = ContextInfo
+  { task              :: Task
+  , detailLevel       :: ContextDetailLevel
+  , taskMemories      :: [ConnectedMemorySummary]
+  , projectMemories   :: [ConnectedMemorySummary]  -- from all ancestor projects
+  , workspaceMemories :: [ConnectedMemorySummary]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ContextInfo where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON ContextInfo where
   parseJSON  = genericParseJSON jsonOptions
 
 ------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 module HMem.DB.Overview
   ( getTaskOverview
+  , getContextInfo
   , getWorkspaceVisualization
   ) where
 
@@ -21,6 +22,7 @@ import Rel8 hiding (filter, null)
 
 import HMem.DB.Memory qualified as Mem
 import HMem.DB.Pool (runSession)
+import HMem.DB.Project qualified as Proj
 import HMem.DB.Schema
 import HMem.DB.Task qualified as Task
 import HMem.Types
@@ -59,6 +61,51 @@ getTaskOverview pool taskId extraContext = do
         , dependencies = dependencies
         , connectedMemories = connectedMemories
         }
+
+-- | Retrieve context info for a task, with memories grouped by scope
+-- (task, project ancestors, workspace) and limited per scope according
+-- to the detail level.
+getContextInfo
+  :: Pool Hasql.Connection -> UUID -> ContextDetailLevel -> IO (Maybe ContextInfo)
+getContextInfo pool taskId level = do
+  mTask <- Task.getTask pool taskId
+  case mTask of
+    Nothing -> pure Nothing
+    Just task -> do
+      let n = contextDetailLimit level
+
+      -- Task-linked memories (top N by pinned, importance, recency)
+      taskMems <- Mem.getTaskMemories pool taskId
+      let taskCandidates = map (memoryCandidateFromMemory ScopeTask) taskMems
+          taskSummaries  = take n $ summarizeCandidates taskCandidates
+
+      -- Walk parent project chain collecting memories
+      projCandidates <- collectProjectMemories pool task.projectId []
+      let projSummaries = take n $ summarizeCandidates projCandidates
+
+      -- Workspace-level memories (top N)
+      wsCandidates <- listWorkspaceMemoryCandidates pool task.workspaceId
+      let wsSummaries = take n $ map toConnectedMemorySummary wsCandidates
+
+      pure $ Just ContextInfo
+        { task              = task
+        , detailLevel       = level
+        , taskMemories      = taskSummaries
+        , projectMemories   = projSummaries
+        , workspaceMemories = wsSummaries
+        }
+
+-- | Walk the project parent chain, collecting memory candidates from
+-- each ancestor project.
+collectProjectMemories
+  :: Pool Hasql.Connection -> Maybe UUID -> [MemoryCandidate] -> IO [MemoryCandidate]
+collectProjectMemories _pool Nothing acc = pure acc
+collectProjectMemories pool (Just projId) acc = do
+  mems <- Mem.getProjectMemories pool projId
+  let candidates = map (memoryCandidateFromMemory ScopeProject) mems
+  mProj <- Proj.getProject pool projId
+  let parentId = mProj >>= (.parentId)
+  collectProjectMemories pool parentId (acc <> candidates)
 
 getWorkspaceVisualization
   :: Pool Hasql.Connection

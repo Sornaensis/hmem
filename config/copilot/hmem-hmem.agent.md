@@ -49,28 +49,40 @@ Reusable filtered queries over workspace data.
 - `saved_view_create`, `saved_view_get`, `saved_view_list`, `saved_view_update`, `saved_view_execute`
 - Lifecycle: `entity_lifecycle` (entity_type: saved_view, action: delete/restore/purge)
 
+### Workflow Tools (Composite)
+These combine multiple steps into a single call. Prefer them for common task/project work.
+- `task_start` — Sets task to in_progress + loads context (task, project, workspace memories). Use at the start of every work session.
+- `task_finish` — Optionally records notes as a linked memory, then updates task status (done/blocked/cancelled).
+- `project_spec` — Creates a project and its initial tasks in one call.
+- `project_archive` — Archives a project, optionally recording a summary as a linked memory.
+- `context_get` — Loads grouped context for a task without changing its status (light/medium/heavy detail).
+
 ### Cleanup & Activity
 - `cleanup_run`, `cleanup_policy` (action: list/upsert)
 - `activity_timeline`
 
 ## Workflow Patterns
 
-### Starting a new project
+### Specifying a new project
 1. Ensure a workspace exists (`workspace_list` / `workspace_register`)
-2. Create the project (`project_create`)
-3. Break work into tasks (`task_create` with project_id)
-4. Add any relevant existing memories (`link_memory` with entity_type: project)
+2. Create the project with tasks in one call (`project_spec`)
+3. Add dependencies between tasks if needed (`task_dependency`)
+4. Link any pre-existing relevant memories (`link_memory` with entity_type: project)
 
-### Capturing knowledge during work
-1. Search for existing related memories (`memory_search`)
-2. Create or update memories as appropriate
-3. Link new memories to the relevant task/project
-4. Tag and categorize for future retrieval
+### Working on a task (implementation)
+1. Start the task (`task_start` — sets in_progress + loads context)
+2. Do the work, referencing the returned context
+3. Store any new knowledge as memories (`memory_create`)
+4. Link new memories to the task (`link_memory` with entity_type: task)
+5. Finish the task (`task_finish` — records notes + sets done/blocked/cancelled)
 
 ### Reviewing status
 1. List active projects (`project_list` with status=active)
 2. Use `project_overview` for a full summary of a project's tasks, subprojects, and linked memories
-3. List tasks for a project (`task_list` with project_id), or use `task_overview` for a single task with full context
+3. Use `task_overview` or `context_get` for task-level detail
 4. Use `workspace_visualization` to get an SVG or JSON graph of the entire workspace
 5. Check activity timeline for recent changes
-6. Search memories for context on blocked items
+
+### Archiving a completed project
+1. Ensure all tasks are done/cancelled
+2. Archive the project with a summary (`project_archive`)

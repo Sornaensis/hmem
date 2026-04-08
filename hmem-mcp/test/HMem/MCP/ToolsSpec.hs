@@ -145,7 +145,8 @@ spec = do
 
     it "parses memory_link" $ do
       let args = object
-            [ "source_id"     .= testUUID
+            [ "action"        .= ("create" :: Text)
+            , "source_id"     .= testUUID
             , "target_id"     .= testUUID2
             , "relation_type" .= ("related" :: Text)
             ]
@@ -176,13 +177,13 @@ spec = do
         other -> expectationFailure $ "Expected MemoryCreateBatch, got: " <> show other
 
     it "parses memory_link with action=create" $ do
-      let args = object [ "action" .= ("create" :: Text), "source_id" .= testUUID, "target_id" .= testUUID2, "relation_type" .= ("related_to" :: Text) ]
+      let args = object [ "action" .= ("create" :: Text), "source_id" .= testUUID, "target_id" .= testUUID2, "relation_type" .= ("related" :: Text) ]
       case parseToolCall "memory_link" args of
         Right (LinkMemories sid _) -> sid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected LinkMemories, got: " <> show other
 
     it "parses memory_link with action=remove" $ do
-      let args = object [ "action" .= ("remove" :: Text), "source_id" .= testUUID, "target_id" .= testUUID2, "relation_type" .= ("related_to" :: Text) ]
+      let args = object [ "action" .= ("remove" :: Text), "source_id" .= testUUID, "target_id" .= testUUID2, "relation_type" .= ("related" :: Text) ]
       case parseToolCall "memory_link" args of
         Right (MemoryUnlink sid tid _) -> do
           sid `shouldBe` parsedUUID

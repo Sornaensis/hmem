@@ -6,7 +6,7 @@ You have access to the hmem MCP server which provides persistent memory storage 
 
 ### Storing Memories
 - Use `memory_create` to store important information, decisions, patterns, and user preferences.
-- Use `memory_create_batch` when storing multiple related items.
+- Use `memory_create` with `items` array to batch-create multiple related memories.
 - Set `memory_type` to `long_term` for durable knowledge (architecture decisions, user preferences, patterns) and `short_term` for transient context.
 - Set `importance` from 1-10: 1-3 background trivia, 4-6 useful context, 7-8 important decisions, 9-10 critical constraints.
 - Always include 2-5 descriptive `tags` (lowercase, hyphenated).
@@ -19,49 +19,46 @@ You have access to the hmem MCP server which provides persistent memory storage 
 - Use `memory_list` to browse memories in a workspace.
 
 ### Organizing Memories
-- `memory_link` (action: create/remove) — Create or remove typed relationships: related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to.
-- `memory_set_tags` — Manage tags (use `memory_get` to see current tags).
-- Use `memory_update` with pinned=true/false to pin/unpin. Use `memory_update` with importance=N to adjust importance.
-- `memory_graph` — Explore relationship networks from a starting memory.
-- Categories: `category_create`, `category_list`, `link_memory` (entity_type: category), `list_entity_memories` (entity_type: category).
+- `memory_link` (action: create/remove/list/graph/find) — Create or remove typed relationships: related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to. Also list links, explore graph, or find by relation type.
+- `memory_set_tags` — Manage tags. Use `items` array for batch tag operations.
+- Use `memory_update` with pinned=true/false to pin/unpin. Use `memory_update` with `items` for batch updates.
+- Categories: `category` (action: create/get/list/update), `link_memory` (entity_type: category), `list_entity_memories` (entity_type: category).
 
 ## Task & Project Management
 
 ### Projects
 - `project_create` — Create with name, description, priority. Supports sub-projects via parent_id.
 - `project_list` — Filter by status: active, paused, completed, archived.
-- `project_update` — Change status, priority, description.
+- `project_update` — Change status, priority, description. Use `items` array for batch updates.
 - `link_memory` (entity_type: project) — Attach relevant knowledge to projects.
-- `entity_lifecycle` (entity_type: project) — Delete, restore, or purge projects.
+- `entity_lifecycle` (entity_type: project) — Delete, restore, or purge projects. Use `ids` array for batch delete.
 
 ### Tasks
 - `task_create` — Create with title, description, priority, optional due_at (ISO 8601), optional project_id.
 - `task_list` — Filter by workspace, project, or status: todo, in_progress, blocked, done, cancelled.
-- `task_update` — Move through statuses. Setting `done` auto-records completion time.
+- `task_update` — Move through statuses. Setting `done` auto-records completion time. Use `items` for batch updates.
 - `task_dependency` (action: add/remove) — Define task ordering.
 - `link_memory` (entity_type: task) — Attach context to tasks.
-- `entity_lifecycle` (entity_type: task) — Delete, restore, or purge tasks.
+- `entity_lifecycle` (entity_type: task) — Delete, restore, or purge tasks. Use `ids` array for batch delete.
 
 ### Workspaces
 All data is scoped to workspaces. Common operations:
 - `workspace_register` — Create a workspace (name required; optionally set path, gh_owner, gh_repo, type).
 - `workspace_list` / `workspace_get` — Browse and retrieve workspaces.
-- `workspace_group` (action: create/add_member/...) — Organize workspaces into groups.
 - `entity_lifecycle` (entity_type: workspace) — Delete, restore, or purge workspaces.
+
+## Saved Views
+- `saved_view` (action: create/get/list/update/execute) — Create and manage reusable query views.
 
 ## Cleanup
 - `cleanup_run` — Run cleanup on a workspace (applies configured policies).
-- `cleanup_policy` (action: list/upsert) — Configure auto-cleanup rules (max age, max count, min importance thresholds).
-
-## Activity
-- `activity_timeline` — View recent activity across the system or within a workspace.
 
 ## Best Practices
 1. **Search before creating** — Always check if similar memories exist.
 2. **Link related memories** — Use `supersedes` when newer info replaces older; `contradicts` for conflicts.
 3. **Keep workspaces organized** — One workspace per project/repo. Use groups for related workspaces.
 4. **Structure tasks** — Use projects -> tasks -> sub-tasks. Add dependencies for ordering.
-5. **Batch operations** — Use `memory_create_batch` for bulk storage.
+5. **Batch operations** — Use `items` array on `memory_create`, `memory_update`, `memory_set_tags`, `project_update`, `task_update` for bulk operations. Use `ids` array on `entity_lifecycle` for batch deletes.
 
 ## Workflow Tools
 

@@ -37,7 +37,7 @@ import HMem.Types
 
 toolDefinitions :: [Value]
 toolDefinitions =
-    [ mkTool "memory_create" "Create a new memory in a workspace. Use this for initial capture, then refine later with updates, tags, links, or categories." $ object
+    [ mkTool "memory_create" "Create one or more memories in a workspace. For batch creation, pass items[] array (max 100) instead of top-level fields. Use this for initial capture, then refine later with updates, tags, links, or categories." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
@@ -53,40 +53,12 @@ toolDefinitions =
           , "tags"         .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
                                        "description" .= t "Tags for categorization"]
           , "fts_language" .= prop "string" "Full-text search language (default 'english'). Use a PostgreSQL regconfig name, e.g. 'spanish', 'german', 'simple'."
+          , "items"        .= object ["type" .= t "array",
+                                       "description" .= t "Batch: array of memory objects (same fields as top-level, max 100). When present, top-level fields are ignored.",
+                                       "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
+                                       "items" .= object ["type" .= t "object"]]
           ]
-      , "required" .= [t "workspace_id", t "content", t "memory_type"]
-      ]
-
-    , mkTool "memory_create_batch" "Create multiple related memories in a single transaction. Prefer this when capturing several items from one source or conversation. Max 100 items per batch." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "memories" .= object
-              [ "type" .= t "array"
-              , "description" .= t "Array of memory objects to create (same schema as memory_create)"
-              , "minItems" .= (1 :: Int)
-              , "maxItems" .= (100 :: Int)
-              , "items" .= object
-                  [ "type" .= t "object"
-                  , "properties" .= object
-                      [ "workspace_id" .= prop "string" "UUID of the workspace"
-                      , "content"      .= propMaxLength "string" "The memory content" maxMemoryContentBytes
-                      , "summary"      .= propMaxLength "string" "Optional short summary" maxMemorySummaryBytes
-                      , "memory_type"  .= propEnum "string" "short_term or long_term" ["short_term", "long_term"]
-                      , "importance"   .= prop "integer" "1 (lowest) to 10 (highest), default 5"
-                      , "metadata"     .= prop "object" "Optional metadata JSON object"
-                      , "expires_at"   .= prop "string" "ISO 8601 expiration time"
-                      , "source"       .= prop "string" "Provenance"
-                      , "confidence"   .= prop "number" "Confidence level 0.0-1.0"
-                      , "tags"         .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                                                   "description" .= t "Tags for categorization"]
-                      , "fts_language" .= prop "string" "Full-text search language (default 'english'). A PostgreSQL regconfig name."
-                      , "pinned"       .= prop "boolean" "Pin this memory (default false)"
-                      ]
-                  , "required" .= [t "workspace_id", t "content", t "memory_type"]
-                  ]
-              ]
-          ]
-      , "required" .= [t "memories"]
+      , "required" .= ([] :: [Text])
       ]
 
     , mkTool "memory_search" "Preferred discovery step before create, update, or linking work. Use 'query' for keyword search, or combine filters (workspace_id, memory_type, tags, min_importance, category_id, pinned_only) to narrow results. All parameters are optional; omit workspace_id for cross-workspace search. Returns compact results by default; set detail=true for full content and metadata." $ object
@@ -115,10 +87,10 @@ toolDefinitions =
       , "required" .= [t "memory_id"]
       ]
 
-    , mkTool "memory_update" "Enrich or correct an existing memory. Use null to clear nullable fields such as summary, expires_at, or source. Also use this to pin/unpin (set pinned=true/false) or adjust importance (set importance=1-10)." $ object
+    , mkTool "memory_update" "Enrich or correct existing memories. For single: pass memory_id + fields. For batch: pass items[] array (max 100) of {id, ...fields}. Use null to clear nullable fields such as summary, expires_at, or source. Also use this to pin/unpin or adjust importance." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "memory_id"   .= prop "string" "UUID of the memory to update"
+          [ "memory_id"   .= prop "string" "UUID of the memory to update (single mode)"
           , "content"     .= propMaxLength "string" "New content" maxMemoryContentBytes
           , "summary"     .= propMaxLength "string" "New summary (null to clear)" maxMemorySummaryBytes
           , "importance"  .= prop "integer" "New importance, 1 (lowest) to 10 (highest)"
@@ -128,31 +100,41 @@ toolDefinitions =
           , "source"      .= prop "string" "Provenance (null to clear)"
           , "confidence"  .= prop "number" "Confidence level 0.0-1.0"
           , "pinned"      .= prop "boolean" "Pin or unpin this memory"
+          , "items"       .= object ["type" .= t "array",
+                                      "description" .= t "Batch: array of {id, ...update fields} objects (max 100). When present, top-level fields are ignored.",
+                                      "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
+                                      "items" .= object ["type" .= t "object"]]
           ]
-      , "required" .= [t "memory_id"]
+      , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "entity_lifecycle" "Soft-delete, restore, or permanently purge any entity. Use action 'delete' to soft-delete (hides from views, recoverable). Use 'restore' to undo a soft-delete. Use 'purge' to permanently and irreversibly remove (must be soft-deleted first). For projects and tasks, delete/restore cascades to child subtrees." $ object
+    , mkTool "entity_lifecycle" "Soft-delete, restore, or permanently purge any entity. Use action 'delete' to soft-delete (hides from views, recoverable). Use 'restore' to undo a soft-delete. Use 'purge' to permanently and irreversibly remove (must be soft-deleted first). For batch soft-delete, pass ids[] instead of entity_id (max 100). For projects and tasks, delete/restore cascades to child subtrees." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "entity_type" .= propEnum "string" "Type of entity" ["memory", "project", "task", "category", "workspace", "saved_view"]
-          , "entity_id"   .= prop "string" "UUID of the entity"
+          , "entity_id"   .= prop "string" "UUID of the entity (for single operations)"
+          , "ids"          .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                                       "description" .= t "Array of entity UUIDs for batch delete (max 100, action must be 'delete')",
+                                       "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
           , "action"       .= propEnum "string" "Lifecycle action" ["delete", "restore", "purge"]
           ]
-      , "required" .= [t "entity_type", t "entity_id", t "action"]
+      , "required" .= [t "entity_type", t "action"]
       ]
 
-    , mkTool "memory_link" "Create or remove a typed link between two memories. Relation types: related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to. Use action 'create' to add a link, 'remove' to delete one." $ object
+    , mkTool "memory_link" "Manage typed links between memories. Actions: 'create' adds a link, 'remove' deletes one, 'list' shows all links for a memory, 'graph' returns the connected subgraph up to a depth, 'find' finds all links of a relation type in a workspace. Relation types: related, supersedes, contradicts, elaborates, inspires, depends_on, derived_from, alternative_to." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "action"        .= propEnum "string" "Whether to create or remove the link" ["create", "remove"]
-          , "source_id"     .= prop "string" "Source memory UUID"
-          , "target_id"     .= prop "string" "Target memory UUID"
-          , "relation_type" .= propEnum "string" "Relation type"
+          [ "action"        .= propEnum "string" "Operation to perform" ["create", "remove", "list", "graph", "find"]
+          , "source_id"     .= prop "string" "Source memory UUID (required for create, remove)"
+          , "target_id"     .= prop "string" "Target memory UUID (required for create, remove)"
+          , "relation_type" .= propEnum "string" "Relation type (required for create, remove, find)"
               ["related", "supersedes", "contradicts", "elaborates", "inspires", "depends_on", "derived_from", "alternative_to"]
-          , "strength"      .= prop "number" "Link strength 0.0-1.0, default 1.0 (only used with action=create)"
+          , "strength"      .= prop "number" "Link strength 0.0-1.0, default 1.0 (create only)"
+          , "memory_id"     .= prop "string" "Memory UUID (required for list, graph)"
+          , "depth"         .= prop "integer" "Max traversal depth 1-5, default 2 (graph only)"
+          , "workspace_id"  .= prop "string" "Workspace UUID (required for find)"
           ]
-      , "required" .= [t "action", t "source_id", t "target_id", t "relation_type"]
+      , "required" .= [t "action"]
       ]
 
     , mkTool "project_create" "Create a top-level or child project in a workspace. Set parent_id to create a subproject under an existing project. After creating, add tasks with task_create and link relevant memories with project_link_memory. Use project_overview to inspect the result." $ object
@@ -217,10 +199,10 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "task_update" "Edit, move, or reparent an existing task. Use project_id and/or parent_id to reorganize it; null clears those fields. Moving a task across projects also moves its task subtree." $ object
+    , mkTool "task_update" "Update one or more tasks. For single: pass task_id + fields. For batch: pass items[] array (max 100) of {id, ...fields}. Use project_id and/or parent_id to reorganize; null clears those fields. Moving a task across projects also moves its subtree." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "task_id"     .= prop "string" "UUID of the task"
+          [ "task_id"     .= prop "string" "UUID of the task (single mode)"
           , "title"       .= propMaxLength "string" "New title" maxNameBytes
           , "description" .= propMaxLength "string" "New description (null to clear)" maxDescriptionBytes
           , "project_id"  .= prop "string" "New project UUID (null to clear)"
@@ -230,8 +212,12 @@ toolDefinitions =
           , "priority"    .= prop "integer" "New priority, 1 (lowest) to 10 (highest)"
           , "metadata"    .= prop "object" "New metadata JSON object"
           , "due_at"      .= prop "string" "ISO 8601 due date (null to clear)"
+          , "items"       .= object ["type" .= t "array",
+                                      "description" .= t "Batch: array of {id, ...update fields} objects (max 100). When present, top-level fields are ignored.",
+                                      "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
+                                      "items" .= object ["type" .= t "object"]]
           ]
-      , "required" .= [t "task_id"]
+      , "required" .= ([] :: [Text])
       ]
 
     , mkTool "workspace_register" "Register a new workspace — the top-level container for memories, projects, and tasks. Use type 'repository' for code repos (set path), 'planning' for cross-repo coordination, 'personal' for individual notes, or 'organization' for team scope." $ object
@@ -334,25 +320,6 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-  , mkTool "memory_graph" "Get the subgraph of memories reachable from a source memory via links, up to a configurable depth. Returns all nodes and edges in the connected neighborhood." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "memory_id" .= prop "string" "UUID of the source memory"
-          , "depth"     .= prop "integer" "Max traversal depth (1-5, default 2)"
-          ]
-      , "required" .= [t "memory_id"]
-      ]
-
-  , mkTool "memory_find_by_relation" "Find all memory links of a specific relation type in a workspace. Useful for discovering dependency chains (depends_on), contradiction clusters (contradicts), or knowledge threads (elaborates)." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "workspace_id"  .= prop "string" "UUID of the workspace"
-          , "relation_type" .= propEnum "string" "Relation type to find"
-              ["related", "supersedes", "contradicts", "elaborates", "inspires", "depends_on", "derived_from", "alternative_to"]
-          ]
-      , "required" .= [t "workspace_id", t "relation_type"]
-      ]
-
   , mkTool "list_entity_memories" "List all memories linked to a project, task, or category." $ object
       [ "type" .= t "object"
       , "properties" .= object
@@ -377,10 +344,10 @@ toolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
-    , mkTool "project_update" "Rename, reprioritize, reparent, or detach an existing project. Use parent_id=null to move it back to the top level." $ object
+    , mkTool "project_update" "Update one or more projects. For single: pass project_id + fields. For batch: pass items[] array (max 100) of {id, ...fields}. Use parent_id=null to move it back to the top level." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "project_id"  .= prop "string" "UUID of the project"
+          [ "project_id"  .= prop "string" "UUID of the project (single mode)"
           , "name"        .= propMaxLength "string" "New name" maxNameBytes
           , "description" .= propMaxLength "string" "New description (null to clear)" maxDescriptionBytes
           , "parent_id"   .= prop "string" "New parent project UUID (null to clear)"
@@ -388,8 +355,12 @@ toolDefinitions =
               ["active", "paused", "completed", "archived"]
           , "priority"    .= prop "integer" "New priority, 1 (lowest) to 10 (highest)"
           , "metadata"    .= prop "object" "New metadata JSON object"
+          , "items"       .= object ["type" .= t "array",
+                                      "description" .= t "Batch: array of {id, ...update fields} objects (max 100). When present, top-level fields are ignored.",
+                                      "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
+                                      "items" .= object ["type" .= t "object"]]
           ]
-      , "required" .= [t "project_id"]
+      , "required" .= ([] :: [Text])
       ]
 
 
@@ -429,50 +400,6 @@ toolDefinitions =
 
 
 
-  -- Issue 2: Memory categories
-  , mkTool "category_create" "Create a category for organizing memories. Set workspace_id to scope it to one workspace, or omit for a global category. Use parent_id for nested sub-categories." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "workspace_id" .= prop "string" "UUID of the workspace (omit for a global category)"
-          , "name"         .= propMaxLength "string" "Category name" maxNameBytes
-          , "description"  .= prop "string" "Category description"
-          , "parent_id"    .= prop "string" "Parent category UUID for sub-categories"
-          ]
-      , "required" .= [t "name"]
-      ]
-
-  , mkTool "category_get" "Get a category by ID with full detail: name, description, parent_id, workspace_id, and timestamps." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "category_id" .= prop "string" "UUID of the category" ]
-      , "required" .= [t "category_id"]
-      ]
-
-    , mkTool "category_list" "List categories for a workspace, or omit workspace_id to browse global categories. Use this to find IDs before category updates or memory linking." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "workspace_id" .= prop "string" "UUID of the workspace (omit for global categories)"
-          , "limit"        .= prop "integer" "Max results (default 50)"
-          , "offset"       .= prop "integer" "Offset for pagination (default 0)"
-          ]
-      , "required" .= ([] :: [Text])
-      ]
-
-  , mkTool "category_update" "Update a category's name, description, or parent. Use category_list to find IDs first." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "category_id" .= prop "string" "UUID of the category"
-          , "name"        .= propMaxLength "string" "New name" maxNameBytes
-          , "description" .= prop "string" "New description"
-          , "parent_id"   .= prop "string" "New parent category UUID"
-          ]
-      , "required" .= [t "category_id"]
-      ]
-
-
-
-
-
   -- Issue 3: Task dependencies
     , mkTool "task_dependency" "Add or remove an ordering dependency between tasks. Use action 'add' to declare that the first task depends on the second (must complete before it). Use action 'remove' to delete the constraint. For parent/child hierarchy, use parent_id in task_create instead." $ object
       [ "type" .= t "object"
@@ -497,265 +424,52 @@ toolDefinitions =
       , "required" .= [t "entity_type", t "entity_id", t "action", t "memory_ids"]
       ]
 
-  -- Issue 5: Memory link listing
-  , mkTool "memory_links_list" "List all outgoing and incoming links for a memory, including relation types and connected memory IDs." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "memory_id" .= prop "string" "UUID of the memory" ]
-      , "required" .= [t "memory_id"]
-      ]
-
   -- Issue 7: Set tags on a memory
-    , mkTool "memory_set_tags" "Set tags on a memory, replacing the existing tag set. Use memory_get with the memory ID first if you need to merge with existing tags." $ object
+    , mkTool "memory_set_tags" "Set tags on one or more memories, replacing existing tags. For single: pass memory_id + tags. For batch: pass items[] array (max 100) of {memory_id, tags}. Check existing tags with memory_get first if you need to merge." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "memory_id" .= prop "string" "UUID of the memory"
+          [ "memory_id" .= prop "string" "UUID of the memory (single mode)"
           , "tags"      .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                                    "description" .= t "Tags to set on the memory"]
+                                    "description" .= t "Tags to set on the memory (single mode)"]
+          , "items"     .= object ["type" .= t "array",
+                                    "description" .= t "Batch: array of {memory_id, tags} objects (max 100). When present, top-level fields are ignored.",
+                                    "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
+                                    "items" .= object ["type" .= t "object"]]
           ]
-      , "required" .= [t "memory_id", t "tags"]
+      , "required" .= ([] :: [Text])
       ]
 
-  -- Issue 10: Cleanup policy CRUD
-    , mkTool "cleanup_policy" "List or upsert cleanup policies for a workspace. Use action 'list' to see existing policies, or 'upsert' to create or update a policy for a specific memory type." $ object
+  -- Collapsed CRUD tools
+  , mkTool "category" "Manage memory categories. Actions: 'create' (name required, optional workspace_id, description, parent_id), 'get' (category_id), 'list' (optional workspace_id, limit, offset), 'update' (category_id + fields to change). Lifecycle (delete/restore/purge) uses entity_lifecycle." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "action"         .= propEnum "string" "Whether to list or upsert policies" ["list", "upsert"]
-          , "workspace_id"   .= prop "string" "UUID of the workspace"
-          , "memory_type"    .= propEnum "string" "Memory type to clean (required for upsert)"
-              ["short_term", "long_term"]
-          , "max_age_hours"  .= prop "integer" "Max age in hours before cleanup (upsert only)"
-          , "max_count"      .= prop "integer" "Max memory count before cleanup (upsert only)"
-          , "min_importance" .= prop "integer" "Minimum importance to keep, 1 (lowest) to 10 (highest) (required for upsert)"
-          , "enabled"        .= prop "boolean" "Whether the policy is active (required for upsert)"
-          , "limit"          .= prop "integer" "Max results for list (default 50)"
-          , "offset"         .= prop "integer" "Offset for list pagination (default 0)"
-          ]
-      , "required" .= [t "action", t "workspace_id"]
-      ]
-
-  -- Workspace groups
-  , mkTool "workspace_group" "Manage workspace groups — organize related workspaces into portfolios. Actions: 'create' (name, description), 'get' (group_id), 'list' (limit, offset), 'delete' (group_id), 'add_member' (group_id, workspace_id), 'remove_member' (group_id, workspace_id), 'list_members' (group_id)." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "action"       .= propEnum "string" "Operation to perform"
-              ["create", "get", "list", "delete", "add_member", "remove_member", "list_members"]
-          , "group_id"     .= prop "string" "UUID of the workspace group (required for get, delete, add_member, remove_member, list_members)"
-          , "workspace_id" .= prop "string" "UUID of the workspace (required for add_member, remove_member)"
-          , "name"         .= propMaxLength "string" "Group name (required for create)" maxNameBytes
-          , "description"  .= prop "string" "Group description (for create)"
+          [ "action"       .= propEnum "string" "Operation to perform" ["create", "get", "list", "update"]
+          , "category_id"  .= prop "string" "UUID of the category (required for get, update)"
+          , "workspace_id" .= prop "string" "UUID of the workspace (optional for create, list)"
+          , "name"         .= propMaxLength "string" "Category name (required for create)" maxNameBytes
+          , "description"  .= prop "string" "Category description (create, update)"
+          , "parent_id"    .= prop "string" "Parent category UUID (create, update)"
           , "limit"        .= prop "integer" "Max results for list (default 50)"
           , "offset"       .= prop "integer" "Offset for list pagination (default 0)"
           ]
       , "required" .= [t "action"]
       ]
 
-  -- Activity timeline
-    , mkTool "activity_timeline" "Browse recent changes across the system or within one workspace. Filter by entity_type to see only memory, project, or task events. Useful for audits and timeline-style review." $ object
+  , mkTool "saved_view" "Manage saved views — reusable queries you can execute later. Actions: 'create' (workspace_id, name, entity_type, optional query_params), 'get' (view_id), 'list' (workspace_id), 'update' (view_id + fields), 'execute' (view_id, optional limit/offset/detail overrides). Lifecycle uses entity_lifecycle." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "workspace_id" .= prop "string" "UUID of the workspace (omit for all)"
-          , "entity_type"  .= propEnum "string" "Filter to one entity type" ["memory", "project", "task"]
-          , "limit"        .= prop "integer" "Max events to return (default 50)"
+          [ "action"       .= propEnum "string" "Operation to perform" ["create", "get", "list", "update", "execute"]
+          , "view_id"      .= prop "string" "UUID of the saved view (required for get, update, execute)"
+          , "workspace_id" .= prop "string" "UUID of the workspace (required for create, list)"
+          , "name"         .= propMaxLength "string" "View name (required for create)" maxNameBytes
+          , "description"  .= prop "string" "Optional description (create, update)"
+          , "entity_type"  .= propEnum "string" "Which entity this view queries (required for create)" ["memory_search", "memory_list", "project_list", "task_list", "activity"]
+          , "query_params" .= prop "object" "Query parameters matching the entity_type's schema (create, update)"
+          , "limit"        .= prop "integer" "Max results (list, execute; default 50)"
+          , "offset"       .= prop "integer" "Offset for pagination (list, execute; default 0)"
+          , "detail"       .= prop "boolean" "If true, return full detail (execute only; default false)"
           ]
-      , "required" .= ([] :: [Text])
-      ]
-
-  -- Embedding / vector similarity (requires pgvector extension)
-  , mkTool "memory_similar" "Find memories similar to a given embedding vector (cosine similarity). Requires pgvector." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "workspace_id"    .= prop "string" "UUID of the workspace"
-          , "embedding"       .= object ["type" .= t "array", "items" .= object ["type" .= t "number"],
-                                          "description" .= t "Query embedding vector (e.g. 1536 floats from OpenAI text-embedding-ada-002)"]
-          , "limit"           .= prop "integer" "Max results (default 10)"
-          , "min_similarity"  .= prop "number" "Minimum cosine similarity 0.0-1.0 (default 0.0)"
-          ]
-      , "required" .= [t "workspace_id", t "embedding"]
-      ]
-
-  , mkTool "memory_set_embedding" "Store an embedding vector on a memory. Requires pgvector." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "memory_id"  .= prop "string" "UUID of the memory"
-          , "embedding"  .= object ["type" .= t "array", "items" .= object ["type" .= t "number"],
-                                     "description" .= t "Embedding vector (e.g. 1536 floats)"]
-          ]
-      , "required" .= [t "memory_id", t "embedding"]
-      ]
-
-  -- Batch operations
-  , mkTool "batch_delete" "Soft-delete multiple entities of the same type at once. Max 100 IDs per call. Returns the number actually deleted (already-deleted or missing IDs are skipped)." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "entity_type" .= propEnum "string" "Type of entities to delete" ["memory", "project", "task", "category"]
-          , "ids" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                              "description" .= t "Array of entity UUIDs to soft-delete",
-                              "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
-          ]
-      , "required" .= [t "entity_type", t "ids"]
-      ]
-
-  , mkTool "task_move_batch" "Move multiple tasks to a different project (or detach from all projects by passing null for project_id). Max 100 tasks per call." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "task_ids"   .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                                     "description" .= t "Array of task UUIDs to move",
-                                     "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int)]
-          , "project_id" .= prop "string" "Target project UUID (null to detach tasks from any project)"
-          ]
-      , "required" .= [t "task_ids"]
-      ]
-
-
-
-  , mkTool "memory_set_tags_batch" "Set tags on multiple memories at once, each with its own tag list. Replaces existing tags for each memory. Max 100 items." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "items" .= object ["type" .= t "array",
-                                "description" .= t "Array of {memory_id, tags} objects",
-                                "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
-                                "items" .= object
-                                    [ "type" .= t "object"
-                                    , "properties" .= object
-                                        [ "memory_id" .= prop "string" "UUID of the memory"
-                                        , "tags" .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
-                                                             "description" .= t "New tags for this memory"]
-                                        ]
-                                    , "required" .= [t "memory_id", t "tags"]
-                                    ]]
-          ]
-      , "required" .= [t "items"]
-      ]
-
-  , mkTool "memory_update_batch" "Update multiple memories at once. Each item specifies a memory ID and the fields to update (same fields as memory_update). Missing or non-existent IDs are skipped. Max 100 items." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "items" .= object ["type" .= t "array",
-                                "description" .= t "Array of memory update objects",
-                                "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
-                                "items" .= object
-                                    [ "type" .= t "object"
-                                    , "properties" .= object
-                                        [ "id"          .= prop "string" "UUID of the memory to update"
-                                        , "content"     .= propMaxLength "string" "New content" maxMemoryContentBytes
-                                        , "summary"     .= propMaxLength "string" "New summary (null to clear)" maxMemorySummaryBytes
-                                        , "importance"  .= prop "integer" "New importance, 1 (lowest) to 10 (highest)"
-                                        , "memory_type" .= propEnum "string" "New type" ["short_term", "long_term"]
-                                        , "metadata"    .= prop "object" "New metadata JSON object"
-                                        , "expires_at"  .= prop "string" "ISO 8601 expiration time (null to clear)"
-                                        , "source"      .= prop "string" "Provenance (null to clear)"
-                                        , "confidence"  .= prop "number" "Confidence level 0.0-1.0"
-                                        , "pinned"      .= prop "boolean" "Pin or unpin this memory"
-                                        ]
-                                    , "required" .= [t "id"]
-                                    ]]
-          ]
-      , "required" .= [t "items"]
-      ]
-
-  , mkTool "project_update_batch" "Update multiple projects at once. Each item specifies a project ID and the fields to update (same fields as project_update). Missing or non-existent IDs are skipped. Max 100 items." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "items" .= object ["type" .= t "array",
-                                "description" .= t "Array of project update objects",
-                                "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
-                                "items" .= object
-                                    [ "type" .= t "object"
-                                    , "properties" .= object
-                                        [ "id"          .= prop "string" "UUID of the project to update"
-                                        , "name"        .= propMaxLength "string" "New name" maxNameBytes
-                                        , "description" .= propMaxLength "string" "New description (null to clear)" maxDescriptionBytes
-                                        , "parent_id"   .= prop "string" "New parent project UUID (null to clear)"
-                                        , "status"      .= propEnum "string" "New status"
-                                            ["active", "paused", "completed", "archived"]
-                                        , "priority"    .= prop "integer" "New priority, 1 (lowest) to 10 (highest)"
-                                        , "metadata"    .= prop "object" "New metadata JSON object"
-                                        ]
-                                    , "required" .= [t "id"]
-                                    ]]
-          ]
-      , "required" .= [t "items"]
-      ]
-
-  , mkTool "task_update_batch" "Update multiple tasks at once. Each item specifies a task ID and the fields to update (same fields as task_update). Missing or non-existent IDs are skipped. Max 100 items." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "items" .= object ["type" .= t "array",
-                                "description" .= t "Array of task update objects",
-                                "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
-                                "items" .= object
-                                    [ "type" .= t "object"
-                                    , "properties" .= object
-                                        [ "id"          .= prop "string" "UUID of the task to update"
-                                        , "title"       .= propMaxLength "string" "New title" maxNameBytes
-                                        , "description" .= propMaxLength "string" "New description (null to clear)" maxDescriptionBytes
-                                        , "project_id"  .= prop "string" "New project UUID (null to clear)"
-                                        , "parent_id"   .= prop "string" "New parent task UUID (null to clear)"
-                                        , "status"      .= propEnum "string" "New status"
-                                            ["todo", "in_progress", "blocked", "done", "cancelled"]
-                                        , "priority"    .= prop "integer" "New priority, 1 (lowest) to 10 (highest)"
-                                        , "metadata"    .= prop "object" "New metadata JSON object"
-                                        , "due_at"      .= prop "string" "ISO 8601 due date (null to clear)"
-                                        ]
-                                    , "required" .= [t "id"]
-                                    ]]
-          ]
-      , "required" .= [t "items"]
-      ]
-
-  -- Saved views
-  , mkTool "saved_view_create" "Create a saved view that stores a reusable query. Specify entity_type (memory_search, memory_list, project_list, task_list, activity) and query_params matching that entity's query schema. Execute later with saved_view_execute." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "workspace_id" .= prop "string" "UUID of the workspace"
-          , "name"         .= propMaxLength "string" "Name for this saved view" maxNameBytes
-          , "description"  .= prop "string" "Optional description"
-          , "entity_type"  .= propEnum "string" "Which entity this view queries" ["memory_search", "memory_list", "project_list", "task_list", "activity"]
-          , "query_params" .= prop "object" "Query parameters matching the entity_type's query schema (e.g. tags, min_importance for memory_search)"
-          ]
-      , "required" .= [t "workspace_id", t "name", t "entity_type"]
-      ]
-
-  , mkTool "saved_view_list" "List saved views in a workspace. Returns paginated results ordered by name." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "workspace_id" .= prop "string" "UUID of the workspace"
-          , "limit"        .= prop "integer" "Max results (default 50)"
-          , "offset"       .= prop "integer" "Offset for pagination (default 0)"
-          ]
-      , "required" .= [t "workspace_id"]
-      ]
-
-  , mkTool "saved_view_get" "Get a saved view by ID, including its stored query_params." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "view_id" .= prop "string" "UUID of the saved view" ]
-      , "required" .= [t "view_id"]
-      ]
-
-  , mkTool "saved_view_update" "Update a saved view's name, description, or query_params. Pass null for description to clear it." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "view_id"      .= prop "string" "UUID of the saved view"
-          , "name"         .= propMaxLength "string" "New name" maxNameBytes
-          , "description"  .= prop "string" "New description (null to clear)"
-          , "query_params" .= prop "object" "New query parameters"
-          ]
-      , "required" .= [t "view_id"]
-      ]
-
-
-
-  , mkTool "saved_view_execute" "Execute a saved view, running its stored query with optional limit/offset/detail overrides. Returns the matching entities." $ object
-      [ "type" .= t "object"
-      , "properties" .= object
-          [ "view_id" .= prop "string" "UUID of the saved view to execute"
-          , "limit"   .= prop "integer" "Override max results (default 50)"
-          , "offset"  .= prop "integer" "Override pagination offset (default 0)"
-          , "detail"  .= prop "boolean" "If true, return full detail instead of compact results (default false)"
-          ]
-      , "required" .= [t "view_id"]
+      , "required" .= [t "action"]
       ]
 
   -- ================================================================
@@ -886,8 +600,6 @@ data ToolCall
   | CategoryUnlinkMem UUID UUID            -- memory_id, category_id
   | MemorySetTags   UUID [Text]            -- memory_id, tags
   | MemoryUnlink    UUID UUID RelationType -- source_id, target_id, relation_type
-  | CleanupPoliciesList UUID (Maybe Int) (Maybe Int) -- workspace_id, limit, offset
-  | CleanupPolicyUpsert UpsertCleanupPolicy
   | WorkspaceReg   CreateWorkspace
   | CleanupRun     UUID
     | MemoryList     MemoryListQuery Bool      -- query, detail
@@ -896,16 +608,6 @@ data ToolCall
   | ProjectListMem UUID
     | CategoryListMem UUID
   | TaskListMem    UUID
-  | WsGroupCreate  CreateWorkspaceGroup
-  | WsGroupGet     UUID
-  | WsGroupList    (Maybe Int) (Maybe Int)
-  | WsGroupDelete  UUID
-  | WsGroupAddMem  UUID UUID  -- group_id, workspace_id
-  | WsGroupRmMem   UUID UUID  -- group_id, workspace_id
-  | WsGroupListMem UUID
-  | ActivityTimeline (Maybe UUID) (Maybe Text) (Maybe Int)
-  | MemorySimilar SimilarQuery
-  | MemorySetEmbedding UUID [Double]
   | MemoryDeleteBatch [UUID]
   | TaskDeleteBatch [UUID]
     | ProjectDeleteBatch [UUID]
@@ -945,45 +647,68 @@ data SpecTask = SpecTask
 -- a typed ToolCall, validating all fields against HMem.Types.
 parseToolCall :: Text -> Value -> Either String ToolCall
 parseToolCall name args = case name of
-    "memory_create"            -> MemoryCreate <$> parse args
-    "memory_create_batch"      -> MemoryCreateBatch <$> need "memories"
+    "memory_create"            -> do
+        mItems <- opt "items" :: Either String (Maybe [Value])
+        case mItems of
+            Just items -> MemoryCreateBatch <$> mapM (parseEither parseJSON) items
+            Nothing    -> MemoryCreate <$> parse args
     "memory_search"            -> MemorySearch <$> parse args <*> (maybe False id <$> opt "detail")
     "memory_get"               -> MemoryGet <$> need "memory_id"
-    "memory_update"            -> MemoryUpdate <$> need "memory_id" <*> parse args
+    "memory_update"            -> do
+        mItems <- opt "items" :: Either String (Maybe [Value])
+        case mItems of
+            Just items -> MemoryUpdateBatch <$> parseBatchUpdateItems' items
+            Nothing    -> MemoryUpdate <$> need "memory_id" <*> parse args
     "entity_lifecycle"          -> do
         entityType <- need "entity_type" :: Either String Text
-        eid <- need "entity_id"
         action <- need "action" :: Either String Text
-        case (entityType, action) of
-            ("memory",     "delete")  -> Right $ MemoryDelete eid
-            ("memory",     "restore") -> Right $ MemoryRestore eid
-            ("memory",     "purge")   -> Right $ MemoryPurge eid
-            ("project",    "delete")  -> Right $ ProjectDelete eid
-            ("project",    "restore") -> Right $ ProjectRestore eid
-            ("project",    "purge")   -> Right $ ProjectPurge eid
-            ("task",       "delete")  -> Right $ TaskDelete eid
-            ("task",       "restore") -> Right $ TaskRestore eid
-            ("task",       "purge")   -> Right $ TaskPurge eid
-            ("category",   "delete")  -> Right $ CategoryDelete eid
-            ("category",   "restore") -> Right $ CategoryRestore eid
-            ("category",   "purge")   -> Right $ CategoryPurge eid
-            ("workspace",  "delete")  -> Right $ WsDelete eid
-            ("workspace",  "restore") -> Right $ WsRestore eid
-            ("workspace",  "purge")   -> Right $ WsPurge eid
-            ("saved_view", "delete")  -> Right $ SavedViewDelete eid
-            ("saved_view", "restore") -> Right $ SavedViewRestore eid
-            ("saved_view", "purge")   -> Right $ SavedViewPurge eid
-            _ -> Left $ "entity_lifecycle: invalid entity_type/action: " <> T.unpack entityType <> "/" <> T.unpack action
+        mIds <- opt "ids" :: Either String (Maybe [UUID])
+        mEid <- opt "entity_id" :: Either String (Maybe UUID)
+        case (action, mIds) of
+            ("delete", Just ids) -> case entityType of
+                "memory"   -> Right $ MemoryDeleteBatch ids
+                "project"  -> Right $ ProjectDeleteBatch ids
+                "task"     -> Right $ TaskDeleteBatch ids
+                "category" -> Right $ CategoryDeleteBatch ids
+                _          -> Left $ "entity_lifecycle: batch delete not supported for " <> T.unpack entityType
+            _ -> case mEid of
+                Nothing -> Left "entity_lifecycle: entity_id is required for non-batch operations"
+                Just eid -> case (entityType, action) of
+                    ("memory",     "delete")  -> Right $ MemoryDelete eid
+                    ("memory",     "restore") -> Right $ MemoryRestore eid
+                    ("memory",     "purge")   -> Right $ MemoryPurge eid
+                    ("project",    "delete")  -> Right $ ProjectDelete eid
+                    ("project",    "restore") -> Right $ ProjectRestore eid
+                    ("project",    "purge")   -> Right $ ProjectPurge eid
+                    ("task",       "delete")  -> Right $ TaskDelete eid
+                    ("task",       "restore") -> Right $ TaskRestore eid
+                    ("task",       "purge")   -> Right $ TaskPurge eid
+                    ("category",   "delete")  -> Right $ CategoryDelete eid
+                    ("category",   "restore") -> Right $ CategoryRestore eid
+                    ("category",   "purge")   -> Right $ CategoryPurge eid
+                    ("workspace",  "delete")  -> Right $ WsDelete eid
+                    ("workspace",  "restore") -> Right $ WsRestore eid
+                    ("workspace",  "purge")   -> Right $ WsPurge eid
+                    ("saved_view", "delete")  -> Right $ SavedViewDelete eid
+                    ("saved_view", "restore") -> Right $ SavedViewRestore eid
+                    ("saved_view", "purge")   -> Right $ SavedViewPurge eid
+                    _ -> Left $ "entity_lifecycle: invalid entity_type/action: " <> T.unpack entityType <> "/" <> T.unpack action
     "memory_link"              -> do
         action <- need "action" :: Either String Text
         case action of
             "create" -> LinkMemories <$> need "source_id" <*> parse args
             "remove" -> MemoryUnlink <$> need "source_id" <*> need "target_id" <*> need "relation_type"
-            _        -> Left "memory_link: action must be 'create' or 'remove'"
-    "memory_links_list"        -> MemoryLinksList <$> need "memory_id"
+            "list"   -> MemoryLinksList <$> need "memory_id"
+            "graph"  -> MemoryGraphCall <$> need "memory_id" <*> opt "depth"
+            "find"   -> MemoryFindByRelation <$> need "workspace_id" <*> need "relation_type"
+            _        -> Left "memory_link: action must be 'create', 'remove', 'list', 'graph', or 'find'"
     "project_create"           -> ProjectCreate <$> parse args
     "project_get"              -> ProjectGet <$> need "project_id"
-    "project_update"           -> ProjectUpdate <$> need "project_id" <*> parse args
+    "project_update"           -> do
+        mItems <- opt "items" :: Either String (Maybe [Value])
+        case mItems of
+            Just items -> ProjectUpdateBatch <$> parseBatchUpdateItems' items
+            Nothing    -> ProjectUpdate <$> need "project_id" <*> parse args
     "project_list"             -> ProjectList <$> parse args
     "link_memory"              -> do
         entityType <- need "entity_type" :: Either String Text
@@ -1023,24 +748,30 @@ parseToolCall name args = case name of
     "task_overview"            -> TaskOverviewCall <$> need "task_id" <*> (maybe False id <$> opt "extra_context")
     "context_get"              -> ContextGetCall <$> need "task_id" <*> (maybe ContextMedium id <$> opt "detail_level")
     "task_list"                -> TaskList <$> parse args
-    "task_update"              -> TaskUpdate <$> need "task_id" <*> parse args
+    "task_update"              -> do
+        mItems <- opt "items" :: Either String (Maybe [Value])
+        case mItems of
+            Just items -> TaskUpdateBatch <$> parseBatchUpdateItems' items
+            Nothing    -> TaskUpdate <$> need "task_id" <*> parse args
     "task_dependency"          -> do
         action <- need "action" :: Either String Text
         case action of
             "add"    -> TaskDepAdd <$> need "task_id" <*> need "depends_on_id"
             "remove" -> TaskDepRemove <$> need "task_id" <*> need "depends_on_id"
             _        -> Left "task_dependency: action must be 'add' or 'remove'"
-    "category_create"          -> CategoryCreate <$> parse args
-    "category_get"             -> CategoryGet <$> need "category_id"
-    "category_list"            -> CategoryList <$> opt "workspace_id" <*> opt "limit" <*> opt "offset"
-    "category_update"          -> CategoryUpdate <$> need "category_id" <*> parse args
-    "memory_set_tags"          -> MemorySetTags <$> need "memory_id" <*> need "tags"
-    "cleanup_policy"           -> do
+    "memory_set_tags"          -> do
+        mItems <- opt "items" :: Either String (Maybe [Value])
+        case mItems of
+            Just items -> MemorySetTagsBatch <$> parseBatchSetTags' items
+            Nothing    -> MemorySetTags <$> need "memory_id" <*> need "tags"
+    "category"                 -> do
         action <- need "action" :: Either String Text
         case action of
-            "list"   -> CleanupPoliciesList <$> need "workspace_id" <*> opt "limit" <*> opt "offset"
-            "upsert" -> CleanupPolicyUpsert <$> parse args
-            _        -> Left "cleanup_policy: action must be 'list' or 'upsert'"
+            "create" -> CategoryCreate <$> parse args
+            "get"    -> CategoryGet <$> need "category_id"
+            "list"   -> CategoryList <$> opt "workspace_id" <*> opt "limit" <*> opt "offset"
+            "update" -> CategoryUpdate <$> need "category_id" <*> parse args
+            _        -> Left $ "category: invalid action: " <> T.unpack action
     "workspace_list"           -> WorkspaceList <$> opt "limit" <*> opt "offset"
     "workspace_get"            -> WorkspaceGet <$> need "workspace_id"
     "workspace_visualization"  -> WorkspaceVisualizationCall <$> need "workspace_id" <*> parse args <*> (maybe WorkspaceVisualizationSvg id <$> opt "format")
@@ -1048,43 +779,15 @@ parseToolCall name args = case name of
     "workspace_register"       -> WorkspaceReg <$> parse args
     "cleanup_run"              -> CleanupRun <$> need "workspace_id"
     "memory_list"              -> MemoryList <$> parse args <*> (maybe False id <$> opt "detail")
-    "memory_graph"             -> MemoryGraphCall <$> need "memory_id" <*> opt "depth"
-    "memory_find_by_relation"  -> MemoryFindByRelation <$> need "workspace_id" <*> need "relation_type"
-
-    "workspace_group"          -> do
+    "saved_view"               -> do
         action <- need "action" :: Either String Text
         case action of
-            "create"        -> WsGroupCreate <$> parse args
-            "get"           -> WsGroupGet <$> need "group_id"
-            "list"          -> WsGroupList <$> opt "limit" <*> opt "offset"
-            "delete"        -> WsGroupDelete <$> need "group_id"
-            "add_member"    -> WsGroupAddMem <$> need "group_id" <*> need "workspace_id"
-            "remove_member" -> WsGroupRmMem <$> need "group_id" <*> need "workspace_id"
-            "list_members"  -> WsGroupListMem <$> need "group_id"
-            _               -> Left $ "workspace_group: invalid action: " <> T.unpack action
-    "activity_timeline"        -> ActivityTimeline <$> opt "workspace_id" <*> opt "entity_type" <*> opt "limit"
-    "memory_similar"           -> MemorySimilar <$> parse args
-    "memory_set_embedding"     -> MemorySetEmbedding <$> need "memory_id" <*> need "embedding"
-    "batch_delete"             -> do
-        entityType <- need "entity_type" :: Either String Text
-        ids <- need "ids"
-        case entityType of
-            "memory"   -> Right $ MemoryDeleteBatch ids
-            "project"  -> Right $ ProjectDeleteBatch ids
-            "task"     -> Right $ TaskDeleteBatch ids
-            "category" -> Right $ CategoryDeleteBatch ids
-            _          -> Left $ "batch_delete: invalid entity_type: " <> T.unpack entityType
-    "task_move_batch"           -> TaskMoveBatch <$> need "task_ids" <*> opt "project_id"
-
-    "memory_set_tags_batch"     -> MemorySetTagsBatch <$> parseBatchSetTags args
-    "memory_update_batch"       -> MemoryUpdateBatch <$> parseBatchUpdateItems args
-    "project_update_batch"      -> ProjectUpdateBatch <$> parseBatchUpdateItems args
-    "task_update_batch"         -> TaskUpdateBatch <$> parseBatchUpdateItems args
-    "saved_view_create"         -> SavedViewCreate <$> parse args
-    "saved_view_list"           -> SavedViewList <$> need "workspace_id" <*> opt "limit" <*> opt "offset"
-    "saved_view_get"            -> SavedViewGet <$> need "view_id"
-    "saved_view_update"         -> SavedViewUpdate <$> need "view_id" <*> parse args
-    "saved_view_execute"        -> SavedViewExecute <$> need "view_id" <*> opt "limit" <*> opt "offset" <*> opt "detail"
+            "create"  -> SavedViewCreate <$> parse args
+            "get"     -> SavedViewGet <$> need "view_id"
+            "list"    -> SavedViewList <$> need "workspace_id" <*> opt "limit" <*> opt "offset"
+            "update"  -> SavedViewUpdate <$> need "view_id" <*> parse args
+            "execute" -> SavedViewExecute <$> need "view_id" <*> opt "limit" <*> opt "offset" <*> opt "detail"
+            _         -> Left $ "saved_view: invalid action: " <> T.unpack action
     "project_overview"          -> ProjectOverviewCall <$> need "project_id"
     -- Workflow composite tools
     "task_start"                -> TaskStartCall <$> need "task_id" <*> (maybe ContextMedium id <$> opt "detail_level")
@@ -1108,22 +811,18 @@ parseToolCall name args = case name of
     opt :: FromJSON a => Key -> Either String (Maybe a)
     opt k = parseEither (withObject "args" (.:? k)) args
 
--- | Parse the batch set-tags items array into [(UUID, [Text])].
-parseBatchSetTags :: Value -> Either String [(UUID, [Text])]
-parseBatchSetTags = parseEither $ withObject "args" $ \o -> do
-  items <- o .: "items" :: Parser [Value]
-  mapM parseItem items
+-- | Parse the batch set-tags items from a pre-extracted [Value].
+parseBatchSetTags' :: [Value] -> Either String [(UUID, [Text])]
+parseBatchSetTags' = mapM (parseEither parseItem)
   where
     parseItem = withObject "BatchSetTagsItem" $ \o -> do
       mid  <- o .: "memory_id"
       tags <- o .: "tags"
       pure (mid, tags)
 
--- | Parse batch update items array into [(UUID, a)] where a is FromJSON.
-parseBatchUpdateItems :: FromJSON a => Value -> Either String [(UUID, a)]
-parseBatchUpdateItems = parseEither $ withObject "args" $ \o -> do
-  items <- o .: "items" :: Parser [Value]
-  mapM parseItem items
+-- | Parse batch update items from a pre-extracted [Value].
+parseBatchUpdateItems' :: FromJSON a => [Value] -> Either String [(UUID, a)]
+parseBatchUpdateItems' = mapM (parseEither parseItem)
   where
     parseItem = withObject "BatchUpdateItem" $ \o -> do
       uid <- o .: "id"
@@ -1215,51 +914,40 @@ validateToolCall = \case
     CategoryCreate cc -> CategoryCreate cc <$ firstValidationError (validateCreateMemoryCategoryInput cc)
     CategoryList mwid ml mo -> Right $ CategoryList mwid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
     CategoryUpdate cid uc -> CategoryUpdate cid uc <$ firstValidationError (validateUpdateMemoryCategoryInput uc)
-    WsGroupCreate cg -> WsGroupCreate cg <$ firstValidationError (validateCreateWorkspaceGroupInput cg)
-    WsGroupList ml mo -> Right $ WsGroupList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
     WorkspaceReg cw -> WorkspaceReg cw <$ firstValidationError (validateCreateWorkspaceInput cw)
     WorkspaceList ml mo -> Right $ WorkspaceList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
     WorkspaceVisualizationCall wid query format ->
         let query' = clampWorkspaceVisualizationQuery query
         in WorkspaceVisualizationCall wid query' format <$ firstValidationError (validateWorkspaceVisualizationQuery query')
     WsUpdate wid uw -> WsUpdate wid uw <$ firstValidationError (validateUpdateWorkspaceInput uw)
-    CleanupPoliciesList wid ml mo -> Right $ CleanupPoliciesList wid (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
-    ActivityTimeline mws met ml -> Right $ ActivityTimeline mws met (clampMaybe 1 200 <$> ml)
-    MemorySimilar sq -> Right $ MemorySimilar sq
-        { limit = clampMaybe 1 200 <$> sq.limit
-        , minSimilarity = clampMaybe 0.0 1.0 <$> sq.minSimilarity
-        }
-    MemorySetEmbedding mid vec
-        | null vec  -> Left "memory_set_embedding: embedding must not be empty"
-        | otherwise -> Right $ MemorySetEmbedding mid vec
-    MemoryDeleteBatch ids -> validateBatchIds "memory_delete_batch" ids (MemoryDeleteBatch ids)
-    TaskDeleteBatch ids -> validateBatchIds "task_delete_batch" ids (TaskDeleteBatch ids)
-    ProjectDeleteBatch ids -> validateBatchIds "project_delete_batch" ids (ProjectDeleteBatch ids)
-    CategoryDeleteBatch ids -> validateBatchIds "category_delete_batch" ids (CategoryDeleteBatch ids)
-    TaskMoveBatch ids pid -> validateBatchIds "task_move_batch" ids (TaskMoveBatch ids pid)
+    MemoryDeleteBatch ids -> validateBatchIds "entity_lifecycle/batch_delete" ids (MemoryDeleteBatch ids)
+    TaskDeleteBatch ids -> validateBatchIds "entity_lifecycle/batch_delete" ids (TaskDeleteBatch ids)
+    ProjectDeleteBatch ids -> validateBatchIds "entity_lifecycle/batch_delete" ids (ProjectDeleteBatch ids)
+    CategoryDeleteBatch ids -> validateBatchIds "entity_lifecycle/batch_delete" ids (CategoryDeleteBatch ids)
+    TaskMoveBatch ids pid -> validateBatchIds "task_update/batch_move" ids (TaskMoveBatch ids pid)
     ProjectLinkMemBatch pid mids -> validateBatchIds "project_link_memories_batch" mids (ProjectLinkMemBatch pid mids)
     CategoryLinkMemBatch cid mids -> validateBatchIds "category_link_memories_batch" mids (CategoryLinkMemBatch cid mids)
     TaskLinkMemBatch tid mids -> validateBatchIds "task_link_memories_batch" mids (TaskLinkMemBatch tid mids)
     MemorySetTagsBatch items
-        | null items -> Left "memory_set_tags_batch: items must not be empty"
-        | length items > 100 -> Left "memory_set_tags_batch: items must contain at most 100 items"
+        | null items -> Left "memory_set_tags: items must not be empty"
+        | length items > 100 -> Left "memory_set_tags: items must contain at most 100 items"
         | otherwise -> Right $ MemorySetTagsBatch items
     MemoryUpdateBatch items
-        | null items -> Left "memory_update_batch: items must not be empty"
-        | length items > 100 -> Left "memory_update_batch: items must contain at most 100 items"
+        | null items -> Left "memory_update: items must not be empty"
+        | length items > 100 -> Left "memory_update: items must contain at most 100 items"
         | otherwise ->
             let items' = [(uid, clampUpdateMemory um) | (uid, um) <- items]
                 errs = concat [validateUpdateMemoryInput um | (_, um) <- items']
             in MemoryUpdateBatch items' <$ firstValidationError errs
     ProjectUpdateBatch items
-        | null items -> Left "project_update_batch: items must not be empty"
-        | length items > 100 -> Left "project_update_batch: items must contain at most 100 items"
+        | null items -> Left "project_update: items must not be empty"
+        | length items > 100 -> Left "project_update: items must contain at most 100 items"
         | otherwise ->
             let errs = concat [validateUpdateProjectInput up | (_, up) <- items]
             in ProjectUpdateBatch items <$ firstValidationError errs
     TaskUpdateBatch items
-        | null items -> Left "task_update_batch: items must not be empty"
-        | length items > 100 -> Left "task_update_batch: items must contain at most 100 items"
+        | null items -> Left "task_update: items must not be empty"
+        | length items > 100 -> Left "task_update: items must contain at most 100 items"
         | otherwise ->
             let errs = concat [validateUpdateTaskInput ut | (_, ut) <- items]
             in TaskUpdateBatch items <$ firstValidationError errs
@@ -1483,12 +1171,6 @@ executeToolCall mgr base mApiKey = \case
                               (toJSON tags)
     MemoryUnlink sid tid rt -> delJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath sid <> "/links/"
                                <> uuidPath tid <> "/" <> T.unpack (relationTypeToText rt))
-    CleanupPoliciesList wid ml mo -> getJSON mgr base mApiKey ("/api/v1/cleanup/policies" <> buildQuery
-                            [ ("workspace_id", Just $ uuidPath wid)
-                            , ("limit", show <$> ml)
-                            , ("offset", show <$> mo)
-                            ])
-    CleanupPolicyUpsert cp  -> postJSON mgr base mApiKey "/api/v1/cleanup/policies" cp
     WorkspaceList ml mo      -> getJSON  mgr base mApiKey ("/api/v1/workspaces" <> buildQuery
                             [ ("limit", show <$> ml)
                             , ("offset", show <$> mo)
@@ -1523,26 +1205,6 @@ executeToolCall mgr base mApiKey = \case
     ProjectListMem pid -> getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
     CategoryListMem cid -> getJSON mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid <> "/memories")
     TaskListMem tid -> getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
-    WsGroupCreate cg -> postJSON mgr base mApiKey "/api/v1/groups" cg
-    WsGroupGet gid   -> getJSON  mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid)
-    WsGroupList ml mo -> getJSON mgr base mApiKey ("/api/v1/groups" <> buildQuery
-                            [ ("limit", show <$> ml)
-                            , ("offset", show <$> mo)
-                            ])
-    WsGroupDelete gid -> delJSON mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid)
-    WsGroupAddMem gid wsId -> postJSON mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid <> "/members")
-                              (object ["workspace_id" .= wsId])
-    WsGroupRmMem gid wsId -> delJSON mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid <> "/members/"
-                              <> uuidPath wsId)
-    WsGroupListMem gid -> getJSON mgr base mApiKey ("/api/v1/groups/" <> uuidPath gid <> "/members")
-    ActivityTimeline mws met ml -> getJSON mgr base mApiKey ("/api/v1/activity" <> buildQuery
-                            [ ("workspace_id", uuidPath <$> mws)
-                            , ("entity_type", T.unpack <$> met)
-                            , ("limit", show <$> ml)
-                            ])
-    MemorySimilar sq -> postJSON mgr base mApiKey "/api/v1/memories/similar" sq
-    MemorySetEmbedding mid vec -> putJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/embedding")
-                                  (toJSON vec)
     MemoryDeleteBatch ids -> postJSON mgr base mApiKey "/api/v1/memories/batch-delete"
                               (object ["ids" .= ids])
     TaskDeleteBatch ids -> postJSON mgr base mApiKey "/api/v1/tasks/batch-delete"
@@ -1911,7 +1573,7 @@ t = Prelude.id
 -- (new required fields, renamed tools, changed semantics).
 -- Adding new optional fields or new tools does not require a bump.
 toolApiVersion :: Text
-toolApiVersion = "0.4.0"
+toolApiVersion = "0.5.0"
 
 mkTool :: Text -> Text -> Value -> Value
 mkTool name desc inputSchema = object

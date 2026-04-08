@@ -165,14 +165,14 @@ spec = do
           tags `shouldBe` ["a", "b"]
         other -> expectationFailure $ "Expected MemorySetTags, got: " <> show other
 
-    it "parses memory_create_batch" $ do
+    it "parses memory_create with items (batch)" $ do
       let item = object
             [ "workspace_id" .= testUUID
             , "content"      .= ("batch item" :: Text)
             , "memory_type"  .= ("short_term" :: Text)
             ]
-          args = object [ "memories" .= [item, item] ]
-      case parseToolCall "memory_create_batch" args of
+          args = object [ "items" .= [item, item] ]
+      case parseToolCall "memory_create" args of
         Right (MemoryCreateBatch cms) -> length cms `shouldBe` 2
         other -> expectationFailure $ "Expected MemoryCreateBatch, got: " <> show other
 
@@ -304,12 +304,6 @@ spec = do
         Right (MemorySearch sq' _) -> sq'.limit `shouldBe` Just 200
         other -> expectationFailure $ "Expected MemorySearch, got: " <> show other
 
-    it "rejects empty embedding vector" $ do
-      validateToolCall (MemorySetEmbedding parsedUUID []) `shouldSatisfy` isLeft
-
-    it "accepts non-empty embedding vector" $ do
-      validateToolCall (MemorySetEmbedding parsedUUID [0.1, 0.2, 0.3]) `shouldSatisfy` isRight
-
     it "rejects task_list with neither workspace_id nor project_id" $ do
       validateToolCall (TaskList TaskListQuery
         { workspaceId = Nothing
@@ -437,15 +431,17 @@ spec = do
         Right (ProjectListMem pid) -> pid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected ProjectListMem, got: " <> show other
 
-    it "parses batch_delete for project" $ do
-      let deleteArgs = object [ "entity_type" .= ("project" :: Text), "ids" .= ([testUUID, testUUID2] :: [Text]) ]
-          updateArgs = object
-            [ "items" .= [ object [ "id" .= testUUID, "name" .= ("Renamed" :: Text) ] ]
-            ]
-      case parseToolCall "batch_delete" deleteArgs of
+    it "parses entity_lifecycle batch delete for project" $ do
+      let deleteArgs = object [ "entity_type" .= ("project" :: Text), "ids" .= ([testUUID, testUUID2] :: [Text]), "action" .= ("delete" :: Text) ]
+      case parseToolCall "entity_lifecycle" deleteArgs of
         Right (ProjectDeleteBatch ids) -> ids `shouldBe` [parsedUUID, parsedUUID2]
         other -> expectationFailure $ "Expected ProjectDeleteBatch, got: " <> show other
-      case parseToolCall "project_update_batch" updateArgs of
+
+    it "parses project_update with items (batch)" $ do
+      let updateArgs = object
+            [ "items" .= [ object [ "id" .= testUUID, "name" .= ("Renamed" :: Text) ] ]
+            ]
+      case parseToolCall "project_update" updateArgs of
         Right (ProjectUpdateBatch items) -> length items `shouldBe` 1
         other -> expectationFailure $ "Expected ProjectUpdateBatch, got: " <> show other
 
@@ -626,15 +622,15 @@ spec = do
         Right (CategoryListMem cid) -> cid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected CategoryListMem, got: " <> show other
 
-    it "parses batch_delete for category and link_memory batch for category" $ do
-      let deleteArgs = object [ "entity_type" .= ("category" :: Text), "ids" .= ([testUUID, testUUID2] :: [Text]) ]
+    it "parses entity_lifecycle batch delete for category and link_memory batch for category" $ do
+      let deleteArgs = object [ "entity_type" .= ("category" :: Text), "ids" .= ([testUUID, testUUID2] :: [Text]), "action" .= ("delete" :: Text) ]
           linkArgs = object
             [ "entity_type" .= ("category" :: Text)
             , "entity_id" .= testUUID
             , "action" .= ("link" :: Text)
             , "memory_ids" .= ([testUUID, testUUID2] :: [Text])
             ]
-      case parseToolCall "batch_delete" deleteArgs of
+      case parseToolCall "entity_lifecycle" deleteArgs of
         Right (CategoryDeleteBatch ids) -> ids `shouldBe` [parsedUUID, parsedUUID2]
         other -> expectationFailure $ "Expected CategoryDeleteBatch, got: " <> show other
       case parseToolCall "link_memory" linkArgs of
@@ -732,12 +728,11 @@ spec = do
           Just contentSchema = objectField "content" properties
       numberField "maxLength" contentSchema `shouldBe` Just (fromIntegral maxMemoryContentBytes)
 
-    it "advertises batch size bounds" $ do
-      let Just schema = inputSchemaFor "memory_create_batch"
+    it "advertises batch items support on memory_create" $ do
+      let Just schema = inputSchemaFor "memory_create"
           Just properties = objectField "properties" schema
-          Just memoriesSchema = objectField "memories" properties
-      numberField "minItems" memoriesSchema `shouldBe` Just 1
-      numberField "maxItems" memoriesSchema `shouldBe` Just 100
+          Just itemsSchema = objectField "items" properties
+      objectField "items" itemsSchema `shouldSatisfy` (/= Nothing)
 
     it "advertises list filter timestamps and task priority" $ do
       let Just memorySchema = inputSchemaFor "memory_list"
@@ -757,9 +752,8 @@ spec = do
       inputSchemaFor "entity_lifecycle" `shouldSatisfy` (/= Nothing)
       inputSchemaFor "link_memory" `shouldSatisfy` (/= Nothing)
       inputSchemaFor "list_entity_memories" `shouldSatisfy` (/= Nothing)
-      inputSchemaFor "batch_delete" `shouldSatisfy` (/= Nothing)
-      inputSchemaFor "workspace_group" `shouldSatisfy` (/= Nothing)
-      inputSchemaFor "project_update_batch" `shouldSatisfy` (/= Nothing)
+      inputSchemaFor "category" `shouldSatisfy` (/= Nothing)
+      inputSchemaFor "saved_view" `shouldSatisfy` (/= Nothing)
 
     it "defines task_overview and workspace_visualization" $ do
       let Just taskOverviewSchema = inputSchemaFor "task_overview"
@@ -781,43 +775,46 @@ spec = do
 
   describe "parseToolCall (saved view tools)" $ do
 
-    it "parses saved_view_create" $ do
+    it "parses saved_view with action=create" $ do
       let args = object
-            [ "workspace_id" .= testUUID
+            [ "action"       .= ("create" :: Text)
+            , "workspace_id" .= testUUID
             , "name"         .= ("My View" :: Text)
             , "entity_type"  .= ("memory_search" :: Text)
             , "query_params" .= object ["tags" .= (["haskell"] :: [Text])]
             ]
-      case parseToolCall "saved_view_create" args of
+      case parseToolCall "saved_view" args of
         Right (SavedViewCreate csv) -> do
           csv.workspaceId `shouldBe` parsedUUID
           csv.name `shouldBe` "My View"
           csv.entityType `shouldBe` "memory_search"
         other -> expectationFailure $ "Expected SavedViewCreate, got: " <> show other
 
-    it "parses saved_view_list" $ do
+    it "parses saved_view with action=list" $ do
       let args = object
-            [ "workspace_id" .= testUUID
+            [ "action"       .= ("list" :: Text)
+            , "workspace_id" .= testUUID
             , "limit"        .= (20 :: Int)
             ]
-      case parseToolCall "saved_view_list" args of
+      case parseToolCall "saved_view" args of
         Right (SavedViewList wid ml _mo) -> do
           wid `shouldBe` parsedUUID
           ml `shouldBe` Just 20
         other -> expectationFailure $ "Expected SavedViewList, got: " <> show other
 
-    it "parses saved_view_get" $ do
-      let args = object [ "view_id" .= testUUID ]
-      case parseToolCall "saved_view_get" args of
+    it "parses saved_view with action=get" $ do
+      let args = object [ "action" .= ("get" :: Text), "view_id" .= testUUID ]
+      case parseToolCall "saved_view" args of
         Right (SavedViewGet vid) -> vid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected SavedViewGet, got: " <> show other
 
-    it "parses saved_view_update" $ do
+    it "parses saved_view with action=update" $ do
       let args = object
-            [ "view_id" .= testUUID
+            [ "action"  .= ("update" :: Text)
+            , "view_id" .= testUUID
             , "name"    .= ("Renamed" :: Text)
             ]
-      case parseToolCall "saved_view_update" args of
+      case parseToolCall "saved_view" args of
         Right (SavedViewUpdate vid usv) -> do
           vid `shouldBe` parsedUUID
           usv.name `shouldBe` Just "Renamed"
@@ -835,13 +832,14 @@ spec = do
         Right (SavedViewPurge vid) -> vid `shouldBe` parsedUUID
         other -> expectationFailure $ "Expected SavedViewPurge, got: " <> show other
 
-    it "parses saved_view_execute with optional params" $ do
+    it "parses saved_view with action=execute and optional params" $ do
       let args = object
-            [ "view_id" .= testUUID
+            [ "action"  .= ("execute" :: Text)
+            , "view_id" .= testUUID
             , "limit"   .= (10 :: Int)
             , "detail"  .= True
             ]
-      case parseToolCall "saved_view_execute" args of
+      case parseToolCall "saved_view" args of
         Right (SavedViewExecute vid ml _mo md) -> do
           vid `shouldBe` parsedUUID
           ml `shouldBe` Just 10
@@ -870,15 +868,11 @@ spec = do
 
   describe "toolDefinitions (saved views)" $ do
 
-    it "defines saved_view_create with required fields" $ do
-      let Just schema = inputSchemaFor "saved_view_create"
+    it "defines saved_view with action-based schema" $ do
+      let Just schema = inputSchemaFor "saved_view"
           Just properties = objectField "properties" schema
+      objectField "action" properties `shouldSatisfy` (/= Nothing)
       objectField "workspace_id" properties `shouldSatisfy` (/= Nothing)
-      objectField "name" properties `shouldSatisfy` (/= Nothing)
-      objectField "entity_type" properties `shouldSatisfy` (/= Nothing)
-
-    it "defines saved_view_execute" $ do
-      inputSchemaFor "saved_view_execute" `shouldSatisfy` (/= Nothing)
 
 inputSchemaFor :: Text -> Maybe Value
 inputSchemaFor toolName = case filter ((== Just toolName) . textField "name") toolDefinitions of

@@ -968,12 +968,13 @@ memoryHandlers pool tracker bc pgvec =
       _ <- requireMemoryH mid
       _ <- requireMemoryH cml.targetId
       handleDBErrors $ Mem.linkMemories pool mid cml
+      emit bc Created ETMemoryLink mid (Just $ object ["source_id" .= mid, "target_id" .= cml.targetId])
       pure NoContent
 
     unlinkH mid tid rt = do
       _ <- requireMemoryH mid
       ok <- handleDBErrors $ Mem.unlinkMemories pool mid tid rt
-      if ok then pure NoContent else throwError err404
+      if ok then do emit bc Deleted ETMemoryLink mid (Just $ object ["source_id" .= mid, "target_id" .= tid]); pure NoContent else throwError err404
 
     getTagsH mid = do
       _ <- requireMemoryH mid
@@ -982,6 +983,7 @@ memoryHandlers pool tracker bc pgvec =
     setTagsH mid tags = do
       _ <- requireMemoryH mid
       handleDBErrors $ Mem.setTags pool mid tags
+      emit bc Updated ETTag mid (Just $ object ["memory_id" .= mid, "tags" .= tags])
       pure NoContent
 
     graphH mid mdepth = do
@@ -1118,11 +1120,13 @@ projectHandlers pool bc =
       _ <- requireProjectH pid
       _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
       handleDBErrors $ Proj.linkProjectMemory pool pid lm.memoryId
+      emit bc Updated ETProject pid (Just $ object ["linked_memory" .= lm.memoryId])
       pure NoContent
 
     unlinkMemoryH pid mid = do
       _ <- requireProjectH pid
       handleDBErrors $ Proj.unlinkProjectMemory pool pid mid
+      emit bc Updated ETProject pid (Just $ object ["unlinked_memory" .= mid])
       pure NoContent
 
     getProjectMemoriesH pid = do
@@ -1257,22 +1261,26 @@ taskHandlers pool bc =
       _ <- requireTaskH tid
       _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
       handleDBErrors $ Task.linkTaskMemory pool tid lm.memoryId
+      emit bc Updated ETTask tid (Just $ object ["linked_memory" .= lm.memoryId])
       pure NoContent
 
     unlinkMemoryH tid mid = do
       _ <- requireTaskH tid
       handleDBErrors $ Task.unlinkTaskMemory pool tid mid
+      emit bc Updated ETTask tid (Just $ object ["unlinked_memory" .= mid])
       pure NoContent
 
     addDepH tid ld = do
       _ <- requireTaskH tid
       _ <- requireTaskH ld.dependsOnId
       handleDBErrors $ Task.addDependency pool tid ld.dependsOnId
+      emit bc Created ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= ld.dependsOnId])
       pure NoContent
 
     removeDepH tid depId = do
       _ <- requireTaskH tid
       handleDBErrors $ Task.removeDependency pool tid depId
+      emit bc Deleted ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= depId])
       pure NoContent
 
     getTaskMemoriesH tid = do
@@ -1421,11 +1429,13 @@ categoryHandlers pool bc =
       _ <- requireCategoryH cl.categoryId
       _ <- handleDBErrors (Mem.getMemory pool cl.memoryId) >>= maybe (throwError err404) pure
       handleDBErrors $ Cat.linkMemoryCategory pool cl.memoryId cl.categoryId
+      emit bc Created ETCategoryLink cl.categoryId (Just $ object ["category_id" .= cl.categoryId, "memory_id" .= cl.memoryId])
       pure NoContent
 
     unlinkH cl = do
       _ <- requireCategoryH cl.categoryId
       handleDBErrors $ Cat.unlinkMemoryCategory pool cl.memoryId cl.categoryId
+      emit bc Deleted ETCategoryLink cl.categoryId (Just $ object ["category_id" .= cl.categoryId, "memory_id" .= cl.memoryId])
       pure NoContent
 
 -- Workspace group handlers -----------------------------------------
@@ -1462,10 +1472,12 @@ workspaceGroupHandlers pool bc =
 
     addMemberH gid req = do
       handleDBErrors $ WG.addMember pool gid req.workspaceId
+      emit bc Updated ETWorkspaceGroup gid (Just $ object ["added_workspace" .= req.workspaceId])
       pure NoContent
 
     removeMemberH gid wsId = do
       handleDBErrors $ WG.removeMember pool gid wsId
+      emit bc Updated ETWorkspaceGroup gid (Just $ object ["removed_workspace" .= wsId])
       pure NoContent
 
     listMembersH gid = handleDBErrors $ WG.listGroupMembers pool gid

@@ -200,6 +200,9 @@ type alias Model =
 
     -- Delete confirmation
     , deleteConfirmation : Maybe ( String, String )
+
+    -- Self-event suppression: entity IDs with recent local mutations
+    , pendingMutationIds : Dict String Bool
     }
 
 
@@ -381,6 +384,7 @@ init rawFlags url key =
                         []
             , focusHistoryIndex = 0
             , deleteConfirmation = Nothing
+            , pendingMutationIds = Dict.empty
             }
 
         model =
@@ -725,6 +729,7 @@ type Msg
     | GotProjects (Result Http.Error (Api.PaginatedResult Api.Project))
     | GotTasks (Result Http.Error (Api.PaginatedResult Api.Task))
     | GotMemories (Result Http.Error (Api.PaginatedResult Api.Memory))
+    | GotSingleMemory (Result Http.Error Api.Memory)
     | GotVisualization (Result Http.Error Api.WorkspaceVisualization)
       -- Mutation responses
     | MutationDone String (Result Http.Error ())
@@ -833,6 +838,7 @@ type Msg
     | FocusBreadcrumbNav Int
     | ClearFocus
     | GlobalKeyDown Int
+    | ClearPendingMutation String
     | NoOp
 
 
@@ -1059,6 +1065,14 @@ update msg model =
                 Err _ ->
                     addToast Error "Failed to load memories" model
 
+        GotSingleMemory result ->
+            case result of
+                Ok mem ->
+                    ( { model | memories = Dict.insert mem.id mem model.memories }, Cmd.none )
+
+                Err _ ->
+                    ( model, Cmd.none )
+
         GotVisualization result ->
             case result of
                 Ok viz ->
@@ -1101,12 +1115,21 @@ update msg model =
         ProjectCreated result ->
             case result of
                 Ok proj ->
-                    addToast Success ("Created project: " ++ proj.name)
-                        { model
-                            | projects = Dict.insert proj.id proj model.projects
-                            , createForm = Nothing
-                            , inlineCreate = Nothing
-                        }
+                    let
+                        updatedModel =
+                            { model
+                                | projects = Dict.insert proj.id proj model.projects
+                                , createForm = Nothing
+                                , inlineCreate = Nothing
+                            }
+
+                        ( trackedModel, trackCmd ) =
+                            trackLocalMutation proj.id updatedModel
+
+                        ( toastedModel, toastCmd ) =
+                            addToast Success ("Created project: " ++ proj.name) trackedModel
+                    in
+                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
 
                 Err _ ->
                     addToast Error "Failed to create project" model
@@ -1114,12 +1137,21 @@ update msg model =
         TaskCreated result ->
             case result of
                 Ok task ->
-                    addToast Success ("Created task: " ++ task.title)
-                        { model
-                            | tasks = Dict.insert task.id task model.tasks
-                            , createForm = Nothing
-                            , inlineCreate = Nothing
-                        }
+                    let
+                        updatedModel =
+                            { model
+                                | tasks = Dict.insert task.id task model.tasks
+                                , createForm = Nothing
+                                , inlineCreate = Nothing
+                            }
+
+                        ( trackedModel, trackCmd ) =
+                            trackLocalMutation task.id updatedModel
+
+                        ( toastedModel, toastCmd ) =
+                            addToast Success ("Created task: " ++ task.title) trackedModel
+                    in
+                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
 
                 Err _ ->
                     addToast Error "Failed to create task" model
@@ -1127,11 +1159,20 @@ update msg model =
         MemoryCreated result ->
             case result of
                 Ok mem ->
-                    addToast Success "Memory created"
-                        { model
-                            | memories = Dict.insert mem.id mem model.memories
-                            , createForm = Nothing
-                        }
+                    let
+                        updatedModel =
+                            { model
+                                | memories = Dict.insert mem.id mem model.memories
+                                , createForm = Nothing
+                            }
+
+                        ( trackedModel, trackCmd ) =
+                            trackLocalMutation mem.id updatedModel
+
+                        ( toastedModel, toastCmd ) =
+                            addToast Success "Memory created" trackedModel
+                    in
+                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
 
                 Err _ ->
                     addToast Error "Failed to create memory" model
@@ -1139,9 +1180,12 @@ update msg model =
         ProjectUpdated result ->
             case result of
                 Ok proj ->
-                    ( { model | projects = Dict.insert proj.id proj model.projects }
-                    , Cmd.none
-                    )
+                    let
+                        ( trackedModel, trackCmd ) =
+                            trackLocalMutation proj.id
+                                { model | projects = Dict.insert proj.id proj model.projects }
+                    in
+                    ( trackedModel, trackCmd )
 
                 Err _ ->
                     addToast Error "Failed to update project" model
@@ -1149,9 +1193,12 @@ update msg model =
         TaskUpdated result ->
             case result of
                 Ok task ->
-                    ( { model | tasks = Dict.insert task.id task model.tasks }
-                    , Cmd.none
-                    )
+                    let
+                        ( trackedModel, trackCmd ) =
+                            trackLocalMutation task.id
+                                { model | tasks = Dict.insert task.id task model.tasks }
+                    in
+                    ( trackedModel, trackCmd )
 
                 Err _ ->
                     addToast Error "Failed to update task" model
@@ -1159,9 +1206,12 @@ update msg model =
         MemoryUpdated result ->
             case result of
                 Ok mem ->
-                    ( { model | memories = Dict.insert mem.id mem model.memories }
-                    , Cmd.none
-                    )
+                    let
+                        ( trackedModel, trackCmd ) =
+                            trackLocalMutation mem.id
+                                { model | memories = Dict.insert mem.id mem model.memories }
+                    in
+                    ( trackedModel, trackCmd )
 
                 Err _ ->
                     addToast Error "Failed to update memory" model
@@ -1169,9 +1219,12 @@ update msg model =
         WorkspaceUpdated result ->
             case result of
                 Ok ws ->
-                    ( { model | workspaces = Dict.insert ws.id ws model.workspaces }
-                    , Cmd.none
-                    )
+                    let
+                        ( trackedModel, trackCmd ) =
+                            trackLocalMutation ws.id
+                                { model | workspaces = Dict.insert ws.id ws model.workspaces }
+                    in
+                    ( trackedModel, trackCmd )
 
                 Err _ ->
                     addToast Error "Failed to update workspace" model
@@ -2121,6 +2174,21 @@ update msg model =
         NoOp ->
             ( model, Cmd.none )
 
+        ClearPendingMutation entityId ->
+            ( { model | pendingMutationIds = Dict.remove entityId model.pendingMutationIds }
+            , Cmd.none
+            )
+
+
+{-| Mark an entity ID as recently mutated locally. Returns the updated model
+and a Cmd that clears the flag after 3 seconds.
+-}
+trackLocalMutation : String -> Model -> ( Model, Cmd Msg )
+trackLocalMutation entityId model =
+    ( { model | pendingMutationIds = Dict.insert entityId True model.pendingMutationIds }
+    , Process.sleep 3000 |> ElmTask.perform (\_ -> ClearPendingMutation entityId)
+    )
+
 
 saveEditCmd : String -> { entityType : String, entityId : String, field : String, value : String, original : String } -> Cmd Msg
 saveEditCmd apiUrl state =
@@ -2166,40 +2234,171 @@ refreshAfterMutation model =
 handleChangeEvent : Api.ChangeEvent -> Model -> ( Model, Cmd Msg )
 handleChangeEvent event model =
     let
-        refreshCmd =
-            case model.selectedWorkspaceId of
-                Just wsId ->
-                    case event.entityType of
-                        Api.EProject ->
-                            Api.fetchProjects model.flags.apiUrl wsId GotProjects
+        ( updatedModel, refreshCmd ) =
+            applyChangeEvent event model
 
-                        Api.ETask ->
-                            Api.fetchTasks model.flags.apiUrl wsId GotTasks
-
-                        Api.EMemory ->
-                            Api.fetchMemories model.flags.apiUrl wsId GotMemories
-
-                        Api.EWorkspace ->
-                            Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
-
-                        _ ->
-                            Cmd.none
-
-                Nothing ->
-                    case event.entityType of
-                        Api.EWorkspace ->
-                            Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
-
-                        _ ->
-                            Cmd.none
-
-        toastMsg =
-            changeEventDescription event
-
-        ( toastedModel, toastCmd ) =
-            addToast Info toastMsg model
+        isSelfEvent =
+            Dict.member event.entityId model.pendingMutationIds
     in
-    ( toastedModel, Cmd.batch [ refreshCmd, toastCmd ] )
+    if isSelfEvent then
+        -- Self-event: apply data (harmless upsert) but skip the toast
+        ( updatedModel, refreshCmd )
+
+    else
+        let
+            toastMsg =
+                changeEventDescription event
+
+            ( toastedModel, toastCmd ) =
+                addToast Info toastMsg updatedModel
+        in
+        ( toastedModel, Cmd.batch [ refreshCmd, toastCmd ] )
+
+
+{-| Try to apply the change event payload directly into the model.
+Falls back to a full re-fetch when the payload is missing or cannot be decoded.
+-}
+applyChangeEvent : Api.ChangeEvent -> Model -> ( Model, Cmd Msg )
+applyChangeEvent event model =
+    case event.entityType of
+        Api.EWorkspace ->
+            case event.changeType of
+                Api.Deleted ->
+                    ( { model | workspaces = Dict.remove event.entityId model.workspaces }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    case Maybe.andThen (tryDecode Api.workspaceDecoder) event.payload of
+                        Just ws ->
+                            ( { model | workspaces = Dict.insert ws.id ws model.workspaces }
+                            , Cmd.none
+                            )
+
+                        Nothing ->
+                            ( model
+                            , Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
+                            )
+
+        Api.EProject ->
+            case event.changeType of
+                Api.Deleted ->
+                    ( { model | projects = Dict.remove event.entityId model.projects }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    case Maybe.andThen (tryDecode Api.projectDecoder) event.payload of
+                        Just proj ->
+                            ( { model | projects = Dict.insert proj.id proj model.projects }
+                            , Cmd.none
+                            )
+
+                        Nothing ->
+                            withWorkspace model <|
+                                \wsId -> Api.fetchProjects model.flags.apiUrl wsId GotProjects
+
+        Api.ETask ->
+            case event.changeType of
+                Api.Deleted ->
+                    ( { model | tasks = Dict.remove event.entityId model.tasks }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    case Maybe.andThen (tryDecode Api.taskDecoder) event.payload of
+                        Just task ->
+                            ( { model | tasks = Dict.insert task.id task model.tasks }
+                            , Cmd.none
+                            )
+
+                        Nothing ->
+                            withWorkspace model <|
+                                \wsId -> Api.fetchTasks model.flags.apiUrl wsId GotTasks
+
+        Api.EMemory ->
+            case event.changeType of
+                Api.Deleted ->
+                    ( { model | memories = Dict.remove event.entityId model.memories }
+                    , Cmd.none
+                    )
+
+                _ ->
+                    case Maybe.andThen (tryDecode Api.memoryDecoder) event.payload of
+                        Just mem ->
+                            ( { model | memories = Dict.insert mem.id mem model.memories }
+                            , Cmd.none
+                            )
+
+                        Nothing ->
+                            withWorkspace model <|
+                                \wsId -> Api.fetchMemories model.flags.apiUrl wsId GotMemories
+
+        Api.EMemoryLink ->
+            -- Memory links affect the graph view; refresh visualization if on graph page
+            withWorkspace model <|
+                \wsId ->
+                    case model.page of
+                        MemoryGraphPage ->
+                            Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
+
+                        _ ->
+                            Cmd.none
+
+        Api.ECategory ->
+            -- Categories don't have a dedicated Dict yet; refresh memories
+            -- since category changes can affect memory display
+            withWorkspace model <|
+                \wsId -> Api.fetchMemories model.flags.apiUrl wsId GotMemories
+
+        Api.ETaskDependency ->
+            -- Refresh task dependencies for the affected task
+            ( model
+            , Api.fetchTaskOverview model.flags.apiUrl event.entityId (GotTaskDependencies event.entityId)
+            )
+
+        Api.ECategoryLink ->
+            -- Category-memory link changed; refresh memories
+            withWorkspace model <|
+                \wsId -> Api.fetchMemories model.flags.apiUrl wsId GotMemories
+
+        Api.ETag ->
+            -- Tags changed on a memory; refresh that memory
+            ( model
+            , Api.fetchMemory model.flags.apiUrl event.entityId GotSingleMemory
+            )
+
+        Api.EWorkspaceGroup ->
+            -- Workspace groups affect the sidebar; refresh workspaces
+            ( model
+            , Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
+            )
+
+        Api.ESavedView ->
+            -- Saved views are not currently rendered in the main UI; no-op
+            ( model, Cmd.none )
+
+        Api.EOther _ ->
+            ( model, Cmd.none )
+
+
+{-| Helper: run a command that needs a workspace ID, or no-op if none selected.
+-}
+withWorkspace : Model -> (String -> Cmd Msg) -> ( Model, Cmd Msg )
+withWorkspace model mkCmd =
+    case model.selectedWorkspaceId of
+        Just wsId ->
+            ( model, mkCmd wsId )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
+{-| Try to decode a JSON Value using a given decoder.
+-}
+tryDecode : Decode.Decoder a -> Decode.Value -> Maybe a
+tryDecode decoder val =
+    Result.toMaybe (Decode.decodeValue decoder val)
 
 
 changeEventDescription : Api.ChangeEvent -> String
@@ -2235,6 +2434,21 @@ changeEventDescription event =
 
                 Api.ECategory ->
                     "Category"
+
+                Api.EWorkspaceGroup ->
+                    "Workspace group"
+
+                Api.ESavedView ->
+                    "Saved view"
+
+                Api.ETaskDependency ->
+                    "Task dependency"
+
+                Api.ECategoryLink ->
+                    "Category link"
+
+                Api.ETag ->
+                    "Tags"
 
                 Api.EOther s ->
                     s

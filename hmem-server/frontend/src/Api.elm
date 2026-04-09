@@ -451,6 +451,11 @@ type EntityType
     | EMemory
     | EMemoryLink
     | ECategory
+    | EWorkspaceGroup
+    | ESavedView
+    | ETaskDependency
+    | ECategoryLink
+    | ETag
     | EOther String
 
 
@@ -513,6 +518,21 @@ entityTypeDecoder =
 
                     "category" ->
                         D.succeed ECategory
+
+                    "workspace_group" ->
+                        D.succeed EWorkspaceGroup
+
+                    "saved_view" ->
+                        D.succeed ESavedView
+
+                    "task_dependency" ->
+                        D.succeed ETaskDependency
+
+                    "category_link" ->
+                        D.succeed ECategoryLink
+
+                    "tag" ->
+                        D.succeed ETag
 
                     _ ->
                         D.succeed (EOther s)

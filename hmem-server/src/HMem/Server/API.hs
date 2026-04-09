@@ -427,6 +427,10 @@ emit bc ct et eid mpayload = liftIO $ do
   now <- getCurrentTime
   bc ChangeEvent { changeType = ct, entityType = et, entityId = eid, timestamp = now, payload = mpayload }
 
+-- | Emit one event per ID in a list. Used by batch handlers.
+emitMany :: Broadcast -> ChangeType -> EntityType -> [UUID] -> Handler ()
+emitMany bc ct et ids = mapM_ (\eid -> emit bc ct et eid Nothing) ids
+
 -- Health handler ---------------------------------------------------
 
 healthHandler :: Pool Hasql.Connection -> AccessTracker -> Server HealthAPI
@@ -1023,16 +1027,19 @@ memoryHandlers pool tracker bc pgvec =
     batchDeleteH br = do
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Mem.deleteMemoryBatch pool br.ids
+      emitMany bc Deleted ETMemory br.ids
       pure BatchResult { affected = n }
 
     batchSetTagsH bst = do
       rejectValidationErrors (validateBatchSetTagsRequest bst)
       n <- handleDBErrors $ Mem.setTagsBatch pool [(item.memoryId, item.tags) | item <- bst.items]
+      emitMany bc Updated ETTag (map (.memoryId) bst.items)
       pure BatchResult { affected = n }
 
     batchUpdateH bur = do
       rejectValidationErrors (validateBatchUpdateMemoryRequest bur)
       n <- handleDBErrors $ Mem.updateMemoryBatch pool [(item.id, item.update) | item <- bur.items]
+      emitMany bc Updated ETMemory (map (.id) bur.items)
       pure BatchResult { affected = n }
 
 -- Project handlers -------------------------------------------------
@@ -1137,16 +1144,19 @@ projectHandlers pool bc =
       _ <- requireProjectH pid
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
       n <- handleDBErrors $ Proj.linkProjectMemoryBatch pool pid blr.memoryIds
+      emit bc Updated ETProject pid Nothing
       pure BatchResult { affected = n }
 
     batchDeleteH br = do
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Proj.deleteProjectBatch pool br.ids
+      emitMany bc Deleted ETProject br.ids
       pure BatchResult { affected = n }
 
     batchUpdateH bur = do
       rejectValidationErrors (validateBatchUpdateProjectRequest bur)
       n <- handleDBErrors $ Proj.updateProjectBatch pool [(item.id, item.update) | item <- bur.items]
+      emitMany bc Updated ETProject (map (.id) bur.items)
       pure BatchResult { affected = n }
 
     projectOverviewH pid = do
@@ -1298,22 +1308,26 @@ taskHandlers pool bc =
     batchDeleteH br = do
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Task.deleteTaskBatch pool br.ids
+      emitMany bc Deleted ETTask br.ids
       pure BatchResult { affected = n }
 
     batchMoveH bmr = do
       rejectValidationErrors (validateBatchMoveTasksRequest bmr)
       n <- handleDBErrors $ Task.moveTasksBatch pool bmr.taskIds bmr.projectId
+      emitMany bc Updated ETTask bmr.taskIds
       pure BatchResult { affected = n }
 
     batchUpdateH bur = do
       rejectValidationErrors (validateBatchUpdateTaskRequest bur)
       n <- handleDBErrors $ Task.updateTaskBatch pool [(item.id, item.update) | item <- bur.items]
+      emitMany bc Updated ETTask (map (.id) bur.items)
       pure BatchResult { affected = n }
 
     batchLinkMemoriesH tid blr = do
       _ <- requireTaskH tid
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
       n <- handleDBErrors $ Task.linkTaskMemoryBatch pool tid blr.memoryIds
+      emit bc Updated ETTask tid Nothing
       pure BatchResult { affected = n }
 
 -- Cleanup handlers -------------------------------------------------
@@ -1418,11 +1432,13 @@ categoryHandlers pool bc =
       _ <- requireCategoryH cid
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
       n <- handleDBErrors $ Cat.linkMemoryCategoryBatch pool cid blr.memoryIds
+      emit bc Updated ETCategory cid Nothing
       pure BatchResult { affected = n }
 
     batchDeleteH br = do
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Cat.deleteCategoryBatch pool br.ids
+      emitMany bc Deleted ETCategory br.ids
       pure BatchResult { affected = n }
 
     linkH cl = do

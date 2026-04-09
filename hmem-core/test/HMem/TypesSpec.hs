@@ -163,6 +163,8 @@ spec = do
             , projectId = Nothing
             , status = Just Todo
             , priority = Just 4
+            , query = Nothing
+            , searchLanguage = Nothing
             , createdAfter = Just (read "2026-03-30 10:00:00 UTC")
             , createdBefore = Just (read "2026-03-30 11:00:00 UTC")
             , updatedAfter = Nothing
@@ -279,6 +281,8 @@ spec = do
             , createdBefore = Nothing
             , updatedAfter = Just (read "2026-03-30 11:00:00 UTC")
             , updatedBefore = Just (read "2026-03-30 10:00:00 UTC")
+            , query = Nothing
+            , searchLanguage = Nothing
             , limit = Nothing
             , offset = Nothing
             }

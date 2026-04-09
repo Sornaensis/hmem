@@ -41,6 +41,7 @@ import HMem.DB.Project qualified as Proj
 import HMem.DB.RequestContext (currentRequestId)
 import HMem.DB.SavedView qualified as SV
 import HMem.DB.Schema
+import HMem.DB.Search qualified as Search
 import HMem.DB.Task qualified as Task
 import HMem.DB.WorkspaceGroup qualified as WG
 import HMem.Server.AccessTracker (AccessTracker, trackAccess, bufferSize)
@@ -63,6 +64,7 @@ type HMemAPI = "api" :> "v1" :>
   :<|> "groups"      :> WorkspaceGroupAPI
   :<|> "activity"    :> ActivityAPI
   :<|> "saved-views" :> SavedViewAPI
+  :<|> "search"      :> SearchAPI
   )
 
 -- Health check
@@ -263,6 +265,10 @@ type SavedViewAPI =
          :> QueryParam "limit" Int :> QueryParam "offset" Int :> QueryParam "detail" Bool
          :> Post '[JSON] Value
 
+-- Unified search
+type SearchAPI =
+  ReqBody '[JSON] UnifiedSearchQuery :> Post '[JSON] UnifiedSearchResults
+
 -- Request body for group member operations
 newtype GroupMemberReq = GroupMemberReq { workspaceId :: UUID }
   deriving (Show, Eq, Generic)
@@ -420,6 +426,7 @@ server pool tracker bc pgvec =
   :<|> workspaceGroupHandlers pool bc
   :<|> activityHandlers pool
   :<|> savedViewHandlers pool bc
+  :<|> searchHandler pool
 
 -- | Emit a change event to all connected WebSocket clients.
 emit :: Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
@@ -1070,6 +1077,8 @@ projectHandlers pool bc =
           query = ProjectListQuery
             { workspaceId = mws
             , status = mstatus
+            , query = Nothing
+            , searchLanguage = Nothing
             , createdAfter = mcreatedAfter
             , createdBefore = mcreatedBefore
             , updatedAfter = mupdatedAfter
@@ -1165,11 +1174,13 @@ projectHandlers pool bc =
         { workspaceId = Nothing, projectId = Just pid, status = Nothing
         , priority = Nothing, createdAfter = Nothing, createdBefore = Nothing
         , updatedAfter = Nothing, updatedBefore = Nothing
+        , query = Nothing, searchLanguage = Nothing
         , limit = Just 200, offset = Just 0 }
       allProjects <- handleDBErrors $ Proj.listProjectsWithQuery pool ProjectListQuery
         { workspaceId = Just proj.workspaceId, status = Nothing
         , createdAfter = Nothing, createdBefore = Nothing
         , updatedAfter = Nothing, updatedBefore = Nothing
+        , query = Nothing, searchLanguage = Nothing
         , limit = Just 200, offset = Just 0 }
       let childProjects = Prelude.filter (\p -> p.parentId == Just pid) allProjects
       mems <- handleDBErrors $ Mem.getProjectMemories pool pid
@@ -1214,6 +1225,8 @@ taskHandlers pool bc =
             , projectId = mpid
             , status = mstatus
             , priority = mpriority
+            , query = Nothing
+            , searchLanguage = Nothing
             , createdAfter = mcreatedAfter
             , createdBefore = mcreatedBefore
             , updatedAfter = mupdatedAfter
@@ -1599,6 +1612,7 @@ savedViewHandlers pool bc =
             Aeson.Success pq -> do
               let pq' = ProjectListQuery
                     { workspaceId = pq.workspaceId, status = pq.status
+                    , query = pq.query, searchLanguage = pq.searchLanguage
                     , createdAfter = pq.createdAfter, createdBefore = pq.createdBefore
                     , updatedAfter = pq.updatedAfter, updatedBefore = pq.updatedBefore
                     , limit = Just (lim + 1), offset = Just off }
@@ -1611,6 +1625,7 @@ savedViewHandlers pool bc =
               let tq' = TaskListQuery
                     { workspaceId = tq.workspaceId, projectId = tq.projectId
                     , status = tq.status, priority = tq.priority
+                    , query = tq.query, searchLanguage = tq.searchLanguage
                     , createdAfter = tq.createdAfter, createdBefore = tq.createdBefore
                     , updatedAfter = tq.updatedAfter, updatedBefore = tq.updatedBefore
                     , limit = Just (lim + 1), offset = Just off }
@@ -1636,6 +1651,14 @@ savedViewHandlers pool bc =
               ]
           }
 
+------------------------------------------------------------------------
+-- Unified search
+------------------------------------------------------------------------
+
+searchHandler :: Pool Hasql.Connection -> Server SearchAPI
+searchHandler pool usq = do
+  rejectValidationErrors (validateUnifiedSearchQuery usq)
+  handleDBErrors $ Search.searchAll pool usq
 
 ------------------------------------------------------------------------
 -- Helpers

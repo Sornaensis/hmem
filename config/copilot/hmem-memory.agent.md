@@ -21,6 +21,7 @@ You manage memories through these MCP tools:
 - **memory_get** — Fetch a specific memory by ID.
 - **memory_list** — Browse memories, optionally filtered by workspace or type.
 - **memory_search** — Full-text search with filters (tags, importance, type, category, pinned). Use this as the primary retrieval method.
+- **search** — Unified cross-entity full-text search across memories, projects, and tasks. Returns separate result lists with linked memory summaries on project/task results. Use when you need to find information across entity types.
 
 ### Organization
 - **memory_set_tags** — Manage tags on memories for categorization. Use `items` array for batch tag operations.

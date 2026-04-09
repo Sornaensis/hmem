@@ -46,6 +46,15 @@ module HMem.Types
   , UpdateTask(..)
   , TaskListQuery(..)
 
+    -- * Unified search types
+  , EntitySearchType(..)
+  , UnifiedSearchQuery(..)
+  , LinkedMemorySummary(..)
+  , ProjectSearchResult(..)
+  , TaskSearchResult(..)
+  , UnifiedSearchResults(..)
+  , validateUnifiedSearchQuery
+
     -- * Visualization types
   , WorkspaceVisualizationMemoryFilter(..)
   , WorkspaceVisualizationQuery(..)
@@ -842,14 +851,16 @@ instance FromJSON MemoryListQuery where
   parseJSON  = genericParseJSON jsonOptions
 
 data ProjectListQuery = ProjectListQuery
-  { workspaceId   :: Maybe UUID
-  , status        :: Maybe ProjectStatus
-  , createdAfter  :: Maybe UTCTime
-  , createdBefore :: Maybe UTCTime
-  , updatedAfter  :: Maybe UTCTime
-  , updatedBefore :: Maybe UTCTime
-  , limit         :: Maybe Int
-  , offset        :: Maybe Int
+  { workspaceId     :: Maybe UUID
+  , status          :: Maybe ProjectStatus
+  , query           :: Maybe Text
+  , searchLanguage  :: Maybe Text
+  , createdAfter    :: Maybe UTCTime
+  , createdBefore   :: Maybe UTCTime
+  , updatedAfter    :: Maybe UTCTime
+  , updatedBefore   :: Maybe UTCTime
+  , limit           :: Maybe Int
+  , offset          :: Maybe Int
   } deriving (Show, Eq, Generic)
 
 instance ToJSON ProjectListQuery where
@@ -869,16 +880,18 @@ instance ToJSON ProjectOverview where
   toJSON     = genericToJSON jsonOptions
 
 data TaskListQuery = TaskListQuery
-  { workspaceId   :: Maybe UUID
-  , projectId     :: Maybe UUID
-  , status        :: Maybe TaskStatus
-  , priority      :: Maybe Int
-  , createdAfter  :: Maybe UTCTime
-  , createdBefore :: Maybe UTCTime
-  , updatedAfter  :: Maybe UTCTime
-  , updatedBefore :: Maybe UTCTime
-  , limit         :: Maybe Int
-  , offset        :: Maybe Int
+  { workspaceId     :: Maybe UUID
+  , projectId       :: Maybe UUID
+  , status          :: Maybe TaskStatus
+  , priority        :: Maybe Int
+  , query           :: Maybe Text
+  , searchLanguage  :: Maybe Text
+  , createdAfter    :: Maybe UTCTime
+  , createdBefore   :: Maybe UTCTime
+  , updatedAfter    :: Maybe UTCTime
+  , updatedBefore   :: Maybe UTCTime
+  , limit           :: Maybe Int
+  , offset          :: Maybe Int
   } deriving (Show, Eq, Generic)
 
 instance ToJSON TaskListQuery where
@@ -1707,3 +1720,101 @@ validateBatchUpdateTaskRequest br =
                      (validateUpdateTaskInput item.update)
       | (idx, item) <- zip [(0 :: Int) ..] br.items
       ]
+
+------------------------------------------------------------------------
+-- Unified search
+------------------------------------------------------------------------
+
+data EntitySearchType = SearchMemory | SearchProject | SearchTask
+  deriving (Show, Eq, Ord, Bounded, Enum, Generic)
+
+instance ToJSON EntitySearchType where
+  toJSON SearchMemory  = String "memory"
+  toJSON SearchProject = String "project"
+  toJSON SearchTask    = String "task"
+
+instance FromJSON EntitySearchType where
+  parseJSON = withText "EntitySearchType" $ \case
+    "memory"  -> pure SearchMemory
+    "project" -> pure SearchProject
+    "task"    -> pure SearchTask
+    other     -> fail $ "Invalid entity search type: " <> T.unpack other
+
+data UnifiedSearchQuery = UnifiedSearchQuery
+  { workspaceId    :: Maybe UUID
+  , query          :: Text
+  , entityTypes    :: Maybe [EntitySearchType]
+  , searchLanguage :: Maybe Text
+  , limit          :: Maybe Int
+  , offset         :: Maybe Int
+  -- Memory-specific filters
+  , memoryType     :: Maybe MemoryType
+  , tags           :: Maybe [Text]
+  , minImportance  :: Maybe Int
+  , categoryId     :: Maybe UUID
+  , pinnedOnly     :: Maybe Bool
+  -- Project-specific filters
+  , projectStatus  :: Maybe ProjectStatus
+  -- Task-specific filters
+  , taskStatus     :: Maybe TaskStatus
+  , taskPriority   :: Maybe Int
+  , projectId      :: Maybe UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON UnifiedSearchQuery where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON UnifiedSearchQuery where
+  parseJSON  = genericParseJSON jsonOptions
+
+-- | Compact summary of a linked memory included in project/task search results.
+data LinkedMemorySummary = LinkedMemorySummary
+  { id         :: UUID
+  , summary    :: Maybe Text
+  , tags       :: [Text]
+  , importance :: Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON LinkedMemorySummary where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON LinkedMemorySummary where
+  parseJSON  = genericParseJSON jsonOptions
+
+-- | A project search result with its linked memories.
+data ProjectSearchResult = ProjectSearchResult
+  { project        :: Project
+  , linkedMemories :: [LinkedMemorySummary]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ProjectSearchResult where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON ProjectSearchResult where
+  parseJSON  = genericParseJSON jsonOptions
+
+-- | A task search result with its linked memories.
+data TaskSearchResult = TaskSearchResult
+  { task           :: Task
+  , linkedMemories :: [LinkedMemorySummary]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TaskSearchResult where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON TaskSearchResult where
+  parseJSON  = genericParseJSON jsonOptions
+
+-- | Results from a unified search across entity types.
+data UnifiedSearchResults = UnifiedSearchResults
+  { memories :: [Memory]
+  , projects :: [ProjectSearchResult]
+  , tasks    :: [TaskSearchResult]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON UnifiedSearchResults where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON UnifiedSearchResults where
+  parseJSON  = genericParseJSON jsonOptions
+
+validateUnifiedSearchQuery :: UnifiedSearchQuery -> [Text]
+validateUnifiedSearchQuery usq =
+  ["query is required and must not be empty" | T.null (T.strip usq.query)]
+  <> validateOptionalIntRange "min_importance" 1 10 usq.minImportance
+  <> validateOptionalIntRange "task_priority" 1 10 usq.taskPriority

@@ -123,6 +123,7 @@ createProject pool cp = do
               , projStatus      = unsafeDefault
               , projPriority    = lit pri
               , projMetadata    = lit meta
+              , projSearchVector = unsafeDefault
               , projDeletedAt   = unsafeDefault
               , projCreatedAt   = unsafeDefault
               , projUpdatedAt   = unsafeDefault
@@ -301,6 +302,8 @@ listProjects pool wsId mstatus mlimit moffset =
   listProjectsWithQuery pool ProjectListQuery
     { workspaceId = Just wsId
     , status = mstatus
+    , query = Nothing
+    , searchLanguage = Nothing
     , createdAfter = Nothing
     , createdBefore = Nothing
     , updatedAfter = Nothing
@@ -312,31 +315,49 @@ listProjects pool wsId mstatus mlimit moffset =
 listProjectsWithQuery :: Pool Hasql.Connection -> ProjectListQuery -> IO [Project]
 listProjectsWithQuery pool pq = do
   let (lim, off) = capPagination pq.limit pq.offset
-  rows <- runSession pool $ Session.statement () $ run $ select $
-    limit (fromIntegral lim) $ offset (fromIntegral off) $
-    orderBy (((\row -> row.projPriority) >$< desc) <> ((\row -> row.projName) >$< asc)) $ do
-      row <- each projectSchema
-      case pq.workspaceId of
-        Just wid -> where_ $ row.projWorkspaceId ==. lit wid
-        Nothing  -> pure ()
-      where_ $ activeProject row
-      case pq.status of
-        Nothing -> pure ()
-        Just s  -> where_ $ row.projStatus ==. lit s
-      case pq.createdAfter of
-        Just createdAfter -> where_ $ row.projCreatedAt >=. lit createdAfter
-        Nothing -> pure ()
-      case pq.createdBefore of
-        Just createdBefore -> where_ $ row.projCreatedAt <=. lit createdBefore
-        Nothing -> pure ()
-      case pq.updatedAfter of
-        Just updatedAfter -> where_ $ row.projUpdatedAt >=. lit updatedAfter
-        Nothing -> pure ()
-      case pq.updatedBefore of
-        Just updatedBefore -> where_ $ row.projUpdatedAt <=. lit updatedBefore
-        Nothing -> pure ()
-      pure row
-  pure $ map rowToProject rows
+      searchLang = fromMaybe "english" pq.searchLanguage
+      applyFilters row = do
+        case pq.workspaceId of
+          Just wid -> where_ $ row.projWorkspaceId ==. lit wid
+          Nothing  -> pure ()
+        where_ $ activeProject row
+        case pq.status of
+          Nothing -> pure ()
+          Just s  -> where_ $ row.projStatus ==. lit s
+        case pq.createdAfter of
+          Just createdAfter -> where_ $ row.projCreatedAt >=. lit createdAfter
+          Nothing -> pure ()
+        case pq.createdBefore of
+          Just createdBefore -> where_ $ row.projCreatedAt <=. lit createdBefore
+          Nothing -> pure ()
+        case pq.updatedAfter of
+          Just updatedAfter -> where_ $ row.projUpdatedAt >=. lit updatedAfter
+          Nothing -> pure ()
+        case pq.updatedBefore of
+          Just updatedBefore -> where_ $ row.projUpdatedAt <=. lit updatedBefore
+          Nothing -> pure ()
+  case pq.query of
+    Nothing -> do
+      rows <- runSession pool $ Session.statement () $ run $ select $
+        limit (fromIntegral lim) $ offset (fromIntegral off) $
+        orderBy (((\row -> row.projPriority) >$< desc) <> ((\row -> row.projName) >$< asc)) $ do
+          row <- each projectSchema
+          applyFilters row
+          pure row
+      pure $ map rowToProject rows
+    Just q -> do
+      results <- runSession pool $ Session.statement () $ run $ select $
+        limit (fromIntegral lim) $ offset (fromIntegral off) $
+        orderBy (snd >$< desc) $ do
+          row <- each projectSchema
+          applyFilters row
+          let config = unsafeCastExpr (lit searchLang) :: Expr PgRegConfig
+          let tsq = function "plainto_tsquery" (config, lit q) :: Expr PgTSQuery
+          let tsvec = row.projSearchVector :: Expr PgTSVector
+          where_ $ rawBinaryOperator "@@" tsvec tsq
+          let tsRank = function "ts_rank" (tsvec, tsq) :: Expr Double
+          pure (row, tsRank)
+      pure $ map (rowToProject . fst) results
 
 ------------------------------------------------------------------------
 -- Memory links

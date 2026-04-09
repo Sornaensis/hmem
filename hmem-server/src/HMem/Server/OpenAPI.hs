@@ -155,6 +155,13 @@ instance ToSchema VisualizationProjectMemoryLink where declareNamedSchema = gene
 instance ToSchema VisualizationTaskMemoryLink where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WorkspaceVisualization where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WorkspaceVisualizationResponse where declareNamedSchema _ = declareNamedSchema (Proxy @WorkspaceVisualization)
+instance ToSchema EntitySearchType       where
+  declareNamedSchema = genericDeclareNamedSchema defaultSchemaOptions
+instance ToSchema UnifiedSearchQuery     where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema LinkedMemorySummary    where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ProjectSearchResult    where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TaskSearchResult       where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema UnifiedSearchResults   where declareNamedSchema = genericDeclareNamedSchema opts
 
 ------------------------------------------------------------------------
 -- Helper

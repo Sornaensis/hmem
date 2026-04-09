@@ -255,17 +255,18 @@ memoryLinkSchema = TableSchema
 ------------------------------------------------------------------------
 
 data ProjectT f = ProjectT
-  { projId          :: Column f UUID
-  , projWorkspaceId :: Column f UUID
-  , projParentId    :: Column f (Maybe UUID)
-  , projName        :: Column f Text
-  , projDescription :: Column f (Maybe Text)
-  , projStatus      :: Column f ProjectStatus
-  , projPriority    :: Column f Int16
-  , projMetadata    :: Column f Value
-  , projDeletedAt   :: Column f (Maybe UTCTime)
-  , projCreatedAt   :: Column f UTCTime
-  , projUpdatedAt   :: Column f UTCTime
+  { projId           :: Column f UUID
+  , projWorkspaceId  :: Column f UUID
+  , projParentId     :: Column f (Maybe UUID)
+  , projName         :: Column f Text
+  , projDescription  :: Column f (Maybe Text)
+  , projStatus       :: Column f ProjectStatus
+  , projPriority     :: Column f Int16
+  , projMetadata     :: Column f Value
+  , projSearchVector :: Column f PgTSVector
+  , projDeletedAt    :: Column f (Maybe UTCTime)
+  , projCreatedAt    :: Column f UTCTime
+  , projUpdatedAt    :: Column f UTCTime
   } deriving stock Generic
     deriving anyclass Rel8able
 
@@ -273,17 +274,18 @@ projectSchema :: TableSchema (ProjectT Name)
 projectSchema = TableSchema
   { name    = "projects"
   , columns = ProjectT
-      { projId          = "id"
-      , projWorkspaceId = "workspace_id"
-      , projParentId    = "parent_id"
-      , projName        = "name"
-      , projDescription = "description"
-      , projStatus      = "status"
-      , projPriority    = "priority"
-      , projMetadata    = "metadata"
-        , projDeletedAt   = "deleted_at"
-      , projCreatedAt   = "created_at"
-      , projUpdatedAt   = "updated_at"
+      { projId           = "id"
+      , projWorkspaceId  = "workspace_id"
+      , projParentId     = "parent_id"
+      , projName         = "name"
+      , projDescription  = "description"
+      , projStatus       = "status"
+      , projPriority     = "priority"
+      , projMetadata     = "metadata"
+      , projSearchVector = "search_vector"
+      , projDeletedAt    = "deleted_at"
+      , projCreatedAt    = "created_at"
+      , projUpdatedAt    = "updated_at"
       }
   }
 
@@ -292,20 +294,21 @@ projectSchema = TableSchema
 ------------------------------------------------------------------------
 
 data TaskT f = TaskT
-  { taskId          :: Column f UUID
-  , taskWorkspaceId :: Column f UUID
-  , taskProjectId   :: Column f (Maybe UUID)
-  , taskParentId    :: Column f (Maybe UUID)
-  , taskTitle       :: Column f Text
-  , taskDescription :: Column f (Maybe Text)
-  , taskStatus      :: Column f TaskStatus
-  , taskPriority    :: Column f Int16
-  , taskMetadata    :: Column f Value
-  , taskDueAt       :: Column f (Maybe UTCTime)
-  , taskCompletedAt :: Column f (Maybe UTCTime)
-  , taskDeletedAt   :: Column f (Maybe UTCTime)
-  , taskCreatedAt   :: Column f UTCTime
-  , taskUpdatedAt   :: Column f UTCTime
+  { taskId           :: Column f UUID
+  , taskWorkspaceId  :: Column f UUID
+  , taskProjectId    :: Column f (Maybe UUID)
+  , taskParentId     :: Column f (Maybe UUID)
+  , taskTitle        :: Column f Text
+  , taskDescription  :: Column f (Maybe Text)
+  , taskStatus       :: Column f TaskStatus
+  , taskPriority     :: Column f Int16
+  , taskMetadata     :: Column f Value
+  , taskDueAt        :: Column f (Maybe UTCTime)
+  , taskCompletedAt  :: Column f (Maybe UTCTime)
+  , taskSearchVector :: Column f PgTSVector
+  , taskDeletedAt    :: Column f (Maybe UTCTime)
+  , taskCreatedAt    :: Column f UTCTime
+  , taskUpdatedAt    :: Column f UTCTime
   } deriving stock Generic
     deriving anyclass Rel8able
 
@@ -313,20 +316,21 @@ taskSchema :: TableSchema (TaskT Name)
 taskSchema = TableSchema
   { name    = "tasks"
   , columns = TaskT
-      { taskId          = "id"
-      , taskWorkspaceId = "workspace_id"
-      , taskProjectId   = "project_id"
-      , taskParentId    = "parent_id"
-      , taskTitle       = "title"
-      , taskDescription = "description"
-      , taskStatus      = "status"
-      , taskPriority    = "priority"
-      , taskMetadata    = "metadata"
-      , taskDueAt       = "due_at"
-      , taskCompletedAt = "completed_at"
-        , taskDeletedAt   = "deleted_at"
-      , taskCreatedAt   = "created_at"
-      , taskUpdatedAt   = "updated_at"
+      { taskId           = "id"
+      , taskWorkspaceId  = "workspace_id"
+      , taskProjectId    = "project_id"
+      , taskParentId     = "parent_id"
+      , taskTitle        = "title"
+      , taskDescription  = "description"
+      , taskStatus       = "status"
+      , taskPriority     = "priority"
+      , taskMetadata     = "metadata"
+      , taskDueAt        = "due_at"
+      , taskCompletedAt  = "completed_at"
+      , taskSearchVector = "search_vector"
+      , taskDeletedAt    = "deleted_at"
+      , taskCreatedAt    = "created_at"
+      , taskUpdatedAt    = "updated_at"
       }
   }
 

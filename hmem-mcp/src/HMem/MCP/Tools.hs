@@ -531,6 +531,33 @@ toolDefinitions =
           ]
       , "required" .= [t "project_id"]
       ]
+
+  , mkTool "search" "Unified full-text search across memories, projects, and tasks. Searches all three entity types in parallel by default; use entity_types to restrict scope. Project and task results include their linked memory summaries. Use this as the primary discovery tool before making changes." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "workspace_id"     .= prop "string" "UUID of the workspace (omit for cross-workspace search)"
+          , "query"            .= prop "string" "Full-text search query (required)"
+          , "entity_types"     .= object ["type" .= t "array", "items" .= propEnum "string" "Entity types to search" ["memory", "project", "task"],
+                                           "description" .= t "Which entity types to search (default: all three)"]
+          , "search_language"  .= prop "string" "Language for query stemming (default 'english'). PostgreSQL regconfig name."
+          , "limit"            .= prop "integer" "Max results per entity type (default 10)"
+          , "offset"           .= prop "integer" "Offset for pagination (default 0)"
+          -- Memory-specific filters
+          , "memory_type"      .= propEnum "string" "Filter memories by type" ["short_term", "long_term"]
+          , "tags"             .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                                           "description" .= t "Filter memories by tags (any-match)"]
+          , "min_importance"   .= prop "integer" "Minimum importance for memories (1-10)"
+          , "category_id"      .= prop "string" "Filter memories by category UUID"
+          , "pinned_only"      .= prop "boolean" "If true, only return pinned memories"
+          -- Project-specific filters
+          , "project_status"   .= propEnum "string" "Filter projects by status" ["active", "paused", "completed", "archived"]
+          -- Task-specific filters
+          , "task_status"      .= propEnum "string" "Filter tasks by status" ["todo", "in_progress", "blocked", "done", "cancelled"]
+          , "task_priority"    .= prop "integer" "Filter tasks by exact priority (1-10)"
+          , "project_id"       .= prop "string" "Filter tasks by project UUID"
+          ]
+      , "required" .= [t "query"]
+      ]
   ]
 
 ------------------------------------------------------------------------
@@ -634,6 +661,7 @@ data ToolCall
   | TaskFinishCall UUID TaskStatus (Maybe Text) (Maybe [Text])   -- task_id, status, notes, tags
   | ProjectSpecCall UUID Text (Maybe Text) (Maybe Int32) [SpecTask] -- ws_id, name, desc, priority, tasks
   | ProjectArchiveCall UUID (Maybe Text)                         -- project_id, summary
+  | UnifiedSearch UnifiedSearchQuery
   deriving (Show, Eq)
 
 -- | A task stub for project_spec — just the fields needed to create a task.
@@ -800,6 +828,7 @@ parseToolCall name args = case name of
         tasks <- parseSpecTasks args
         Right $ ProjectSpecCall wsId pName pDesc pPri tasks
     "project_archive"           -> ProjectArchiveCall <$> need "project_id" <*> opt "summary"
+    "search"                    -> UnifiedSearch <$> parse args
     _                           -> Left $ "Unknown tool: " <> T.unpack name
   where
     parse :: FromJSON a => Value -> Either String a
@@ -966,6 +995,16 @@ validateToolCall = \case
         | otherwise -> Right $ ProjectSpecCall wsId pName pDesc (clampMaybe 1 10 <$> pPri)
             [st { stPriority = clampMaybe 1 10 <$> st.stPriority } | st <- tasks]
     ProjectArchiveCall pid mSummary -> Right $ ProjectArchiveCall pid mSummary
+    UnifiedSearch usq
+        | not (validFtsLanguage usq.searchLanguage) -> Left $ "Invalid search_language: " <> show usq.searchLanguage
+        | otherwise ->
+            let usq' = usq
+                  { limit = clampMaybe 1 200 <$> usq.limit
+                  , offset = clampMaybe 0 10000 <$> usq.offset
+                  , minImportance = clampMaybe 1 10 <$> usq.minImportance
+                  , taskPriority = clampMaybe 1 10 <$> usq.taskPriority
+                  }
+            in UnifiedSearch usq' <$ firstValidationError (validateUnifiedSearchQuery usq')
     other -> Right other
 
 -- | Whitelist of valid PostgreSQL full-text search configurations.
@@ -1261,6 +1300,7 @@ executeToolCall mgr base mApiKey = \case
                             , ("detail", (\b -> if b then "true" else "false") <$> md)
                             ]) (object [])
     ProjectOverviewCall pid -> getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/overview")
+    UnifiedSearch usq -> postJSON mgr base mApiKey "/api/v1/search" usq
 
     -- ================================================================
     -- WORKFLOW COMPOSITE TOOLS

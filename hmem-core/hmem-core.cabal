@@ -27,6 +27,7 @@ library
       HMem.DB.RequestContext
       HMem.DB.SavedView
       HMem.DB.Schema
+      HMem.DB.Search
       HMem.DB.Task
       HMem.DB.TestHarness
       HMem.DB.WorkspaceGroup
@@ -56,6 +57,7 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints
   build-depends:
       aeson >=2.0
+    , async
     , base >=4.7 && <5
     , bytestring
     , containers
@@ -101,6 +103,7 @@ executable run-integration-tests
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wredundant-constraints -threaded
   build-depends:
       aeson >=2.0
+    , async
     , base >=4.7 && <5
     , bytestring
     , containers
@@ -156,6 +159,7 @@ test-suite hmem-core-test
   build-depends:
       QuickCheck
     , aeson >=2.0
+    , async
     , base >=4.7 && <5
     , bytestring
     , containers

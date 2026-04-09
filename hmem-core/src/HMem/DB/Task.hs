@@ -210,6 +210,7 @@ createTask pool ct = do
               , taskMetadata    = lit meta
               , taskDueAt       = lit ct.dueAt
               , taskCompletedAt = lit (Nothing :: Maybe UTCTime)
+              , taskSearchVector = unsafeDefault
               , taskDeletedAt   = unsafeDefault
               , taskCreatedAt   = unsafeDefault
               , taskUpdatedAt   = unsafeDefault
@@ -424,6 +425,8 @@ listTasks pool projId mstatus mlimit moffset =
     , projectId = Just projId
     , status = mstatus
     , priority = Nothing
+    , query = Nothing
+    , searchLanguage = Nothing
     , createdAfter = Nothing
     , createdBefore = Nothing
     , updatedAfter = Nothing
@@ -435,37 +438,55 @@ listTasks pool projId mstatus mlimit moffset =
 listTasksWithQuery :: Pool Hasql.Connection -> TaskListQuery -> IO [Task]
 listTasksWithQuery pool tq = do
   let (lim, off) = capPagination tq.limit tq.offset
-  rows <- runSession pool $ Session.statement () $ run $ select $
-    limit (fromIntegral lim) $ offset (fromIntegral off) $
-    orderBy (((\row -> row.taskPriority) >$< desc) <> ((\row -> row.taskCreatedAt) >$< asc)) $ do
-      row <- each taskSchema
-      where_ $ activeTask row
-      case tq.workspaceId of
-        Just wsId -> where_ $ row.taskWorkspaceId ==. lit wsId
-        Nothing -> pure ()
-      case tq.projectId of
-        Just projId -> where_ $ row.taskProjectId ==. lit (Just projId)
-        Nothing -> pure ()
-      case tq.status of
-        Nothing -> pure ()
-        Just s  -> where_ $ row.taskStatus ==. lit s
-      case tq.priority of
-        Just priority -> where_ $ row.taskPriority ==. lit (fromIntegral priority :: Int16)
-        Nothing -> pure ()
-      case tq.createdAfter of
-        Just createdAfter -> where_ $ row.taskCreatedAt >=. lit createdAfter
-        Nothing -> pure ()
-      case tq.createdBefore of
-        Just createdBefore -> where_ $ row.taskCreatedAt <=. lit createdBefore
-        Nothing -> pure ()
-      case tq.updatedAfter of
-        Just updatedAfter -> where_ $ row.taskUpdatedAt >=. lit updatedAfter
-        Nothing -> pure ()
-      case tq.updatedBefore of
-        Just updatedBefore -> where_ $ row.taskUpdatedAt <=. lit updatedBefore
-        Nothing -> pure ()
-      pure row
-  enrichTaskCounts pool $ map rowToTask rows
+      searchLang = fromMaybe "english" tq.searchLanguage
+      applyFilters row = do
+        where_ $ activeTask row
+        case tq.workspaceId of
+          Just wsId -> where_ $ row.taskWorkspaceId ==. lit wsId
+          Nothing -> pure ()
+        case tq.projectId of
+          Just projId -> where_ $ row.taskProjectId ==. lit (Just projId)
+          Nothing -> pure ()
+        case tq.status of
+          Nothing -> pure ()
+          Just s  -> where_ $ row.taskStatus ==. lit s
+        case tq.priority of
+          Just priority -> where_ $ row.taskPriority ==. lit (fromIntegral priority :: Int16)
+          Nothing -> pure ()
+        case tq.createdAfter of
+          Just createdAfter -> where_ $ row.taskCreatedAt >=. lit createdAfter
+          Nothing -> pure ()
+        case tq.createdBefore of
+          Just createdBefore -> where_ $ row.taskCreatedAt <=. lit createdBefore
+          Nothing -> pure ()
+        case tq.updatedAfter of
+          Just updatedAfter -> where_ $ row.taskUpdatedAt >=. lit updatedAfter
+          Nothing -> pure ()
+        case tq.updatedBefore of
+          Just updatedBefore -> where_ $ row.taskUpdatedAt <=. lit updatedBefore
+          Nothing -> pure ()
+  case tq.query of
+    Nothing -> do
+      rows <- runSession pool $ Session.statement () $ run $ select $
+        limit (fromIntegral lim) $ offset (fromIntegral off) $
+        orderBy (((\row -> row.taskPriority) >$< desc) <> ((\row -> row.taskCreatedAt) >$< asc)) $ do
+          row <- each taskSchema
+          applyFilters row
+          pure row
+      enrichTaskCounts pool $ map rowToTask rows
+    Just q -> do
+      results <- runSession pool $ Session.statement () $ run $ select $
+        limit (fromIntegral lim) $ offset (fromIntegral off) $
+        orderBy (snd >$< desc) $ do
+          row <- each taskSchema
+          applyFilters row
+          let config = unsafeCastExpr (lit searchLang) :: Expr PgRegConfig
+          let tsq = function "plainto_tsquery" (config, lit q) :: Expr PgTSQuery
+          let tsvec = row.taskSearchVector :: Expr PgTSVector
+          where_ $ rawBinaryOperator "@@" tsvec tsq
+          let tsRank = function "ts_rank" (tsvec, tsq) :: Expr Double
+          pure (row, tsRank)
+      enrichTaskCounts pool $ map (rowToTask . fst) results
 
 -- | List tasks by workspace (including workspace-level tasks without a project).
 listTasksByWorkspace
@@ -482,6 +503,8 @@ listTasksByWorkspace pool wsId mstatus mprojId mlimit moffset =
     , projectId = mprojId
     , status = mstatus
     , priority = Nothing
+    , query = Nothing
+    , searchLanguage = Nothing
     , createdAfter = Nothing
     , createdBefore = Nothing
     , updatedAfter = Nothing

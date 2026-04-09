@@ -58,6 +58,9 @@ These combine multiple steps into a single call. Prefer them for common task/pro
 ### Cleanup
 - `cleanup_run` — Run cleanup on a workspace (applies configured policies).
 
+### Unified Search
+- `search` — Full-text search across memories, projects, and tasks in a single call. Supports per-entity filters (memory_type, tags, min_importance, category_id, pinned_only, project_status, task_status, task_priority, project_id). Returns separate lists for each entity type. Project and task results include linked memory summaries.
+
 ## Workflow Patterns
 
 ### Specifying a new project

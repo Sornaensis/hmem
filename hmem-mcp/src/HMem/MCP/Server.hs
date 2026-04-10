@@ -16,6 +16,8 @@ import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.UUID (UUID)
+import Data.UUID qualified as UUID
 import Network.HTTP.Client (Manager, newManager, managerResponseTimeout, responseTimeoutMicro)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import System.IO (hFlush, hSetBuffering, stdin, stdout, stderr, hPutStrLn, BufferMode (..), hIsEOF)
@@ -87,8 +89,9 @@ runMCPServer serverUrl mApiKey = do
   queue  <- newTBQueueIO (fromIntegral maxQueueDepth)
   active <- newTVarIO (0 :: Int)
   initialized <- newTVarIO False
+  wsContext <- newTVarIO (Nothing :: Maybe UUID)
   -- Spawn fixed worker pool
-  replicateM_ maxConcurrency $ forkIO $ worker mgr lock serverUrl mApiKey queue active initialized
+  replicateM_ maxConcurrency $ forkIO $ worker mgr lock serverUrl mApiKey queue active initialized wsContext
   -- Read stdin → queue
   readLoop lock queue
   -- Drain: wait for queue to empty and all workers to finish
@@ -101,8 +104,8 @@ runMCPServer serverUrl mApiKey = do
 
 -- | Worker thread: reads from the queue and processes each line.
 -- Atomically dequeues + increments active counter to prevent drain races.
-worker :: Manager -> MVar () -> String -> Maybe Text -> TBQueue BS8.ByteString -> TVar Int -> TVar Bool -> IO ()
-worker mgr lock url mApiKey queue active initialized = go
+worker :: Manager -> MVar () -> String -> Maybe Text -> TBQueue BS8.ByteString -> TVar Int -> TVar Bool -> TVar (Maybe UUID) -> IO ()
+worker mgr lock url mApiKey queue active initialized wsContext = go
   where
     go = do
       mline <- try @SomeException $ atomically $ do
@@ -112,7 +115,7 @@ worker mgr lock url mApiKey queue active initialized = go
       case mline of
         Left _ -> pure ()  -- Worker exits cleanly
         Right line -> do
-          (processLine mgr lock url mApiKey initialized line `catch` \(_ :: SomeException) -> pure ())
+          (processLine mgr lock url mApiKey initialized wsContext line `catch` \(_ :: SomeException) -> pure ())
             `finally` atomically (modifyTVar' active (subtract 1))
           go
 
@@ -139,8 +142,8 @@ readLoop lock queue = do
             else pure ()
           readLoop lock queue
 
-processLine :: Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> BS8.ByteString -> IO ()
-processLine mgr lock serverUrl mApiKey initialized line
+processLine :: Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe UUID) -> BS8.ByteString -> IO ()
+processLine mgr lock serverUrl mApiKey initialized wsContext line
   | BS8.null line = pure ()
   | otherwise = case eitherDecodeStrict @Value line of
       Left _err ->
@@ -152,7 +155,7 @@ processLine mgr lock serverUrl mApiKey initialized line
           sendResponse lock $ jsonRpcError (extractId val) (-32600)
             "Invalid Request: missing required 'method' field"
         Right req -> do
-          mresp <- handleRequest mgr serverUrl mApiKey initialized req
+          mresp <- handleRequest mgr serverUrl mApiKey initialized wsContext req
             `catch` \(e :: SomeException) ->
               pure $ Just $ jsonRpcError req.reqId (-32603)
                 ("Internal error: " <> T.pack (show e))
@@ -172,8 +175,8 @@ extractId _          = Nothing
 -- @notifications/initialized@ are accepted before the handshake
 -- completes.  All other methods receive @-32002@ ("Server not
 -- initialized").
-handleRequest :: Manager -> String -> Maybe Text -> TVar Bool -> JsonRpcRequest -> IO (Maybe Value)
-handleRequest mgr serverUrl mApiKey initialized req = case req.reqMethod of
+handleRequest :: Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe UUID) -> JsonRpcRequest -> IO (Maybe Value)
+handleRequest mgr serverUrl mApiKey initialized wsContext req = case req.reqMethod of
   "initialize" -> do
     atomically $ modifyTVar' initialized (const True)
     pure $ Just $ jsonRpcResponse req.reqId $ object
@@ -203,11 +206,11 @@ handleRequest mgr serverUrl mApiKey initialized req = case req.reqMethod of
     ready <- atomically $ readTVar initialized
     if not ready
       then pure $ Just $ jsonRpcError req.reqId (-32002) "Server not initialized"
-      else handleMethod mgr serverUrl mApiKey req
+      else handleMethod mgr serverUrl mApiKey wsContext req
 
 -- | Dispatch initialized requests to the appropriate handler.
-handleMethod :: Manager -> String -> Maybe Text -> JsonRpcRequest -> IO (Maybe Value)
-handleMethod mgr serverUrl mApiKey req = case req.reqMethod of
+handleMethod :: Manager -> String -> Maybe Text -> TVar (Maybe UUID) -> JsonRpcRequest -> IO (Maybe Value)
+handleMethod mgr serverUrl mApiKey wsContext req = case req.reqMethod of
   "tools/list" -> do
     let allTools = toolDefinitions
         cursorIdx = parseCursor req.reqParams
@@ -222,8 +225,20 @@ handleMethod mgr serverUrl mApiKey req = case req.reqMethod of
       Nothing -> pure $ Just $ jsonRpcError req.reqId (-32602)
           "Invalid params: tools/call requires 'name' and 'arguments'"
       Just params -> do
-        result <- handleToolCall mgr serverUrl mApiKey params
-        pure $ Just $ jsonRpcResponse req.reqId result
+        -- Handle workspace context tools directly (they mutate server state)
+        let mToolName = case params of
+              Object o -> case KM.lookup "name" o of
+                Just (String n) -> Just n
+                _               -> Nothing
+              _ -> Nothing
+        case mToolName of
+          Just "set_workspace" -> handleSetWorkspace wsContext req params
+          Just "get_workspace" -> handleGetWorkspace wsContext req
+          _ -> do
+            -- Inject workspace_id from context when absent
+            params' <- injectWorkspaceContext wsContext params
+            result <- handleToolCall mgr serverUrl mApiKey params'
+            pure $ Just $ jsonRpcResponse req.reqId result
 
   method ->
     pure $ Just $ jsonRpcError req.reqId (-32601)
@@ -239,6 +254,75 @@ sendResponse :: MVar () -> Value -> IO ()
 sendResponse lock v = withMVar lock $ \_ -> do
   BL8.putStrLn (encode v)
   hFlush stdout
+
+------------------------------------------------------------------------
+-- Workspace context helpers
+------------------------------------------------------------------------
+
+-- | Handle the set_workspace tool: stores a workspace UUID in the
+-- server's session state so subsequent tool calls can omit workspace_id.
+-- Passing null or omitting workspace_id clears the context.
+handleSetWorkspace :: TVar (Maybe UUID) -> JsonRpcRequest -> Value -> IO (Maybe Value)
+handleSetWorkspace wsContext req params = do
+  let mWsIdText = case params of
+        Object o -> case KM.lookup "arguments" o of
+          Just (Object args) -> case KM.lookup "workspace_id" args of
+            Just (String s) -> Just (Just s)
+            Just Null       -> Just Nothing   -- explicit clear
+            Nothing         -> Just Nothing   -- omitted = clear
+            _               -> Nothing        -- invalid type
+          _ -> Just Nothing   -- no arguments = clear
+        _ -> Nothing
+  case mWsIdText of
+    Nothing -> pure $ Just $ jsonRpcResponse req.reqId $ object
+      [ "content" .= [ object [ "type" .= t "text", "text" .= t "Error: invalid workspace_id format" ] ]
+      , "isError" .= True
+      ]
+    Just Nothing -> do
+      atomically $ modifyTVar' wsContext (const Nothing)
+      hPutStrLn stderr "MCP server: workspace context cleared."
+      pure $ Just $ jsonRpcResponse req.reqId $ object
+        [ "content" .= [ object [ "type" .= t "text", "text" .= t "Workspace context cleared." ] ] ]
+    Just (Just wsText) -> case UUID.fromText wsText of
+      Nothing -> pure $ Just $ jsonRpcResponse req.reqId $ object
+        [ "content" .= [ object [ "type" .= t "text", "text" .= ("Invalid UUID: " <> wsText) ] ]
+        , "isError" .= True
+        ]
+      Just uuid -> do
+        atomically $ modifyTVar' wsContext (const (Just uuid))
+        hPutStrLn stderr $ "MCP server: workspace context set to " <> T.unpack wsText
+        pure $ Just $ jsonRpcResponse req.reqId $ object
+          [ "content" .= [ object [ "type" .= t "text", "text" .= ("Workspace context set to " <> wsText) ] ] ]
+  where
+    t :: Text -> Text
+    t = id
+
+-- | Handle the get_workspace tool: returns the current workspace context.
+handleGetWorkspace :: TVar (Maybe UUID) -> JsonRpcRequest -> IO (Maybe Value)
+handleGetWorkspace wsContext req = do
+  mws <- atomically $ readTVar wsContext
+  let msg = case mws of
+        Nothing   -> "No workspace context set."
+        Just uuid -> "Current workspace: " <> UUID.toText uuid
+  pure $ Just $ jsonRpcResponse req.reqId $ object
+    [ "content" .= [ object [ "type" .= ("text" :: Text), "text" .= msg ] ] ]
+
+-- | Inject the stored workspace_id into tool call arguments when the
+-- arguments object does not already contain a workspace_id field.
+-- Explicit workspace_id in the call always takes precedence.
+injectWorkspaceContext :: TVar (Maybe UUID) -> Value -> IO Value
+injectWorkspaceContext wsContext params = do
+  mws <- atomically $ readTVar wsContext
+  case mws of
+    Nothing -> pure params
+    Just wsId -> pure $ case params of
+      Object o -> case KM.lookup "arguments" o of
+        Just (Object args)
+          | not (KM.member "workspace_id" args) ->
+              Object $ KM.insert "arguments"
+                (Object $ KM.insert "workspace_id" (toJSON wsId) args) o
+        _ -> params
+      _ -> params
 
 -- | Parse the cursor parameter from tools/list params.
 -- Accepts both string and numeric cursors; defaults to 0.

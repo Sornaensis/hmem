@@ -1,7 +1,7 @@
 ---
 description: "Task and project management agent — creates, tracks, and organizes tasks and projects via hmem MCP tools."
 tools:
-  - hmem
+  - hmem/*
 ---
 
 # Task Management Agent
@@ -42,6 +42,10 @@ Use these composite tools for common workflows — they combine multiple steps i
 
 ### Unified Search
 - **search** — Full-text search across memories, projects, and tasks in one call. Returns separate lists per entity type with linked memory summaries on project/task results. Supports per-entity filters (project_status, task_status, task_priority, project_id, memory_type, tags, etc.).
+
+## Workspace Context
+
+At the start of every session, call `set_workspace` with the target workspace UUID. This sets a server-side context so you can omit `workspace_id` from all subsequent tool calls — the server injects it automatically. Use `get_workspace` to check the current context. Pass null or omit `workspace_id` in `set_workspace` to clear it. An explicit `workspace_id` in any tool call always takes precedence over the context.
 
 ## Guidelines
 

@@ -47,6 +47,12 @@ All data is scoped to workspaces. Common operations:
 - `workspace_list` / `workspace_get` — Browse and retrieve workspaces.
 - `entity_lifecycle` (entity_type: workspace) — Delete, restore, or purge workspaces.
 
+### Workspace Context
+- `set_workspace` — Set the active workspace UUID for the session. Once set, all subsequent tool calls that accept workspace_id will use this workspace automatically when workspace_id is omitted. Pass null or omit workspace_id to clear.
+- `get_workspace` — Check the currently active workspace UUID.
+- An explicit `workspace_id` in any tool call always takes precedence over the context.
+- **Best practice:** Call `set_workspace` once at the start of every session.
+
 ## Saved Views
 - `saved_view` (action: create/get/list/update/execute) — Create and manage reusable query views.
 

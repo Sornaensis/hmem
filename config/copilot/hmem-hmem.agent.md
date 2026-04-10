@@ -1,7 +1,7 @@
 ---
 description: "Full hmem agent — combines memory management and task tracking. Use for general-purpose interactions with the hmem system (workspaces, memories, projects, tasks, cleanup)."
 tools:
-  - hmem
+  - hmem/*
 ---
 
 # hmem Agent
@@ -61,10 +61,14 @@ These combine multiple steps into a single call. Prefer them for common task/pro
 ### Unified Search
 - `search` — Full-text search across memories, projects, and tasks in a single call. Supports per-entity filters (memory_type, tags, min_importance, category_id, pinned_only, project_status, task_status, task_priority, project_id). Returns separate lists for each entity type. Project and task results include linked memory summaries.
 
+## Workspace Context
+
+At the start of every session, call `set_workspace` with the target workspace UUID. This sets a server-side context so you can omit `workspace_id` from all subsequent tool calls — the server injects it automatically. Use `get_workspace` to check the current context. Pass null or omit `workspace_id` in `set_workspace` to clear it. An explicit `workspace_id` in any tool call always takes precedence over the context.
+
 ## Workflow Patterns
 
 ### Specifying a new project
-1. Ensure a workspace exists (`workspace_list` / `workspace_register`)
+1. Set workspace context (`set_workspace`)
 2. Create the project with tasks in one call (`project_spec`)
 3. Add dependencies between tasks if needed (`task_dependency`)
 4. Link any pre-existing relevant memories (`link_memory` with entity_type: project)

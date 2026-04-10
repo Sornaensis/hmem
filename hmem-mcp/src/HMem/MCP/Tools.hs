@@ -37,7 +37,19 @@ import HMem.Types
 
 toolDefinitions :: [Value]
 toolDefinitions =
-    [ mkTool "memory_create" "Create one or more memories in a workspace. For batch creation, pass items[] array (max 100) instead of top-level fields. Use this for initial capture, then refine later with updates, tags, links, or categories." $ object
+    [ mkTool "set_workspace" "Set the active workspace context. Once set, all subsequent tool calls that accept workspace_id will use this workspace automatically when workspace_id is omitted. Call this once at the start of a session. Pass null or omit workspace_id to clear the context." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "workspace_id" .= prop "string" "UUID of the workspace to set as active context (omit or null to clear)"
+          ]
+      ]
+
+    , mkTool "get_workspace" "Get the currently active workspace context UUID, if any." $ object
+      [ "type" .= t "object"
+      , "properties" .= object []
+      ]
+
+    , mkTool "memory_create" "Create one or more memories in a workspace. For batch creation, pass items[] array (max 100) instead of top-level fields. Use this for initial capture, then refine later with updates, tags, links, or categories." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"

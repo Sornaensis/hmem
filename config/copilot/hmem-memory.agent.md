@@ -1,7 +1,7 @@
 ---
 description: "Memory management agent — stores, searches, links, and organizes long-term and short-term memories via hmem MCP tools."
 tools:
-  - hmem
+  - hmem/*
 ---
 
 # Memory Agent
@@ -42,6 +42,10 @@ Reusable filtered queries over workspace data.
 - **workspace_register** / **workspace_list** / **workspace_get** / **workspace_update** — Manage workspaces that scope memories.
 - **entity_lifecycle** (entity_type: workspace, action: delete/restore/purge) — Soft-delete lifecycle for workspaces.
 - **workspace_visualization** — Render SVG or JSON workspace graph showing projects, tasks, memories, and relationships.
+
+## Workspace Context
+
+At the start of every session, call `set_workspace` with the target workspace UUID. This sets a server-side context so you can omit `workspace_id` from all subsequent tool calls — the server injects it automatically. Use `get_workspace` to check the current context. Pass null or omit `workspace_id` in `set_workspace` to clear it. An explicit `workspace_id` in any tool call always takes precedence over the context.
 
 ## Guidelines
 

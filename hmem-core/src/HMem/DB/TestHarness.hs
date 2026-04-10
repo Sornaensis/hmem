@@ -243,7 +243,6 @@ createTestWorkspace env wsName = withConn env.pool $ \conn -> do
               [ WorkspaceT
                   { wsId        = unsafeDefault
                   , wsName      = lit wsName
-                  , wsPath      = lit (Nothing :: Maybe Text)
                   , wsGhOwner   = lit (Nothing :: Maybe Text)
                   , wsGhRepo    = lit (Nothing :: Maybe Text)
                   , wsType      = lit WsRepository
@@ -262,7 +261,6 @@ createTestWorkspace env wsName = withConn env.pool $ \conn -> do
       pure Workspace
         { id            = r.wsId
         , name          = r.wsName
-        , path          = r.wsPath
         , ghOwner       = r.wsGhOwner
         , ghRepo        = r.wsGhRepo
         , workspaceType = r.wsType

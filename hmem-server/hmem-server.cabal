@@ -18,6 +18,7 @@ data-files:
     migrations/V002__soft_deletes_audit_and_integrity.sql
     migrations/V003__saved_views.sql
     migrations/V004__project_task_fts.sql
+    migrations/V005__drop_workspace_path.sql
 
 library
   exposed-modules:

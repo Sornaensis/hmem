@@ -477,7 +477,6 @@ rowToWorkspace :: WorkspaceT Result -> Workspace
 rowToWorkspace r = Workspace
   { id            = r.wsId
   , name          = r.wsName
-  , path          = r.wsPath
   , ghOwner       = r.wsGhOwner
   , ghRepo        = r.wsGhRepo
   , workspaceType = r.wsType
@@ -520,7 +519,6 @@ workspaceHandlers pool bc =
                 [ WorkspaceT
                     { wsId        = unsafeDefault
                     , wsName      = lit cw.name
-                    , wsPath      = lit cw.path
                     , wsGhOwner   = lit cw.ghOwner
                     , wsGhRepo    = lit cw.ghRepo
                     , wsType      = lit (fromMaybe WsRepository cw.workspaceType)
@@ -559,7 +557,6 @@ workspaceHandlers pool bc =
           , set = \_ row -> row
               { wsName    = maybe row.wsName    lit uw.name
               , wsType    = maybe row.wsType    lit uw.workspaceType
-              , wsPath    = applyNullableUpdate row.wsPath uw.path
               , wsGhOwner = applyNullableUpdate row.wsGhOwner uw.ghOwner
               , wsGhRepo  = applyNullableUpdate row.wsGhRepo uw.ghRepo
               }

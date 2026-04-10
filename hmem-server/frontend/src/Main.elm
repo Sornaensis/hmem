@@ -3061,12 +3061,7 @@ viewWorkspaceCard ws =
                 [ text (Api.workspaceTypeToString ws.workspaceType) ]
             ]
         , div [ class "card-body" ]
-            [ case ws.path of
-                Just p ->
-                    span [ class "card-meta" ] [ text p ]
-
-                Nothing ->
-                    text ""
+            [ text ""
             ]
         ]
 
@@ -3141,15 +3136,6 @@ viewWorkspacePage wsId model =
                             [ span [ class "workspace-detail-label" ] [ text "ID" ]
                             , span [ class "workspace-detail-value card-id card-id-copy", onClick (CopyId ws.id) ] [ text ws.id ]
                             ]
-                        , case ws.path of
-                            Just p ->
-                                div [ class "workspace-detail" ]
-                                    [ span [ class "workspace-detail-label" ] [ text "Path" ]
-                                    , span [ class "workspace-detail-value" ] [ text p ]
-                                    ]
-
-                            Nothing ->
-                                text ""
                         , case ws.ghOwner of
                             Just owner ->
                                 div [ class "workspace-detail" ]

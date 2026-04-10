@@ -660,7 +660,6 @@ data Workspace = Workspace
   { id            :: UUID
   , name          :: Text
   , workspaceType :: WorkspaceType
-  , path          :: Maybe Text
   , ghOwner       :: Maybe Text
   , ghRepo        :: Maybe Text
   , createdAt     :: UTCTime
@@ -675,7 +674,6 @@ instance FromJSON Workspace where
 data CreateWorkspace = CreateWorkspace
   { name          :: Text
   , workspaceType :: Maybe WorkspaceType
-  , path          :: Maybe Text
   , ghOwner       :: Maybe Text
   , ghRepo        :: Maybe Text
   } deriving (Show, Eq, Generic)
@@ -688,7 +686,6 @@ instance FromJSON CreateWorkspace where
 data UpdateWorkspace = UpdateWorkspace
   { name          :: Maybe Text
   , workspaceType :: Maybe WorkspaceType
-  , path          :: FieldUpdate Text
   , ghOwner       :: FieldUpdate Text
   , ghRepo        :: FieldUpdate Text
   } deriving (Show, Eq, Generic)
@@ -697,7 +694,6 @@ instance ToJSON UpdateWorkspace where
   toJSON uw = object $ catMaybes
     [ ("name" .=)           <$> uw.name
     , ("workspace_type" .=) <$> uw.workspaceType
-    , fieldUpdatePair "path" uw.path
     , fieldUpdatePair "gh_owner" uw.ghOwner
     , fieldUpdatePair "gh_repo" uw.ghRepo
     ]
@@ -705,7 +701,6 @@ instance FromJSON UpdateWorkspace where
   parseJSON = withObject "UpdateWorkspace" $ \o -> UpdateWorkspace
     <$> o .:? "name"
     <*> o .:? "workspace_type"
-    <*> parseFieldUpdate o "path"
     <*> parseFieldUpdate o "gh_owner"
     <*> parseFieldUpdate o "gh_repo"
 

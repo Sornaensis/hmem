@@ -420,7 +420,7 @@ renderWorkspaceHeader workspace showTasks showTaskStatusSummary headerWidth head
   , T.concat ["  <desc>Workspace visualization for ", escapeXml workspace.name, " showing ", descriptionText, ".</desc>"]
   , T.concat ["  <rect x=\"24\" y=\"20\" rx=\"24\" ry=\"24\" width=\"", svgNumber headerWidth, "\" height=\"", svgNumber headerBoxHeight, "\" fill=\"#ffffff\" opacity=\"0.92\" filter=\"url(#shadow)\"/>"]
   , T.concat ["  <text x=\"40\" y=\"56\" class=\"title\">", escapeXml workspace.name, "</text>"]
-  , T.concat ["  <text x=\"40\" y=\"82\" class=\"subtitle\">", escapeXml (workspaceTypeToText workspace.workspaceType), maybe "" (\pathText -> " | " <> escapeXml pathText) workspace.path, "</text>"]
+  , T.concat ["  <text x=\"40\" y=\"82\" class=\"subtitle\">", escapeXml (workspaceTypeToText workspace.workspaceType), "</text>"]
   , T.concat ["  <text x=\"540\" y=\"54\" class=\"subtitle\">Tasks in filter: ", T.pack (show totalTasks), "</text>"]
   , T.concat ["  <text x=\"540\" y=\"76\" class=\"subtitle\">Direct memory links: ", T.pack (show directLinks), " | via tasks: ", T.pack (show derivedLinks), " | memory relations: ", T.pack (show memoryLinksCount), "</text>"]
   ] <> [T.concat ["  <text x=\"540\" y=\"98\" class=\"subtitle\">", escapeXml summaryText, "</text>"] | showTaskStatusSummary, Just summaryText <- [mTaskSummary]]

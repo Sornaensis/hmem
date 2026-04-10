@@ -411,14 +411,16 @@ spec = around withApp $ do
       firstResp <- postJSON app "/api/v1/workspaces"
         (object
           [ "name" .= ("safe-errors-a" :: T.Text)
-          , "path" .= ("/tmp/same-workspace-path" :: T.Text)
+          , "gh_owner" .= ("test-owner" :: T.Text)
+          , "gh_repo" .= ("test-repo" :: T.Text)
           ])
       respStatus firstResp `shouldBe` 200
 
       secondResp <- postJSON app "/api/v1/workspaces"
         (object
           [ "name" .= ("safe-errors-b" :: T.Text)
-          , "path" .= ("/tmp/same-workspace-path" :: T.Text)
+          , "gh_owner" .= ("test-owner" :: T.Text)
+          , "gh_repo" .= ("test-repo" :: T.Text)
           ])
       respStatus secondResp `shouldBe` 409
 
@@ -881,11 +883,12 @@ spec = around withApp $ do
       getResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id)
       respStatus getResp `shouldBe` 404
 
-    it "soft-deletes workspace children and allows recreation with the same path" $ \app -> do
+    it "soft-deletes workspace children and allows recreation with the same gh info" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"
         (object
           [ "name" .= ("cascade-ws" :: T.Text)
-          , "path" .= ("C:/tmp/cascade-ws" :: T.Text)
+          , "gh_owner" .= ("cascade-owner" :: T.Text)
+          , "gh_repo" .= ("cascade-repo" :: T.Text)
           ])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
 
@@ -932,7 +935,8 @@ spec = around withApp $ do
       recreateResp <- postJSON app "/api/v1/workspaces"
         (object
           [ "name" .= ("cascade-ws-recreated" :: T.Text)
-          , "path" .= ("C:/tmp/cascade-ws" :: T.Text)
+          , "gh_owner" .= ("cascade-owner" :: T.Text)
+          , "gh_repo" .= ("cascade-repo" :: T.Text)
           ])
       respStatus recreateResp `shouldBe` 200
 

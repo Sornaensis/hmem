@@ -1009,12 +1009,12 @@ doWorkspaces opts = withApiClient $ \mgr base -> do
       if null filtered
         then putStrLn "No matching workspaces found."
         else do
-          putStrLn $ padRight 38 "ID" <> padRight 30 "NAME" <> padRight 14 "TYPE" <> "PATH"
-          putStrLn $ replicate 100 '-'
+          putStrLn $ padRight 38 "ID" <> padRight 30 "NAME" <> "TYPE"
+          putStrLn $ replicate 82 '-'
           mapM_ printWorkspace filtered
   where
     printWorkspace ws =
-      putStrLn $ padRight 38 (show ws.id) <> padRight 30 (T.unpack ws.name) <> padRight 14 (T.unpack (workspaceTypeToText ws.workspaceType)) <> maybe "" T.unpack ws.path
+      putStrLn $ padRight 38 (show ws.id) <> padRight 30 (T.unpack ws.name) <> T.unpack (workspaceTypeToText ws.workspaceType)
 
 doProjects :: ProjectsOpts -> IO ()
 doProjects opts = withApiClient $ \mgr base -> do

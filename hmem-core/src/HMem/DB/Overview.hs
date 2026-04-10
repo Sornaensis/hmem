@@ -410,7 +410,6 @@ rowToWorkspace row = Workspace
   { id = row.wsId
   , name = row.wsName
   , workspaceType = row.wsType
-  , path = row.wsPath
   , ghOwner = row.wsGhOwner
   , ghRepo = row.wsGhRepo
   , createdAt = row.wsCreatedAt

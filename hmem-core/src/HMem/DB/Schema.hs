@@ -130,7 +130,6 @@ data WorkspaceT f = WorkspaceT
   { wsId        :: Column f UUID
   , wsName      :: Column f Text
   , wsType      :: Column f WorkspaceType
-  , wsPath      :: Column f (Maybe Text)
   , wsGhOwner   :: Column f (Maybe Text)
   , wsGhRepo    :: Column f (Maybe Text)
   , wsDeletedAt :: Column f (Maybe UTCTime)
@@ -146,7 +145,6 @@ workspaceSchema = TableSchema
       { wsId        = "id"
       , wsName      = "name"
       , wsType      = "workspace_type"
-      , wsPath      = "path"
       , wsGhOwner   = "gh_owner"
       , wsGhRepo    = "gh_repo"
         , wsDeletedAt = "deleted_at"

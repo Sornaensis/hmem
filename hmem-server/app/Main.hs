@@ -141,9 +141,9 @@ seedDevData pool = do
   hPutStrLn stderr "[dev] Seeding demo data..."
   Pool.withConn pool $ \conn -> do
     let seedSql = "\
-          \INSERT INTO workspaces (name, path, workspace_type) VALUES \
-          \  ('Demo Workspace', '/tmp/demo-workspace', 'repository'), \
-          \  ('Research Notes', NULL, 'personal'); \
+          \INSERT INTO workspaces (name, workspace_type) VALUES \
+          \  ('Demo Workspace', 'repository'), \
+          \  ('Research Notes', 'personal'); \
           \\
           \INSERT INTO projects (workspace_id, name, description, status) \
           \SELECT w.id, p.name, p.description, p.status::project_status_enum \

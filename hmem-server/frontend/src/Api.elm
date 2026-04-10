@@ -45,7 +45,6 @@ type alias Workspace =
     { id : String
     , name : String
     , workspaceType : WorkspaceType
-    , path : Maybe String
     , ghOwner : Maybe String
     , ghRepo : Maybe String
     , createdAt : String
@@ -296,7 +295,6 @@ workspaceDecoder =
         |> required "id" D.string
         |> required "name" D.string
         |> required "workspace_type" workspaceTypeDecoder
-        |> optional "path" (D.nullable D.string) Nothing
         |> optional "gh_owner" (D.nullable D.string) Nothing
         |> optional "gh_repo" (D.nullable D.string) Nothing
         |> required "created_at" D.string

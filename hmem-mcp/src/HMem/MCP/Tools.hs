@@ -232,11 +232,10 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "workspace_register" "Register a new workspace — the top-level container for memories, projects, and tasks. Use type 'repository' for code repos (set path), 'planning' for cross-repo coordination, 'personal' for individual notes, or 'organization' for team scope." $ object
+    , mkTool "workspace_register" "Register a new workspace — the top-level container for memories, projects, and tasks. Use type 'repository' for code repos, 'planning' for cross-repo coordination, 'personal' for individual notes, or 'organization' for team scope." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "name"           .= propMaxLength "string" "Workspace name" maxNameBytes
-          , "path"           .= prop "string" "Filesystem path"
           , "gh_owner"       .= prop "string" "GitHub owner"
           , "gh_repo"        .= prop "string" "GitHub repository"
           , "workspace_type" .= propEnum "string" "Workspace type"
@@ -253,7 +252,7 @@ toolDefinitions =
           ]
       ]
 
-    , mkTool "workspace_get" "Get a workspace by ID with full detail: name, type, path, GitHub info, and timestamps." $ object
+    , mkTool "workspace_get" "Get a workspace by ID with full detail: name, type, GitHub info, and timestamps." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace" ]
@@ -300,14 +299,13 @@ toolDefinitions =
       , "required" .= [t "workspace_id"]
       ]
 
-    , mkTool "workspace_update" "Update workspace identity or scoping fields. Use null to clear path or GitHub fields when needed." $ object
+    , mkTool "workspace_update" "Update workspace identity or scoping fields. Use null to clear GitHub fields when needed." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id"   .= prop "string" "UUID of the workspace"
           , "name"           .= propMaxLength "string" "New workspace name" maxNameBytes
           , "workspace_type" .= propEnum "string" "New workspace type"
               ["repository", "planning", "personal", "organization"]
-          , "path"           .= prop "string" "New filesystem path (null to clear)"
           , "gh_owner"       .= prop "string" "New GitHub owner (null to clear)"
           , "gh_repo"        .= prop "string" "New GitHub repository (null to clear)"
           ]

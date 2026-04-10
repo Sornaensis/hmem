@@ -125,7 +125,6 @@ spec = do
     it "CreateWorkspace roundtrips through JSON" $ do
       let cw = CreateWorkspace
             { name          = "my-workspace"
-            , path          = Just "/home/user/project"
             , ghOwner       = Just "user"
             , ghRepo        = Just "repo"
             , workspaceType = Just WsRepository
@@ -135,7 +134,6 @@ spec = do
     it "CreateWorkspace with Nothing fields roundtrips" $ do
       let cw = CreateWorkspace
             { name          = "minimal"
-            , path          = Nothing
             , ghOwner       = Nothing
             , ghRepo        = Nothing
             , workspaceType = Nothing

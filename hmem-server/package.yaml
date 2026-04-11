@@ -78,6 +78,7 @@ executables:
       - hasql
       - http-client
       - http-types
+      - haskeline
 
   build-frontend:
     main:        BuildFrontend.hs

@@ -11,21 +11,21 @@
 --   @hmem-ctl workspaces@    – list workspaces (with optional name search)
 --   @hmem-ctl projects@      – list projects (with optional name/workspace filter)
 --   @hmem-ctl visualize@     – generate SVG workspace visualization
---   @hmem-ctl mk-ws@        – interactively select/create workspace, write .hmem.workspace
+--   @hmem-ctl workspace@    – interactively select/create workspace, write .hmem.workspace
 --
 --   Requires: initdb, pg_ctl, createdb, psql on PATH (ships with PostgreSQL).
 
 module Main where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception  (SomeException, bracket_, try)
+import Control.Exception  (SomeException, try)
 import Control.Monad      (filterM, when)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Lazy.Char8 qualified as BL8
-import Data.Char          (isSpace, ord)
+import Data.Char          (isSpace)
 import Data.List          (isInfixOf, dropWhileEnd, isPrefixOf)
 import Data.Maybe         (catMaybes, fromMaybe)
 import Data.Text qualified as T
@@ -41,15 +41,15 @@ import System.Directory   (createDirectoryIfMissing, copyFile,
                            removeDirectoryRecursive, removeFile)
 import System.Exit        (ExitCode(..), exitFailure)
 import System.FilePath    ((</>))
+import System.Console.Haskeline (InputT, runInputT, defaultSettings,
+                                getInputChar, outputStr, outputStrLn)
 import System.IO          (IOMode(..), hFlush, hPutStrLn,
-                           hSetBuffering, hSetEcho, hGetChar,
-                           hReady, BufferMode(..),
-                           openFile, stderr, stdout, stdin)
-import System.IO.Error    (catchIOError)
+                           openFile, stderr, stdout)
 import System.Info        (os)
 import System.Process     (CreateProcess(..), StdStream(..), callProcess,
                            createProcess, proc, readProcess, waitForProcess)
 
+import Control.Monad.IO.Class (liftIO)
 import HMem.Config
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool qualified as Pool
@@ -73,7 +73,7 @@ data Command
   | CmdWorkspaces WorkspacesOpts
   | CmdProjects   ProjectsOpts
   | CmdVisualize  VisualizeOpts
-  | CmdMkWs
+  | CmdWorkspace
 
 data WorkspacesOpts = WorkspacesOpts
   { wsName :: Maybe String
@@ -115,7 +115,7 @@ commandParser = subparser
       (progDesc "List projects (optionally filter by name or workspace)"))
   <> command "visualize"  (info (CmdVisualize <$> visualizeParser)
       (progDesc "Generate SVG workspace visualization"))
-  <> command "mk-ws"     (info (pure CmdMkWs)
+  <> command "workspace" (info (pure CmdWorkspace)
       (progDesc "Interactively select or create a workspace, write .hmem.workspace"))
   )
   <|> pure CmdSetup
@@ -157,7 +157,7 @@ main = do
     CmdWorkspaces opts -> doWorkspaces opts
     CmdProjects opts   -> doProjects opts
     CmdVisualize opts  -> doVisualize opts
-    CmdMkWs            -> doMkWs
+    CmdWorkspace       -> doWorkspace
 
 ------------------------------------------------------------------------
 -- Init
@@ -1114,11 +1114,11 @@ generateVisualization mgr base ws opts = do
           putStrLn $ "Wrote SVG to: " <> path
 
 ------------------------------------------------------------------------
--- mk-ws: interactive workspace selector
+-- workspace: interactive workspace selector
 ------------------------------------------------------------------------
 
-doMkWs :: IO ()
-doMkWs = withApiClient $ \mgr base -> do
+doWorkspace :: IO ()
+doWorkspace = withApiClient $ \mgr base -> do
   -- Check if .hmem.workspace already exists
   existingFile <- doesFileExist ".hmem.workspace"
   when existingFile $ do
@@ -1181,107 +1181,58 @@ createNewWorkspace mgr base = do
       pure ws.id
 
 ------------------------------------------------------------------------
--- Arrow-key menu TUI (raw ANSI)
+-- Interactive menu (haskeline)
 ------------------------------------------------------------------------
 
-data MenuKey = MUp | MDown | MEnter | MEsc | MOther
-
--- | Read a single menu key, decoding ANSI escape sequences for arrow keys.
--- Also supports j/k (vim-style) as alternatives that work even when
--- escape sequences are unavailable.
-readMenuKey :: IO MenuKey
-readMenuKey = do
-  c <- hGetChar stdin
-  case c of
-    '\n' -> pure MEnter
-    '\r' -> pure MEnter
-    'k'  -> pure MUp
-    'j'  -> pure MDown
-    'q'  -> pure MEsc
-    '\ESC' -> do
-      -- Try to read an escape sequence (e.g. ESC [ A for arrow up)
-      ready <- hReady stdin `catchIOError` \_ -> pure False
-      if ready
-        then do
-          c2 <- hGetChar stdin
-          if c2 == '['
-            then do
-              c3 <- hGetChar stdin
-              case c3 of
-                'A' -> pure MUp    -- ESC [ A = Up
-                'B' -> pure MDown  -- ESC [ B = Down
-                _   -> pure MOther
-            else pure MOther
-        else pure MEsc  -- bare Esc key
-    _ | ord c == 0 || ord c == 224 -> do
-        -- Windows console: special keys send 0 or 224 + scan code
-        ready <- hReady stdin `catchIOError` \_ -> pure False
-        if ready
-          then do
-            c2 <- hGetChar stdin
-            case ord c2 of
-              72 -> pure MUp     -- Up arrow scan code
-              80 -> pure MDown   -- Down arrow scan code
-              _  -> pure MOther
-          else pure MOther
-    _ -> pure MOther
-
--- | Display an interactive menu with arrow-key (or j/k) navigation.
+-- | Display an interactive menu with j/k navigation.
 -- Returns the 0-based index of the selected item.
 arrowMenu :: String -> [String] -> IO Int
-arrowMenu title options = bracket_
-  (hSetBuffering stdin NoBuffering >> hSetEcho stdin False)
-  (hSetBuffering stdin LineBuffering >> hSetEcho stdin True)
-  (do
-    -- Hide cursor
-    putStr "\ESC[?25l"
-    hFlush stdout
-    renderMenu 0 True
-    result <- inputLoop 0
-    -- Show cursor, clear menu
-    putStr "\ESC[?25h"
-    hFlush stdout
-    pure result
-  )
+arrowMenu title options =
+  runInputT defaultSettings go
   where
     nOpts = length options
-    totalLines = nOpts + 4  -- title + blank + options + blank + help line
+    totalLines = nOpts + 4  -- title + blank + options + blank + help
 
-    renderMenu :: Int -> Bool -> IO ()
-    renderMenu cursor isFirst = do
-      -- Move cursor to start of menu area (unless first render)
-      if isFirst
-        then pure ()
-        else putStr $ "\ESC[" ++ show totalLines ++ "A"
-      -- Title
-      putStrLn $ "\ESC[1m" ++ title ++ "\ESC[0m"
-      putStrLn ""
-      -- Options
+    go :: InputT IO Int
+    go = do
+      outputStr "\ESC[?25l"   -- hide cursor
+      renderMenu 0
+      result <- inputLoop 0
+      outputStr "\ESC[?25h"   -- show cursor
+      outputStrLn $ title ++ " " ++ (options !! result)
+      pure result
+
+    renderMenu :: Int -> InputT IO ()
+    renderMenu cursor = do
+      outputStrLn $ "\ESC[1m" ++ title ++ "\ESC[0m"
+      outputStrLn ""
       mapM_ (\(i, opt) ->
         if i == cursor
-          then putStrLn $ "  \ESC[36;1m> " ++ opt ++ "\ESC[0m"
-          else putStrLn $ "    " ++ opt
+          then outputStrLn $ "  \ESC[36;1m> " ++ opt ++ "\ESC[0m"
+          else outputStrLn $ "    " ++ opt
         ) (zip [0..] options)
-      putStrLn ""
-      putStrLn "  \ESC[90m↑/↓/j/k navigate  Enter select  q quit\ESC[0m"
-      hFlush stdout
+      outputStrLn ""
+      outputStrLn "  \ESC[90mj/k: move  Space: select  q: quit\ESC[0m"
 
-    inputLoop :: Int -> IO Int
+    redrawMenu :: Int -> InputT IO ()
+    redrawMenu cursor = do
+      outputStr $ "\ESC[" ++ show totalLines ++ "A"
+      renderMenu cursor
+
+    inputLoop :: Int -> InputT IO Int
     inputLoop cursor = do
-      key <- readMenuKey
-      case key of
-        MUp    -> let c' = max 0 (cursor - 1)
-                  in renderMenu c' False >> inputLoop c'
-        MDown  -> let c' = min (nOpts - 1) (cursor + 1)
-                  in renderMenu c' False >> inputLoop c'
-        MEnter -> do
-          -- Move past the menu, reprint selection
-          putStrLn $ title ++ " " ++ (options !! cursor)
-          pure cursor
-        MEsc   -> do
-          putStrLn ""
-          exitFailure
-        MOther -> inputLoop cursor
+      mc <- getInputChar ""
+      case mc of
+        Just 'k' ->
+          let c' = max 0 (cursor - 1)
+          in redrawMenu c' >> inputLoop c'
+        Just 'j' ->
+          let c' = min (nOpts - 1) (cursor + 1)
+          in redrawMenu c' >> inputLoop c'
+        Just ' ' -> pure cursor
+        Just 'q' -> liftIO exitFailure
+        Nothing  -> liftIO exitFailure
+        _        -> inputLoop cursor
 
 promptLine :: String -> IO String
 promptLine prompt = do

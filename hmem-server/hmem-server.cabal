@@ -185,6 +185,7 @@ executable hmem-ctl
     , directory
     , fast-logger
     , filepath
+    , haskeline
     , hasql
     , hmem-core
     , hmem-server

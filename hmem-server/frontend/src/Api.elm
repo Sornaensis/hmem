@@ -1,6 +1,7 @@
 module Api exposing
     ( Workspace, Project, Task, Memory, MemoryLink
     , TaskDependencySummary, TaskOverview
+    , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, UnifiedSearchResults
     , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
     , PaginatedResult
     , MemoryType(..), ProjectStatus(..), TaskStatus(..), WorkspaceType(..)
@@ -17,7 +18,7 @@ module Api exposing
     , fetchTaskOverview
     , fetchVisualization
     , addTaskDependency, removeTaskDependency
-    , searchMemories
+    , searchMemories, unifiedSearch
     , createProject, createProjectWithParent
     , updateProject, deleteProject
     , createTask, createTaskWithParent
@@ -114,6 +115,33 @@ type alias TaskDependencySummary =
 type alias TaskOverview =
     { task : Task
     , dependencies : List TaskDependencySummary
+    }
+
+
+type alias LinkedMemorySummary =
+    { id : String
+    , summary : Maybe String
+    , tags : List String
+    , importance : Int
+    }
+
+
+type alias ProjectSearchResult =
+    { project : Project
+    , linkedMemories : List LinkedMemorySummary
+    }
+
+
+type alias TaskSearchResult =
+    { task : Task
+    , linkedMemories : List LinkedMemorySummary
+    }
+
+
+type alias UnifiedSearchResults =
+    { memories : List Memory
+    , projects : List ProjectSearchResult
+    , tasks : List TaskSearchResult
     }
 
 
@@ -400,6 +428,37 @@ taskStatusDecoder =
             )
 
 
+linkedMemorySummaryDecoder : Decoder LinkedMemorySummary
+linkedMemorySummaryDecoder =
+    D.succeed LinkedMemorySummary
+        |> required "id" D.string
+        |> optional "summary" (D.nullable D.string) Nothing
+        |> optional "tags" (D.list D.string) []
+        |> required "importance" D.int
+
+
+projectSearchResultDecoder : Decoder ProjectSearchResult
+projectSearchResultDecoder =
+    D.succeed ProjectSearchResult
+        |> required "project" projectDecoder
+        |> optional "linked_memories" (D.list linkedMemorySummaryDecoder) []
+
+
+taskSearchResultDecoder : Decoder TaskSearchResult
+taskSearchResultDecoder =
+    D.succeed TaskSearchResult
+        |> required "task" taskDecoder
+        |> optional "linked_memories" (D.list linkedMemorySummaryDecoder) []
+
+
+unifiedSearchResultsDecoder : Decoder UnifiedSearchResults
+unifiedSearchResultsDecoder =
+    D.succeed UnifiedSearchResults
+        |> optional "memories" (D.list memoryDecoder) []
+        |> optional "projects" (D.list projectSearchResultDecoder) []
+        |> optional "tasks" (D.list taskSearchResultDecoder) []
+
+
 workspaceTypeDecoder : Decoder WorkspaceType
 workspaceTypeDecoder =
     D.string
@@ -653,6 +712,28 @@ searchMemories apiUrl query mWorkspaceId toMsg =
         { url = apiUrl ++ "/api/v1/memories/search"
         , body = Http.jsonBody body
         , expect = Http.expectJson toMsg (D.list memoryDecoder)
+        }
+
+
+unifiedSearch : String -> String -> Maybe String -> (Result Http.Error UnifiedSearchResults -> msg) -> Cmd msg
+unifiedSearch apiUrl query mWorkspaceId toMsg =
+    let
+        body =
+            E.object
+                ([ ( "query", E.string query ) ]
+                    ++ (case mWorkspaceId of
+                            Just wsId ->
+                                [ ( "workspace_id", E.string wsId ) ]
+
+                            Nothing ->
+                                []
+                       )
+                )
+    in
+    Http.post
+        { url = apiUrl ++ "/api/v1/search"
+        , body = Http.jsonBody body
+        , expect = Http.expectJson toMsg unifiedSearchResultsDecoder
         }
 
 

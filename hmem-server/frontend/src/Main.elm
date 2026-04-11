@@ -148,6 +148,8 @@ type alias Model =
 
     -- Search/filter
     , searchQuery : String
+    , unifiedSearchResults : Maybe Api.UnifiedSearchResults
+    , isSearching : Bool
     , filterShowOnly : FilterShowOnly
     , filterPriority : FilterPriority
     , filterProjectStatuses : List String
@@ -352,6 +354,8 @@ init rawFlags url key =
             , selectedWorkspaceId = Nothing
             , activeTab = frag.tab
             , searchQuery = ""
+            , unifiedSearchResults = Nothing
+            , isSearching = False
             , filterShowOnly = ShowAll
             , filterPriority = AnyPriority
             , filterProjectStatuses = []
@@ -746,6 +750,8 @@ type Msg
     | DismissToast Int
     | AutoDismissToast Int
     | SearchInput String
+    | SubmitSearch
+    | GotUnifiedSearchResults (Result Http.Error Api.UnifiedSearchResults)
     | SetFilterShowOnly FilterShowOnly
     | SetFilterPriority FilterPriority
     | ToggleFilterProjectStatus String
@@ -957,6 +963,8 @@ update msg model =
                             , taskDependencies = Dict.empty
                             , addingDependencyFor = Nothing
                             , searchQuery = ""
+                            , unifiedSearchResults = Nothing
+                            , isSearching = False
                             , filterShowOnly = ShowAll
                             , filterPriority = AnyPriority
                             , filterProjectStatuses = []
@@ -1249,9 +1257,36 @@ update msg model =
         SearchInput query ->
             let
                 newModel =
-                    { model | searchQuery = query }
+                    if String.isEmpty query then
+                        { model | searchQuery = query, unifiedSearchResults = Nothing, isSearching = False }
+
+                    else
+                        { model | searchQuery = query }
             in
             ( newModel, saveFiltersCmd newModel )
+
+        SubmitSearch ->
+            let
+                trimmed =
+                    String.trim model.searchQuery
+            in
+            if String.isEmpty trimmed then
+                ( { model | unifiedSearchResults = Nothing, isSearching = False }, Cmd.none )
+
+            else
+                ( { model | isSearching = True }
+                , Api.unifiedSearch model.flags.apiUrl trimmed model.selectedWorkspaceId GotUnifiedSearchResults
+                )
+
+        GotUnifiedSearchResults result ->
+            case result of
+                Ok results ->
+                    ( { model | unifiedSearchResults = Just results, isSearching = False }, Cmd.none )
+
+                Err _ ->
+                    ( { model | isSearching = False }
+                    , Cmd.none
+                    )
 
         SetFilterShowOnly show ->
             let
@@ -3172,40 +3207,47 @@ viewWorkspacePage wsId model =
                     div [ class "loading-indicator" ] [ text "Loading..." ]
 
                   else
-                    viewTabContent wsId model
+                    case model.unifiedSearchResults of
+                        Just results ->
+                            viewUnifiedSearchResults model results
+
+                        Nothing ->
+                            viewTabContent wsId model
                 ]
 
 
 viewSearchBar : Model -> Html Msg
 viewSearchBar model =
     div [ class "search-filter-bar" ]
-        [ div [ class "search-bar" ]
+        [ Html.form [ class "search-bar", onSubmit SubmitSearch ]
             [ input
                 [ class "search-input"
                 , type_ "text"
-                , placeholder
-                    (if model.activeTab == MemoriesTab then
-                        "Filter memories..."
-
-                     else
-                        "Filter projects & tasks..."
-                    )
+                , placeholder "Search all entities... (Enter to search)"
                 , value model.searchQuery
                 , onInput SearchInput
                 ]
                 []
-            , if not (String.isEmpty model.searchQuery) then
-                button [ class "search-clear", onClick (SearchInput "") ] [ text "✕" ]
+            , if model.isSearching then
+                span [ class "search-spinner" ] [ text "…" ]
+
+              else if not (String.isEmpty model.searchQuery) then
+                button [ class "search-clear", onClick (SearchInput ""), type_ "button" ] [ text "✕" ]
 
               else
                 text ""
             ]
-        , case model.activeTab of
-            ProjectsTab ->
-                viewFilterBar model
+        , case model.unifiedSearchResults of
+            Just _ ->
+                text ""
 
-            MemoriesTab ->
-                viewMemoryFilterBar model
+            Nothing ->
+                case model.activeTab of
+                    ProjectsTab ->
+                        viewFilterBar model
+
+                    MemoriesTab ->
+                        viewMemoryFilterBar model
         ]
 
 
@@ -3497,6 +3539,115 @@ viewTabContent wsId model =
 
         MemoriesTab ->
             viewMemoriesList wsId model
+
+
+viewUnifiedSearchResults : Model -> Api.UnifiedSearchResults -> Html Msg
+viewUnifiedSearchResults model results =
+    let
+        totalCount =
+            List.length results.memories + List.length results.projects + List.length results.tasks
+    in
+    div [ class "unified-search-results" ]
+        [ div [ class "search-results-header" ]
+            [ span [ class "search-results-count" ]
+                [ text (String.fromInt totalCount ++ " results") ]
+            ]
+        , if not (List.isEmpty results.projects) then
+            div [ class "search-results-section" ]
+                [ h3 [ class "search-section-title" ]
+                    [ text ("Projects (" ++ String.fromInt (List.length results.projects) ++ ")") ]
+                , div [ class "entity-list" ]
+                    (List.map (viewSearchProjectResult model) results.projects)
+                ]
+
+          else
+            text ""
+        , if not (List.isEmpty results.tasks) then
+            div [ class "search-results-section" ]
+                [ h3 [ class "search-section-title" ]
+                    [ text ("Tasks (" ++ String.fromInt (List.length results.tasks) ++ ")") ]
+                , div [ class "entity-list" ]
+                    (List.map (viewSearchTaskResult model) results.tasks)
+                ]
+
+          else
+            text ""
+        , if not (List.isEmpty results.memories) then
+            div [ class "search-results-section" ]
+                [ h3 [ class "search-section-title" ]
+                    [ text ("Memories (" ++ String.fromInt (List.length results.memories) ++ ")") ]
+                , div [ class "entity-list" ]
+                    (List.map (viewMemoryCard model) results.memories)
+                ]
+
+          else
+            text ""
+        , if totalCount == 0 then
+            div [ class "empty-state" ] [ text "No results found." ]
+
+          else
+            text ""
+        ]
+
+
+viewSearchProjectResult : Model -> Api.ProjectSearchResult -> Html Msg
+viewSearchProjectResult model result =
+    div [ class "search-result-card" ]
+        [ div [ class "card-header" ]
+            [ span [ class "card-title" ] [ text result.project.name ]
+            , span [ class ("badge badge-" ++ Api.projectStatusToString result.project.status) ]
+                [ text (Api.projectStatusToString result.project.status) ]
+            , span [ class "badge badge-priority" ]
+                [ text ("P" ++ String.fromInt result.project.priority) ]
+            ]
+        , case result.project.description of
+            Just desc ->
+                div [ class "card-body" ] [ text desc ]
+
+            Nothing ->
+                text ""
+        , if not (List.isEmpty result.linkedMemories) then
+            div [ class "linked-memories-summary" ]
+                (List.map viewLinkedMemorySummary result.linkedMemories)
+
+          else
+            text ""
+        ]
+
+
+viewSearchTaskResult : Model -> Api.TaskSearchResult -> Html Msg
+viewSearchTaskResult model result =
+    div [ class "search-result-card" ]
+        [ div [ class "card-header" ]
+            [ span [ class "card-title" ] [ text result.task.title ]
+            , span [ class ("badge badge-" ++ Api.taskStatusToString result.task.status) ]
+                [ text (Api.taskStatusToString result.task.status) ]
+            , span [ class "badge badge-priority" ]
+                [ text ("P" ++ String.fromInt result.task.priority) ]
+            ]
+        , case result.task.description of
+            Just desc ->
+                div [ class "card-body" ] [ text desc ]
+
+            Nothing ->
+                text ""
+        , if not (List.isEmpty result.linkedMemories) then
+            div [ class "linked-memories-summary" ]
+                (List.map viewLinkedMemorySummary result.linkedMemories)
+
+          else
+            text ""
+        ]
+
+
+viewLinkedMemorySummary : Api.LinkedMemorySummary -> Html Msg
+viewLinkedMemorySummary mem =
+    div [ class "linked-memory-chip" ]
+        [ span [ class "linked-memory-importance" ]
+            [ text (String.fromInt mem.importance) ]
+        , span [ class "linked-memory-text" ]
+            [ text (Maybe.withDefault "(no summary)" mem.summary) ]
+        ]
 
 
 

@@ -133,6 +133,8 @@ type MemoryAPI =
 type ProjectAPI =
        QueryParam "workspace_id" UUID
          :> QueryParam "status" ProjectStatus
+         :> QueryParam "query" Text
+         :> QueryParam "search_language" Text
          :> QueryParam "created_after" UTCTime
          :> QueryParam "created_before" UTCTime
          :> QueryParam "updated_after" UTCTime
@@ -161,6 +163,8 @@ type TaskAPI =
          :> QueryParam "project_id" UUID
          :> QueryParam "status" TaskStatus
          :> QueryParam "priority" Int
+         :> QueryParam "query" Text
+         :> QueryParam "search_language" Text
          :> QueryParam "created_after" UTCTime
          :> QueryParam "created_before" UTCTime
          :> QueryParam "updated_after" UTCTime
@@ -1068,14 +1072,14 @@ projectHandlers pool bc =
     requireProjectH :: UUID -> Handler Project
     requireProjectH pid = handleDBErrors (Proj.getProject pool pid) >>= maybe (throwError err404) pure
 
-    listProjectsH mws mstatus mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset = do
+    listProjectsH mws mstatus mquery msearchLang mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset = do
       let lim = capLimit mlimit
           off = capOffset moffset
           query = ProjectListQuery
             { workspaceId = mws
             , status = mstatus
-            , query = Nothing
-            , searchLanguage = Nothing
+            , query = mquery
+            , searchLanguage = msearchLang
             , createdAfter = mcreatedAfter
             , createdBefore = mcreatedBefore
             , updatedAfter = mupdatedAfter
@@ -1214,7 +1218,7 @@ taskHandlers pool bc =
     requireTaskH :: UUID -> Handler Task
     requireTaskH tid = handleDBErrors (Task.getTask pool tid) >>= maybe (throwError err404) pure
 
-    listTasksH mws mpid mstatus mpriority mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset = do
+    listTasksH mws mpid mstatus mpriority mquery msearchLang mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset = do
       let lim = capLimit mlimit
           off = capOffset moffset
           query = TaskListQuery
@@ -1222,8 +1226,8 @@ taskHandlers pool bc =
             , projectId = mpid
             , status = mstatus
             , priority = mpriority
-            , query = Nothing
-            , searchLanguage = Nothing
+            , query = mquery
+            , searchLanguage = msearchLang
             , createdAfter = mcreatedAfter
             , createdBefore = mcreatedBefore
             , updatedAfter = mupdatedAfter

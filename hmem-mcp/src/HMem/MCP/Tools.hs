@@ -162,12 +162,14 @@ toolDefinitions =
       , "required" .= [t "workspace_id", t "name"]
       ]
 
-    , mkTool "project_list" "Browse or filter projects to find IDs before update, linking, deletion, or task creation. Omit workspace_id for cross-workspace browsing." $ object
+    , mkTool "project_list" "Browse or filter projects to find IDs before update, linking, deletion, or task creation. Supports optional full-text search via query parameter. Omit workspace_id for cross-workspace browsing." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (omit for cross-workspace browsing)"
           , "status"       .= propEnum "string" "Filter by status"
               ["active", "paused", "completed", "archived"]
+          , "query"           .= prop "string" "Full-text search query (searches project name and description)"
+          , "search_language" .= prop "string" "PostgreSQL text search language (default: english)"
           , "created_after"  .= prop "string" "Filter for projects created on or after this ISO 8601 timestamp"
           , "created_before" .= prop "string" "Filter for projects created on or before this ISO 8601 timestamp"
           , "updated_after"  .= prop "string" "Filter for projects updated on or after this ISO 8601 timestamp"
@@ -193,7 +195,7 @@ toolDefinitions =
       , "required" .= [t "workspace_id", t "title"]
       ]
 
-    , mkTool "task_list" "Browse or filter tasks to find IDs before update, linking, dependency changes, or deletion. Use workspace_id for workspace-wide listing or project_id for project-scoped listing; both are optional." $ object
+    , mkTool "task_list" "Browse or filter tasks to find IDs before update, linking, dependency changes, or deletion. Supports optional full-text search via query parameter. Use workspace_id for workspace-wide listing or project_id for project-scoped listing; both are optional." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (use this or project_id)"
@@ -201,6 +203,8 @@ toolDefinitions =
           , "status"     .= propEnum "string" "Filter by status"
               ["todo", "in_progress", "blocked", "done", "cancelled"]
           , "priority"   .= prop "integer" "Filter by exact priority value (1-10, where 10 is highest)"
+          , "query"           .= prop "string" "Full-text search query (searches task title and description)"
+          , "search_language" .= prop "string" "PostgreSQL text search language (default: english)"
           , "created_after"  .= prop "string" "Filter for tasks created on or after this ISO 8601 timestamp"
           , "created_before" .= prop "string" "Filter for tasks created on or before this ISO 8601 timestamp"
           , "updated_after"  .= prop "string" "Filter for tasks updated on or after this ISO 8601 timestamp"

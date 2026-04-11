@@ -205,6 +205,11 @@ type alias Model =
 
     -- Self-event suppression: entity IDs with recent local mutations
     , pendingMutationIds : Dict String Bool
+
+    -- Workspace groups
+    , workspaceGroups : Dict String Api.WorkspaceGroup
+    , groupMembers : Dict String (List String)
+    , managingGroup : Maybe ManagingGroupState
     }
 
 
@@ -316,6 +321,12 @@ type alias AddDependencyState =
     }
 
 
+type alias ManagingGroupState =
+    { groupId : String
+    , addingWorkspace : Bool
+    }
+
+
 
 -- INIT
 
@@ -389,6 +400,9 @@ init rawFlags url key =
             , focusHistoryIndex = 0
             , deleteConfirmation = Nothing
             , pendingMutationIds = Dict.empty
+            , workspaceGroups = Dict.empty
+            , groupMembers = Dict.empty
+            , managingGroup = Nothing
             }
 
         model =
@@ -402,6 +416,7 @@ init rawFlags url key =
         cmds =
             [ connectWebSocket flags.wsUrl
             , Api.fetchWorkspaces flags.apiUrl GotWorkspaces
+            , Api.fetchWorkspaceGroups flags.apiUrl GotWorkspaceGroups
             ]
 
         pageCmd =
@@ -845,6 +860,17 @@ type Msg
     | ClearFocus
     | GlobalKeyDown Int
     | ClearPendingMutation String
+      -- Workspace groups
+    | GotWorkspaceGroups (Result Http.Error (Api.PaginatedResult Api.WorkspaceGroup))
+    | GotGroupMembers String (Result Http.Error (List String))
+    | CreateWorkspaceGroup String
+    | WorkspaceGroupCreated (Result Http.Error Api.WorkspaceGroup)
+    | DeleteWorkspaceGroup String
+    | WorkspaceGroupDeleted String (Result Http.Error ())
+    | ToggleManageGroup String
+    | AddWorkspaceToGroup String String
+    | RemoveWorkspaceFromGroup String String
+    | GroupMembershipDone String (Result Http.Error ())
     | NoOp
 
 
@@ -2214,6 +2240,109 @@ update msg model =
             , Cmd.none
             )
 
+        -- Workspace groups
+        GotWorkspaceGroups result ->
+            case result of
+                Ok paginated ->
+                    let
+                        groups =
+                            indexBy .id paginated.items
+
+                        fetchMembersCmds =
+                            paginated.items
+                                |> List.map (\g -> Api.fetchGroupMembers model.flags.apiUrl g.id (GotGroupMembers g.id))
+                    in
+                    ( { model | workspaceGroups = groups }
+                    , Cmd.batch fetchMembersCmds
+                    )
+
+                Err _ ->
+                    addToast Error "Failed to load workspace groups" model
+
+        GotGroupMembers groupId result ->
+            case result of
+                Ok memberIds ->
+                    ( { model | groupMembers = Dict.insert groupId memberIds model.groupMembers }
+                    , Cmd.none
+                    )
+
+                Err _ ->
+                    ( model, Cmd.none )
+
+        CreateWorkspaceGroup name ->
+            ( model
+            , Api.createWorkspaceGroup model.flags.apiUrl name Nothing WorkspaceGroupCreated
+            )
+
+        WorkspaceGroupCreated result ->
+            case result of
+                Ok group ->
+                    addToast Success ("Group \"" ++ group.name ++ "\" created")
+                        { model | workspaceGroups = Dict.insert group.id group model.workspaceGroups }
+
+                Err _ ->
+                    addToast Error "Failed to create workspace group" model
+
+        DeleteWorkspaceGroup groupId ->
+            ( model
+            , Api.deleteWorkspaceGroup model.flags.apiUrl groupId (WorkspaceGroupDeleted groupId)
+            )
+
+        WorkspaceGroupDeleted groupId result ->
+            case result of
+                Ok () ->
+                    addToast Success "Group deleted"
+                        { model
+                            | workspaceGroups = Dict.remove groupId model.workspaceGroups
+                            , groupMembers = Dict.remove groupId model.groupMembers
+                            , managingGroup =
+                                case model.managingGroup of
+                                    Just st ->
+                                        if st.groupId == groupId then
+                                            Nothing
+
+                                        else
+                                            model.managingGroup
+
+                                    Nothing ->
+                                        Nothing
+                        }
+
+                Err _ ->
+                    addToast Error "Failed to delete group" model
+
+        ToggleManageGroup groupId ->
+            case model.managingGroup of
+                Just st ->
+                    if st.groupId == groupId then
+                        ( { model | managingGroup = Nothing }, Cmd.none )
+
+                    else
+                        ( { model | managingGroup = Just { groupId = groupId, addingWorkspace = False } }, Cmd.none )
+
+                Nothing ->
+                    ( { model | managingGroup = Just { groupId = groupId, addingWorkspace = False } }, Cmd.none )
+
+        AddWorkspaceToGroup groupId workspaceId ->
+            ( model
+            , Api.addGroupMember model.flags.apiUrl groupId workspaceId (GroupMembershipDone groupId)
+            )
+
+        RemoveWorkspaceFromGroup groupId workspaceId ->
+            ( model
+            , Api.removeGroupMember model.flags.apiUrl groupId workspaceId (GroupMembershipDone groupId)
+            )
+
+        GroupMembershipDone groupId result ->
+            case result of
+                Ok () ->
+                    ( model
+                    , Api.fetchGroupMembers model.flags.apiUrl groupId (GotGroupMembers groupId)
+                    )
+
+                Err _ ->
+                    addToast Error "Failed to update group membership" model
+
 
 {-| Mark an entity ID as recently mutated locally. Returns the updated model
 and a Cmd that clears the flag after 3 seconds.
@@ -2404,9 +2533,12 @@ applyChangeEvent event model =
             )
 
         Api.EWorkspaceGroup ->
-            -- Workspace groups affect the sidebar; refresh workspaces
+            -- Workspace groups affect the sidebar; refresh groups and workspaces
             ( model
-            , Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
+            , Cmd.batch
+                [ Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
+                , Api.fetchWorkspaceGroups model.flags.apiUrl GotWorkspaceGroups
+                ]
             )
 
         Api.ESavedView ->
@@ -2966,25 +3098,55 @@ view model =
 
 viewSidebar : Model -> Html Msg
 viewSidebar model =
+    let
+        allWs =
+            Dict.values model.workspaces |> List.sortBy .name
+
+        -- Collect all workspace IDs that belong to at least one group
+        groupedWsIds =
+            model.groupMembers
+                |> Dict.values
+                |> List.concat
+                |> List.foldl (\wsId acc -> Dict.insert wsId True acc) Dict.empty
+
+        ungroupedWs =
+            allWs |> List.filter (\ws -> not (Dict.member ws.id groupedWsIds))
+
+        groups =
+            model.workspaceGroups |> Dict.values |> List.sortBy .name
+    in
     nav [ class "sidebar" ]
         [ div [ class "sidebar-header" ]
             [ a [ href "/", class "sidebar-logo" ] [ text "hmem" ] ]
-        , div [ class "sidebar-section" ]
-            [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
-            , if model.loadingWorkspaces then
-                div [ class "sidebar-loading" ] [ text "Loading..." ]
+        , if not (List.isEmpty groups) then
+            div []
+                (List.map (viewSidebarGroup model) groups)
 
-              else if Dict.isEmpty model.workspaces then
-                div [ class "sidebar-empty" ] [ text "No workspaces" ]
+          else
+            text ""
+        , if not (List.isEmpty ungroupedWs) then
+            div [ class "sidebar-section" ]
+                [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
+                , if model.loadingWorkspaces then
+                    div [ class "sidebar-loading" ] [ text "Loading..." ]
 
-              else
-                ul [ class "sidebar-nav" ]
-                    (model.workspaces
-                        |> Dict.values
-                        |> List.sortBy .name
-                        |> List.map (viewSidebarWorkspace model.selectedWorkspaceId)
-                    )
-            ]
+                  else
+                    ul [ class "sidebar-nav" ]
+                        (ungroupedWs |> List.map (viewSidebarWorkspace model.selectedWorkspaceId))
+                ]
+
+          else if List.isEmpty groups then
+            div [ class "sidebar-section" ]
+                [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
+                , if model.loadingWorkspaces then
+                    div [ class "sidebar-loading" ] [ text "Loading..." ]
+
+                  else
+                    div [ class "sidebar-empty" ] [ text "No workspaces" ]
+                ]
+
+          else
+            text ""
         , div [ class "sidebar-section" ]
             [ ul [ class "sidebar-nav" ]
                 [ li []
@@ -2995,6 +3157,51 @@ viewSidebar model =
                     ]
                 ]
             ]
+        ]
+
+
+viewSidebarGroup : Model -> Api.WorkspaceGroup -> Html Msg
+viewSidebarGroup model group =
+    let
+        memberIds =
+            Dict.get group.id model.groupMembers |> Maybe.withDefault []
+
+        memberWs =
+            memberIds
+                |> List.filterMap (\wsId -> Dict.get wsId model.workspaces)
+                |> List.sortBy .name
+
+        collapsed =
+            isCollapsed model ("group-" ++ group.id)
+    in
+    div [ class "sidebar-section" ]
+        [ div
+            [ class "sidebar-section-title sidebar-group-title"
+            , onClick (ToggleTreeNode ("group-" ++ group.id))
+            , style "cursor" "pointer"
+            , style "display" "flex"
+            , style "align-items" "center"
+            , style "gap" "0.25rem"
+            ]
+            [ span [ class "collapse-toggle" ]
+                [ text
+                    (if collapsed then
+                        "▸"
+
+                     else
+                        "▾"
+                    )
+                ]
+            , text group.name
+            , span [ style "margin-left" "auto", style "font-size" "0.75rem", style "opacity" "0.6" ]
+                [ text (String.fromInt (List.length memberWs)) ]
+            ]
+        , if collapsed then
+            text ""
+
+          else
+            ul [ class "sidebar-nav" ]
+                (memberWs |> List.map (viewSidebarWorkspace model.selectedWorkspaceId))
         ]
 
 
@@ -3072,18 +3279,79 @@ viewPage model =
 
 viewHomePage : Model -> Html Msg
 viewHomePage model =
+    let
+        allWs =
+            model.workspaces |> Dict.values |> List.sortBy .name
+
+        groups =
+            model.workspaceGroups |> Dict.values |> List.sortBy .name
+
+        groupedWsIds =
+            model.groupMembers
+                |> Dict.values
+                |> List.concat
+                |> List.foldl (\wsId acc -> Dict.insert wsId True acc) Dict.empty
+
+        ungroupedWs =
+            allWs |> List.filter (\ws -> not (Dict.member ws.id groupedWsIds))
+    in
     div [ class "page" ]
         [ h2 [] [ text "Workspaces" ]
         , if model.loadingWorkspaces then
             div [ class "loading-indicator" ] [ text "Loading workspaces..." ]
 
           else
-            div [ class "card-grid" ]
-                (model.workspaces
-                    |> Dict.values
-                    |> List.sortBy .name
-                    |> List.map viewWorkspaceCard
+            div []
+                (List.map (viewHomeGroup model) groups
+                    ++ [ if not (List.isEmpty ungroupedWs) then
+                            div []
+                                [ if not (List.isEmpty groups) then
+                                    h3 [ style "margin-top" "1.5rem", style "margin-bottom" "0.75rem" ] [ text "Ungrouped" ]
+
+                                  else
+                                    text ""
+                                , div [ class "card-grid" ]
+                                    (ungroupedWs |> List.map viewWorkspaceCard)
+                                ]
+
+                         else
+                            text ""
+                       ]
                 )
+        ]
+
+
+viewHomeGroup : Model -> Api.WorkspaceGroup -> Html Msg
+viewHomeGroup model group =
+    let
+        memberIds =
+            Dict.get group.id model.groupMembers |> Maybe.withDefault []
+
+        memberWs =
+            memberIds
+                |> List.filterMap (\wsId -> Dict.get wsId model.workspaces)
+                |> List.sortBy .name
+    in
+    div [ style "margin-bottom" "1.5rem" ]
+        [ h3 [ style "margin-bottom" "0.75rem", style "display" "flex", style "align-items" "center", style "gap" "0.5rem" ]
+            [ text group.name
+            , span [ style "font-size" "0.85rem", style "opacity" "0.6", style "font-weight" "normal" ]
+                [ text
+                    (case group.description of
+                        Just desc ->
+                            "— " ++ desc
+
+                        Nothing ->
+                            ""
+                    )
+                ]
+            ]
+        , if List.isEmpty memberWs then
+            div [ class "empty-state" ] [ text "No workspaces in this group." ]
+
+          else
+            div [ class "card-grid" ]
+                (memberWs |> List.map viewWorkspaceCard)
         ]
 
 
@@ -3841,7 +4109,7 @@ viewProjectsTree wsId model =
                         rootProjects =
                             wsProjects
                                 |> List.filter (\p -> p.parentId == Nothing)
-                                |> List.sortBy (\p -> negate p.priority)
+                                |> List.sortBy (\p -> ( Api.projectStatusOrder p.status, negate p.priority, String.toLower p.name ))
 
                         visibleRootProjects =
                             rootProjects
@@ -3861,7 +4129,7 @@ viewProjectsTree wsId model =
                         orphanTasks =
                             wsTasks
                                 |> List.filter (\t -> t.projectId == Nothing && t.parentId == Nothing)
-                                |> List.sortBy (\t -> negate t.priority)
+                                |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
 
                         visibleOrphans =
                             orphanTasks
@@ -3921,7 +4189,7 @@ viewProjectNode allProjects model depth project hasSearch query =
         children =
             allProjects
                 |> List.filter (\p -> p.parentId == Just project.id)
-                |> List.sortBy (\p -> negate p.priority)
+                |> List.sortBy (\p -> ( Api.projectStatusOrder p.status, negate p.priority, String.toLower p.name ))
 
         visibleChildren =
             children
@@ -3948,7 +4216,7 @@ viewProjectNode allProjects model depth project hasSearch query =
             model.tasks
                 |> Dict.values
                 |> List.filter (\t -> t.projectId == Just project.id && t.parentId == Nothing)
-                |> List.sortBy (\t -> negate t.priority)
+                |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
 
         visibleTasks =
             projectTasks
@@ -4331,7 +4599,7 @@ viewTaskCard showProject model task =
                     model.tasks
                         |> Dict.values
                         |> List.filter (\t -> t.parentId == Just task.id)
-                        |> List.sortBy (\t -> negate t.priority)
+                        |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
             in
             div [ class "tree-children" ]
                 (viewTasksWithZones model "task-subtasks" task.projectId (Just task.id) childTasks)
@@ -4407,7 +4675,7 @@ viewMemoriesList wsId model =
                 |> List.filter memoryPassesPinnedFilter
                 |> List.filter memoryPassesImportanceFilter
                 |> List.filter memoryPassesTagFilter
-                |> List.sortBy (\m -> negate m.importance)
+                |> List.sortBy (\m -> ( negate m.importance, String.toLower (m.summary |> Maybe.withDefault m.content) ))
 
         inlineCreateView =
             viewInlineCreateMemory model
@@ -4690,7 +4958,7 @@ viewLinkEntityPopover model memoryId linkedProjects linkedTasks =
                                             || (p.description |> Maybe.map (\d -> String.contains query (String.toLower d)) |> Maybe.withDefault False)
                                             || String.contains query crumbText
                                 )
-                            |> List.sortBy .name
+                            |> List.sortBy (\p -> ( Api.projectStatusOrder p.status, negate p.priority, String.toLower p.name ))
                             |> List.take 10
 
                     availableTasks =
@@ -4713,7 +4981,7 @@ viewLinkEntityPopover model memoryId linkedProjects linkedTasks =
                                             || (t.description |> Maybe.map (\d -> String.contains query (String.toLower d)) |> Maybe.withDefault False)
                                             || String.contains query crumbText
                                 )
-                            |> List.sortBy (\t -> negate t.priority)
+                            |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
                             |> List.take 10
 
                     allItems =
@@ -5239,7 +5507,7 @@ viewAddDependencyPopover model taskId deps =
                                             || (t.description |> Maybe.map (\d -> String.contains query (String.toLower d)) |> Maybe.withDefault False)
                                             || String.contains query crumbText
                                 )
-                            |> List.sortBy (\t -> negate t.priority)
+                            |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
                             |> List.take 15
                 in
                 div [ class "popover-container" ]
@@ -5642,7 +5910,7 @@ viewLinkMemoryPopover model entityType entityId linkedMems =
                                             || (m.summary |> Maybe.map (\s -> String.contains query (String.toLower s)) |> Maybe.withDefault False)
                                             || List.any (\tag -> String.contains query (String.toLower tag)) m.tags
                                 )
-                            |> List.sortBy (\m -> negate m.importance)
+                            |> List.sortBy (\m -> ( negate m.importance, String.toLower (m.summary |> Maybe.withDefault m.content) ))
                             |> List.take 15
                 in
                 div [ class "popover-container" ]

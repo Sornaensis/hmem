@@ -1,5 +1,6 @@
 module Api exposing
     ( Workspace, Project, Task, Memory, MemoryLink
+    , WorkspaceGroup
     , TaskDependencySummary, TaskOverview
     , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, UnifiedSearchResults
     , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
@@ -24,10 +25,13 @@ module Api exposing
     , createTask, createTaskWithParent
     , updateTask, deleteTask
     , createMemory, updateMemory, deleteMemory, setTags
+    , fetchWorkspaceGroups, createWorkspaceGroup, deleteWorkspaceGroup
+    , fetchGroupMembers, addGroupMember, removeGroupMember
     , decodeChangeEvent
     , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder
     , memoryTypeToString, memoryTypeFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
     , projectStatusFromString, taskStatusFromString
+    , projectStatusOrder, taskStatusOrder
     , allProjectStatuses, allTaskStatuses, allMemoryTypes
     )
 
@@ -93,6 +97,15 @@ type alias Memory =
     , importance : Int
     , pinned : Bool
     , tags : List String
+    , createdAt : String
+    , updatedAt : String
+    }
+
+
+type alias WorkspaceGroup =
+    { id : String
+    , name : String
+    , description : Maybe String
     , createdAt : String
     , updatedAt : String
     }
@@ -313,6 +326,29 @@ allMemoryTypes =
     [ ShortTerm, LongTerm ]
 
 
+{-| Sort order for project statuses: active first, archived last.
+-}
+projectStatusOrder : ProjectStatus -> Int
+projectStatusOrder ps =
+    case ps of
+        ProjActive -> 0
+        ProjPaused -> 1
+        ProjCompleted -> 2
+        ProjArchived -> 3
+
+
+{-| Sort order for task statuses: in-progress first, cancelled last.
+-}
+taskStatusOrder : TaskStatus -> Int
+taskStatusOrder ts =
+    case ts of
+        InProgress -> 0
+        Todo -> 1
+        Blocked -> 2
+        Done -> 3
+        Cancelled -> 4
+
+
 
 -- DECODERS
 
@@ -373,6 +409,16 @@ memoryDecoder =
         |> required "importance" D.int
         |> required "pinned" D.bool
         |> required "tags" (D.list D.string)
+        |> required "created_at" D.string
+        |> required "updated_at" D.string
+
+
+workspaceGroupDecoder : Decoder WorkspaceGroup
+workspaceGroupDecoder =
+    D.succeed WorkspaceGroup
+        |> required "id" D.string
+        |> required "name" D.string
+        |> optional "description" (D.nullable D.string) Nothing
         |> required "created_at" D.string
         |> required "updated_at" D.string
 
@@ -1131,6 +1177,82 @@ fetchVisualization apiUrl wsId toMsg =
         , url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/visualization"
         , body = Http.jsonBody (E.object [])
         , expect = Http.expectJson toMsg workspaceVisualizationDecoder
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+
+-- WORKSPACE GROUPS
+
+
+fetchWorkspaceGroups : String -> (Result Http.Error (PaginatedResult WorkspaceGroup) -> msg) -> Cmd msg
+fetchWorkspaceGroups apiUrl toMsg =
+    Http.get
+        { url = apiUrl ++ "/api/v1/groups?limit=200"
+        , expect = Http.expectJson toMsg (paginatedDecoder workspaceGroupDecoder)
+        }
+
+
+createWorkspaceGroup : String -> String -> Maybe String -> (Result Http.Error WorkspaceGroup -> msg) -> Cmd msg
+createWorkspaceGroup apiUrl name mDescription toMsg =
+    Http.post
+        { url = apiUrl ++ "/api/v1/groups"
+        , body =
+            Http.jsonBody
+                (E.object
+                    ([ ( "name", E.string name ) ]
+                        ++ (case mDescription of
+                                Just desc ->
+                                    [ ( "description", E.string desc ) ]
+
+                                Nothing ->
+                                    []
+                           )
+                    )
+                )
+        , expect = Http.expectJson toMsg workspaceGroupDecoder
+        }
+
+
+deleteWorkspaceGroup : String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+deleteWorkspaceGroup apiUrl groupId toMsg =
+    Http.request
+        { method = "DELETE"
+        , headers = []
+        , url = apiUrl ++ "/api/v1/groups/" ++ groupId
+        , body = Http.emptyBody
+        , expect = Http.expectWhatever toMsg
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+fetchGroupMembers : String -> String -> (Result Http.Error (List String) -> msg) -> Cmd msg
+fetchGroupMembers apiUrl groupId toMsg =
+    Http.get
+        { url = apiUrl ++ "/api/v1/groups/" ++ groupId ++ "/members"
+        , expect = Http.expectJson toMsg (D.list D.string)
+        }
+
+
+addGroupMember : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+addGroupMember apiUrl groupId workspaceId toMsg =
+    Http.post
+        { url = apiUrl ++ "/api/v1/groups/" ++ groupId ++ "/members"
+        , body = Http.jsonBody (E.object [ ( "workspace_id", E.string workspaceId ) ])
+        , expect = Http.expectWhatever toMsg
+        }
+
+
+removeGroupMember : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+removeGroupMember apiUrl groupId workspaceId toMsg =
+    Http.request
+        { method = "DELETE"
+        , headers = []
+        , url = apiUrl ++ "/api/v1/groups/" ++ groupId ++ "/members/" ++ workspaceId
+        , body = Http.emptyBody
+        , expect = Http.expectWhatever toMsg
         , timeout = Nothing
         , tracker = Nothing
         }

@@ -287,6 +287,7 @@ type EditState
 type CreateForm
     = CreateProjectForm { name : String }
     | CreateMemoryForm { content : String, memoryType : Api.MemoryType }
+    | CreateGroupForm { name : String, description : String }
 
 
 type InlineCreate
@@ -1552,23 +1553,42 @@ update msg model =
             ( { model | createForm = Just form }, Cmd.none )
 
         SubmitCreateForm ->
-            case ( model.createForm, model.selectedWorkspaceId ) of
-                ( Just (CreateProjectForm f), Just wsId ) ->
+            case model.createForm of
+                Just (CreateGroupForm f) ->
                     if String.isEmpty (String.trim f.name) then
                         ( model, Cmd.none )
 
                     else
-                        ( model, Api.createProject model.flags.apiUrl wsId f.name ProjectCreated )
+                        let
+                            desc =
+                                if String.isEmpty (String.trim f.description) then
+                                    Nothing
 
-                ( Just (CreateMemoryForm f), Just wsId ) ->
-                    if String.isEmpty (String.trim f.content) then
-                        ( model, Cmd.none )
-
-                    else
-                        ( model, Api.createMemory model.flags.apiUrl wsId f.content f.memoryType MemoryCreated )
+                                else
+                                    Just (String.trim f.description)
+                        in
+                        ( { model | createForm = Nothing }
+                        , Api.createWorkspaceGroup model.flags.apiUrl (String.trim f.name) desc WorkspaceGroupCreated
+                        )
 
                 _ ->
-                    ( model, Cmd.none )
+                    case ( model.createForm, model.selectedWorkspaceId ) of
+                        ( Just (CreateProjectForm f), Just wsId ) ->
+                            if String.isEmpty (String.trim f.name) then
+                                ( model, Cmd.none )
+
+                            else
+                                ( model, Api.createProject model.flags.apiUrl wsId f.name ProjectCreated )
+
+                        ( Just (CreateMemoryForm f), Just wsId ) ->
+                            if String.isEmpty (String.trim f.content) then
+                                ( model, Cmd.none )
+
+                            else
+                                ( model, Api.createMemory model.flags.apiUrl wsId f.content f.memoryType MemoryCreated )
+
+                        _ ->
+                            ( model, Cmd.none )
 
         CancelCreateForm ->
             ( { model | createForm = Nothing }, Cmd.none )
@@ -1665,6 +1685,9 @@ update msg model =
 
                                 "memory" ->
                                     Api.deleteMemory model.flags.apiUrl entityId (MutationDone "memory")
+
+                                "group" ->
+                                    Api.deleteWorkspaceGroup model.flags.apiUrl entityId (WorkspaceGroupDeleted entityId)
 
                                 _ ->
                                     Cmd.none
@@ -3296,7 +3319,14 @@ viewHomePage model =
             allWs |> List.filter (\ws -> not (Dict.member ws.id groupedWsIds))
     in
     div [ class "page" ]
-        [ h2 [] [ text "Workspaces" ]
+        [ h2 [ style "display" "flex", style "align-items" "center", style "gap" "0.75rem" ]
+            [ text "Workspaces"
+            , button
+                [ class "btn-small"
+                , onClick (ShowCreateForm (CreateGroupForm { name = "", description = "" }))
+                ]
+                [ text "+ Group" ]
+            ]
         , if model.loadingWorkspaces then
             div [ class "loading-indicator" ] [ text "Loading workspaces..." ]
 
@@ -3331,21 +3361,116 @@ viewHomeGroup model group =
             memberIds
                 |> List.filterMap (\wsId -> Dict.get wsId model.workspaces)
                 |> List.sortBy .name
-    in
-    div [ style "margin-bottom" "1.5rem" ]
-        [ h3 [ style "margin-bottom" "0.75rem", style "display" "flex", style "align-items" "center", style "gap" "0.5rem" ]
-            [ text group.name
-            , span [ style "font-size" "0.85rem", style "opacity" "0.6", style "font-weight" "normal" ]
-                [ text
-                    (case group.description of
-                        Just desc ->
-                            "— " ++ desc
 
-                        Nothing ->
-                            ""
-                    )
+        isManaging =
+            case model.managingGroup of
+                Just st ->
+                    st.groupId == group.id
+
+                Nothing ->
+                    False
+
+        allGroupedIds =
+            model.groupMembers
+                |> Dict.values
+                |> List.concat
+                |> List.foldl (\wsId acc -> Dict.insert wsId True acc) Dict.empty
+
+        ungroupedWs =
+            model.workspaces
+                |> Dict.values
+                |> List.filter (\ws -> not (Dict.member ws.id allGroupedIds))
+                |> List.sortBy .name
+    in
+    div [ class "group-section" ]
+        [ div [ class "group-header" ]
+            [ h3 [ class "group-title" ]
+                [ text group.name
+                , case group.description of
+                    Just desc ->
+                        span [ class "group-description" ] [ text ("— " ++ desc) ]
+
+                    Nothing ->
+                        text ""
+                ]
+            , div [ class "group-actions" ]
+                [ button
+                    [ class
+                        (if isManaging then
+                            "btn-small group-manage-active"
+
+                         else
+                            "btn-small"
+                        )
+                    , onClick (ToggleManageGroup group.id)
+                    , title
+                        (if isManaging then
+                            "Done managing"
+
+                         else
+                            "Manage members"
+                        )
+                    ]
+                    [ text
+                        (if isManaging then
+                            "Done"
+
+                         else
+                            "Manage"
+                        )
+                    ]
+                , button
+                    [ class "btn-small btn-danger-subtle"
+                    , onClick (ConfirmDelete "group" group.id)
+                    , title "Delete group"
+                    ]
+                    [ text "Delete" ]
                 ]
             ]
+        , if isManaging then
+            div [ class "group-manage-panel" ]
+                [ if not (List.isEmpty memberWs) then
+                    div [ class "group-member-list" ]
+                        (memberWs
+                            |> List.map
+                                (\ws ->
+                                    span [ class "group-member-chip" ]
+                                        [ text ws.name
+                                        , button
+                                            [ class "chip-remove"
+                                            , onClick (RemoveWorkspaceFromGroup group.id ws.id)
+                                            , title ("Remove " ++ ws.name)
+                                            ]
+                                            [ text "×" ]
+                                        ]
+                                )
+                        )
+
+                  else
+                    text ""
+                , if not (List.isEmpty ungroupedWs) then
+                    div [ class "group-add-section" ]
+                        [ span [ class "group-add-label" ] [ text "Add workspace:" ]
+                        , div [ class "group-add-options" ]
+                            (ungroupedWs
+                                |> List.map
+                                    (\ws ->
+                                        button
+                                            [ class "group-add-chip"
+                                            , onClick (AddWorkspaceToGroup group.id ws.id)
+                                            ]
+                                            [ text ("+ " ++ ws.name) ]
+                                    )
+                            )
+                        ]
+
+                  else
+                    div [ class "group-add-section" ]
+                        [ span [ class "group-add-label" , style "opacity" "0.5" ] [ text "All workspaces are grouped" ] ]
+                ]
+
+          else
+            text ""
         , if List.isEmpty memberWs then
             div [ class "empty-state" ] [ text "No workspaces in this group." ]
 
@@ -6267,6 +6392,58 @@ viewCreateFormContent form =
                     ]
                 ]
 
+        CreateGroupForm f ->
+            div []
+                [ h3 [ class "modal-title" ] [ text "New Group" ]
+                , div [ class "form-group" ]
+                    [ label [ class "form-label" ] [ text "Name" ]
+                    , input
+                        [ class "form-input"
+                        , value f.name
+                        , onInput (\s -> UpdateCreateForm (CreateGroupForm { f | name = s }))
+                        , placeholder "Group name"
+                        , autofocus True
+                        , onKeyDown
+                            (\keyCode ->
+                                if keyCode == 13 then
+                                    SubmitCreateForm
+
+                                else if keyCode == 27 then
+                                    CancelCreateForm
+
+                                else
+                                    NoOp
+                            )
+                        ]
+                        []
+                    ]
+                , div [ class "form-group" ]
+                    [ label [ class "form-label" ] [ text "Description (optional)" ]
+                    , input
+                        [ class "form-input"
+                        , value f.description
+                        , onInput (\s -> UpdateCreateForm (CreateGroupForm { f | description = s }))
+                        , placeholder "Brief description"
+                        , onKeyDown
+                            (\keyCode ->
+                                if keyCode == 13 then
+                                    SubmitCreateForm
+
+                                else if keyCode == 27 then
+                                    CancelCreateForm
+
+                                else
+                                    NoOp
+                            )
+                        ]
+                        []
+                    ]
+                , div [ class "modal-actions" ]
+                    [ button [ class "btn btn-secondary", onClick CancelCreateForm ] [ text "Cancel" ]
+                    , button [ class "btn btn-primary", onClick SubmitCreateForm ] [ text "Create" ]
+                    ]
+                ]
+
 
 
 -- DROP ACTION MODAL
@@ -6339,6 +6516,9 @@ viewDeleteConfirmModal model =
                                 |> Maybe.map (\m -> Maybe.withDefault (truncate 50 m.content) m.summary)
                                 |> Maybe.withDefault "this memory"
 
+                        "group" ->
+                            Dict.get entityId model.workspaceGroups |> Maybe.map .name |> Maybe.withDefault "this group"
+
                         _ ->
                             "this item"
 
@@ -6355,6 +6535,9 @@ viewDeleteConfirmModal model =
 
                         "memory" ->
                             "memory"
+
+                        "group" ->
+                            "group"
 
                         _ ->
                             "item"

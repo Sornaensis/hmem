@@ -828,6 +828,9 @@ doStop = do
   putStrLn "Stopping hmem-server..."
   _ <- try stopServer :: IO (Either SomeException ())
 
+  putStrLn "Stopping hmem-mcp processes..."
+  _ <- try stopMcp :: IO (Either SomeException ())
+
   putStrLn "Stopping PostgreSQL..."
   _ <- try (callProcess "pg_ctl" ["stop", "-D", dataDir, "-m", "fast"])
         :: IO (Either SomeException ())
@@ -836,6 +839,9 @@ doStop = do
     stopServer
       | isWindows = callProcess "taskkill" ["/IM", "hmem-server.exe", "/F"]
       | otherwise = callProcess "pkill" ["-f", "hmem-server"]
+    stopMcp
+      | isWindows = callProcess "taskkill" ["/IM", "hmem-mcp.exe", "/F"]
+      | otherwise = callProcess "pkill" ["-f", "hmem-mcp"]
 
 doStatus :: IO ()
 doStatus = do

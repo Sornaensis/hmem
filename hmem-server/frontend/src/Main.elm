@@ -4230,59 +4230,85 @@ viewProjectsTree wsId model =
                             []
 
                 _ ->
-                    let
-                        rootProjects =
-                            wsProjects
-                                |> List.filter (\p -> p.parentId == Nothing)
-                                |> List.sortBy (\p -> ( Api.projectStatusOrder p.status, negate p.priority, String.toLower p.name ))
+                    case model.filterShowOnly of
+                        ShowTasksOnly ->
+                            let
+                                rootTasks =
+                                    wsTasks
+                                        |> List.filter (\t -> t.parentId == Nothing)
+                                        |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
 
-                        visibleRootProjects =
-                            rootProjects
-                                |> (if hasSearch then
-                                        List.filter (projectTreeMatchesSearch query wsProjects wsTasks)
+                                visibleRootTasks =
+                                    rootTasks
+                                        |> (if hasSearch then
+                                                List.filter (taskTreeMatchesSearch query wsTasks)
+
+                                            else
+                                                identity
+                                           )
+                                        |> (if hasActiveFilters then
+                                                List.filter (\t -> taskTreePassesFilters t wsTasks taskPassesFilters)
+
+                                            else
+                                                identity
+                                           )
+                            in
+                            List.map (viewTaskCard False model) visibleRootTasks
+
+                        _ ->
+                            let
+                                rootProjects =
+                                    wsProjects
+                                        |> List.filter (\p -> p.parentId == Nothing)
+                                        |> List.sortBy (\p -> ( Api.projectStatusOrder p.status, negate p.priority, String.toLower p.name ))
+
+                                visibleRootProjects =
+                                    rootProjects
+                                        |> (if hasSearch then
+                                                List.filter (projectTreeMatchesSearch query wsProjects wsTasks)
+
+                                            else
+                                                identity
+                                           )
+                                        |> (if hasActiveFilters then
+                                                List.filter (\p -> projectTreePassesFilters (\pp -> passesStatusFilter model.filterProjectStatuses (Api.projectStatusToString pp.status)) p wsProjects wsTasks projectPassesFilters taskPassesFilters)
+
+                                            else
+                                                identity
+                                           )
+
+                                orphanTasks =
+                                    wsTasks
+                                        |> List.filter (\t -> t.projectId == Nothing && t.parentId == Nothing)
+                                        |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
+
+                                visibleOrphans =
+                                    orphanTasks
+                                        |> (if hasSearch then
+                                                List.filter (taskTreeMatchesSearch query wsTasks)
+
+                                            else
+                                                identity
+                                           )
+                                        |> (if hasActiveFilters then
+                                                List.filter (\t -> taskTreePassesFilters t wsTasks taskPassesFilters)
+
+                                            else
+                                                identity
+                                           )
+                            in
+                            viewProjectsWithZones model (\p -> viewProjectNode wsProjects model 0 p hasSearch query) Nothing visibleRootProjects
+                                ++ (if model.filterShowOnly /= ShowProjectsOnly && not (List.isEmpty visibleOrphans) then
+                                        [ div [ class "orphan-tasks-section" ]
+                                            [ div [ class "orphan-tasks-header" ] [ text "Unassigned Tasks" ]
+                                            , div [ class "tree-tasks" ]
+                                                (viewTasksWithZones model "orphan" Nothing Nothing visibleOrphans)
+                                            ]
+                                        ]
 
                                     else
-                                        identity
+                                        []
                                    )
-                                |> (if hasActiveFilters then
-                                        List.filter (\p -> projectTreePassesFilters (\pp -> passesStatusFilter model.filterProjectStatuses (Api.projectStatusToString pp.status)) p wsProjects wsTasks projectPassesFilters taskPassesFilters)
-
-                                    else
-                                        identity
-                                   )
-
-                        orphanTasks =
-                            wsTasks
-                                |> List.filter (\t -> t.projectId == Nothing && t.parentId == Nothing)
-                                |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
-
-                        visibleOrphans =
-                            orphanTasks
-                                |> (if hasSearch then
-                                        List.filter (taskTreeMatchesSearch query wsTasks)
-
-                                    else
-                                        identity
-                                   )
-                                |> (if hasActiveFilters then
-                                        List.filter (\t -> taskTreePassesFilters t wsTasks taskPassesFilters)
-
-                                    else
-                                        identity
-                                   )
-                    in
-                    viewProjectsWithZones model (\p -> viewProjectNode wsProjects model 0 p hasSearch query) Nothing visibleRootProjects
-                        ++ (if not (List.isEmpty visibleOrphans) then
-                                [ div [ class "orphan-tasks-section" ]
-                                    [ div [ class "orphan-tasks-header" ] [ text "Unassigned Tasks" ]
-                                    , div [ class "tree-tasks" ]
-                                        (viewTasksWithZones model "orphan" Nothing Nothing visibleOrphans)
-                                    ]
-                                ]
-
-                            else
-                                []
-                           )
     in
     div [ class "tree-view" ]
         (expandCollapseBar

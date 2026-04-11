@@ -39,7 +39,7 @@ import System.Directory   (createDirectoryIfMissing, copyFile,
                            findExecutable, getHomeDirectory,
                            listDirectory,
                            removeDirectoryRecursive, removeFile)
-import System.Exit        (ExitCode(..), exitFailure)
+import System.Exit        (ExitCode(..), exitFailure, exitSuccess)
 import System.FilePath    ((</>))
 import System.IO          (IOMode(..), hFlush, hPutStrLn,
                            openFile, stderr, stdout)
@@ -1145,22 +1145,28 @@ doWorkspace = withApiClient $ \mgr base -> do
             ) workspaces
             ++ ["Create new workspace"]
 
-      selected <- arrowMenu "Select a workspace:" options
+      mSelected <- arrowMenu "Select a workspace:" options
 
-      wsId <- if selected == length workspaces
-        then createNewWorkspace mgr base
-        else pure $ (.id) (workspaces !! selected)
+      case mSelected of
+        Nothing -> putStrLn "Cancelled." >> exitSuccess
+        Just selected -> do
+          wsId <- if selected == length workspaces
+            then createNewWorkspace mgr base
+            else pure $ (.id) (workspaces !! selected)
 
-      -- Write the file
-      writeFile ".hmem.workspace" (show wsId <> "\n")
-      putStrLn $ "Wrote .hmem.workspace (" <> show wsId <> ")"
+          -- Write the file
+          writeFile ".hmem.workspace" (show wsId <> "\n")
+          putStrLn $ "Wrote .hmem.workspace (" <> show wsId <> ")"
 
 createNewWorkspace :: HTTP.Manager -> String -> IO UUID
 createNewWorkspace mgr base = do
   -- Ask for workspace type
   let types = [WsRepository, WsPlanning, WsPersonal, WsOrganization]
       typeLabels = map (T.unpack . workspaceTypeToText) types
-  typeIdx <- arrowMenu "Workspace type:" typeLabels
+  mTypeIdx <- arrowMenu "Workspace type:" typeLabels
+  typeIdx <- case mTypeIdx of
+    Nothing -> putStrLn "Cancelled." >> exitSuccess
+    Just i  -> pure i
   let wsType = types !! typeIdx
 
   -- Ask for name
@@ -1190,8 +1196,8 @@ createNewWorkspace mgr base = do
 ------------------------------------------------------------------------
 
 -- | Display an interactive menu using brick TUI.
--- Returns the 0-based index of the selected item.
-arrowMenu :: String -> [String] -> IO Int
+-- Returns the 0-based index of the selected item, or Nothing if cancelled.
+arrowMenu :: String -> [String] -> IO (Maybe Int)
 arrowMenu title options = do
   let items = BL.list () (Vec.fromList (zip [0..] options)) 1
       app = Brick.App
@@ -1204,8 +1210,8 @@ arrowMenu title options = do
   vtyBuilder <- VtyCross.mkVty Vty.defaultConfig
   result <- Brick.customMain vtyBuilder (VtyCross.mkVty Vty.defaultConfig) Nothing app items
   case BL.listSelectedElement result of
-    Just (_, (idx, _)) -> pure idx
-    Nothing            -> exitFailure
+    Just (_, (idx, _)) -> pure (Just idx)
+    Nothing            -> pure Nothing
 
 drawMenu :: String -> BL.List () (Int, String) -> [Brick.Widget ()]
 drawMenu title l =
@@ -1229,8 +1235,8 @@ renderItem sel (_, label)
 handleMenuEvent :: Brick.BrickEvent () e -> Brick.EventM () (BL.List () (Int, String)) ()
 handleMenuEvent (Brick.VtyEvent (Vty.EvKey Vty.KEnter []))      = Brick.halt
 handleMenuEvent (Brick.VtyEvent (Vty.EvKey (Vty.KChar ' ') [])) = Brick.halt
-handleMenuEvent (Brick.VtyEvent (Vty.EvKey Vty.KEsc []))         = Brick.halt >> error "quit"
-handleMenuEvent (Brick.VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) = Brick.halt >> error "quit"
+handleMenuEvent (Brick.VtyEvent (Vty.EvKey Vty.KEsc []))         = Brick.put (BL.list () Vec.empty 1) >> Brick.halt
+handleMenuEvent (Brick.VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) = Brick.put (BL.list () Vec.empty 1) >> Brick.halt
 handleMenuEvent (Brick.VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) =
   handleMenuEvent (Brick.VtyEvent (Vty.EvKey Vty.KDown []))
 handleMenuEvent (Brick.VtyEvent (Vty.EvKey (Vty.KChar 'k') [])) =

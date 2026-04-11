@@ -41,9 +41,11 @@ import System.Directory   (createDirectoryIfMissing, copyFile,
                            removeDirectoryRecursive, removeFile)
 import System.Exit        (ExitCode(..), exitFailure)
 import System.FilePath    ((</>))
-import System.IO          (BufferMode(..), IOMode(..), hFlush, hGetBuffering,
-                           hGetEcho, hPutStr, hPutStrLn, hSetBuffering, hSetEcho,
-                           openFile, stderr, stdin, stdout)
+import System.IO          (IOMode(..), hFlush, hPutStrLn,
+                           hSetBuffering, hSetEcho, hGetChar,
+                           hReady, BufferMode(..),
+                           openFile, stderr, stdout, stdin)
+import System.IO.Error    (catchIOError)
 import System.Info        (os)
 import System.Process     (CreateProcess(..), StdStream(..), callProcess,
                            createProcess, proc, readProcess, waitForProcess)
@@ -1179,84 +1181,107 @@ createNewWorkspace mgr base = do
       pure ws.id
 
 ------------------------------------------------------------------------
--- Arrow-key menu TUI
+-- Arrow-key menu TUI (raw ANSI)
 ------------------------------------------------------------------------
 
--- | Display a list of options with arrow-key navigation.
+data MenuKey = MUp | MDown | MEnter | MEsc | MOther
+
+-- | Read a single menu key, decoding ANSI escape sequences for arrow keys.
+-- Also supports j/k (vim-style) as alternatives that work even when
+-- escape sequences are unavailable.
+readMenuKey :: IO MenuKey
+readMenuKey = do
+  c <- hGetChar stdin
+  case c of
+    '\n' -> pure MEnter
+    '\r' -> pure MEnter
+    'k'  -> pure MUp
+    'j'  -> pure MDown
+    'q'  -> pure MEsc
+    '\ESC' -> do
+      -- Try to read an escape sequence (e.g. ESC [ A for arrow up)
+      ready <- hReady stdin `catchIOError` \_ -> pure False
+      if ready
+        then do
+          c2 <- hGetChar stdin
+          if c2 == '['
+            then do
+              c3 <- hGetChar stdin
+              case c3 of
+                'A' -> pure MUp    -- ESC [ A = Up
+                'B' -> pure MDown  -- ESC [ B = Down
+                _   -> pure MOther
+            else pure MOther
+        else pure MEsc  -- bare Esc key
+    _ | ord c == 0 || ord c == 224 -> do
+        -- Windows console: special keys send 0 or 224 + scan code
+        ready <- hReady stdin `catchIOError` \_ -> pure False
+        if ready
+          then do
+            c2 <- hGetChar stdin
+            case ord c2 of
+              72 -> pure MUp     -- Up arrow scan code
+              80 -> pure MDown   -- Down arrow scan code
+              _  -> pure MOther
+          else pure MOther
+    _ -> pure MOther
+
+-- | Display an interactive menu with arrow-key (or j/k) navigation.
 -- Returns the 0-based index of the selected item.
 arrowMenu :: String -> [String] -> IO Int
-arrowMenu title options = do
-  putStrLn title
-  withRawInput $ menuLoop 0
+arrowMenu title options = bracket_
+  (hSetBuffering stdin NoBuffering >> hSetEcho stdin False)
+  (hSetBuffering stdin LineBuffering >> hSetEcho stdin True)
+  (do
+    -- Hide cursor
+    putStr "\ESC[?25l"
+    hFlush stdout
+    renderMenu 0 True
+    result <- inputLoop 0
+    -- Show cursor, clear menu
+    putStr "\ESC[?25h"
+    hFlush stdout
+    pure result
+  )
   where
     nOpts = length options
+    totalLines = nOpts + 4  -- title + blank + options + blank + help line
 
-    menuLoop :: Int -> IO Int
-    menuLoop cursor = do
-      renderMenu cursor
-      key <- readKey
-      case key of
-        KeyUp    -> menuLoop (max 0 (cursor - 1))
-        KeyDown  -> menuLoop (min (nOpts - 1) (cursor + 1))
-        KeyEnter -> do
-          -- Move cursor below the menu before returning
-          putStr $ "\ESC[" <> show nOpts <> "B"
-          putStrLn ""
-          hFlush stdout
-          pure cursor
-        _        -> menuLoop cursor
-
-    renderMenu :: Int -> IO ()
-    renderMenu cursor = do
-      -- Move cursor to start of menu area and redraw
-      mapM_ (\(i, opt) -> do
-        let prefix = if i == cursor then " \ESC[1;36m> " else "   "
-            suffix = if i == cursor then "\ESC[0m" else ""
-        putStr $ "\r" <> prefix <> opt <> suffix <> "\ESC[K\n"
+    renderMenu :: Int -> Bool -> IO ()
+    renderMenu cursor isFirst = do
+      -- Move cursor to start of menu area (unless first render)
+      if isFirst
+        then pure ()
+        else putStr $ "\ESC[" ++ show totalLines ++ "A"
+      -- Title
+      putStrLn $ "\ESC[1m" ++ title ++ "\ESC[0m"
+      putStrLn ""
+      -- Options
+      mapM_ (\(i, opt) ->
+        if i == cursor
+          then putStrLn $ "  \ESC[36;1m> " ++ opt ++ "\ESC[0m"
+          else putStrLn $ "    " ++ opt
         ) (zip [0..] options)
-      -- Move cursor back up to the top of the menu
-      putStr $ "\ESC[" <> show nOpts <> "A"
+      putStrLn ""
+      putStrLn "  \ESC[90m↑/↓/j/k navigate  Enter select  q quit\ESC[0m"
       hFlush stdout
 
-data Key = KeyUp | KeyDown | KeyEnter | KeyOther
-
-readKey :: IO Key
-readKey = do
-  c <- getChar
-  case ord c of
-    13 -> pure KeyEnter    -- CR
-    10 -> pure KeyEnter    -- LF
-    27 -> do               -- ESC: start of escape sequence
-      c2 <- getChar
-      case c2 of
-        '[' -> do
-          c3 <- getChar
-          case c3 of
-            'A' -> pure KeyUp
-            'B' -> pure KeyDown
-            _   -> pure KeyOther
-        _ -> pure KeyOther
-    0   -> readWindowsKey  -- Windows: null prefix for special keys
-    224 -> readWindowsKey  -- Windows: 0xE0 prefix for special keys
-    _   -> pure KeyOther
-
-readWindowsKey :: IO Key
-readWindowsKey = do
-  c <- getChar
-  case ord c of
-    72 -> pure KeyUp       -- Windows scan code for Up
-    80 -> pure KeyDown     -- Windows scan code for Down
-    _  -> pure KeyOther
-
--- | Run an action with stdin in raw mode (no buffering, no echo),
--- restoring the original settings afterward.
-withRawInput :: IO a -> IO a
-withRawInput action = do
-  oldBuf  <- hGetBuffering stdin
-  oldEcho <- hGetEcho stdin
-  let setup    = hSetBuffering stdin NoBuffering >> hSetEcho stdin False
-      teardown = hSetBuffering stdin oldBuf >> hSetEcho stdin oldEcho
-  bracket_ setup teardown action
+    inputLoop :: Int -> IO Int
+    inputLoop cursor = do
+      key <- readMenuKey
+      case key of
+        MUp    -> let c' = max 0 (cursor - 1)
+                  in renderMenu c' False >> inputLoop c'
+        MDown  -> let c' = min (nOpts - 1) (cursor + 1)
+                  in renderMenu c' False >> inputLoop c'
+        MEnter -> do
+          -- Move past the menu, reprint selection
+          putStrLn $ title ++ " " ++ (options !! cursor)
+          pure cursor
+        MEsc   -> do
+          putStrLn ""
+          exitFailure
+        MOther -> inputLoop cursor
 
 promptLine :: String -> IO String
 promptLine prompt = do

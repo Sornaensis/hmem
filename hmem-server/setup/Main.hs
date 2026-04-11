@@ -41,15 +41,20 @@ import System.Directory   (createDirectoryIfMissing, copyFile,
                            removeDirectoryRecursive, removeFile)
 import System.Exit        (ExitCode(..), exitFailure)
 import System.FilePath    ((</>))
-import System.Console.Haskeline (InputT, runInputT, defaultSettings,
-                                getInputChar, outputStr, outputStrLn)
 import System.IO          (IOMode(..), hFlush, hPutStrLn,
                            openFile, stderr, stdout)
 import System.Info        (os)
 import System.Process     (CreateProcess(..), StdStream(..), callProcess,
                            createProcess, proc, readProcess, waitForProcess)
 
-import Control.Monad.IO.Class (liftIO)
+import qualified Brick
+import qualified Brick.Widgets.List as BL
+import qualified Brick.Widgets.Center as C
+import qualified Brick.Widgets.Border as B
+import qualified Brick.AttrMap as A
+import qualified Graphics.Vty as Vty
+import qualified Graphics.Vty.CrossPlatform as VtyCross
+import qualified Data.Vector as Vec
 import HMem.Config
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool qualified as Pool
@@ -1181,58 +1186,65 @@ createNewWorkspace mgr base = do
       pure ws.id
 
 ------------------------------------------------------------------------
--- Interactive menu (haskeline)
+-- Interactive menu (brick/vty)
 ------------------------------------------------------------------------
 
--- | Display an interactive menu with j/k navigation.
+-- | Display an interactive menu using brick TUI.
 -- Returns the 0-based index of the selected item.
 arrowMenu :: String -> [String] -> IO Int
-arrowMenu title options =
-  runInputT defaultSettings go
-  where
-    nOpts = length options
-    totalLines = nOpts + 4  -- title + blank + options + blank + help
+arrowMenu title options = do
+  let items = BL.list () (Vec.fromList (zip [0..] options)) 1
+      app = Brick.App
+        { Brick.appDraw         = drawMenu title
+        , Brick.appChooseCursor = Brick.neverShowCursor
+        , Brick.appHandleEvent  = handleMenuEvent
+        , Brick.appStartEvent   = pure ()
+        , Brick.appAttrMap      = const menuAttrMap
+        }
+  vtyBuilder <- VtyCross.mkVty Vty.defaultConfig
+  result <- Brick.customMain vtyBuilder (VtyCross.mkVty Vty.defaultConfig) Nothing app items
+  case BL.listSelectedElement result of
+    Just (_, (idx, _)) -> pure idx
+    Nothing            -> exitFailure
 
-    go :: InputT IO Int
-    go = do
-      outputStr "\ESC[?25l"   -- hide cursor
-      renderMenu 0
-      result <- inputLoop 0
-      outputStr "\ESC[?25h"   -- show cursor
-      outputStrLn $ title ++ " " ++ (options !! result)
-      pure result
+drawMenu :: String -> BL.List () (Int, String) -> [Brick.Widget ()]
+drawMenu title l =
+  [ Brick.padAll 1 $
+    Brick.vBox
+      [ Brick.withAttr (A.attrName "title") $ Brick.str title
+      , Brick.str " "
+      , BL.renderList renderItem True l
+      , Brick.str " "
+      , Brick.withAttr (A.attrName "help") $
+          Brick.str "  ↑/↓/j/k: move  Enter/Space: select  q/Esc: quit"
+      ]
+  ]
 
-    renderMenu :: Int -> InputT IO ()
-    renderMenu cursor = do
-      outputStrLn $ "\ESC[1m" ++ title ++ "\ESC[0m"
-      outputStrLn ""
-      mapM_ (\(i, opt) ->
-        if i == cursor
-          then outputStrLn $ "  \ESC[36;1m> " ++ opt ++ "\ESC[0m"
-          else outputStrLn $ "    " ++ opt
-        ) (zip [0..] options)
-      outputStrLn ""
-      outputStrLn "  \ESC[90mj/k: move  Space: select  q: quit\ESC[0m"
+renderItem :: Bool -> (Int, String) -> Brick.Widget ()
+renderItem sel (_, label)
+  | sel       = Brick.withAttr (A.attrName "selected") $
+                  Brick.str $ "  > " <> label
+  | otherwise = Brick.str $ "    " <> label
 
-    redrawMenu :: Int -> InputT IO ()
-    redrawMenu cursor = do
-      outputStr $ "\ESC[" ++ show totalLines ++ "A"
-      renderMenu cursor
+handleMenuEvent :: Brick.BrickEvent () e -> Brick.EventM () (BL.List () (Int, String)) ()
+handleMenuEvent (Brick.VtyEvent (Vty.EvKey Vty.KEnter []))      = Brick.halt
+handleMenuEvent (Brick.VtyEvent (Vty.EvKey (Vty.KChar ' ') [])) = Brick.halt
+handleMenuEvent (Brick.VtyEvent (Vty.EvKey Vty.KEsc []))         = Brick.halt >> error "quit"
+handleMenuEvent (Brick.VtyEvent (Vty.EvKey (Vty.KChar 'q') [])) = Brick.halt >> error "quit"
+handleMenuEvent (Brick.VtyEvent (Vty.EvKey (Vty.KChar 'j') [])) =
+  handleMenuEvent (Brick.VtyEvent (Vty.EvKey Vty.KDown []))
+handleMenuEvent (Brick.VtyEvent (Vty.EvKey (Vty.KChar 'k') [])) =
+  handleMenuEvent (Brick.VtyEvent (Vty.EvKey Vty.KUp []))
+handleMenuEvent (Brick.VtyEvent ev) = BL.handleListEvent ev
+handleMenuEvent _ = pure ()
 
-    inputLoop :: Int -> InputT IO Int
-    inputLoop cursor = do
-      mc <- getInputChar ""
-      case mc of
-        Just 'k' ->
-          let c' = max 0 (cursor - 1)
-          in redrawMenu c' >> inputLoop c'
-        Just 'j' ->
-          let c' = min (nOpts - 1) (cursor + 1)
-          in redrawMenu c' >> inputLoop c'
-        Just ' ' -> pure cursor
-        Just 'q' -> liftIO exitFailure
-        Nothing  -> liftIO exitFailure
-        _        -> inputLoop cursor
+menuAttrMap :: A.AttrMap
+menuAttrMap = A.attrMap Vty.defAttr
+  [ (A.attrName "title",    Vty.withStyle Vty.defAttr Vty.bold)
+  , (A.attrName "selected", Vty.withForeColor (Vty.withStyle Vty.defAttr Vty.bold) Vty.cyan)
+  , (A.attrName "help",     Vty.withForeColor Vty.defAttr (Vty.rgbColor 128 128 128))
+  , (BL.listSelectedFocusedAttr, Vty.withForeColor (Vty.withStyle Vty.defAttr Vty.bold) Vty.cyan)
+  ]
 
 promptLine :: String -> IO String
 promptLine prompt = do

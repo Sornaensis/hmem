@@ -180,12 +180,12 @@ executable hmem-ctl
   build-depends:
       aeson >=2.0
     , base >=4.7 && <5
+    , brick
     , bytestring
     , containers
     , directory
     , fast-logger
     , filepath
-    , haskeline
     , hasql
     , hmem-core
     , hmem-server
@@ -205,6 +205,9 @@ executable hmem-ctl
     , text
     , time
     , uuid
+    , vector
+    , vty
+    , vty-crossplatform
     , wai
     , wai-cors
     , wai-extra

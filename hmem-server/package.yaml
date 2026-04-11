@@ -78,7 +78,10 @@ executables:
       - hasql
       - http-client
       - http-types
-      - haskeline
+      - brick
+      - vty
+      - vty-crossplatform
+      - vector
 
   build-frontend:
     main:        BuildFrontend.hs

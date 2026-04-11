@@ -11,24 +11,26 @@
 --   @hmem-ctl workspaces@    – list workspaces (with optional name search)
 --   @hmem-ctl projects@      – list projects (with optional name/workspace filter)
 --   @hmem-ctl visualize@     – generate SVG workspace visualization
+--   @hmem-ctl mk-ws@        – interactively select/create workspace, write .hmem.workspace
 --
 --   Requires: initdb, pg_ctl, createdb, psql on PATH (ships with PostgreSQL).
 
 module Main where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception  (SomeException, try)
+import Control.Exception  (SomeException, bracket_, try)
 import Control.Monad      (filterM, when)
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Lazy.Char8 qualified as BL8
-import Data.Char          (isSpace)
+import Data.Char          (isSpace, ord)
 import Data.List          (isInfixOf, dropWhileEnd, isPrefixOf)
 import Data.Maybe         (catMaybes, fromMaybe)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Data.UUID          (UUID)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Types.Status (statusCode)
 import Options.Applicative
@@ -39,7 +41,9 @@ import System.Directory   (createDirectoryIfMissing, copyFile,
                            removeDirectoryRecursive, removeFile)
 import System.Exit        (ExitCode(..), exitFailure)
 import System.FilePath    ((</>))
-import System.IO          (IOMode(..), hFlush, hPutStrLn, openFile, stderr, stdout)
+import System.IO          (BufferMode(..), IOMode(..), hFlush, hGetBuffering,
+                           hGetEcho, hPutStr, hPutStrLn, hSetBuffering, hSetEcho,
+                           openFile, stderr, stdin, stdout)
 import System.Info        (os)
 import System.Process     (CreateProcess(..), StdStream(..), callProcess,
                            createProcess, proc, readProcess, waitForProcess)
@@ -67,6 +71,7 @@ data Command
   | CmdWorkspaces WorkspacesOpts
   | CmdProjects   ProjectsOpts
   | CmdVisualize  VisualizeOpts
+  | CmdMkWs
 
 data WorkspacesOpts = WorkspacesOpts
   { wsName :: Maybe String
@@ -108,6 +113,8 @@ commandParser = subparser
       (progDesc "List projects (optionally filter by name or workspace)"))
   <> command "visualize"  (info (CmdVisualize <$> visualizeParser)
       (progDesc "Generate SVG workspace visualization"))
+  <> command "mk-ws"     (info (pure CmdMkWs)
+      (progDesc "Interactively select or create a workspace, write .hmem.workspace"))
   )
   <|> pure CmdSetup
 
@@ -148,6 +155,7 @@ main = do
     CmdWorkspaces opts -> doWorkspaces opts
     CmdProjects opts   -> doProjects opts
     CmdVisualize opts  -> doVisualize opts
+    CmdMkWs            -> doMkWs
 
 ------------------------------------------------------------------------
 -- Init
@@ -1103,14 +1111,168 @@ generateVisualization mgr base ws opts = do
           TIO.writeFile path svgText
           putStrLn $ "Wrote SVG to: " <> path
 
+------------------------------------------------------------------------
+-- mk-ws: interactive workspace selector
+------------------------------------------------------------------------
+
+doMkWs :: IO ()
+doMkWs = withApiClient $ \mgr base -> do
+  -- Check if .hmem.workspace already exists
+  existingFile <- doesFileExist ".hmem.workspace"
+  when existingFile $ do
+    existingId <- strip <$> readFile ".hmem.workspace"
+    putStrLn $ "Note: .hmem.workspace already exists (ID: " <> existingId <> ")"
+    putStrLn ""
+
+  -- Fetch existing workspaces
+  body <- apiGet mgr base "/api/v1/workspaces?limit=200"
+  case Aeson.decode body :: Maybe (PaginatedResult Workspace) of
+    Nothing -> do
+      hPutStrLn stderr "Error: could not parse workspace list"
+      exitFailure
+    Just result -> do
+      let workspaces = result.items
+          options = map (\ws ->
+            padRight 30 (ellipsis 28 $ T.unpack ws.name)
+              <> T.unpack (workspaceTypeToText ws.workspaceType)
+            ) workspaces
+            ++ ["Create new workspace"]
+
+      selected <- arrowMenu "Select a workspace:" options
+
+      wsId <- if selected == length workspaces
+        then createNewWorkspace mgr base
+        else pure $ (.id) (workspaces !! selected)
+
+      -- Write the file
+      writeFile ".hmem.workspace" (show wsId <> "\n")
+      putStrLn $ "Wrote .hmem.workspace (" <> show wsId <> ")"
+
+createNewWorkspace :: HTTP.Manager -> String -> IO UUID
+createNewWorkspace mgr base = do
+  -- Ask for workspace type
+  let types = [WsRepository, WsPlanning, WsPersonal, WsOrganization]
+      typeLabels = map (T.unpack . workspaceTypeToText) types
+  typeIdx <- arrowMenu "Workspace type:" typeLabels
+  let wsType = types !! typeIdx
+
+  -- Ask for name
+  wsName <- promptLine "Workspace name: "
+  when (null (strip wsName)) $ do
+    hPutStrLn stderr "Error: name cannot be empty"
+    exitFailure
+
+  let createReq = CreateWorkspace
+        { name = T.pack (strip wsName)
+        , workspaceType = Just wsType
+        , ghOwner = Nothing
+        , ghRepo = Nothing
+        }
+  respBody <- apiPostJson mgr base "/api/v1/workspaces" createReq
+  case Aeson.decode respBody :: Maybe Workspace of
+    Nothing -> do
+      hPutStrLn stderr "Error: could not parse created workspace"
+      exitFailure
+    Just ws -> do
+      putStrLn $ "Created workspace: " <> T.unpack ws.name
+        <> " (" <> T.unpack (workspaceTypeToText ws.workspaceType) <> ")"
+      pure ws.id
+
+------------------------------------------------------------------------
+-- Arrow-key menu TUI
+------------------------------------------------------------------------
+
+-- | Display a list of options with arrow-key navigation.
+-- Returns the 0-based index of the selected item.
+arrowMenu :: String -> [String] -> IO Int
+arrowMenu title options = do
+  putStrLn title
+  withRawInput $ menuLoop 0
+  where
+    nOpts = length options
+
+    menuLoop :: Int -> IO Int
+    menuLoop cursor = do
+      renderMenu cursor
+      key <- readKey
+      case key of
+        KeyUp    -> menuLoop (max 0 (cursor - 1))
+        KeyDown  -> menuLoop (min (nOpts - 1) (cursor + 1))
+        KeyEnter -> do
+          -- Move cursor below the menu before returning
+          putStr $ "\ESC[" <> show nOpts <> "B"
+          putStrLn ""
+          hFlush stdout
+          pure cursor
+        _        -> menuLoop cursor
+
+    renderMenu :: Int -> IO ()
+    renderMenu cursor = do
+      -- Move cursor to start of menu area and redraw
+      mapM_ (\(i, opt) -> do
+        let prefix = if i == cursor then " \ESC[1;36m> " else "   "
+            suffix = if i == cursor then "\ESC[0m" else ""
+        putStr $ "\r" <> prefix <> opt <> suffix <> "\ESC[K\n"
+        ) (zip [0..] options)
+      -- Move cursor back up to the top of the menu
+      putStr $ "\ESC[" <> show nOpts <> "A"
+      hFlush stdout
+
+data Key = KeyUp | KeyDown | KeyEnter | KeyOther
+
+readKey :: IO Key
+readKey = do
+  c <- getChar
+  case ord c of
+    13 -> pure KeyEnter    -- CR
+    10 -> pure KeyEnter    -- LF
+    27 -> do               -- ESC: start of escape sequence
+      c2 <- getChar
+      case c2 of
+        '[' -> do
+          c3 <- getChar
+          case c3 of
+            'A' -> pure KeyUp
+            'B' -> pure KeyDown
+            _   -> pure KeyOther
+        _ -> pure KeyOther
+    0   -> readWindowsKey  -- Windows: null prefix for special keys
+    224 -> readWindowsKey  -- Windows: 0xE0 prefix for special keys
+    _   -> pure KeyOther
+
+readWindowsKey :: IO Key
+readWindowsKey = do
+  c <- getChar
+  case ord c of
+    72 -> pure KeyUp       -- Windows scan code for Up
+    80 -> pure KeyDown     -- Windows scan code for Down
+    _  -> pure KeyOther
+
+-- | Run an action with stdin in raw mode (no buffering, no echo),
+-- restoring the original settings afterward.
+withRawInput :: IO a -> IO a
+withRawInput action = do
+  oldBuf  <- hGetBuffering stdin
+  oldEcho <- hGetEcho stdin
+  let setup    = hSetBuffering stdin NoBuffering >> hSetEcho stdin False
+      teardown = hSetBuffering stdin oldBuf >> hSetEcho stdin oldEcho
+  bracket_ setup teardown action
+
+promptLine :: String -> IO String
+promptLine prompt = do
+  putStr prompt
+  hFlush stdout
+  getLine
+
+toLowerAscii :: Char -> Char
+toLowerAscii c
+  | c >= 'A' && c <= 'Z' = toEnum (fromEnum c + 32)
+  | otherwise = c
+
 -- Helpers for the query commands
 
 matchName :: String -> String -> Bool
-matchName pattern str = map toLowerAscii pattern `isInfixOf` map toLowerAscii str
-  where
-    toLowerAscii c
-      | c >= 'A' && c <= 'Z' = toEnum (fromEnum c + 32)
-      | otherwise = c
+matchName pat str = map toLowerAscii pat `isInfixOf` map toLowerAscii str
 
 padRight :: Int -> String -> String
 padRight n s = take n (s <> replicate n ' ')

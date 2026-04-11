@@ -754,6 +754,8 @@ a:hover {
   font-size: 0.8125rem;
   color: var(--text-muted);
   min-height: 2rem;
+  max-height: 20rem;
+  overflow-y: auto;
   transition: background 0.15s;
   white-space: pre-wrap;
 }

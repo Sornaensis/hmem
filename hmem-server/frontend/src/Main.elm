@@ -79,6 +79,13 @@ port localStorageReceived : (Encode.Value -> msg) -> Sub msg
 
 
 
+-- PORTS: Scroll
+
+
+port onMainContentScroll : (Float -> msg) -> Sub msg
+
+
+
 -- FLAGS
 
 
@@ -210,6 +217,9 @@ type alias Model =
     , workspaceGroups : Dict String Api.WorkspaceGroup
     , groupMembers : Dict String (List String)
     , managingGroup : Maybe ManagingGroupState
+
+    -- Scroll tracking
+    , mainContentScrollY : Float
     }
 
 
@@ -404,6 +414,7 @@ init rawFlags url key =
             , workspaceGroups = Dict.empty
             , groupMembers = Dict.empty
             , managingGroup = Nothing
+            , mainContentScrollY = 0
             }
 
         model =
@@ -872,6 +883,7 @@ type Msg
     | AddWorkspaceToGroup String String
     | RemoveWorkspaceFromGroup String String
     | GroupMembershipDone String (Result Http.Error ())
+    | MainContentScrolled Float
     | NoOp
 
 
@@ -1003,6 +1015,7 @@ update msg model =
                             , collapsedNodes = Dict.empty
                             , expandedCards = Dict.empty
                             , graphLoaded = False
+                            , mainContentScrollY = 0
                           }
                         , Cmd.batch
                             [ loadWorkspaceData model.flags.apiUrl wsId
@@ -2258,6 +2271,9 @@ update msg model =
         NoOp ->
             ( model, Cmd.none )
 
+        MainContentScrolled scrollY ->
+            ( { model | mainContentScrollY = scrollY }, Cmd.none )
+
         ClearPendingMutation entityId ->
             ( { model | pendingMutationIds = Dict.remove entityId model.pendingMutationIds }
             , Cmd.none
@@ -3094,6 +3110,7 @@ subscriptions _ =
         , cytoscapeEdgeClicked CytoscapeEdgeClicked
         , Browser.Events.onKeyDown (Decode.map GlobalKeyDown (Decode.field "keyCode" Decode.int))
         , localStorageReceived LocalStorageLoaded
+        , onMainContentScroll MainContentScrolled
         ]
 
 
@@ -3545,7 +3562,8 @@ viewWorkspacePage wsId model =
                         ]
             in
             div [ class "page" ]
-                [ div [ class "workspace-header" ]
+                [ viewStickyWorkspaceBar model ws summaryParts
+                , div [ class "workspace-header" ]
                     [ div [ class "workspace-header-top" ]
                         [ div [ class "workspace-header-title" ]
                             [ span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
@@ -3607,6 +3625,126 @@ viewWorkspacePage wsId model =
                         Nothing ->
                             viewTabContent wsId model
                 ]
+
+
+viewStickyWorkspaceBar : Model -> Api.Workspace -> List String -> Html Msg
+viewStickyWorkspaceBar model ws summaryParts =
+    let
+        stickyThreshold =
+            200
+
+        isVisible =
+            model.mainContentScrollY > stickyThreshold
+
+        activeFilters =
+            case model.activeTab of
+                ProjectsTab ->
+                    List.filterMap identity
+                        [ if model.filterShowOnly /= ShowAll then
+                            Just
+                                (case model.filterShowOnly of
+                                    ShowProjectsOnly ->
+                                        "Projects only"
+
+                                    ShowTasksOnly ->
+                                        "Tasks only"
+
+                                    ShowAll ->
+                                        ""
+                                )
+
+                          else
+                            Nothing
+                        , if not (List.isEmpty model.filterProjectStatuses) then
+                            Just ("Project: " ++ String.join ", " (List.map (\s -> String.replace "_" " " s) model.filterProjectStatuses))
+
+                          else
+                            Nothing
+                        , if not (List.isEmpty model.filterTaskStatuses) then
+                            Just ("Task: " ++ String.join ", " (List.map (\s -> String.replace "_" " " s) model.filterTaskStatuses))
+
+                          else
+                            Nothing
+                        , case model.filterPriority of
+                            AnyPriority ->
+                                Nothing
+
+                            ExactPriority v ->
+                                Just ("Priority = " ++ String.fromInt v)
+
+                            AbovePriority v ->
+                                Just ("Priority ≥ " ++ String.fromInt v)
+
+                            BelowPriority v ->
+                                Just ("Priority ≤ " ++ String.fromInt v)
+                        , if String.isEmpty model.searchQuery then
+                            Nothing
+
+                          else
+                            Just ("Search: \"" ++ model.searchQuery ++ "\"")
+                        ]
+
+                MemoriesTab ->
+                    List.filterMap identity
+                        [ if not (List.isEmpty model.filterMemoryTypes) then
+                            Just ("Type: " ++ String.join ", " (List.map (\s -> String.replace "_" " " s) model.filterMemoryTypes))
+
+                          else
+                            Nothing
+                        , case model.filterMemoryPinned of
+                            Just True ->
+                                Just "Pinned"
+
+                            Just False ->
+                                Just "Unpinned"
+
+                            Nothing ->
+                                Nothing
+                        , case model.filterImportance of
+                            AnyPriority ->
+                                Nothing
+
+                            ExactPriority v ->
+                                Just ("Importance = " ++ String.fromInt v)
+
+                            AbovePriority v ->
+                                Just ("Importance ≥ " ++ String.fromInt v)
+
+                            BelowPriority v ->
+                                Just ("Importance ≤ " ++ String.fromInt v)
+                        , if String.isEmpty model.searchQuery then
+                            Nothing
+
+                          else
+                            Just ("Search: \"" ++ model.searchQuery ++ "\"")
+                        ]
+    in
+    div
+        [ class
+            ("sticky-workspace-bar"
+                ++ (if isVisible then
+                        " sticky-workspace-bar--visible"
+
+                    else
+                        ""
+                   )
+            )
+        ]
+        [ span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
+            [ text (Api.workspaceTypeToString ws.workspaceType) ]
+        , span [ class "sticky-workspace-name" ] [ text ws.name ]
+        , if not (List.isEmpty summaryParts) then
+            span [ class "sticky-workspace-summary" ] [ text (String.join " · " summaryParts) ]
+
+          else
+            text ""
+        , if not (List.isEmpty activeFilters) then
+            span [ class "sticky-workspace-filters" ]
+                (List.map (\f -> span [ class "sticky-filter-pill" ] [ text f ]) activeFilters)
+
+          else
+            text ""
+        ]
 
 
 viewSearchBar : Model -> Html Msg

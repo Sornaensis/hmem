@@ -303,3 +303,45 @@ app.ports.requestLocalStorage.subscribe(function (key) {
     // ignore parse errors
   }
 })
+
+// ---------------------------------------------------------------------------
+// Scroll tracking for sticky workspace bar
+// ---------------------------------------------------------------------------
+
+;(function () {
+  let ticking = false
+  let wasAbove = false
+  const threshold = 200
+  function onScroll () {
+    if (!ticking) {
+      requestAnimationFrame(function () {
+        const el = document.getElementById('main-content-scroll')
+        if (el) {
+          const isAbove = el.scrollTop > threshold
+          if (isAbove !== wasAbove) {
+            wasAbove = isAbove
+            app.ports.onMainContentScroll.send(el.scrollTop)
+          }
+        }
+        ticking = false
+      })
+      ticking = true
+    }
+  }
+  function attach (el) {
+    el.addEventListener('scroll', onScroll, { passive: true })
+  }
+  const existing = document.getElementById('main-content-scroll')
+  if (existing) {
+    attach(existing)
+  } else {
+    const observer = new MutationObserver(function () {
+      const el = document.getElementById('main-content-scroll')
+      if (el) {
+        attach(el)
+        observer.disconnect()
+      }
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+  }
+})()

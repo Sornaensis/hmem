@@ -43,7 +43,7 @@ You have access to the hmem MCP server which provides persistent memory storage 
 
 ### Workspaces
 All data is scoped to workspaces. Common operations:
-- `workspace_register` — Create a workspace (name required; optionally set path, gh_owner, gh_repo, type).
+- `workspace_register` — Create a workspace (name required; optionally set gh_owner, gh_repo, type).
 - `workspace_list` / `workspace_get` — Browse and retrieve workspaces.
 - `entity_lifecycle` (entity_type: workspace) — Delete, restore, or purge workspaces.
 

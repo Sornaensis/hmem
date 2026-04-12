@@ -1594,7 +1594,7 @@ trimForLLM (Object o) =
         [ "workspace_id", "created_at", "updated_at", "last_accessed_at"
         , "access_count", "fts_language", "dependency_count", "memory_link_count"
         ]
-      isNullDrop k v = v == Null && k `elem` ["confidence", "source", "expires_at", "completed_at", "due_at", "parent_id", "project_id", "description", "gh_owner", "gh_repo", "path"]
+      isNullDrop k v = v == Null && k `elem` ["confidence", "source", "expires_at", "completed_at", "due_at", "parent_id", "project_id", "description", "gh_owner", "gh_repo"]
       isEmptyMetadata k v = k == "metadata" && v == Object mempty
   in Object (KM.map trimForLLM cleaned)
 trimForLLM (Array arr) = Array (fmap trimForLLM arr)

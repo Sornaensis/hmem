@@ -1056,7 +1056,6 @@ spec = around withApp $ do
       wsResp <- postJSON app "/api/v1/workspaces"
         (object
           [ "name" .= ("restore-workspace-ws" :: T.Text)
-          , "path" .= ("C:/tmp/restore-workspace" :: T.Text)
           ])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
 

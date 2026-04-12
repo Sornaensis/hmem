@@ -24,7 +24,6 @@
     ║ PK id              UUID                                        ║
     ║    name            TEXT                                        ║
     ║    workspace_type  workspace_type_enum                         ║
-    ║    path            TEXT (UNIQUE)                               ║
     ║    gh_owner        TEXT ─┐                                     ║
     ║    gh_repo         TEXT ─┘ (UNIQUE together)                   ║
     ║    deleted_at      TIMESTAMPTZ                                 ║

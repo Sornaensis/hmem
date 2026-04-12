@@ -29,7 +29,7 @@ A PostgreSQL-backed memory and task management system for LLMs, written in Haske
 - **Tag System** — Flexible tagging for fast filtered queries
 - **Project Management** — Workspace-scoped projects with sub-project hierarchy
 - **Task Management** — Tasks with sub-tasks, dependencies (DAG), and memory references
-- **Workspace Scoping** — Scope by filesystem path or GitHub owner/repo
+- **Workspace Scoping** — Scope by `.hmem.workspace` file in the project root or GitHub owner/repo
 - **Configurable Cleanup** — Automatic expiry and pruning by age, count, and importance thresholds
 - **Soft Deletes + Purge** — Delete operations hide entities first; permanent removal is explicit via purge endpoints/tools
 - **MCP Protocol** — JSON-RPC over stdio for direct LLM integration

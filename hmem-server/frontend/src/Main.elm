@@ -2868,11 +2868,11 @@ viewDropZone model zone =
                 text ""
 
 
-viewTasksWithZones : Model -> String -> Maybe String -> Maybe String -> List Api.Task -> List (Html Msg)
+viewTasksWithZones : Model -> String -> Maybe String -> Maybe String -> List Api.Task -> List ( String, Html Msg )
 viewTasksWithZones model zoneType projectId parentTaskId tasks =
     case model.dragging of
         Nothing ->
-            List.map (viewTaskCard False model) tasks
+            List.map (\t -> ( t.id, viewTaskCard False model t )) tasks
 
         Just _ ->
             let
@@ -2884,24 +2884,24 @@ viewTasksWithZones model zoneType projectId parentTaskId tasks =
                     , belowPriority = belowPri
                     }
 
-                go remaining prevPri =
+                go remaining idx prevPri =
                     case remaining of
                         [] ->
-                            [ viewDropZone model (makeZone prevPri Nothing) ]
+                            [ ( "dz-" ++ zoneType ++ "-end", viewDropZone model (makeZone prevPri Nothing) ) ]
 
                         t :: rest ->
-                            viewDropZone model (makeZone prevPri (Just t.priority))
-                                :: viewTaskCard False model t
-                                :: go rest (Just t.priority)
+                            ( "dz-" ++ zoneType ++ "-" ++ String.fromInt idx, viewDropZone model (makeZone prevPri (Just t.priority)) )
+                                :: ( t.id, viewTaskCard False model t )
+                                :: go rest (idx + 1) (Just t.priority)
             in
-            go tasks Nothing
+            go tasks 0 Nothing
 
 
-viewProjectsWithZones : Model -> (Api.Project -> Html Msg) -> Maybe String -> List Api.Project -> List (Html Msg)
+viewProjectsWithZones : Model -> (Api.Project -> Html Msg) -> Maybe String -> List Api.Project -> List ( String, Html Msg )
 viewProjectsWithZones model renderProject parentId projects =
     case model.dragging of
         Nothing ->
-            List.map renderProject projects
+            List.map (\p -> ( p.id, renderProject p )) projects
 
         Just _ ->
             let
@@ -2913,17 +2913,17 @@ viewProjectsWithZones model renderProject parentId projects =
                     , belowPriority = belowPri
                     }
 
-                go remaining prevPri =
+                go remaining idx prevPri =
                     case remaining of
                         [] ->
-                            [ viewDropZone model (makeZone prevPri Nothing) ]
+                            [ ( "dz-proj-end", viewDropZone model (makeZone prevPri Nothing) ) ]
 
                         p :: rest ->
-                            viewDropZone model (makeZone prevPri (Just p.priority))
-                                :: renderProject p
-                                :: go rest (Just p.priority)
+                            ( "dz-proj-" ++ String.fromInt idx, viewDropZone model (makeZone prevPri (Just p.priority)) )
+                                :: ( p.id, renderProject p )
+                                :: go rest (idx + 1) (Just p.priority)
             in
-            go projects Nothing
+            go projects 0 Nothing
 
 
 isExpanded : Model -> String -> Bool
@@ -4354,7 +4354,7 @@ viewProjectsTree wsId model =
                 Just ( "project", projId ) ->
                     case Dict.get projId model.projects of
                         Just proj ->
-                            [ viewProjectNode wsProjects model 0 proj hasSearch query ]
+                            [ ( projId, viewProjectNode wsProjects model 0 proj hasSearch query ) ]
 
                         Nothing ->
                             []
@@ -4362,7 +4362,7 @@ viewProjectsTree wsId model =
                 Just ( "task", taskId ) ->
                     case Dict.get taskId model.tasks of
                         Just task ->
-                            [ viewFocusedTaskNode model task wsProjects hasSearch query hasActiveFilters taskPassesFilters ]
+                            [ ( taskId, viewFocusedTaskNode model task wsProjects hasSearch query hasActiveFilters taskPassesFilters ) ]
 
                         Nothing ->
                             []
@@ -4391,7 +4391,7 @@ viewProjectsTree wsId model =
                                                 identity
                                            )
                             in
-                            List.map (viewTaskCard False model) visibleRootTasks
+                            List.map (\t -> ( t.id, viewTaskCard False model t )) visibleRootTasks
 
                         _ ->
                             let
@@ -4437,21 +4437,24 @@ viewProjectsTree wsId model =
                             in
                             viewProjectsWithZones model (\p -> viewProjectNode wsProjects model 0 p hasSearch query) Nothing visibleRootProjects
                                 ++ (if model.filterShowOnly /= ShowProjectsOnly && not (List.isEmpty visibleOrphans) then
-                                        [ div [ class "orphan-tasks-section" ]
-                                            [ div [ class "orphan-tasks-header" ] [ text "Unassigned Tasks" ]
-                                            , div [ class "tree-tasks" ]
-                                                (viewTasksWithZones model "orphan" Nothing Nothing visibleOrphans)
-                                            ]
+                                        [ ( "orphan-tasks-section"
+                                          , div [ class "orphan-tasks-section" ]
+                                                [ div [ class "orphan-tasks-header" ] [ text "Unassigned Tasks" ]
+                                                , Keyed.node "div" [ class "tree-tasks" ]
+                                                    (viewTasksWithZones model "orphan" Nothing Nothing visibleOrphans)
+                                                ]
+                                          )
                                         ]
 
                                     else
                                         []
                                    )
     in
-    div [ class "tree-view" ]
-        (expandCollapseBar
-            :: inlineCreateView
-            :: focusBreadcrumbBar
+    Keyed.node "div"
+        [ class "tree-view" ]
+        (( "expand-collapse-bar", expandCollapseBar )
+            :: ( "inline-create", inlineCreateView )
+            :: ( "focus-breadcrumb", focusBreadcrumbBar )
             :: treeContent
         )
 
@@ -4653,11 +4656,13 @@ viewProjectNode allProjects model depth project hasSearch query =
                 ]
             ]
         , if not collapsed then
-            div [ class "tree-children" ]
+            Keyed.node "div" [ class "tree-children" ]
                 (viewProjectsWithZones model (\c -> viewProjectNode allProjects model (depth + 1) c hasSearch query) (Just project.id) visibleChildren
                     ++ (if not (List.isEmpty visibleTasks) then
-                            [ div [ class "tree-tasks", style "margin-left" "20px" ]
-                                (viewTasksWithZones model "project-tasks" (Just project.id) Nothing visibleTasks)
+                            [ ( "project-tasks-" ++ project.id
+                              , Keyed.node "div" [ class "tree-tasks", style "margin-left" "20px" ]
+                                    (viewTasksWithZones model "project-tasks" (Just project.id) Nothing visibleTasks)
+                              )
                             ]
 
                         else
@@ -4890,7 +4895,7 @@ viewTaskCard showProject model task =
                         |> List.filter (\t -> t.parentId == Just task.id)
                         |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
             in
-            div [ class "tree-children" ]
+            Keyed.node "div" [ class "tree-children" ]
                 (viewTasksWithZones model "task-subtasks" task.projectId (Just task.id) childTasks)
 
           else
@@ -4969,14 +4974,14 @@ viewMemoriesList wsId model =
         inlineCreateView =
             viewInlineCreateMemory model
     in
-    div [ class "entity-list" ]
-        (viewTagCloud model allTags
-            :: inlineCreateView
+    Keyed.node "div" [ class "entity-list" ]
+        (( "tag-cloud", viewTagCloud model allTags )
+            :: ( "inline-create-memory", inlineCreateView )
             :: (if List.isEmpty wsMemories then
-                    [ div [ class "empty-state" ] [ text "No memories yet." ] ]
+                    [ ( "empty-state", div [ class "empty-state" ] [ text "No memories yet." ] ) ]
 
                 else
-                    List.map (viewMemoryCard model) wsMemories
+                    List.map (\m -> ( m.id, viewMemoryCard model m )) wsMemories
                )
         )
 

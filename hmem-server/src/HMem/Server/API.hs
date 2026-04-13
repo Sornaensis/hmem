@@ -32,6 +32,7 @@ import Rel8 qualified (Delete(..))
 import Servant
 import System.IO (stderr)
 
+import HMem.DB.Audit qualified as Audit
 import HMem.DB.Category qualified as Cat
 import HMem.DB.Cleanup qualified as Cleanup
 import HMem.DB.Memory qualified as Mem
@@ -64,6 +65,7 @@ type HMemAPI = "api" :> "v1" :>
   :<|> "activity"    :> ActivityAPI
   :<|> "saved-views" :> SavedViewAPI
   :<|> "search"      :> SearchAPI
+  :<|> "audit"       :> AuditAPI
   )
 
 -- Health check
@@ -269,6 +271,17 @@ type SavedViewAPI =
 type SearchAPI =
   ReqBody '[JSON] UnifiedSearchQuery :> Post '[JSON] UnifiedSearchResults
 
+-- Audit log
+type AuditAPI =
+       QueryParam "entity_type" Text
+         :> QueryParam "action" AuditAction
+         :> QueryParam "since" UTCTime
+         :> QueryParam "until" UTCTime
+         :> QueryParam "limit" Int
+         :> QueryParam "offset" Int
+         :> Get '[JSON] (PaginatedResult AuditLogEntry)
+  :<|> Capture "auditId" UUID :> Get '[JSON] AuditLogEntry
+
 -- Request body for group member operations
 newtype GroupMemberReq = GroupMemberReq { workspaceId :: UUID }
   deriving (Show, Eq, Generic)
@@ -336,6 +349,12 @@ instance FromHttpApiData ContextDetailLevel where
   parseQueryParam "medium" = Right ContextMedium
   parseQueryParam "heavy"  = Right ContextHeavy
   parseQueryParam t        = Left ("Invalid detail level: " <> t <> " (expected light, medium, or heavy)")
+
+instance FromHttpApiData AuditAction where
+  parseQueryParam "create" = Right AuditCreate
+  parseQueryParam "update" = Right AuditUpdate
+  parseQueryParam "delete" = Right AuditDelete
+  parseQueryParam t        = Left ("Invalid audit action: " <> t <> " (expected create, update, or delete)")
 
 ------------------------------------------------------------------------
 -- Structured error handling
@@ -427,6 +446,7 @@ server pool tracker bc pgvec =
   :<|> activityHandlers pool
   :<|> savedViewHandlers pool bc
   :<|> searchHandler pool
+  :<|> auditHandlers pool
 
 -- | Emit a change event to all connected WebSocket clients.
 emit :: Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
@@ -1497,6 +1517,36 @@ workspaceGroupHandlers pool bc =
       pure NoContent
 
     listMembersH gid = handleDBErrors $ WG.listGroupMembers pool gid
+
+-- Audit log handlers -----------------------------------------------
+
+auditHandlers :: Pool Hasql.Connection -> Server AuditAPI
+auditHandlers pool =
+       listAuditH
+  :<|> getAuditH
+  where
+    listAuditH :: Maybe Text -> Maybe AuditAction -> Maybe UTCTime -> Maybe UTCTime
+               -> Maybe Int -> Maybe Int -> Handler (PaginatedResult AuditLogEntry)
+    listAuditH mEntityType mAction mSince mUntil mlimit moffset = do
+      let lim = capLimit mlimit
+          off = capOffset moffset
+          q = AuditLogQuery
+            { entityType = mEntityType
+            , action     = mAction
+            , since      = mSince
+            , until      = mUntil
+            , limit      = Just (lim + 1)
+            , offset     = Just off
+            }
+      results <- handleDBErrors $ Audit.getAuditLog pool q
+      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
+
+    getAuditH :: UUID -> Handler AuditLogEntry
+    getAuditH auditId = do
+      mEntry <- handleDBErrors $ Audit.getAuditEntry pool auditId
+      case mEntry of
+        Just entry -> pure entry
+        Nothing    -> throwError err404
 
 -- Activity handlers ------------------------------------------------
 

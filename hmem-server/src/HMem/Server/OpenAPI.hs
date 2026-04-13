@@ -155,6 +155,15 @@ instance ToSchema ProjectSearchResult    where declareNamedSchema = genericDecla
 instance ToSchema TaskSearchResult       where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema UnifiedSearchResults   where declareNamedSchema = genericDeclareNamedSchema opts
 
+-- Audit log types
+instance ToSchema AuditAction where
+  declareNamedSchema _ = pure $ NamedSchema (Just "AuditAction") $ mempty
+    & type_ ?~ OpenApiString
+    & enum_ ?~ ["create", "update", "delete"]
+instance ToParamSchema AuditAction where
+  toParamSchema _ = mempty & type_ ?~ OpenApiString & enum_ ?~ ["create", "update", "delete"]
+instance ToSchema AuditLogEntry          where declareNamedSchema = genericDeclareNamedSchema opts
+
 ------------------------------------------------------------------------
 -- Helper
 ------------------------------------------------------------------------

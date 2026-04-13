@@ -3635,89 +3635,6 @@ viewStickyWorkspaceBar model ws summaryParts =
 
         isVisible =
             model.mainContentScrollY > stickyThreshold
-
-        activeFilters =
-            case model.activeTab of
-                ProjectsTab ->
-                    List.filterMap identity
-                        [ if model.filterShowOnly /= ShowAll then
-                            Just
-                                (case model.filterShowOnly of
-                                    ShowProjectsOnly ->
-                                        "Projects only"
-
-                                    ShowTasksOnly ->
-                                        "Tasks only"
-
-                                    ShowAll ->
-                                        ""
-                                )
-
-                          else
-                            Nothing
-                        , if not (List.isEmpty model.filterProjectStatuses) then
-                            Just ("Project: " ++ String.join ", " (List.map (\s -> String.replace "_" " " s) model.filterProjectStatuses))
-
-                          else
-                            Nothing
-                        , if not (List.isEmpty model.filterTaskStatuses) then
-                            Just ("Task: " ++ String.join ", " (List.map (\s -> String.replace "_" " " s) model.filterTaskStatuses))
-
-                          else
-                            Nothing
-                        , case model.filterPriority of
-                            AnyPriority ->
-                                Nothing
-
-                            ExactPriority v ->
-                                Just ("Priority = " ++ String.fromInt v)
-
-                            AbovePriority v ->
-                                Just ("Priority ≥ " ++ String.fromInt v)
-
-                            BelowPriority v ->
-                                Just ("Priority ≤ " ++ String.fromInt v)
-                        , if String.isEmpty model.searchQuery then
-                            Nothing
-
-                          else
-                            Just ("Search: \"" ++ model.searchQuery ++ "\"")
-                        ]
-
-                MemoriesTab ->
-                    List.filterMap identity
-                        [ if not (List.isEmpty model.filterMemoryTypes) then
-                            Just ("Type: " ++ String.join ", " (List.map (\s -> String.replace "_" " " s) model.filterMemoryTypes))
-
-                          else
-                            Nothing
-                        , case model.filterMemoryPinned of
-                            Just True ->
-                                Just "Pinned"
-
-                            Just False ->
-                                Just "Unpinned"
-
-                            Nothing ->
-                                Nothing
-                        , case model.filterImportance of
-                            AnyPriority ->
-                                Nothing
-
-                            ExactPriority v ->
-                                Just ("Importance = " ++ String.fromInt v)
-
-                            AbovePriority v ->
-                                Just ("Importance ≥ " ++ String.fromInt v)
-
-                            BelowPriority v ->
-                                Just ("Importance ≤ " ++ String.fromInt v)
-                        , if String.isEmpty model.searchQuery then
-                            Nothing
-
-                          else
-                            Just ("Search: \"" ++ model.searchQuery ++ "\"")
-                        ]
     in
     div
         [ class
@@ -3730,20 +3647,17 @@ viewStickyWorkspaceBar model ws summaryParts =
                    )
             )
         ]
-        [ span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
-            [ text (Api.workspaceTypeToString ws.workspaceType) ]
-        , span [ class "sticky-workspace-name" ] [ text ws.name ]
-        , if not (List.isEmpty summaryParts) then
-            span [ class "sticky-workspace-summary" ] [ text (String.join " · " summaryParts) ]
+        [ div [ class "sticky-workspace-bar__header" ]
+            [ span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
+                [ text (Api.workspaceTypeToString ws.workspaceType) ]
+            , span [ class "sticky-workspace-name" ] [ text ws.name ]
+            , if not (List.isEmpty summaryParts) then
+                span [ class "sticky-workspace-summary" ] [ text (String.join " · " summaryParts) ]
 
-          else
-            text ""
-        , if not (List.isEmpty activeFilters) then
-            span [ class "sticky-workspace-filters" ]
-                (List.map (\f -> span [ class "sticky-filter-pill" ] [ text f ]) activeFilters)
-
-          else
-            text ""
+              else
+                text ""
+            ]
+        , viewSearchBar model
         ]
 
 

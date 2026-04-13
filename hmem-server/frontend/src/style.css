@@ -649,9 +649,8 @@ a:hover {
   z-index: 10;
   background: var(--bg-surface);
   display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 0.25rem;
   border-bottom: 1px solid transparent;
   margin: -2rem -2rem 0 -2rem;
   max-height: 0;
@@ -663,7 +662,7 @@ a:hover {
 }
 
 .sticky-workspace-bar--visible {
-  max-height: 5rem;
+  max-height: 16rem;
   opacity: 1;
   pointer-events: auto;
   padding: 0.5rem 1.25rem;
@@ -671,6 +670,21 @@ a:hover {
   border-bottom-color: var(--border);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
   margin-bottom: 1rem;
+}
+
+.sticky-workspace-bar__header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.sticky-workspace-bar .search-filter-bar {
+  margin-bottom: 0;
+}
+
+.sticky-workspace-bar .search-bar {
+  margin-bottom: 0;
 }
 
 .sticky-workspace-name {
@@ -685,24 +699,6 @@ a:hover {
 
 .sticky-workspace-summary {
   font-size: 0.75rem;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.sticky-workspace-filters {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  flex-wrap: wrap;
-  margin-left: auto;
-}
-
-.sticky-filter-pill {
-  font-size: 0.6875rem;
-  padding: 0.125rem 0.5rem;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: 1rem;
   color: var(--text-muted);
   white-space: nowrap;
 }

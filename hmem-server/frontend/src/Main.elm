@@ -13,6 +13,8 @@ import Html.Keyed as Keyed
 import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
+import Markdown.Parser
+import Markdown.Renderer
 import Process
 import Task as ElmTask
 import Url
@@ -5357,6 +5359,21 @@ viewEditableText model entityType entityId field currentValue =
                 ]
 
 
+viewMarkdownContent : String -> Html Msg
+viewMarkdownContent raw =
+    case
+        raw
+            |> Markdown.Parser.parse
+            |> Result.mapError (\_ -> "parse error")
+            |> Result.andThen (Markdown.Renderer.render Markdown.Renderer.defaultHtmlRenderer)
+    of
+        Ok rendered ->
+            div [ class "markdown-content" ] rendered
+
+        Err _ ->
+            div [ class "markdown-content", style "white-space" "pre-wrap" ] [ text raw ]
+
+
 viewEditableTextarea : Model -> String -> String -> String -> String -> Html Msg
 viewEditableTextarea model entityType entityId field currentValue =
     case editingValue model entityId field of
@@ -5386,13 +5403,11 @@ viewEditableTextarea model entityType entityId field currentValue =
                 , onClick (StartEdit entityType entityId field currentValue)
                 , title "Click to edit"
                 ]
-                [ text
-                    (if String.isEmpty currentValue then
-                        "Click to add description..."
+                [ if String.isEmpty currentValue then
+                    text "Click to add description..."
 
-                     else
-                        currentValue
-                    )
+                  else
+                    viewMarkdownContent currentValue
                 ]
 
 

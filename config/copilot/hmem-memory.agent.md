@@ -41,7 +41,6 @@ Reusable filtered queries over workspace data.
 ### Workspaces
 - **workspace_register** / **workspace_list** / **workspace_get** / **workspace_update** — Manage workspaces that scope memories.
 - **entity_lifecycle** (entity_type: workspace, action: delete/restore/purge) — Soft-delete lifecycle for workspaces.
-- **workspace_visualization** — Render SVG or JSON workspace graph showing projects, tasks, memories, and relationships.
 
 ## Workspace Context
 

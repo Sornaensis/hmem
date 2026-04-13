@@ -12,7 +12,6 @@ import Data.Proxy (Proxy (..))
 import Servant.OpenApi (toOpenApi)
 
 import HMem.Server.API (HMemAPI, CleanupRunReq, GroupMemberReq, CategoryLink)
-import HMem.Server.VisualizationSvg (WorkspaceVisualizationResponse)
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -147,14 +146,7 @@ instance ToSchema TaskDependencySummary  where declareNamedSchema = genericDecla
 instance ToSchema ConnectedMemorySummary where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema TaskOverview           where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ContextInfo            where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema WorkspaceVisualizationMemoryFilter where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema WorkspaceVisualizationQuery where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema VisualizationMemory where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema VisualizationTaskDependency where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema VisualizationProjectMemoryLink where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema VisualizationTaskMemoryLink where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema WorkspaceVisualization where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema WorkspaceVisualizationResponse where declareNamedSchema _ = declareNamedSchema (Proxy @WorkspaceVisualization)
+
 instance ToSchema EntitySearchType       where
   declareNamedSchema = genericDeclareNamedSchema defaultSchemaOptions
 instance ToSchema UnifiedSearchQuery     where declareNamedSchema = genericDeclareNamedSchema opts

@@ -10,7 +10,6 @@
 --   @hmem-ctl reinstall@     – uninstall + full setup
 --   @hmem-ctl workspaces@    – list workspaces (with optional name search)
 --   @hmem-ctl projects@      – list projects (with optional name/workspace filter)
---   @hmem-ctl visualize@     – generate SVG workspace visualization
 --   @hmem-ctl workspace@    – interactively select/create workspace, write .hmem.workspace
 --
 --   Requires: initdb, pg_ctl, createdb, psql on PATH (ships with PostgreSQL).
@@ -58,7 +57,6 @@ import qualified Data.Vector as Vec
 import HMem.Config
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool qualified as Pool
-import HMem.Server.VisualizationSvg (renderWorkspaceVisualizationSvg, SvgDocument(..))
 import HMem.Types
 import Paths_hmem_server qualified as Paths
 
@@ -77,7 +75,6 @@ data Command
   | CmdReinstall
   | CmdWorkspaces WorkspacesOpts
   | CmdProjects   ProjectsOpts
-  | CmdVisualize  VisualizeOpts
   | CmdWorkspace
 
 data WorkspacesOpts = WorkspacesOpts
@@ -88,14 +85,6 @@ data ProjectsOpts = ProjectsOpts
   { projName      :: Maybe String
   , projWorkspace :: Maybe String
   , projStatus    :: Maybe String
-  }
-
-data VisualizeOpts = VisualizeOpts
-  { vizWorkspace  :: String
-  , vizShowTasks  :: Bool
-  , vizShowSummary :: Bool
-  , vizShowDescs  :: Bool
-  , vizOutput     :: Maybe FilePath
   }
 
 commandParser :: Parser Command
@@ -118,8 +107,6 @@ commandParser = subparser
       (progDesc "List workspaces (optionally filter by name)"))
   <> command "projects"   (info (CmdProjects <$> projectsParser)
       (progDesc "List projects (optionally filter by name or workspace)"))
-  <> command "visualize"  (info (CmdVisualize <$> visualizeParser)
-      (progDesc "Generate SVG workspace visualization"))
   <> command "workspace" (info (pure CmdWorkspace)
       (progDesc "Interactively select or create a workspace, write .hmem.workspace"))
   )
@@ -134,14 +121,6 @@ projectsParser = ProjectsOpts
   <$> optional (strOption (long "name" <> short 'n' <> metavar "PATTERN" <> help "Filter projects by name (case-insensitive substring)"))
   <*> optional (strOption (long "workspace" <> short 'w' <> metavar "NAME" <> help "Filter by workspace name (case-insensitive substring)"))
   <*> optional (strOption (long "status" <> short 's' <> metavar "STATUS" <> help "Filter by status (active, paused, completed, archived)"))
-
-visualizeParser :: Parser VisualizeOpts
-visualizeParser = VisualizeOpts
-  <$> strOption (long "workspace" <> short 'w' <> metavar "NAME" <> help "Workspace name (case-insensitive substring match)")
-  <*> switch (long "tasks" <> short 't' <> help "Include task nodes in SVG")
-  <*> (not <$> switch (long "no-summary" <> help "Suppress task status summaries"))
-  <*> switch (long "descriptions" <> short 'd' <> help "Show project/task descriptions")
-  <*> optional (strOption (long "output" <> short 'o' <> metavar "FILE" <> help "Output file path (default: stdout)"))
 
 main :: IO ()
 main = do
@@ -161,7 +140,6 @@ main = do
     CmdReinstall -> doUninstall >> doInit >> doInstall
     CmdWorkspaces opts -> doWorkspaces opts
     CmdProjects opts   -> doProjects opts
-    CmdVisualize opts  -> doVisualize opts
     CmdWorkspace       -> doWorkspace
 
 ------------------------------------------------------------------------
@@ -978,7 +956,7 @@ removeIfExists path = do
   when exists $ removeFile path
 
 ------------------------------------------------------------------------
--- Query commands (workspaces, projects, visualize)
+-- Query commands (workspaces, projects)
 ------------------------------------------------------------------------
 
 -- | Create an HTTP manager and build the base URL from config.
@@ -1072,51 +1050,6 @@ doProjects opts = withApiClient $ \mgr base -> do
       mapM_ (\p ->
         putStrLn $ padRight 38 (show p.id) <> padRight 28 (ellipsis 26 $ T.unpack p.name) <> padRight 12 (T.unpack (projectStatusToText p.status)) <> padRight 5 (show p.priority) <> wsNameLookup p.workspaceId
         ) filtered
-
-doVisualize :: VisualizeOpts -> IO ()
-doVisualize opts = withApiClient $ \mgr base -> do
-  -- Find workspace by name
-  wsBody <- apiGet mgr base "/api/v1/workspaces?limit=100"
-  case Aeson.decode wsBody :: Maybe (PaginatedResult Workspace) of
-    Nothing -> do
-      hPutStrLn stderr "Error: could not parse workspace list"
-      exitFailure
-    Just result -> do
-      let matching = filter (matchName opts.vizWorkspace . T.unpack . (.name)) result.items
-      case matching of
-        [] -> do
-          hPutStrLn stderr $ "No workspace matching '" <> opts.vizWorkspace <> "' found."
-          exitFailure
-        [ws] -> generateVisualization mgr base ws opts
-        multiple -> do
-          hPutStrLn stderr $ "Multiple workspaces match '" <> opts.vizWorkspace <> "':"
-          mapM_ (\ws -> hPutStrLn stderr $ "  " <> show ws.id <> "  " <> T.unpack ws.name) multiple
-          hPutStrLn stderr "Please refine your search."
-          exitFailure
-
-generateVisualization :: HTTP.Manager -> String -> Workspace -> VisualizeOpts -> IO ()
-generateVisualization mgr base ws opts = do
-  let vizQuery = WorkspaceVisualizationQuery
-        { includeProjectIds = Nothing
-        , excludeProjectIds = Nothing
-        , taskStatuses = Nothing
-        , memoryFilter = Nothing
-        , showTasks = Just opts.vizShowTasks
-        , showTaskStatusSummary = Just opts.vizShowSummary
-        , showDescriptions = Just opts.vizShowDescs
-        }
-  body <- apiPostJson mgr base ("/api/v1/workspaces/" <> show ws.id <> "/visualization") vizQuery
-  case Aeson.decode body :: Maybe WorkspaceVisualization of
-    Nothing -> do
-      hPutStrLn stderr "Error: could not parse visualization response"
-      exitFailure
-    Just viz -> do
-      let SvgDocument svgText = renderWorkspaceVisualizationSvg vizQuery viz
-      case opts.vizOutput of
-        Nothing -> TIO.putStr svgText
-        Just path -> do
-          TIO.writeFile path svgText
-          putStrLn $ "Wrote SVG to: " <> path
 
 ------------------------------------------------------------------------
 -- workspace: interactive workspace selector

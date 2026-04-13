@@ -18,7 +18,6 @@ Use this agent when the user wants to interact with hmem without specifying whet
 Workspaces scope all data. Every memory, project, and task belongs to a workspace.
 - CRUD: `workspace_register`, `workspace_list`, `workspace_get`, `workspace_update`
 - Lifecycle: `entity_lifecycle` (entity_type: workspace, action: delete/restore/purge)
-- Visualization: `workspace_visualization` — renders SVG (default) or JSON workspace graph showing projects, tasks, memories, and relationships. Supports `show_tasks` (opt-in) and `show_task_status_summary` (opt-out).
 
 ### Memories
 Store and retrieve knowledge. Supports full-text search, tags, categories, typed links, and importance scoring.
@@ -84,8 +83,7 @@ At the start of every session, call `set_workspace` with the target workspace UU
 1. List active projects (`project_list` with status=active)
 2. Use `project_overview` for a full summary of a project's tasks, subprojects, and linked memories
 3. Use `task_overview` or `context_get` for task-level detail
-4. Use `workspace_visualization` to get an SVG or JSON graph of the entire workspace
-5. Check activity timeline for recent changes
+4. Check activity timeline for recent changes
 
 ### Archiving a completed project
 1. Ensure all tasks are done/cancelled

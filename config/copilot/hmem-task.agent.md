@@ -37,9 +37,6 @@ Use these composite tools for common workflows — they combine multiple steps i
 - **link_memory** (entity_type: task) — Attach or detach memories to/from a task.
 - **list_entity_memories** (entity_type: task) — See all memories linked to a task.
 
-### Workspace Visualization
-- **workspace_visualization** — Render SVG or JSON workspace graph showing projects, tasks, memories, and their relationships. Use `show_tasks=true` to include task nodes.
-
 ### Unified Search
 - **search** — Full-text search across memories, projects, and tasks in one call. Returns separate lists per entity type with linked memory summaries on project/task results. Supports per-entity filters (project_status, task_status, task_priority, project_id, memory_type, tags, etc.).
 

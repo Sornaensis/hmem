@@ -29,7 +29,6 @@ library
       HMem.Server.Logging
       HMem.Server.OpenAPI
       HMem.Server.Static
-      HMem.Server.VisualizationSvg
       HMem.Server.WebSocket
   other-modules:
       Paths_hmem_server

@@ -17,6 +17,7 @@ build-type:     Simple
 library
   exposed-modules:
       HMem.Config
+      HMem.DB.Audit
       HMem.DB.Category
       HMem.DB.Cleanup
       HMem.DB.Memory

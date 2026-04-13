@@ -91,6 +91,13 @@ module HMem.Types
   , UpdateSavedView(..)
   , SavedViewListQuery(..)
 
+    -- * Audit log
+  , AuditAction(..)
+  , AuditLogEntry(..)
+  , AuditLogQuery(..)
+  , auditActionToText
+  , auditActionFromText
+
     -- * Pagination
   , PaginatedResult(..)
 
@@ -1402,6 +1409,63 @@ data SavedViewListQuery = SavedViewListQuery
 instance ToJSON SavedViewListQuery where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON SavedViewListQuery where
+  parseJSON  = genericParseJSON jsonOptions
+
+------------------------------------------------------------------------
+-- Audit log
+------------------------------------------------------------------------
+
+data AuditAction = AuditCreate | AuditUpdate | AuditDelete
+  deriving (Show, Eq, Ord, Bounded, Enum, Generic)
+
+auditActionToText :: AuditAction -> Text
+auditActionToText AuditCreate = "create"
+auditActionToText AuditUpdate = "update"
+auditActionToText AuditDelete = "delete"
+
+auditActionFromText :: Text -> Maybe AuditAction
+auditActionFromText "create" = Just AuditCreate
+auditActionFromText "update" = Just AuditUpdate
+auditActionFromText "delete" = Just AuditDelete
+auditActionFromText _        = Nothing
+
+instance ToJSON AuditAction where
+  toJSON = String . auditActionToText
+
+instance FromJSON AuditAction where
+  parseJSON = withText "AuditAction" $ \t ->
+    case auditActionFromText t of
+      Just a  -> pure a
+      Nothing -> fail $ "Invalid audit action: " <> T.unpack t
+
+data AuditLogEntry = AuditLogEntry
+  { id         :: UUID
+  , entityType :: Text
+  , entityId   :: Text
+  , action     :: AuditAction
+  , oldValues  :: Maybe Value
+  , newValues  :: Maybe Value
+  , requestId  :: Maybe Text
+  , changedAt  :: UTCTime
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON AuditLogEntry where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON AuditLogEntry where
+  parseJSON  = genericParseJSON jsonOptions
+
+data AuditLogQuery = AuditLogQuery
+  { entityType :: Maybe Text
+  , action     :: Maybe AuditAction
+  , since      :: Maybe UTCTime
+  , until      :: Maybe UTCTime
+  , limit      :: Maybe Int
+  , offset     :: Maybe Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON AuditLogQuery where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON AuditLogQuery where
   parseJSON  = genericParseJSON jsonOptions
 
 ------------------------------------------------------------------------

@@ -3519,7 +3519,7 @@ viewSidebar model =
                     ]
                 , li []
                     [ a [ href "/audit", class "sidebar-link" ]
-                        [ span [ class "sidebar-icon" ] [ text "📋" ]
+                        [ span [ class "sidebar-icon icon-audit" ] []
                         , text "Audit Log"
                         ]
                     ]
@@ -6950,7 +6950,7 @@ viewAuditLogPage : Model -> Html Msg
 viewAuditLogPage model =
     div [ class "page audit-log-view" ]
         [ div [ class "page-header" ]
-            [ h2 [] [ text "📋 Audit Log" ] ]
+            [ h2 [] [ span [ class "page-header-icon icon-audit" ] [], text "Audit Log" ] ]
         , viewAuditLogFilters model
         , if List.isEmpty model.auditLog then
             div [ class "empty-state" ] [ text "No audit log entries found." ]

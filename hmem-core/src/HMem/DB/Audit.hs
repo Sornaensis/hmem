@@ -105,6 +105,7 @@ getAuditLog :: Pool Hasql.Connection -> AuditLogQuery -> IO [AuditLogEntry]
 getAuditLog pool q = do
   let (lim, off) = capPagination q.limit q.offset
       params = ( q.entityType
+               , q.entityId
                , auditActionToText <$> q.action
                , q.since
                , q.until
@@ -113,7 +114,7 @@ getAuditLog pool q = do
                )
   runSession pool $ Session.statement params getAuditLogStatement
 
-type AuditLogParams = (Maybe Text, Maybe Text, Maybe UTCTime, Maybe UTCTime, Int32, Int32)
+type AuditLogParams = (Maybe Text, Maybe Text, Maybe Text, Maybe UTCTime, Maybe UTCTime, Int32, Int32)
 
 getAuditLogStatement :: Statement.Statement AuditLogParams [AuditLogEntry]
 getAuditLogStatement = Statement.Statement sql encoder decoder True
@@ -123,17 +124,19 @@ getAuditLogStatement = Statement.Statement sql encoder decoder True
       , "       request_id, changed_at"
       , "FROM audit_log"
       , "WHERE ($1::text IS NULL OR entity_type = $1)"
-      , "  AND ($2::text IS NULL OR action::text = $2)"
-      , "  AND ($3::timestamptz IS NULL OR changed_at >= $3)"
-      , "  AND ($4::timestamptz IS NULL OR changed_at <= $4)"
+      , "  AND ($2::text IS NULL OR entity_id = $2)"
+      , "  AND ($3::text IS NULL OR action::text = $3)"
+      , "  AND ($4::timestamptz IS NULL OR changed_at >= $4)"
+      , "  AND ($5::timestamptz IS NULL OR changed_at <= $5)"
       , "ORDER BY changed_at DESC, id DESC"
-      , "LIMIT $5 OFFSET $6"
+      , "LIMIT $6 OFFSET $7"
       ]
     encoder =
-      contramap (\(a,_,_,_,_,_) -> a) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,b,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,c,_,_,_) -> c) (Enc.param (Enc.nullable Enc.timestamptz)) <>
-      contramap (\(_,_,_,d,_,_) -> d) (Enc.param (Enc.nullable Enc.timestamptz)) <>
-      contramap (\(_,_,_,_,e,_) -> e) (Enc.param (Enc.nonNullable Enc.int4)) <>
-      contramap (\(_,_,_,_,_,f) -> f) (Enc.param (Enc.nonNullable Enc.int4))
+      contramap (\(a,_,_,_,_,_,_) -> a) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,b,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,c,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,d,_,_,_) -> d) (Enc.param (Enc.nullable Enc.timestamptz)) <>
+      contramap (\(_,_,_,_,e,_,_) -> e) (Enc.param (Enc.nullable Enc.timestamptz)) <>
+      contramap (\(_,_,_,_,_,f,_) -> f) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,g) -> g) (Enc.param (Enc.nonNullable Enc.int4))
     decoder = Dec.rowList auditLogRowDecoder

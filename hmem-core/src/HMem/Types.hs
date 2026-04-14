@@ -1457,6 +1457,7 @@ instance FromJSON AuditLogEntry where
 
 data AuditLogQuery = AuditLogQuery
   { entityType :: Maybe Text
+  , entityId   :: Maybe Text
   , action     :: Maybe AuditAction
   , since      :: Maybe UTCTime
   , until      :: Maybe UTCTime

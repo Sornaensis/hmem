@@ -4,6 +4,7 @@ module Api exposing
     , TaskDependencySummary, TaskOverview
     , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, UnifiedSearchResults
     , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
+    , AuditAction(..), AuditLogEntry, RevertResult
     , PaginatedResult
     , MemoryType(..), ProjectStatus(..), TaskStatus(..), WorkspaceType(..)
     , ChangeEvent, ChangeType(..), EntityType(..)
@@ -27,9 +28,11 @@ module Api exposing
     , createMemory, updateMemory, deleteMemory, setTags
     , fetchWorkspaceGroups, createWorkspaceGroup, deleteWorkspaceGroup
     , fetchGroupMembers, addGroupMember, removeGroupMember
+    , fetchAuditLog, fetchEntityHistory, revertAuditEntry
     , decodeChangeEvent
-    , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder
+    , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, auditLogEntryDecoder
     , memoryTypeToString, memoryTypeFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
+    , auditActionToString, auditActionFromString
     , projectStatusFromString, taskStatusFromString
     , projectStatusOrder, taskStatusOrder
     , allProjectStatuses, allTaskStatuses, allMemoryTypes
@@ -161,6 +164,30 @@ type alias UnifiedSearchResults =
 type alias PaginatedResult a =
     { items : List a
     , hasMore : Bool
+    }
+
+
+type AuditAction
+    = AuditCreate
+    | AuditUpdate
+    | AuditDelete
+
+
+type alias AuditLogEntry =
+    { id : String
+    , entityType : String
+    , entityId : String
+    , action : AuditAction
+    , oldValues : Maybe D.Value
+    , newValues : Maybe D.Value
+    , requestId : Maybe String
+    , changedAt : String
+    }
+
+
+type alias RevertResult =
+    { auditEntry : AuditLogEntry
+    , entity : Maybe D.Value
     }
 
 
@@ -349,6 +376,35 @@ taskStatusOrder ts =
         Cancelled -> 4
 
 
+auditActionToString : AuditAction -> String
+auditActionToString a =
+    case a of
+        AuditCreate ->
+            "create"
+
+        AuditUpdate ->
+            "update"
+
+        AuditDelete ->
+            "delete"
+
+
+auditActionFromString : String -> Maybe AuditAction
+auditActionFromString s =
+    case s of
+        "create" ->
+            Just AuditCreate
+
+        "update" ->
+            Just AuditUpdate
+
+        "delete" ->
+            Just AuditDelete
+
+        _ ->
+            Nothing
+
+
 
 -- DECODERS
 
@@ -526,6 +582,46 @@ workspaceTypeDecoder =
                     _ ->
                         D.fail ("Unknown workspace type: " ++ s)
             )
+
+
+auditActionDecoder : Decoder AuditAction
+auditActionDecoder =
+    D.string
+        |> D.andThen
+            (\s ->
+                case s of
+                    "create" ->
+                        D.succeed AuditCreate
+
+                    "update" ->
+                        D.succeed AuditUpdate
+
+                    "delete" ->
+                        D.succeed AuditDelete
+
+                    _ ->
+                        D.fail ("Unknown audit action: " ++ s)
+            )
+
+
+auditLogEntryDecoder : Decoder AuditLogEntry
+auditLogEntryDecoder =
+    D.succeed AuditLogEntry
+        |> required "id" D.string
+        |> required "entity_type" D.string
+        |> required "entity_id" D.string
+        |> required "action" auditActionDecoder
+        |> optional "old_values" (D.nullable D.value) Nothing
+        |> optional "new_values" (D.nullable D.value) Nothing
+        |> optional "request_id" (D.nullable D.string) Nothing
+        |> required "changed_at" D.string
+
+
+revertResultDecoder : Decoder RevertResult
+revertResultDecoder =
+    D.succeed RevertResult
+        |> required "audit_entry" auditLogEntryDecoder
+        |> optional "entity" (D.nullable D.value) Nothing
 
 
 
@@ -1255,4 +1351,62 @@ removeGroupMember apiUrl groupId workspaceId toMsg =
         , expect = Http.expectWhatever toMsg
         , timeout = Nothing
         , tracker = Nothing
+        }
+
+
+
+-- AUDIT LOG
+
+
+fetchAuditLog : String -> { entityType : Maybe String, entityId : Maybe String, action : Maybe String, since : Maybe String, until : Maybe String, limit : Maybe Int, offset : Maybe Int } -> (Result Http.Error (PaginatedResult AuditLogEntry) -> msg) -> Cmd msg
+fetchAuditLog apiUrl filters toMsg =
+    let
+        params =
+            List.filterMap identity
+                [ Maybe.map (\v -> "entity_type=" ++ v) filters.entityType
+                , Maybe.map (\v -> "entity_id=" ++ v) filters.entityId
+                , Maybe.map (\v -> "action=" ++ v) filters.action
+                , Maybe.map (\v -> "since=" ++ v) filters.since
+                , Maybe.map (\v -> "until=" ++ v) filters.until
+                , Maybe.map (\v -> "limit=" ++ String.fromInt v) filters.limit
+                , Maybe.map (\v -> "offset=" ++ String.fromInt v) filters.offset
+                ]
+
+        queryString =
+            case params of
+                [] ->
+                    ""
+
+                _ ->
+                    "?" ++ String.join "&" params
+    in
+    Http.get
+        { url = apiUrl ++ "/api/v1/audit" ++ queryString
+        , expect = Http.expectJson toMsg (paginatedDecoder auditLogEntryDecoder)
+        }
+
+
+fetchEntityHistory : String -> String -> String -> Maybe Int -> (Result Http.Error (PaginatedResult AuditLogEntry) -> msg) -> Cmd msg
+fetchEntityHistory apiUrl entityType entityId mLimit toMsg =
+    let
+        limitParam =
+            case mLimit of
+                Just n ->
+                    "&limit=" ++ String.fromInt n
+
+                Nothing ->
+                    ""
+    in
+    Http.get
+        { url = apiUrl ++ "/api/v1/audit?entity_type=" ++ entityType ++ "&entity_id=" ++ entityId ++ limitParam
+        , expect = Http.expectJson toMsg (paginatedDecoder auditLogEntryDecoder)
+        }
+
+
+revertAuditEntry : String -> String -> (Result Http.Error RevertResult -> msg) -> Cmd msg
+revertAuditEntry apiUrl auditId toMsg =
+    Http.post
+        { url = apiUrl ++ "/api/v1/audit/" ++ auditId ++ "/revert"
+        , body = Http.emptyBody
+        , expect = Http.expectJson toMsg revertResultDecoder
         }

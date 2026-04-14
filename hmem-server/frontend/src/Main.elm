@@ -886,6 +886,11 @@ type Msg
     | RemoveWorkspaceFromGroup String String
     | GroupMembershipDone String (Result Http.Error ())
     | MainContentScrolled Float
+      -- Audit log
+    | GotAuditLog (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
+    | GotEntityHistory String (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
+    | RevertAuditEntry String
+    | AuditRevertDone (Result Http.Error Api.RevertResult)
     | NoOp
 
 
@@ -2269,6 +2274,33 @@ update msg model =
 
             else
                 ( model, Cmd.none )
+
+        GotAuditLog result ->
+            case result of
+                Ok _ ->
+                    ( model, Cmd.none )
+
+                Err _ ->
+                    addToast Error "Failed to load audit log" model
+
+        GotEntityHistory _ result ->
+            case result of
+                Ok _ ->
+                    ( model, Cmd.none )
+
+                Err _ ->
+                    addToast Error "Failed to load entity history" model
+
+        RevertAuditEntry auditId ->
+            ( model, Api.revertAuditEntry model.flags.apiUrl auditId AuditRevertDone )
+
+        AuditRevertDone result ->
+            case result of
+                Ok _ ->
+                    addToast Success "Change reverted successfully" model
+
+                Err _ ->
+                    addToast Error "Failed to revert change" model
 
         NoOp ->
             ( model, Cmd.none )

@@ -275,6 +275,7 @@ type SearchAPI =
 -- Audit log
 type AuditAPI =
        QueryParam "entity_type" Text
+         :> QueryParam "entity_id" Text
          :> QueryParam "action" AuditAction
          :> QueryParam "since" UTCTime
          :> QueryParam "until" UTCTime
@@ -1528,13 +1529,14 @@ auditHandlers pool bc =
   :<|> revertAuditH
   :<|> getAuditH
   where
-    listAuditH :: Maybe Text -> Maybe AuditAction -> Maybe UTCTime -> Maybe UTCTime
+    listAuditH :: Maybe Text -> Maybe Text -> Maybe AuditAction -> Maybe UTCTime -> Maybe UTCTime
                -> Maybe Int -> Maybe Int -> Handler (PaginatedResult AuditLogEntry)
-    listAuditH mEntityType mAction mSince mUntil mlimit moffset = do
+    listAuditH mEntityType mEntityId mAction mSince mUntil mlimit moffset = do
       let lim = capLimit mlimit
           off = capOffset moffset
           q = AuditLogQuery
             { entityType = mEntityType
+            , entityId   = mEntityId
             , action     = mAction
             , since      = mSince
             , until      = mUntil

@@ -1,4 +1,4 @@
-port module Main exposing (main)
+module Main exposing (main)
 
 import Api exposing (..)
 import Browser
@@ -15,76 +15,11 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Markdown.Parser
 import Markdown.Renderer
+import Ports exposing (..)
 import Process
 import Task as ElmTask
 import Url
 import Url.Parser as Parser exposing (Parser, (</>))
-
-
-
--- PORTS: WebSocket
-
-
-port connectWebSocket : String -> Cmd msg
-
-
-port disconnectWebSocket : () -> Cmd msg
-
-
-port sendWebSocket : String -> Cmd msg
-
-
-port wsConnected : (() -> msg) -> Sub msg
-
-
-port wsDisconnected : (() -> msg) -> Sub msg
-
-
-port wsMessage : (String -> msg) -> Sub msg
-
-
-
--- PORTS: Cytoscape
-
-
-port initCytoscape : Encode.Value -> Cmd msg
-
-
-port destroyCytoscape : () -> Cmd msg
-
-
-port updateCytoscape : Encode.Value -> Cmd msg
-
-
-port cytoscapeNodeClicked : (String -> msg) -> Sub msg
-
-
-port cytoscapeEdgeClicked : (String -> msg) -> Sub msg
-
-
--- PORTS: Clipboard
-
-
-port copyToClipboard : String -> Cmd msg
-
-
--- PORTS: Local storage
-
-
-port saveToLocalStorage : Encode.Value -> Cmd msg
-
-
-port requestLocalStorage : String -> Cmd msg
-
-
-port localStorageReceived : (Encode.Value -> msg) -> Sub msg
-
-
-
--- PORTS: Scroll
-
-
-port onMainContentScroll : (Float -> msg) -> Sub msg
 
 
 

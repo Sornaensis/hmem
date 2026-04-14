@@ -259,35 +259,6 @@ saveFiltersCmd model =
 
 
 
--- TOAST
-
-
-addToast : ToastLevel -> String -> Model -> ( Model, Cmd Msg )
-addToast level message model =
-    let
-        tid =
-            model.nextToastId
-
-        dismissDelay =
-            case level of
-                Error ->
-                    8000
-
-                Warning ->
-                    6000
-
-                _ ->
-                    4000
-    in
-    ( { model
-        | toasts = model.toasts ++ [ Toast tid message level ]
-        , nextToastId = tid + 1
-      }
-    , ElmTask.perform (\_ -> AutoDismissToast tid) (Process.sleep dismissDelay)
-    )
-
-
-
 -- MUTATION TRACKING
 
 

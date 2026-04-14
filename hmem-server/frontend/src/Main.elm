@@ -17,6 +17,7 @@ import Markdown.Parser
 import Markdown.Renderer
 import Ports exposing (..)
 import Route exposing (handleUrlChange, handleUrlRequest, loadWorkspaceData, urlToPage)
+import Toast exposing (addToast)
 import Types exposing (..)
 import Url
 
@@ -440,11 +441,11 @@ update msg model =
             in
             ( newModel, replaceFragment newModel )
 
-        DismissToast toastId ->
-            ( { model | toasts = List.filter (\t -> t.id /= toastId) model.toasts }, Cmd.none )
+        DismissToast _ ->
+            Toast.update msg model
 
-        AutoDismissToast toastId ->
-            ( { model | toasts = List.filter (\t -> t.id /= toastId) model.toasts }, Cmd.none )
+        AutoDismissToast _ ->
+            Toast.update msg model
 
         SearchInput query ->
             let
@@ -2393,7 +2394,7 @@ view model =
             [ viewSidebar model
             , Keyed.node "div" [ class "main-content", id "main-content-scroll" ]
                 [ ( pageKey model.page, viewPage model ) ]
-            , viewToasts model.toasts
+            , Toast.view model.toasts
             , viewConnectionStatus model.wsState
             , viewCreateFormModal model
             , viewDropActionModal model
@@ -6509,40 +6510,6 @@ viewRevertConfirmModal model =
                     ]
                 ]
 
-
-
--- TOASTS
-
-
-viewToasts : List Toast -> Html Msg
-viewToasts toasts =
-    div [ class "toast-container" ]
-        (List.map viewToast toasts)
-
-
-viewToast : Toast -> Html Msg
-viewToast toast =
-    div
-        [ class ("toast toast-" ++ toastLevelClass toast.level)
-        , onClick (DismissToast toast.id)
-        ]
-        [ text toast.message ]
-
-
-toastLevelClass : ToastLevel -> String
-toastLevelClass level =
-    case level of
-        Info ->
-            "info"
-
-        Success ->
-            "success"
-
-        Warning ->
-            "warning"
-
-        Error ->
-            "error"
 
 
 viewConnectionStatus : WSState -> Html Msg

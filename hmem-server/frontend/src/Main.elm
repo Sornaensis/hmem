@@ -222,6 +222,11 @@ type alias Model =
 
     -- Scroll tracking
     , mainContentScrollY : Float
+
+    -- Entity history (audit log)
+    , entityHistory : Dict String (List Api.AuditLogEntry)
+    , entityHistoryHasMore : Dict String Bool
+    , historyExpanded : Dict String Bool
     }
 
 
@@ -417,6 +422,9 @@ init rawFlags url key =
             , groupMembers = Dict.empty
             , managingGroup = Nothing
             , mainContentScrollY = 0
+            , entityHistory = Dict.empty
+            , entityHistoryHasMore = Dict.empty
+            , historyExpanded = Dict.empty
             }
 
         model =
@@ -891,6 +899,8 @@ type Msg
     | GotEntityHistory String (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
     | RevertAuditEntry String
     | AuditRevertDone (Result Http.Error Api.RevertResult)
+    | ToggleEntityHistory String String
+    | LoadMoreHistory String String
     | NoOp
 
 
@@ -1023,6 +1033,9 @@ update msg model =
                             , expandedCards = Dict.empty
                             , graphLoaded = False
                             , mainContentScrollY = 0
+                            , entityHistory = Dict.empty
+                            , entityHistoryHasMore = Dict.empty
+                            , historyExpanded = Dict.empty
                           }
                         , Cmd.batch
                             [ loadWorkspaceData model.flags.apiUrl wsId
@@ -2283,13 +2296,22 @@ update msg model =
                 Err _ ->
                     addToast Error "Failed to load audit log" model
 
-        GotEntityHistory _ result ->
+        GotEntityHistory entityId result ->
             case result of
-                Ok _ ->
-                    ( model, Cmd.none )
+                Ok paginated ->
+                    ( { model
+                        | entityHistory = Dict.insert entityId paginated.items model.entityHistory
+                        , entityHistoryHasMore = Dict.insert entityId paginated.hasMore model.entityHistoryHasMore
+                      }
+                    , Cmd.none
+                    )
 
                 Err _ ->
-                    addToast Error "Failed to load entity history" model
+                    let
+                        ( m, cmd ) =
+                            addToast Error "Failed to load entity history" model
+                    in
+                    ( { m | entityHistory = Dict.insert entityId [] m.entityHistory }, cmd )
 
         RevertAuditEntry auditId ->
             ( model, Api.revertAuditEntry model.flags.apiUrl auditId AuditRevertDone )
@@ -2301,6 +2323,35 @@ update msg model =
 
                 Err _ ->
                     addToast Error "Failed to revert change" model
+
+        ToggleEntityHistory entityType entityId ->
+            let
+                current =
+                    Dict.get entityId model.historyExpanded |> Maybe.withDefault False
+
+                newExpanded =
+                    not current
+
+                fetchCmd =
+                    if newExpanded && not (Dict.member entityId model.entityHistory) then
+                        Api.fetchEntityHistory model.flags.apiUrl entityType entityId Nothing (GotEntityHistory entityId)
+
+                    else
+                        Cmd.none
+            in
+            ( { model | historyExpanded = Dict.insert entityId newExpanded model.historyExpanded }
+            , fetchCmd
+            )
+
+        LoadMoreHistory entityType entityId ->
+            -- Re-fetches with a larger limit (replaces full list, not append)
+            let
+                currentCount =
+                    Dict.get entityId model.entityHistory |> Maybe.map List.length |> Maybe.withDefault 0
+            in
+            ( model
+            , Api.fetchEntityHistory model.flags.apiUrl entityType entityId (Just (currentCount + 20)) (GotEntityHistory entityId)
+            )
 
         NoOp ->
             ( model, Cmd.none )
@@ -4576,6 +4627,7 @@ viewProjectNode allProjects model depth project hasSearch query =
                 , if isExpanded model project.id then
                     div [ class "card-extras" ]
                         [ viewLinkedMemories model "project" project.id linkedMems
+                        , viewEntityHistory model "project" project.id
                         ]
 
                   else
@@ -4801,6 +4853,7 @@ viewTaskCard showProject model task =
                         text ""
                     , viewTaskDependencies model task.id deps
                     , viewLinkedMemories model "task" task.id linkedMems
+                    , viewEntityHistory model "task" task.id
                     ]
 
               else
@@ -5070,6 +5123,7 @@ viewMemoryCard model memory =
                 div [ class "card-extras" ]
                     [ viewTagEditor model memory
                     , viewMemoryLinkedEntities model memory.id linkedProjects linkedTasks
+                    , viewEntityHistory model "memory" memory.id
                     ]
 
               else if not (List.isEmpty linkedProjects) || not (List.isEmpty linkedTasks) then
@@ -6084,6 +6138,213 @@ viewInlineCreateInputForParent model parentId inputType =
 
         Nothing ->
             text ""
+
+        _ ->
+            text ""
+
+
+
+-- ENTITY HISTORY
+
+
+{-| Decode any scalar JSON value to a String for display in diffs.
+Handles strings, ints, floats, bools, and nulls. Nested objects/arrays
+will cause the dict decode to fail, falling back to a generic message.
+-}
+flexibleStringDecoder : Decode.Decoder String
+flexibleStringDecoder =
+    Decode.oneOf
+        [ Decode.string
+        , Decode.map String.fromInt Decode.int
+        , Decode.map String.fromFloat Decode.float
+        , Decode.map
+            (\b ->
+                if b then
+                    "true"
+
+                else
+                    "false"
+            )
+            Decode.bool
+        , Decode.null "null"
+        ]
+
+
+viewEntityHistory : Model -> String -> String -> Html Msg
+viewEntityHistory model entityType entityId =
+    let
+        expanded =
+            Dict.get entityId model.historyExpanded |> Maybe.withDefault False
+    in
+    div [ class "entity-history" ]
+        [ button [ class "entity-history-toggle", onClick (ToggleEntityHistory entityType entityId) ]
+            [ text
+                (if expanded then
+                    "▾ History"
+
+                 else
+                    "▸ History"
+                )
+            ]
+        , if expanded then
+            case Dict.get entityId model.entityHistory of
+                Just entries ->
+                    div [ class "entity-history-timeline" ]
+                        (List.map viewHistoryEntry entries
+                            ++ (if Dict.get entityId model.entityHistoryHasMore |> Maybe.withDefault False then
+                                    [ button [ class "entity-history-load-more", onClick (LoadMoreHistory entityType entityId) ]
+                                        [ text "Load more..." ]
+                                    ]
+
+                                else
+                                    []
+                               )
+                            ++ (if List.isEmpty entries then
+                                    [ div [ class "entity-history-empty" ] [ text "No history entries" ] ]
+
+                                else
+                                    []
+                               )
+                        )
+
+                Nothing ->
+                    div [ class "entity-history-timeline" ]
+                        [ div [ class "entity-history-loading" ] [ text "Loading..." ] ]
+
+          else
+            text ""
+        ]
+
+
+viewHistoryEntry : Api.AuditLogEntry -> Html Msg
+viewHistoryEntry entry =
+    let
+        actionLabel =
+            case entry.action of
+                Api.AuditCreate ->
+                    "Created"
+
+                Api.AuditUpdate ->
+                    "Updated"
+
+                Api.AuditDelete ->
+                    "Deleted"
+
+        actionClass =
+            "history-action-" ++ Api.auditActionToString entry.action
+
+        changedFields =
+            case entry.action of
+                Api.AuditUpdate ->
+                    viewChangedFields entry.oldValues entry.newValues
+
+                Api.AuditCreate ->
+                    case entry.newValues of
+                        Just nv ->
+                            viewJsonSummary "Initial" nv
+
+                        Nothing ->
+                            text ""
+
+                Api.AuditDelete ->
+                    text ""
+    in
+    div [ class "history-entry" ]
+        [ div [ class "history-entry-header" ]
+            [ span [ class ("history-action-badge " ++ actionClass) ] [ text actionLabel ]
+            , span [ class "history-timestamp" ] [ text (formatDate entry.changedAt) ]
+            , button [ class "btn-revert", disabled True, title "Revert this change" ] [ text "↩" ]
+            ]
+        , changedFields
+        ]
+
+
+viewChangedFields : Maybe Decode.Value -> Maybe Decode.Value -> Html Msg
+viewChangedFields mOld mNew =
+    case ( mOld, mNew ) of
+        ( Just oldVal, Just newVal ) ->
+            case ( Decode.decodeValue (Decode.dict flexibleStringDecoder) oldVal, Decode.decodeValue (Decode.dict flexibleStringDecoder) newVal ) of
+                ( Ok oldDict, Ok newDict ) ->
+                    let
+                        changedKeys =
+                            Dict.merge
+                                (\k v acc -> ( k, Just v, Nothing ) :: acc)
+                                (\k ov nv acc ->
+                                    if ov /= nv then
+                                        ( k, Just ov, Just nv ) :: acc
+
+                                    else
+                                        acc
+                                )
+                                (\k v acc -> ( k, Nothing, Just v ) :: acc)
+                                oldDict
+                                newDict
+                                []
+                                |> List.reverse
+                    in
+                    if List.isEmpty changedKeys then
+                        text ""
+
+                    else
+                        div [ class "history-diff" ]
+                            (List.map
+                                (\( field, mOldV, mNewV ) ->
+                                    div [ class "history-diff-field" ]
+                                        [ span [ class "history-diff-field-name" ] [ text field ]
+                                        , case ( mOldV, mNewV ) of
+                                            ( Just ov, Just nv ) ->
+                                                span []
+                                                    [ span [ class "history-diff-old" ] [ text ov ]
+                                                    , text " → "
+                                                    , span [ class "history-diff-new" ] [ text nv ]
+                                                    ]
+
+                                            ( Nothing, Just nv ) ->
+                                                span [ class "history-diff-new" ] [ text nv ]
+
+                                            ( Just ov, Nothing ) ->
+                                                span [ class "history-diff-old" ] [ text ov ]
+
+                                            ( Nothing, Nothing ) ->
+                                                text ""
+                                        ]
+                                )
+                                changedKeys
+                            )
+
+                -- Fallback: values aren't simple string dicts, show raw
+                _ ->
+                    div [ class "history-diff" ]
+                        [ div [ class "history-diff-field" ] [ text "Fields changed" ] ]
+
+        _ ->
+            text ""
+
+
+viewJsonSummary : String -> Decode.Value -> Html Msg
+viewJsonSummary _ val =
+    case Decode.decodeValue (Decode.dict flexibleStringDecoder) val of
+        Ok dict ->
+            let
+                items =
+                    Dict.toList dict
+                        |> List.filter (\( k, _ ) -> not (List.member k [ "id", "workspace_id", "created_at", "updated_at", "deleted_at" ]))
+                        |> List.take 5
+            in
+            if List.isEmpty items then
+                text ""
+
+            else
+                div [ class "history-diff" ]
+                    (List.map
+                        (\( field, v ) ->
+                            div [ class "history-diff-field" ]
+                                [ span [ class "history-diff-field-name" ] [ text field ]
+                                , span [ class "history-diff-new" ] [ text v ]
+                                ]
+                        )
+                        items
+                    )
 
         _ ->
             text ""

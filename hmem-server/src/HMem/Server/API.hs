@@ -11,7 +11,7 @@ module HMem.Server.API
 
 import Control.Exception (throwIO, try)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON (..), ToJSON (..), genericToJSON, genericParseJSON, Value, object, (.=))
+import Data.Aeson (FromJSON (..), ToJSON (..), genericToJSON, genericParseJSON, Value(..), object, (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Aeson (fromText)
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -24,6 +24,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime, getCurrentTime)
 import Data.UUID (UUID)
+import Data.UUID qualified as UUID
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
 import GHC.Generics (Generic)
@@ -280,6 +281,7 @@ type AuditAPI =
          :> QueryParam "limit" Int
          :> QueryParam "offset" Int
          :> Get '[JSON] (PaginatedResult AuditLogEntry)
+  :<|> Capture "auditId" UUID :> "revert" :> Post '[JSON] RevertResult
   :<|> Capture "auditId" UUID :> Get '[JSON] AuditLogEntry
 
 -- Request body for group member operations
@@ -446,7 +448,7 @@ server pool tracker bc pgvec =
   :<|> activityHandlers pool
   :<|> savedViewHandlers pool bc
   :<|> searchHandler pool
-  :<|> auditHandlers pool
+  :<|> auditHandlers pool bc
 
 -- | Emit a change event to all connected WebSocket clients.
 emit :: Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
@@ -1520,9 +1522,10 @@ workspaceGroupHandlers pool bc =
 
 -- Audit log handlers -----------------------------------------------
 
-auditHandlers :: Pool Hasql.Connection -> Server AuditAPI
-auditHandlers pool =
+auditHandlers :: Pool Hasql.Connection -> Broadcast -> Server AuditAPI
+auditHandlers pool bc =
        listAuditH
+  :<|> revertAuditH
   :<|> getAuditH
   where
     listAuditH :: Maybe Text -> Maybe AuditAction -> Maybe UTCTime -> Maybe UTCTime
@@ -1547,6 +1550,144 @@ auditHandlers pool =
       case mEntry of
         Just entry -> pure entry
         Nothing    -> throwError err404
+
+    revertAuditH :: UUID -> Handler RevertResult
+    revertAuditH auditId = do
+      mEntry <- handleDBErrors $ Audit.getAuditEntry pool auditId
+      entry <- case mEntry of
+        Just e  -> pure e
+        Nothing -> throwError err404
+
+      entityId <- case UUID.fromText entry.entityId of
+        Just uid -> pure uid
+        Nothing  -> throwError $ revertError "unsupported_entity"
+                      "Cannot revert composite-key entity types"
+
+      entityVal <- case (entry.entityType, entry.action) of
+        ("memory", AuditUpdate) -> do
+          um <- parseOldValues entry
+          mMem <- handleDBErrors (Mem.updateMemory pool entityId um)
+          case mMem of
+            Just mem -> do
+              emit bc Updated ETMemory entityId (Just $ toJSON mem)
+              pure (Just $ toJSON mem)
+            Nothing -> throwError $ revertError "conflict"
+                         "Memory not found or deleted; cannot revert update"
+
+        ("memory", AuditDelete) -> do
+          ok <- handleDBErrors $ Mem.restoreMemory pool entityId
+          if ok then do
+            mMem <- handleDBErrors (Mem.getMemory pool entityId)
+            let val = fmap toJSON mMem
+            emit bc Updated ETMemory entityId val
+            pure val
+          else throwError $ revertError "conflict" "Memory not found or not deleted"
+
+        ("memory", AuditCreate) -> do
+          ok <- handleDBErrors $ Mem.deleteMemory pool entityId
+          if ok then do
+            emit bc Deleted ETMemory entityId Nothing
+            pure Nothing
+          else throwError $ revertError "conflict" "Memory not found or already deleted"
+
+        ("project", AuditUpdate) -> do
+          up <- parseOldValues entry
+          mProj <- handleDBErrors (Proj.updateProject pool entityId up)
+          case mProj of
+            Just proj -> do
+              emit bc Updated ETProject entityId (Just $ toJSON proj)
+              pure (Just $ toJSON proj)
+            Nothing -> throwError $ revertError "conflict"
+                         "Project not found or deleted; cannot revert update"
+
+        ("project", AuditDelete) -> do
+          ok <- handleDBErrors $ Proj.restoreProject pool entityId
+          if ok then do
+            mProj <- handleDBErrors (Proj.getProject pool entityId)
+            let val = fmap toJSON mProj
+            emit bc Updated ETProject entityId val
+            pure val
+          else throwError $ revertError "conflict" "Project not found or not deleted"
+
+        ("project", AuditCreate) -> do
+          ok <- handleDBErrors $ Proj.deleteProject pool entityId
+          if ok then do
+            emit bc Deleted ETProject entityId Nothing
+            pure Nothing
+          else throwError $ revertError "conflict" "Project not found or already deleted"
+
+        ("task", AuditUpdate) -> do
+          ut <- parseOldValues entry
+          mTask <- handleDBErrors (Task.updateTask pool entityId ut)
+          case mTask of
+            Just task -> do
+              emit bc Updated ETTask entityId (Just $ toJSON task)
+              pure (Just $ toJSON task)
+            Nothing -> throwError $ revertError "conflict"
+                         "Task not found or deleted; cannot revert update"
+
+        ("task", AuditDelete) -> do
+          ok <- handleDBErrors $ Task.restoreTask pool entityId
+          if ok then do
+            mTask <- handleDBErrors (Task.getTask pool entityId)
+            let val = fmap toJSON mTask
+            emit bc Updated ETTask entityId val
+            pure val
+          else throwError $ revertError "conflict" "Task not found or not deleted"
+
+        ("task", AuditCreate) -> do
+          ok <- handleDBErrors $ Task.deleteTask pool entityId
+          if ok then do
+            emit bc Deleted ETTask entityId Nothing
+            pure Nothing
+          else throwError $ revertError "conflict" "Task not found or already deleted"
+
+        ("memory_category", AuditUpdate) -> do
+          uc <- parseOldValues entry
+          mCat <- handleDBErrors (Cat.updateCategory pool entityId uc)
+          case mCat of
+            Just cat -> do
+              emit bc Updated ETCategory entityId (Just $ toJSON cat)
+              pure (Just $ toJSON cat)
+            Nothing -> throwError $ revertError "conflict"
+                         "Category not found or deleted; cannot revert update"
+
+        ("memory_category", AuditDelete) -> do
+          ok <- handleDBErrors $ Cat.restoreCategory pool entityId
+          if ok then do
+            mCat <- handleDBErrors (Cat.getCategory pool entityId)
+            let val = fmap toJSON mCat
+            emit bc Updated ETCategory entityId val
+            pure val
+          else throwError $ revertError "conflict" "Category not found or not deleted"
+
+        ("memory_category", AuditCreate) -> do
+          ok <- handleDBErrors $ Cat.deleteCategory pool entityId
+          if ok then do
+            emit bc Deleted ETCategory entityId Nothing
+            pure Nothing
+          else throwError $ revertError "conflict" "Category not found or already deleted"
+
+        (typ, _) -> throwError $ revertError "unsupported_entity"
+                      ("Entity type not supported for revert: " <> typ)
+
+      pure RevertResult { auditEntry = entry, entity = entityVal }
+
+    parseOldValues :: FromJSON a => AuditLogEntry -> Handler a
+    parseOldValues entry = case entry.oldValues of
+      Nothing -> throwError $ revertError "missing_data" "Audit entry has no old_values"
+      Just val -> case Aeson.fromJSON val of
+        Aeson.Success a -> pure a
+        Aeson.Error msg -> throwError $ revertError "parse_error"
+                       ("Failed to parse old_values: " <> T.pack msg)
+
+    revertError :: Text -> Text -> ServerError
+    revertError errType msg = err409
+      { errBody = Aeson.encode $ object
+          [ "error"   .= errType
+          , "message" .= msg
+          ]
+      }
 
 -- Activity handlers ------------------------------------------------
 

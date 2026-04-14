@@ -95,6 +95,7 @@ module HMem.Types
   , AuditAction(..)
   , AuditLogEntry(..)
   , AuditLogQuery(..)
+  , RevertResult(..)
   , auditActionToText
   , auditActionFromText
 
@@ -1466,6 +1467,16 @@ data AuditLogQuery = AuditLogQuery
 instance ToJSON AuditLogQuery where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON AuditLogQuery where
+  parseJSON  = genericParseJSON jsonOptions
+
+data RevertResult = RevertResult
+  { auditEntry :: AuditLogEntry
+  , entity     :: Maybe Value
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON RevertResult where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON RevertResult where
   parseJSON  = genericParseJSON jsonOptions
 
 ------------------------------------------------------------------------

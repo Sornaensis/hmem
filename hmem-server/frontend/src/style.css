@@ -2530,6 +2530,15 @@ a:hover {
   text-decoration: underline;
 }
 
+.audit-entity-summary.audit-entity-no-nav {
+  color: var(--text);
+  cursor: default;
+}
+
+.audit-entity-summary.audit-entity-no-nav:hover {
+  text-decoration: none;
+}
+
 .audit-timestamp {
   font-size: 0.75rem;
   color: var(--text-muted);

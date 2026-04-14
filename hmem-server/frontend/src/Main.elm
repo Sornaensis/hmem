@@ -2317,31 +2317,39 @@ update msg model =
                     orElseMaybe
                         (Maybe.andThen extractWsId auditEntry.oldValues)
                         (Maybe.andThen extractWsId auditEntry.newValues)
+
+                resolvedTarget =
+                    resolveAuditNavigationTarget auditEntry
             in
-            case mWorkspaceId of
-                Just wsId ->
-                    let
-                        focusEntry =
-                            ( auditEntry.entityType, auditEntry.entityId )
-
-                        newHistory =
-                            List.take (model.focusHistoryIndex + 1) model.focusHistory ++ [ focusEntry ]
-
-                        newIndex =
-                            List.length newHistory - 1
-                    in
-                    ( { model
-                        | selectedWorkspaceId = Just wsId
-                        , focusedEntity = Just focusEntry
-                        , breadcrumbAnchor = Just focusEntry
-                        , focusHistory = newHistory
-                        , focusHistoryIndex = newIndex
-                      }
-                    , Nav.pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment model.activeTab (Just focusEntry))
-                    )
-
+            case resolvedTarget of
                 Nothing ->
-                    addToast Warning "Cannot navigate: entity workspace unknown" model
+                    addToast Warning "Cannot navigate to this entity type" model
+
+                Just ( targetType, targetId ) ->
+                    case mWorkspaceId of
+                        Just wsId ->
+                            let
+                                focusEntry =
+                                    ( targetType, targetId )
+
+                                newHistory =
+                                    List.take (model.focusHistoryIndex + 1) model.focusHistory ++ [ focusEntry ]
+
+                                newIndex =
+                                    List.length newHistory - 1
+                            in
+                            ( { model
+                                | selectedWorkspaceId = Just wsId
+                                , focusedEntity = Just focusEntry
+                                , breadcrumbAnchor = Just focusEntry
+                                , focusHistory = newHistory
+                                , focusHistoryIndex = newIndex
+                              }
+                            , Nav.pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment model.activeTab (Just focusEntry))
+                            )
+
+                        Nothing ->
+                            addToast Warning "Cannot navigate: entity workspace unknown" model
 
         FocusBreadcrumbNav idx ->
             let
@@ -7009,6 +7017,176 @@ viewAuditLogFilters model =
         ]
 
 
+{-| Resolve the navigation target for an audit log entry.
+For primary entity types (memory, project, task, etc.), returns (entityType, entityId) directly.
+For relationship types, extracts the parent entity to navigate to.
+Returns Nothing for types that cannot be navigated (e.g. workspace_group_member).
+-}
+resolveAuditNavigationTarget : Api.AuditLogEntry -> Maybe ( String, String )
+resolveAuditNavigationTarget entry =
+    let
+        extractField field val =
+            Decode.decodeValue (Decode.field field Decode.string) val |> Result.toMaybe
+
+        fromValues field =
+            let
+                fromNew =
+                    Maybe.andThen (extractField field) entry.newValues
+
+                fromOld =
+                    Maybe.andThen (extractField field) entry.oldValues
+            in
+            case fromNew of
+                Just _ ->
+                    fromNew
+
+                Nothing ->
+                    fromOld
+    in
+    case entry.entityType of
+        "memory_link" ->
+            fromValues "source_id" |> Maybe.map (\id -> ( "memory", id ))
+
+        "memory_tag" ->
+            fromValues "memory_id" |> Maybe.map (\id -> ( "memory", id ))
+
+        "memory_category_link" ->
+            fromValues "memory_id" |> Maybe.map (\id -> ( "memory", id ))
+
+        "project_memory_link" ->
+            fromValues "project_id" |> Maybe.map (\id -> ( "project", id ))
+
+        "task_memory_link" ->
+            fromValues "task_id" |> Maybe.map (\id -> ( "task", id ))
+
+        "task_dependency" ->
+            fromValues "task_id" |> Maybe.map (\id -> ( "task", id ))
+
+        "workspace_group_member" ->
+            Nothing
+
+        _ ->
+            Just ( entry.entityType, entry.entityId )
+
+
+{-| Build a human-readable summary for an audit log entry.
+For primary entities: uses name/title/content.
+For relationship types: describes the relationship.
+-}
+auditEntitySummary : Model -> Api.AuditLogEntry -> String
+auditEntitySummary model entry =
+    let
+        decodeDict v =
+            Decode.decodeValue (Decode.dict flexibleStringDecoder) v |> Result.toMaybe
+
+        newDict =
+            Maybe.andThen decodeDict entry.newValues
+
+        oldDict =
+            Maybe.andThen decodeDict entry.oldValues
+
+        getField field =
+            case Maybe.andThen (Dict.get field) newDict of
+                Just v ->
+                    Just v
+
+                Nothing ->
+                    Maybe.andThen (Dict.get field) oldDict
+
+        short id =
+            String.left 8 id
+
+        lookupMemoryName id =
+            Dict.get id model.memories |> Maybe.map (\m -> String.left 40 m.content) |> Maybe.withDefault (short id)
+
+        lookupProjectName id =
+            Dict.get id model.projects |> Maybe.map .name |> Maybe.withDefault (short id)
+
+        lookupTaskName id =
+            Dict.get id model.tasks |> Maybe.map .title |> Maybe.withDefault (short id)
+    in
+    case entry.entityType of
+        "memory_link" ->
+            let
+                src =
+                    getField "source_id" |> Maybe.map lookupMemoryName |> Maybe.withDefault "?"
+
+                tgt =
+                    getField "target_id" |> Maybe.map lookupMemoryName |> Maybe.withDefault "?"
+
+                rel =
+                    getField "relation_type" |> Maybe.withDefault "link"
+            in
+            src ++ " → " ++ tgt ++ " (" ++ rel ++ ")"
+
+        "memory_tag" ->
+            let
+                tag =
+                    getField "tag" |> Maybe.withDefault "?"
+
+                mem =
+                    getField "memory_id" |> Maybe.map lookupMemoryName |> Maybe.withDefault "?"
+            in
+            "Tag \"" ++ tag ++ "\" on " ++ mem
+
+        "memory_category_link" ->
+            let
+                mem =
+                    getField "memory_id" |> Maybe.map lookupMemoryName |> Maybe.withDefault "?"
+
+                cat =
+                    getField "category_id" |> Maybe.map short |> Maybe.withDefault "?"
+            in
+            mem ++ " ↔ Category " ++ cat
+
+        "task_dependency" ->
+            let
+                task =
+                    getField "task_id" |> Maybe.map lookupTaskName |> Maybe.withDefault "?"
+
+                dep =
+                    getField "depends_on_id" |> Maybe.map lookupTaskName |> Maybe.withDefault "?"
+            in
+            task ++ " → depends on " ++ dep
+
+        "project_memory_link" ->
+            let
+                proj =
+                    getField "project_id" |> Maybe.map lookupProjectName |> Maybe.withDefault "?"
+
+                mem =
+                    getField "memory_id" |> Maybe.map lookupMemoryName |> Maybe.withDefault "?"
+            in
+            proj ++ " ↔ " ++ mem
+
+        "task_memory_link" ->
+            let
+                task =
+                    getField "task_id" |> Maybe.map lookupTaskName |> Maybe.withDefault "?"
+
+                mem =
+                    getField "memory_id" |> Maybe.map lookupMemoryName |> Maybe.withDefault "?"
+            in
+            task ++ " ↔ " ++ mem
+
+        _ ->
+            -- Primary entities: use name/title/content
+            getField "name"
+                |> Maybe.withDefault
+                    (getField "title"
+                        |> Maybe.withDefault
+                            (getField "content"
+                                |> Maybe.map (String.left 60)
+                                |> Maybe.withDefault (short entry.entityId)
+                            )
+                    )
+
+
+isRevertableEntityType : String -> Bool
+isRevertableEntityType entityType =
+    List.member entityType [ "memory", "project", "task", "memory_category" ]
+
+
 viewAuditLogEntry : Model -> Api.AuditLogEntry -> Html Msg
 viewAuditLogEntry model entry =
     let
@@ -7030,39 +7208,22 @@ viewAuditLogEntry model entry =
             Dict.get entry.id model.auditLogExpanded |> Maybe.withDefault False
 
         entitySummary =
-            case entry.newValues of
-                Just nv ->
-                    case Decode.decodeValue (Decode.dict flexibleStringDecoder) nv of
-                        Ok dict ->
-                            Dict.get "name" dict
-                                |> Maybe.withDefault
-                                    (Dict.get "title" dict
-                                        |> Maybe.withDefault
-                                            (Dict.get "content" dict
-                                                |> Maybe.map (String.left 60)
-                                                |> Maybe.withDefault (String.left 8 entry.entityId)
-                                            )
-                                    )
+            auditEntitySummary model entry
 
-                        _ ->
-                            String.left 8 entry.entityId
+        navigable =
+            resolveAuditNavigationTarget entry /= Nothing
 
-                Nothing ->
-                    case entry.oldValues of
-                        Just ov ->
-                            case Decode.decodeValue (Decode.dict flexibleStringDecoder) ov of
-                                Ok dict ->
-                                    Dict.get "name" dict
-                                        |> Maybe.withDefault
-                                            (Dict.get "title" dict
-                                                |> Maybe.withDefault (String.left 8 entry.entityId)
-                                            )
+        summaryAttrs =
+            if navigable then
+                [ class "audit-entity-summary"
+                , stopPropagationOn "click" (Decode.succeed ( NavigateToAuditEntity entry, True ))
+                , title ("Go to " ++ entry.entityType)
+                ]
 
-                                _ ->
-                                    String.left 8 entry.entityId
-
-                        Nothing ->
-                            String.left 8 entry.entityId
+            else
+                [ class "audit-entity-summary audit-entity-no-nav"
+                , title entry.entityType
+                ]
     in
     div [ class "audit-entry" ]
         [ div [ class "audit-entry-row", onClick (ToggleAuditExpand entry.id) ]
@@ -7077,7 +7238,7 @@ viewAuditLogEntry model entry =
                 ]
             , span [ class ("audit-action-badge " ++ actionClass) ] [ text actionLabel ]
             , span [ class "audit-entity-type" ] [ text entry.entityType ]
-            , span [ class "audit-entity-summary", stopPropagationOn "click" (Decode.succeed ( NavigateToAuditEntity entry, True )), title ("Go to " ++ entry.entityType) ]
+            , span summaryAttrs
                 [ text entitySummary ]
             , span [ class "audit-timestamp" ] [ text (formatDate entry.changedAt) ]
             ]
@@ -7105,7 +7266,11 @@ viewAuditLogEntry model entry =
                 , div [ class "audit-entry-meta" ]
                     [ span [ class "audit-entry-id" ] [ text ("Entry: " ++ String.left 8 entry.id) ]
                     , span [ class "audit-entity-id" ] [ text ("Entity: " ++ String.left 8 entry.entityId) ]
-                    , button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩ Revert" ]
+                    , if isRevertableEntityType entry.entityType then
+                        button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩ Revert" ]
+
+                      else
+                        text ""
                     ]
                 ]
 

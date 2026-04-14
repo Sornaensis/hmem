@@ -1366,8 +1366,8 @@ fetchAuditLog apiUrl filters toMsg =
                 [ Maybe.map (\v -> "entity_type=" ++ v) filters.entityType
                 , Maybe.map (\v -> "entity_id=" ++ v) filters.entityId
                 , Maybe.map (\v -> "action=" ++ v) filters.action
-                , Maybe.map (\v -> "since=" ++ v) filters.since
-                , Maybe.map (\v -> "until=" ++ v) filters.until
+                , Maybe.map (\v -> "since=" ++ v ++ "T00:00:00Z") filters.since
+                , Maybe.map (\v -> "until=" ++ v ++ "T23:59:59Z") filters.until
                 , Maybe.map (\v -> "limit=" ++ String.fromInt v) filters.limit
                 , Maybe.map (\v -> "offset=" ++ String.fromInt v) filters.offset
                 ]

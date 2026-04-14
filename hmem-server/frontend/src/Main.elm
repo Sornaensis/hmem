@@ -227,6 +227,23 @@ type alias Model =
     , entityHistory : Dict String (List Api.AuditLogEntry)
     , entityHistoryHasMore : Dict String Bool
     , historyExpanded : Dict String Bool
+
+    -- Audit log browser
+    , auditLog : List Api.AuditLogEntry
+    , auditLogHasMore : Bool
+    , auditLogFilters : AuditLogFilters
+    , auditLogExpanded : Dict String Bool
+    }
+
+
+type alias AuditLogFilters =
+    { entityType : Maybe String
+    , entityId : Maybe String
+    , action : Maybe String
+    , since : Maybe String
+    , until : Maybe String
+    , limit : Maybe Int
+    , offset : Maybe Int
     }
 
 
@@ -260,6 +277,7 @@ type Page
     = HomePage
     | WorkspacePage String
     | MemoryGraphPage
+    | AuditLogPage
     | NotFound
 
 
@@ -425,6 +443,10 @@ init rawFlags url key =
             , entityHistory = Dict.empty
             , entityHistoryHasMore = Dict.empty
             , historyExpanded = Dict.empty
+            , auditLog = []
+            , auditLogHasMore = False
+            , auditLogFilters = { entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
+            , auditLogExpanded = Dict.empty
             }
 
         model =
@@ -486,6 +508,7 @@ type Route
     = HomeRoute
     | WorkspaceRoute String
     | MemoryGraphRoute
+    | AuditLogRoute
 
 
 routeParser : Parser (Route -> a) a
@@ -494,6 +517,7 @@ routeParser =
         [ Parser.map HomeRoute Parser.top
         , Parser.map WorkspaceRoute (Parser.s "workspace" </> Parser.string)
         , Parser.map MemoryGraphRoute (Parser.s "memory-graph")
+        , Parser.map AuditLogRoute (Parser.s "audit")
         ]
 
 
@@ -508,6 +532,9 @@ urlToPage url =
 
         Just MemoryGraphRoute ->
             MemoryGraphPage
+
+        Just AuditLogRoute ->
+            AuditLogPage
 
         Nothing ->
             NotFound
@@ -878,6 +905,7 @@ type Msg
       -- Focus mode
     | FocusEntity String String
     | FocusEntityKeepForward String String
+    | NavigateToAuditEntity Api.AuditLogEntry
     | FocusBreadcrumbNav Int
     | ClearFocus
     | GlobalKeyDown Int
@@ -901,6 +929,10 @@ type Msg
     | AuditRevertDone (Result Http.Error Api.RevertResult)
     | ToggleEntityHistory String String
     | LoadMoreHistory String String
+    | SetAuditFilter String String
+    | ApplyAuditFilters
+    | LoadMoreAuditLog
+    | ToggleAuditExpand String
     | NoOp
 
 
@@ -1052,6 +1084,32 @@ update msg model =
 
                         Nothing ->
                             Cmd.none
+                    )
+
+                AuditLogPage ->
+                    let
+                        destroyCmd =
+                            if model.page == MemoryGraphPage then
+                                destroyCytoscape ()
+
+                            else
+                                Cmd.none
+
+                        emptyFilters =
+                            { entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
+                    in
+                    ( { model
+                        | url = url
+                        , page = page
+                        , auditLog = []
+                        , auditLogHasMore = False
+                        , auditLogFilters = emptyFilters
+                        , auditLogExpanded = Dict.empty
+                      }
+                    , Cmd.batch
+                        [ Api.fetchAuditLog model.flags.apiUrl emptyFilters GotAuditLog
+                        , destroyCmd
+                        ]
                     )
 
                 _ ->
@@ -2230,6 +2288,50 @@ update msg model =
             in
             ( newModel, replaceFragment newModel )
 
+        NavigateToAuditEntity auditEntry ->
+            let
+                -- Extract workspace_id from the entry's values
+                extractWsId val =
+                    Decode.decodeValue (Decode.field "workspace_id" Decode.string) val |> Result.toMaybe
+
+                orElseMaybe fallback primary =
+                    case primary of
+                        Just _ ->
+                            primary
+
+                        Nothing ->
+                            fallback
+
+                mWorkspaceId =
+                    orElseMaybe
+                        (Maybe.andThen extractWsId auditEntry.oldValues)
+                        (Maybe.andThen extractWsId auditEntry.newValues)
+            in
+            case mWorkspaceId of
+                Just wsId ->
+                    let
+                        focusEntry =
+                            ( auditEntry.entityType, auditEntry.entityId )
+
+                        newHistory =
+                            List.take (model.focusHistoryIndex + 1) model.focusHistory ++ [ focusEntry ]
+
+                        newIndex =
+                            List.length newHistory - 1
+                    in
+                    ( { model
+                        | selectedWorkspaceId = Just wsId
+                        , focusedEntity = Just focusEntry
+                        , breadcrumbAnchor = Just focusEntry
+                        , focusHistory = newHistory
+                        , focusHistoryIndex = newIndex
+                      }
+                    , Nav.pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment model.activeTab (Just focusEntry))
+                    )
+
+                Nothing ->
+                    addToast Warning "Cannot navigate: entity workspace unknown" model
+
         FocusBreadcrumbNav idx ->
             let
                 entry =
@@ -2290,8 +2392,13 @@ update msg model =
 
         GotAuditLog result ->
             case result of
-                Ok _ ->
-                    ( model, Cmd.none )
+                Ok paginated ->
+                    ( { model
+                        | auditLog = model.auditLog ++ paginated.items
+                        , auditLogHasMore = paginated.hasMore
+                      }
+                    , Cmd.none
+                    )
 
                 Err _ ->
                     addToast Error "Failed to load audit log" model
@@ -2351,6 +2458,63 @@ update msg model =
             in
             ( model
             , Api.fetchEntityHistory model.flags.apiUrl entityType entityId (Just (currentCount + 20)) (GotEntityHistory entityId)
+            )
+
+        SetAuditFilter filterName filterValue ->
+            let
+                filters =
+                    model.auditLogFilters
+
+                updated =
+                    case filterName of
+                        "entityType" ->
+                            { filters | entityType = if filterValue == "" then Nothing else Just filterValue }
+
+                        "action" ->
+                            { filters | action = if filterValue == "" then Nothing else Just filterValue }
+
+                        "since" ->
+                            { filters | since = if filterValue == "" then Nothing else Just filterValue }
+
+                        "until" ->
+                            { filters | until = if filterValue == "" then Nothing else Just filterValue }
+
+                        _ ->
+                            filters
+            in
+            ( { model | auditLogFilters = updated }, Cmd.none )
+
+        ApplyAuditFilters ->
+            let
+                oldFilters =
+                    model.auditLogFilters
+
+                filters =
+                    { oldFilters | offset = Nothing }
+            in
+            ( { model | auditLog = [], auditLogHasMore = False, auditLogFilters = filters }
+            , Api.fetchAuditLog model.flags.apiUrl filters GotAuditLog
+            )
+
+        LoadMoreAuditLog ->
+            let
+                oldFilters =
+                    model.auditLogFilters
+
+                filters =
+                    { oldFilters | offset = Just (List.length model.auditLog) }
+            in
+            ( { model | auditLogFilters = filters }
+            , Api.fetchAuditLog model.flags.apiUrl filters GotAuditLog
+            )
+
+        ToggleAuditExpand entryId ->
+            let
+                current =
+                    Dict.get entryId model.auditLogExpanded |> Maybe.withDefault False
+            in
+            ( { model | auditLogExpanded = Dict.insert entryId (not current) model.auditLogExpanded }
+            , Cmd.none
             )
 
         NoOp ->
@@ -3280,6 +3444,12 @@ viewSidebar model =
                         , text "Knowledge Graph"
                         ]
                     ]
+                , li []
+                    [ a [ href "/audit", class "sidebar-link" ]
+                        [ span [ class "sidebar-icon" ] [ text "📋" ]
+                        , text "Audit Log"
+                        ]
+                    ]
                 ]
             ]
         ]
@@ -3377,6 +3547,9 @@ pageKey page =
         MemoryGraphPage ->
             "graph"
 
+        AuditLogPage ->
+            "audit"
+
         NotFound ->
             "notfound"
 
@@ -3392,6 +3565,9 @@ viewPage model =
 
         MemoryGraphPage ->
             viewGraphPage model
+
+        AuditLogPage ->
+            viewAuditLogPage model
 
         NotFound ->
             div [ class "page" ]
@@ -6691,6 +6867,177 @@ viewGraphWorkspaceSelector model =
                     )
                     wsList
             )
+
+
+
+-- AUDIT LOG BROWSER
+
+
+viewAuditLogPage : Model -> Html Msg
+viewAuditLogPage model =
+    div [ class "page audit-log-view" ]
+        [ div [ class "page-header" ]
+            [ h2 [] [ text "📋 Audit Log" ] ]
+        , viewAuditLogFilters model
+        , if List.isEmpty model.auditLog then
+            div [ class "empty-state" ] [ text "No audit log entries found." ]
+
+          else
+            div [ class "audit-log-list" ]
+                (List.map (viewAuditLogEntry model) model.auditLog
+                    ++ (if model.auditLogHasMore then
+                            [ button [ class "audit-log-load-more", onClick LoadMoreAuditLog ]
+                                [ text "Load more..." ]
+                            ]
+
+                        else
+                            []
+                       )
+                )
+        ]
+
+
+viewAuditLogFilters : Model -> Html Msg
+viewAuditLogFilters model =
+    let
+        filters =
+            model.auditLogFilters
+    in
+    div [ class "audit-log-filters" ]
+        [ div [ class "audit-filter-group" ]
+            [ label [] [ text "Entity type" ]
+            , select [ onInput (SetAuditFilter "entityType") ]
+                [ option [ value "", selected (filters.entityType == Nothing) ] [ text "All" ]
+                , option [ value "workspace", selected (filters.entityType == Just "workspace") ] [ text "Workspace" ]
+                , option [ value "project", selected (filters.entityType == Just "project") ] [ text "Project" ]
+                , option [ value "task", selected (filters.entityType == Just "task") ] [ text "Task" ]
+                , option [ value "memory", selected (filters.entityType == Just "memory") ] [ text "Memory" ]
+                , option [ value "category", selected (filters.entityType == Just "category") ] [ text "Category" ]
+                ]
+            ]
+        , div [ class "audit-filter-group" ]
+            [ label [] [ text "Action" ]
+            , select [ onInput (SetAuditFilter "action") ]
+                [ option [ value "", selected (filters.action == Nothing) ] [ text "All" ]
+                , option [ value "create", selected (filters.action == Just "create") ] [ text "Create" ]
+                , option [ value "update", selected (filters.action == Just "update") ] [ text "Update" ]
+                , option [ value "delete", selected (filters.action == Just "delete") ] [ text "Delete" ]
+                ]
+            ]
+        , div [ class "audit-filter-group" ]
+            [ label [] [ text "Since" ]
+            , input [ type_ "date", value (Maybe.withDefault "" filters.since), onInput (SetAuditFilter "since") ] []
+            ]
+        , div [ class "audit-filter-group" ]
+            [ label [] [ text "Until" ]
+            , input [ type_ "date", value (Maybe.withDefault "" filters.until), onInput (SetAuditFilter "until") ] []
+            ]
+        , button [ class "btn btn-primary", onClick ApplyAuditFilters ] [ text "Apply" ]
+        ]
+
+
+viewAuditLogEntry : Model -> Api.AuditLogEntry -> Html Msg
+viewAuditLogEntry model entry =
+    let
+        actionLabel =
+            case entry.action of
+                Api.AuditCreate ->
+                    "Created"
+
+                Api.AuditUpdate ->
+                    "Updated"
+
+                Api.AuditDelete ->
+                    "Deleted"
+
+        actionClass =
+            "audit-action-" ++ Api.auditActionToString entry.action
+
+        expanded =
+            Dict.get entry.id model.auditLogExpanded |> Maybe.withDefault False
+
+        entitySummary =
+            case entry.newValues of
+                Just nv ->
+                    case Decode.decodeValue (Decode.dict flexibleStringDecoder) nv of
+                        Ok dict ->
+                            Dict.get "name" dict
+                                |> Maybe.withDefault
+                                    (Dict.get "title" dict
+                                        |> Maybe.withDefault
+                                            (Dict.get "content" dict
+                                                |> Maybe.map (String.left 60)
+                                                |> Maybe.withDefault (String.left 8 entry.entityId)
+                                            )
+                                    )
+
+                        _ ->
+                            String.left 8 entry.entityId
+
+                Nothing ->
+                    case entry.oldValues of
+                        Just ov ->
+                            case Decode.decodeValue (Decode.dict flexibleStringDecoder) ov of
+                                Ok dict ->
+                                    Dict.get "name" dict
+                                        |> Maybe.withDefault
+                                            (Dict.get "title" dict
+                                                |> Maybe.withDefault (String.left 8 entry.entityId)
+                                            )
+
+                                _ ->
+                                    String.left 8 entry.entityId
+
+                        Nothing ->
+                            String.left 8 entry.entityId
+    in
+    div [ class "audit-entry" ]
+        [ div [ class "audit-entry-row", onClick (ToggleAuditExpand entry.id) ]
+            [ span [ class "audit-expand-icon" ]
+                [ text
+                    (if expanded then
+                        "▾"
+
+                     else
+                        "▸"
+                    )
+                ]
+            , span [ class ("audit-action-badge " ++ actionClass) ] [ text actionLabel ]
+            , span [ class "audit-entity-type" ] [ text entry.entityType ]
+            , span [ class "audit-entity-summary", stopPropagationOn "click" (Decode.succeed ( NavigateToAuditEntity entry, True )), title ("Go to " ++ entry.entityType) ]
+                [ text entitySummary ]
+            , span [ class "audit-timestamp" ] [ text (formatDate entry.changedAt) ]
+            ]
+        , if expanded then
+            div [ class "audit-entry-detail" ]
+                [ case entry.action of
+                    Api.AuditUpdate ->
+                        viewChangedFields entry.oldValues entry.newValues
+
+                    Api.AuditCreate ->
+                        case entry.newValues of
+                            Just nv ->
+                                viewJsonSummary "Initial" nv
+
+                            Nothing ->
+                                text ""
+
+                    Api.AuditDelete ->
+                        case entry.oldValues of
+                            Just ov ->
+                                viewJsonSummary "Deleted" ov
+
+                            Nothing ->
+                                text ""
+                , div [ class "audit-entry-meta" ]
+                    [ span [ class "audit-entry-id" ] [ text ("Entry: " ++ String.left 8 entry.id) ]
+                    , span [ class "audit-entity-id" ] [ text ("Entity: " ++ String.left 8 entry.entityId) ]
+                    ]
+                ]
+
+          else
+            text ""
+        ]
 
 
 

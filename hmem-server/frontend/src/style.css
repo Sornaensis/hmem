@@ -2543,3 +2543,13 @@ a:hover {
   color: var(--accent);
   border-color: var(--accent);
 }
+
+.revert-confirm-modal {
+  max-width: 28rem;
+}
+
+.revert-confirm-desc {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  margin: 0.5rem 0 1rem;
+}

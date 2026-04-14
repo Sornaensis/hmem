@@ -233,6 +233,10 @@ type alias Model =
     , auditLogHasMore : Bool
     , auditLogFilters : AuditLogFilters
     , auditLogExpanded : Dict String Bool
+
+    -- Revert confirmation
+    , revertConfirmation : Maybe Api.AuditLogEntry
+    , revertInFlight : Bool
     }
 
 
@@ -447,6 +451,8 @@ init rawFlags url key =
             , auditLogHasMore = False
             , auditLogFilters = { entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
             , auditLogExpanded = Dict.empty
+            , revertConfirmation = Nothing
+            , revertInFlight = False
             }
 
         model =
@@ -925,14 +931,17 @@ type Msg
       -- Audit log
     | GotAuditLog (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
     | GotEntityHistory String (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
-    | RevertAuditEntry String
-    | AuditRevertDone (Result Http.Error Api.RevertResult)
     | ToggleEntityHistory String String
     | LoadMoreHistory String String
     | SetAuditFilter String String
     | ApplyAuditFilters
     | LoadMoreAuditLog
     | ToggleAuditExpand String
+      -- Revert
+    | ConfirmRevert Api.AuditLogEntry
+    | PerformRevert
+    | CancelRevert
+    | GotRevertResult String String (Result Http.Error Api.RevertResult)
     | NoOp
 
 
@@ -1105,6 +1114,8 @@ update msg model =
                         , auditLogHasMore = False
                         , auditLogFilters = emptyFilters
                         , auditLogExpanded = Dict.empty
+                        , revertConfirmation = Nothing
+                        , revertInFlight = False
                       }
                     , Cmd.batch
                         [ Api.fetchAuditLog model.flags.apiUrl emptyFilters GotAuditLog
@@ -2420,17 +2431,6 @@ update msg model =
                     in
                     ( { m | entityHistory = Dict.insert entityId [] m.entityHistory }, cmd )
 
-        RevertAuditEntry auditId ->
-            ( model, Api.revertAuditEntry model.flags.apiUrl auditId AuditRevertDone )
-
-        AuditRevertDone result ->
-            case result of
-                Ok _ ->
-                    addToast Success "Change reverted successfully" model
-
-                Err _ ->
-                    addToast Error "Failed to revert change" model
-
         ToggleEntityHistory entityType entityId ->
             let
                 current =
@@ -2516,6 +2516,78 @@ update msg model =
             ( { model | auditLogExpanded = Dict.insert entryId (not current) model.auditLogExpanded }
             , Cmd.none
             )
+
+        ConfirmRevert entry ->
+            ( { model | revertConfirmation = Just entry }, Cmd.none )
+
+        CancelRevert ->
+            ( { model | revertConfirmation = Nothing }, Cmd.none )
+
+        PerformRevert ->
+            case model.revertConfirmation of
+                Just entry ->
+                    ( { model | revertInFlight = True }
+                    , Api.revertAuditEntry model.flags.apiUrl entry.id (GotRevertResult entry.entityType entry.entityId)
+                    )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        GotRevertResult entityType entityId result ->
+            case result of
+                Ok _ ->
+                    let
+                        -- Refresh the entity history for this entity
+                        refreshHistoryCmd =
+                            Api.fetchEntityHistory model.flags.apiUrl entityType entityId Nothing (GotEntityHistory entityId)
+
+                        -- Re-fetch audit log if on audit page
+                        refreshAuditCmd =
+                            case model.page of
+                                AuditLogPage ->
+                                    let
+                                        oldFilters =
+                                            model.auditLogFilters
+
+                                        filters =
+                                            { oldFilters | offset = Nothing }
+                                    in
+                                    Api.fetchAuditLog model.flags.apiUrl filters GotAuditLog
+
+                                _ ->
+                                    Cmd.none
+
+                        clearAuditLog =
+                            case model.page of
+                                AuditLogPage ->
+                                    True
+
+                                _ ->
+                                    False
+
+                        ( toastModel, toastCmd ) =
+                            addToast Success "Change reverted successfully"
+                                { model
+                                    | revertConfirmation = Nothing
+                                    , revertInFlight = False
+                                    , auditLog =
+                                        if clearAuditLog then
+                                            []
+
+                                        else
+                                            model.auditLog
+                                }
+                    in
+                    ( toastModel
+                    , Cmd.batch [ toastCmd, refreshHistoryCmd, refreshAuditCmd ]
+                    )
+
+                Err _ ->
+                    let
+                        ( toastModel, toastCmd ) =
+                            addToast Error "Failed to revert change" { model | revertConfirmation = Nothing, revertInFlight = False }
+                    in
+                    ( toastModel, toastCmd )
 
         NoOp ->
             ( model, Cmd.none )
@@ -3380,6 +3452,7 @@ view model =
             , viewCreateFormModal model
             , viewDropActionModal model
             , viewDeleteConfirmModal model
+            , viewRevertConfirmModal model
             ]
         ]
     }
@@ -6429,7 +6502,7 @@ viewHistoryEntry entry =
         [ div [ class "history-entry-header" ]
             [ span [ class ("history-action-badge " ++ actionClass) ] [ text actionLabel ]
             , span [ class "history-timestamp" ] [ text (formatDate entry.changedAt) ]
-            , button [ class "btn-revert", disabled True, title "Revert this change" ] [ text "↩" ]
+            , button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩" ]
             ]
         , changedFields
         ]
@@ -7032,6 +7105,7 @@ viewAuditLogEntry model entry =
                 , div [ class "audit-entry-meta" ]
                     [ span [ class "audit-entry-id" ] [ text ("Entry: " ++ String.left 8 entry.id) ]
                     , span [ class "audit-entity-id" ] [ text ("Entity: " ++ String.left 8 entry.entityId) ]
+                    , button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩ Revert" ]
                     ]
                 ]
 
@@ -7291,6 +7365,90 @@ viewDeleteConfirmModal model =
                     , div [ class "modal-actions" ]
                         [ button [ class "btn btn-danger", onClick PerformDelete ] [ text "Delete" ]
                         , button [ class "btn btn-secondary", onClick CancelDelete ] [ text "Cancel" ]
+                        ]
+                    ]
+                ]
+
+
+
+viewRevertConfirmModal : Model -> Html Msg
+viewRevertConfirmModal model =
+    case model.revertConfirmation of
+        Nothing ->
+            text ""
+
+        Just entry ->
+            let
+                ( title, description ) =
+                    case entry.action of
+                        Api.AuditCreate ->
+                            ( "Delete this " ++ entry.entityType ++ "?"
+                            , "This will undo the creation by deleting the " ++ entry.entityType ++ "."
+                            )
+
+                        Api.AuditDelete ->
+                            ( "Restore this " ++ entry.entityType ++ "?"
+                            , "This will restore the previously deleted " ++ entry.entityType ++ "."
+                            )
+
+                        Api.AuditUpdate ->
+                            let
+                                fieldList =
+                                    case ( entry.oldValues, entry.newValues ) of
+                                        ( Just oldVal, Just newVal ) ->
+                                            case ( Decode.decodeValue (Decode.dict flexibleStringDecoder) oldVal, Decode.decodeValue (Decode.dict flexibleStringDecoder) newVal ) of
+                                                ( Ok oldDict, Ok newDict ) ->
+                                                    Dict.merge
+                                                        (\k _ acc -> k :: acc)
+                                                        (\k ov nv acc ->
+                                                            if ov /= nv then
+                                                                k :: acc
+
+                                                            else
+                                                                acc
+                                                        )
+                                                        (\k _ acc -> k :: acc)
+                                                        oldDict
+                                                        newDict
+                                                        []
+                                                        |> List.reverse
+
+                                                _ ->
+                                                    []
+
+                                        _ ->
+                                            []
+
+                                fieldStr =
+                                    if List.isEmpty fieldList then
+                                        "fields"
+
+                                    else
+                                        String.join ", " fieldList
+                            in
+                            ( "Revert this change?"
+                            , "This will restore " ++ fieldStr ++ " to their previous values."
+                            )
+            in
+            div [ class "modal-overlay", onClick CancelRevert ]
+                [ div [ class "modal revert-confirm-modal", stopPropagationOn "click" (Decode.succeed ( NoOp, True )) ]
+                    [ h3 [ class "modal-title" ] [ text title ]
+                    , p [ class "revert-confirm-desc" ] [ text description ]
+                    , div [ class "modal-actions" ]
+                        [ button
+                            [ class "btn btn-primary"
+                            , onClick PerformRevert
+                            , disabled model.revertInFlight
+                            ]
+                            [ text
+                                (if model.revertInFlight then
+                                    "Reverting..."
+
+                                 else
+                                    "Revert"
+                                )
+                            ]
+                        , button [ class "btn btn-secondary", onClick CancelRevert ] [ text "Cancel" ]
                         ]
                     ]
                 ]

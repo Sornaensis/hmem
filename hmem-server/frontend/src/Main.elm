@@ -7,6 +7,7 @@ import Browser.Navigation as Nav
 import Dict
 import Feature.AuditLog
 import Feature.Focus exposing (buildProjectBreadcrumb, buildTaskBreadcrumb)
+import Feature.Graph
 import Feature.Groups
 import Feature.Search
 import Helpers exposing (..)
@@ -14,7 +15,6 @@ import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Html.Keyed as Keyed
-import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Markdown.Parser
@@ -220,10 +220,10 @@ update msg model =
 
         -- Cytoscape
         CytoscapeNodeClicked _ ->
-            ( model, Cmd.none )
+            Feature.Graph.update msg model
 
         CytoscapeEdgeClicked _ ->
-            ( model, Cmd.none )
+            Feature.Graph.update msg model
 
         -- HTTP responses
         GotWorkspaces result ->
@@ -278,35 +278,8 @@ update msg model =
                 Err _ ->
                     ( model, Cmd.none )
 
-        GotVisualization result ->
-            case result of
-                Ok viz ->
-                    let
-                        newModel =
-                            { model | graphVisualization = Just viz, graphLoaded = True }
-                    in
-                    ( newModel, initCytoscapeGraph newModel )
-
-                Err err ->
-                    let
-                        errorMsg =
-                            case err of
-                                Http.BadBody body ->
-                                    "Decode error: " ++ body
-
-                                Http.BadStatus code ->
-                                    "HTTP " ++ String.fromInt code
-
-                                Http.BadUrl u ->
-                                    "Bad URL: " ++ u
-
-                                Http.Timeout ->
-                                    "Request timed out"
-
-                                Http.NetworkError ->
-                                    "Network error"
-                    in
-                    addToast Error ("Graph load failed: " ++ errorMsg) model
+        GotVisualization _ ->
+            Feature.Graph.update msg model
 
         -- Mutation responses
         MutationDone entityType result ->
@@ -795,14 +768,8 @@ update msg model =
         LocalStorageLoaded json ->
             ( applyStoredFilters json model, Cmd.none )
 
-        LoadGraphForWorkspace wsId ->
-            ( { model
-                | selectedWorkspaceId = Just wsId
-                , graphLoaded = False
-                , graphVisualization = Nothing
-              }
-            , Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
-            )
+        LoadGraphForWorkspace _ ->
+            Feature.Graph.update msg model
 
         ExpandAndEdit cardId entityType entityId field currentValue ->
             let
@@ -1821,147 +1788,6 @@ viewProjectsWithZones model renderProject parentId projects =
 
 
 
--- CYTOSCAPE GRAPH
-
-
-initCytoscapeGraph : Model -> Cmd Msg
-initCytoscapeGraph model =
-    case model.graphVisualization of
-        Nothing ->
-            Cmd.none
-
-        Just viz ->
-            let
-                projectNodes =
-                    viz.projects
-                        |> List.map
-                            (\p ->
-                                Encode.object
-                                    [ ( "data"
-                                      , Encode.object
-                                            [ ( "id", Encode.string p.id )
-                                            , ( "label", Encode.string (truncate 40 p.name) )
-                                            ]
-                                      )
-                                    , ( "classes", Encode.string "project" )
-                                    ]
-                            )
-
-                taskNodes =
-                    viz.tasks
-                        |> List.map
-                            (\t ->
-                                Encode.object
-                                    [ ( "data"
-                                      , Encode.object
-                                            [ ( "id", Encode.string t.id )
-                                            , ( "label", Encode.string (truncate 40 t.title) )
-                                            ]
-                                      )
-                                    , ( "classes", Encode.string "task" )
-                                    ]
-                            )
-
-                memNodes =
-                    viz.memories
-                        |> List.map
-                            (\m ->
-                                Encode.object
-                                    [ ( "data"
-                                      , Encode.object
-                                            [ ( "id", Encode.string m.id )
-                                            , ( "label", Encode.string (truncate 40 m.summary) )
-                                            ]
-                                      )
-                                    , ( "classes", Encode.string "memory" )
-                                    ]
-                            )
-
-                memoryLinkEdges =
-                    viz.memoryLinks
-                        |> List.map
-                            (\link ->
-                                Encode.object
-                                    [ ( "data"
-                                      , Encode.object
-                                            [ ( "id", Encode.string ("ml-" ++ link.sourceId ++ "-" ++ link.targetId) )
-                                            , ( "source", Encode.string link.sourceId )
-                                            , ( "target", Encode.string link.targetId )
-                                            , ( "label", Encode.string link.relationType )
-                                            ]
-                                      )
-                                    ]
-                            )
-
-                projectMemoryEdges =
-                    viz.projectMemoryLinks
-                        |> List.map
-                            (\link ->
-                                Encode.object
-                                    [ ( "data"
-                                      , Encode.object
-                                            [ ( "id", Encode.string ("pm-" ++ link.projectId ++ "-" ++ link.memoryId) )
-                                            , ( "source", Encode.string link.projectId )
-                                            , ( "target", Encode.string link.memoryId )
-                                            ]
-                                      )
-                                    , ( "classes", Encode.string "entity-memory" )
-                                    ]
-                            )
-
-                taskMemoryEdges =
-                    viz.taskMemoryLinks
-                        |> List.map
-                            (\link ->
-                                Encode.object
-                                    [ ( "data"
-                                      , Encode.object
-                                            [ ( "id", Encode.string ("tm-" ++ link.taskId ++ "-" ++ link.memoryId) )
-                                            , ( "source", Encode.string link.taskId )
-                                            , ( "target", Encode.string link.memoryId )
-                                            ]
-                                      )
-                                    , ( "classes", Encode.string "entity-memory" )
-                                    ]
-                            )
-
-                taskDependencyEdges =
-                    viz.taskDependencies
-                        |> List.map
-                            (\dep ->
-                                Encode.object
-                                    [ ( "data"
-                                      , Encode.object
-                                            [ ( "id", Encode.string ("td-" ++ dep.taskId ++ "-" ++ dep.dependsOnId) )
-                                            , ( "source", Encode.string dep.taskId )
-                                            , ( "target", Encode.string dep.dependsOnId )
-                                            ]
-                                      )
-                                    , ( "classes", Encode.string "dependency" )
-                                    ]
-                            )
-
-                allElements =
-                    projectNodes ++ taskNodes ++ memNodes ++ memoryLinkEdges ++ projectMemoryEdges ++ taskMemoryEdges ++ taskDependencyEdges
-
-                positionsKey =
-                    case model.selectedWorkspaceId of
-                        Just wsId ->
-                            graphPositionsKey wsId
-
-                        Nothing ->
-                            ""
-            in
-            initCytoscape
-                (Encode.object
-                    [ ( "containerId", Encode.string "cytoscape-container" )
-                    , ( "elements", Encode.list identity allElements )
-                    , ( "positionsKey", Encode.string positionsKey )
-                    ]
-                )
-
-
-
 -- SUBSCRIPTIONS
 
 
@@ -2031,7 +1857,7 @@ viewPage model =
             viewWorkspacePage wsId model
 
         MemoryGraphPage ->
-            viewGraphPage model
+            Feature.Graph.viewGraphPage model
 
         AuditLogPage ->
             Feature.AuditLog.viewAuditLogPage model
@@ -4252,68 +4078,6 @@ taskTreePassesFilters task allTasks taskFilter =
 
 
 
--- GRAPH PAGE
-
-
-viewGraphPage : Model -> Html Msg
-viewGraphPage model =
-    div [ class "page" ]
-        [ div [ class "page-header" ]
-            [ h2 [] [ text "Knowledge Graph" ]
-            , viewGraphWorkspaceSelector model
-            ]
-        , case model.graphVisualization of
-            Nothing ->
-                case model.selectedWorkspaceId of
-                    Nothing ->
-                        div [ class "empty-state" ] [ text "Select a workspace to view its knowledge graph." ]
-
-                    Just _ ->
-                        if model.graphLoaded then
-                            div [ class "empty-state" ] [ text "No data found for this workspace." ]
-
-                        else
-                            div [ class "loading-indicator" ] [ text "Loading graph..." ]
-
-            Just _ ->
-                div [ id "cytoscape-container", style "width" "100%", style "height" "calc(100vh - 8rem)" ] []
-        ]
-
-
-viewGraphWorkspaceSelector : Model -> Html Msg
-viewGraphWorkspaceSelector model =
-    let
-        wsList =
-            Dict.values model.workspaces |> List.sortBy .name
-    in
-    if List.isEmpty wsList then
-        text ""
-
-    else
-        select
-            [ class "form-input"
-            , style "width" "auto"
-            , style "max-width" "250px"
-            , onInput
-                (\s ->
-                    if String.isEmpty s then
-                        NoOp
-
-                    else
-                        LoadGraphForWorkspace s
-                )
-            ]
-            (option [ value "", selected (model.selectedWorkspaceId == Nothing) ] [ text "Select workspace..." ]
-                :: List.map
-                    (\ws ->
-                        option [ value ws.id, selected (model.selectedWorkspaceId == Just ws.id) ]
-                            [ text ws.name ]
-                    )
-                    wsList
-            )
-
-
-
 -- CREATE FORM MODAL
 
 
@@ -4483,9 +4247,9 @@ viewDropActionModal model =
                     [ h3 [ class "modal-title" ] [ text "Move Task" ]
                     , p [ class "drop-action-desc" ]
                         [ text "What should "
-                        , strong [] [ text (truncate 40 dragName) ]
+                        , strong [] [ text (truncateText 40 dragName) ]
                         , text " become relative to "
-                        , strong [] [ text (truncate 40 targetName) ]
+                        , strong [] [ text (truncateText 40 targetName) ]
                         , text "?"
                         ]
                     , div [ class "drop-action-buttons" ]
@@ -4524,7 +4288,7 @@ viewDeleteConfirmModal model =
 
                         "memory" ->
                             Dict.get entityId model.memories
-                                |> Maybe.map (\m -> Maybe.withDefault (truncate 50 m.content) m.summary)
+                                |> Maybe.map (\m -> Maybe.withDefault (truncateText 50 m.content) m.summary)
                                 |> Maybe.withDefault "this memory"
 
                         "group" ->
@@ -4558,7 +4322,7 @@ viewDeleteConfirmModal model =
                     [ h3 [ class "modal-title" ] [ text ("Delete " ++ typeLabel ++ "?") ]
                     , p [ class "delete-confirm-desc" ]
                         [ text "Are you sure you want to delete "
-                        , strong [] [ text (truncate 60 entityName) ]
+                        , strong [] [ text (truncateText 60 entityName) ]
                         , text "? This action cannot be undone."
                         ]
                     , div [ class "modal-actions" ]
@@ -4606,15 +4370,6 @@ countLabel remaining completed noun pluralNoun =
 
     else
         Just (String.fromInt remaining ++ "/" ++ String.fromInt total ++ " " ++ pluralNoun ++ " remaining")
-
-
-truncate : Int -> String -> String
-truncate maxLen str =
-    if String.length str > maxLen then
-        String.left maxLen str ++ "…"
-
-    else
-        str
 
 
 uniqueStrings : List String -> List String

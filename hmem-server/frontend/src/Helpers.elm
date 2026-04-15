@@ -307,6 +307,15 @@ formatDate dateStr =
     String.left 10 dateStr
 
 
+truncateText : Int -> String -> String
+truncateText maxLen str =
+    if String.length str > maxLen then
+        String.left maxLen str ++ "…"
+
+    else
+        str
+
+
 truncateId : String -> String
 truncateId id =
     String.left 8 id ++ "..."

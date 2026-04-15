@@ -6,6 +6,7 @@ import Browser.Events
 import Browser.Navigation as Nav
 import Dict
 import Feature.AuditLog
+import Feature.DragDrop
 import Feature.Focus exposing (buildProjectBreadcrumb, buildTaskBreadcrumb)
 import Feature.Graph
 import Feature.Groups
@@ -822,188 +823,32 @@ update msg model =
             , Cmd.batch [ saveCmd, focusElement (editElementId entityId field), fetchMemCmd, fetchDepCmd ]
             )
 
-        DragStartCard entType entId ->
-            ( { model | dragging = Just { entityType = entType, entityId = entId } }, Cmd.none )
+        DragStartCard _ _ ->
+            Feature.DragDrop.update msg model
 
-        DragOverCard targetId ->
-            ( { model | dragOver = Just (OverCard targetId) }, Cmd.none )
+        DragOverCard _ ->
+            Feature.DragDrop.update msg model
 
-        DragOverZone zone ->
-            ( { model | dragOver = Just (OverZone zone) }, Cmd.none )
+        DragOverZone _ ->
+            Feature.DragDrop.update msg model
 
-        DropOnCard targetType targetId ->
-            case model.dragging of
-                Just drag ->
-                    if drag.entityId == targetId then
-                        ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
-
-                    else if drag.entityType == "task" && targetType == "project" then
-                        -- Drop task/subtask on project → move as direct task in that project
-                        ( { model | dragging = Nothing, dragOver = Nothing }
-                        , Api.updateTask model.flags.apiUrl drag.entityId
-                            [ ( "project_id", Encode.string targetId )
-                            , ( "parent_id", Encode.null )
-                            ]
-                            TaskUpdated
-                        )
-
-                    else if drag.entityType == "project" && targetType == "project" then
-                        -- Drop project on project → make it a subproject
-                        ( { model | dragging = Nothing, dragOver = Nothing }
-                        , Api.updateProject model.flags.apiUrl drag.entityId
-                            [ ( "parent_id", Encode.string targetId ) ]
-                            ProjectUpdated
-                        )
-
-                    else if drag.entityType == "task" && targetType == "task" then
-                        -- Drop task on task → show modal asking Subtask or Dependency
-                        ( { model
-                            | dragging = Nothing
-                            , dragOver = Nothing
-                            , dropActionModal = Just { dragTaskId = drag.entityId, targetTaskId = targetId }
-                          }
-                        , Cmd.none
-                        )
-
-                    else if drag.entityType == targetType then
-                        -- Same type → swap priorities
-                        ( { model | dragging = Nothing, dragOver = Nothing }
-                        , swapPriorities model.flags.apiUrl drag targetType targetId model
-                        )
-
-                    else
-                        ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
-
-                Nothing ->
-                    ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
+        DropOnCard _ _ ->
+            Feature.DragDrop.update msg model
 
         DragEndCard ->
-            ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
+            Feature.DragDrop.update msg model
 
-        DropOnZone zone ->
-            case model.dragging of
-                Just drag ->
-                    let
-                        newPriority =
-                            computeDropPriority zone.abovePriority zone.belowPriority
-                    in
-                    case ( drag.entityType, zone.parentType ) of
-                        ( "task", "project-tasks" ) ->
-                            ( { model | dragging = Nothing, dragOver = Nothing }
-                            , Api.updateTask model.flags.apiUrl
-                                drag.entityId
-                                [ ( "project_id"
-                                  , case zone.projectId of
-                                        Just pid ->
-                                            Encode.string pid
+        DropOnZone _ ->
+            Feature.DragDrop.update msg model
 
-                                        Nothing ->
-                                            Encode.null
-                                  )
-                                , ( "parent_id", Encode.null )
-                                , ( "priority", Encode.int newPriority )
-                                ]
-                                TaskUpdated
-                            )
-
-                        ( "task", "task-subtasks" ) ->
-                            ( { model | dragging = Nothing, dragOver = Nothing }
-                            , Api.updateTask model.flags.apiUrl
-                                drag.entityId
-                                [ ( "parent_id"
-                                  , case zone.parentId of
-                                        Just pid ->
-                                            Encode.string pid
-
-                                        Nothing ->
-                                            Encode.null
-                                  )
-                                , ( "project_id"
-                                  , case zone.projectId of
-                                        Just pid ->
-                                            Encode.string pid
-
-                                        Nothing ->
-                                            Encode.null
-                                  )
-                                , ( "priority", Encode.int newPriority )
-                                ]
-                                TaskUpdated
-                            )
-
-                        ( "task", "orphan" ) ->
-                            ( { model | dragging = Nothing, dragOver = Nothing }
-                            , Api.updateTask model.flags.apiUrl
-                                drag.entityId
-                                [ ( "project_id", Encode.null )
-                                , ( "parent_id", Encode.null )
-                                , ( "priority", Encode.int newPriority )
-                                ]
-                                TaskUpdated
-                            )
-
-                        ( "project", "project" ) ->
-                            ( { model | dragging = Nothing, dragOver = Nothing }
-                            , Api.updateProject model.flags.apiUrl
-                                drag.entityId
-                                [ ( "priority", Encode.int newPriority )
-                                , ( "parent_id"
-                                  , case zone.parentId of
-                                        Just pid ->
-                                            Encode.string pid
-
-                                        Nothing ->
-                                            Encode.null
-                                  )
-                                ]
-                                ProjectUpdated
-                            )
-
-                        _ ->
-                            ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
-
-                Nothing ->
-                    ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
-
-        -- Drop action modal
         DropActionMakeSubtask ->
-            case model.dropActionModal of
-                Just modal ->
-                    let
-                        targetTask =
-                            Dict.get modal.targetTaskId model.tasks
-                    in
-                    ( { model | dropActionModal = Nothing }
-                    , Api.updateTask model.flags.apiUrl modal.dragTaskId
-                        [ ( "parent_id", Encode.string modal.targetTaskId )
-                        , ( "project_id"
-                          , case targetTask |> Maybe.andThen .projectId of
-                                Just pid ->
-                                    Encode.string pid
-
-                                Nothing ->
-                                    Encode.null
-                          )
-                        ]
-                        TaskUpdated
-                    )
-
-                Nothing ->
-                    ( model, Cmd.none )
+            Feature.DragDrop.update msg model
 
         DropActionMakeDependency ->
-            case model.dropActionModal of
-                Just modal ->
-                    ( { model | dropActionModal = Nothing }
-                    , Api.addTaskDependency model.flags.apiUrl modal.dragTaskId modal.targetTaskId
-                        (DependencyMutationDone modal.dragTaskId)
-                    )
-
-                Nothing ->
-                    ( model, Cmd.none )
+            Feature.DragDrop.update msg model
 
         CancelDropAction ->
-            ( { model | dropActionModal = Nothing }, Cmd.none )
+            Feature.DragDrop.update msg model
 
         -- Inline create
         ShowInlineCreate ic ->
@@ -1613,71 +1458,6 @@ changeEventDescription event =
 -- HELPERS
 
 
-dragOverClass : Model -> String -> String
-dragOverClass model entityId =
-    case ( model.dragOver, model.dragging ) of
-        ( Just (OverCard overId), Just drag ) ->
-            if overId == entityId && drag.entityId /= entityId then
-                -- Task or project dragged over a project → green "move" indicator
-                if (drag.entityType == "task" || drag.entityType == "project") && Dict.member entityId model.projects then
-                    " drag-over drag-over-move"
-
-                else
-                    " drag-over"
-
-            else
-                ""
-
-        _ ->
-            ""
-
-
-swapPriorities : String -> DragInfo -> String -> String -> Model -> Cmd Msg
-swapPriorities apiUrl drag targetType targetId model =
-    case drag.entityType of
-        "project" ->
-            let
-                dragPri =
-                    Dict.get drag.entityId model.projects |> Maybe.map .priority |> Maybe.withDefault 5
-
-                targetPri =
-                    Dict.get targetId model.projects |> Maybe.map .priority |> Maybe.withDefault 5
-            in
-            Cmd.batch
-                [ Api.updateProject apiUrl drag.entityId [ ( "priority", Encode.int targetPri ) ] ProjectUpdated
-                , Api.updateProject apiUrl targetId [ ( "priority", Encode.int dragPri ) ] ProjectUpdated
-                ]
-
-        "task" ->
-            let
-                dragPri =
-                    Dict.get drag.entityId model.tasks |> Maybe.map .priority |> Maybe.withDefault 5
-
-                targetPri =
-                    Dict.get targetId model.tasks |> Maybe.map .priority |> Maybe.withDefault 5
-            in
-            Cmd.batch
-                [ Api.updateTask apiUrl drag.entityId [ ( "priority", Encode.int targetPri ) ] TaskUpdated
-                , Api.updateTask apiUrl targetId [ ( "priority", Encode.int dragPri ) ] TaskUpdated
-                ]
-
-        "memory" ->
-            let
-                dragImp =
-                    Dict.get drag.entityId model.memories |> Maybe.map .importance |> Maybe.withDefault 5
-
-                targetImp =
-                    Dict.get targetId model.memories |> Maybe.map .importance |> Maybe.withDefault 5
-            in
-            Cmd.batch
-                [ Api.updateMemory apiUrl drag.entityId [ ( "importance", Encode.int targetImp ) ] MemoryUpdated
-                , Api.updateMemory apiUrl targetId [ ( "importance", Encode.int dragImp ) ] MemoryUpdated
-                ]
-
-        _ ->
-            Cmd.none
-
-
 viewDropZone : Model -> DropZoneInfo -> Html Msg
 viewDropZone model zone =
     case model.dragging of
@@ -1820,7 +1600,7 @@ view model =
             , Toast.view model.toasts
             , viewConnectionStatus model.wsState
             , viewCreateFormModal model
-            , viewDropActionModal model
+            , Feature.DragDrop.viewDropActionModal model
             , viewDeleteConfirmModal model
             , Feature.AuditLog.viewRevertConfirmModal model
             ]
@@ -2287,7 +2067,7 @@ viewProjectNode allProjects model depth project hasSearch query =
     in
     div [ class "tree-node", style "margin-left" (String.fromInt (depth * 20) ++ "px"), id ("entity-" ++ project.id) ]
         [ div
-            [ class ("card tree-card card-project card-status-" ++ Api.projectStatusToString project.status ++ dragOverClass model project.id)
+            [ class ("card tree-card card-project card-status-" ++ Api.projectStatusToString project.status ++ Feature.DragDrop.dragOverClass model project.id)
             , draggable "true"
             , on "dragstart" (Decode.succeed (DragStartCard "project" project.id))
             , preventDefaultOn "dragover" (Decode.succeed ( DragOverCard project.id, True ))
@@ -2485,7 +2265,7 @@ viewTaskCard showProject model task =
             Dict.get task.id model.entityMemories |> Maybe.withDefault []
     in
     div
-        ([ class ("card tree-card " ++ cardClass ++ " card-status-" ++ Api.taskStatusToString task.status ++ dragOverClass model task.id)
+        ([ class ("card tree-card " ++ cardClass ++ " card-status-" ++ Api.taskStatusToString task.status ++ Feature.DragDrop.dragOverClass model task.id)
         , draggable "true"
         , id ("entity-" ++ task.id)
         , on "dragstart" (Decode.succeed (DragStartCard "task" task.id))
@@ -2797,7 +2577,7 @@ viewMemoryCard model memory =
             List.filterMap (\eid -> Dict.get eid model.tasks) linkedEntities
     in
     div
-        [ class ("card" ++ dragOverClass model memory.id)
+        [ class ("card" ++ Feature.DragDrop.dragOverClass model memory.id)
         , draggable "true"
         , on "dragstart" (Decode.succeed (DragStartCard "memory" memory.id))
         , preventDefaultOn "dragover" (Decode.succeed ( DragOverCard memory.id, True ))
@@ -4216,55 +3996,6 @@ viewCreateFormContent form =
                 , div [ class "modal-actions" ]
                     [ button [ class "btn btn-secondary", onClick CancelCreateForm ] [ text "Cancel" ]
                     , button [ class "btn btn-primary", onClick SubmitCreateForm ] [ text "Create" ]
-                    ]
-                ]
-
-
-
--- DROP ACTION MODAL
-
-
-viewDropActionModal : Model -> Html Msg
-viewDropActionModal model =
-    case model.dropActionModal of
-        Nothing ->
-            text ""
-
-        Just modal ->
-            let
-                dragName =
-                    Dict.get modal.dragTaskId model.tasks
-                        |> Maybe.map .title
-                        |> Maybe.withDefault "Task"
-
-                targetName =
-                    Dict.get modal.targetTaskId model.tasks
-                        |> Maybe.map .title
-                        |> Maybe.withDefault "Task"
-            in
-            div [ class "modal-overlay", onClick CancelDropAction ]
-                [ div [ class "modal drop-action-modal", stopPropagationOn "click" (Decode.succeed ( NoOp, True )) ]
-                    [ h3 [ class "modal-title" ] [ text "Move Task" ]
-                    , p [ class "drop-action-desc" ]
-                        [ text "What should "
-                        , strong [] [ text (truncateText 40 dragName) ]
-                        , text " become relative to "
-                        , strong [] [ text (truncateText 40 targetName) ]
-                        , text "?"
-                        ]
-                    , div [ class "drop-action-buttons" ]
-                        [ button [ class "btn drop-action-btn", onClick DropActionMakeSubtask ]
-                            [ span [ class "drop-action-icon" ] [ text "↳" ]
-                            , span [] [ text "Subtask" ]
-                            ]
-                        , button [ class "btn drop-action-btn", onClick DropActionMakeDependency ]
-                            [ span [ class "drop-action-icon" ] [ text "⟶" ]
-                            , span [] [ text "Dependency" ]
-                            ]
-                        ]
-                    , div [ class "modal-actions" ]
-                        [ button [ class "btn btn-secondary", onClick CancelDropAction ] [ text "Cancel" ]
-                        ]
                     ]
                 ]
 

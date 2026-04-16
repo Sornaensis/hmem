@@ -7,6 +7,7 @@ import Browser.Navigation as Nav
 import Dict
 import Feature.AuditLog
 import Feature.Cards
+import Feature.DataLoading
 import Feature.Dependencies
 import Feature.DragDrop
 import Feature.Editing
@@ -225,57 +226,20 @@ update msg model =
             Feature.Graph.update msg model
 
         -- HTTP responses
-        GotWorkspaces result ->
-            case result of
-                Ok paginated ->
-                    ( { model
-                        | workspaces = indexBy .id paginated.items
-                        , loadingWorkspaces = False
-                      }
-                    , Cmd.none
-                    )
+        GotWorkspaces _ ->
+            Feature.DataLoading.update msg model
 
-                Err _ ->
-                    addToast Error "Failed to load workspaces"
-                        { model | loadingWorkspaces = False }
+        GotProjects _ ->
+            Feature.DataLoading.update msg model
 
-        GotProjects result ->
-            case result of
-                Ok paginated ->
-                    ( { model
-                        | projects = indexBy .id paginated.items
-                        , loadingWorkspaceData = False
-                      }
-                    , Cmd.none
-                    )
+        GotTasks _ ->
+            Feature.DataLoading.update msg model
 
-                Err _ ->
-                    addToast Error "Failed to load projects"
-                        { model | loadingWorkspaceData = False }
+        GotMemories _ ->
+            Feature.DataLoading.update msg model
 
-        GotTasks result ->
-            case result of
-                Ok paginated ->
-                    ( { model | tasks = indexBy .id paginated.items }, Cmd.none )
-
-                Err _ ->
-                    addToast Error "Failed to load tasks" model
-
-        GotMemories result ->
-            case result of
-                Ok paginated ->
-                    ( { model | memories = indexBy .id paginated.items }, Cmd.none )
-
-                Err _ ->
-                    addToast Error "Failed to load memories" model
-
-        GotSingleMemory result ->
-            case result of
-                Ok mem ->
-                    ( { model | memories = Dict.insert mem.id mem model.memories }, Cmd.none )
-
-                Err _ ->
-                    ( model, Cmd.none )
+        GotSingleMemory _ ->
+            Feature.DataLoading.update msg model
 
         GotVisualization _ ->
             Feature.Graph.update msg model

@@ -15,19 +15,19 @@ import Feature.Focus
 import Feature.Graph
 import Feature.Groups
 import Feature.Memory
+import Feature.Mutations
 import Feature.Search
 import Feature.WebSocket
 import Helpers exposing (..)
 import Html exposing (..)
 import Html.Attributes exposing (..)
-import Html.Events exposing (..)
 import Html.Keyed as Keyed
 import Json.Decode as Decode
 import Page.Home
 import Page.Workspace
 import Ports exposing (..)
 import Route exposing (handleUrlChange, handleUrlRequest, loadWorkspaceData, urlToPage)
-import Toast exposing (addToast)
+import Toast
 import Types exposing (..)
 import Url
 
@@ -245,130 +245,29 @@ update msg model =
             Feature.Graph.update msg model
 
         -- Mutation responses
-        MutationDone entityType result ->
-            case result of
-                Ok _ ->
-                    refreshAfterMutation model
+        MutationDone _ _ ->
+            Feature.Mutations.update msg model
 
-                Err _ ->
-                    addToast Error ("Failed to update " ++ entityType) model
+        ProjectCreated _ ->
+            Feature.Mutations.update msg model
 
-        ProjectCreated result ->
-            case result of
-                Ok proj ->
-                    let
-                        updatedModel =
-                            { model
-                                | projects = Dict.insert proj.id proj model.projects
-                                , createForm = Nothing
-                                , inlineCreate = Nothing
-                            }
+        TaskCreated _ ->
+            Feature.Mutations.update msg model
 
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation proj.id updatedModel
+        MemoryCreated _ ->
+            Feature.Mutations.update msg model
 
-                        ( toastedModel, toastCmd ) =
-                            addToast Success ("Created project: " ++ proj.name) trackedModel
-                    in
-                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
+        ProjectUpdated _ ->
+            Feature.Mutations.update msg model
 
-                Err _ ->
-                    addToast Error "Failed to create project" model
+        TaskUpdated _ ->
+            Feature.Mutations.update msg model
 
-        TaskCreated result ->
-            case result of
-                Ok task ->
-                    let
-                        updatedModel =
-                            { model
-                                | tasks = Dict.insert task.id task model.tasks
-                                , createForm = Nothing
-                                , inlineCreate = Nothing
-                            }
+        MemoryUpdated _ ->
+            Feature.Mutations.update msg model
 
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation task.id updatedModel
-
-                        ( toastedModel, toastCmd ) =
-                            addToast Success ("Created task: " ++ task.title) trackedModel
-                    in
-                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
-
-                Err _ ->
-                    addToast Error "Failed to create task" model
-
-        MemoryCreated result ->
-            case result of
-                Ok mem ->
-                    let
-                        updatedModel =
-                            { model
-                                | memories = Dict.insert mem.id mem model.memories
-                                , createForm = Nothing
-                            }
-
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation mem.id updatedModel
-
-                        ( toastedModel, toastCmd ) =
-                            addToast Success "Memory created" trackedModel
-                    in
-                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
-
-                Err _ ->
-                    addToast Error "Failed to create memory" model
-
-        ProjectUpdated result ->
-            case result of
-                Ok proj ->
-                    let
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation proj.id
-                                { model | projects = Dict.insert proj.id proj model.projects }
-                    in
-                    ( trackedModel, trackCmd )
-
-                Err _ ->
-                    addToast Error "Failed to update project" model
-
-        TaskUpdated result ->
-            case result of
-                Ok task ->
-                    let
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation task.id
-                                { model | tasks = Dict.insert task.id task model.tasks }
-                    in
-                    ( trackedModel, trackCmd )
-
-                Err _ ->
-                    addToast Error "Failed to update task" model
-
-        MemoryUpdated result ->
-            case result of
-                Ok mem ->
-                    let
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation mem.id
-                                { model | memories = Dict.insert mem.id mem model.memories }
-                    in
-                    ( trackedModel, trackCmd )
-
-                Err _ ->
-                    addToast Error "Failed to update memory" model
-
-        WorkspaceUpdated result ->
-            case result of
-                Ok ws ->
-                    let
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation ws.id
-                                { model | workspaces = Dict.insert ws.id ws model.workspaces }
-                    in
-                    ( trackedModel, trackCmd )
-
-                Err _ ->
-                    addToast Error "Failed to update workspace" model
+        WorkspaceUpdated _ ->
+            Feature.Mutations.update msg model
 
         -- UI
         SelectWorkspace wsId ->
@@ -770,20 +669,6 @@ update msg model =
 
         GroupMembershipDone _ _ ->
             Feature.Groups.update msg model
-
-
-
--- HELPERS
-
-
-refreshAfterMutation : Model -> ( Model, Cmd Msg )
-refreshAfterMutation model =
-    case model.selectedWorkspaceId of
-        Just wsId ->
-            ( model, loadWorkspaceData model.flags.apiUrl wsId )
-
-        Nothing ->
-            ( model, Cmd.none )
 
 
 

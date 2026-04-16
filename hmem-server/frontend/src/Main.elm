@@ -15,6 +15,7 @@ import Feature.Graph
 import Feature.Groups
 import Feature.Memory
 import Feature.Search
+import Feature.WebSocket
 import Helpers exposing (..)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -160,7 +161,7 @@ init rawFlags url key =
                     baseModel
 
         cmds =
-            [ connectWebSocket flags.wsUrl
+            [ Feature.WebSocket.connectCmd flags.wsUrl
             , Api.fetchWorkspaces flags.apiUrl GotWorkspaces
             , Api.fetchWorkspaceGroups flags.apiUrl GotWorkspaceGroups
             ]
@@ -208,19 +209,13 @@ update msg model =
 
         -- WebSocket
         WsConnectedMsg ->
-            ( { model | wsState = Connected }, Cmd.none )
+            Feature.WebSocket.update msg model
 
         WsDisconnectedMsg ->
-            addToast Warning "Connection lost. Reconnecting..."
-                { model | wsState = Disconnected }
+            Feature.WebSocket.update msg model
 
-        WsMessageReceived raw ->
-            case Api.decodeChangeEvent raw of
-                Just event ->
-                    handleChangeEvent event model
-
-                Nothing ->
-                    ( model, Cmd.none )
+        WsMessageReceived _ ->
+            Feature.WebSocket.update msg model
 
         -- Cytoscape
         CytoscapeNodeClicked _ ->
@@ -813,6 +808,10 @@ update msg model =
             Feature.Groups.update msg model
 
 
+
+-- HELPERS
+
+
 refreshAfterMutation : Model -> ( Model, Cmd Msg )
 refreshAfterMutation model =
     case model.selectedWorkspaceId of
@@ -823,238 +822,6 @@ refreshAfterMutation model =
             ( model, Cmd.none )
 
 
-handleChangeEvent : Api.ChangeEvent -> Model -> ( Model, Cmd Msg )
-handleChangeEvent event model =
-    let
-        ( updatedModel, refreshCmd ) =
-            applyChangeEvent event model
-
-        isSelfEvent =
-            Dict.member event.entityId model.pendingMutationIds
-    in
-    if isSelfEvent then
-        -- Self-event: apply data (harmless upsert) but skip the toast
-        ( updatedModel, refreshCmd )
-
-    else
-        let
-            toastMsg =
-                changeEventDescription event
-
-            ( toastedModel, toastCmd ) =
-                addToast Info toastMsg updatedModel
-        in
-        ( toastedModel, Cmd.batch [ refreshCmd, toastCmd ] )
-
-
-{-| Try to apply the change event payload directly into the model.
-Falls back to a full re-fetch when the payload is missing or cannot be decoded.
--}
-applyChangeEvent : Api.ChangeEvent -> Model -> ( Model, Cmd Msg )
-applyChangeEvent event model =
-    case event.entityType of
-        Api.EWorkspace ->
-            case event.changeType of
-                Api.Deleted ->
-                    ( { model | workspaces = Dict.remove event.entityId model.workspaces }
-                    , Cmd.none
-                    )
-
-                _ ->
-                    case Maybe.andThen (tryDecode Api.workspaceDecoder) event.payload of
-                        Just ws ->
-                            ( { model | workspaces = Dict.insert ws.id ws model.workspaces }
-                            , Cmd.none
-                            )
-
-                        Nothing ->
-                            ( model
-                            , Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
-                            )
-
-        Api.EProject ->
-            case event.changeType of
-                Api.Deleted ->
-                    ( { model | projects = Dict.remove event.entityId model.projects }
-                    , Cmd.none
-                    )
-
-                _ ->
-                    case Maybe.andThen (tryDecode Api.projectDecoder) event.payload of
-                        Just proj ->
-                            ( { model | projects = Dict.insert proj.id proj model.projects }
-                            , Cmd.none
-                            )
-
-                        Nothing ->
-                            withWorkspace model <|
-                                \wsId -> Api.fetchProjects model.flags.apiUrl wsId GotProjects
-
-        Api.ETask ->
-            case event.changeType of
-                Api.Deleted ->
-                    ( { model | tasks = Dict.remove event.entityId model.tasks }
-                    , Cmd.none
-                    )
-
-                _ ->
-                    case Maybe.andThen (tryDecode Api.taskDecoder) event.payload of
-                        Just task ->
-                            ( { model | tasks = Dict.insert task.id task model.tasks }
-                            , Cmd.none
-                            )
-
-                        Nothing ->
-                            withWorkspace model <|
-                                \wsId -> Api.fetchTasks model.flags.apiUrl wsId GotTasks
-
-        Api.EMemory ->
-            case event.changeType of
-                Api.Deleted ->
-                    ( { model | memories = Dict.remove event.entityId model.memories }
-                    , Cmd.none
-                    )
-
-                _ ->
-                    case Maybe.andThen (tryDecode Api.memoryDecoder) event.payload of
-                        Just mem ->
-                            ( { model | memories = Dict.insert mem.id mem model.memories }
-                            , Cmd.none
-                            )
-
-                        Nothing ->
-                            withWorkspace model <|
-                                \wsId -> Api.fetchMemories model.flags.apiUrl wsId GotMemories
-
-        Api.EMemoryLink ->
-            -- Memory links affect the graph view; refresh visualization if on graph page
-            withWorkspace model <|
-                \wsId ->
-                    case model.page of
-                        MemoryGraphPage ->
-                            Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
-
-                        _ ->
-                            Cmd.none
-
-        Api.ECategory ->
-            -- Categories don't have a dedicated Dict yet; refresh memories
-            -- since category changes can affect memory display
-            withWorkspace model <|
-                \wsId -> Api.fetchMemories model.flags.apiUrl wsId GotMemories
-
-        Api.ETaskDependency ->
-            -- Refresh task dependencies for the affected task
-            ( model
-            , Api.fetchTaskOverview model.flags.apiUrl event.entityId (GotTaskDependencies event.entityId)
-            )
-
-        Api.ECategoryLink ->
-            -- Category-memory link changed; refresh memories
-            withWorkspace model <|
-                \wsId -> Api.fetchMemories model.flags.apiUrl wsId GotMemories
-
-        Api.ETag ->
-            -- Tags changed on a memory; refresh that memory
-            ( model
-            , Api.fetchMemory model.flags.apiUrl event.entityId GotSingleMemory
-            )
-
-        Api.EWorkspaceGroup ->
-            -- Workspace groups affect the sidebar; refresh groups and workspaces
-            ( model
-            , Cmd.batch
-                [ Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
-                , Api.fetchWorkspaceGroups model.flags.apiUrl GotWorkspaceGroups
-                ]
-            )
-
-        Api.ESavedView ->
-            -- Saved views are not currently rendered in the main UI; no-op
-            ( model, Cmd.none )
-
-        Api.EOther _ ->
-            ( model, Cmd.none )
-
-
-{-| Helper: run a command that needs a workspace ID, or no-op if none selected.
--}
-withWorkspace : Model -> (String -> Cmd Msg) -> ( Model, Cmd Msg )
-withWorkspace model mkCmd =
-    case model.selectedWorkspaceId of
-        Just wsId ->
-            ( model, mkCmd wsId )
-
-        Nothing ->
-            ( model, Cmd.none )
-
-
-{-| Try to decode a JSON Value using a given decoder.
--}
-tryDecode : Decode.Decoder a -> Decode.Value -> Maybe a
-tryDecode decoder val =
-    Result.toMaybe (Decode.decodeValue decoder val)
-
-
-changeEventDescription : Api.ChangeEvent -> String
-changeEventDescription event =
-    let
-        action =
-            case event.changeType of
-                Api.Created ->
-                    "created"
-
-                Api.Updated ->
-                    "updated"
-
-                Api.Deleted ->
-                    "deleted"
-
-        entity =
-            case event.entityType of
-                Api.EWorkspace ->
-                    "Workspace"
-
-                Api.EProject ->
-                    "Project"
-
-                Api.ETask ->
-                    "Task"
-
-                Api.EMemory ->
-                    "Memory"
-
-                Api.EMemoryLink ->
-                    "Memory link"
-
-                Api.ECategory ->
-                    "Category"
-
-                Api.EWorkspaceGroup ->
-                    "Workspace group"
-
-                Api.ESavedView ->
-                    "Saved view"
-
-                Api.ETaskDependency ->
-                    "Task dependency"
-
-                Api.ECategoryLink ->
-                    "Category link"
-
-                Api.ETag ->
-                    "Tags"
-
-                Api.EOther s ->
-                    s
-    in
-    entity ++ " " ++ action
-
-
-
--- HELPERS
-
-
 
 -- SUBSCRIPTIONS
 
@@ -1062,9 +829,7 @@ changeEventDescription event =
 subscriptions : Model -> Sub Msg
 subscriptions _ =
     Sub.batch
-        [ wsConnected (\_ -> WsConnectedMsg)
-        , wsDisconnected (\_ -> WsDisconnectedMsg)
-        , wsMessage WsMessageReceived
+        [ Feature.WebSocket.subscriptions
         , cytoscapeNodeClicked CytoscapeNodeClicked
         , cytoscapeEdgeClicked CytoscapeEdgeClicked
         , Browser.Events.onKeyDown (Decode.map GlobalKeyDown (Decode.field "keyCode" Decode.int))

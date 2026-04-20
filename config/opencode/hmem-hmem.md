@@ -18,6 +18,7 @@ permission:
   hmem_task_create: allow
   hmem_task_list: allow
   hmem_task_update: allow
+  hmem_task_dependency: allow
   hmem_entity_lifecycle: allow
 ---
 

@@ -4,14 +4,34 @@ module HMem.DB.MemorySpec (spec) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (try, SomeException)
+import Data.Functor.Contravariant ((>$<))
 import Data.Maybe (isJust, isNothing)
 import Data.Text qualified as T
 import Data.UUID (UUID)
+import Hasql.Decoders qualified as D
+import Hasql.Encoders qualified as E
+import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import Test.Hspec
 
 import HMem.DB.Memory
+import HMem.DB.Pool (runSession)
 import HMem.DB.TestHarness
 import HMem.Types
+
+
+backdateMemoryUpdatedAt :: TestEnv -> UUID -> Int -> IO ()
+backdateMemoryUpdatedAt env mid hours = do
+  runSession env.pool $ Session.sql "ALTER TABLE memories DISABLE TRIGGER trg_memories_updated_at"
+  let stmt = Statement.Statement
+        "UPDATE memories SET updated_at = now() - ($1 * interval '1 hour') WHERE id = $2"
+        (  (fromIntegral . fst >$< E.param (E.nonNullable E.int4))
+        <> (snd               >$< E.param (E.nonNullable E.uuid))
+        )
+        D.noResult
+        True
+  runSession env.pool $ Session.statement (hours, mid) stmt
+  runSession env.pool $ Session.sql "ALTER TABLE memories ENABLE TRIGGER trg_memories_updated_at"
 
 spec :: Spec
 spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
@@ -292,6 +312,36 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         , minImportance = Just 5, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
       length results `shouldBe` 1
       (head results).importance `shouldBe` 9
+
+    it "prefers more recent memories when FTS relevance is otherwise equal" $ \env -> do
+      ws <- createTestWorkspace env "search-recency-ws"
+      older <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "haskell functional"
+        , summary = Nothing, memoryType = ShortTerm, importance = Just 5
+        , metadata = Nothing, expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      newer <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "haskell functional"
+        , summary = Nothing, memoryType = ShortTerm, importance = Just 5
+        , metadata = Nothing, expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      backdateMemoryUpdatedAt env older.id (24 * 365)
+      results <- searchMemories env.pool SearchQuery
+        { workspaceId = Just ws.id, query = Just "haskell functional"
+        , memoryType = Nothing, tags = Nothing
+        , minImportance = Nothing, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
+      map (.id) results `shouldSatisfy` (not . null)
+      (head results).id `shouldBe` newer.id
+
+    it "ignores an empty tag filter when query search is present" $ \env -> do
+      ws <- createTestWorkspace env "search-empty-tags-ws"
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "haskell functional"
+        , summary = Nothing, memoryType = ShortTerm, importance = Just 5
+        , metadata = Nothing, expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      results <- searchMemories env.pool SearchQuery
+        { workspaceId = Just ws.id, query = Just "haskell functional"
+        , memoryType = Nothing, tags = Just []
+        , minImportance = Nothing, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
+      map (.id) results `shouldBe` [mem.id]
 
   describe "touchMemory" $ do
     it "increments access count" $ \env -> do

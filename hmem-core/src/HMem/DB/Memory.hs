@@ -510,21 +510,23 @@ searchMemories pool sq = do
       enrichRowsS rs
     Just q -> do
       let searchLang = fromMaybe "english" sq.searchLanguage
-      runSession pool $ do
-        results <- Session.statement () $ run $ select $
-          limit (fromIntegral lim) $ offset (fromIntegral off) $
-          orderBy (snd >$< desc) $ do
-            row <- each memorySchema
-            applyFilters row
-            let config = unsafeCastExpr (lit searchLang) :: Expr PgRegConfig
-            let tsq = function "plainto_tsquery" (config, lit q) :: Expr PgTSQuery
-            -- Use the pre-computed search_vector column (GIN-indexed)
-            -- instead of recomputing to_tsvector() per row.
-            let tsvec = row.memSearchVector :: Expr PgTSVector
-            where_ $ rawBinaryOperator "@@" tsvec tsq
-            let tsRank = function "ts_rank" (tsvec, tsq) :: Expr Double
-            pure (row, tsRank)
-        enrichRowsS (map fst results)
+          tagsParam = case sq.tags of
+            Just [] -> Nothing
+            other   -> other
+      ids <- runSession pool $ Session.statement
+        ( sq.workspaceId
+        , imp
+        , memoryTypeToText <$> sq.memoryType
+        , tagsParam
+        , sq.categoryId
+        , sq.pinnedOnly
+        , searchLang
+        , q
+        , fromIntegral lim :: Int32
+        , fromIntegral off :: Int32
+        )
+        searchMemoryIdsByTextStatement
+      fetchMemoriesByIdsOrdered pool ids
   pure rows
 
 ------------------------------------------------------------------------
@@ -850,6 +852,74 @@ fetchMemoriesByIds pool ids =
       where_ $ activeMemory row
       pure row
     enrichRowsS rows
+
+fetchMemoriesByIdsOrdered :: Pool Hasql.Connection -> [UUID] -> IO [Memory]
+fetchMemoriesByIdsOrdered _ [] = pure []
+fetchMemoriesByIdsOrdered pool ids = do
+  mems <- fetchMemoriesByIds pool ids
+  let memMap = Map.fromList [(m.id, m) | m <- mems]
+  pure $ mapMaybe (`Map.lookup` memMap) ids
+
+searchMemoryIdsByTextStatement :: Statement.Statement
+  ( Maybe UUID
+  , Int16
+  , Maybe Text
+  , Maybe [Text]
+  , Maybe UUID
+  , Maybe Bool
+  , Text
+  , Text
+  , Int32
+  , Int32
+  )
+  [UUID]
+searchMemoryIdsByTextStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.intercalate "\n"
+      [ "SELECT m.id"
+      , "FROM memories m"
+      , "WHERE m.deleted_at IS NULL"
+      , "  AND ($1::uuid IS NULL OR m.workspace_id = $1)"
+      , "  AND m.importance >= $2"
+      , "  AND ($3::text IS NULL OR m.memory_type::text = $3)"
+      , "  AND ( $4::text[] IS NULL"
+      , "        OR EXISTS ("
+      , "             SELECT 1"
+      , "             FROM memory_tags mt"
+      , "             WHERE mt.memory_id = m.id"
+      , "               AND mt.tag = ANY($4::text[])"
+      , "        )"
+      , "      )"
+      , "  AND ( $5::uuid IS NULL"
+      , "        OR EXISTS ("
+      , "             SELECT 1"
+      , "             FROM memory_category_links mcl"
+      , "             JOIN memory_categories mc ON mc.id = mcl.category_id"
+      , "             WHERE mcl.memory_id = m.id"
+      , "               AND mcl.category_id = $5"
+      , "               AND mc.deleted_at IS NULL"
+      , "        )"
+      , "      )"
+      , "  AND ($6::boolean IS DISTINCT FROM TRUE OR m.pinned = TRUE)"
+      , "  AND m.search_vector @@ plainto_tsquery($7::regconfig, $8)"
+      , "ORDER BY"
+      , "  ts_rank(m.search_vector, plainto_tsquery($7::regconfig, $8))"
+      , "    * (1.0 / (1.0 + ((EXTRACT(EPOCH FROM (now() - m.updated_at)) / 86400.0) / 30.0))) DESC,"
+      , "  m.updated_at DESC"
+      , "LIMIT $9 OFFSET $10"
+      ]
+    encoder =
+         contramap (\(a,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nullable Enc.uuid))
+      <> contramap (\(_,b,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.int2))
+      <> contramap (\(_,_,c,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,d,_,_,_,_,_,_) -> d) (Enc.param (Enc.nullable (Enc.foldableArray (Enc.nonNullable Enc.text))))
+      <> contramap (\(_,_,_,_,e,_,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.uuid))
+      <> contramap (\(_,_,_,_,_,f,_,_,_,_) -> f) (Enc.param (Enc.nullable Enc.bool))
+      <> contramap (\(_,_,_,_,_,_,g,_,_,_) -> g) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,h,_,_) -> h) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,_,i,_) -> i) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,_,_,_,j) -> j) (Enc.param (Enc.nonNullable Enc.int4))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
 -- | Find all memory links within a workspace (any relation type).
 findLinksForWorkspace :: Pool Hasql.Connection -> UUID -> IO [MemoryLink]

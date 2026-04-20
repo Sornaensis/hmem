@@ -13,7 +13,6 @@ import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy.Char8 qualified as BL8
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID (UUID)
@@ -21,8 +20,6 @@ import Data.UUID qualified as UUID
 import Network.HTTP.Client (Manager, newManager, managerResponseTimeout, responseTimeoutMicro)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import System.IO (hFlush, hSetBuffering, stdin, stdout, stderr, hPutStrLn, BufferMode (..), hIsEOF)
-import Text.Read (readMaybe)
-
 import HMem.MCP.Tools (handleToolCall, toolDefinitions)
 
 ------------------------------------------------------------------------
@@ -74,10 +71,6 @@ maxConcurrency = 16
 -- | Maximum number of pending requests in the queue before rejecting.
 maxQueueDepth :: Int
 maxQueueDepth = 64
-
--- | Page size for tools/list pagination.
-toolsPageSize :: Int
-toolsPageSize = 15
 
 runMCPServer :: String -> Maybe Text -> IO ()
 runMCPServer serverUrl mApiKey = do
@@ -212,13 +205,8 @@ handleRequest mgr serverUrl mApiKey initialized wsContext req = case req.reqMeth
 handleMethod :: Manager -> String -> Maybe Text -> TVar (Maybe UUID) -> JsonRpcRequest -> IO (Maybe Value)
 handleMethod mgr serverUrl mApiKey wsContext req = case req.reqMethod of
   "tools/list" -> do
-    let allTools = toolDefinitions
-        cursorIdx = parseCursor req.reqParams
-        page = take toolsPageSize (drop cursorIdx allTools)
-        nextIdx = cursorIdx + toolsPageSize
-    pure $ Just $ jsonRpcResponse req.reqId $ object $
-      [ "tools" .= page ] ++
-      [ "nextCursor" .= show nextIdx | nextIdx < length allTools ]
+    pure $ Just $ jsonRpcResponse req.reqId $ object
+      [ "tools" .= toolDefinitions ]
 
   "tools/call" -> do
     case req.reqParams of
@@ -324,11 +312,3 @@ injectWorkspaceContext wsContext params = do
         _ -> params
       _ -> params
 
--- | Parse the cursor parameter from tools/list params.
--- Accepts both string and numeric cursors; defaults to 0.
-parseCursor :: Maybe Value -> Int
-parseCursor (Just (Object o)) = case KM.lookup "cursor" o of
-  Just (String s) -> fromMaybe 0 (readMaybe (T.unpack s))
-  Just (Number n) -> round n
-  _               -> 0
-parseCursor _ = 0

@@ -424,6 +424,7 @@ installAgentConfigs = do
   let agentDir = dir </> "agents"
   createDirectoryIfMissing True (agentDir </> "copilot")
   createDirectoryIfMissing True (agentDir </> "claude")
+  createDirectoryIfMissing True (agentDir </> "opencode")
 
   -- Write Copilot agent definitions to ~/.hmem/agents/
   writeAgentFile (agentDir </> "copilot" </> "hmem-memory.agent.md")
@@ -436,6 +437,14 @@ installAgentConfigs = do
   -- Write Claude instructions
   writeAgentFile (agentDir </> "claude" </> "hmem-instructions.md")
     claudeInstructions
+
+  -- Write OpenCode agent definitions to ~/.hmem/agents/
+  writeAgentFile (agentDir </> "opencode" </> "hmem-memory.md")
+    opencodeMemoryAgent
+  writeAgentFile (agentDir </> "opencode" </> "hmem-task.md")
+    opencodeTaskAgent
+  writeAgentFile (agentDir </> "opencode" </> "hmem-hmem.md")
+    opencodeHmemAgent
 
   putStrLn $ "  Agents installed to: " <> agentDir
 
@@ -456,6 +465,20 @@ installAgentConfigs = do
     writeAgentFile (vsPromptsDir </> name) content) agentFiles
 
   putStrLn $ "  VS Code prompts dir: " <> vsPromptsDir
+
+  -- Also install into OpenCode global agents directory
+  step "Installing agents to OpenCode"
+  home <- getHomeDirectory
+  let openCodeAgentsDir = home </> ".config" </> "opencode" </> "agents"
+  createDirectoryIfMissing True openCodeAgentsDir
+  let openCodeAgentFiles =
+        [ ("hmem-memory.md", opencodeMemoryAgent)
+        , ("hmem-task.md",   opencodeTaskAgent)
+        , ("hmem-hmem.md",   opencodeHmemAgent)
+        ]
+  mapM_ (\(name, content) ->
+    writeAgentFile (openCodeAgentsDir </> name) content) openCodeAgentFiles
+  putStrLn $ "  OpenCode agents dir: " <> openCodeAgentsDir
 
 writeAgentFile :: FilePath -> String -> IO ()
 writeAgentFile path content = do
@@ -743,6 +766,135 @@ claudeInstructions = unlines
   , "4. Always include 2-5 descriptive tags."
   , "5. Use long_term for durable knowledge, short_term for transient context."
   , "6. Prefer creating minimal records first, then reorganize or enrich with update tools as the structure becomes clearer."
+  ]
+
+opencodeMemoryAgent :: String
+opencodeMemoryAgent = unlines
+  [ "---"
+  , "description: Memory management agent for hmem workspaces."
+  , "mode: subagent"
+  , "permission:"
+  , "  \"*\": deny"
+  , "  question: allow"
+  , "  hmem_set_workspace: allow"
+  , "  hmem_get_workspace: allow"
+  , "  hmem_workspace_list: allow"
+  , "  hmem_workspace_register: allow"
+  , "  hmem_memory_create: allow"
+  , "  hmem_memory_search: allow"
+  , "  hmem_memory_get: allow"
+  , "  hmem_memory_update: allow"
+  , "  hmem_memory_link: allow"
+  , "  hmem_entity_lifecycle: allow"
+  , "---"
+  , ""
+  , "# Memory Agent"
+  , ""
+  , "You are the hmem memory management agent."
+  , ""
+  , "Use the hmem MCP tools to store, retrieve, refine, and relate memories."
+  , ""
+  , "Guidelines:"
+  , "- Set or confirm workspace context first with `hmem_set_workspace` or `hmem_get_workspace`."
+  , "- Search before creating new memories to avoid duplicates."
+  , "- Use `short_term` for temporary context and `long_term` for durable knowledge."
+  , "- Set importance carefully from `1` to `10`."
+  , "- Use tags consistently and update existing memories when that is better than duplicating them."
+  , "- Use `hmem_memory_link` to relate memories when there is a clear semantic connection."
+  , "- Do not invent unsupported category or saved-view workflows if the corresponding tools are unavailable."
+  , ""
+  , "When unsure whether to create or update, search first and choose the smaller change."
+  ]
+
+opencodeTaskAgent :: String
+opencodeTaskAgent = unlines
+  [ "---"
+  , "description: Task and project management agent for hmem workspaces."
+  , "mode: subagent"
+  , "permission:"
+  , "  \"*\": deny"
+  , "  question: allow"
+  , "  hmem_set_workspace: allow"
+  , "  hmem_get_workspace: allow"
+  , "  hmem_workspace_list: allow"
+  , "  hmem_project_create: allow"
+  , "  hmem_project_list: allow"
+  , "  hmem_task_create: allow"
+  , "  hmem_task_list: allow"
+  , "  hmem_task_update: allow"
+  , "  hmem_entity_lifecycle: allow"
+  , "  hmem_memory_search: allow"
+  , "  hmem_memory_get: allow"
+  , "---"
+  , ""
+  , "# Task Management Agent"
+  , ""
+  , "You are the hmem task management agent."
+  , ""
+  , "Use the hmem MCP tools to structure and track work inside a workspace."
+  , ""
+  , "Guidelines:"
+  , "- Set or confirm workspace context first with `hmem_set_workspace` or `hmem_get_workspace`."
+  , "- Use projects to group related work and tasks to track execution."
+  , "- Keep task status accurate: `todo`, `in_progress`, `blocked`, `done`, `cancelled`."
+  , "- Prefer focused listings over broad dumps."
+  , "- Use `hmem_memory_search` when you need existing context before creating or updating work items."
+  , "- Do not invent unsupported workflows or tools. Use only the allowed hmem tools above."
+  , ""
+  , "Priority conventions:"
+  , "- `1-3`: low"
+  , "- `4-6`: normal"
+  , "- `7-8`: high"
+  , "- `9-10`: urgent"
+  , ""
+  , "When updating work, be explicit about what changed and why."
+  ]
+
+opencodeHmemAgent :: String
+opencodeHmemAgent = unlines
+  [ "---"
+  , "description: Combined hmem agent for workspace, memory, project, and task workflows."
+  , "mode: subagent"
+  , "permission:"
+  , "  \"*\": deny"
+  , "  question: allow"
+  , "  hmem_set_workspace: allow"
+  , "  hmem_get_workspace: allow"
+  , "  hmem_workspace_register: allow"
+  , "  hmem_workspace_list: allow"
+  , "  hmem_memory_create: allow"
+  , "  hmem_memory_search: allow"
+  , "  hmem_memory_get: allow"
+  , "  hmem_memory_update: allow"
+  , "  hmem_memory_link: allow"
+  , "  hmem_project_create: allow"
+  , "  hmem_project_list: allow"
+  , "  hmem_task_create: allow"
+  , "  hmem_task_list: allow"
+  , "  hmem_task_update: allow"
+  , "  hmem_entity_lifecycle: allow"
+  , "---"
+  , ""
+  , "# hmem Agent"
+  , ""
+  , "You are the general hmem agent."
+  , ""
+  , "Use the hmem MCP tools to manage workspaces, memories, projects, and tasks together when the user needs combined workflow support."
+  , ""
+  , "Guidelines:"
+  , "- Set or confirm workspace context first with `hmem_set_workspace` or `hmem_get_workspace`."
+  , "- Search existing memories and work items before creating new ones."
+  , "- Prefer the smallest correct change: update existing records when appropriate instead of duplicating them."
+  , "- Keep task and project status accurate."
+  , "- Use memory creation and linking when new work produces reusable knowledge."
+  , "- Use lifecycle operations carefully: delete is soft-delete, purge is permanent."
+  , "- Do not reference tools that are not actually available in this environment."
+  , ""
+  , "Typical pattern:"
+  , "- confirm workspace"
+  , "- inspect existing memories or tasks"
+  , "- create or update the needed records"
+  , "- link related knowledge when useful"
   ]
 
 ------------------------------------------------------------------------

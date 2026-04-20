@@ -1,4 +1,4 @@
-module Feature.DragDrop exposing (dragOverClass, update, viewDropActionModal)
+module Feature.DragDrop exposing (dragOverClass, handleEscape, init, update, viewDropActionModal)
 
 import Api
 import Dict
@@ -9,6 +9,14 @@ import Html.Events exposing (..)
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Types exposing (..)
+
+
+init : DragDropModel
+init =
+    { dragging = Nothing
+    , dragOver = Nothing
+    , dropActionModal = Nothing
+    }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -229,6 +237,15 @@ clearDragState =
     updateDragDropModel (
         \dd -> { dd | dragging = Nothing, dragOver = Nothing }
     )
+
+
+handleEscape : Model -> Maybe Model
+handleEscape model =
+    if model.dragDrop.dropActionModal /= Nothing then
+        Just (updateDragDropModel (\dd -> { dd | dropActionModal = Nothing }) model)
+
+    else
+        Nothing
 
 
 trackedTaskMutation : List String -> String -> List ( String, Encode.Value ) -> Model -> ( Model, Cmd Msg )

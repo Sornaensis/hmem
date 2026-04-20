@@ -1,5 +1,8 @@
 module Feature.Editing exposing
-    ( onKeyDown
+    ( clearForTabSwitch
+    , handleEscape
+    , init
+    , onKeyDown
     , update
     , viewCreateFormModal
     , viewEditableText
@@ -25,6 +28,38 @@ import Json.Encode as Encode
 import Markdown.Parser
 import Markdown.Renderer
 import Types exposing (..)
+
+
+init : EditingModel
+init =
+    { editState = Nothing
+    , createForm = Nothing
+    , inlineCreate = Nothing
+    }
+
+
+clearForTabSwitch : Model -> Model
+clearForTabSwitch =
+    updateEditingModel
+        (\ed ->
+            { ed
+                | createForm = Nothing
+                , editState = Nothing
+                , inlineCreate = Nothing
+            }
+        )
+
+
+handleEscape : Model -> Maybe Model
+handleEscape model =
+    if model.editing.inlineCreate /= Nothing then
+        Just (updateEditingModel (\ed -> { ed | inlineCreate = Nothing }) model)
+
+    else if model.editing.editState /= Nothing then
+        Just (updateEditingModel (\ed -> { ed | editState = Nothing }) model)
+
+    else
+        Nothing
 
 
 

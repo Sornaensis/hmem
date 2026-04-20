@@ -1,4 +1,4 @@
-module Toast exposing (addToast, update, view)
+module Toast exposing (addToast, init, update, view)
 
 import Html exposing (..)
 import Html.Attributes exposing (class)
@@ -6,6 +6,13 @@ import Html.Events exposing (onClick)
 import Process
 import Task as ElmTask
 import Types exposing (..)
+
+
+init : ToastModel
+init =
+    { toasts = []
+    , nextToastId = 0
+    }
 
 
 

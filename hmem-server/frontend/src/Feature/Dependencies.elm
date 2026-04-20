@@ -1,5 +1,7 @@
 module Feature.Dependencies exposing
-    ( update
+    ( handleEscape
+    , init
+    , update
     , viewTaskDependencies
     )
 
@@ -13,6 +15,26 @@ import Html.Events exposing (..)
 import Json.Decode as Decode
 import Toast exposing (addToast)
 import Types exposing (..)
+
+
+init : DependenciesModel
+init =
+    { taskDependencies = Dict.empty
+    , addingDependencyFor = Nothing
+    }
+
+
+handleEscape : Model -> Maybe Model
+handleEscape model =
+    if model.dependencies.addingDependencyFor /= Nothing then
+        let
+            currentDependencies =
+                model.dependencies
+        in
+        Just { model | dependencies = { currentDependencies | addingDependencyFor = Nothing } }
+
+    else
+        Nothing
 
 
 

@@ -1,9 +1,17 @@
-module Feature.Mutations exposing (update)
+module Feature.Mutations exposing (init, update)
 
 import Dict
 import Helpers exposing (beginWorkspaceDataReload, trackLocalMutation)
 import Toast exposing (addToast)
 import Types exposing (..)
+
+
+init : MutationsModel
+init =
+    { pendingMutationIds = Dict.empty
+    , pendingRequestIds = Dict.empty
+    , nextRequestId = 1
+    }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -150,6 +158,20 @@ update msg model =
                 Err _ ->
                     addToast Error "Failed to update workspace" model
 
+        ClearPendingMutation entityId ->
+            ( updateMutationsModel
+                (\records -> { records | pendingMutationIds = Dict.remove entityId records.pendingMutationIds })
+                model
+            , Cmd.none
+            )
+
+        ClearPendingRequest requestId ->
+            ( updateMutationsModel
+                (\records -> { records | pendingRequestIds = Dict.remove requestId records.pendingRequestIds })
+                model
+            , Cmd.none
+            )
+
         _ ->
             ( model, Cmd.none )
 
@@ -157,3 +179,8 @@ update msg model =
 refreshAfterMutation : Model -> ( Model, Cmd Msg )
 refreshAfterMutation model =
     beginWorkspaceDataReload False model
+
+
+updateMutationsModel : (MutationsModel -> MutationsModel) -> Model -> Model
+updateMutationsModel fn model =
+    { model | mutations = fn model.mutations }

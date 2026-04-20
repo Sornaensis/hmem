@@ -1,4 +1,4 @@
-module Feature.Search exposing (update, viewSearchBar, viewUnifiedSearchResults)
+module Feature.Search exposing (init, update, viewSearchBar, viewUnifiedSearchResults)
 
 import Api
 import Helpers exposing (saveFiltersCmd)
@@ -6,6 +6,22 @@ import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Types exposing (..)
+
+
+init : SearchModel
+init =
+    { query = ""
+    , unifiedResults = Nothing
+    , isSearching = False
+    , filterShowOnly = ShowAll
+    , filterPriority = AnyPriority
+    , filterProjectStatuses = []
+    , filterTaskStatuses = []
+    , filterMemoryTypes = []
+    , filterImportance = AnyPriority
+    , filterMemoryPinned = Nothing
+    , filterTags = []
+    }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )

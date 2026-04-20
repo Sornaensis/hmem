@@ -1,9 +1,53 @@
-module Feature.DataLoading exposing (update)
+module Feature.DataLoading exposing (init, prepareForPageLoad, update)
 
 import Dict
 import Helpers exposing (indexBy)
 import Toast exposing (addToast)
 import Types exposing (..)
+
+
+init : DataLoadingModel
+init =
+    { loadingWorkspaces = True
+    , loadingWorkspaceData = False
+    , pendingWorkspaceLoads = 0
+    , activeWorkspaceLoadToken = Nothing
+    , nextWorkspaceLoadToken = 1
+    }
+
+
+prepareForPageLoad : Page -> DataLoadingModel -> DataLoadingModel
+prepareForPageLoad page dataLoading =
+    { dataLoading
+        | loadingWorkspaceData =
+            case page of
+                WorkspacePage _ ->
+                    True
+
+                _ ->
+                    False
+        , pendingWorkspaceLoads =
+            case page of
+                WorkspacePage _ ->
+                    3
+
+                _ ->
+                    0
+        , activeWorkspaceLoadToken =
+            case page of
+                WorkspacePage _ ->
+                    Just dataLoading.nextWorkspaceLoadToken
+
+                _ ->
+                    Nothing
+        , nextWorkspaceLoadToken =
+            case page of
+                WorkspacePage _ ->
+                    dataLoading.nextWorkspaceLoadToken + 1
+
+                _ ->
+                    dataLoading.nextWorkspaceLoadToken
+    }
 
 
 finishWorkspaceLoad : Maybe Int -> DataLoadingModel -> DataLoadingModel

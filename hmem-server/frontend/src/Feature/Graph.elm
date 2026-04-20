@@ -1,4 +1,4 @@
-module Feature.Graph exposing (update, viewGraphPage)
+module Feature.Graph exposing (init, update, viewGraphPage)
 
 import Api
 import Dict
@@ -11,6 +11,13 @@ import Json.Encode as Encode
 import Ports exposing (initCytoscape)
 import Toast exposing (addToast)
 import Types exposing (..)
+
+
+init : GraphModel
+init =
+    { visualization = Nothing
+    , loaded = False
+    }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )

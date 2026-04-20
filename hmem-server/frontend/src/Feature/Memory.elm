@@ -1,5 +1,8 @@
 module Feature.Memory exposing
-    ( update
+    ( clearForTabSwitch
+    , handleEscape
+    , init
+    , update
     , viewLinkedMemories
     , viewMemoriesList
     , viewMemoryCard
@@ -19,6 +22,37 @@ import Html.Keyed as Keyed
 import Json.Decode as Decode
 import Toast exposing (addToast)
 import Types exposing (..)
+
+
+init : MemoryModel
+init =
+    { entityMemories = Dict.empty
+    , linkingMemoryFor = Nothing
+    , linkingEntityFor = Nothing
+    }
+
+
+clearForTabSwitch : Model -> Model
+clearForTabSwitch =
+    updateMemoryModel
+        (\mm ->
+            { mm
+                | linkingMemoryFor = Nothing
+                , linkingEntityFor = Nothing
+            }
+        )
+
+
+handleEscape : Model -> Maybe Model
+handleEscape model =
+    if model.memory.linkingMemoryFor /= Nothing then
+        Just (updateMemoryModel (\mm -> { mm | linkingMemoryFor = Nothing }) model)
+
+    else if model.memory.linkingEntityFor /= Nothing then
+        Just (updateMemoryModel (\mm -> { mm | linkingEntityFor = Nothing }) model)
+
+    else
+        Nothing
 
 
 

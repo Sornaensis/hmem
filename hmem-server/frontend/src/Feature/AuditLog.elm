@@ -1,4 +1,4 @@
-module Feature.AuditLog exposing (update, viewAuditLogPage, viewEntityHistory, viewRevertConfirmModal)
+module Feature.AuditLog exposing (init, update, viewAuditLogPage, viewEntityHistory, viewRevertConfirmModal)
 
 import Api
 import Browser.Navigation as Nav
@@ -10,6 +10,20 @@ import Html.Events exposing (..)
 import Json.Decode as Decode
 import Toast exposing (addToast)
 import Types exposing (..)
+
+
+init : AuditLogModel
+init =
+    { entityHistory = Dict.empty
+    , entityHistoryHasMore = Dict.empty
+    , historyExpanded = Dict.empty
+    , entries = []
+    , hasMore = False
+    , filters = { entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
+    , expandedEntries = Dict.empty
+    , revertConfirmation = Nothing
+    , revertInFlight = False
+    }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )

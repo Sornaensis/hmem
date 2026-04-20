@@ -1,5 +1,6 @@
 module Feature.WebSocket exposing
     ( connectCmd
+    , init
     , subscriptions
     , update
     )
@@ -11,6 +12,11 @@ import Json.Decode as Decode
 import Ports exposing (connectWebSocket, wsConnected, wsDisconnected, wsMessage)
 import Toast exposing (addToast)
 import Types exposing (..)
+
+
+init : WebSocketModel
+init =
+    { state = Disconnected }
 
 
 connectCmd : String -> Cmd Msg

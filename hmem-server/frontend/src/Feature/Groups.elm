@@ -1,4 +1,4 @@
-module Feature.Groups exposing (update, viewHomePage, viewSidebar)
+module Feature.Groups exposing (init, update, viewHomePage, viewSidebar)
 
 import Api
 import Dict
@@ -8,6 +8,14 @@ import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Toast exposing (addToast)
 import Types exposing (..)
+
+
+init : GroupsModel
+init =
+    { workspaceGroups = Dict.empty
+    , groupMembers = Dict.empty
+    , managingGroup = Nothing
+    }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )

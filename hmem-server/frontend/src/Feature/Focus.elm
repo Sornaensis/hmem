@@ -1,4 +1,4 @@
-module Feature.Focus exposing (buildProjectBreadcrumb, buildTaskBreadcrumb, update, viewFocusBreadcrumbBar, viewTaskBreadcrumb)
+module Feature.Focus exposing (buildProjectBreadcrumb, buildTaskBreadcrumb, init, update, viewFocusBreadcrumbBar, viewTaskBreadcrumb)
 
 import Api
 import Dict
@@ -7,6 +7,15 @@ import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Types exposing (..)
+
+
+init : Maybe ( String, String ) -> FocusModel
+init maybeFocus =
+    { focusedEntity = maybeFocus
+    , breadcrumbAnchor = maybeFocus
+    , history = Maybe.map List.singleton maybeFocus |> Maybe.withDefault []
+    , historyIndex = 0
+    }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )

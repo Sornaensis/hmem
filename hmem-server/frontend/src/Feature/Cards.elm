@@ -1,5 +1,7 @@
 module Feature.Cards exposing
-    ( update
+    ( handleEscape
+    , init
+    , update
     , viewDeleteConfirmModal
     , viewProjectsTree
     )
@@ -21,6 +23,14 @@ import Json.Decode as Decode
 import Ports exposing (copyToClipboard)
 import Toast exposing (addToast)
 import Types exposing (..)
+
+
+init : CardsModel
+init =
+    { expandedCards = Dict.empty
+    , collapsedNodes = Dict.empty
+    , deleteConfirmation = Nothing
+    }
 
 
 
@@ -77,6 +87,46 @@ update msg model =
               }
             , Cmd.batch [ fetchMemCmd, fetchDepCmd ]
             )
+
+        ToggleTreeNode nodeId ->
+            let
+                current =
+                    Dict.get nodeId model.cards.collapsedNodes |> Maybe.withDefault False
+
+                newModel =
+                    updateCardsModel
+                        (\records -> { records | collapsedNodes = Dict.insert nodeId (not current) records.collapsedNodes })
+                        model
+            in
+            ( newModel, saveFiltersCmd newModel )
+
+        ExpandAllNodes ->
+            let
+                newModel =
+                    updateCardsModel (\records -> { records | collapsedNodes = Dict.empty }) model
+            in
+            ( newModel, saveFiltersCmd newModel )
+
+        CollapseAllNodes ->
+            let
+                projectNodes =
+                    model.projects
+                        |> Dict.values
+                        |> List.map (\record -> ( "proj-" ++ record.id, True ))
+
+                taskNodes =
+                    model.tasks
+                        |> Dict.values
+                        |> (\tasks ->
+                                tasks
+                                    |> List.filter (\task -> List.any (\t2 -> t2.parentId == Just task.id) tasks)
+                           )
+                        |> List.map (\record -> ( "task-" ++ record.id, True ))
+
+                newModel =
+                    updateCardsModel (\records -> { records | collapsedNodes = Dict.fromList (projectNodes ++ taskNodes) }) model
+            in
+            ( newModel, saveFiltersCmd newModel )
 
         ConfirmDelete entityType entityId ->
             let
@@ -140,8 +190,29 @@ update msg model =
             in
             ( m2, Cmd.batch [ copyToClipboard idStr, toastCmd ] )
 
+        ScrollToEntity entityId ->
+            ( updateCardsModel
+                (\records -> { records | expandedCards = Dict.insert entityId True records.expandedCards })
+                model
+            , scrollToElement ("entity-" ++ entityId)
+            )
+
         _ ->
             ( model, Cmd.none )
+
+
+handleEscape : Model -> Maybe Model
+handleEscape model =
+    if model.cards.deleteConfirmation /= Nothing then
+        Just (updateCardsModel (\records -> { records | deleteConfirmation = Nothing }) model)
+
+    else
+        Nothing
+
+
+updateCardsModel : (CardsModel -> CardsModel) -> Model -> Model
+updateCardsModel fn model =
+    { model | cards = fn model.cards }
 
 
 

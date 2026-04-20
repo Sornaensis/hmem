@@ -33,13 +33,13 @@ update msg model =
         ToggleCardExpand cardId ->
             let
                 current =
-                    Dict.get cardId model.expandedCards |> Maybe.withDefault False
+                    Dict.get cardId model.cards.expandedCards |> Maybe.withDefault False
 
                 newExpanded =
                     not current
 
                 fetchMemCmd =
-                    if newExpanded && not (Dict.member cardId model.entityMemories) then
+                    if newExpanded && not (Dict.member cardId model.memory.entityMemories) then
                         if Dict.member cardId model.projects then
                             Api.fetchProjectMemories model.flags.apiUrl cardId (GotEntityMemories cardId)
 
@@ -53,47 +53,85 @@ update msg model =
                         Cmd.none
 
                 fetchDepCmd =
-                    if newExpanded && Dict.member cardId model.tasks && not (Dict.member cardId model.taskDependencies) then
+                    if newExpanded && Dict.member cardId model.tasks && not (Dict.member cardId model.dependencies.taskDependencies) then
                         Api.fetchTaskOverview model.flags.apiUrl cardId (GotTaskDependencies cardId)
 
                     else
                         Cmd.none
+
+                currentCards =
+                    model.cards
+
+                updatedCards =
+                    { currentCards | expandedCards = Dict.insert cardId newExpanded model.cards.expandedCards }
+
+                currentEditing =
+                    model.editing
+
+                updatedEditing =
+                    { currentEditing | editState = Nothing }
             in
-            ( { model | expandedCards = Dict.insert cardId newExpanded model.expandedCards, editing = Nothing }
+            ( { model
+                | cards = updatedCards
+                , editing = updatedEditing
+              }
             , Cmd.batch [ fetchMemCmd, fetchDepCmd ]
             )
 
         ConfirmDelete entityType entityId ->
-            ( { model | deleteConfirmation = Just ( entityType, entityId ) }, Cmd.none )
+            let
+                currentCards =
+                    model.cards
+
+                updatedCards =
+                    { currentCards | deleteConfirmation = Just ( entityType, entityId ) }
+            in
+            ( { model | cards = updatedCards }, Cmd.none )
 
         PerformDelete ->
-            case model.deleteConfirmation of
+            case model.cards.deleteConfirmation of
                 Just ( entityType, entityId ) ->
                     let
+                        currentCards =
+                            model.cards
+
+                        updatedCards =
+                            { currentCards | deleteConfirmation = Nothing }
+
+                        ( trackedModel, requestId, clearCmd ) =
+                            beginTrackedMutation [ entityId ] { model | cards = updatedCards }
+
                         cmd =
                             case entityType of
                                 "project" ->
-                                    Api.deleteProject model.flags.apiUrl entityId (MutationDone "project")
+                                    Api.deleteProject model.flags.apiUrl entityId requestId (MutationDone "project")
 
                                 "task" ->
-                                    Api.deleteTask model.flags.apiUrl entityId (MutationDone "task")
+                                    Api.deleteTask model.flags.apiUrl entityId requestId (MutationDone "task")
 
                                 "memory" ->
-                                    Api.deleteMemory model.flags.apiUrl entityId (MutationDone "memory")
+                                    Api.deleteMemory model.flags.apiUrl entityId requestId (MutationDone "memory")
 
                                 "group" ->
-                                    Api.deleteWorkspaceGroup model.flags.apiUrl entityId (WorkspaceGroupDeleted entityId)
+                                    Api.deleteWorkspaceGroup model.flags.apiUrl entityId requestId (WorkspaceGroupDeleted entityId)
 
                                 _ ->
                                     Cmd.none
                     in
-                    ( { model | deleteConfirmation = Nothing }, cmd )
+                    ( trackedModel, Cmd.batch [ clearCmd, cmd ] )
 
                 Nothing ->
                     ( model, Cmd.none )
 
         CancelDelete ->
-            ( { model | deleteConfirmation = Nothing }, Cmd.none )
+            let
+                currentCards =
+                    model.cards
+
+                updatedCards =
+                    { currentCards | deleteConfirmation = Nothing }
+            in
+            ( { model | cards = updatedCards }, Cmd.none )
 
         CopyId idStr ->
             let
@@ -124,23 +162,23 @@ viewProjectsTree wsId model =
                 |> List.filter (\t -> t.workspaceId == wsId)
 
         query =
-            String.toLower (String.trim model.searchQuery)
+            String.toLower (String.trim model.search.query)
 
         hasSearch =
             not (String.isEmpty query)
 
         hasActiveFilters =
-            model.filterShowOnly /= ShowAll || model.filterPriority /= AnyPriority || not (List.isEmpty model.filterProjectStatuses) || not (List.isEmpty model.filterTaskStatuses)
+            model.search.filterShowOnly /= ShowAll || model.search.filterPriority /= AnyPriority || not (List.isEmpty model.search.filterProjectStatuses) || not (List.isEmpty model.search.filterTaskStatuses)
 
         projectPassesFilters p =
-            (model.filterShowOnly /= ShowTasksOnly)
-                && passesStatusFilter model.filterProjectStatuses (Api.projectStatusToString p.status)
-                && passesPriorityFilter model.filterPriority p.priority
+            (model.search.filterShowOnly /= ShowTasksOnly)
+                && passesStatusFilter model.search.filterProjectStatuses (Api.projectStatusToString p.status)
+                && passesPriorityFilter model.search.filterPriority p.priority
 
         taskPassesFilters t =
-            (model.filterShowOnly /= ShowProjectsOnly)
-                && passesStatusFilter model.filterTaskStatuses (Api.taskStatusToString t.status)
-                && passesPriorityFilter model.filterPriority t.priority
+            (model.search.filterShowOnly /= ShowProjectsOnly)
+                && passesStatusFilter model.search.filterTaskStatuses (Api.taskStatusToString t.status)
+                && passesPriorityFilter model.search.filterPriority t.priority
 
         expandCollapseBar =
             div [ class "tree-toolbar" ]
@@ -155,7 +193,7 @@ viewProjectsTree wsId model =
             Feature.Focus.viewFocusBreadcrumbBar model
 
         treeContent =
-            case model.focusedEntity of
+            case model.focus.focusedEntity of
                 Just ( "project", projId ) ->
                     case Dict.get projId model.projects of
                         Just proj ->
@@ -173,7 +211,7 @@ viewProjectsTree wsId model =
                             []
 
                 _ ->
-                    case model.filterShowOnly of
+                    case model.search.filterShowOnly of
                         ShowTasksOnly ->
                             let
                                 rootTasks =
@@ -214,7 +252,7 @@ viewProjectsTree wsId model =
                                                 identity
                                            )
                                         |> (if hasActiveFilters then
-                                                List.filter (\p -> projectTreePassesFilters (\pp -> passesStatusFilter model.filterProjectStatuses (Api.projectStatusToString pp.status)) p wsProjects wsTasks projectPassesFilters taskPassesFilters)
+                                                List.filter (\p -> projectTreePassesFilters (\pp -> passesStatusFilter model.search.filterProjectStatuses (Api.projectStatusToString pp.status)) p wsProjects wsTasks projectPassesFilters taskPassesFilters)
 
                                             else
                                                 identity
@@ -241,7 +279,7 @@ viewProjectsTree wsId model =
                                            )
                             in
                             viewProjectsWithZones model (\p -> viewProjectNode wsProjects model 0 p hasSearch query) Nothing visibleRootProjects
-                                ++ (if model.filterShowOnly /= ShowProjectsOnly && not (List.isEmpty visibleOrphans) then
+                                ++ (if model.search.filterShowOnly /= ShowProjectsOnly && not (List.isEmpty visibleOrphans) then
                                         [ ( "orphan-tasks-section"
                                           , div [ class "orphan-tasks-section" ]
                                                 [ div [ class "orphan-tasks-header" ] [ text "Unassigned Tasks" ]
@@ -271,17 +309,17 @@ viewProjectNode allProjects model depth project hasSearch query =
             Dict.values model.tasks
 
         hasActiveFilters =
-            model.filterShowOnly /= ShowAll || model.filterPriority /= AnyPriority || not (List.isEmpty model.filterProjectStatuses) || not (List.isEmpty model.filterTaskStatuses)
+            model.search.filterShowOnly /= ShowAll || model.search.filterPriority /= AnyPriority || not (List.isEmpty model.search.filterProjectStatuses) || not (List.isEmpty model.search.filterTaskStatuses)
 
         projectPassesFilters p =
-            (model.filterShowOnly /= ShowTasksOnly)
-                && passesStatusFilter model.filterProjectStatuses (Api.projectStatusToString p.status)
-                && passesPriorityFilter model.filterPriority p.priority
+            (model.search.filterShowOnly /= ShowTasksOnly)
+                && passesStatusFilter model.search.filterProjectStatuses (Api.projectStatusToString p.status)
+                && passesPriorityFilter model.search.filterPriority p.priority
 
         taskPassesFilters t =
-            (model.filterShowOnly /= ShowProjectsOnly)
-                && passesStatusFilter model.filterTaskStatuses (Api.taskStatusToString t.status)
-                && passesPriorityFilter model.filterPriority t.priority
+            (model.search.filterShowOnly /= ShowProjectsOnly)
+                && passesStatusFilter model.search.filterTaskStatuses (Api.taskStatusToString t.status)
+                && passesPriorityFilter model.search.filterPriority t.priority
 
         children =
             allProjects
@@ -297,7 +335,7 @@ viewProjectNode allProjects model depth project hasSearch query =
                         identity
                    )
                 |> (if hasActiveFilters then
-                        List.filter (\p -> projectTreePassesFilters (\pp -> passesStatusFilter model.filterProjectStatuses (Api.projectStatusToString pp.status)) p allProjects allTasks projectPassesFilters taskPassesFilters)
+                        List.filter (\p -> projectTreePassesFilters (\pp -> passesStatusFilter model.search.filterProjectStatuses (Api.projectStatusToString pp.status)) p allProjects allTasks projectPassesFilters taskPassesFilters)
 
                     else
                         identity
@@ -331,7 +369,7 @@ viewProjectNode allProjects model depth project hasSearch query =
                    )
 
         linkedMems =
-            Dict.get project.id model.entityMemories |> Maybe.withDefault []
+            Dict.get project.id model.memory.entityMemories |> Maybe.withDefault []
     in
     div [ class "tree-node", style "margin-left" (String.fromInt (depth * 20) ++ "px"), id ("entity-" ++ project.id) ]
         [ div
@@ -529,7 +567,7 @@ viewTaskCard showProject model task =
                 "card-task"
 
         linkedMems =
-            Dict.get task.id model.entityMemories |> Maybe.withDefault []
+            Dict.get task.id model.memory.entityMemories |> Maybe.withDefault []
     in
     div
         ([ class ("card tree-card " ++ cardClass ++ " card-status-" ++ Api.taskStatusToString task.status ++ Feature.DragDrop.dragOverClass model task.id)
@@ -626,7 +664,7 @@ viewTaskCard showProject model task =
             div [ class "card-summary" ] [ text (String.join " · " summaryParts) ]
         , let
             deps =
-                Dict.get task.id model.taskDependencies |> Maybe.withDefault []
+                Dict.get task.id model.dependencies.taskDependencies |> Maybe.withDefault []
 
             extrasExpanded =
                 isExpanded model task.id
@@ -711,7 +749,7 @@ viewTaskCard showProject model task =
 
 viewDeleteConfirmModal : Model -> Html Msg
 viewDeleteConfirmModal model =
-    case model.deleteConfirmation of
+    case model.cards.deleteConfirmation of
         Nothing ->
             text ""
 
@@ -731,7 +769,7 @@ viewDeleteConfirmModal model =
                                 |> Maybe.withDefault "this memory"
 
                         "group" ->
-                            Dict.get entityId model.workspaceGroups |> Maybe.map .name |> Maybe.withDefault "this group"
+                            Dict.get entityId model.groups.workspaceGroups |> Maybe.map .name |> Maybe.withDefault "this group"
 
                         _ ->
                             "this item"
@@ -778,7 +816,7 @@ viewDeleteConfirmModal model =
 
 viewDropZone : Model -> DropZoneInfo -> Html Msg
 viewDropZone model zone =
-    case model.dragging of
+    case model.dragDrop.dragging of
         Nothing ->
             text ""
 
@@ -802,7 +840,7 @@ viewDropZone model zone =
                             False
 
                 isActive =
-                    case model.dragOver of
+                    case model.dragDrop.dragOver of
                         Just (OverZone z) ->
                             z == zone
 
@@ -829,7 +867,7 @@ viewDropZone model zone =
 
 viewTasksWithZones : Model -> String -> Maybe String -> Maybe String -> List Api.Task -> List ( String, Html Msg )
 viewTasksWithZones model zoneType projectId parentTaskId tasks =
-    case model.dragging of
+    case model.dragDrop.dragging of
         Nothing ->
             List.map (\t -> ( t.id, viewTaskCard False model t )) tasks
 
@@ -858,7 +896,7 @@ viewTasksWithZones model zoneType projectId parentTaskId tasks =
 
 viewProjectsWithZones : Model -> (Api.Project -> Html Msg) -> Maybe String -> List Api.Project -> List ( String, Html Msg )
 viewProjectsWithZones model renderProject parentId projects =
-    case model.dragging of
+    case model.dragDrop.dragging of
         Nothing ->
             List.map (\p -> ( p.id, renderProject p )) projects
 

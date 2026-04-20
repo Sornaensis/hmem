@@ -20,8 +20,14 @@ update msg model =
             case result of
                 Ok viz ->
                     let
+                        currentGraph =
+                            model.graph
+
+                        updatedGraph =
+                            { currentGraph | visualization = Just viz, loaded = True }
+
                         newModel =
-                            { model | graphVisualization = Just viz, graphLoaded = True }
+                            { model | graph = updatedGraph }
                     in
                     ( newModel, initCytoscapeGraph newModel )
 
@@ -53,10 +59,16 @@ update msg model =
             ( model, Cmd.none )
 
         LoadGraphForWorkspace wsId ->
+            let
+                currentGraph =
+                    model.graph
+
+                updatedGraph =
+                    { currentGraph | loaded = False, visualization = Nothing }
+            in
             ( { model
                 | selectedWorkspaceId = Just wsId
-                , graphLoaded = False
-                , graphVisualization = Nothing
+                , graph = updatedGraph
               }
             , Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
             )
@@ -71,7 +83,7 @@ update msg model =
 
 initCytoscapeGraph : Model -> Cmd Msg
 initCytoscapeGraph model =
-    case model.graphVisualization of
+    case model.graph.visualization of
         Nothing ->
             Cmd.none
 
@@ -217,14 +229,14 @@ viewGraphPage model =
             [ h2 [] [ text "Knowledge Graph" ]
             , viewGraphWorkspaceSelector model
             ]
-        , case model.graphVisualization of
+        , case model.graph.visualization of
             Nothing ->
                 case model.selectedWorkspaceId of
                     Nothing ->
                         div [ class "empty-state" ] [ text "Select a workspace to view its knowledge graph." ]
 
                     Just _ ->
-                        if model.graphLoaded then
+                        if model.graph.loaded then
                             div [ class "empty-state" ] [ text "No data found for this workspace." ]
 
                         else

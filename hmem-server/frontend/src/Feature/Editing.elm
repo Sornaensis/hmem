@@ -16,7 +16,7 @@ module Feature.Editing exposing
 
 import Api
 import Dict
-import Helpers exposing (editElementId, editingValue, focusElement)
+import Helpers exposing (beginTrackedMutation, editElementId, editingValue, focusElement)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
@@ -37,50 +37,65 @@ update msg model =
         -- Inline editing
         StartEdit entityType entityId field currentValue ->
             let
-                saveCmd =
-                    case model.editing of
+                editingModel =
+                    model.editing
+
+                ( baseModel, saveCmd ) =
+                    case editingModel.editState of
                         Just (EditingField state) ->
                             if state.value /= state.original then
-                                saveEditCmd model.flags.apiUrl state
+                                let
+                                    ( trackedModel, requestId, clearCmd ) =
+                                        beginTrackedMutation [ state.entityId ] model
+                                in
+                                ( trackedModel, Cmd.batch [ clearCmd, saveEditCmd model.flags.apiUrl (Just requestId) state ] )
 
                             else
-                                Cmd.none
+                                ( model, Cmd.none )
 
                         Nothing ->
-                            Cmd.none
+                            ( model, Cmd.none )
             in
-            ( { model
-                | editing =
-                    Just
-                        (EditingField
-                            { entityType = entityType
-                            , entityId = entityId
-                            , field = field
-                            , value = currentValue
-                            , original = currentValue
-                            }
-                        )
-              }
+            ( updateEditingModel
+                (\ed ->
+                    { ed
+                        | editState =
+                            Just
+                                (EditingField
+                                    { entityType = entityType
+                                    , entityId = entityId
+                                    , field = field
+                                    , value = currentValue
+                                    , original = currentValue
+                                    }
+                                )
+                    }
+                )
+                baseModel
             , Cmd.batch [ saveCmd, focusElement (editElementId entityId field) ]
             )
 
         EditInput newValue ->
-            case model.editing of
+            case model.editing.editState of
                 Just (EditingField state) ->
-                    ( { model | editing = Just (EditingField { state | value = newValue }) }, Cmd.none )
+                    ( updateEditingModel (\ed -> { ed | editState = Just (EditingField { state | value = newValue }) }) model, Cmd.none )
 
                 Nothing ->
                     ( model, Cmd.none )
 
         SaveEdit saveEntityId saveField ->
-            case model.editing of
+            case model.editing.editState of
                 Just (EditingField state) ->
                     if state.entityId == saveEntityId && state.field == saveField then
                         if state.value == state.original then
-                            ( { model | editing = Nothing }, Cmd.none )
+                            ( updateEditingModel (\ed -> { ed | editState = Nothing }) model, Cmd.none )
 
                         else
-                            ( { model | editing = Nothing }, saveEditCmd model.flags.apiUrl state )
+                            let
+                                ( trackedModel, requestId, clearCmd ) =
+                                    beginTrackedMutation [ state.entityId ] (updateEditingModel (\ed -> { ed | editState = Nothing }) model)
+                            in
+                            ( trackedModel, Cmd.batch [ clearCmd, saveEditCmd model.flags.apiUrl (Just requestId) state ] )
 
                     else
                         -- Editing state has moved to a different field; don't clear it
@@ -90,63 +105,112 @@ update msg model =
                     ( model, Cmd.none )
 
         CancelEdit ->
-            ( { model | editing = Nothing }, Cmd.none )
+            ( updateEditingModel (\ed -> { ed | editState = Nothing }) model, Cmd.none )
 
         -- Quick-change handlers
         ChangeProjectStatus projId newStatus ->
-            ( model
-            , Api.updateProject model.flags.apiUrl
-                projId
-                [ ( "status", Encode.string (Api.projectStatusToString newStatus) ) ]
-                ProjectUpdated
+            let
+                ( trackedModel, requestId, clearCmd ) =
+                    beginTrackedMutation [ projId ] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ clearCmd
+                , Api.updateProject model.flags.apiUrl
+                    projId
+                    [ ( "status", Encode.string (Api.projectStatusToString newStatus) ), ( "request_id", Encode.string requestId ) ]
+                    ProjectUpdated
+                ]
             )
 
         ChangeTaskStatus taskId newStatus ->
-            ( model
-            , Api.updateTask model.flags.apiUrl
-                taskId
-                [ ( "status", Encode.string (Api.taskStatusToString newStatus) ) ]
-                TaskUpdated
+            let
+                ( trackedModel, requestId, clearCmd ) =
+                    beginTrackedMutation [ taskId ] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ clearCmd
+                , Api.updateTask model.flags.apiUrl
+                    taskId
+                    [ ( "status", Encode.string (Api.taskStatusToString newStatus) ), ( "request_id", Encode.string requestId ) ]
+                    TaskUpdated
+                ]
             )
 
         ChangeProjectPriority projId newPri ->
-            ( model
-            , Api.updateProject model.flags.apiUrl
-                projId
-                [ ( "priority", Encode.int newPri ) ]
-                ProjectUpdated
+            let
+                ( trackedModel, requestId, clearCmd ) =
+                    beginTrackedMutation [ projId ] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ clearCmd
+                , Api.updateProject model.flags.apiUrl
+                    projId
+                    [ ( "priority", Encode.int newPri ), ( "request_id", Encode.string requestId ) ]
+                    ProjectUpdated
+                ]
             )
 
         ChangeTaskPriority taskId newPri ->
-            ( model
-            , Api.updateTask model.flags.apiUrl
-                taskId
-                [ ( "priority", Encode.int newPri ) ]
-                TaskUpdated
+            let
+                ( trackedModel, requestId, clearCmd ) =
+                    beginTrackedMutation [ taskId ] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ clearCmd
+                , Api.updateTask model.flags.apiUrl
+                    taskId
+                    [ ( "priority", Encode.int newPri ), ( "request_id", Encode.string requestId ) ]
+                    TaskUpdated
+                ]
             )
 
         ChangeMemoryImportance memId newImp ->
-            ( model
-            , Api.updateMemory model.flags.apiUrl
-                memId
-                [ ( "importance", Encode.int newImp ) ]
-                MemoryUpdated
+            let
+                ( trackedModel, requestId, clearCmd ) =
+                    beginTrackedMutation [ memId ] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ clearCmd
+                , Api.updateMemory model.flags.apiUrl
+                    memId
+                    [ ( "importance", Encode.int newImp ), ( "request_id", Encode.string requestId ) ]
+                    MemoryUpdated
+                ]
             )
 
         ToggleMemoryPin memId newPinned ->
-            ( model
-            , Api.updateMemory model.flags.apiUrl
-                memId
-                [ ( "pinned", Encode.bool newPinned ) ]
-                MemoryUpdated
+            let
+                ( trackedModel, requestId, clearCmd ) =
+                    beginTrackedMutation [ memId ] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ clearCmd
+                , Api.updateMemory model.flags.apiUrl
+                    memId
+                    [ ( "pinned", Encode.bool newPinned ), ( "request_id", Encode.string requestId ) ]
+                    MemoryUpdated
+                ]
             )
 
         ChangeMemoryType memId newType ->
-            ( model
-            , Api.updateMemory model.flags.apiUrl
-                memId
-                [ ( "memory_type", Encode.string (Api.memoryTypeToString newType) ) ]
-                MemoryUpdated
+            let
+                ( trackedModel, requestId, clearCmd ) =
+                    beginTrackedMutation [ memId ] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ clearCmd
+                , Api.updateMemory model.flags.apiUrl
+                    memId
+                    [ ( "memory_type", Encode.string (Api.memoryTypeToString newType) ), ( "request_id", Encode.string requestId ) ]
+                    MemoryUpdated
+                ]
             )
 
         -- Tags
@@ -156,8 +220,11 @@ update msg model =
                     let
                         newTags =
                             List.filter (\t -> t /= tagToRemove) mem.tags
+
+                        ( trackedModel, requestId, clearCmd ) =
+                            beginTrackedMutation [ memId ] model
                     in
-                    ( model, Api.setTags model.flags.apiUrl memId newTags (MutationDone "tags") )
+                    ( trackedModel, Cmd.batch [ clearCmd, Api.setTags model.flags.apiUrl memId newTags requestId (MutationDone "tags") ] )
 
                 Nothing ->
                     ( model, Cmd.none )
@@ -172,9 +239,15 @@ update msg model =
                         let
                             newTags =
                                 mem.tags ++ [ String.trim newTag ]
+
+                            trackedModel =
+                                updateEditingModel (\ed -> { ed | editState = Nothing }) model
+
+                            ( trackedModel2, requestId, clearCmd ) =
+                                beginTrackedMutation [ memId ] trackedModel
                         in
-                        ( { model | editing = Nothing }
-                        , Api.setTags model.flags.apiUrl memId newTags (MutationDone "tags")
+                        ( trackedModel2
+                        , Cmd.batch [ clearCmd, Api.setTags model.flags.apiUrl memId newTags requestId (MutationDone "tags") ]
                         )
 
                 Nothing ->
@@ -182,13 +255,13 @@ update msg model =
 
         -- Create forms
         ShowCreateForm form ->
-            ( { model | createForm = Just form }, Cmd.none )
+            ( updateEditingModel (\ed -> { ed | createForm = Just form }) model, Cmd.none )
 
         UpdateCreateForm form ->
-            ( { model | createForm = Just form }, Cmd.none )
+            ( updateEditingModel (\ed -> { ed | createForm = Just form }) model, Cmd.none )
 
         SubmitCreateForm ->
-            case model.createForm of
+            case model.editing.createForm of
                 Just (CreateGroupForm f) ->
                     if String.isEmpty (String.trim f.name) then
                         ( model, Cmd.none )
@@ -201,42 +274,56 @@ update msg model =
 
                                 else
                                     Just (String.trim f.description)
+
+                            ( trackedModel, requestId, clearCmd ) =
+                                beginTrackedMutation [] (updateEditingModel (\ed -> { ed | createForm = Nothing }) model)
                         in
-                        ( { model | createForm = Nothing }
-                        , Api.createWorkspaceGroup model.flags.apiUrl (String.trim f.name) desc WorkspaceGroupCreated
+                        ( trackedModel
+                        , Cmd.batch
+                            [ clearCmd
+                            , Api.createWorkspaceGroup model.flags.apiUrl (String.trim f.name) desc requestId WorkspaceGroupCreated
+                            ]
                         )
 
                 _ ->
-                    case ( model.createForm, model.selectedWorkspaceId ) of
+                    case ( model.editing.createForm, model.selectedWorkspaceId ) of
                         ( Just (CreateProjectForm f), Just wsId ) ->
                             if String.isEmpty (String.trim f.name) then
                                 ( model, Cmd.none )
 
                             else
-                                ( model, Api.createProject model.flags.apiUrl wsId f.name ProjectCreated )
+                                let
+                                    ( trackedModel, requestId, clearCmd ) =
+                                        beginTrackedMutation [] model
+                                in
+                                ( trackedModel, Cmd.batch [ clearCmd, Api.createProject model.flags.apiUrl wsId f.name requestId ProjectCreated ] )
 
                         ( Just (CreateMemoryForm f), Just wsId ) ->
                             if String.isEmpty (String.trim f.content) then
                                 ( model, Cmd.none )
 
                             else
-                                ( model, Api.createMemory model.flags.apiUrl wsId f.content f.memoryType MemoryCreated )
+                                let
+                                    ( trackedModel, requestId, clearCmd ) =
+                                        beginTrackedMutation [] model
+                                in
+                                ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId f.content f.memoryType requestId MemoryCreated ] )
 
                         _ ->
                             ( model, Cmd.none )
 
         CancelCreateForm ->
-            ( { model | createForm = Nothing }, Cmd.none )
+            ( updateEditingModel (\ed -> { ed | createForm = Nothing }) model, Cmd.none )
 
         -- Inline create
         ShowInlineCreate ic ->
-            ( { model | inlineCreate = Just ic }, focusElement "inline-create-input" )
+            ( updateEditingModel (\ed -> { ed | inlineCreate = Just ic }) model, focusElement "inline-create-input" )
 
         UpdateInlineCreate ic ->
-            ( { model | inlineCreate = Just ic }, Cmd.none )
+            ( updateEditingModel (\ed -> { ed | inlineCreate = Just ic }) model, Cmd.none )
 
         SubmitInlineCreate ->
-            case ( model.inlineCreate, model.selectedWorkspaceId ) of
+            case ( model.editing.inlineCreate, model.selectedWorkspaceId ) of
                 ( Just (InlineCreateProject { parentId, name }), Just wsId ) ->
                     if String.isEmpty (String.trim name) then
                         ( model, Cmd.none )
@@ -244,10 +331,18 @@ update msg model =
                     else
                         case parentId of
                             Just pid ->
-                                ( model, Api.createProjectWithParent model.flags.apiUrl wsId pid name ProjectCreated )
+                                let
+                                    ( trackedModel, requestId, clearCmd ) =
+                                        beginTrackedMutation [] model
+                                in
+                                ( trackedModel, Cmd.batch [ clearCmd, Api.createProjectWithParent model.flags.apiUrl wsId pid name requestId ProjectCreated ] )
 
                             Nothing ->
-                                ( model, Api.createProject model.flags.apiUrl wsId name ProjectCreated )
+                                let
+                                    ( trackedModel, requestId, clearCmd ) =
+                                        beginTrackedMutation [] model
+                                in
+                                ( trackedModel, Cmd.batch [ clearCmd, Api.createProject model.flags.apiUrl wsId name requestId ProjectCreated ] )
 
                 ( Just (InlineCreateTask { projectId, parentId, title }), Just wsId ) ->
                     if String.isEmpty (String.trim title) then
@@ -256,41 +351,57 @@ update msg model =
                     else
                         case parentId of
                             Just pid ->
-                                ( model, Api.createTaskWithParent model.flags.apiUrl wsId projectId pid title TaskCreated )
+                                let
+                                    ( trackedModel, requestId, clearCmd ) =
+                                        beginTrackedMutation [] model
+                                in
+                                ( trackedModel, Cmd.batch [ clearCmd, Api.createTaskWithParent model.flags.apiUrl wsId projectId pid title requestId TaskCreated ] )
 
                             Nothing ->
-                                ( model, Api.createTask model.flags.apiUrl wsId projectId title TaskCreated )
+                                let
+                                    ( trackedModel, requestId, clearCmd ) =
+                                        beginTrackedMutation [] model
+                                in
+                                ( trackedModel, Cmd.batch [ clearCmd, Api.createTask model.flags.apiUrl wsId projectId title requestId TaskCreated ] )
 
                 ( Just (InlineCreateMemory { content }), Just wsId ) ->
                     if String.isEmpty (String.trim content) then
                         ( model, Cmd.none )
 
                     else
-                        ( model, Api.createMemory model.flags.apiUrl wsId content Api.ShortTerm MemoryCreated )
+                        let
+                            ( trackedModel, requestId, clearCmd ) =
+                                beginTrackedMutation [] model
+                        in
+                        ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId content Api.ShortTerm requestId MemoryCreated ] )
 
                 _ ->
                     ( model, Cmd.none )
 
         CancelInlineCreate ->
-            ( { model | inlineCreate = Nothing }, Cmd.none )
+            ( updateEditingModel (\ed -> { ed | inlineCreate = Nothing }) model, Cmd.none )
 
         -- Expand and edit (composite)
         ExpandAndEdit cardId entityType entityId field currentValue ->
             let
-                saveCmd =
-                    case model.editing of
+                ( baseModel, saveCmd ) =
+                    case model.editing.editState of
                         Just (EditingField state) ->
                             if state.value /= state.original then
-                                saveEditCmd model.flags.apiUrl state
+                                let
+                                    ( trackedModel, requestId, clearCmd ) =
+                                        beginTrackedMutation [ state.entityId ] model
+                                in
+                                ( trackedModel, Cmd.batch [ clearCmd, saveEditCmd model.flags.apiUrl (Just requestId) state ] )
 
                             else
-                                Cmd.none
+                                ( model, Cmd.none )
 
                         Nothing ->
-                            Cmd.none
+                            ( model, Cmd.none )
 
                 fetchMemCmd =
-                    if not (Dict.member cardId model.entityMemories) then
+                    if not (Dict.member cardId model.memory.entityMemories) then
                         if Dict.member cardId model.projects then
                             Api.fetchProjectMemories model.flags.apiUrl cardId (GotEntityMemories cardId)
 
@@ -304,25 +415,36 @@ update msg model =
                         Cmd.none
 
                 fetchDepCmd =
-                    if Dict.member cardId model.tasks && not (Dict.member cardId model.taskDependencies) then
+                    if Dict.member cardId model.tasks && not (Dict.member cardId model.dependencies.taskDependencies) then
                         Api.fetchTaskOverview model.flags.apiUrl cardId (GotTaskDependencies cardId)
 
                     else
                         Cmd.none
+
+                currentCards =
+                    model.cards
+
+                updatedCards =
+                    { currentCards | expandedCards = Dict.insert cardId True model.cards.expandedCards }
             in
-            ( { model
-                | expandedCards = Dict.insert cardId True model.expandedCards
-                , editing =
-                    Just
-                        (EditingField
-                            { entityType = entityType
-                            , entityId = entityId
-                            , field = field
-                            , value = currentValue
-                            , original = currentValue
-                            }
-                        )
+            ( { baseModel
+                | cards = updatedCards
               }
+                |> updateEditingModel
+                    (\ed ->
+                        { ed
+                            | editState =
+                                Just
+                                    (EditingField
+                                        { entityType = entityType
+                                        , entityId = entityId
+                                        , field = field
+                                        , value = currentValue
+                                        , original = currentValue
+                                        }
+                                    )
+                        }
+                    )
             , Cmd.batch [ saveCmd, focusElement (editElementId entityId field), fetchMemCmd, fetchDepCmd ]
             )
 
@@ -334,31 +456,47 @@ update msg model =
 -- COMMANDS
 
 
-saveEditCmd : String -> { entityType : String, entityId : String, field : String, value : String, original : String } -> Cmd Msg
-saveEditCmd apiUrl state =
+updateEditingModel : (EditingModel -> EditingModel) -> Model -> Model
+updateEditingModel fn model =
+    { model | editing = fn model.editing }
+
+
+saveEditCmd : String -> Maybe String -> { entityType : String, entityId : String, field : String, value : String, original : String } -> Cmd Msg
+saveEditCmd apiUrl maybeRequestId state =
+    let
+        fields =
+            [ ( state.field, Encode.string state.value ) ]
+                ++ (case maybeRequestId of
+                        Just requestId ->
+                            [ ( "request_id", Encode.string requestId ) ]
+
+                        Nothing ->
+                            []
+                   )
+    in
     case state.entityType of
         "workspace" ->
             Api.updateWorkspace apiUrl
                 state.entityId
-                [ ( state.field, Encode.string state.value ) ]
+                fields
                 WorkspaceUpdated
 
         "project" ->
             Api.updateProject apiUrl
                 state.entityId
-                [ ( state.field, Encode.string state.value ) ]
+                fields
                 ProjectUpdated
 
         "task" ->
             Api.updateTask apiUrl
                 state.entityId
-                [ ( state.field, Encode.string state.value ) ]
+                fields
                 TaskUpdated
 
         "memory" ->
             Api.updateMemory apiUrl
                 state.entityId
-                [ ( state.field, Encode.string state.value ) ]
+                fields
                 MemoryUpdated
 
         _ ->
@@ -627,7 +765,7 @@ viewTagEditor model memory =
 
 viewCreateFormModal : Model -> Html Msg
 viewCreateFormModal model =
-    case model.createForm of
+    case model.editing.createForm of
         Nothing ->
             text ""
 
@@ -770,7 +908,7 @@ viewCreateFormContent form =
 
 viewInlineCreateMemory : Model -> Html Msg
 viewInlineCreateMemory model =
-    case model.inlineCreate of
+    case model.editing.inlineCreate of
         Just (InlineCreateMemory f) ->
             div [ class "inline-create-row" ]
                 [ input
@@ -809,7 +947,7 @@ viewInlineCreateInput : Model -> Maybe String -> String -> Html Msg
 viewInlineCreateInput model parentId inputType =
     let
         isActive =
-            case model.inlineCreate of
+            case model.editing.inlineCreate of
                 Just (InlineCreateProject ic) ->
                     inputType == "project" && ic.parentId == parentId
 
@@ -817,7 +955,7 @@ viewInlineCreateInput model parentId inputType =
                     False
     in
     if isActive then
-        case model.inlineCreate of
+        case model.editing.inlineCreate of
             Just (InlineCreateProject f) ->
                 div [ class "inline-create-row" ]
                     [ input
@@ -860,7 +998,7 @@ viewInlineCreateInput model parentId inputType =
 
 viewInlineCreateInputForParent : Model -> Maybe String -> String -> Html Msg
 viewInlineCreateInputForParent model parentId inputType =
-    case model.inlineCreate of
+    case model.editing.inlineCreate of
         Just (InlineCreateProject f) ->
             if inputType == "project" && f.parentId == parentId then
                 div [ class "inline-create-row" ]

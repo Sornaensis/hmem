@@ -17,19 +17,25 @@ update msg model =
                 entry =
                     ( entityType, entityId )
 
+                focusModel =
+                    model.focus
+
                 -- Truncate any forward history, then append
                 newHistory =
-                    List.take (model.focusHistoryIndex + 1) model.focusHistory ++ [ entry ]
+                    List.take (focusModel.historyIndex + 1) focusModel.history ++ [ entry ]
 
                 newIndex =
                     List.length newHistory - 1
 
                 newModel =
                     { model
-                        | focusedEntity = Just entry
-                        , breadcrumbAnchor = Just entry
-                        , focusHistory = newHistory
-                        , focusHistoryIndex = newIndex
+                        | focus =
+                            { focusModel
+                                | focusedEntity = Just entry
+                                , breadcrumbAnchor = Just entry
+                                , history = newHistory
+                                , historyIndex = newIndex
+                            }
                     }
             in
             ( newModel, replaceFragment newModel )
@@ -39,36 +45,51 @@ update msg model =
                 entry =
                     ( entityType, entityId )
 
+                focusModel =
+                    model.focus
+
                 -- Only change what's focused, don't modify history
                 newModel =
-                    { model | focusedEntity = Just entry }
+                    { model | focus = { focusModel | focusedEntity = Just entry } }
             in
             ( newModel, replaceFragment newModel )
 
         FocusBreadcrumbNav idx ->
             let
+                focusModel =
+                    model.focus
+
                 entry =
-                    model.focusHistory
+                    focusModel.history
                         |> List.drop idx
                         |> List.head
 
                 newModel =
                     { model
-                        | focusedEntity = entry
-                        , breadcrumbAnchor = entry
-                        , focusHistoryIndex = idx
+                        | focus =
+                            { focusModel
+                                | focusedEntity = entry
+                                , breadcrumbAnchor = entry
+                                , historyIndex = idx
+                            }
                     }
             in
             ( newModel, replaceFragment newModel )
 
         ClearFocus ->
             let
+                focusModel =
+                    model.focus
+
                 newModel =
                     { model
-                        | focusedEntity = Nothing
-                        , breadcrumbAnchor = Nothing
-                        , focusHistory = []
-                        , focusHistoryIndex = 0
+                        | focus =
+                            { focusModel
+                                | focusedEntity = Nothing
+                                , breadcrumbAnchor = Nothing
+                                , history = []
+                                , historyIndex = 0
+                            }
                     }
             in
             ( newModel, replaceFragment newModel )
@@ -79,7 +100,7 @@ update msg model =
 
 viewFocusBreadcrumbBar : Model -> Html Msg
 viewFocusBreadcrumbBar model =
-    case model.breadcrumbAnchor of
+    case model.focus.breadcrumbAnchor of
         Just ( aType, aId ) ->
             let
                 -- Tree-based parent chain for the breadcrumb anchor (deepest focused entity)
@@ -105,7 +126,7 @@ viewFocusBreadcrumbBar model =
                             []
 
                 currentFocusId =
-                    model.focusedEntity |> Maybe.map Tuple.second |> Maybe.withDefault ""
+                    model.focus.focusedEntity |> Maybe.map Tuple.second |> Maybe.withDefault ""
 
                 treeCrumbLinks =
                     treeCrumbs
@@ -127,22 +148,22 @@ viewFocusBreadcrumbBar model =
                 -- If the user navigated to a parent (focusedEntity differs from history entry),
                 -- include the history entry at the current index as part of forward crumbs
                 historyEntry =
-                    model.focusHistory
-                        |> List.drop model.focusHistoryIndex
+                    model.focus.history
+                        |> List.drop model.focus.historyIndex
                         |> List.head
 
                 isOnParent =
-                    historyEntry /= model.focusedEntity
+                    historyEntry /= model.focus.focusedEntity
 
                 forwardStartIdx =
                     if isOnParent then
-                        model.focusHistoryIndex
+                        model.focus.historyIndex
 
                     else
-                        model.focusHistoryIndex + 1
+                        model.focus.historyIndex + 1
 
                 forwardCrumbs =
-                    model.focusHistory
+                    model.focus.history
                         |> List.drop forwardStartIdx
                         |> List.indexedMap
                             (\i ( fType, fId ) ->

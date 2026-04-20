@@ -16,7 +16,7 @@ addToast : ToastLevel -> String -> Model -> ( Model, Cmd Msg )
 addToast level message model =
     let
         tid =
-            model.nextToastId
+            model.toast.nextToastId
 
         dismissDelay =
             case level of
@@ -28,10 +28,18 @@ addToast level message model =
 
                 _ ->
                     4000
+
+        currentToast =
+            model.toast
+
+        updatedToast =
+            { currentToast
+                | toasts = model.toast.toasts ++ [ Toast tid message level ]
+                , nextToastId = tid + 1
+            }
     in
     ( { model
-        | toasts = model.toasts ++ [ Toast tid message level ]
-        , nextToastId = tid + 1
+        | toast = updatedToast
       }
     , ElmTask.perform (\_ -> AutoDismissToast tid) (Process.sleep dismissDelay)
     )
@@ -45,10 +53,24 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         DismissToast toastId ->
-            ( { model | toasts = List.filter (\t -> t.id /= toastId) model.toasts }, Cmd.none )
+            let
+                currentToast =
+                    model.toast
+
+                updatedToast =
+                    { currentToast | toasts = List.filter (\t -> t.id /= toastId) model.toast.toasts }
+            in
+            ( { model | toast = updatedToast }, Cmd.none )
 
         AutoDismissToast toastId ->
-            ( { model | toasts = List.filter (\t -> t.id /= toastId) model.toasts }, Cmd.none )
+            let
+                currentToast =
+                    model.toast
+
+                updatedToast =
+                    { currentToast | toasts = List.filter (\t -> t.id /= toastId) model.toast.toasts }
+            in
+            ( { model | toast = updatedToast }, Cmd.none )
 
         _ ->
             ( model, Cmd.none )
@@ -58,10 +80,10 @@ update msg model =
 -- VIEW
 
 
-view : List Toast -> Html Msg
-view toasts =
+view : ToastModel -> Html Msg
+view toastModel =
     div [ class "toast-container" ]
-        (List.map viewToast toasts)
+        (List.map viewToast toastModel.toasts)
 
 
 viewToast : Toast -> Html Msg

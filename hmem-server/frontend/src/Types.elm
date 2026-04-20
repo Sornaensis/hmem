@@ -16,6 +16,7 @@ import Url
 type alias Flags =
     { apiUrl : String
     , wsUrl : String
+    , sessionId : String
     }
 
 
@@ -28,106 +29,135 @@ type alias Model =
     , url : Url.Url
     , page : Page
     , flags : Flags
-    , wsState : WSState
-    , toasts : List Toast
-    , nextToastId : Int
-
-    -- Data
+    , selectedWorkspaceId : Maybe String
+    , activeTab : WorkspaceTab
+    , mainContentScrollY : Float
     , workspaces : Dict String Api.Workspace
     , projects : Dict String Api.Project
     , tasks : Dict String Api.Task
     , memories : Dict String Api.Memory
-    , graphVisualization : Maybe Api.WorkspaceVisualization
-    , entityMemories : Dict String (List Api.Memory)
+    , toast : ToastModel
+    , webSocket : WebSocketModel
+    , dataLoading : DataLoadingModel
+    , search : SearchModel
+    , editing : EditingModel
+    , memory : MemoryModel
+    , dependencies : DependenciesModel
+    , cards : CardsModel
+    , graph : GraphModel
+    , dragDrop : DragDropModel
+    , focus : FocusModel
+    , mutations : MutationsModel
+    , groups : GroupsModel
+    , auditLog : AuditLogModel
+    }
 
-    -- Loading states
-    , loadingWorkspaces : Bool
+
+type alias ToastModel =
+    { toasts : List Toast
+    , nextToastId : Int
+    }
+
+
+type alias WebSocketModel =
+    { state : WSState
+    }
+
+
+type alias DataLoadingModel =
+    { loadingWorkspaces : Bool
     , loadingWorkspaceData : Bool
+    , pendingWorkspaceLoads : Int
+    , activeWorkspaceLoadToken : Maybe Int
+    , nextWorkspaceLoadToken : Int
+    }
 
-    -- Current workspace detail
-    , selectedWorkspaceId : Maybe String
-    , activeTab : WorkspaceTab
 
-    -- Search/filter
-    , searchQuery : String
-    , unifiedSearchResults : Maybe Api.UnifiedSearchResults
+type alias SearchModel =
+    { query : String
+    , unifiedResults : Maybe Api.UnifiedSearchResults
     , isSearching : Bool
     , filterShowOnly : FilterShowOnly
     , filterPriority : FilterPriority
     , filterProjectStatuses : List String
     , filterTaskStatuses : List String
-
-    -- Memory filters
     , filterMemoryTypes : List String
     , filterImportance : FilterPriority
     , filterMemoryPinned : Maybe Bool
     , filterTags : List String
+    }
 
-    -- Inline editing
-    , editing : Maybe EditState
 
-    -- Create forms
+type alias EditingModel =
+    { editState : Maybe EditState
     , createForm : Maybe CreateForm
-
-    -- Inline create (in-card)
     , inlineCreate : Maybe InlineCreate
+    }
 
-    -- Memory linking
+
+type alias MemoryModel =
+    { entityMemories : Dict String (List Api.Memory)
     , linkingMemoryFor : Maybe LinkingState
     , linkingEntityFor : Maybe LinkingState
+    }
 
-    -- Task dependencies
-    , taskDependencies : Dict String (List Api.TaskDependencySummary)
+
+type alias DependenciesModel =
+    { taskDependencies : Dict String (List Api.TaskDependencySummary)
     , addingDependencyFor : Maybe AddDependencyState
+    }
 
-    -- Expanded cards
-    , expandedCards : Dict String Bool
 
-    -- Tree collapse state
+type alias CardsModel =
+    { expandedCards : Dict String Bool
     , collapsedNodes : Dict String Bool
-
-    -- Graph page state
-    , graphLoaded : Bool
-
-    -- Drag state
-    , dragging : Maybe DragInfo
-    , dragOver : Maybe DragTarget
-
-    -- Drop action modal (task-on-task)
-    , dropActionModal : Maybe DropActionModal
-
-    -- Focus mode
-    , focusedEntity : Maybe ( String, String )
-    , breadcrumbAnchor : Maybe ( String, String )
-    , focusHistory : List ( String, String )
-    , focusHistoryIndex : Int
-
-    -- Delete confirmation
     , deleteConfirmation : Maybe ( String, String )
+    }
 
-    -- Self-event suppression: entity IDs with recent local mutations
-    , pendingMutationIds : Dict String Bool
 
-    -- Workspace groups
-    , workspaceGroups : Dict String Api.WorkspaceGroup
+type alias GraphModel =
+    { visualization : Maybe Api.WorkspaceVisualization
+    , loaded : Bool
+    }
+
+
+type alias DragDropModel =
+    { dragging : Maybe DragInfo
+    , dragOver : Maybe DragTarget
+    , dropActionModal : Maybe DropActionModal
+    }
+
+
+type alias FocusModel =
+    { focusedEntity : Maybe ( String, String )
+    , breadcrumbAnchor : Maybe ( String, String )
+    , history : List ( String, String )
+    , historyIndex : Int
+    }
+
+
+type alias MutationsModel =
+    { pendingMutationIds : Dict String Bool
+    , pendingRequestIds : Dict String Bool
+    , nextRequestId : Int
+    }
+
+
+type alias GroupsModel =
+    { workspaceGroups : Dict String Api.WorkspaceGroup
     , groupMembers : Dict String (List String)
     , managingGroup : Maybe ManagingGroupState
+    }
 
-    -- Scroll tracking
-    , mainContentScrollY : Float
 
-    -- Entity history (audit log)
-    , entityHistory : Dict String (List Api.AuditLogEntry)
+type alias AuditLogModel =
+    { entityHistory : Dict String (List Api.AuditLogEntry)
     , entityHistoryHasMore : Dict String Bool
     , historyExpanded : Dict String Bool
-
-    -- Audit log browser
-    , auditLog : List Api.AuditLogEntry
-    , auditLogHasMore : Bool
-    , auditLogFilters : AuditLogFilters
-    , auditLogExpanded : Dict String Bool
-
-    -- Revert confirmation
+    , entries : List Api.AuditLogEntry
+    , hasMore : Bool
+    , filters : AuditLogFilters
+    , expandedEntries : Dict String Bool
     , revertConfirmation : Maybe Api.AuditLogEntry
     , revertInFlight : Bool
     }
@@ -287,9 +317,9 @@ type Msg
     | CytoscapeEdgeClicked String
       -- HTTP responses
     | GotWorkspaces (Result Http.Error (Api.PaginatedResult Api.Workspace))
-    | GotProjects (Result Http.Error (Api.PaginatedResult Api.Project))
-    | GotTasks (Result Http.Error (Api.PaginatedResult Api.Task))
-    | GotMemories (Result Http.Error (Api.PaginatedResult Api.Memory))
+    | GotProjects String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Project))
+    | GotTasks String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Task))
+    | GotMemories String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Memory))
     | GotSingleMemory (Result Http.Error Api.Memory)
     | GotVisualization (Result Http.Error Api.WorkspaceVisualization)
       -- Mutation responses
@@ -415,6 +445,7 @@ type Msg
     | RemoveWorkspaceFromGroup String String
     | GroupMembershipDone String (Result Http.Error ())
     | MainContentScrolled Float
+    | ClearPendingRequest String
       -- Audit log
     | GotAuditLog (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
     | GotEntityHistory String (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))

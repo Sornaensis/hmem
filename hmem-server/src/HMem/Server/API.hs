@@ -455,7 +455,8 @@ server pool tracker bc pgvec =
 emit :: Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
 emit bc ct et eid mpayload = liftIO $ do
   now <- getCurrentTime
-  bc ChangeEvent { changeType = ct, entityType = et, entityId = eid, timestamp = now, payload = mpayload }
+  reqId <- currentRequestId
+  bc ChangeEvent { changeType = ct, entityType = et, entityId = eid, timestamp = now, requestId = reqId, payload = mpayload }
 
 -- | Emit one event per ID in a list. Used by batch handlers.
 emitMany :: Broadcast -> ChangeType -> EntityType -> [UUID] -> Handler ()

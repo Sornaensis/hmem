@@ -25,33 +25,67 @@ update msg model =
         GotTaskDependencies taskId result ->
             case result of
                 Ok overview ->
-                    ( { model | taskDependencies = Dict.insert taskId overview.dependencies model.taskDependencies }, Cmd.none )
+                    let
+                        dependenciesModel =
+                            model.dependencies
+                    in
+                    ( { model | dependencies = { dependenciesModel | taskDependencies = Dict.insert taskId overview.dependencies dependenciesModel.taskDependencies } }, Cmd.none )
 
                 Err _ ->
                     addToast Error "Failed to load task dependencies" model
 
         StartAddDependency taskId ->
-            ( { model | addingDependencyFor = Just { taskId = taskId, search = "" } }, Cmd.none )
+            let
+                dependenciesModel =
+                    model.dependencies
+            in
+            ( { model | dependencies = { dependenciesModel | addingDependencyFor = Just { taskId = taskId, search = "" } } }, Cmd.none )
 
         DependencySearch query ->
-            case model.addingDependencyFor of
+            case model.dependencies.addingDependencyFor of
                 Just st ->
-                    ( { model | addingDependencyFor = Just { st | search = query } }, Cmd.none )
+                    let
+                        dependenciesModel =
+                            model.dependencies
+                    in
+                    ( { model | dependencies = { dependenciesModel | addingDependencyFor = Just { st | search = query } } }, Cmd.none )
 
                 Nothing ->
                     ( model, Cmd.none )
 
         CancelAddDependency ->
-            ( { model | addingDependencyFor = Nothing }, Cmd.none )
+            let
+                dependenciesModel =
+                    model.dependencies
+            in
+            ( { model | dependencies = { dependenciesModel | addingDependencyFor = Nothing } }, Cmd.none )
 
         PerformAddDependency taskId dependsOnId ->
-            ( { model | addingDependencyFor = Nothing }
-            , Api.addTaskDependency model.flags.apiUrl taskId dependsOnId (DependencyMutationDone taskId)
+            let
+                dependenciesModel =
+                    model.dependencies
+
+                ( trackedModel, requestId, trackCmd ) =
+                    beginTrackedMutation [ taskId, dependsOnId ]
+                        { model | dependencies = { dependenciesModel | addingDependencyFor = Nothing } }
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ trackCmd
+                , Api.addTaskDependency model.flags.apiUrl taskId dependsOnId requestId (DependencyMutationDone taskId)
+                ]
             )
 
         PerformRemoveDependency taskId dependsOnId ->
-            ( model
-            , Api.removeTaskDependency model.flags.apiUrl taskId dependsOnId (DependencyMutationDone taskId)
+            let
+                ( trackedModel, requestId, trackCmd ) =
+                    beginTrackedMutation [ taskId, dependsOnId ] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ trackCmd
+                , Api.removeTaskDependency model.flags.apiUrl taskId dependsOnId requestId (DependencyMutationDone taskId)
+                ]
             )
 
         DependencyMutationDone taskId result ->
@@ -74,7 +108,7 @@ viewTaskDependencies : Model -> String -> List Api.TaskDependencySummary -> Html
 viewTaskDependencies model taskId deps =
     let
         selectorOpen =
-            case model.addingDependencyFor of
+            case model.dependencies.addingDependencyFor of
                 Just st ->
                     st.taskId == taskId
 
@@ -118,7 +152,7 @@ viewTaskDependencies model taskId deps =
 
 viewAddDependencyPopover : Model -> String -> List Api.TaskDependencySummary -> Html Msg
 viewAddDependencyPopover model taskId deps =
-    case model.addingDependencyFor of
+    case model.dependencies.addingDependencyFor of
         Just st ->
             if st.taskId == taskId then
                 let

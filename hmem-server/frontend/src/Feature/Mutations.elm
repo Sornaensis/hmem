@@ -1,8 +1,7 @@
 module Feature.Mutations exposing (update)
 
 import Dict
-import Helpers exposing (trackLocalMutation)
-import Route exposing (loadWorkspaceData)
+import Helpers exposing (beginWorkspaceDataReload, trackLocalMutation)
 import Toast exposing (addToast)
 import Types exposing (..)
 
@@ -22,11 +21,16 @@ update msg model =
             case result of
                 Ok proj ->
                     let
+                        currentEditing =
+                            model.editing
+
+                        updatedEditing =
+                            { currentEditing | createForm = Nothing, inlineCreate = Nothing }
+
                         updatedModel =
                             { model
                                 | projects = Dict.insert proj.id proj model.projects
-                                , createForm = Nothing
-                                , inlineCreate = Nothing
+                                , editing = updatedEditing
                             }
 
                         ( trackedModel, trackCmd ) =
@@ -44,11 +48,16 @@ update msg model =
             case result of
                 Ok task ->
                     let
+                        currentEditing =
+                            model.editing
+
+                        updatedEditing =
+                            { currentEditing | createForm = Nothing, inlineCreate = Nothing }
+
                         updatedModel =
                             { model
                                 | tasks = Dict.insert task.id task model.tasks
-                                , createForm = Nothing
-                                , inlineCreate = Nothing
+                                , editing = updatedEditing
                             }
 
                         ( trackedModel, trackCmd ) =
@@ -66,10 +75,16 @@ update msg model =
             case result of
                 Ok mem ->
                     let
+                        currentEditing =
+                            model.editing
+
+                        updatedEditing =
+                            { currentEditing | createForm = Nothing }
+
                         updatedModel =
                             { model
                                 | memories = Dict.insert mem.id mem model.memories
-                                , createForm = Nothing
+                                , editing = updatedEditing
                             }
 
                         ( trackedModel, trackCmd ) =
@@ -141,9 +156,4 @@ update msg model =
 
 refreshAfterMutation : Model -> ( Model, Cmd Msg )
 refreshAfterMutation model =
-    case model.selectedWorkspaceId of
-        Just wsId ->
-            ( model, loadWorkspaceData model.flags.apiUrl wsId )
-
-        Nothing ->
-            ( model, Cmd.none )
+    beginWorkspaceDataReload False model

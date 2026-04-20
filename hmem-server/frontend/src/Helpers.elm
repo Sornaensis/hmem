@@ -8,6 +8,7 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Ports exposing (saveToLocalStorage)
 import Process
+import String
 import Task as ElmTask
 import Types exposing (..)
 
@@ -108,7 +109,7 @@ replaceFragment : Model -> Cmd Msg
 replaceFragment model =
     case model.selectedWorkspaceId of
         Just wsId ->
-            Nav.replaceUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment model.activeTab model.focusedEntity)
+            Nav.replaceUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment model.activeTab model.focus.focusedEntity)
 
         Nothing ->
             Cmd.none
@@ -126,10 +127,18 @@ localStorageKey wsId =
 encodeFilterState : Model -> Encode.Value
 encodeFilterState model =
     Encode.object
-        [ ( "searchQuery", Encode.string model.searchQuery )
+        [ ( "workspaceId"
+          , case model.selectedWorkspaceId of
+                Just wsId ->
+                    Encode.string wsId
+
+                Nothing ->
+                    Encode.null
+          )
+        , ( "searchQuery", Encode.string model.search.query )
         , ( "filterShowOnly"
           , Encode.string
-                (case model.filterShowOnly of
+                (case model.search.filterShowOnly of
                     ShowAll ->
                         "all"
 
@@ -140,13 +149,13 @@ encodeFilterState model =
                         "tasks"
                 )
           )
-        , ( "filterPriority", encodeFilterPriority model.filterPriority )
-        , ( "filterProjectStatuses", Encode.list Encode.string model.filterProjectStatuses )
-        , ( "filterTaskStatuses", Encode.list Encode.string model.filterTaskStatuses )
-        , ( "filterMemoryTypes", Encode.list Encode.string model.filterMemoryTypes )
-        , ( "filterImportance", encodeFilterPriority model.filterImportance )
+        , ( "filterPriority", encodeFilterPriority model.search.filterPriority )
+        , ( "filterProjectStatuses", Encode.list Encode.string model.search.filterProjectStatuses )
+        , ( "filterTaskStatuses", Encode.list Encode.string model.search.filterTaskStatuses )
+        , ( "filterMemoryTypes", Encode.list Encode.string model.search.filterMemoryTypes )
+        , ( "filterImportance", encodeFilterPriority model.search.filterImportance )
         , ( "filterMemoryPinned"
-          , case model.filterMemoryPinned of
+          , case model.search.filterMemoryPinned of
                 Just True ->
                     Encode.string "true"
 
@@ -156,9 +165,9 @@ encodeFilterState model =
                 Nothing ->
                     Encode.null
           )
-        , ( "filterTags", Encode.list Encode.string model.filterTags )
+        , ( "filterTags", Encode.list Encode.string model.search.filterTags )
         , ( "collapsedNodes"
-          , model.collapsedNodes
+          , model.cards.collapsedNodes
                 |> Dict.toList
                 |> List.filter (\( _, v ) -> v)
                 |> List.map (\( k, _ ) -> k)
@@ -228,19 +237,57 @@ applyStoredFilters json model =
         decodeCollapsed =
             Decode.list Decode.string
                 |> Decode.map (\ids -> Dict.fromList (List.map (\id -> ( id, True )) ids))
+
+        currentSearch =
+            model.search
+
+        updatedSearch =
+            { currentSearch
+                | query = Decode.decodeValue (Decode.field "searchQuery" Decode.string) json |> Result.withDefault currentSearch.query
+                , filterShowOnly = Decode.decodeValue (Decode.field "filterShowOnly" decodeShowOnly) json |> Result.withDefault currentSearch.filterShowOnly
+                , filterPriority = Decode.decodeValue (Decode.field "filterPriority" decodeFilterPriority) json |> Result.withDefault currentSearch.filterPriority
+                , filterProjectStatuses = Decode.decodeValue (Decode.field "filterProjectStatuses" (Decode.list Decode.string)) json |> Result.withDefault currentSearch.filterProjectStatuses
+                , filterTaskStatuses = Decode.decodeValue (Decode.field "filterTaskStatuses" (Decode.list Decode.string)) json |> Result.withDefault currentSearch.filterTaskStatuses
+                , filterMemoryTypes = Decode.decodeValue (Decode.field "filterMemoryTypes" (Decode.list Decode.string)) json |> Result.withDefault currentSearch.filterMemoryTypes
+                , filterImportance = Decode.decodeValue (Decode.field "filterImportance" decodeFilterPriority) json |> Result.withDefault currentSearch.filterImportance
+                , filterMemoryPinned = Decode.decodeValue (Decode.field "filterMemoryPinned" decodePinned) json |> Result.withDefault currentSearch.filterMemoryPinned
+                , filterTags = Decode.decodeValue (Decode.field "filterTags" (Decode.list Decode.string)) json |> Result.withDefault currentSearch.filterTags
+            }
+
+        currentCards =
+            model.cards
+
+        updatedCards =
+            { currentCards
+                | collapsedNodes = Decode.decodeValue (Decode.field "collapsedNodes" decodeCollapsed) json |> Result.withDefault currentCards.collapsedNodes
+            }
     in
     { model
-        | searchQuery = Decode.decodeValue (Decode.field "searchQuery" Decode.string) json |> Result.withDefault model.searchQuery
-        , filterShowOnly = Decode.decodeValue (Decode.field "filterShowOnly" decodeShowOnly) json |> Result.withDefault model.filterShowOnly
-        , filterPriority = Decode.decodeValue (Decode.field "filterPriority" decodeFilterPriority) json |> Result.withDefault model.filterPriority
-        , filterProjectStatuses = Decode.decodeValue (Decode.field "filterProjectStatuses" (Decode.list Decode.string)) json |> Result.withDefault model.filterProjectStatuses
-        , filterTaskStatuses = Decode.decodeValue (Decode.field "filterTaskStatuses" (Decode.list Decode.string)) json |> Result.withDefault model.filterTaskStatuses
-        , filterMemoryTypes = Decode.decodeValue (Decode.field "filterMemoryTypes" (Decode.list Decode.string)) json |> Result.withDefault model.filterMemoryTypes
-        , filterImportance = Decode.decodeValue (Decode.field "filterImportance" decodeFilterPriority) json |> Result.withDefault model.filterImportance
-        , filterMemoryPinned = Decode.decodeValue (Decode.field "filterMemoryPinned" decodePinned) json |> Result.withDefault model.filterMemoryPinned
-        , filterTags = Decode.decodeValue (Decode.field "filterTags" (Decode.list Decode.string)) json |> Result.withDefault model.filterTags
-        , collapsedNodes = Decode.decodeValue (Decode.field "collapsedNodes" decodeCollapsed) json |> Result.withDefault model.collapsedNodes
+        | search = updatedSearch
+        , cards = updatedCards
     }
+
+
+applyStoredFiltersIfCurrentWorkspace : Encode.Value -> Model -> Model
+applyStoredFiltersIfCurrentWorkspace json model =
+    let
+        storedWorkspaceId =
+            Decode.decodeValue (Decode.field "workspaceId" (Decode.nullable Decode.string)) json
+                |> Result.withDefault Nothing
+    in
+    case ( model.selectedWorkspaceId, storedWorkspaceId ) of
+        ( Just currentWsId, Just storedWsId ) ->
+            if currentWsId == storedWsId then
+                applyStoredFilters json model
+
+            else
+                model
+
+        ( Just _, Nothing ) ->
+            model
+
+        _ ->
+            applyStoredFilters json model
 
 
 saveFiltersCmd : Model -> Cmd Msg
@@ -258,6 +305,37 @@ saveFiltersCmd model =
             Cmd.none
 
 
+beginWorkspaceDataReload : Bool -> Model -> ( Model, Cmd Msg )
+beginWorkspaceDataReload showLoading model =
+    case model.selectedWorkspaceId of
+        Just wsId ->
+            let
+                currentDataLoading =
+                    model.dataLoading
+
+                token =
+                    currentDataLoading.nextWorkspaceLoadToken
+
+                updatedDataLoading =
+                    { currentDataLoading
+                        | activeWorkspaceLoadToken = Just token
+                        , nextWorkspaceLoadToken = token + 1
+                        , loadingWorkspaceData = if showLoading then True else currentDataLoading.loadingWorkspaceData
+                        , pendingWorkspaceLoads = 3
+                    }
+            in
+            ( { model | dataLoading = updatedDataLoading }
+            , Cmd.batch
+                [ Api.fetchProjects model.flags.apiUrl wsId (GotProjects wsId (Just token))
+                , Api.fetchTasks model.flags.apiUrl wsId (GotTasks wsId (Just token))
+                , Api.fetchMemories model.flags.apiUrl wsId (GotMemories wsId (Just token))
+                ]
+            )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
 
 -- MUTATION TRACKING
 
@@ -267,8 +345,47 @@ and a Cmd that clears the flag after 3 seconds.
 -}
 trackLocalMutation : String -> Model -> ( Model, Cmd Msg )
 trackLocalMutation entityId model =
-    ( { model | pendingMutationIds = Dict.insert entityId True model.pendingMutationIds }
-    , Process.sleep 3000 |> ElmTask.perform (\_ -> ClearPendingMutation entityId)
+    let
+        ( updatedModel, _, clearCmd ) =
+            beginTrackedMutation [ entityId ] model
+    in
+    ( updatedModel, clearCmd )
+
+
+trackLocalMutations : List String -> Model -> ( Model, Cmd Msg )
+trackLocalMutations entityIds model =
+    let
+        ( updatedModel, _, clearCmd ) =
+            beginTrackedMutation entityIds model
+    in
+    ( updatedModel, clearCmd )
+
+
+beginTrackedMutation : List String -> Model -> ( Model, String, Cmd Msg )
+beginTrackedMutation entityIds model =
+    let
+        currentMutations =
+            model.mutations
+
+        requestId =
+            model.flags.sessionId ++ "-req-" ++ String.fromInt currentMutations.nextRequestId
+
+        updatedMutations =
+            { currentMutations
+                | pendingMutationIds =
+                    List.foldl (\entityId acc -> Dict.insert entityId True acc) model.mutations.pendingMutationIds entityIds
+                , pendingRequestIds = Dict.insert requestId True model.mutations.pendingRequestIds
+                , nextRequestId = currentMutations.nextRequestId + 1
+            }
+    in
+    ( { model | mutations = updatedMutations }
+    , requestId
+    , Cmd.batch
+        ((Process.sleep 3000 |> ElmTask.perform (\_ -> ClearPendingRequest requestId))
+            :: (entityIds
+                    |> List.map (\entityId -> Process.sleep 3000 |> ElmTask.perform (\_ -> ClearPendingMutation entityId))
+               )
+        )
     )
 
 
@@ -353,17 +470,17 @@ graphPositionsKey wsId =
 
 isExpanded : Model -> String -> Bool
 isExpanded model cardId =
-    Dict.get cardId model.expandedCards |> Maybe.withDefault False
+    Dict.get cardId model.cards.expandedCards |> Maybe.withDefault False
 
 
 isCollapsed : Model -> String -> Bool
 isCollapsed model nodeId =
-    Dict.get nodeId model.collapsedNodes |> Maybe.withDefault False
+    Dict.get nodeId model.cards.collapsedNodes |> Maybe.withDefault False
 
 
 editingValue : Model -> String -> String -> Maybe String
 editingValue model entityId field =
-    case model.editing of
+    case model.editing.editState of
         Just (EditingField state) ->
             if state.entityId == entityId && state.field == field then
                 Just state.value

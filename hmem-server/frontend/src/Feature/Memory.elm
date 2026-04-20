@@ -30,48 +30,59 @@ update msg model =
     case msg of
         -- Memory linking
         StartLinkMemory entityType entityId ->
-            ( { model | linkingMemoryFor = Just { entityType = entityType, entityId = entityId, search = "" } }, Cmd.none )
+            ( updateMemoryModel
+                (\mm -> { mm | linkingMemoryFor = Just { entityType = entityType, entityId = entityId, search = "" } })
+                model
+            , Cmd.none
+            )
 
         LinkMemorySearch query ->
-            case model.linkingMemoryFor of
+            case model.memory.linkingMemoryFor of
                 Just st ->
-                    ( { model | linkingMemoryFor = Just { st | search = query } }, Cmd.none )
+                    ( updateMemoryModel (\mm -> { mm | linkingMemoryFor = Just { st | search = query } }) model, Cmd.none )
 
                 Nothing ->
                     ( model, Cmd.none )
 
         CancelLinkMemory ->
-            ( { model | linkingMemoryFor = Nothing }, Cmd.none )
+            ( updateMemoryModel (\mm -> { mm | linkingMemoryFor = Nothing }) model, Cmd.none )
 
         PerformLinkMemory entityType entityId memoryId ->
             let
+                ( trackedModel, requestId, trackCmd ) =
+                    beginTrackedMutation [ entityId, memoryId ]
+                        (updateMemoryModel (\mm -> { mm | linkingMemoryFor = Nothing }) model)
+
                 cmd =
                     case entityType of
                         "project" ->
-                            Api.linkProjectMemory model.flags.apiUrl entityId memoryId (MemoryLinkDone entityId)
+                            Api.linkProjectMemory model.flags.apiUrl entityId memoryId requestId (MemoryLinkDone entityId)
 
                         "task" ->
-                            Api.linkTaskMemory model.flags.apiUrl entityId memoryId (MemoryLinkDone entityId)
+                            Api.linkTaskMemory model.flags.apiUrl entityId memoryId requestId (MemoryLinkDone entityId)
 
                         _ ->
                             Cmd.none
             in
-            ( { model | linkingMemoryFor = Nothing }, cmd )
+            ( trackedModel, Cmd.batch [ trackCmd, cmd ] )
 
         PerformUnlinkMemory entityType entityId memoryId ->
             let
+                ( trackedModel, requestId, trackCmd ) =
+                    beginTrackedMutation [ entityId, memoryId ] model
+
                 cmd =
                     case entityType of
                         "project" ->
-                            Api.unlinkProjectMemory model.flags.apiUrl entityId memoryId (MemoryLinkDone entityId)
+                            Api.unlinkProjectMemory model.flags.apiUrl entityId memoryId requestId (MemoryLinkDone entityId)
 
                         "task" ->
-                            Api.unlinkTaskMemory model.flags.apiUrl entityId memoryId (MemoryLinkDone entityId)
+                            Api.unlinkTaskMemory model.flags.apiUrl entityId memoryId requestId (MemoryLinkDone entityId)
 
                         _ ->
                             Cmd.none
             in
-            ( model, cmd )
+            ( trackedModel, Cmd.batch [ trackCmd, cmd ] )
 
         MemoryLinkDone entityId result ->
             case result of
@@ -95,55 +106,66 @@ update msg model =
         GotEntityMemories entityId result ->
             case result of
                 Ok mems ->
-                    ( { model | entityMemories = Dict.insert entityId mems model.entityMemories }, Cmd.none )
+                    ( updateMemoryModel (\mm -> { mm | entityMemories = Dict.insert entityId mems mm.entityMemories }) model, Cmd.none )
 
                 Err _ ->
                     addToast Error "Failed to load linked memories" model
 
         -- Entity linking from memory cards
         StartLinkEntity memoryId ->
-            ( { model | linkingEntityFor = Just { entityType = "memory", entityId = memoryId, search = "" } }, Cmd.none )
+            ( updateMemoryModel
+                (\mm -> { mm | linkingEntityFor = Just { entityType = "memory", entityId = memoryId, search = "" } })
+                model
+            , Cmd.none
+            )
 
         LinkEntitySearch query ->
-            case model.linkingEntityFor of
+            case model.memory.linkingEntityFor of
                 Just st ->
-                    ( { model | linkingEntityFor = Just { st | search = query } }, Cmd.none )
+                    ( updateMemoryModel (\mm -> { mm | linkingEntityFor = Just { st | search = query } }) model, Cmd.none )
 
                 Nothing ->
                     ( model, Cmd.none )
 
         CancelLinkEntity ->
-            ( { model | linkingEntityFor = Nothing }, Cmd.none )
+            ( updateMemoryModel (\mm -> { mm | linkingEntityFor = Nothing }) model, Cmd.none )
 
         PerformLinkEntity entityType entityId memoryId ->
             let
+                ( trackedModel, requestId, trackCmd ) =
+                    beginTrackedMutation [ entityId, memoryId ]
+                        (updateMemoryModel (\mm -> { mm | linkingEntityFor = Nothing }) model)
+
                 cmd =
                     case entityType of
                         "project" ->
-                            Api.linkProjectMemory model.flags.apiUrl entityId memoryId (MemoryLinkDone entityId)
+                            Api.linkProjectMemory model.flags.apiUrl entityId memoryId requestId (MemoryLinkDone entityId)
 
                         "task" ->
-                            Api.linkTaskMemory model.flags.apiUrl entityId memoryId (MemoryLinkDone entityId)
+                            Api.linkTaskMemory model.flags.apiUrl entityId memoryId requestId (MemoryLinkDone entityId)
 
                         _ ->
                             Cmd.none
             in
-            ( { model | linkingEntityFor = Nothing }, cmd )
+            ( trackedModel, Cmd.batch [ trackCmd, cmd ] )
 
         PerformUnlinkEntity entityType entityId memoryId ->
             let
+                ( trackedModel, requestId, trackCmd ) =
+                    beginTrackedMutation [ entityId, memoryId ] model
+
                 cmd =
                     case entityType of
                         "project" ->
-                            Api.unlinkProjectMemory model.flags.apiUrl entityId memoryId (MemoryLinkDone entityId)
+                            Api.unlinkProjectMemory model.flags.apiUrl entityId memoryId requestId (MemoryLinkDone entityId)
 
                         "task" ->
-                            Api.unlinkTaskMemory model.flags.apiUrl entityId memoryId (MemoryLinkDone entityId)
+                            Api.unlinkTaskMemory model.flags.apiUrl entityId memoryId requestId (MemoryLinkDone entityId)
 
                         _ ->
                             Cmd.none
             in
-            ( model, cmd )
+            ( trackedModel, Cmd.batch [ trackCmd, cmd ] )
 
         _ ->
             ( model, Cmd.none )
@@ -157,20 +179,20 @@ viewMemoriesList : String -> Model -> Html Msg
 viewMemoriesList wsId model =
     let
         query =
-            String.toLower (String.trim model.searchQuery)
+            String.toLower (String.trim model.search.query)
 
         hasSearch =
             not (String.isEmpty query)
 
         memoryPassesTypeFilter m =
-            if List.isEmpty model.filterMemoryTypes then
+            if List.isEmpty model.search.filterMemoryTypes then
                 True
 
             else
-                List.member (Api.memoryTypeToString m.memoryType) model.filterMemoryTypes
+                List.member (Api.memoryTypeToString m.memoryType) model.search.filterMemoryTypes
 
         memoryPassesPinnedFilter m =
-            case model.filterMemoryPinned of
+            case model.search.filterMemoryPinned of
                 Nothing ->
                     True
 
@@ -178,14 +200,14 @@ viewMemoriesList wsId model =
                     m.pinned == pinned
 
         memoryPassesImportanceFilter m =
-            passesPriorityFilter model.filterImportance m.importance
+            passesPriorityFilter model.search.filterImportance m.importance
 
         memoryPassesTagFilter m =
-            if List.isEmpty model.filterTags then
+            if List.isEmpty model.search.filterTags then
                 True
 
             else
-                List.any (\t -> List.member t m.tags) model.filterTags
+                List.any (\t -> List.member t m.tags) model.search.filterTags
 
         allWsMemories =
             model.memories
@@ -244,7 +266,7 @@ viewTagCloud model allTags =
                     (\tag ->
                         button
                             [ class
-                                (if List.member tag model.filterTags then
+                                (if List.member tag model.search.filterTags then
                                     "tag-cloud-tag tag-cloud-tag-active"
 
                                  else
@@ -259,6 +281,11 @@ viewTagCloud model allTags =
             ]
 
 
+updateMemoryModel : (MemoryModel -> MemoryModel) -> Model -> Model
+updateMemoryModel fn model =
+    { model | memory = fn model.memory }
+
+
 
 -- VIEW: MEMORY CARD
 
@@ -270,7 +297,7 @@ viewMemoryCard model memory =
             isExpanded model memory.id
 
         linkedEntities =
-            model.entityMemories
+            model.memory.entityMemories
                 |> Dict.toList
                 |> List.filterMap
                     (\( entityId, mems ) ->
@@ -432,7 +459,7 @@ viewMemoryLinkedEntities model memoryId projects tasks =
                     tasks
 
         selectorOpen =
-            case model.linkingEntityFor of
+            case model.memory.linkingEntityFor of
                 Just st ->
                     st.entityId == memoryId
 
@@ -474,7 +501,7 @@ viewMemoryLinkedEntities model memoryId projects tasks =
 
 viewLinkEntityPopover : Model -> String -> List Api.Project -> List Api.Task -> Html Msg
 viewLinkEntityPopover model memoryId linkedProjects linkedTasks =
-    case model.linkingEntityFor of
+    case model.memory.linkingEntityFor of
         Just st ->
             if st.entityId == memoryId then
                 let
@@ -662,7 +689,7 @@ viewLinkedMemories : Model -> String -> String -> List Api.Memory -> Html Msg
 viewLinkedMemories model entityType entityId linkedMems =
     let
         selectorOpen =
-            case model.linkingMemoryFor of
+            case model.memory.linkingMemoryFor of
                 Just st ->
                     st.entityType == entityType && st.entityId == entityId
 
@@ -706,7 +733,7 @@ viewLinkedMemories model entityType entityId linkedMems =
 
 viewLinkMemoryPopover : Model -> String -> String -> List Api.Memory -> Html Msg
 viewLinkMemoryPopover model entityType entityId linkedMems =
-    case model.linkingMemoryFor of
+    case model.memory.linkingMemoryFor of
         Just st ->
             if st.entityType == entityType && st.entityId == entityId then
                 let

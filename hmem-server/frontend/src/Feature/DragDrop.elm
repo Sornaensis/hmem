@@ -15,65 +15,72 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         DragStartCard entType entId ->
-            ( { model | dragging = Just { entityType = entType, entityId = entId } }, Cmd.none )
+            ( updateDragDropModel (
+                \dd -> { dd | dragging = Just { entityType = entType, entityId = entId } }
+              ) model
+            , Cmd.none
+            )
 
         DragOverCard targetId ->
-            ( { model | dragOver = Just (OverCard targetId) }, Cmd.none )
+            ( updateDragDropModel (
+                \dd -> { dd | dragOver = Just (OverCard targetId) }
+              ) model
+            , Cmd.none
+            )
 
         DragOverZone zone ->
-            ( { model | dragOver = Just (OverZone zone) }, Cmd.none )
+            ( updateDragDropModel (
+                \dd -> { dd | dragOver = Just (OverZone zone) }
+              ) model
+            , Cmd.none
+            )
 
         DropOnCard targetType targetId ->
-            case model.dragging of
+            case model.dragDrop.dragging of
                 Just drag ->
                     if drag.entityId == targetId then
-                        ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
+                        ( clearDragState model, Cmd.none )
 
                     else if drag.entityType == "task" && targetType == "project" then
-                        -- Drop task/subtask on project → move as direct task in that project
-                        ( { model | dragging = Nothing, dragOver = Nothing }
-                        , Api.updateTask model.flags.apiUrl drag.entityId
+                        trackedTaskMutation [ drag.entityId, targetId ] drag.entityId
                             [ ( "project_id", Encode.string targetId )
                             , ( "parent_id", Encode.null )
                             ]
-                            TaskUpdated
-                        )
+                            model
 
                     else if drag.entityType == "project" && targetType == "project" then
-                        -- Drop project on project → make it a subproject
-                        ( { model | dragging = Nothing, dragOver = Nothing }
-                        , Api.updateProject model.flags.apiUrl drag.entityId
+                        trackedProjectMutation [ drag.entityId, targetId ] drag.entityId
                             [ ( "parent_id", Encode.string targetId ) ]
-                            ProjectUpdated
-                        )
+                            model
 
                     else if drag.entityType == "task" && targetType == "task" then
-                        -- Drop task on task → show modal asking Subtask or Dependency
-                        ( { model
-                            | dragging = Nothing
-                            , dragOver = Nothing
-                            , dropActionModal = Just { dragTaskId = drag.entityId, targetTaskId = targetId }
-                          }
+                        ( updateDragDropModel
+                            (
+                                \dd ->
+                                    { dd
+                                        | dragging = Nothing
+                                        , dragOver = Nothing
+                                        , dropActionModal = Just { dragTaskId = drag.entityId, targetTaskId = targetId }
+                                    }
+                            )
+                            model
                         , Cmd.none
                         )
 
                     else if drag.entityType == targetType then
-                        -- Same type → swap priorities
-                        ( { model | dragging = Nothing, dragOver = Nothing }
-                        , swapPriorities model.flags.apiUrl drag targetType targetId model
-                        )
+                        trackedSwapPriorities drag targetType targetId model
 
                     else
-                        ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
+                        ( clearDragState model, Cmd.none )
 
                 Nothing ->
-                    ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
+                    ( clearDragState model, Cmd.none )
 
         DragEndCard ->
-            ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
+            ( clearDragState model, Cmd.none )
 
         DropOnZone zone ->
-            case model.dragging of
+            case model.dragDrop.dragging of
                 Just drag ->
                     let
                         newPriority =
@@ -81,9 +88,7 @@ update msg model =
                     in
                     case ( drag.entityType, zone.parentType ) of
                         ( "task", "project-tasks" ) ->
-                            ( { model | dragging = Nothing, dragOver = Nothing }
-                            , Api.updateTask model.flags.apiUrl
-                                drag.entityId
+                            trackedTaskMutation [ drag.entityId ] drag.entityId
                                 [ ( "project_id"
                                   , case zone.projectId of
                                         Just pid ->
@@ -95,13 +100,10 @@ update msg model =
                                 , ( "parent_id", Encode.null )
                                 , ( "priority", Encode.int newPriority )
                                 ]
-                                TaskUpdated
-                            )
+                                model
 
                         ( "task", "task-subtasks" ) ->
-                            ( { model | dragging = Nothing, dragOver = Nothing }
-                            , Api.updateTask model.flags.apiUrl
-                                drag.entityId
+                            trackedTaskMutation [ drag.entityId ] drag.entityId
                                 [ ( "parent_id"
                                   , case zone.parentId of
                                         Just pid ->
@@ -120,24 +122,18 @@ update msg model =
                                   )
                                 , ( "priority", Encode.int newPriority )
                                 ]
-                                TaskUpdated
-                            )
+                                model
 
                         ( "task", "orphan" ) ->
-                            ( { model | dragging = Nothing, dragOver = Nothing }
-                            , Api.updateTask model.flags.apiUrl
-                                drag.entityId
+                            trackedTaskMutation [ drag.entityId ] drag.entityId
                                 [ ( "project_id", Encode.null )
                                 , ( "parent_id", Encode.null )
                                 , ( "priority", Encode.int newPriority )
                                 ]
-                                TaskUpdated
-                            )
+                                model
 
                         ( "project", "project" ) ->
-                            ( { model | dragging = Nothing, dragOver = Nothing }
-                            , Api.updateProject model.flags.apiUrl
-                                drag.entityId
+                            trackedProjectMutation [ drag.entityId ] drag.entityId
                                 [ ( "priority", Encode.int newPriority )
                                 , ( "parent_id"
                                   , case zone.parentId of
@@ -148,69 +144,140 @@ update msg model =
                                             Encode.null
                                   )
                                 ]
-                                ProjectUpdated
-                            )
+                                model
 
                         _ ->
-                            ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
+                            ( clearDragState model, Cmd.none )
 
                 Nothing ->
-                    ( { model | dragging = Nothing, dragOver = Nothing }, Cmd.none )
+                    ( clearDragState model, Cmd.none )
 
-        -- Drop action modal
         DropActionMakeSubtask ->
-            case model.dropActionModal of
+            case model.dragDrop.dropActionModal of
                 Just modal ->
                     let
+                        ( trackedModel, requestId, clearCmd ) =
+                            beginTrackedMutation [ modal.dragTaskId, modal.targetTaskId ]
+                                (updateDragDropModel (
+                                    \dd -> { dd | dropActionModal = Nothing }
+                                  ) model)
+
                         targetTask =
                             Dict.get modal.targetTaskId model.tasks
                     in
-                    ( { model | dropActionModal = Nothing }
-                    , Api.updateTask model.flags.apiUrl modal.dragTaskId
-                        [ ( "parent_id", Encode.string modal.targetTaskId )
-                        , ( "project_id"
-                          , case targetTask |> Maybe.andThen .projectId of
-                                Just pid ->
-                                    Encode.string pid
+                    ( trackedModel
+                    , Cmd.batch
+                        [ clearCmd
+                        , Api.updateTask model.flags.apiUrl modal.dragTaskId
+                            [ ( "parent_id", Encode.string modal.targetTaskId )
+                            , ( "project_id"
+                              , case targetTask |> Maybe.andThen .projectId of
+                                    Just pid ->
+                                        Encode.string pid
 
-                                Nothing ->
-                                    Encode.null
-                          )
+                                    Nothing ->
+                                        Encode.null
+                              )
+                            , ( "request_id", Encode.string requestId )
+                            ]
+                            TaskUpdated
                         ]
-                        TaskUpdated
                     )
 
                 Nothing ->
                     ( model, Cmd.none )
 
         DropActionMakeDependency ->
-            case model.dropActionModal of
+            case model.dragDrop.dropActionModal of
                 Just modal ->
-                    ( { model | dropActionModal = Nothing }
-                    , Api.addTaskDependency model.flags.apiUrl modal.dragTaskId modal.targetTaskId
-                        (DependencyMutationDone modal.dragTaskId)
+                    let
+                        ( trackedModel, requestId, clearCmd ) =
+                            beginTrackedMutation [ modal.dragTaskId, modal.targetTaskId ]
+                                (updateDragDropModel (
+                                    \dd -> { dd | dropActionModal = Nothing }
+                                  ) model)
+                    in
+                    ( trackedModel
+                    , Cmd.batch
+                        [ clearCmd
+                        , Api.addTaskDependency model.flags.apiUrl modal.dragTaskId modal.targetTaskId requestId
+                            (DependencyMutationDone modal.dragTaskId)
+                        ]
                     )
 
                 Nothing ->
                     ( model, Cmd.none )
 
         CancelDropAction ->
-            ( { model | dropActionModal = Nothing }, Cmd.none )
+            ( updateDragDropModel (
+                \dd -> { dd | dropActionModal = Nothing }
+              ) model
+            , Cmd.none
+            )
 
         _ ->
             ( model, Cmd.none )
 
 
+updateDragDropModel : (DragDropModel -> DragDropModel) -> Model -> Model
+updateDragDropModel fn model =
+    { model | dragDrop = fn model.dragDrop }
 
--- HELPERS
+
+clearDragState : Model -> Model
+clearDragState =
+    updateDragDropModel (
+        \dd -> { dd | dragging = Nothing, dragOver = Nothing }
+    )
+
+
+trackedTaskMutation : List String -> String -> List ( String, Encode.Value ) -> Model -> ( Model, Cmd Msg )
+trackedTaskMutation trackedIds taskId fields model =
+    let
+        ( trackedModel, requestId, clearCmd ) =
+            beginTrackedMutation trackedIds (clearDragState model)
+    in
+    ( trackedModel
+    , Cmd.batch
+        [ clearCmd
+        , Api.updateTask model.flags.apiUrl taskId (fields ++ [ ( "request_id", Encode.string requestId ) ]) TaskUpdated
+        ]
+    )
+
+
+trackedProjectMutation : List String -> String -> List ( String, Encode.Value ) -> Model -> ( Model, Cmd Msg )
+trackedProjectMutation trackedIds projectId fields model =
+    let
+        ( trackedModel, requestId, clearCmd ) =
+            beginTrackedMutation trackedIds (clearDragState model)
+    in
+    ( trackedModel
+    , Cmd.batch
+        [ clearCmd
+        , Api.updateProject model.flags.apiUrl projectId (fields ++ [ ( "request_id", Encode.string requestId ) ]) ProjectUpdated
+        ]
+    )
+
+
+trackedSwapPriorities : DragInfo -> String -> String -> Model -> ( Model, Cmd Msg )
+trackedSwapPriorities drag targetType targetId model =
+    let
+        ( trackedModel, requestId, clearCmd ) =
+            beginTrackedMutation [ drag.entityId, targetId ] (clearDragState model)
+    in
+    ( trackedModel
+    , Cmd.batch
+        [ clearCmd
+        , swapPriorities model.flags.apiUrl requestId drag targetType targetId model
+        ]
+    )
 
 
 dragOverClass : Model -> String -> String
 dragOverClass model entityId =
-    case ( model.dragOver, model.dragging ) of
+    case ( model.dragDrop.dragOver, model.dragDrop.dragging ) of
         ( Just (OverCard overId), Just drag ) ->
             if overId == entityId && drag.entityId /= entityId then
-                -- Task or project dragged over a project → green "move" indicator
                 if (drag.entityType == "task" || drag.entityType == "project") && Dict.member entityId model.projects then
                     " drag-over drag-over-move"
 
@@ -224,8 +291,8 @@ dragOverClass model entityId =
             ""
 
 
-swapPriorities : String -> DragInfo -> String -> String -> Model -> Cmd Msg
-swapPriorities apiUrl drag targetType targetId model =
+swapPriorities : String -> String -> DragInfo -> String -> String -> Model -> Cmd Msg
+swapPriorities apiUrl requestId drag targetType targetId model =
     case drag.entityType of
         "project" ->
             let
@@ -236,8 +303,8 @@ swapPriorities apiUrl drag targetType targetId model =
                     Dict.get targetId model.projects |> Maybe.map .priority |> Maybe.withDefault 5
             in
             Cmd.batch
-                [ Api.updateProject apiUrl drag.entityId [ ( "priority", Encode.int targetPri ) ] ProjectUpdated
-                , Api.updateProject apiUrl targetId [ ( "priority", Encode.int dragPri ) ] ProjectUpdated
+                [ Api.updateProject apiUrl drag.entityId [ ( "priority", Encode.int targetPri ), ( "request_id", Encode.string requestId ) ] ProjectUpdated
+                , Api.updateProject apiUrl targetId [ ( "priority", Encode.int dragPri ), ( "request_id", Encode.string requestId ) ] ProjectUpdated
                 ]
 
         "task" ->
@@ -249,8 +316,8 @@ swapPriorities apiUrl drag targetType targetId model =
                     Dict.get targetId model.tasks |> Maybe.map .priority |> Maybe.withDefault 5
             in
             Cmd.batch
-                [ Api.updateTask apiUrl drag.entityId [ ( "priority", Encode.int targetPri ) ] TaskUpdated
-                , Api.updateTask apiUrl targetId [ ( "priority", Encode.int dragPri ) ] TaskUpdated
+                [ Api.updateTask apiUrl drag.entityId [ ( "priority", Encode.int targetPri ), ( "request_id", Encode.string requestId ) ] TaskUpdated
+                , Api.updateTask apiUrl targetId [ ( "priority", Encode.int dragPri ), ( "request_id", Encode.string requestId ) ] TaskUpdated
                 ]
 
         "memory" ->
@@ -262,21 +329,17 @@ swapPriorities apiUrl drag targetType targetId model =
                     Dict.get targetId model.memories |> Maybe.map .importance |> Maybe.withDefault 5
             in
             Cmd.batch
-                [ Api.updateMemory apiUrl drag.entityId [ ( "importance", Encode.int targetImp ) ] MemoryUpdated
-                , Api.updateMemory apiUrl targetId [ ( "importance", Encode.int dragImp ) ] MemoryUpdated
+                [ Api.updateMemory apiUrl drag.entityId [ ( "importance", Encode.int targetImp ), ( "request_id", Encode.string requestId ) ] MemoryUpdated
+                , Api.updateMemory apiUrl targetId [ ( "importance", Encode.int dragImp ), ( "request_id", Encode.string requestId ) ] MemoryUpdated
                 ]
 
         _ ->
             Cmd.none
 
 
-
--- VIEW
-
-
 viewDropActionModal : Model -> Html Msg
 viewDropActionModal model =
-    case model.dropActionModal of
+    case model.dragDrop.dropActionModal of
         Nothing ->
             text ""
 
@@ -313,7 +376,6 @@ viewDropActionModal model =
                             ]
                         ]
                     , div [ class "modal-actions" ]
-                        [ button [ class "btn btn-secondary", onClick CancelDropAction ] [ text "Cancel" ]
-                        ]
+                        [ button [ class "btn btn-secondary", onClick CancelDropAction ] [ text "Cancel" ] ]
                     ]
                 ]

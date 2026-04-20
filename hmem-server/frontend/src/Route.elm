@@ -15,12 +15,12 @@ import Url.Parser as Parser exposing ((</>), Parser)
 -- ROUTING
 
 
-loadWorkspaceData : String -> String -> Cmd Msg
-loadWorkspaceData apiUrl wsId =
+loadWorkspaceData : String -> String -> Maybe Int -> Cmd Msg
+loadWorkspaceData apiUrl wsId maybeLoadToken =
     Cmd.batch
-        [ Api.fetchProjects apiUrl wsId GotProjects
-        , Api.fetchTasks apiUrl wsId GotTasks
-        , Api.fetchMemories apiUrl wsId GotMemories
+        [ Api.fetchProjects apiUrl wsId (GotProjects wsId maybeLoadToken)
+        , Api.fetchTasks apiUrl wsId (GotTasks wsId maybeLoadToken)
+        , Api.fetchMemories apiUrl wsId (GotMemories wsId maybeLoadToken)
         ]
 
 
@@ -95,40 +95,64 @@ handleUrlChange url model =
                         parseFragment url.fragment
 
                     focusChangedExternally =
-                        frag.focus /= model.focusedEntity
+                        frag.focus /= model.focus.focusedEntity
+
+                    currentFocus =
+                        model.focus
+
+                    updatedFocus =
+                        { currentFocus
+                            | focusedEntity = frag.focus
+                            , breadcrumbAnchor =
+                                if focusChangedExternally then
+                                    frag.focus
+
+                                else
+                                    model.focus.breadcrumbAnchor
+                            , history =
+                                if focusChangedExternally then
+                                    case frag.focus of
+                                        Just f ->
+                                            [ f ]
+
+                                        Nothing ->
+                                            []
+
+                                else
+                                    model.focus.history
+                            , historyIndex =
+                                if focusChangedExternally then
+                                    0
+
+                                else
+                                    model.focus.historyIndex
+                        }
+
+                    currentEditing =
+                        model.editing
+
+                    updatedEditing =
+                        { currentEditing
+                            | createForm = Nothing
+                            , editState = Nothing
+                            , inlineCreate = Nothing
+                        }
+
+                    currentMemory =
+                        model.memory
+
+                    updatedMemory =
+                        { currentMemory
+                            | linkingMemoryFor = Nothing
+                            , linkingEntityFor = Nothing
+                        }
                 in
                 ( { model
                     | url = url
                     , activeTab = frag.tab
-                    , focusedEntity = frag.focus
-                    , breadcrumbAnchor =
-                        if focusChangedExternally then
-                            frag.focus
-
-                        else
-                            model.breadcrumbAnchor
-                    , focusHistory =
-                        if focusChangedExternally then
-                            case frag.focus of
-                                Just f ->
-                                    [ f ]
-
-                                Nothing ->
-                                    []
-
-                        else
-                            model.focusHistory
-                    , focusHistoryIndex =
-                        if focusChangedExternally then
-                            0
-
-                        else
-                            model.focusHistoryIndex
-                    , createForm = Nothing
-                    , editing = Nothing
-                    , inlineCreate = Nothing
-                    , linkingMemoryFor = Nothing
-                    , linkingEntityFor = Nothing
+                    , focus = updatedFocus
+                    , editing = updatedEditing
+                    , memory = updatedMemory
                   }
                 , Cmd.none
                 )
@@ -144,61 +168,149 @@ handleUrlChange url model =
 
                         else
                             Cmd.none
+
+                    currentDataLoading =
+                        model.dataLoading
+
+                    updatedDataLoading =
+                        { currentDataLoading
+                            | loadingWorkspaceData = True
+                            , pendingWorkspaceLoads = 3
+                            , activeWorkspaceLoadToken = Just currentDataLoading.nextWorkspaceLoadToken
+                            , nextWorkspaceLoadToken = currentDataLoading.nextWorkspaceLoadToken + 1
+                        }
+
+                    currentFocus =
+                        model.focus
+
+                    updatedFocus =
+                        { currentFocus
+                            | focusedEntity = frag.focus
+                            , breadcrumbAnchor = frag.focus
+                            , history =
+                                case frag.focus of
+                                    Just f ->
+                                        [ f ]
+
+                                    Nothing ->
+                                        []
+                            , historyIndex = 0
+                        }
+
+                    currentEditing =
+                        model.editing
+
+                    updatedEditing =
+                        { currentEditing
+                            | editState = Nothing
+                            , createForm = Nothing
+                            , inlineCreate = Nothing
+                        }
+
+                    currentMemory =
+                        model.memory
+
+                    updatedMemory =
+                        { currentMemory
+                            | linkingMemoryFor = Nothing
+                            , linkingEntityFor = Nothing
+                            , entityMemories = Dict.empty
+                        }
+
+                    currentDependencies =
+                        model.dependencies
+
+                    updatedDependencies =
+                        { currentDependencies
+                            | taskDependencies = Dict.empty
+                            , addingDependencyFor = Nothing
+                        }
+
+                    currentSearch =
+                        model.search
+
+                    updatedSearch =
+                        { currentSearch
+                            | query = ""
+                            , unifiedResults = Nothing
+                            , isSearching = False
+                            , filterShowOnly = ShowAll
+                            , filterPriority = AnyPriority
+                            , filterProjectStatuses = []
+                            , filterTaskStatuses = []
+                            , filterMemoryTypes = []
+                            , filterImportance = AnyPriority
+                            , filterMemoryPinned = Nothing
+                            , filterTags = []
+                        }
+
+                    currentCards =
+                        model.cards
+
+                    updatedCards =
+                        { currentCards
+                            | collapsedNodes = Dict.empty
+                            , expandedCards = Dict.empty
+                        }
+
+                    currentGraph =
+                        model.graph
+
+                    updatedGraph =
+                        { currentGraph
+                            | loaded = False
+                            , visualization = Nothing
+                        }
+
+                    currentAuditLog =
+                        model.auditLog
+
+                    updatedAuditLog =
+                        { currentAuditLog
+                            | entityHistory = Dict.empty
+                            , entityHistoryHasMore = Dict.empty
+                            , historyExpanded = Dict.empty
+                        }
                 in
                 ( { model
                     | url = url
                     , page = page
                     , selectedWorkspaceId = Just wsId
-                    , loadingWorkspaceData = True
                     , activeTab = frag.tab
-                    , focusedEntity = frag.focus
-                    , breadcrumbAnchor = frag.focus
-                    , focusHistory =
-                        case frag.focus of
-                            Just f ->
-                                [ f ]
-
-                            Nothing ->
-                                []
-                    , focusHistoryIndex = 0
                     , projects = Dict.empty
                     , tasks = Dict.empty
                     , memories = Dict.empty
-                    , editing = Nothing
-                    , createForm = Nothing
-                    , inlineCreate = Nothing
-                    , linkingMemoryFor = Nothing
-                    , entityMemories = Dict.empty
-                    , taskDependencies = Dict.empty
-                    , addingDependencyFor = Nothing
-                    , searchQuery = ""
-                    , unifiedSearchResults = Nothing
-                    , isSearching = False
-                    , filterShowOnly = ShowAll
-                    , filterPriority = AnyPriority
-                    , filterProjectStatuses = []
-                    , filterTaskStatuses = []
-                    , filterMemoryTypes = []
-                    , filterImportance = AnyPriority
-                    , filterMemoryPinned = Nothing
-                    , filterTags = []
-                    , collapsedNodes = Dict.empty
-                    , expandedCards = Dict.empty
-                    , graphLoaded = False
                     , mainContentScrollY = 0
-                    , entityHistory = Dict.empty
-                    , entityHistoryHasMore = Dict.empty
-                    , historyExpanded = Dict.empty
+                    , dataLoading = updatedDataLoading
+                    , focus = updatedFocus
+                    , editing = updatedEditing
+                    , memory = updatedMemory
+                    , dependencies = updatedDependencies
+                    , search = updatedSearch
+                    , cards = updatedCards
+                    , graph = updatedGraph
+                    , auditLog = updatedAuditLog
                   }
                 , Cmd.batch
-                    [ loadWorkspaceData model.flags.apiUrl wsId
+                    [ loadWorkspaceData model.flags.apiUrl wsId updatedDataLoading.activeWorkspaceLoadToken
                     , requestLocalStorage (localStorageKey wsId)
                     , destroyCmd
                     ]
                 )
 
         MemoryGraphPage ->
-            ( { model | url = url, page = page, graphLoaded = False, graphVisualization = Nothing }
+            let
+                currentGraph =
+                    model.graph
+
+                updatedGraph =
+                    { currentGraph | loaded = False, visualization = Nothing }
+            in
+            ( { model
+                | url = url
+                , page = page
+                , graph = updatedGraph
+              }
             , case model.selectedWorkspaceId of
                 Just wsId ->
                     Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
@@ -218,16 +330,24 @@ handleUrlChange url model =
 
                 emptyFilters =
                     { entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
+
+                currentAuditLog =
+                    model.auditLog
+
+                updatedAuditLog =
+                    { currentAuditLog
+                        | entries = []
+                        , hasMore = False
+                        , filters = emptyFilters
+                        , expandedEntries = Dict.empty
+                        , revertConfirmation = Nothing
+                        , revertInFlight = False
+                    }
             in
             ( { model
                 | url = url
                 , page = page
-                , auditLog = []
-                , auditLogHasMore = False
-                , auditLogFilters = emptyFilters
-                , auditLogExpanded = Dict.empty
-                , revertConfirmation = Nothing
-                , revertInFlight = False
+                , auditLog = updatedAuditLog
               }
             , Cmd.batch
                 [ Api.fetchAuditLog model.flags.apiUrl emptyFilters GotAuditLog

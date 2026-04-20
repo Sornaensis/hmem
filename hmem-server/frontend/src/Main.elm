@@ -46,6 +46,9 @@ decodeFlags raw =
             , wsUrl =
                 Decode.decodeValue (Decode.field "wsUrl" Decode.string) raw
                     |> Result.withDefault ""
+            , sessionId =
+                Decode.decodeValue (Decode.field "sessionId" Decode.string) raw
+                    |> Result.withDefault "session"
             }
 
         storedFilters =
@@ -89,74 +92,107 @@ init rawFlags url key =
             , url = url
             , page = page
             , flags = flags
-            , wsState = Disconnected
-            , toasts = []
-            , nextToastId = 0
+            , selectedWorkspaceId = Nothing
+            , activeTab = frag.tab
+            , mainContentScrollY = 0
             , workspaces = Dict.empty
             , projects = Dict.empty
             , tasks = Dict.empty
             , memories = Dict.empty
-            , graphVisualization = Nothing
-            , entityMemories = Dict.empty
-            , loadingWorkspaces = True
-            , loadingWorkspaceData = False
-            , selectedWorkspaceId = Nothing
-            , activeTab = frag.tab
-            , searchQuery = ""
-            , unifiedSearchResults = Nothing
-            , isSearching = False
-            , filterShowOnly = ShowAll
-            , filterPriority = AnyPriority
-            , filterProjectStatuses = []
-            , filterTaskStatuses = []
-            , filterMemoryTypes = []
-            , filterImportance = AnyPriority
-            , filterMemoryPinned = Nothing
-            , filterTags = []
-            , editing = Nothing
-            , createForm = Nothing
-            , inlineCreate = Nothing
-            , linkingMemoryFor = Nothing
-            , linkingEntityFor = Nothing
-            , taskDependencies = Dict.empty
-            , addingDependencyFor = Nothing
-            , expandedCards = Dict.empty
-            , collapsedNodes = Dict.empty
-            , graphLoaded = False
-            , dragging = Nothing
-            , dragOver = Nothing
-            , dropActionModal = Nothing
-            , focusedEntity = frag.focus
-            , breadcrumbAnchor = frag.focus
-            , focusHistory =
-                case frag.focus of
-                    Just f ->
-                        [ f ]
+            , toast =
+                { toasts = []
+                , nextToastId = 0
+                }
+            , webSocket =
+                { state = Disconnected
+                }
+            , dataLoading =
+                { loadingWorkspaces = True
+                , loadingWorkspaceData = False
+                , pendingWorkspaceLoads = 0
+                , activeWorkspaceLoadToken = Nothing
+                , nextWorkspaceLoadToken = 1
+                }
+            , search =
+                { query = ""
+                , unifiedResults = Nothing
+                , isSearching = False
+                , filterShowOnly = ShowAll
+                , filterPriority = AnyPriority
+                , filterProjectStatuses = []
+                , filterTaskStatuses = []
+                , filterMemoryTypes = []
+                , filterImportance = AnyPriority
+                , filterMemoryPinned = Nothing
+                , filterTags = []
+                }
+            , editing =
+                { editState = Nothing
+                , createForm = Nothing
+                , inlineCreate = Nothing
+                }
+            , memory =
+                { entityMemories = Dict.empty
+                , linkingMemoryFor = Nothing
+                , linkingEntityFor = Nothing
+                }
+            , dependencies =
+                { taskDependencies = Dict.empty
+                , addingDependencyFor = Nothing
+                }
+            , cards =
+                { expandedCards = Dict.empty
+                , collapsedNodes = Dict.empty
+                , deleteConfirmation = Nothing
+                }
+            , graph =
+                { visualization = Nothing
+                , loaded = False
+                }
+            , dragDrop =
+                { dragging = Nothing
+                , dragOver = Nothing
+                , dropActionModal = Nothing
+                }
+            , focus =
+                { focusedEntity = frag.focus
+                , breadcrumbAnchor = frag.focus
+                , history =
+                    case frag.focus of
+                        Just f ->
+                            [ f ]
 
-                    Nothing ->
-                        []
-            , focusHistoryIndex = 0
-            , deleteConfirmation = Nothing
-            , pendingMutationIds = Dict.empty
-            , workspaceGroups = Dict.empty
-            , groupMembers = Dict.empty
-            , managingGroup = Nothing
-            , mainContentScrollY = 0
-            , entityHistory = Dict.empty
-            , entityHistoryHasMore = Dict.empty
-            , historyExpanded = Dict.empty
-            , auditLog = []
-            , auditLogHasMore = False
-            , auditLogFilters = { entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
-            , auditLogExpanded = Dict.empty
-            , revertConfirmation = Nothing
-            , revertInFlight = False
+                        Nothing ->
+                            []
+                , historyIndex = 0
+                }
+            , mutations =
+                { pendingMutationIds = Dict.empty
+                , pendingRequestIds = Dict.empty
+                , nextRequestId = 1
+                }
+            , groups =
+                { workspaceGroups = Dict.empty
+                , groupMembers = Dict.empty
+                , managingGroup = Nothing
+                }
+            , auditLog =
+                { entityHistory = Dict.empty
+                , entityHistoryHasMore = Dict.empty
+                , historyExpanded = Dict.empty
+                , entries = []
+                , hasMore = False
+                , filters = { entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
+                , expandedEntries = Dict.empty
+                , revertConfirmation = Nothing
+                , revertInFlight = False
+                }
             }
 
         model =
             case decoded.storedFilters of
                 Just json ->
-                    applyStoredFilters json baseModel
+                    applyStoredFiltersIfCurrentWorkspace json baseModel
 
                 Nothing ->
                     baseModel
@@ -170,10 +206,45 @@ init rawFlags url key =
         pageCmd =
             case page of
                 WorkspacePage wsId ->
-                    loadWorkspaceData flags.apiUrl wsId
+                    loadWorkspaceData flags.apiUrl wsId (Just model.dataLoading.nextWorkspaceLoadToken)
 
                 _ ->
                     Cmd.none
+
+        currentDataLoading =
+            model.dataLoading
+
+        updatedDataLoading =
+            { currentDataLoading
+                | loadingWorkspaceData =
+                    case page of
+                        WorkspacePage _ ->
+                            True
+
+                        _ ->
+                            False
+                , pendingWorkspaceLoads =
+                    case page of
+                        WorkspacePage _ ->
+                            3
+
+                        _ ->
+                            0
+                , activeWorkspaceLoadToken =
+                    case page of
+                        WorkspacePage _ ->
+                            Just model.dataLoading.nextWorkspaceLoadToken
+
+                        _ ->
+                            Nothing
+                , nextWorkspaceLoadToken =
+                    case page of
+                        WorkspacePage _ ->
+                            model.dataLoading.nextWorkspaceLoadToken + 1
+
+                        _ ->
+                            model.dataLoading.nextWorkspaceLoadToken
+            }
     in
     ( { model
         | selectedWorkspaceId =
@@ -183,13 +254,7 @@ init rawFlags url key =
 
                 _ ->
                     Nothing
-        , loadingWorkspaceData =
-            case page of
-                WorkspacePage _ ->
-                    True
-
-                _ ->
-                    False
+        , dataLoading = updatedDataLoading
       }
     , Cmd.batch (cmds ++ [ pageCmd ])
     )
@@ -229,13 +294,13 @@ update msg model =
         GotWorkspaces _ ->
             Feature.DataLoading.update msg model
 
-        GotProjects _ ->
+        GotProjects _ _ _ ->
             Feature.DataLoading.update msg model
 
-        GotTasks _ ->
+        GotTasks _ _ _ ->
             Feature.DataLoading.update msg model
 
-        GotMemories _ ->
+        GotMemories _ _ _ ->
             Feature.DataLoading.update msg model
 
         GotSingleMemory _ ->
@@ -275,8 +340,31 @@ update msg model =
 
         SwitchTab tab ->
             let
+                currentEditing =
+                    model.editing
+
+                updatedEditing =
+                    { currentEditing
+                        | createForm = Nothing
+                        , editState = Nothing
+                        , inlineCreate = Nothing
+                    }
+
+                currentMemory =
+                    model.memory
+
+                updatedMemory =
+                    { currentMemory
+                        | linkingMemoryFor = Nothing
+                        , linkingEntityFor = Nothing
+                    }
+
                 newModel =
-                    { model | activeTab = tab, createForm = Nothing, editing = Nothing, inlineCreate = Nothing, linkingMemoryFor = Nothing, linkingEntityFor = Nothing }
+                    { model
+                        | activeTab = tab
+                        , editing = updatedEditing
+                        , memory = updatedMemory
+                    }
             in
             ( newModel, replaceFragment newModel )
 
@@ -382,17 +470,29 @@ update msg model =
         ToggleTreeNode nodeId ->
             let
                 current =
-                    Dict.get nodeId model.collapsedNodes |> Maybe.withDefault False
+                    Dict.get nodeId model.cards.collapsedNodes |> Maybe.withDefault False
+
+                currentCards =
+                    model.cards
+
+                updatedCards =
+                    { currentCards | collapsedNodes = Dict.insert nodeId (not current) model.cards.collapsedNodes }
 
                 newModel =
-                    { model | collapsedNodes = Dict.insert nodeId (not current) model.collapsedNodes }
+                    { model | cards = updatedCards }
             in
             ( newModel, saveFiltersCmd newModel )
 
         ExpandAllNodes ->
             let
+                currentCards =
+                    model.cards
+
+                updatedCards =
+                    { currentCards | collapsedNodes = Dict.empty }
+
                 newModel =
-                    { model | collapsedNodes = Dict.empty }
+                    { model | cards = updatedCards }
             in
             ( newModel, saveFiltersCmd newModel )
 
@@ -413,8 +513,14 @@ update msg model =
                         |> List.filter (\t -> List.any (\t2 -> t2.parentId == Just t.id) allTasks)
                         |> List.map (\t -> ( "task-" ++ t.id, True ))
 
+                currentCards =
+                    model.cards
+
+                updatedCards =
+                    { currentCards | collapsedNodes = Dict.fromList (projectNodes ++ taskNodes) }
+
                 newModel =
-                    { model | collapsedNodes = Dict.fromList (projectNodes ++ taskNodes) }
+                    { model | cards = updatedCards }
             in
             ( newModel, saveFiltersCmd newModel )
 
@@ -432,7 +538,7 @@ update msg model =
             Feature.Cards.update msg model
 
         LocalStorageLoaded json ->
-            ( applyStoredFilters json model, Cmd.none )
+            ( applyStoredFiltersIfCurrentWorkspace json model, Cmd.none )
 
         LoadGraphForWorkspace _ ->
             Feature.Graph.update msg model
@@ -541,9 +647,14 @@ update msg model =
             Feature.Dependencies.update msg model
 
         ScrollToEntity entityId ->
-            ( { model
-                | expandedCards = Dict.insert entityId True model.expandedCards
-              }
+            let
+                currentCards =
+                    model.cards
+
+                updatedCards =
+                    { currentCards | expandedCards = Dict.insert entityId True model.cards.expandedCards }
+            in
+            ( { model | cards = updatedCards }
             , scrollToElement ("entity-" ++ entityId)
             )
 
@@ -565,26 +676,75 @@ update msg model =
         GlobalKeyDown keyCode ->
             if keyCode == 27 then
                 -- Escape: dismiss any active popup/edit, inner-most first
-                if model.deleteConfirmation /= Nothing then
-                    ( { model | deleteConfirmation = Nothing }, Cmd.none )
+                if model.cards.deleteConfirmation /= Nothing then
+                    let
+                        currentCards =
+                            model.cards
 
-                else if model.dropActionModal /= Nothing then
-                    ( { model | dropActionModal = Nothing }, Cmd.none )
+                        updatedCards =
+                            { currentCards | deleteConfirmation = Nothing }
+                    in
+                    ( { model | cards = updatedCards }, Cmd.none )
 
-                else if model.addingDependencyFor /= Nothing then
-                    ( { model | addingDependencyFor = Nothing }, Cmd.none )
+                else if model.dragDrop.dropActionModal /= Nothing then
+                    let
+                        currentDragDrop =
+                            model.dragDrop
 
-                else if model.linkingMemoryFor /= Nothing then
-                    ( { model | linkingMemoryFor = Nothing }, Cmd.none )
+                        updatedDragDrop =
+                            { currentDragDrop | dropActionModal = Nothing }
+                    in
+                    ( { model | dragDrop = updatedDragDrop }, Cmd.none )
 
-                else if model.linkingEntityFor /= Nothing then
-                    ( { model | linkingEntityFor = Nothing }, Cmd.none )
+                else if model.dependencies.addingDependencyFor /= Nothing then
+                    let
+                        currentDependencies =
+                            model.dependencies
 
-                else if model.inlineCreate /= Nothing then
-                    ( { model | inlineCreate = Nothing }, Cmd.none )
+                        updatedDependencies =
+                            { currentDependencies | addingDependencyFor = Nothing }
+                    in
+                    ( { model | dependencies = updatedDependencies }, Cmd.none )
 
-                else if model.editing /= Nothing then
-                    ( { model | editing = Nothing }, Cmd.none )
+                else if model.memory.linkingMemoryFor /= Nothing then
+                    let
+                        currentMemory =
+                            model.memory
+
+                        updatedMemory =
+                            { currentMemory | linkingMemoryFor = Nothing }
+                    in
+                    ( { model | memory = updatedMemory }, Cmd.none )
+
+                else if model.memory.linkingEntityFor /= Nothing then
+                    let
+                        currentMemory =
+                            model.memory
+
+                        updatedMemory =
+                            { currentMemory | linkingEntityFor = Nothing }
+                    in
+                    ( { model | memory = updatedMemory }, Cmd.none )
+
+                else if model.editing.inlineCreate /= Nothing then
+                    let
+                        currentEditing =
+                            model.editing
+
+                        updatedEditing =
+                            { currentEditing | inlineCreate = Nothing }
+                    in
+                    ( { model | editing = updatedEditing }, Cmd.none )
+
+                else if model.editing.editState /= Nothing then
+                    let
+                        currentEditing =
+                            model.editing
+
+                        updatedEditing =
+                            { currentEditing | editState = Nothing }
+                    in
+                    ( { model | editing = updatedEditing }, Cmd.none )
 
                 else
                     ( model, Cmd.none )
@@ -635,9 +795,26 @@ update msg model =
             ( { model | mainContentScrollY = scrollY }, Cmd.none )
 
         ClearPendingMutation entityId ->
-            ( { model | pendingMutationIds = Dict.remove entityId model.pendingMutationIds }
+            let
+                currentMutations =
+                    model.mutations
+
+                updatedMutations =
+                    { currentMutations | pendingMutationIds = Dict.remove entityId model.mutations.pendingMutationIds }
+            in
+            ( { model | mutations = updatedMutations }
             , Cmd.none
             )
+
+        ClearPendingRequest requestId ->
+            let
+                currentMutations =
+                    model.mutations
+
+                updatedMutations =
+                    { currentMutations | pendingRequestIds = Dict.remove requestId model.mutations.pendingRequestIds }
+            in
+            ( { model | mutations = updatedMutations }, Cmd.none )
 
         -- Workspace groups
         GotWorkspaceGroups _ ->
@@ -699,8 +876,8 @@ view model =
             [ Feature.Groups.viewSidebar model
             , Keyed.node "div" [ class "main-content", id "main-content-scroll" ]
                 [ ( pageKey model.page, viewPage model ) ]
-            , Toast.view model.toasts
-            , viewConnectionStatus model.wsState
+            , Toast.view model.toast
+            , viewConnectionStatus model.webSocket.state
             , Feature.Editing.viewCreateFormModal model
             , Feature.DragDrop.viewDropActionModal model
             , Feature.Cards.viewDeleteConfirmModal model

@@ -1,6 +1,14 @@
 import { Elm } from './Main.elm'
 import cytoscape from 'cytoscape'
 
+function createSessionId() {
+  if (window.crypto && window.crypto.randomUUID) {
+    return window.crypto.randomUUID()
+  }
+
+  return `session-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
 // Determine workspace ID from URL for loading stored filters at init
 function getWorkspaceFilters() {
   const match = window.location.pathname.match(/^\/workspace\/([^/]+)/)
@@ -20,6 +28,7 @@ const app = Elm.Main.init({
   flags: {
     apiUrl: window.location.origin,
     wsUrl: `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/ws`,
+    sessionId: createSessionId(),
     storedFilters: getWorkspaceFilters()
   }
 })

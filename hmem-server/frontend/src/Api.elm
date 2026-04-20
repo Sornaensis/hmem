@@ -633,6 +633,7 @@ type alias ChangeEvent =
     , entityType : EntityType
     , entityId : String
     , timestamp : String
+    , requestId : Maybe String
     , payload : Maybe D.Value
     }
 
@@ -671,6 +672,7 @@ changeEventDecoder =
         |> required "entity_type" entityTypeDecoder
         |> required "entity_id" D.string
         |> required "timestamp" D.string
+        |> optional "request_id" (D.nullable D.string) Nothing
         |> optional "data" (D.nullable D.value) Nothing
 
 
@@ -760,9 +762,13 @@ fetchWorkspace apiUrl wsId toMsg =
 
 updateWorkspace : String -> String -> List ( String, E.Value ) -> (Result Http.Error Workspace -> msg) -> Cmd msg
 updateWorkspace apiUrl wsId fields toMsg =
+    let
+        headers =
+            requestIdHeaders fields
+    in
     Http.request
         { method = "PUT"
-        , headers = []
+        , headers = headers
         , url = apiUrl ++ "/api/v1/workspaces/" ++ wsId
         , body = Http.jsonBody (E.object fields)
         , expect = Http.expectJson toMsg workspaceDecoder
@@ -883,26 +889,35 @@ unifiedSearch apiUrl query mWorkspaceId toMsg =
 -- MUTATION REQUESTS
 
 
-createProject : String -> String -> String -> (Result Http.Error Project -> msg) -> Cmd msg
-createProject apiUrl wsId name toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/projects"
+createProject : String -> String -> String -> String -> (Result Http.Error Project -> msg) -> Cmd msg
+createProject apiUrl wsId name requestId toMsg =
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/projects"
         , body =
             Http.jsonBody
                 (E.object
                     [ ( "workspace_id", E.string wsId )
                     , ( "name", E.string name )
+                    , ( "request_id", E.string requestId )
                     ]
                 )
         , expect = Http.expectJson toMsg projectDecoder
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 
 updateProject : String -> String -> List ( String, E.Value ) -> (Result Http.Error Project -> msg) -> Cmd msg
 updateProject apiUrl projectId fields toMsg =
+    let
+        headers =
+            requestIdHeaders fields
+    in
     Http.request
         { method = "PUT"
-        , headers = []
+        , headers = headers
         , url = apiUrl ++ "/api/v1/projects/" ++ projectId
         , body = Http.jsonBody (E.object fields)
         , expect = Http.expectJson toMsg projectDecoder
@@ -911,11 +926,11 @@ updateProject apiUrl projectId fields toMsg =
         }
 
 
-deleteProject : String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-deleteProject apiUrl projectId toMsg =
+deleteProject : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+deleteProject apiUrl projectId requestId toMsg =
     Http.request
         { method = "DELETE"
-        , headers = []
+        , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/projects/" ++ projectId
         , body = Http.emptyBody
         , expect = Http.expectWhatever toMsg
@@ -924,16 +939,19 @@ deleteProject apiUrl projectId toMsg =
         }
 
 
-createTask : String -> String -> Maybe String -> String -> (Result Http.Error Task -> msg) -> Cmd msg
-createTask apiUrl wsId mProjectId title toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/tasks"
+createTask : String -> String -> Maybe String -> String -> String -> (Result Http.Error Task -> msg) -> Cmd msg
+createTask apiUrl wsId mProjectId title requestId toMsg =
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/tasks"
         , body =
             Http.jsonBody
                 (E.object
-                    ([ ( "workspace_id", E.string wsId )
-                     , ( "title", E.string title )
-                     ]
+                     ([ ( "workspace_id", E.string wsId )
+                      , ( "title", E.string title )
+                      , ( "request_id", E.string requestId )
+                      ]
                         ++ (case mProjectId of
                                 Just pid ->
                                     [ ( "project_id", E.string pid ) ]
@@ -944,14 +962,20 @@ createTask apiUrl wsId mProjectId title toMsg =
                     )
                 )
         , expect = Http.expectJson toMsg taskDecoder
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 
 updateTask : String -> String -> List ( String, E.Value ) -> (Result Http.Error Task -> msg) -> Cmd msg
 updateTask apiUrl taskId fields toMsg =
+    let
+        headers =
+            requestIdHeaders fields
+    in
     Http.request
         { method = "PUT"
-        , headers = []
+        , headers = headers
         , url = apiUrl ++ "/api/v1/tasks/" ++ taskId
         , body = Http.jsonBody (E.object fields)
         , expect = Http.expectJson toMsg taskDecoder
@@ -960,11 +984,11 @@ updateTask apiUrl taskId fields toMsg =
         }
 
 
-deleteTask : String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-deleteTask apiUrl taskId toMsg =
+deleteTask : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+deleteTask apiUrl taskId requestId toMsg =
     Http.request
         { method = "DELETE"
-        , headers = []
+        , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/tasks/" ++ taskId
         , body = Http.emptyBody
         , expect = Http.expectWhatever toMsg
@@ -973,27 +997,36 @@ deleteTask apiUrl taskId toMsg =
         }
 
 
-createMemory : String -> String -> String -> MemoryType -> (Result Http.Error Memory -> msg) -> Cmd msg
-createMemory apiUrl wsId content mtype toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/memories"
+createMemory : String -> String -> String -> MemoryType -> String -> (Result Http.Error Memory -> msg) -> Cmd msg
+createMemory apiUrl wsId content mtype requestId toMsg =
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/memories"
         , body =
             Http.jsonBody
                 (E.object
                     [ ( "workspace_id", E.string wsId )
                     , ( "content", E.string content )
                     , ( "memory_type", E.string (memoryTypeToString mtype) )
+                    , ( "request_id", E.string requestId )
                     ]
                 )
         , expect = Http.expectJson toMsg memoryDecoder
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 
 updateMemory : String -> String -> List ( String, E.Value ) -> (Result Http.Error Memory -> msg) -> Cmd msg
 updateMemory apiUrl memId fields toMsg =
+    let
+        headers =
+            requestIdHeaders fields
+    in
     Http.request
         { method = "PUT"
-        , headers = []
+        , headers = headers
         , url = apiUrl ++ "/api/v1/memories/" ++ memId
         , body = Http.jsonBody (E.object fields)
         , expect = Http.expectJson toMsg memoryDecoder
@@ -1002,11 +1035,11 @@ updateMemory apiUrl memId fields toMsg =
         }
 
 
-deleteMemory : String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-deleteMemory apiUrl memId toMsg =
+deleteMemory : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+deleteMemory apiUrl memId requestId toMsg =
     Http.request
         { method = "DELETE"
-        , headers = []
+        , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/memories/" ++ memId
         , body = Http.emptyBody
         , expect = Http.expectWhatever toMsg
@@ -1015,11 +1048,11 @@ deleteMemory apiUrl memId toMsg =
         }
 
 
-setTags : String -> String -> List String -> (Result Http.Error () -> msg) -> Cmd msg
-setTags apiUrl memId tags toMsg =
+setTags : String -> String -> List String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+setTags apiUrl memId tags requestId toMsg =
     Http.request
         { method = "PUT"
-        , headers = []
+        , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/memories/" ++ memId ++ "/tags"
         , body = Http.jsonBody (E.list E.string tags)
         , expect = Http.expectWhatever toMsg
@@ -1048,77 +1081,93 @@ fetchTaskMemories apiUrl taskId toMsg =
         }
 
 
-linkProjectMemory : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-linkProjectMemory apiUrl projectId memoryId toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/projects/" ++ projectId ++ "/memories"
-        , body = Http.jsonBody (E.object [ ( "memory_id", E.string memoryId ) ])
+linkProjectMemory : String -> String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+linkProjectMemory apiUrl projectId memoryId requestId toMsg =
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/projects/" ++ projectId ++ "/memories"
+        , body = Http.jsonBody (E.object [ ( "memory_id", E.string memoryId ), ( "request_id", E.string requestId ) ])
         , expect = Http.expectWhatever toMsg
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 
-unlinkProjectMemory : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-unlinkProjectMemory apiUrl projectId memoryId toMsg =
+unlinkProjectMemory : String -> String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+unlinkProjectMemory apiUrl projectId memoryId requestId toMsg =
     Http.request
         { method = "DELETE"
-        , headers = []
+        , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/projects/" ++ projectId ++ "/memories/" ++ memoryId
-        , body = Http.emptyBody
+        , body = Http.jsonBody (E.object [ ( "memory_id", E.string memoryId ), ( "request_id", E.string requestId ) ])
         , expect = Http.expectWhatever toMsg
         , timeout = Nothing
         , tracker = Nothing
         }
 
 
-linkTaskMemory : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-linkTaskMemory apiUrl taskId memoryId toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/tasks/" ++ taskId ++ "/memories"
-        , body = Http.jsonBody (E.object [ ( "memory_id", E.string memoryId ) ])
+linkTaskMemory : String -> String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+linkTaskMemory apiUrl taskId memoryId requestId toMsg =
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/tasks/" ++ taskId ++ "/memories"
+        , body = Http.jsonBody (E.object [ ( "memory_id", E.string memoryId ), ( "request_id", E.string requestId ) ])
         , expect = Http.expectWhatever toMsg
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 
-unlinkTaskMemory : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-unlinkTaskMemory apiUrl taskId memoryId toMsg =
+unlinkTaskMemory : String -> String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+unlinkTaskMemory apiUrl taskId memoryId requestId toMsg =
     Http.request
         { method = "DELETE"
-        , headers = []
+        , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/tasks/" ++ taskId ++ "/memories/" ++ memoryId
-        , body = Http.emptyBody
+        , body = Http.jsonBody (E.object [ ( "memory_id", E.string memoryId ), ( "request_id", E.string requestId ) ])
         , expect = Http.expectWhatever toMsg
         , timeout = Nothing
         , tracker = Nothing
         }
 
 
-createProjectWithParent : String -> String -> String -> String -> (Result Http.Error Project -> msg) -> Cmd msg
-createProjectWithParent apiUrl wsId parentId name toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/projects"
+createProjectWithParent : String -> String -> String -> String -> String -> (Result Http.Error Project -> msg) -> Cmd msg
+createProjectWithParent apiUrl wsId parentId name requestId toMsg =
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/projects"
         , body =
             Http.jsonBody
                 (E.object
                     [ ( "workspace_id", E.string wsId )
                     , ( "parent_id", E.string parentId )
                     , ( "name", E.string name )
+                    , ( "request_id", E.string requestId )
                     ]
                 )
         , expect = Http.expectJson toMsg projectDecoder
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 
-createTaskWithParent : String -> String -> Maybe String -> String -> String -> (Result Http.Error Task -> msg) -> Cmd msg
-createTaskWithParent apiUrl wsId mProjectId parentId title toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/tasks"
+createTaskWithParent : String -> String -> Maybe String -> String -> String -> String -> (Result Http.Error Task -> msg) -> Cmd msg
+createTaskWithParent apiUrl wsId mProjectId parentId title requestId toMsg =
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/tasks"
         , body =
             Http.jsonBody
                 (E.object
-                    ([ ( "workspace_id", E.string wsId )
-                     , ( "parent_id", E.string parentId )
-                     , ( "title", E.string title )
-                     ]
+                     ([ ( "workspace_id", E.string wsId )
+                      , ( "parent_id", E.string parentId )
+                      , ( "title", E.string title )
+                      , ( "request_id", E.string requestId )
+                      ]
                         ++ (case mProjectId of
                                 Just pid ->
                                     [ ( "project_id", E.string pid ) ]
@@ -1129,6 +1178,8 @@ createTaskWithParent apiUrl wsId mProjectId parentId title toMsg =
                     )
                 )
         , expect = Http.expectJson toMsg taskDecoder
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 
@@ -1144,22 +1195,26 @@ fetchTaskOverview apiUrl taskId toMsg =
         }
 
 
-addTaskDependency : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-addTaskDependency apiUrl taskId dependsOnId toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/tasks/" ++ taskId ++ "/dependencies"
-        , body = Http.jsonBody (E.object [ ( "depends_on_id", E.string dependsOnId ) ])
+addTaskDependency : String -> String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+addTaskDependency apiUrl taskId dependsOnId requestId toMsg =
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/tasks/" ++ taskId ++ "/dependencies"
+        , body = Http.jsonBody (E.object [ ( "depends_on_id", E.string dependsOnId ), ( "request_id", E.string requestId ) ])
         , expect = Http.expectWhatever toMsg
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 
-removeTaskDependency : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-removeTaskDependency apiUrl taskId dependsOnId toMsg =
+removeTaskDependency : String -> String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+removeTaskDependency apiUrl taskId dependsOnId requestId toMsg =
     Http.request
         { method = "DELETE"
-        , headers = []
+        , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/tasks/" ++ taskId ++ "/dependencies/" ++ dependsOnId
-        , body = Http.emptyBody
+        , body = Http.jsonBody (E.object [ ( "depends_on_id", E.string dependsOnId ), ( "request_id", E.string requestId ) ])
         , expect = Http.expectWhatever toMsg
         , timeout = Nothing
         , tracker = Nothing
@@ -1290,14 +1345,16 @@ fetchWorkspaceGroups apiUrl toMsg =
         }
 
 
-createWorkspaceGroup : String -> String -> Maybe String -> (Result Http.Error WorkspaceGroup -> msg) -> Cmd msg
-createWorkspaceGroup apiUrl name mDescription toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/groups"
+createWorkspaceGroup : String -> String -> Maybe String -> String -> (Result Http.Error WorkspaceGroup -> msg) -> Cmd msg
+createWorkspaceGroup apiUrl name mDescription requestId toMsg =
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "X-Request-ID" requestId ]
+        , url = apiUrl ++ "/api/v1/groups"
         , body =
             Http.jsonBody
                 (E.object
-                    ([ ( "name", E.string name ) ]
+                    ([ ( "name", E.string name ), ( "request_id", E.string requestId ) ]
                         ++ (case mDescription of
                                 Just desc ->
                                     [ ( "description", E.string desc ) ]
@@ -1308,14 +1365,16 @@ createWorkspaceGroup apiUrl name mDescription toMsg =
                     )
                 )
         , expect = Http.expectJson toMsg workspaceGroupDecoder
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 
-deleteWorkspaceGroup : String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-deleteWorkspaceGroup apiUrl groupId toMsg =
+deleteWorkspaceGroup : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+deleteWorkspaceGroup apiUrl groupId requestId toMsg =
     Http.request
         { method = "DELETE"
-        , headers = []
+        , headers = [ Http.header "X-Request-ID" requestId ]
         , url = apiUrl ++ "/api/v1/groups/" ++ groupId
         , body = Http.emptyBody
         , expect = Http.expectWhatever toMsg
@@ -1332,22 +1391,26 @@ fetchGroupMembers apiUrl groupId toMsg =
         }
 
 
-addGroupMember : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-addGroupMember apiUrl groupId workspaceId toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/groups/" ++ groupId ++ "/members"
-        , body = Http.jsonBody (E.object [ ( "workspace_id", E.string workspaceId ) ])
+addGroupMember : String -> String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+addGroupMember apiUrl groupId workspaceId requestId toMsg =
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "X-Request-ID" requestId ]
+        , url = apiUrl ++ "/api/v1/groups/" ++ groupId ++ "/members"
+        , body = Http.jsonBody (E.object [ ( "workspace_id", E.string workspaceId ), ( "request_id", E.string requestId ) ])
         , expect = Http.expectWhatever toMsg
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 
-removeGroupMember : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
-removeGroupMember apiUrl groupId workspaceId toMsg =
+removeGroupMember : String -> String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+removeGroupMember apiUrl groupId workspaceId requestId toMsg =
     Http.request
         { method = "DELETE"
-        , headers = []
+        , headers = [ Http.header "X-Request-ID" requestId ]
         , url = apiUrl ++ "/api/v1/groups/" ++ groupId ++ "/members/" ++ workspaceId
-        , body = Http.emptyBody
+        , body = Http.jsonBody (E.object [ ( "workspace_id", E.string workspaceId ), ( "request_id", E.string requestId ) ])
         , expect = Http.expectWhatever toMsg
         , timeout = Nothing
         , tracker = Nothing
@@ -1403,10 +1466,33 @@ fetchEntityHistory apiUrl entityType entityId mLimit toMsg =
         }
 
 
-revertAuditEntry : String -> String -> (Result Http.Error RevertResult -> msg) -> Cmd msg
-revertAuditEntry apiUrl auditId toMsg =
-    Http.post
-        { url = apiUrl ++ "/api/v1/audit/" ++ auditId ++ "/revert"
+revertAuditEntry : String -> String -> String -> (Result Http.Error RevertResult -> msg) -> Cmd msg
+revertAuditEntry apiUrl auditId requestId toMsg =
+    Http.request
+        { method = "POST"
+        , headers = [ Http.header "X-Request-ID" requestId ]
+        , url = apiUrl ++ "/api/v1/audit/" ++ auditId ++ "/revert"
         , body = Http.emptyBody
         , expect = Http.expectJson toMsg revertResultDecoder
+        , timeout = Nothing
+        , tracker = Nothing
         }
+
+
+requestIdHeaders : List ( String, E.Value ) -> List Http.Header
+requestIdHeaders fields =
+    case List.filter (\( key, _ ) -> key == "request_id") fields of
+        ( _, value ) :: _ ->
+            [ Http.header "X-Request-Id" (decodeEncodedString (E.encode 0 value)) ]
+
+        _ ->
+            []
+
+
+decodeEncodedString : String -> String
+decodeEncodedString encoded =
+    if String.length encoded >= 2 && String.left 1 encoded == "\"" && String.right 1 encoded == "\"" then
+        encoded |> String.dropLeft 1 |> String.dropRight 1
+
+    else
+        encoded

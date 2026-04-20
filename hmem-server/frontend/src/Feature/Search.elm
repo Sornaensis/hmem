@@ -13,119 +13,160 @@ update msg model =
     case msg of
         SearchInput query ->
             let
-                newModel =
+                searchModel =
+                    model.search
+
+                updatedSearch =
                     if String.isEmpty query then
-                        { model | searchQuery = query, unifiedSearchResults = Nothing, isSearching = False }
+                        { searchModel | query = query, unifiedResults = Nothing, isSearching = False }
 
                     else
-                        { model | searchQuery = query }
+                        { searchModel | query = query }
+
+                newModel =
+                    { model | search = updatedSearch }
             in
             ( newModel, saveFiltersCmd newModel )
 
         SubmitSearch ->
             let
                 trimmed =
-                    String.trim model.searchQuery
+                    String.trim model.search.query
+
+                searchModel =
+                    model.search
             in
             if String.isEmpty trimmed then
-                ( { model | unifiedSearchResults = Nothing, isSearching = False }, Cmd.none )
+                ( { model | search = { searchModel | unifiedResults = Nothing, isSearching = False } }, Cmd.none )
 
             else
-                ( { model | isSearching = True }
+                ( { model | search = { searchModel | isSearching = True } }
                 , Api.unifiedSearch model.flags.apiUrl trimmed model.selectedWorkspaceId GotUnifiedSearchResults
                 )
 
         GotUnifiedSearchResults result ->
             case result of
                 Ok results ->
-                    ( { model | unifiedSearchResults = Just results, isSearching = False }, Cmd.none )
+                    let
+                        searchModel =
+                            model.search
+                    in
+                    ( { model | search = { searchModel | unifiedResults = Just results, isSearching = False } }, Cmd.none )
 
                 Err _ ->
-                    ( { model | isSearching = False }
+                    let
+                        searchModel =
+                            model.search
+                    in
+                    ( { model | search = { searchModel | isSearching = False } }
                     , Cmd.none
                     )
 
         SetFilterShowOnly show ->
             let
+                searchModel =
+                    model.search
+
                 newModel =
-                    { model | filterShowOnly = show }
+                    { model | search = { searchModel | filterShowOnly = show } }
             in
             ( newModel, saveFiltersCmd newModel )
 
         SetFilterPriority pri ->
             let
+                searchModel =
+                    model.search
+
                 newModel =
-                    { model | filterPriority = pri }
+                    { model | search = { searchModel | filterPriority = pri } }
             in
             ( newModel, saveFiltersCmd newModel )
 
         ToggleFilterProjectStatus status ->
             let
+                searchModel =
+                    model.search
+
                 newStatuses =
-                    if List.member status model.filterProjectStatuses then
-                        List.filter (\s -> s /= status) model.filterProjectStatuses
+                    if List.member status searchModel.filterProjectStatuses then
+                        List.filter (\s -> s /= status) searchModel.filterProjectStatuses
 
                     else
-                        status :: model.filterProjectStatuses
+                        status :: searchModel.filterProjectStatuses
 
                 newModel =
-                    { model | filterProjectStatuses = newStatuses }
+                    { model | search = { searchModel | filterProjectStatuses = newStatuses } }
             in
             ( newModel, saveFiltersCmd newModel )
 
         ToggleFilterTaskStatus status ->
             let
+                searchModel =
+                    model.search
+
                 newStatuses =
-                    if List.member status model.filterTaskStatuses then
-                        List.filter (\s -> s /= status) model.filterTaskStatuses
+                    if List.member status searchModel.filterTaskStatuses then
+                        List.filter (\s -> s /= status) searchModel.filterTaskStatuses
 
                     else
-                        status :: model.filterTaskStatuses
+                        status :: searchModel.filterTaskStatuses
 
                 newModel =
-                    { model | filterTaskStatuses = newStatuses }
+                    { model | search = { searchModel | filterTaskStatuses = newStatuses } }
             in
             ( newModel, saveFiltersCmd newModel )
 
         ToggleFilterMemoryType mtype ->
             let
+                searchModel =
+                    model.search
+
                 newTypes =
-                    if List.member mtype model.filterMemoryTypes then
-                        List.filter (\s -> s /= mtype) model.filterMemoryTypes
+                    if List.member mtype searchModel.filterMemoryTypes then
+                        List.filter (\s -> s /= mtype) searchModel.filterMemoryTypes
 
                     else
-                        mtype :: model.filterMemoryTypes
+                        mtype :: searchModel.filterMemoryTypes
 
                 newModel =
-                    { model | filterMemoryTypes = newTypes }
+                    { model | search = { searchModel | filterMemoryTypes = newTypes } }
             in
             ( newModel, saveFiltersCmd newModel )
 
         SetFilterImportance imp ->
             let
+                searchModel =
+                    model.search
+
                 newModel =
-                    { model | filterImportance = imp }
+                    { model | search = { searchModel | filterImportance = imp } }
             in
             ( newModel, saveFiltersCmd newModel )
 
         SetFilterMemoryPinned pinned ->
             let
+                searchModel =
+                    model.search
+
                 newModel =
-                    { model | filterMemoryPinned = pinned }
+                    { model | search = { searchModel | filterMemoryPinned = pinned } }
             in
             ( newModel, saveFiltersCmd newModel )
 
         ToggleFilterTag tag ->
             let
+                searchModel =
+                    model.search
+
                 newTags =
-                    if List.member tag model.filterTags then
-                        List.filter (\t -> t /= tag) model.filterTags
+                    if List.member tag searchModel.filterTags then
+                        List.filter (\t -> t /= tag) searchModel.filterTags
 
                     else
-                        tag :: model.filterTags
+                        tag :: searchModel.filterTags
 
                 newModel =
-                    { model | filterTags = newTags }
+                    { model | search = { searchModel | filterTags = newTags } }
             in
             ( newModel, saveFiltersCmd newModel )
 
@@ -141,20 +182,20 @@ viewSearchBar model =
                 [ class "search-input"
                 , type_ "text"
                 , placeholder "Search all entities... (Enter to search)"
-                , value model.searchQuery
+                , value model.search.query
                 , onInput SearchInput
                 ]
                 []
-            , if model.isSearching then
+            , if model.search.isSearching then
                 span [ class "search-spinner" ] [ text "…" ]
 
-              else if not (String.isEmpty model.searchQuery) then
+              else if not (String.isEmpty model.search.query) then
                 button [ class "search-clear", onClick (SearchInput ""), type_ "button" ] [ text "✕" ]
 
               else
                 text ""
             ]
-        , case model.unifiedSearchResults of
+        , case model.search.unifiedResults of
             Just _ ->
                 text ""
 
@@ -173,24 +214,24 @@ viewFilterBar model =
     div [ class "filter-bar" ]
         [ div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Show:" ]
-            , viewFilterPill "All" (model.filterShowOnly == ShowAll) (SetFilterShowOnly ShowAll)
-            , viewFilterPill "Projects" (model.filterShowOnly == ShowProjectsOnly) (SetFilterShowOnly ShowProjectsOnly)
-            , viewFilterPill "Tasks" (model.filterShowOnly == ShowTasksOnly) (SetFilterShowOnly ShowTasksOnly)
+            , viewFilterPill "All" (model.search.filterShowOnly == ShowAll) (SetFilterShowOnly ShowAll)
+            , viewFilterPill "Projects" (model.search.filterShowOnly == ShowProjectsOnly) (SetFilterShowOnly ShowProjectsOnly)
+            , viewFilterPill "Tasks" (model.search.filterShowOnly == ShowTasksOnly) (SetFilterShowOnly ShowTasksOnly)
             ]
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Project:" ]
-            , viewFilterPill "Active" (List.member "active" model.filterProjectStatuses) (ToggleFilterProjectStatus "active")
-            , viewFilterPill "Paused" (List.member "paused" model.filterProjectStatuses) (ToggleFilterProjectStatus "paused")
-            , viewFilterPill "Completed" (List.member "completed" model.filterProjectStatuses) (ToggleFilterProjectStatus "completed")
-            , viewFilterPill "Archived" (List.member "archived" model.filterProjectStatuses) (ToggleFilterProjectStatus "archived")
+            , viewFilterPill "Active" (List.member "active" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "active")
+            , viewFilterPill "Paused" (List.member "paused" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "paused")
+            , viewFilterPill "Completed" (List.member "completed" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "completed")
+            , viewFilterPill "Archived" (List.member "archived" model.search.filterProjectStatuses) (ToggleFilterProjectStatus "archived")
             ]
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Task:" ]
-            , viewFilterPill "Todo" (List.member "todo" model.filterTaskStatuses) (ToggleFilterTaskStatus "todo")
-            , viewFilterPill "In Progress" (List.member "in_progress" model.filterTaskStatuses) (ToggleFilterTaskStatus "in_progress")
-            , viewFilterPill "Blocked" (List.member "blocked" model.filterTaskStatuses) (ToggleFilterTaskStatus "blocked")
-            , viewFilterPill "Done" (List.member "done" model.filterTaskStatuses) (ToggleFilterTaskStatus "done")
-            , viewFilterPill "Cancelled" (List.member "cancelled" model.filterTaskStatuses) (ToggleFilterTaskStatus "cancelled")
+            , viewFilterPill "Todo" (List.member "todo" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "todo")
+            , viewFilterPill "In Progress" (List.member "in_progress" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "in_progress")
+            , viewFilterPill "Blocked" (List.member "blocked" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "blocked")
+            , viewFilterPill "Done" (List.member "done" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "done")
+            , viewFilterPill "Cancelled" (List.member "cancelled" model.search.filterTaskStatuses) (ToggleFilterTaskStatus "cancelled")
             ]
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Priority:" ]
@@ -215,11 +256,11 @@ viewFilterBar model =
                                 SetFilterPriority AnyPriority
                     )
                 ]
-                [ option [ value "any", selected (model.filterPriority == AnyPriority) ] [ text "Any" ]
+                [ option [ value "any", selected (model.search.filterPriority == AnyPriority) ] [ text "Any" ]
                 , option
                     [ value "exact"
                     , selected
-                        (case model.filterPriority of
+                        (case model.search.filterPriority of
                             ExactPriority _ ->
                                 True
 
@@ -231,7 +272,7 @@ viewFilterBar model =
                 , option
                     [ value "above"
                     , selected
-                        (case model.filterPriority of
+                        (case model.search.filterPriority of
                             AbovePriority _ ->
                                 True
 
@@ -243,7 +284,7 @@ viewFilterBar model =
                 , option
                     [ value "below"
                     , selected
-                        (case model.filterPriority of
+                        (case model.search.filterPriority of
                             BelowPriority _ ->
                                 True
 
@@ -253,7 +294,7 @@ viewFilterBar model =
                     ]
                     [ text "Below" ]
                 ]
-            , case model.filterPriority of
+            , case model.search.filterPriority of
                 AnyPriority ->
                     text ""
 
@@ -298,14 +339,14 @@ viewMemoryFilterBar model =
     div [ class "filter-bar" ]
         [ div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Type:" ]
-            , viewFilterPill "Short Term" (List.member "short_term" model.filterMemoryTypes) (ToggleFilterMemoryType "short_term")
-            , viewFilterPill "Long Term" (List.member "long_term" model.filterMemoryTypes) (ToggleFilterMemoryType "long_term")
+            , viewFilterPill "Short Term" (List.member "short_term" model.search.filterMemoryTypes) (ToggleFilterMemoryType "short_term")
+            , viewFilterPill "Long Term" (List.member "long_term" model.search.filterMemoryTypes) (ToggleFilterMemoryType "long_term")
             ]
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Pinned:" ]
-            , viewFilterPill "All" (model.filterMemoryPinned == Nothing) (SetFilterMemoryPinned Nothing)
-            , viewFilterPill "Pinned" (model.filterMemoryPinned == Just True) (SetFilterMemoryPinned (Just True))
-            , viewFilterPill "Unpinned" (model.filterMemoryPinned == Just False) (SetFilterMemoryPinned (Just False))
+            , viewFilterPill "All" (model.search.filterMemoryPinned == Nothing) (SetFilterMemoryPinned Nothing)
+            , viewFilterPill "Pinned" (model.search.filterMemoryPinned == Just True) (SetFilterMemoryPinned (Just True))
+            , viewFilterPill "Unpinned" (model.search.filterMemoryPinned == Just False) (SetFilterMemoryPinned (Just False))
             ]
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Importance:" ]
@@ -327,11 +368,11 @@ viewMemoryFilterBar model =
                                 SetFilterImportance AnyPriority
                     )
                 ]
-                [ option [ value "any", selected (model.filterImportance == AnyPriority) ] [ text "Any" ]
+                [ option [ value "any", selected (model.search.filterImportance == AnyPriority) ] [ text "Any" ]
                 , option
                     [ value "exact"
                     , selected
-                        (case model.filterImportance of
+                        (case model.search.filterImportance of
                             ExactPriority _ ->
                                 True
 
@@ -343,7 +384,7 @@ viewMemoryFilterBar model =
                 , option
                     [ value "above"
                     , selected
-                        (case model.filterImportance of
+                        (case model.search.filterImportance of
                             AbovePriority _ ->
                                 True
 
@@ -355,7 +396,7 @@ viewMemoryFilterBar model =
                 , option
                     [ value "below"
                     , selected
-                        (case model.filterImportance of
+                        (case model.search.filterImportance of
                             BelowPriority _ ->
                                 True
 
@@ -365,7 +406,7 @@ viewMemoryFilterBar model =
                     ]
                     [ text "Below" ]
                 ]
-            , case model.filterImportance of
+            , case model.search.filterImportance of
                 AnyPriority ->
                     text ""
 

@@ -20,11 +20,20 @@ update msg model =
                         groups =
                             indexBy .id paginated.items
 
+                        currentGroups =
+                            model.groups
+
+                        updatedGroups =
+                            { currentGroups
+                                | workspaceGroups = groups
+                                , groupMembers = Dict.filter (\groupId _ -> Dict.member groupId groups) currentGroups.groupMembers
+                            }
+
                         fetchMembersCmds =
                             paginated.items
                                 |> List.map (\g -> Api.fetchGroupMembers model.flags.apiUrl g.id (GotGroupMembers g.id))
                     in
-                    ( { model | workspaceGroups = groups }
+                    ( { model | groups = updatedGroups }
                     , Cmd.batch fetchMembersCmds
                     )
 
@@ -34,7 +43,14 @@ update msg model =
         GotGroupMembers groupId result ->
             case result of
                 Ok memberIds ->
-                    ( { model | groupMembers = Dict.insert groupId memberIds model.groupMembers }
+                    let
+                        currentGroups =
+                            model.groups
+
+                        updatedGroups =
+                            { currentGroups | groupMembers = Dict.insert groupId memberIds model.groups.groupMembers }
+                    in
+                    ( { model | groups = updatedGroups }
                     , Cmd.none
                     )
 
@@ -42,67 +58,136 @@ update msg model =
                     ( model, Cmd.none )
 
         CreateWorkspaceGroup name ->
-            ( model
-            , Api.createWorkspaceGroup model.flags.apiUrl name Nothing WorkspaceGroupCreated
+            let
+                ( trackedModel, requestId, clearCmd ) =
+                    beginTrackedMutation [] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ clearCmd
+                , Api.createWorkspaceGroup model.flags.apiUrl name Nothing requestId WorkspaceGroupCreated
+                ]
             )
 
         WorkspaceGroupCreated result ->
             case result of
                 Ok group ->
-                    addToast Success ("Group \"" ++ group.name ++ "\" created")
-                        { model | workspaceGroups = Dict.insert group.id group model.workspaceGroups }
+                    let
+                        currentGroups =
+                            model.groups
+
+                        updatedGroups =
+                            { currentGroups | workspaceGroups = Dict.insert group.id group model.groups.workspaceGroups }
+
+                        ( trackedModel, trackCmd ) =
+                            trackLocalMutation group.id { model | groups = updatedGroups }
+
+                        ( toastedModel, toastCmd ) =
+                            addToast Success ("Group \"" ++ group.name ++ "\" created") trackedModel
+                    in
+                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
 
                 Err _ ->
                     addToast Error "Failed to create workspace group" model
 
         DeleteWorkspaceGroup groupId ->
-            ( model
-            , Api.deleteWorkspaceGroup model.flags.apiUrl groupId (WorkspaceGroupDeleted groupId)
+            let
+                ( trackedModel, requestId, trackCmd ) =
+                    beginTrackedMutation [ groupId ] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ trackCmd
+                , Api.deleteWorkspaceGroup model.flags.apiUrl groupId requestId (WorkspaceGroupDeleted groupId)
+                ]
             )
 
         WorkspaceGroupDeleted groupId result ->
             case result of
                 Ok () ->
                     addToast Success "Group deleted"
-                        { model
-                            | workspaceGroups = Dict.remove groupId model.workspaceGroups
-                            , groupMembers = Dict.remove groupId model.groupMembers
-                            , managingGroup =
-                                case model.managingGroup of
-                                    Just st ->
-                                        if st.groupId == groupId then
-                                            Nothing
+                        (let
+                            currentGroups =
+                                model.groups
 
-                                        else
-                                            model.managingGroup
+                            updatedGroups =
+                                { currentGroups
+                                    | workspaceGroups = Dict.remove groupId model.groups.workspaceGroups
+                                    , groupMembers = Dict.remove groupId model.groups.groupMembers
+                                    , managingGroup =
+                                        case model.groups.managingGroup of
+                                            Just st ->
+                                                if st.groupId == groupId then
+                                                    Nothing
 
-                                    Nothing ->
-                                        Nothing
-                        }
+                                                else
+                                                    model.groups.managingGroup
+
+                                            Nothing ->
+                                                Nothing
+                                }
+                         in
+                         { model | groups = updatedGroups }
+                        )
 
                 Err _ ->
                     addToast Error "Failed to delete group" model
 
         ToggleManageGroup groupId ->
-            case model.managingGroup of
+            case model.groups.managingGroup of
                 Just st ->
                     if st.groupId == groupId then
-                        ( { model | managingGroup = Nothing }, Cmd.none )
+                        let
+                            currentGroups =
+                                model.groups
+
+                            updatedGroups =
+                                { currentGroups | managingGroup = Nothing }
+                        in
+                        ( { model | groups = updatedGroups }, Cmd.none )
 
                     else
-                        ( { model | managingGroup = Just { groupId = groupId, addingWorkspace = False } }, Cmd.none )
+                        let
+                            currentGroups =
+                                model.groups
+
+                            updatedGroups =
+                                { currentGroups | managingGroup = Just { groupId = groupId, addingWorkspace = False } }
+                        in
+                        ( { model | groups = updatedGroups }, Cmd.none )
 
                 Nothing ->
-                    ( { model | managingGroup = Just { groupId = groupId, addingWorkspace = False } }, Cmd.none )
+                    let
+                        currentGroups =
+                            model.groups
+
+                        updatedGroups =
+                            { currentGroups | managingGroup = Just { groupId = groupId, addingWorkspace = False } }
+                    in
+                    ( { model | groups = updatedGroups }, Cmd.none )
 
         AddWorkspaceToGroup groupId workspaceId ->
-            ( model
-            , Api.addGroupMember model.flags.apiUrl groupId workspaceId (GroupMembershipDone groupId)
+            let
+                ( trackedModel, requestId, trackCmd ) =
+                    beginTrackedMutation [ groupId, workspaceId ] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ trackCmd
+                , Api.addGroupMember model.flags.apiUrl groupId workspaceId requestId (GroupMembershipDone groupId)
+                ]
             )
 
         RemoveWorkspaceFromGroup groupId workspaceId ->
-            ( model
-            , Api.removeGroupMember model.flags.apiUrl groupId workspaceId (GroupMembershipDone groupId)
+            let
+                ( trackedModel, requestId, trackCmd ) =
+                    beginTrackedMutation [ groupId, workspaceId ] model
+            in
+            ( trackedModel
+            , Cmd.batch
+                [ trackCmd
+                , Api.removeGroupMember model.flags.apiUrl groupId workspaceId requestId (GroupMembershipDone groupId)
+                ]
             )
 
         GroupMembershipDone groupId result ->
@@ -130,7 +215,7 @@ viewSidebar model =
             Dict.values model.workspaces |> List.sortBy .name
 
         groupedWsIds =
-            model.groupMembers
+            model.groups.groupMembers
                 |> Dict.values
                 |> List.concat
                 |> List.foldl (\wsId acc -> Dict.insert wsId True acc) Dict.empty
@@ -139,7 +224,7 @@ viewSidebar model =
             allWs |> List.filter (\ws -> not (Dict.member ws.id groupedWsIds))
 
         groups =
-            model.workspaceGroups |> Dict.values |> List.sortBy .name
+            model.groups.workspaceGroups |> Dict.values |> List.sortBy .name
     in
     nav [ class "sidebar" ]
         [ div [ class "sidebar-header" ]
@@ -153,7 +238,7 @@ viewSidebar model =
         , if not (List.isEmpty ungroupedWs) then
             div [ class "sidebar-section" ]
                 [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
-                , if model.loadingWorkspaces then
+                , if model.dataLoading.loadingWorkspaces then
                     div [ class "sidebar-loading" ] [ text "Loading..." ]
 
                   else
@@ -164,7 +249,7 @@ viewSidebar model =
           else if List.isEmpty groups then
             div [ class "sidebar-section" ]
                 [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
-                , if model.loadingWorkspaces then
+                , if model.dataLoading.loadingWorkspaces then
                     div [ class "sidebar-loading" ] [ text "Loading..." ]
 
                   else
@@ -196,7 +281,7 @@ viewSidebarGroup : Model -> Api.WorkspaceGroup -> Html Msg
 viewSidebarGroup model group =
     let
         memberIds =
-            Dict.get group.id model.groupMembers |> Maybe.withDefault []
+            Dict.get group.id model.groups.groupMembers |> Maybe.withDefault []
 
         memberWs =
             memberIds
@@ -283,10 +368,10 @@ viewHomePage model =
             model.workspaces |> Dict.values |> List.sortBy .name
 
         groups =
-            model.workspaceGroups |> Dict.values |> List.sortBy .name
+            model.groups.workspaceGroups |> Dict.values |> List.sortBy .name
 
         groupedWsIds =
-            model.groupMembers
+            model.groups.groupMembers
                 |> Dict.values
                 |> List.concat
                 |> List.foldl (\wsId acc -> Dict.insert wsId True acc) Dict.empty
@@ -303,7 +388,7 @@ viewHomePage model =
                 ]
                 [ text "+ Group" ]
             ]
-        , if model.loadingWorkspaces then
+        , if model.dataLoading.loadingWorkspaces then
             div [ class "loading-indicator" ] [ text "Loading workspaces..." ]
 
           else
@@ -331,7 +416,7 @@ viewHomeGroup : Model -> Api.WorkspaceGroup -> Html Msg
 viewHomeGroup model group =
     let
         memberIds =
-            Dict.get group.id model.groupMembers |> Maybe.withDefault []
+            Dict.get group.id model.groups.groupMembers |> Maybe.withDefault []
 
         memberWs =
             memberIds
@@ -339,7 +424,7 @@ viewHomeGroup model group =
                 |> List.sortBy .name
 
         isManaging =
-            case model.managingGroup of
+            case model.groups.managingGroup of
                 Just st ->
                     st.groupId == group.id
 
@@ -347,7 +432,7 @@ viewHomeGroup model group =
                     False
 
         allGroupedIds =
-            model.groupMembers
+            model.groups.groupMembers
                 |> Dict.values
                 |> List.concat
                 |> List.foldl (\wsId acc -> Dict.insert wsId True acc) Dict.empty

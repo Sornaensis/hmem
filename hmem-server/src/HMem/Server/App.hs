@@ -4,6 +4,7 @@ module HMem.Server.App
   , authMiddleware
   ) where
 
+import Control.Applicative ((<|>))
 import Data.IORef (atomicModifyIORef', newIORef)
 import Data.Map.Strict qualified as Map
 import Data.Aeson (encode, object, (.=))
@@ -53,7 +54,7 @@ mkApp logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec 
 -- echoed back in the response headers so callers can correlate logs.
 requestIdMiddleware :: Middleware
 requestIdMiddleware app req respond = do
-  rid <- case lookup "X-Request-Id" (Wai.requestHeaders req) of
+  rid <- case lookup "X-Request-Id" (Wai.requestHeaders req) <|> lookup "X-Request-ID" (Wai.requestHeaders req) of
     Just existing -> pure existing
     Nothing       -> TE.encodeUtf8 . UUID.toText <$> UUID.nextRandom
   let req' = req { Wai.requestHeaders = ("X-Request-Id", rid) : Wai.requestHeaders req }
@@ -117,7 +118,8 @@ corsMiddleware corsCfg = cors $ \req ->
       | otherwise = False
     policy = simpleCorsResourcePolicy
       { corsMethods        = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-      , corsRequestHeaders = ["Content-Type", "Authorization"]
+      , corsRequestHeaders = ["Content-Type", "Authorization", "X-Request-Id", "X-Request-ID"]
+      , corsExposedHeaders = Just ["X-Request-Id"]
       }
 
 data RateLimitBucket = RateLimitBucket

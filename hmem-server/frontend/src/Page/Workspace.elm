@@ -114,11 +114,11 @@ viewWorkspacePage wsId model =
                     ]
                 , Feature.Search.viewSearchBar model
                 , viewTabs model.activeTab
-                , if model.loadingWorkspaceData then
+                , if model.dataLoading.loadingWorkspaceData then
                     div [ class "loading-indicator" ] [ text "Loading..." ]
 
                   else
-                    case model.unifiedSearchResults of
+                    case model.search.unifiedResults of
                         Just results ->
                             Feature.Search.viewUnifiedSearchResults (Feature.Memory.viewMemoryCard model) model results
 
@@ -157,7 +157,6 @@ viewStickyWorkspaceBar model ws summaryParts =
               else
                 text ""
             ]
-        , Feature.Search.viewSearchBar model
         ]
 
 

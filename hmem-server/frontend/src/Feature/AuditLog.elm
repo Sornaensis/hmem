@@ -3,7 +3,7 @@ module Feature.AuditLog exposing (update, viewAuditLogPage, viewEntityHistory, v
 import Api
 import Browser.Navigation as Nav
 import Dict
-import Helpers exposing (buildFragment, flexibleStringDecoder, formatDate)
+import Helpers exposing (beginTrackedMutation, buildFragment, flexibleStringDecoder, formatDate)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
@@ -48,19 +48,25 @@ update msg model =
                                 focusEntry =
                                     ( targetType, targetId )
 
+                                focusModel =
+                                    model.focus
+
                                 newHistory =
-                                    List.take (model.focusHistoryIndex + 1) model.focusHistory ++ [ focusEntry ]
+                                    List.take (focusModel.historyIndex + 1) focusModel.history ++ [ focusEntry ]
 
                                 newIndex =
                                     List.length newHistory - 1
                             in
-                            ( { model
-                                | selectedWorkspaceId = Just wsId
-                                , focusedEntity = Just focusEntry
-                                , breadcrumbAnchor = Just focusEntry
-                                , focusHistory = newHistory
-                                , focusHistoryIndex = newIndex
-                              }
+                            ( updateFocusModel
+                                (\fc ->
+                                    { fc
+                                        | focusedEntity = Just focusEntry
+                                        , breadcrumbAnchor = Just focusEntry
+                                        , history = newHistory
+                                        , historyIndex = newIndex
+                                    }
+                                )
+                                { model | selectedWorkspaceId = Just wsId }
                             , Nav.pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment model.activeTab (Just focusEntry))
                             )
 
@@ -70,10 +76,7 @@ update msg model =
         GotAuditLog result ->
             case result of
                 Ok paginated ->
-                    ( { model
-                        | auditLog = model.auditLog ++ paginated.items
-                        , auditLogHasMore = paginated.hasMore
-                      }
+                    ( updateAuditLogModel (\al -> { al | entries = al.entries ++ paginated.items, hasMore = paginated.hasMore }) model
                     , Cmd.none
                     )
 
@@ -83,10 +86,14 @@ update msg model =
         GotEntityHistory entityId result ->
             case result of
                 Ok paginated ->
-                    ( { model
-                        | entityHistory = Dict.insert entityId paginated.items model.entityHistory
-                        , entityHistoryHasMore = Dict.insert entityId paginated.hasMore model.entityHistoryHasMore
-                      }
+                    ( updateAuditLogModel
+                        (\al ->
+                            { al
+                                | entityHistory = Dict.insert entityId paginated.items al.entityHistory
+                                , entityHistoryHasMore = Dict.insert entityId paginated.hasMore al.entityHistoryHasMore
+                            }
+                        )
+                        model
                     , Cmd.none
                     )
 
@@ -95,31 +102,31 @@ update msg model =
                         ( m, cmd ) =
                             addToast Error "Failed to load entity history" model
                     in
-                    ( { m | entityHistory = Dict.insert entityId [] m.entityHistory }, cmd )
+                    ( updateAuditLogModel (\al -> { al | entityHistory = Dict.insert entityId [] al.entityHistory }) m, cmd )
 
         ToggleEntityHistory entityType entityId ->
             let
                 current =
-                    Dict.get entityId model.historyExpanded |> Maybe.withDefault False
+                    Dict.get entityId model.auditLog.historyExpanded |> Maybe.withDefault False
 
                 newExpanded =
                     not current
 
                 fetchCmd =
-                    if newExpanded && not (Dict.member entityId model.entityHistory) then
+                    if newExpanded && not (Dict.member entityId model.auditLog.entityHistory) then
                         Api.fetchEntityHistory model.flags.apiUrl entityType entityId Nothing (GotEntityHistory entityId)
 
                     else
                         Cmd.none
             in
-            ( { model | historyExpanded = Dict.insert entityId newExpanded model.historyExpanded }
+            ( updateAuditLogModel (\al -> { al | historyExpanded = Dict.insert entityId newExpanded al.historyExpanded }) model
             , fetchCmd
             )
 
         LoadMoreHistory entityType entityId ->
             let
                 currentCount =
-                    Dict.get entityId model.entityHistory |> Maybe.map List.length |> Maybe.withDefault 0
+                    Dict.get entityId model.auditLog.entityHistory |> Maybe.map List.length |> Maybe.withDefault 0
             in
             ( model
             , Api.fetchEntityHistory model.flags.apiUrl entityType entityId (Just (currentCount + 20)) (GotEntityHistory entityId)
@@ -128,7 +135,7 @@ update msg model =
         SetAuditFilter filterName filterValue ->
             let
                 filters =
-                    model.auditLogFilters
+                    model.auditLog.filters
 
                 updated =
                     case filterName of
@@ -147,52 +154,59 @@ update msg model =
                         _ ->
                             filters
             in
-            ( { model | auditLogFilters = updated }, Cmd.none )
+            ( updateAuditLogModel (\al -> { al | filters = updated }) model, Cmd.none )
 
         ApplyAuditFilters ->
             let
                 oldFilters =
-                    model.auditLogFilters
+                    model.auditLog.filters
 
                 filters =
                     { oldFilters | offset = Nothing }
             in
-            ( { model | auditLog = [], auditLogHasMore = False, auditLogFilters = filters }
+            ( updateAuditLogModel (\al -> { al | entries = [], hasMore = False, filters = filters }) model
             , Api.fetchAuditLog model.flags.apiUrl filters GotAuditLog
             )
 
         LoadMoreAuditLog ->
             let
                 oldFilters =
-                    model.auditLogFilters
+                    model.auditLog.filters
 
                 filters =
-                    { oldFilters | offset = Just (List.length model.auditLog) }
+                    { oldFilters | offset = Just (List.length model.auditLog.entries) }
             in
-            ( { model | auditLogFilters = filters }
+            ( updateAuditLogModel (\al -> { al | filters = filters }) model
             , Api.fetchAuditLog model.flags.apiUrl filters GotAuditLog
             )
 
         ToggleAuditExpand entryId ->
             let
                 current =
-                    Dict.get entryId model.auditLogExpanded |> Maybe.withDefault False
+                    Dict.get entryId model.auditLog.expandedEntries |> Maybe.withDefault False
             in
-            ( { model | auditLogExpanded = Dict.insert entryId (not current) model.auditLogExpanded }
+            ( updateAuditLogModel (\al -> { al | expandedEntries = Dict.insert entryId (not current) al.expandedEntries }) model
             , Cmd.none
             )
 
         ConfirmRevert entry ->
-            ( { model | revertConfirmation = Just entry }, Cmd.none )
+            ( updateAuditLogModel (\al -> { al | revertConfirmation = Just entry }) model, Cmd.none )
 
         CancelRevert ->
-            ( { model | revertConfirmation = Nothing }, Cmd.none )
+            ( updateAuditLogModel (\al -> { al | revertConfirmation = Nothing }) model, Cmd.none )
 
         PerformRevert ->
-            case model.revertConfirmation of
+            case model.auditLog.revertConfirmation of
                 Just entry ->
-                    ( { model | revertInFlight = True }
-                    , Api.revertAuditEntry model.flags.apiUrl entry.id (GotRevertResult entry.entityType entry.entityId)
+                    let
+                        ( trackedModel, requestId, clearCmd ) =
+                            beginTrackedMutation [ entry.entityId ] (updateAuditLogModel (\al -> { al | revertInFlight = True }) model)
+                    in
+                    ( trackedModel
+                    , Cmd.batch
+                        [ clearCmd
+                        , Api.revertAuditEntry model.flags.apiUrl entry.id requestId (GotRevertResult entry.entityType entry.entityId)
+                        ]
                     )
 
                 Nothing ->
@@ -210,7 +224,7 @@ update msg model =
                                 AuditLogPage ->
                                     let
                                         oldFilters =
-                                            model.auditLogFilters
+                                            model.auditLog.filters
 
                                         filters =
                                             { oldFilters | offset = Nothing }
@@ -230,16 +244,21 @@ update msg model =
 
                         ( toastModel, toastCmd ) =
                             addToast Success "Change reverted successfully"
-                                { model
-                                    | revertConfirmation = Nothing
-                                    , revertInFlight = False
-                                    , auditLog =
-                                        if clearAuditLog then
-                                            []
+                                (updateAuditLogModel
+                                    (\al ->
+                                        { al
+                                            | revertConfirmation = Nothing
+                                            , revertInFlight = False
+                                            , entries =
+                                                if clearAuditLog then
+                                                    []
 
-                                        else
-                                            model.auditLog
-                                }
+                                                else
+                                                    al.entries
+                                        }
+                                    )
+                                    model
+                                )
                     in
                     ( toastModel
                     , Cmd.batch [ toastCmd, refreshHistoryCmd, refreshAuditCmd ]
@@ -248,7 +267,7 @@ update msg model =
                 Err _ ->
                     let
                         ( toastModel, toastCmd ) =
-                            addToast Error "Failed to revert change" { model | revertConfirmation = Nothing, revertInFlight = False }
+                            addToast Error "Failed to revert change" (updateAuditLogModel (\al -> { al | revertConfirmation = Nothing, revertInFlight = False }) model)
                     in
                     ( toastModel, toastCmd )
 
@@ -266,13 +285,13 @@ viewAuditLogPage model =
         [ div [ class "page-header" ]
             [ h2 [] [ span [ class "page-header-icon icon-audit" ] [], text "Audit Log" ] ]
         , viewAuditLogFilters model
-        , if List.isEmpty model.auditLog then
+        , if List.isEmpty model.auditLog.entries then
             div [ class "empty-state" ] [ text "No audit log entries found." ]
 
           else
             div [ class "audit-log-list" ]
-                (List.map (viewAuditLogEntry model) model.auditLog
-                    ++ (if model.auditLogHasMore then
+                (List.map (viewAuditLogEntry model) model.auditLog.entries
+                    ++ (if model.auditLog.hasMore then
                             [ button [ class "audit-log-load-more", onClick LoadMoreAuditLog ]
                                 [ text "Load more..." ]
                             ]
@@ -288,7 +307,7 @@ viewAuditLogFilters : Model -> Html Msg
 viewAuditLogFilters model =
     let
         filters =
-            model.auditLogFilters
+            model.auditLog.filters
     in
     div [ class "audit-log-filters" ]
         [ div [ class "audit-filter-group" ]
@@ -501,7 +520,7 @@ viewAuditLogEntry model entry =
             "audit-action-" ++ Api.auditActionToString entry.action
 
         expanded =
-            Dict.get entry.id model.auditLogExpanded |> Maybe.withDefault False
+            Dict.get entry.id model.auditLog.expandedEntries |> Maybe.withDefault False
 
         entitySummary =
             auditEntitySummary model entry
@@ -583,7 +602,7 @@ viewEntityHistory : Model -> String -> String -> Html Msg
 viewEntityHistory model entityType entityId =
     let
         expanded =
-            Dict.get entityId model.historyExpanded |> Maybe.withDefault False
+            Dict.get entityId model.auditLog.historyExpanded |> Maybe.withDefault False
     in
     div [ class "entity-history" ]
         [ button [ class "entity-history-toggle", onClick (ToggleEntityHistory entityType entityId) ]
@@ -596,11 +615,11 @@ viewEntityHistory model entityType entityId =
                 )
             ]
         , if expanded then
-            case Dict.get entityId model.entityHistory of
+            case Dict.get entityId model.auditLog.entityHistory of
                 Just entries ->
                     div [ class "entity-history-timeline" ]
                         (List.map viewHistoryEntry entries
-                            ++ (if Dict.get entityId model.entityHistoryHasMore |> Maybe.withDefault False then
+                            ++ (if Dict.get entityId model.auditLog.entityHistoryHasMore |> Maybe.withDefault False then
                                     [ button [ class "entity-history-load-more", onClick (LoadMoreHistory entityType entityId) ]
                                         [ text "Load more..." ]
                                     ]
@@ -760,7 +779,7 @@ viewJsonSummary _ val =
 
 viewRevertConfirmModal : Model -> Html Msg
 viewRevertConfirmModal model =
-    case model.revertConfirmation of
+    case model.auditLog.revertConfirmation of
         Nothing ->
             text ""
 
@@ -825,17 +844,27 @@ viewRevertConfirmModal model =
                         [ button
                             [ class "btn btn-primary"
                             , onClick PerformRevert
-                            , disabled model.revertInFlight
+                            , disabled model.auditLog.revertInFlight
                             ]
                             [ text
-                                (if model.revertInFlight then
+                                (if model.auditLog.revertInFlight then
                                     "Reverting..."
 
                                  else
                                     "Revert"
-                                )
+                                 )
                             ]
                         , button [ class "btn btn-secondary", onClick CancelRevert ] [ text "Cancel" ]
                         ]
                     ]
                 ]
+
+
+updateAuditLogModel : (AuditLogModel -> AuditLogModel) -> Model -> Model
+updateAuditLogModel fn model =
+    { model | auditLog = fn model.auditLog }
+
+
+updateFocusModel : (FocusModel -> FocusModel) -> Model -> Model
+updateFocusModel fn model =
+    { model | focus = fn model.focus }

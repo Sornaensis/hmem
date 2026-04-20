@@ -430,9 +430,23 @@ spec = do
         other -> expectationFailure $ "Expected ProjectUnlinkMem, got: " <> show other
 
     it "parses list_entity_memories for project" $ do
-      let args = object [ "entity_type" .= ("project" :: Text), "entity_id" .= testUUID ]
+      let args = object
+            [ "entity_type" .= ("project" :: Text)
+            , "entity_id" .= testUUID
+            , "query" .= ("alpha" :: Text)
+            , "tags" .= (["tag1", "tag2"] :: [Text])
+            , "min_importance" .= (6 :: Int)
+            , "memory_type" .= ("long_term" :: Text)
+            , "min_access_count" .= (3 :: Int)
+            ]
       case parseToolCall "list_entity_memories" args of
-        Right (ProjectListMem pid) -> pid `shouldBe` parsedUUID
+        Right (ProjectListMem pid lq) -> do
+          pid `shouldBe` parsedUUID
+          lq.query `shouldBe` Just "alpha"
+          lq.tags `shouldBe` Just ["tag1", "tag2"]
+          lq.minImportance `shouldBe` Just 6
+          lq.memoryType `shouldBe` Just LongTerm
+          lq.minAccessCount `shouldBe` Just 3
         other -> expectationFailure $ "Expected ProjectListMem, got: " <> show other
 
     it "parses entity_lifecycle batch delete for project" $ do
@@ -554,9 +568,17 @@ spec = do
         other -> expectationFailure $ "Expected TaskUnlinkMem, got: " <> show other
 
     it "parses list_entity_memories for task" $ do
-      let args = object [ "entity_type" .= ("task" :: Text), "entity_id" .= testUUID ]
+      let args = object
+            [ "entity_type" .= ("task" :: Text)
+            , "entity_id" .= testUUID
+            , "query" .= ("beta" :: Text)
+            , "min_importance" .= (4 :: Int)
+            ]
       case parseToolCall "list_entity_memories" args of
-        Right (TaskListMem tid) -> tid `shouldBe` parsedUUID
+        Right (TaskListMem tid lq) -> do
+          tid `shouldBe` parsedUUID
+          lq.query `shouldBe` Just "beta"
+          lq.minImportance `shouldBe` Just 4
         other -> expectationFailure $ "Expected TaskListMem, got: " <> show other
 
   describe "parseToolCall (workspace and category restore/batch tools)" $ do

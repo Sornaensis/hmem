@@ -7,7 +7,7 @@ import Data.Maybe (isJust, isNothing)
 import Test.Hspec
 
 import HMem.DB.Pool (DBException(..))
-import HMem.DB.Memory (createMemory)
+import HMem.DB.Memory (createMemory, getProjectMemories, touchMemory, updateMemory)
 import HMem.DB.Project
 import HMem.DB.Task (createTask, getTask, listTasksByWorkspace)
 import HMem.DB.TestHarness
@@ -239,3 +239,31 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       linkProjectMemory env.pool proj.id mem.id
       -- Unlink
       unlinkProjectMemory env.pool proj.id mem.id
+
+    it "filters linked project memories by query, tags, importance, type, and access count" $ \env -> do
+      ws <- createTestWorkspace env "projmem-filter-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Filter Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      matching <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "alpha haskell note", summary = Nothing
+        , memoryType = LongTerm, importance = Just 8, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Just ["keep"], ftsLanguage = Nothing }
+      nonMatching <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "alpha haskell note", summary = Nothing
+        , memoryType = ShortTerm, importance = Just 3, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Just ["drop"], ftsLanguage = Nothing }
+      linkProjectMemory env.pool proj.id matching.id
+      linkProjectMemory env.pool proj.id nonMatching.id
+      touchMemory env.pool matching.id
+      _ <- updateMemory env.pool matching.id UpdateMemory
+        { content = Nothing, summary = Unchanged, memoryType = Nothing, importance = Nothing
+        , metadata = Nothing, expiresAt = Unchanged, source = Unchanged, confidence = Nothing, pinned = Just True }
+      filtered <- getProjectMemories env.pool proj.id LinkedMemoryListQuery
+        { query = Just "alpha haskell"
+        , tags = Just ["keep"]
+        , minImportance = Just 5
+        , memoryType = Just LongTerm
+        , minAccessCount = Just 1
+        }
+      map (.id) filtered `shouldBe` [matching.id]

@@ -24,6 +24,9 @@ import HMem.DB.Schema
 import HMem.DB.Task qualified as Task
 import HMem.Types
 
+emptyLq :: LinkedMemoryListQuery
+emptyLq = LinkedMemoryListQuery Nothing Nothing Nothing Nothing Nothing
+
 data MemoryCandidate = MemoryCandidate
   { candidateId         :: UUID
   , candidateSummary    :: Text
@@ -40,9 +43,9 @@ getTaskOverview pool taskId extraContext = do
     Nothing -> pure Nothing
     Just task -> do
       dependencies <- listTaskDependencySummaries pool taskId
-      directMemories <- Mem.getTaskMemories pool taskId
+      directMemories <- Mem.getTaskMemories pool taskId emptyLq
       projectMemories <- case (extraContext, task.projectId) of
-        (True, Just projectId) -> Mem.getProjectMemories pool projectId
+        (True, Just projectId) -> Mem.getProjectMemories pool projectId emptyLq
         _                      -> pure []
       workspaceMemories <-
         if extraContext
@@ -72,7 +75,7 @@ getContextInfo pool taskId level = do
       let n = contextDetailLimit level
 
       -- Task-linked memories (top N by pinned, importance, recency)
-      taskMems <- Mem.getTaskMemories pool taskId
+      taskMems <- Mem.getTaskMemories pool taskId emptyLq
       let taskCandidates = map (memoryCandidateFromMemory ScopeTask) taskMems
           taskSummaries  = take n $ summarizeCandidates taskCandidates
 
@@ -98,7 +101,7 @@ collectProjectMemories
   :: Pool Hasql.Connection -> Maybe UUID -> [MemoryCandidate] -> IO [MemoryCandidate]
 collectProjectMemories _pool Nothing acc = pure acc
 collectProjectMemories pool (Just projId) acc = do
-  mems <- Mem.getProjectMemories pool projId
+  mems <- Mem.getProjectMemories pool projId emptyLq
   let candidates = map (memoryCandidateFromMemory ScopeProject) mems
   mProj <- Proj.getProject pool projId
   let parentId = mProj >>= (.parentId)

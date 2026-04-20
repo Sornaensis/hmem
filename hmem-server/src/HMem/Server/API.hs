@@ -151,7 +151,13 @@ type ProjectAPI =
          :> Post '[JSON] NoContent
   :<|> Capture "projectId" UUID :> "memories" :> Capture "memoryId" UUID
          :> Delete '[JSON] NoContent
-  :<|> Capture "projectId" UUID :> "memories" :> Get '[JSON] [Memory]
+  :<|> Capture "projectId" UUID :> "memories"
+         :> QueryParam "query" Text
+         :> QueryParams "tag" Text
+         :> QueryParam "min_importance" Int
+         :> QueryParam "memory_type" MemoryType
+         :> QueryParam "min_access_count" Int
+         :> Get '[JSON] [Memory]
   :<|> Capture "projectId" UUID :> "memories" :> "batch"
          :> ReqBody '[JSON] BatchMemoryLinkRequest :> Post '[JSON] BatchResult
     :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
@@ -185,7 +191,13 @@ type TaskAPI =
          :> Post '[JSON] NoContent
   :<|> Capture "taskId" UUID :> "dependencies" :> Capture "dependsOnId" UUID
          :> Delete '[JSON] NoContent
-  :<|> Capture "taskId" UUID :> "memories" :> Get '[JSON] [Memory]
+  :<|> Capture "taskId" UUID :> "memories"
+         :> QueryParam "query" Text
+         :> QueryParams "tag" Text
+         :> QueryParam "min_importance" Int
+         :> QueryParam "memory_type" MemoryType
+         :> QueryParam "min_access_count" Int
+         :> Get '[JSON] [Memory]
     :<|> Capture "taskId" UUID :> "overview"
       :> QueryParam "extra_context" Bool :> Get '[JSON] TaskOverview
   :<|> Capture "taskId" UUID :> "context"
@@ -1156,9 +1168,24 @@ projectHandlers pool bc =
       emit bc Updated ETProject pid (Just $ object ["unlinked_memory" .= mid])
       pure NoContent
 
-    getProjectMemoriesH pid = do
+    getProjectMemoriesH pid mQuery mTags mMinImportance mMemoryType mMinAccessCount = do
       _ <- requireProjectH pid
-      handleDBErrors $ Mem.getProjectMemories pool pid
+      let lq0 = LinkedMemoryListQuery
+            { query = mQuery
+            , tags = case mTags of [] -> Nothing; xs -> Just xs
+            , minImportance = mMinImportance
+            , memoryType = mMemoryType
+            , minAccessCount = mMinAccessCount
+            }
+          lq = LinkedMemoryListQuery
+            { query = lq0.query
+            , tags = lq0.tags
+            , minImportance = fmap (Prelude.min 10 . Prelude.max 1) lq0.minImportance
+            , memoryType = lq0.memoryType
+            , minAccessCount = fmap (Prelude.max 0) lq0.minAccessCount
+            }
+      rejectValidationErrors (validateLinkedMemoryListQuery lq)
+      handleDBErrors $ Mem.getProjectMemories pool pid lq
 
     batchLinkMemoriesH pid blr = do
       _ <- requireProjectH pid
@@ -1194,7 +1221,7 @@ projectHandlers pool bc =
         , query = Nothing, searchLanguage = Nothing
         , limit = Just 200, offset = Just 0 }
       let childProjects = Prelude.filter (\p -> p.parentId == Just pid) allProjects
-      mems <- handleDBErrors $ Mem.getProjectMemories pool pid
+      mems <- handleDBErrors $ Mem.getProjectMemories pool pid (LinkedMemoryListQuery Nothing Nothing Nothing Nothing Nothing)
       pure ProjectOverview
         { project = proj
         , tasks = tasks
@@ -1317,9 +1344,24 @@ taskHandlers pool bc =
       emit bc Deleted ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= depId])
       pure NoContent
 
-    getTaskMemoriesH tid = do
+    getTaskMemoriesH tid mQuery mTags mMinImportance mMemoryType mMinAccessCount = do
       _ <- requireTaskH tid
-      handleDBErrors $ Mem.getTaskMemories pool tid
+      let lq0 = LinkedMemoryListQuery
+            { query = mQuery
+            , tags = case mTags of [] -> Nothing; xs -> Just xs
+            , minImportance = mMinImportance
+            , memoryType = mMemoryType
+            , minAccessCount = mMinAccessCount
+            }
+          lq = LinkedMemoryListQuery
+            { query = lq0.query
+            , tags = lq0.tags
+            , minImportance = fmap (Prelude.min 10 . Prelude.max 1) lq0.minImportance
+            , memoryType = lq0.memoryType
+            , minAccessCount = fmap (Prelude.max 0) lq0.minAccessCount
+            }
+      rejectValidationErrors (validateLinkedMemoryListQuery lq)
+      handleDBErrors $ Mem.getTaskMemories pool tid lq
 
     taskOverviewH tid mExtraContext = do
       let extraContext = fromMaybe False mExtraContext

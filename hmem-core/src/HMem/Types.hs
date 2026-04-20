@@ -7,12 +7,14 @@ module HMem.Types
   , MemoryType(..)
   , Memory(..)
   , compactMemory
-  , CreateMemory(..)
-  , UpdateMemory(..)
-  , SearchQuery(..)
-  , MemoryListQuery(..)
-  , MemoryLink(..)
-  , CreateMemoryLink(..)
+    , CreateMemory(..)
+    , UpdateMemory(..)
+    , SearchQuery(..)
+    , MemoryListQuery(..)
+    , LinkedMemoryListQuery(..)
+    , validateLinkedMemoryListQuery
+    , MemoryLink(..)
+    , CreateMemoryLink(..)
 
     -- * Workspace types
   , WorkspaceType(..)
@@ -839,6 +841,29 @@ instance ToJSON MemoryListQuery where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON MemoryListQuery where
   parseJSON  = genericParseJSON jsonOptions
+
+data LinkedMemoryListQuery = LinkedMemoryListQuery
+  { query          :: Maybe Text
+  , tags           :: Maybe [Text]
+  , minImportance  :: Maybe Int
+  , memoryType     :: Maybe MemoryType
+  , minAccessCount :: Maybe Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON LinkedMemoryListQuery where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON LinkedMemoryListQuery where
+  parseJSON  = genericParseJSON jsonOptions
+
+validateLinkedMemoryListQuery :: LinkedMemoryListQuery -> [Text]
+validateLinkedMemoryListQuery lq = concat
+  [ case lq.minImportance of
+      Just n | n < 1 || n > 10 -> ["minImportance must be between 1 and 10"]
+      _                        -> []
+  , case lq.minAccessCount of
+      Just n | n < 0 -> ["minAccessCount must be >= 0"]
+      _              -> []
+  ]
 
 data ProjectListQuery = ProjectListQuery
   { workspaceId     :: Maybe UUID

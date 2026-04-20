@@ -293,11 +293,17 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-  , mkTool "list_entity_memories" "List all memories linked to a project, task, or category." $ object
+  , mkTool "list_entity_memories" "List all memories linked to a project, task, or category. For project/task entities, optional filters include query, tags, min_importance, memory_type, and min_access_count." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "entity_type" .= propEnum "string" "Type of entity" ["project", "task", "category"]
           , "entity_id"   .= prop "string" "UUID of the entity"
+          , "query"       .= prop "string" "Optional full-text search query for linked memories (project/task only)"
+          , "tags"        .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                                       "description" .= t "Optional tag filter (any-match) for linked memories (project/task only)"]
+          , "min_importance" .= prop "integer" "Optional minimum importance filter (1-10) for linked memories (project/task only)"
+          , "memory_type"  .= propEnum "string" "Optional memory type filter for linked memories (project/task only)" ["short_term", "long_term"]
+          , "min_access_count" .= prop "integer" "Optional minimum access_count filter for linked memories (project/task only)"
           ]
       , "required" .= [t "entity_type", t "entity_id"]
       ]
@@ -592,9 +598,9 @@ data ToolCall
     | MemoryList     MemoryListQuery Bool      -- query, detail
   | MemoryGraphCall UUID (Maybe Int)
   | MemoryFindByRelation UUID RelationType
-  | ProjectListMem UUID
+  | ProjectListMem UUID LinkedMemoryListQuery
     | CategoryListMem UUID
-  | TaskListMem    UUID
+  | TaskListMem    UUID LinkedMemoryListQuery
   | MemoryDeleteBatch [UUID]
   | TaskDeleteBatch [UUID]
     | ProjectDeleteBatch [UUID]
@@ -726,9 +732,10 @@ parseToolCall name args = case name of
     "list_entity_memories"     -> do
         entityType <- need "entity_type" :: Either String Text
         eid <- need "entity_id"
+        lq <- parse args :: Either String LinkedMemoryListQuery
         case entityType of
-            "project"  -> Right $ ProjectListMem eid
-            "task"     -> Right $ TaskListMem eid
+            "project"  -> Right $ ProjectListMem eid lq
+            "task"     -> Right $ TaskListMem eid lq
             "category" -> Right $ CategoryListMem eid
             _          -> Left $ "list_entity_memories: invalid entity_type: " <> T.unpack entityType
     "task_create"              -> TaskCreate <$> parse args
@@ -909,6 +916,8 @@ validateToolCall = \case
         | otherwise ->
             let tq' = clampTaskListQuery tq
             in TaskList tq' <$ firstValidationError (validateTaskListQuery tq')
+    ProjectListMem pid lq -> Right $ ProjectListMem pid (clampLinkedMemoryListQuery lq)
+    TaskListMem tid lq -> Right $ TaskListMem tid (clampLinkedMemoryListQuery lq)
     TaskOverviewCall tid extraContext -> Right $ TaskOverviewCall tid extraContext
     ContextGetCall tid level -> Right $ ContextGetCall tid level
     TaskUpdate tid ut -> TaskUpdate tid ut <$ firstValidationError (validateUpdateTaskInput ut)
@@ -1067,6 +1076,15 @@ clampTaskListQuery tq = TaskListQuery
     , offset = clampMaybe 0 10000 <$> tq.offset
     }
 
+clampLinkedMemoryListQuery :: LinkedMemoryListQuery -> LinkedMemoryListQuery
+clampLinkedMemoryListQuery lq = LinkedMemoryListQuery
+    { query = lq.query
+    , tags = lq.tags
+    , minImportance = clampMaybe 1 10 <$> lq.minImportance
+    , memoryType = lq.memoryType
+    , minAccessCount = fmap (Prelude.max 0) lq.minAccessCount
+    }
+
 -- | Execute a typed tool call against the hmem-server HTTP API.
 executeToolCall :: Manager -> String -> Maybe Text -> ToolCall -> IO Value
 executeToolCall mgr base mApiKey = \case
@@ -1164,9 +1182,9 @@ executeToolCall mgr base mApiKey = \case
                             [ ("workspace_id", Just $ uuidPath wid)
                             , ("relation_type", Just $ encodeParam rt)
                             ])
-    ProjectListMem pid -> getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
+    ProjectListMem pid lq -> getJSON mgr base mApiKey (buildLinkedMemoryListPath ("/api/v1/projects/" <> uuidPath pid <> "/memories") lq)
     CategoryListMem cid -> getJSON mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid <> "/memories")
-    TaskListMem tid -> getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
+    TaskListMem tid lq -> getJSON mgr base mApiKey (buildLinkedMemoryListPath ("/api/v1/tasks/" <> uuidPath tid <> "/memories") lq)
     MemoryDeleteBatch ids -> postJSON mgr base mApiKey "/api/v1/memories/batch-delete"
                               (object ["ids" .= ids])
     TaskDeleteBatch ids -> postJSON mgr base mApiKey "/api/v1/tasks/batch-delete"
@@ -1563,11 +1581,25 @@ buildTaskListPath tq = "/api/v1/tasks" <> buildQuery
   , ("offset", show <$> tq.offset)
   ]
 
+buildLinkedMemoryListPath :: String -> LinkedMemoryListQuery -> String
+buildLinkedMemoryListPath base lq = base <> buildQueryMulti
+  ([ ("query", maybe [] (pure . T.unpack) lq.query)
+   , ("min_importance", maybe [] (pure . show) lq.minImportance)
+   , ("memory_type", maybe [] (pure . encodeParam) lq.memoryType)
+   , ("min_access_count", maybe [] (pure . show) lq.minAccessCount)
+   ]
+   <> maybe [] (pure . (,) "tag" . map T.unpack) lq.tags)
+
 -- | Build a query string from optional key-value pairs.
 -- Returns "" if all values are Nothing, otherwise "?k1=v1&k2=v2..."
 -- Values are percent-encoded to prevent injection of special characters.
 buildQuery :: [(String, Maybe String)] -> String
 buildQuery params = case [(k, v) | (k, Just v) <- params] of
+  [] -> ""
+  ps -> "?" <> intercalate "&" [k <> "=" <> encodeQueryValue v | (k, v) <- ps]
+
+buildQueryMulti :: [(String, [String])] -> String
+buildQueryMulti params = case [(k, v) | (k, vs) <- params, v <- vs] of
   [] -> ""
   ps -> "?" <> intercalate "&" [k <> "=" <> encodeQueryValue v | (k, v) <- ps]
 

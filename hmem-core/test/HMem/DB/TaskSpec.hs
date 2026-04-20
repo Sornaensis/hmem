@@ -6,7 +6,7 @@ import Control.Exception (try)
 import Data.Maybe (isJust, isNothing)
 import Test.Hspec
 
-import HMem.DB.Memory (createMemory)
+import HMem.DB.Memory (createMemory, getTaskMemories, touchMemory, updateMemory)
 import HMem.DB.Pool (DBException(..))
 import HMem.DB.Project (createProject)
 import HMem.DB.Task
@@ -425,6 +425,38 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       -- Idempotent
       linkTaskMemory env.pool task.id mem.id
       unlinkTaskMemory env.pool task.id mem.id
+
+    it "filters linked task memories by query, tags, importance, type, and access count" $ \env -> do
+      ws <- createTestWorkspace env "taskmem-filter-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Mem"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Linked"
+        , description = Nothing, priority = Nothing, metadata = Nothing
+        , dueAt = Nothing }
+      matching <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "beta haskell note", summary = Nothing
+        , memoryType = LongTerm, importance = Just 7, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Just ["keep"], ftsLanguage = Nothing }
+      nonMatching <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "beta haskell note", summary = Nothing
+        , memoryType = ShortTerm, importance = Just 2, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Just ["drop"], ftsLanguage = Nothing }
+      linkTaskMemory env.pool task.id matching.id
+      linkTaskMemory env.pool task.id nonMatching.id
+      touchMemory env.pool matching.id
+      _ <- updateMemory env.pool matching.id UpdateMemory
+        { content = Nothing, summary = Unchanged, memoryType = Nothing, importance = Nothing
+        , metadata = Nothing, expiresAt = Unchanged, source = Unchanged, confidence = Nothing, pinned = Just True }
+      filtered <- getTaskMemories env.pool task.id LinkedMemoryListQuery
+        { query = Just "beta haskell"
+        , tags = Just ["keep"]
+        , minImportance = Just 5
+        , memoryType = Just LongTerm
+        , minAccessCount = Just 1
+        }
+      map (.id) filtered `shouldBe` [matching.id]
 
   describe "batch update" $ do
     it "batch update with nonexistent ID returns partial success count" $ \env -> do

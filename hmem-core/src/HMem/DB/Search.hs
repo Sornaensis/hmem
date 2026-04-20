@@ -13,6 +13,9 @@ import HMem.DB.Project qualified as Proj
 import HMem.DB.Task qualified as Task
 import HMem.Types
 
+emptyLq :: LinkedMemoryListQuery
+emptyLq = LinkedMemoryListQuery Nothing Nothing Nothing Nothing Nothing
+
 -- | Run a unified full-text search across memories, projects, and tasks
 -- in parallel. Returns per-entity results with linked memory summaries
 -- attached to project and task hits.
@@ -91,7 +94,7 @@ searchAll pool usq = do
 -- | Fetch linked memories for a project and build a search result.
 enrichProjectResult :: Pool Hasql.Connection -> Project -> IO ProjectSearchResult
 enrichProjectResult pool proj = do
-  linkedMems <- Mem.getProjectMemories pool proj.id
+  linkedMems <- Mem.getProjectMemories pool proj.id emptyLq
   pure ProjectSearchResult
     { project = proj
     , linkedMemories = map toLinkedSummary linkedMems
@@ -100,7 +103,7 @@ enrichProjectResult pool proj = do
 -- | Fetch linked memories for a task and build a search result.
 enrichTaskResult :: Pool Hasql.Connection -> Task -> IO TaskSearchResult
 enrichTaskResult pool task = do
-  linkedMems <- Mem.getTaskMemories pool task.id
+  linkedMems <- Mem.getTaskMemories pool task.id emptyLq
   pure TaskSearchResult
     { task = task
     , linkedMemories = map toLinkedSummary linkedMems

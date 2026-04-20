@@ -969,39 +969,101 @@ findByRelation pool wsId relType = do
 -- Cross-entity memory lists
 ------------------------------------------------------------------------
 
+applyLinkedMemoryFilters :: LinkedMemoryListQuery -> MemoryT Expr -> Query ()
+applyLinkedMemoryFilters lq mem = do
+  case lq.tags of
+    Just ts@(_:_) -> present $ do
+      tagRow <- each memoryTagSchema
+      where_ $ tagRow.mtMemoryId ==. mem.memId
+      where_ $ in_ tagRow.mtTag (map lit ts)
+    _ -> pure ()
+  case lq.minImportance of
+    Just imp -> where_ $ mem.memImportance >=. lit (fromIntegral imp :: Int16)
+    Nothing  -> pure ()
+  case lq.memoryType of
+    Just mt -> where_ $ mem.memMemoryType ==. lit mt
+    Nothing -> pure ()
+  case lq.minAccessCount of
+    Just n  -> where_ $ mem.memAccessCount >=. lit (fromIntegral n :: Int32)
+    Nothing -> pure ()
+
 -- | List all memories linked to a project.
-getProjectMemories :: Pool Hasql.Connection -> UUID -> IO [Memory]
-getProjectMemories pool projId =
+getProjectMemories :: Pool Hasql.Connection -> UUID -> LinkedMemoryListQuery -> IO [Memory]
+getProjectMemories pool projId lq =
   runSession pool $ do
-    rows <- Session.statement () $ run $ select $ limit 200 $ do
-      present $ do
-        proj <- each projectSchema
-        where_ $ proj.projId ==. lit projId
-        where_ $ activeProject proj
-      pml <- each projectMemoryLinkSchema
-      where_ $ pml.pmlProjectId ==. lit projId
-      mem <- each memorySchema
-      where_ $ mem.memId ==. pml.pmlMemoryId
-      where_ $ activeMemory mem
-      pure mem
-    enrichRowsS rows
+    case lq.query of
+      Nothing -> do
+        rows <- Session.statement () $ run $ select $ limit 200 $ do
+          present $ do
+            proj <- each projectSchema
+            where_ $ proj.projId ==. lit projId
+            where_ $ activeProject proj
+          pml <- each projectMemoryLinkSchema
+          where_ $ pml.pmlProjectId ==. lit projId
+          mem <- each memorySchema
+          where_ $ mem.memId ==. pml.pmlMemoryId
+          where_ $ activeMemory mem
+          applyLinkedMemoryFilters lq mem
+          pure mem
+        enrichRowsS rows
+      Just q -> do
+        results <- Session.statement () $ run $ select $ limit 200 $ orderBy (((\(_, score, _) -> score) >$< desc) <> ((\(_, _, updatedAt) -> updatedAt) >$< desc)) $ do
+          present $ do
+            proj <- each projectSchema
+            where_ $ proj.projId ==. lit projId
+            where_ $ activeProject proj
+          pml <- each projectMemoryLinkSchema
+          where_ $ pml.pmlProjectId ==. lit projId
+          mem <- each memorySchema
+          where_ $ mem.memId ==. pml.pmlMemoryId
+          where_ $ activeMemory mem
+          applyLinkedMemoryFilters lq mem
+          let config = unsafeCastExpr mem.memFtsLanguage :: Expr PgRegConfig
+              tsq = function "plainto_tsquery" (config, lit q) :: Expr PgTSQuery
+          let tsvec = mem.memSearchVector :: Expr PgTSVector
+          where_ $ rawBinaryOperator "@@" tsvec tsq
+          let tsRank = function "ts_rank" (tsvec, tsq) :: Expr Double
+          pure (mem, tsRank, mem.memUpdatedAt)
+        enrichRowsS (map (\(mem, _, _) -> mem) results)
 
 -- | List all memories linked to a task.
-getTaskMemories :: Pool Hasql.Connection -> UUID -> IO [Memory]
-getTaskMemories pool taskId =
+getTaskMemories :: Pool Hasql.Connection -> UUID -> LinkedMemoryListQuery -> IO [Memory]
+getTaskMemories pool taskId lq =
   runSession pool $ do
-    rows <- Session.statement () $ run $ select $ limit 200 $ do
-      present $ do
-        task <- each taskSchema
-        where_ $ task.taskId ==. lit taskId
-        where_ $ activeTask task
-      tml <- each taskMemoryLinkSchema
-      where_ $ tml.tmlTaskId ==. lit taskId
-      mem <- each memorySchema
-      where_ $ mem.memId ==. tml.tmlMemoryId
-      where_ $ activeMemory mem
-      pure mem
-    enrichRowsS rows
+    case lq.query of
+      Nothing -> do
+        rows <- Session.statement () $ run $ select $ limit 200 $ do
+          present $ do
+            task <- each taskSchema
+            where_ $ task.taskId ==. lit taskId
+            where_ $ activeTask task
+          tml <- each taskMemoryLinkSchema
+          where_ $ tml.tmlTaskId ==. lit taskId
+          mem <- each memorySchema
+          where_ $ mem.memId ==. tml.tmlMemoryId
+          where_ $ activeMemory mem
+          applyLinkedMemoryFilters lq mem
+          pure mem
+        enrichRowsS rows
+      Just q -> do
+        results <- Session.statement () $ run $ select $ limit 200 $ orderBy (((\(_, score, _) -> score) >$< desc) <> ((\(_, _, updatedAt) -> updatedAt) >$< desc)) $ do
+          present $ do
+            task <- each taskSchema
+            where_ $ task.taskId ==. lit taskId
+            where_ $ activeTask task
+          tml <- each taskMemoryLinkSchema
+          where_ $ tml.tmlTaskId ==. lit taskId
+          mem <- each memorySchema
+          where_ $ mem.memId ==. tml.tmlMemoryId
+          where_ $ activeMemory mem
+          applyLinkedMemoryFilters lq mem
+          let config = unsafeCastExpr mem.memFtsLanguage :: Expr PgRegConfig
+              tsq = function "plainto_tsquery" (config, lit q) :: Expr PgTSQuery
+          let tsvec = mem.memSearchVector :: Expr PgTSVector
+          where_ $ rawBinaryOperator "@@" tsvec tsq
+          let tsRank = function "ts_rank" (tsvec, tsq) :: Expr Double
+          pure (mem, tsRank, mem.memUpdatedAt)
+        enrichRowsS (map (\(mem, _, _) -> mem) results)
 
 -- | List all memories linked to a category.
 getCategoryMemories :: Pool Hasql.Connection -> UUID -> IO [Memory]

@@ -144,6 +144,7 @@ module HMem.Types
   , maxMemorySummaryBytes
   , maxNameBytes
   , maxDescriptionBytes
+  , validFtsLanguage
   , maxPaginationOffset
   , maxPaginationLimit
   , capPagination
@@ -259,6 +260,17 @@ maxNameBytes = 1024
 maxDescriptionBytes :: Int
 maxDescriptionBytes = 100 * 1024
 
+validFtsLanguage :: Maybe Text -> Bool
+validFtsLanguage Nothing = True
+validFtsLanguage (Just language) = language `elem`
+  [ "simple", "arabic", "armenian", "basque", "catalan", "danish"
+  , "dutch", "english", "finnish", "french", "german", "greek"
+  , "hindi", "hungarian", "indonesian", "irish", "italian"
+  , "lithuanian", "nepali", "norwegian", "portuguese", "romanian"
+  , "russian", "serbian", "spanish", "swedish", "tamil", "turkish"
+  , "yiddish"
+  ]
+
 -- | Maximum allowed pagination offset (default: 100,000).
 maxPaginationOffset :: Int
 maxPaginationOffset = 100000
@@ -322,6 +334,7 @@ validateProjectListQuery :: ProjectListQuery -> [Text]
 validateProjectListQuery pq =
   validateTimeRange "created_after" pq.createdAfter "created_before" pq.createdBefore
   <> validateTimeRange "updated_after" pq.updatedAfter "updated_before" pq.updatedBefore
+  <> ["Invalid search_language" | not (validFtsLanguage pq.searchLanguage)]
 
 validateCreateTaskInput :: CreateTask -> [Text]
 validateCreateTaskInput ct =
@@ -339,6 +352,7 @@ validateTaskListQuery tq =
   <> validateOptionalIntRange "priority" 1 10 tq.priority
   <> validateTimeRange "created_after" tq.createdAfter "created_before" tq.createdBefore
   <> validateTimeRange "updated_after" tq.updatedAfter "updated_before" tq.updatedBefore
+  <> ["Invalid search_language" | not (validFtsLanguage tq.searchLanguage)]
 
 validateCreateMemoryCategoryInput :: CreateMemoryCategory -> [Text]
 validateCreateMemoryCategoryInput cc =

@@ -6,7 +6,6 @@ import Control.Concurrent.Async (concurrently)
 import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
 import Data.Set qualified as Set
-import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
 
 import HMem.DB.Memory qualified as Mem

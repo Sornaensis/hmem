@@ -21,7 +21,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 
 import HMem.DB.Pool (runSession)
-import HMem.Types (AuditAction(..), AuditLogEntry(..), AuditLogQuery(..), auditActionFromText, auditActionToText, capPagination)
+import HMem.Types (AuditLogEntry(..), AuditLogQuery(..), auditActionFromText, auditActionToText, capPagination)
 
 ------------------------------------------------------------------------
 -- Row decoder (shared)

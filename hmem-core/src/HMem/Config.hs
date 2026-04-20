@@ -414,11 +414,11 @@ validateConfig cfg = (warnings, corrected)
           )
       | otherwise = ([], a)
 
-    validateRateLimit rl =
-      let (ws1, rps) = clampFieldD "rate_limit.requests_per_second" 0.1 10000.0 rl.rlRequestsPerSecond
-          (ws2, burst) = clampField "rate_limit.burst" 1 100000 rl.rlBurst
+    validateRateLimit rateLimitCfg =
+      let (ws1, rps) = clampFieldD "rate_limit.requests_per_second" 0.1 10000.0 rateLimitCfg.rlRequestsPerSecond
+          (ws2, burst) = clampField "rate_limit.burst" 1 100000 rateLimitCfg.rlBurst
       in (ws1 <> ws2, RateLimitConfig
-        { rlEnabled = rl.rlEnabled
+        { rlEnabled = rateLimitCfg.rlEnabled
         , rlRequestsPerSecond = rps
         , rlBurst = burst
         })

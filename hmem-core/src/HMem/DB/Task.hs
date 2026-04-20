@@ -25,7 +25,7 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant ((>$<), contramap)
 import Data.Int (Int16, Int64)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Pool (Pool)
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
@@ -159,10 +159,10 @@ applyFieldUpdateMaybe oldValue = \case
 ensureTaskProject :: Pool Hasql.Connection -> UUID -> Maybe UUID -> IO ()
 ensureTaskProject _ _ Nothing = pure ()
 ensureTaskProject pool workspaceId (Just projectId) = do
-  project <- Proj.getProject pool projectId >>= maybe
+  foundProject <- Proj.getProject pool projectId >>= maybe
     (throwIO $ DBForeignKeyViolation "Referenced project does not exist")
     pure
-  when (project.workspaceId /= workspaceId) $
+  when (foundProject.workspaceId /= workspaceId) $
     throwIO $ DBCheckViolation "Task project must belong to the same workspace"
 
 ensureTaskParent :: Pool Hasql.Connection -> UUID -> Maybe UUID -> IO (Maybe Task)
@@ -238,7 +238,7 @@ getTask pool tid = do
     []    -> pure Nothing
     (r:_) -> do
       enriched <- enrichTaskCounts pool [rowToTask r]
-      pure $ Just (head enriched)
+      pure $ listToMaybe enriched
 
 ------------------------------------------------------------------------
 -- Update
@@ -291,7 +291,7 @@ updateTask pool tid ut = do
         Nothing -> pure Nothing
         Just t -> do
           enriched <- enrichTaskCounts pool [t]
-          pure $ Just (head enriched)
+          pure $ listToMaybe enriched
 
 ------------------------------------------------------------------------
 -- Delete

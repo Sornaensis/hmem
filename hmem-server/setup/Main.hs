@@ -25,10 +25,9 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Char          (isSpace)
-import Data.List          (isInfixOf, dropWhileEnd, isPrefixOf)
-import Data.Maybe         (catMaybes, fromMaybe)
+import Data.List          (isInfixOf, dropWhileEnd)
+import Data.Maybe         (fromMaybe)
 import Data.Text qualified as T
-import Data.Text.IO qualified as TIO
 import Data.UUID          (UUID)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Types.Status (statusCode)
@@ -48,8 +47,6 @@ import System.Process     (CreateProcess(..), StdStream(..), callProcess,
 
 import qualified Brick
 import qualified Brick.Widgets.List as BL
-import qualified Brick.Widgets.Center as C
-import qualified Brick.Widgets.Border as B
 import qualified Brick.AttrMap as A
 import qualified Graphics.Vty as Vty
 import qualified Graphics.Vty.CrossPlatform as VtyCross
@@ -468,8 +465,8 @@ installAgentConfigs = do
 
   -- Also install into OpenCode global agents directory
   step "Installing agents to OpenCode"
-  home <- getHomeDirectory
-  let openCodeAgentsDir = home </> ".config" </> "opencode" </> "agents"
+  openCodeHome <- getHomeDirectory
+  let openCodeAgentsDir = openCodeHome </> ".config" </> "opencode" </> "agents"
   createDirectoryIfMissing True openCodeAgentsDir
   let openCodeAgentFiles =
         [ ("hmem-memory.md", opencodeMemoryAgent)
@@ -1115,11 +1112,11 @@ removeIfExists path = do
 
 -- | Create an HTTP manager and build the base URL from config.
 withApiClient :: (HTTP.Manager -> String -> IO a) -> IO a
-withApiClient action = do
+withApiClient runAction = do
   cfg <- loadConfig
   mgr <- HTTP.newManager HTTP.defaultManagerSettings
   let base = "http://" <> T.unpack cfg.server.host <> ":" <> show cfg.server.port
-  action mgr base
+  runAction mgr base
 
 apiGet :: HTTP.Manager -> String -> String -> IO BL.ByteString
 apiGet mgr base path = do
@@ -1335,7 +1332,7 @@ menuAttrMap :: A.AttrMap
 menuAttrMap = A.attrMap Vty.defAttr
   [ (A.attrName "title",    Vty.withStyle Vty.defAttr Vty.bold)
   , (A.attrName "selected", Vty.withForeColor (Vty.withStyle Vty.defAttr Vty.bold) Vty.cyan)
-  , (A.attrName "help",     Vty.withForeColor Vty.defAttr (Vty.rgbColor 128 128 128))
+  , (A.attrName "help",     Vty.withForeColor Vty.defAttr (Vty.rgbColor (128 :: Int) (128 :: Int) (128 :: Int)))
   , (BL.listSelectedFocusedAttr, Vty.withForeColor (Vty.withStyle Vty.defAttr Vty.bold) Vty.cyan)
   ]
 
@@ -1353,7 +1350,7 @@ toLowerAscii c
 -- Helpers for the query commands
 
 matchName :: String -> String -> Bool
-matchName pat str = map toLowerAscii pat `isInfixOf` map toLowerAscii str
+matchName pat candidate = map toLowerAscii pat `isInfixOf` map toLowerAscii candidate
 
 padRight :: Int -> String -> String
 padRight n s = take n (s <> replicate n ' ')
@@ -1450,7 +1447,8 @@ ensureInitialized commandName = do
   pure dir
 
 isMigrationFile :: FilePath -> Bool
-isMigrationFile f = not (null f) && head f == 'V'
+isMigrationFile ('V':_) = True
+isMigrationFile _ = False
 
 installMigrations :: FilePath -> IO (FilePath, [FilePath])
 installMigrations hmemDir = do

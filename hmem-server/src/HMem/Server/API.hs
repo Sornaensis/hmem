@@ -801,8 +801,8 @@ workspaceHandlers pool bc =
                   update Update
                     { target = projectSchema
                     , from = pure ()
-                    , set = \_ project -> project { projDeletedAt = lit (Nothing :: Maybe UTCTime) }
-                    , updateWhere = \_ project -> project.projWorkspaceId ==. lit wsId &&. project.projDeletedAt ==. lit (Just deletedAt)
+                    , set = \_ projectRow -> projectRow { projDeletedAt = lit (Nothing :: Maybe UTCTime) }
+                    , updateWhere = \_ projectRow -> projectRow.projWorkspaceId ==. lit wsId &&. projectRow.projDeletedAt ==. lit (Just deletedAt)
                     , returning = NoReturning
                     }
                 Session.statement () $ run_ $

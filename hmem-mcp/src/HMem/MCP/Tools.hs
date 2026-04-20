@@ -4,6 +4,8 @@ module HMem.MCP.Tools
   -- * Testing
   , parseToolCall
   , validateToolCall
+  , buildProjectListPath
+  , buildTaskListPath
   , ToolCall(..)
   ) where
 
@@ -16,7 +18,6 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32)
 import Data.List (intercalate)
-import Data.Set qualified as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -874,11 +875,20 @@ validateToolCall = \case
                 in MemoryCreateBatch cms' <$ firstValidationError (validateCreateMemoryBatchInput cms')
     MemorySearch sq detail
         | not (validFtsLanguage sq.searchLanguage) -> Left $ "Invalid search_language: " <> show sq.searchLanguage
-        | otherwise -> Right $ MemorySearch sq
-                { limit = clampMaybe 1 200 <$> sq.limit
-                , offset = clampMaybe 0 10000 <$> sq.offset
-                , minImportance = clampMaybe 1 10 <$> sq.minImportance
-                } detail
+        | otherwise -> Right $ MemorySearch sq' detail
+          where
+            sq' = SearchQuery
+              { workspaceId = sq.workspaceId
+              , query = sq.query
+              , memoryType = sq.memoryType
+              , tags = sq.tags
+              , minImportance = clampMaybe 1 10 <$> sq.minImportance
+              , categoryId = sq.categoryId
+              , pinnedOnly = sq.pinnedOnly
+              , searchLanguage = sq.searchLanguage
+              , limit = clampMaybe 1 200 <$> sq.limit
+              , offset = clampMaybe 0 10000 <$> sq.offset
+              }
     MemoryUpdate mid um ->
         let um' = clampUpdateMemory um
         in MemoryUpdate mid um' <$ firstValidationError (validateUpdateMemoryInput um')
@@ -887,14 +897,18 @@ validateToolCall = \case
         let mq' = clampMemoryListQuery mq
         in MemoryList mq' detail <$ firstValidationError (validateMemoryListQuery mq')
     ProjectCreate cp -> ProjectCreate cp <$ firstValidationError (validateCreateProjectInput cp)
-    ProjectList pq ->
-        let pq' = clampProjectListQuery pq
-        in ProjectList pq' <$ firstValidationError (validateProjectListQuery pq')
+    ProjectList pq
+        | not (validFtsLanguage pq.searchLanguage) -> Left $ "Invalid search_language: " <> show pq.searchLanguage
+        | otherwise ->
+            let pq' = clampProjectListQuery pq
+            in ProjectList pq' <$ firstValidationError (validateProjectListQuery pq')
     ProjectUpdate pid up -> ProjectUpdate pid up <$ firstValidationError (validateUpdateProjectInput up)
     TaskCreate ct -> TaskCreate ct <$ firstValidationError (validateCreateTaskInput ct)
-    TaskList tq ->
-        let tq' = clampTaskListQuery tq
-        in TaskList tq' <$ firstValidationError (validateTaskListQuery tq')
+    TaskList tq
+        | not (validFtsLanguage tq.searchLanguage) -> Left $ "Invalid search_language: " <> show tq.searchLanguage
+        | otherwise ->
+            let tq' = clampTaskListQuery tq
+            in TaskList tq' <$ firstValidationError (validateTaskListQuery tq')
     TaskOverviewCall tid extraContext -> Right $ TaskOverviewCall tid extraContext
     ContextGetCall tid level -> Right $ ContextGetCall tid level
     TaskUpdate tid ut -> TaskUpdate tid ut <$ firstValidationError (validateUpdateTaskInput ut)
@@ -962,22 +976,6 @@ validateToolCall = \case
             in UnifiedSearch usq' <$ firstValidationError (validateUnifiedSearchQuery usq')
     other -> Right other
 
--- | Whitelist of valid PostgreSQL full-text search configurations.
-validFtsLanguages :: Set.Set Text
-validFtsLanguages = Set.fromList
-  [ "simple", "arabic", "armenian", "basque", "catalan", "danish"
-  , "dutch", "english", "finnish", "french", "german", "greek"
-  , "hindi", "hungarian", "indonesian", "irish", "italian"
-  , "lithuanian", "nepali", "norwegian", "portuguese", "romanian"
-  , "russian", "serbian", "spanish", "swedish", "tamil", "turkish"
-  , "yiddish"
-  ]
-
--- | Check that an optional fts_language value is valid (Nothing = use default = ok).
-validFtsLanguage :: Maybe Text -> Bool
-validFtsLanguage Nothing  = True
-validFtsLanguage (Just l) = Set.member l validFtsLanguages
-
 -- | Validate a batch ID list (1-100 items).
 validateBatchIds :: String -> [a] -> ToolCall -> Either String ToolCall
 validateBatchIds toolName ids result
@@ -1028,20 +1026,44 @@ clampUpdateMemory um = UpdateMemory
   }
 
 clampMemoryListQuery :: MemoryListQuery -> MemoryListQuery
-clampMemoryListQuery mq = mq
-    { limit = clampMaybe 1 200 <$> mq.limit
+clampMemoryListQuery mq = MemoryListQuery
+    { workspaceId = mq.workspaceId
+    , memoryType = mq.memoryType
+    , createdAfter = mq.createdAfter
+    , createdBefore = mq.createdBefore
+    , updatedAfter = mq.updatedAfter
+    , updatedBefore = mq.updatedBefore
+    , limit = clampMaybe 1 200 <$> mq.limit
     , offset = clampMaybe 0 10000 <$> mq.offset
     }
 
 clampProjectListQuery :: ProjectListQuery -> ProjectListQuery
-clampProjectListQuery pq = pq
-    { limit = clampMaybe 1 200 <$> pq.limit
+clampProjectListQuery pq = ProjectListQuery
+    { workspaceId = pq.workspaceId
+    , status = pq.status
+    , query = pq.query
+    , searchLanguage = pq.searchLanguage
+    , createdAfter = pq.createdAfter
+    , createdBefore = pq.createdBefore
+    , updatedAfter = pq.updatedAfter
+    , updatedBefore = pq.updatedBefore
+    , limit = clampMaybe 1 200 <$> pq.limit
     , offset = clampMaybe 0 10000 <$> pq.offset
     }
 
 clampTaskListQuery :: TaskListQuery -> TaskListQuery
-clampTaskListQuery tq = tq
-    { limit = clampMaybe 1 200 <$> tq.limit
+clampTaskListQuery tq = TaskListQuery
+    { workspaceId = tq.workspaceId
+    , projectId = tq.projectId
+    , status = tq.status
+    , priority = tq.priority
+    , query = tq.query
+    , searchLanguage = tq.searchLanguage
+    , createdAfter = tq.createdAfter
+    , createdBefore = tq.createdBefore
+    , updatedAfter = tq.updatedAfter
+    , updatedBefore = tq.updatedBefore
+    , limit = clampMaybe 1 200 <$> tq.limit
     , offset = clampMaybe 0 10000 <$> tq.offset
     }
 
@@ -1064,16 +1086,7 @@ executeToolCall mgr base mApiKey = \case
     ProjectDelete pid   -> delJSON  mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
     ProjectRestore pid  -> postJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/restore") (object [])
     ProjectPurge pid    -> delJSON  mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/purge")
-    ProjectList pq -> getJSON mgr base mApiKey ("/api/v1/projects" <> buildQuery
-                            [ ("workspace_id", uuidPath <$> pq.workspaceId)
-                            , ("status", encodeParam <$> pq.status)
-                            , ("created_after", encodeParam <$> pq.createdAfter)
-                            , ("created_before", encodeParam <$> pq.createdBefore)
-                            , ("updated_after", encodeParam <$> pq.updatedAfter)
-                            , ("updated_before", encodeParam <$> pq.updatedBefore)
-                            , ("limit", show <$> pq.limit)
-                            , ("offset", show <$> pq.offset)
-                            ])
+    ProjectList pq -> getJSON mgr base mApiKey (buildProjectListPath pq)
     ProjectLinkMem pid mid -> postJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
                               (object ["memory_id" .= mid])
     ProjectUnlinkMem pid mid -> delJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories/"
@@ -1093,18 +1106,7 @@ executeToolCall mgr base mApiKey = \case
     TaskDelete tid      -> delJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
     TaskRestore tid     -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/restore") (object [])
     TaskPurge tid       -> delJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/purge")
-    TaskList tq -> getJSON mgr base mApiKey ("/api/v1/tasks" <> buildQuery
-                            [ ("workspace_id", uuidPath <$> tq.workspaceId)
-                            , ("project_id", uuidPath <$> tq.projectId)
-                            , ("status", encodeParam <$> tq.status)
-                            , ("priority", show <$> tq.priority)
-                            , ("created_after", encodeParam <$> tq.createdAfter)
-                            , ("created_before", encodeParam <$> tq.createdBefore)
-                            , ("updated_after", encodeParam <$> tq.updatedAfter)
-                            , ("updated_before", encodeParam <$> tq.updatedBefore)
-                            , ("limit", show <$> tq.limit)
-                            , ("offset", show <$> tq.offset)
-                            ])
+    TaskList tq -> getJSON mgr base mApiKey (buildTaskListPath tq)
     TaskUpdate tid ut   -> putJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid) ut
     TaskLinkMem tid mid -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
                             (object ["memory_id" .= mid])
@@ -1531,6 +1533,36 @@ propEnum ty desc vals = object ["type" .= ty, "description" .= desc, "enum" .= v
 uuidPath :: UUID -> String
 uuidPath = UUID.toString
 
+buildProjectListPath :: ProjectListQuery -> String
+buildProjectListPath pq = "/api/v1/projects" <> buildQuery
+  [ ("workspace_id", uuidPath <$> pq.workspaceId)
+  , ("status", encodeParam <$> pq.status)
+  , ("query", T.unpack <$> pq.query)
+  , ("search_language", T.unpack <$> pq.searchLanguage)
+  , ("created_after", encodeParam <$> pq.createdAfter)
+  , ("created_before", encodeParam <$> pq.createdBefore)
+  , ("updated_after", encodeParam <$> pq.updatedAfter)
+  , ("updated_before", encodeParam <$> pq.updatedBefore)
+  , ("limit", show <$> pq.limit)
+  , ("offset", show <$> pq.offset)
+  ]
+
+buildTaskListPath :: TaskListQuery -> String
+buildTaskListPath tq = "/api/v1/tasks" <> buildQuery
+  [ ("workspace_id", uuidPath <$> tq.workspaceId)
+  , ("project_id", uuidPath <$> tq.projectId)
+  , ("status", encodeParam <$> tq.status)
+  , ("priority", show <$> tq.priority)
+  , ("query", T.unpack <$> tq.query)
+  , ("search_language", T.unpack <$> tq.searchLanguage)
+  , ("created_after", encodeParam <$> tq.createdAfter)
+  , ("created_before", encodeParam <$> tq.createdBefore)
+  , ("updated_after", encodeParam <$> tq.updatedAfter)
+  , ("updated_before", encodeParam <$> tq.updatedBefore)
+  , ("limit", show <$> tq.limit)
+  , ("offset", show <$> tq.offset)
+  ]
+
 -- | Build a query string from optional key-value pairs.
 -- Returns "" if all values are Nothing, otherwise "?k1=v1&k2=v2..."
 -- Values are percent-encoded to prevent injection of special characters.
@@ -1540,7 +1572,7 @@ buildQuery params = case [(k, v) | (k, Just v) <- params] of
   ps -> "?" <> intercalate "&" [k <> "=" <> encodeQueryValue v | (k, v) <- ps]
 
 encodeQueryValue :: String -> String
-encodeQueryValue = BS8.unpack . urlEncode True . BS8.pack
+encodeQueryValue = BS8.unpack . urlEncode True . TE.encodeUtf8 . T.pack
 
 encodeParam :: ToJSON a => a -> String
 encodeParam x = case toJSON x of

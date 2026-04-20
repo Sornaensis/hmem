@@ -3,7 +3,6 @@
 module HMem.DB.CleanupSpec (spec) where
 
 import Data.Functor.Contravariant ((>$<))
-import Data.Int (Int32)
 import Data.String (fromString)
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
@@ -88,7 +87,14 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
             , enabled       = True
             }
       _ <- upsertCleanupPolicy env.pool base
-      updated <- upsertCleanupPolicy env.pool base { minImportance = 2 }
+      updated <- upsertCleanupPolicy env.pool UpsertCleanupPolicy
+        { workspaceId = base.workspaceId
+        , memoryType = base.memoryType
+        , maxAgeHours = base.maxAgeHours
+        , maxCount = base.maxCount
+        , minImportance = 2
+        , enabled = base.enabled
+        }
       updated.minImportance `shouldBe` 2
 
       policies <- getCleanupPolicies env.pool ws.id Nothing Nothing
@@ -98,7 +104,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
     it "deletes excess low-importance memories" $ \env -> do
       ws <- createTestWorkspace env "count-ws"
       -- Create 5 memories with importance 2 (below threshold)
-      mems <- mapM (\i -> mkMemory env ws.id 2 ("low-" ++ show i)) [1..5 :: Int]
+      _ <- mapM (\i -> mkMemory env ws.id 2 ("low-" ++ show i)) [1..5 :: Int]
       -- Create 2 memories with high importance (should survive)
       high1 <- mkMemory env ws.id 8 "high-1"
       high2 <- mkMemory env ws.id 9 "high-2"

@@ -160,11 +160,11 @@ updateProject pool pid up = do
   current <- getProject pool pid
   case current of
     Nothing -> pure Nothing
-    Just project -> do
+    Just currentProject -> do
       case up.parentId of
         Unchanged   -> pure ()
         SetNull     -> pure ()
-        SetTo newId -> ensureParentProject pool project.workspaceId (Just newId)
+        SetTo newId -> ensureParentProject pool currentProject.workspaceId (Just newId)
       rows <- runSession pool $ Session.statement () $ run $
         update Update
           { target = projectSchema
@@ -280,8 +280,8 @@ restoreProject pool pid = do
               update Update
                 { target = projectSchema
                 , from = pure ()
-                , set = \_ project -> project { projDeletedAt = lit (Nothing :: Maybe UTCTime) }
-                , updateWhere = \_ project -> in_ project.projId (map lit ids) &&. not_ (isNull project.projDeletedAt)
+                , set = \_ projectRow -> projectRow { projDeletedAt = lit (Nothing :: Maybe UTCTime) }
+                , updateWhere = \_ projectRow -> in_ projectRow.projId (map lit ids) &&. not_ (isNull projectRow.projDeletedAt)
                 , returning = NoReturning
                 }
             pure (n > 0)

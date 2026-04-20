@@ -3,7 +3,7 @@
 module HMem.MCP.ToolsSpec (spec) where
 
 import Data.Aeson
-import Data.Aeson.Key (Key)
+import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Either (isLeft, isRight)
 import Data.Scientific (Scientific)
@@ -628,6 +628,34 @@ spec = do
         , offset = Nothing
         }) `shouldSatisfy` isLeft
 
+    it "rejects invalid search_language for project_list and task_list" $ do
+      validateToolCall (ProjectList ProjectListQuery
+        { workspaceId = Just parsedUUID
+        , status = Nothing
+        , query = Nothing
+        , searchLanguage = Just "not-a-language"
+        , createdAfter = Nothing
+        , createdBefore = Nothing
+        , updatedAfter = Nothing
+        , updatedBefore = Nothing
+        , limit = Nothing
+        , offset = Nothing
+        }) `shouldSatisfy` isLeft
+      validateToolCall (TaskList TaskListQuery
+        { workspaceId = Just parsedUUID
+        , projectId = Nothing
+        , status = Nothing
+        , priority = Nothing
+        , query = Nothing
+        , searchLanguage = Just "not-a-language"
+        , createdAfter = Nothing
+        , createdBefore = Nothing
+        , updatedAfter = Nothing
+        , updatedBefore = Nothing
+        , limit = Nothing
+        , offset = Nothing
+        }) `shouldSatisfy` isLeft
+
     it "clamps category_list limit" $ do
       case validateToolCall (CategoryList Nothing (Just 0) Nothing) of
         Right (CategoryList _ ml _) -> ml `shouldBe` Just 1
@@ -643,28 +671,211 @@ spec = do
       validateToolCall (CategoryDeleteBatch [parsedUUID]) `shouldBe` Right (CategoryDeleteBatch [parsedUUID])
       validateToolCall (CategoryLinkMemBatch parsedUUID []) `shouldSatisfy` isLeft
 
+  describe "validateToolCall (query reconstruction)" $ do
+
+    it "preserves non-clamped fields for memory_search" $ do
+      case validateToolCall (MemorySearch SearchQuery
+        { workspaceId = Just parsedUUID
+        , query = Just "preserve-memory-search"
+        , memoryType = Just LongTerm
+        , tags = Just ["alpha", "beta"]
+        , minImportance = Just 99
+        , categoryId = Just parsedUUID2
+        , pinnedOnly = Just True
+        , searchLanguage = Just "german"
+        , limit = Just 500
+        , offset = Just (-1)
+        } True) of
+        Right (MemorySearch sq detail) -> do
+          sq.workspaceId `shouldBe` Just parsedUUID
+          sq.query `shouldBe` Just "preserve-memory-search"
+          sq.memoryType `shouldBe` Just LongTerm
+          sq.tags `shouldBe` Just ["alpha", "beta"]
+          sq.categoryId `shouldBe` Just parsedUUID2
+          sq.pinnedOnly `shouldBe` Just True
+          sq.searchLanguage `shouldBe` Just "german"
+          sq.minImportance `shouldBe` Just 10
+          sq.limit `shouldBe` Just 200
+          sq.offset `shouldBe` Just 0
+          detail `shouldBe` True
+        other -> expectationFailure $ "Expected MemorySearch, got: " <> show other
+
+    it "preserves non-clamped fields for memory_list" $ do
+      let createdAfterTs = read "2026-03-30 09:00:00 UTC"
+          createdBeforeTs = read "2026-03-30 10:00:00 UTC"
+          updatedAfterTs = read "2026-03-30 11:00:00 UTC"
+          updatedBeforeTs = read "2026-03-30 12:00:00 UTC"
+      case validateToolCall (MemoryList MemoryListQuery
+        { workspaceId = Just parsedUUID
+        , memoryType = Just ShortTerm
+        , createdAfter = Just createdAfterTs
+        , createdBefore = Just createdBeforeTs
+        , updatedAfter = Just updatedAfterTs
+        , updatedBefore = Just updatedBeforeTs
+        , limit = Just 0
+        , offset = Just 10001
+        } False) of
+        Right (MemoryList mq detail) -> do
+          mq.workspaceId `shouldBe` Just parsedUUID
+          mq.memoryType `shouldBe` Just ShortTerm
+          mq.createdAfter `shouldBe` Just createdAfterTs
+          mq.createdBefore `shouldBe` Just createdBeforeTs
+          mq.updatedAfter `shouldBe` Just updatedAfterTs
+          mq.updatedBefore `shouldBe` Just updatedBeforeTs
+          mq.limit `shouldBe` Just 1
+          mq.offset `shouldBe` Just 10000
+          detail `shouldBe` False
+        other -> expectationFailure $ "Expected MemoryList, got: " <> show other
+
+    it "preserves non-clamped fields for project_list" $ do
+      let createdAfterTs = read "2026-03-30 09:00:00 UTC"
+          createdBeforeTs = read "2026-03-30 10:00:00 UTC"
+          updatedAfterTs = read "2026-03-30 11:00:00 UTC"
+          updatedBeforeTs = read "2026-03-30 12:00:00 UTC"
+      case validateToolCall (ProjectList ProjectListQuery
+        { workspaceId = Just parsedUUID
+        , status = Just ProjPaused
+        , query = Just "preserve-project-list"
+        , searchLanguage = Just "english"
+        , createdAfter = Just createdAfterTs
+        , createdBefore = Just createdBeforeTs
+        , updatedAfter = Just updatedAfterTs
+        , updatedBefore = Just updatedBeforeTs
+        , limit = Just 250
+        , offset = Just (-5)
+        }) of
+        Right (ProjectList pq) -> do
+          pq.workspaceId `shouldBe` Just parsedUUID
+          pq.status `shouldBe` Just ProjPaused
+          pq.query `shouldBe` Just "preserve-project-list"
+          pq.searchLanguage `shouldBe` Just "english"
+          pq.createdAfter `shouldBe` Just createdAfterTs
+          pq.createdBefore `shouldBe` Just createdBeforeTs
+          pq.updatedAfter `shouldBe` Just updatedAfterTs
+          pq.updatedBefore `shouldBe` Just updatedBeforeTs
+          pq.limit `shouldBe` Just 200
+          pq.offset `shouldBe` Just 0
+        other -> expectationFailure $ "Expected ProjectList, got: " <> show other
+
+    it "preserves non-clamped fields for task_list" $ do
+      let createdAfterTs = read "2026-03-30 09:00:00 UTC"
+          createdBeforeTs = read "2026-03-30 10:00:00 UTC"
+          updatedAfterTs = read "2026-03-30 11:00:00 UTC"
+          updatedBeforeTs = read "2026-03-30 12:00:00 UTC"
+      case validateToolCall (TaskList TaskListQuery
+        { workspaceId = Just parsedUUID
+        , projectId = Just parsedUUID2
+        , status = Just Blocked
+        , priority = Just 7
+        , query = Just "preserve-task-list"
+        , searchLanguage = Just "french"
+        , createdAfter = Just createdAfterTs
+        , createdBefore = Just createdBeforeTs
+        , updatedAfter = Just updatedAfterTs
+        , updatedBefore = Just updatedBeforeTs
+        , limit = Just 0
+        , offset = Just 10001
+        }) of
+        Right (TaskList tq) -> do
+          tq.workspaceId `shouldBe` Just parsedUUID
+          tq.projectId `shouldBe` Just parsedUUID2
+          tq.status `shouldBe` Just Blocked
+          tq.priority `shouldBe` Just 7
+          tq.query `shouldBe` Just "preserve-task-list"
+          tq.searchLanguage `shouldBe` Just "french"
+          tq.createdAfter `shouldBe` Just createdAfterTs
+          tq.createdBefore `shouldBe` Just createdBeforeTs
+          tq.updatedAfter `shouldBe` Just updatedAfterTs
+          tq.updatedBefore `shouldBe` Just updatedBeforeTs
+          tq.limit `shouldBe` Just 1
+          tq.offset `shouldBe` Just 10000
+        other -> expectationFailure $ "Expected TaskList, got: " <> show other
+
+  describe "request path construction" $ do
+
+    it "forwards project_list query and search_language" $ do
+      let path = buildProjectListPath ProjectListQuery
+            { workspaceId = Just parsedUUID
+            , status = Just ProjPaused
+            , query = Just "project-query"
+            , searchLanguage = Just "english"
+            , createdAfter = Nothing
+            , createdBefore = Nothing
+            , updatedAfter = Nothing
+            , updatedBefore = Nothing
+            , limit = Just 25
+            , offset = Just 5
+            }
+      path `shouldContain` "/api/v1/projects?"
+      path `shouldContain` "workspace_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+      path `shouldContain` "status=paused"
+      path `shouldContain` "query=project-query"
+      path `shouldContain` "search_language=english"
+      path `shouldContain` "limit=25"
+      path `shouldContain` "offset=5"
+
+    it "forwards task_list query and search_language" $ do
+      let path = buildTaskListPath TaskListQuery
+            { workspaceId = Just parsedUUID
+            , projectId = Just parsedUUID2
+            , status = Just Blocked
+            , priority = Just 7
+            , query = Just "task-query"
+            , searchLanguage = Just "french"
+            , createdAfter = Nothing
+            , createdBefore = Nothing
+            , updatedAfter = Nothing
+            , updatedBefore = Nothing
+            , limit = Just 50
+            , offset = Just 10
+            }
+      path `shouldContain` "/api/v1/tasks?"
+      path `shouldContain` "workspace_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+      path `shouldContain` "project_id=11111111-2222-3333-4444-555555555555"
+      path `shouldContain` "status=blocked"
+      path `shouldContain` "priority=7"
+      path `shouldContain` "query=task-query"
+      path `shouldContain` "search_language=french"
+      path `shouldContain` "limit=50"
+      path `shouldContain` "offset=10"
+
+    it "UTF-8 encodes non-ASCII project_list query text" $ do
+      let path = buildProjectListPath ProjectListQuery
+            { workspaceId = Just parsedUUID
+            , status = Nothing
+            , query = Just "café"
+            , searchLanguage = Just "english"
+            , createdAfter = Nothing
+            , createdBefore = Nothing
+            , updatedAfter = Nothing
+            , updatedBefore = Nothing
+            , limit = Nothing
+            , offset = Nothing
+            }
+      path `shouldContain` "query=caf%C3%A9"
+
   describe "toolDefinitions" $ do
 
     it "advertises maxLength for memory content" $ do
-      let Just schema = inputSchemaFor "memory_create"
-          Just properties = objectField "properties" schema
-          Just contentSchema = objectField "content" properties
+      schema <- requireJust "memory_create schema" (inputSchemaFor "memory_create")
+      properties <- requireJust "memory_create properties" (objectField "properties" schema)
+      contentSchema <- requireJust "memory_create content schema" (objectField "content" properties)
       numberField "maxLength" contentSchema `shouldBe` Just (fromIntegral maxMemoryContentBytes)
 
     it "advertises batch items support on memory_create" $ do
-      let Just schema = inputSchemaFor "memory_create"
-          Just properties = objectField "properties" schema
-          Just itemsSchema = objectField "items" properties
+      schema <- requireJust "memory_create schema" (inputSchemaFor "memory_create")
+      properties <- requireJust "memory_create properties" (objectField "properties" schema)
+      itemsSchema <- requireJust "memory_create items schema" (objectField "items" properties)
       objectField "items" itemsSchema `shouldSatisfy` (/= Nothing)
 
     it "advertises list filter timestamps and task priority" $ do
-      let Just memorySchema = inputSchemaFor "memory_list"
-          Just memoryProps = objectField "properties" memorySchema
-          Just projectSchema = inputSchemaFor "project_list"
-          Just projectProps = objectField "properties" projectSchema
-          Just taskSchema = inputSchemaFor "task_list"
-          Just taskProps = objectField "properties" taskSchema
-          createdAfterType = objectField "created_after" memoryProps >>= textField "type"
+      memorySchema <- requireJust "memory_list schema" (inputSchemaFor "memory_list")
+      memoryProps <- requireJust "memory_list properties" (objectField "properties" memorySchema)
+      projectSchema <- requireJust "project_list schema" (inputSchemaFor "project_list")
+      projectProps <- requireJust "project_list properties" (objectField "properties" projectSchema)
+      taskSchema <- requireJust "task_list schema" (inputSchemaFor "task_list")
+      taskProps <- requireJust "task_list properties" (objectField "properties" taskSchema)
+      let createdAfterType = objectField "created_after" memoryProps >>= textField "type"
           updatedBeforeType = objectField "updated_before" projectProps >>= textField "type"
           priorityType = objectField "priority" taskProps >>= textField "type"
       createdAfterType `shouldBe` Just "string"
@@ -679,8 +890,8 @@ spec = do
       inputSchemaFor "saved_view" `shouldSatisfy` (/= Nothing)
 
     it "defines task_overview tool" $ do
-      let Just taskOverviewSchema = inputSchemaFor "task_overview"
-          Just taskOverviewProps = objectField "properties" taskOverviewSchema
+      taskOverviewSchema <- requireJust "task_overview schema" (inputSchemaFor "task_overview")
+      taskOverviewProps <- requireJust "task_overview properties" (objectField "properties" taskOverviewSchema)
       objectField "extra_context" taskOverviewProps `shouldSatisfy` (/= Nothing)
 
   describe "parseToolCall (saved view tools)" $ do
@@ -779,8 +990,8 @@ spec = do
   describe "toolDefinitions (saved views)" $ do
 
     it "defines saved_view with action-based schema" $ do
-      let Just schema = inputSchemaFor "saved_view"
-          Just properties = objectField "properties" schema
+      schema <- requireJust "saved_view schema" (inputSchemaFor "saved_view")
+      properties <- requireJust "saved_view properties" (objectField "properties" schema)
       objectField "action" properties `shouldSatisfy` (/= Nothing)
       objectField "workspace_id" properties `shouldSatisfy` (/= Nothing)
 
@@ -789,23 +1000,24 @@ inputSchemaFor toolName = case filter ((== Just toolName) . textField "name") to
   (Object obj:_) -> KM.lookup "inputSchema" obj
   _              -> Nothing
 
-toolDefinitionFor :: Text -> Maybe Value
-toolDefinitionFor toolName = case filter ((== Just toolName) . textField "name") toolDefinitions of
-  (tool:_) -> Just tool
-  _        -> Nothing
+requireJust :: String -> Maybe a -> IO a
+requireJust label = 
+  maybe
+    (expectationFailure ("Missing expected value: " <> label) >> fail ("Missing expected value: " <> label))
+    pure
 
-objectField :: Key -> Value -> Maybe Value
-objectField key (Object obj) = KM.lookup key obj
+objectField :: Text -> Value -> Maybe Value
+objectField key (Object obj) = KM.lookup (Key.fromText key) obj
 objectField _ _ = Nothing
 
-textField :: Key -> Value -> Maybe Text
-textField key (Object obj) = case KM.lookup key obj of
+textField :: Text -> Value -> Maybe Text
+textField key (Object obj) = case KM.lookup (Key.fromText key) obj of
   Just (String value) -> Just value
   _                   -> Nothing
 textField _ _ = Nothing
 
-numberField :: Key -> Value -> Maybe Scientific
-numberField key (Object obj) = case KM.lookup key obj of
+numberField :: Text -> Value -> Maybe Scientific
+numberField key (Object obj) = case KM.lookup (Key.fromText key) obj of
   Just (Number value) -> Just value
   _                   -> Nothing
 numberField _ _ = Nothing

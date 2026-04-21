@@ -4,14 +4,16 @@ module HMem.Types
   , camelToSnake
 
     -- * Memory types
-  , MemoryType(..)
-  , Memory(..)
-  , compactMemory
+    , MemoryType(..)
+    , MemorySortBy(..)
+    , Memory(..)
+    , compactMemory
     , CreateMemory(..)
     , UpdateMemory(..)
     , SearchQuery(..)
     , MemoryListQuery(..)
     , LinkedMemoryListQuery(..)
+    , validateSearchQuery
     , validateLinkedMemoryListQuery
     , MemoryLink(..)
     , CreateMemoryLink(..)
@@ -321,6 +323,13 @@ validateMemoryListQuery :: MemoryListQuery -> [Text]
 validateMemoryListQuery mq =
   validateTimeRange "created_after" mq.createdAfter "created_before" mq.createdBefore
   <> validateTimeRange "updated_after" mq.updatedAfter "updated_before" mq.updatedBefore
+  <> case mq.minAccessCount of
+       Just n | n < 0 -> ["min_access_count must be >= 0"]
+       _              -> []
+
+validateSearchQuery :: SearchQuery -> [Text]
+validateSearchQuery sq =
+  ["min_access_count must be >= 0" | maybe False (< 0) sq.minAccessCount]
 
 validateCreateProjectInput :: CreateProject -> [Text]
 validateCreateProjectInput cp =
@@ -808,12 +817,29 @@ instance FromJSON UpdateMemory where
     <*> o .:? "confidence"
     <*> o .:? "pinned"
 
+data MemorySortBy = SortRecent | SortImportance | SortAccessCount
+  deriving (Show, Eq, Generic)
+
+instance ToJSON MemorySortBy where
+  toJSON SortRecent      = String "recent"
+  toJSON SortImportance  = String "importance"
+  toJSON SortAccessCount = String "access_count"
+
+instance FromJSON MemorySortBy where
+  parseJSON = withText "MemorySortBy" $ \case
+    "recent"       -> pure SortRecent
+    "importance"   -> pure SortImportance
+    "access_count" -> pure SortAccessCount
+    _               -> fail "Invalid memory sort (expected recent, importance, or access_count)"
+
 data SearchQuery = SearchQuery
   { workspaceId    :: Maybe UUID
   , query          :: Maybe Text
   , memoryType     :: Maybe MemoryType
   , tags           :: Maybe [Text]
   , minImportance  :: Maybe Int
+  , minAccessCount :: Maybe Int
+  , sortBy         :: Maybe MemorySortBy
   , categoryId     :: Maybe UUID
   , pinnedOnly     :: Maybe Bool
   , searchLanguage :: Maybe Text    -- ^ regconfig for plainto_tsquery (default 'english')
@@ -829,6 +855,8 @@ instance FromJSON SearchQuery where
 data MemoryListQuery = MemoryListQuery
   { workspaceId   :: Maybe UUID
   , memoryType    :: Maybe MemoryType
+  , minAccessCount :: Maybe Int
+  , sortBy        :: Maybe MemorySortBy
   , createdAfter  :: Maybe UTCTime
   , createdBefore :: Maybe UTCTime
   , updatedAfter  :: Maybe UTCTime

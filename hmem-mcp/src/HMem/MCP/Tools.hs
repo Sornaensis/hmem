@@ -72,7 +72,7 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "memory_search" "Preferred discovery step before create, update, or linking work. Use 'query' for keyword search, or combine filters (workspace_id, memory_type, tags, min_importance, category_id, pinned_only) to narrow results. All parameters are optional; omit workspace_id for cross-workspace search. Returns compact results by default; set detail=true for full content and metadata." $ object
+    , mkTool "memory_search" "Preferred discovery step before create, update, or linking work. Use 'query' for keyword search, or combine filters (workspace_id, memory_type, tags, min_importance, min_access_count, category_id, pinned_only) to narrow results. When query is omitted, sort_by can order results by recent, importance, or access_count. All parameters are optional; omit workspace_id for cross-workspace search. Returns compact results by default; set detail=true for full content and metadata." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id"   .= prop "string" "UUID of the workspace (omit for cross-workspace search)"
@@ -81,6 +81,8 @@ toolDefinitions =
           , "tags"           .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
                                          "description" .= t "Filter by tags (any-match: returns memories with at least one of the given tags)"]
           , "min_importance" .= prop "integer" "Minimum importance threshold (1-10, where 10 is highest)"
+          , "min_access_count" .= prop "integer" "Minimum access_count threshold (>= 0)"
+          , "sort_by"       .= propEnum "string" "When query is omitted, order by recent, importance, or access_count" ["recent", "importance", "access_count"]
           , "category_id"    .= prop "string" "Filter by category UUID"
           , "pinned_only"    .= prop "boolean" "If true, only return pinned memories"
           , "search_language" .= prop "string" "Language for query stemming (default 'english'). Use a PostgreSQL regconfig name."
@@ -277,11 +279,13 @@ toolDefinitions =
 
 
 
-    , mkTool "memory_list" "Browse memories and collect IDs. Returns compact results by default; set detail=true for full content and metadata. Use memory_search instead when you need keyword or filtered retrieval." $ object
+    , mkTool "memory_list" "Browse memories and collect IDs. Returns compact results by default; set detail=true for full content and metadata. Supports min_access_count filtering and sort_by ordering (recent, importance, access_count). Use memory_search instead when you need keyword or filtered retrieval." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace (omit for all workspaces)"
           , "memory_type"  .= propEnum "string" "Filter by type" ["short_term", "long_term"]
+          , "min_access_count" .= prop "integer" "Minimum access_count threshold (>= 0)"
+          , "sort_by"      .= propEnum "string" "Order by recent, importance, or access_count" ["recent", "importance", "access_count"]
           , "created_after"  .= prop "string" "Filter for memories created on or after this ISO 8601 timestamp"
           , "created_before" .= prop "string" "Filter for memories created on or before this ISO 8601 timestamp"
           , "updated_after"  .= prop "string" "Filter for memories updated on or after this ISO 8601 timestamp"
@@ -882,7 +886,7 @@ validateToolCall = \case
                 in MemoryCreateBatch cms' <$ firstValidationError (validateCreateMemoryBatchInput cms')
     MemorySearch sq detail
         | not (validFtsLanguage sq.searchLanguage) -> Left $ "Invalid search_language: " <> show sq.searchLanguage
-        | otherwise -> Right $ MemorySearch sq' detail
+        | otherwise -> MemorySearch sq' detail <$ firstValidationError (validateSearchQuery sq')
           where
             sq' = SearchQuery
               { workspaceId = sq.workspaceId
@@ -890,6 +894,8 @@ validateToolCall = \case
               , memoryType = sq.memoryType
               , tags = sq.tags
               , minImportance = clampMaybe 1 10 <$> sq.minImportance
+              , minAccessCount = fmap (Prelude.max 0) sq.minAccessCount
+              , sortBy = sq.sortBy
               , categoryId = sq.categoryId
               , pinnedOnly = sq.pinnedOnly
               , searchLanguage = sq.searchLanguage
@@ -1038,6 +1044,8 @@ clampMemoryListQuery :: MemoryListQuery -> MemoryListQuery
 clampMemoryListQuery mq = MemoryListQuery
     { workspaceId = mq.workspaceId
     , memoryType = mq.memoryType
+    , minAccessCount = fmap (Prelude.max 0) mq.minAccessCount
+    , sortBy = mq.sortBy
     , createdAfter = mq.createdAfter
     , createdBefore = mq.createdBefore
     , updatedAfter = mq.updatedAfter
@@ -1168,6 +1176,8 @@ executeToolCall mgr base mApiKey = \case
     MemoryList mq detail -> getJSON mgr base mApiKey ("/api/v1/memories" <> buildQuery
                             [ ("workspace_id", uuidPath <$> mq.workspaceId)
                             , ("type", encodeParam <$> mq.memoryType)
+                            , ("min_access_count", show <$> mq.minAccessCount)
+                            , ("sort_by", encodeParam <$> mq.sortBy)
                             , ("created_after", encodeParam <$> mq.createdAfter)
                             , ("created_before", encodeParam <$> mq.createdBefore)
                             , ("updated_after", encodeParam <$> mq.updatedAfter)

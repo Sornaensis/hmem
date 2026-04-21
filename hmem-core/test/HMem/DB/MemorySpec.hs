@@ -33,6 +33,17 @@ backdateMemoryUpdatedAt env mid hours = do
   runSession env.pool $ Session.statement (hours, mid) stmt
   runSession env.pool $ Session.sql "ALTER TABLE memories ENABLE TRIGGER trg_memories_updated_at"
 
+backdateMemoryCreatedAt :: TestEnv -> UUID -> Int -> IO ()
+backdateMemoryCreatedAt env mid hours = do
+  let stmt = Statement.Statement
+        "UPDATE memories SET created_at = now() - ($1 * interval '1 hour') WHERE id = $2"
+        (  (fromIntegral . fst >$< E.param (E.nonNullable E.int4))
+        <> (snd               >$< E.param (E.nonNullable E.uuid))
+        )
+        D.noResult
+        True
+  runSession env.pool $ Session.statement (hours, mid) stmt
+
 spec :: Spec
 spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
@@ -292,7 +303,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       results <- searchMemories env.pool SearchQuery
         { workspaceId = Just ws.id, query = Just "haskell functional"
         , memoryType = Nothing, tags = Nothing
-        , minImportance = Nothing, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
+        , minImportance = Nothing, minAccessCount = Nothing, sortBy = Nothing, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
       length results `shouldSatisfy` (>= 1)
       any (\m -> T.isInfixOf "Haskell" m.content) results `shouldBe` True
 
@@ -309,9 +320,44 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       results <- searchMemories env.pool SearchQuery
         { workspaceId = Just ws.id, query = Nothing
         , memoryType = Nothing, tags = Nothing
-        , minImportance = Just 5, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
+        , minImportance = Just 5, minAccessCount = Nothing, sortBy = Nothing, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
       length results `shouldBe` 1
       (head results).importance `shouldBe` 9
+
+    it "search without query can filter by min_access_count and sort by access_count" $ \env -> do
+      ws <- createTestWorkspace env "search-access-ws"
+      _ <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "low access", summary = Nothing
+        , memoryType = ShortTerm, importance = Just 5, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      high <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "high access", summary = Nothing
+        , memoryType = ShortTerm, importance = Just 5, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      touchMemory env.pool high.id
+      touchMemory env.pool high.id
+      results <- searchMemories env.pool SearchQuery
+        { workspaceId = Just ws.id, query = Nothing
+        , memoryType = Nothing, tags = Nothing
+        , minImportance = Nothing, minAccessCount = Just 1, sortBy = Just SortAccessCount, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
+      map (.id) results `shouldBe` [high.id]
+
+    it "search without query can sort by recent explicitly" $ \env -> do
+      ws <- createTestWorkspace env "search-recent-ws"
+      older <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "older recent", summary = Nothing
+        , memoryType = ShortTerm, importance = Just 9, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      newer <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "newer recent", summary = Nothing
+        , memoryType = ShortTerm, importance = Just 1, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      backdateMemoryCreatedAt env older.id (24 * 365)
+      results <- searchMemories env.pool SearchQuery
+        { workspaceId = Just ws.id, query = Nothing
+        , memoryType = Nothing, tags = Nothing
+        , minImportance = Nothing, minAccessCount = Nothing, sortBy = Just SortRecent, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
+      map (.id) results `shouldBe` [newer.id, older.id]
 
     it "prefers more recent memories when FTS relevance is otherwise equal" $ \env -> do
       ws <- createTestWorkspace env "search-recency-ws"
@@ -327,7 +373,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       results <- searchMemories env.pool SearchQuery
         { workspaceId = Just ws.id, query = Just "haskell functional"
         , memoryType = Nothing, tags = Nothing
-        , minImportance = Nothing, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
+        , minImportance = Nothing, minAccessCount = Nothing, sortBy = Nothing, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
       map (.id) results `shouldSatisfy` (not . null)
       (head results).id `shouldBe` newer.id
 
@@ -340,7 +386,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       results <- searchMemories env.pool SearchQuery
         { workspaceId = Just ws.id, query = Just "haskell functional"
         , memoryType = Nothing, tags = Just []
-        , minImportance = Nothing, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
+        , minImportance = Nothing, minAccessCount = Nothing, sortBy = Nothing, categoryId = Nothing, pinnedOnly = Nothing, searchLanguage = Nothing, limit = Nothing, offset = Nothing }
       map (.id) results `shouldBe` [mem.id]
 
   describe "touchMemory" $ do
@@ -355,6 +401,33 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       touchMemory env.pool mem.id
       Just m <- getMemory env.pool mem.id
       m.accessCount `shouldBe` 2
+
+  describe "listMemoriesWithQuery" $ do
+    it "supports min_access_count filtering and access_count sorting" $ \env -> do
+      ws <- createTestWorkspace env "list-access-ws"
+      _ <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "low", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      high <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, content = "high", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      touchMemory env.pool high.id
+      touchMemory env.pool high.id
+      results <- listMemoriesWithQuery env.pool MemoryListQuery
+        { workspaceId = Just ws.id
+        , memoryType = Nothing
+        , minAccessCount = Just 1
+        , sortBy = Just SortAccessCount
+        , createdAfter = Nothing
+        , createdBefore = Nothing
+        , updatedAfter = Nothing
+        , updatedBefore = Nothing
+        , limit = Nothing
+        , offset = Nothing
+        }
+      map (.id) results `shouldBe` [high.id]
 
   describe "content size limits" $ do
     it "accepts content at exactly maxMemoryContentBytes" $ \env -> do

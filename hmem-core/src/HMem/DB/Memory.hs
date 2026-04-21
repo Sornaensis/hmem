@@ -423,6 +423,8 @@ listMemories pool mWsId mtype mlimit moffset =
   listMemoriesWithQuery pool MemoryListQuery
     { workspaceId = mWsId
     , memoryType = mtype
+    , minAccessCount = Nothing
+    , sortBy = Nothing
     , createdAfter = Nothing
     , createdBefore = Nothing
     , updatedAfter = Nothing
@@ -434,10 +436,14 @@ listMemories pool mWsId mtype mlimit moffset =
 listMemoriesWithQuery :: Pool Hasql.Connection -> MemoryListQuery -> IO [Memory]
 listMemoriesWithQuery pool mq = do
   let (lim, off) = capPagination mq.limit mq.offset
+      ordering = case mq.sortBy of
+        Just SortImportance  -> ((\row -> row.memImportance) >$< desc) <> ((\row -> row.memCreatedAt) >$< desc)
+        Just SortAccessCount -> ((\row -> row.memAccessCount) >$< desc) <> ((\row -> row.memUpdatedAt) >$< desc)
+        _                    -> ((\row -> row.memCreatedAt) >$< desc)
   runSession pool $ do
     rows <- Session.statement () $ run $ select $
       limit (fromIntegral lim) $ offset (fromIntegral off) $
-      orderBy ((\row -> row.memCreatedAt) >$< desc) $ do
+      orderBy ordering $ do
         row <- each memorySchema
         where_ $ activeMemory row
         case mq.workspaceId of
@@ -446,6 +452,9 @@ listMemoriesWithQuery pool mq = do
         case mq.memoryType of
           Nothing -> pure ()
           Just t  -> where_ $ row.memMemoryType ==. lit t
+        case mq.minAccessCount of
+          Just n  -> where_ $ row.memAccessCount >=. lit (fromIntegral n :: Int32)
+          Nothing -> pure ()
         case mq.createdAfter of
           Just createdAfter -> where_ $ row.memCreatedAt >=. lit createdAfter
           Nothing -> pure ()
@@ -472,12 +481,20 @@ searchMemories :: Pool Hasql.Connection -> SearchQuery -> IO [Memory]
 searchMemories pool sq = do
   let (lim, off) = capPagination sq.limit sq.offset
       imp = maybe 1 fromIntegral (sq.minImportance) :: Int16
+      ordering = case sq.sortBy of
+        Just SortRecent      -> ((\row -> row.memCreatedAt) >$< desc)
+        Just SortImportance  -> ((\row -> row.memImportance) >$< desc) <> ((\row -> row.memCreatedAt) >$< desc)
+        Just SortAccessCount -> ((\row -> row.memAccessCount) >$< desc) <> ((\row -> row.memUpdatedAt) >$< desc)
+        _                    -> ((\row -> row.memImportance) >$< desc) <> ((\row -> row.memCreatedAt) >$< desc)
       applyFilters row = do
         where_ $ activeMemory row
         case sq.workspaceId of
           Just wsId -> where_ $ row.memWorkspaceId ==. lit wsId
           Nothing   -> pure ()
         where_ $ row.memImportance >=. lit imp
+        case sq.minAccessCount of
+          Just n  -> where_ $ row.memAccessCount >=. lit (fromIntegral n :: Int32)
+          Nothing -> pure ()
         case sq.memoryType of
           Just mt -> where_ $ row.memMemoryType ==. lit mt
           Nothing -> pure ()
@@ -503,7 +520,7 @@ searchMemories pool sq = do
     Nothing -> runSession pool $ do
       rs <- Session.statement () $ run $ select $
         limit (fromIntegral lim) $ offset (fromIntegral off) $
-        orderBy (((\row -> row.memImportance) >$< desc) <> ((\row -> row.memCreatedAt) >$< desc)) $ do
+        orderBy ordering $ do
           row <- each memorySchema
           applyFilters row
           pure row
@@ -516,6 +533,7 @@ searchMemories pool sq = do
       ids <- runSession pool $ Session.statement
         ( sq.workspaceId
         , imp
+        , fmap fromIntegral sq.minAccessCount :: Maybe Int32
         , memoryTypeToText <$> sq.memoryType
         , tagsParam
         , sq.categoryId
@@ -863,6 +881,7 @@ fetchMemoriesByIdsOrdered pool ids = do
 searchMemoryIdsByTextStatement :: Statement.Statement
   ( Maybe UUID
   , Int16
+  , Maybe Int32
   , Maybe Text
   , Maybe [Text]
   , Maybe UUID
@@ -881,44 +900,46 @@ searchMemoryIdsByTextStatement = Statement.Statement sql encoder decoder True
       , "WHERE m.deleted_at IS NULL"
       , "  AND ($1::uuid IS NULL OR m.workspace_id = $1)"
       , "  AND m.importance >= $2"
-      , "  AND ($3::text IS NULL OR m.memory_type::text = $3)"
-      , "  AND ( $4::text[] IS NULL"
+      , "  AND ($3::int4 IS NULL OR m.access_count >= $3)"
+      , "  AND ($4::text IS NULL OR m.memory_type::text = $4)"
+      , "  AND ( $5::text[] IS NULL"
       , "        OR EXISTS ("
       , "             SELECT 1"
       , "             FROM memory_tags mt"
       , "             WHERE mt.memory_id = m.id"
-      , "               AND mt.tag = ANY($4::text[])"
+      , "               AND mt.tag = ANY($5::text[])"
       , "        )"
       , "      )"
-      , "  AND ( $5::uuid IS NULL"
+      , "  AND ( $6::uuid IS NULL"
       , "        OR EXISTS ("
       , "             SELECT 1"
       , "             FROM memory_category_links mcl"
       , "             JOIN memory_categories mc ON mc.id = mcl.category_id"
       , "             WHERE mcl.memory_id = m.id"
-      , "               AND mcl.category_id = $5"
+      , "               AND mcl.category_id = $6"
       , "               AND mc.deleted_at IS NULL"
       , "        )"
       , "      )"
-      , "  AND ($6::boolean IS DISTINCT FROM TRUE OR m.pinned = TRUE)"
-      , "  AND m.search_vector @@ plainto_tsquery($7::regconfig, $8)"
+      , "  AND ($7::boolean IS DISTINCT FROM TRUE OR m.pinned = TRUE)"
+      , "  AND m.search_vector @@ plainto_tsquery($8::regconfig, $9)"
       , "ORDER BY"
-      , "  ts_rank(m.search_vector, plainto_tsquery($7::regconfig, $8))"
+      , "  ts_rank(m.search_vector, plainto_tsquery($8::regconfig, $9))"
       , "    * (1.0 / (1.0 + ((EXTRACT(EPOCH FROM (now() - m.updated_at)) / 86400.0) / 30.0))) DESC,"
       , "  m.updated_at DESC"
-      , "LIMIT $9 OFFSET $10"
+      , "LIMIT $10 OFFSET $11"
       ]
     encoder =
-         contramap (\(a,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nullable Enc.uuid))
-      <> contramap (\(_,b,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.int2))
-      <> contramap (\(_,_,c,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,d,_,_,_,_,_,_) -> d) (Enc.param (Enc.nullable (Enc.foldableArray (Enc.nonNullable Enc.text))))
-      <> contramap (\(_,_,_,_,e,_,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.uuid))
-      <> contramap (\(_,_,_,_,_,f,_,_,_,_) -> f) (Enc.param (Enc.nullable Enc.bool))
-      <> contramap (\(_,_,_,_,_,_,g,_,_,_) -> g) (Enc.param (Enc.nonNullable Enc.text))
-      <> contramap (\(_,_,_,_,_,_,_,h,_,_) -> h) (Enc.param (Enc.nonNullable Enc.text))
-      <> contramap (\(_,_,_,_,_,_,_,_,i,_) -> i) (Enc.param (Enc.nonNullable Enc.int4))
-      <> contramap (\(_,_,_,_,_,_,_,_,_,j) -> j) (Enc.param (Enc.nonNullable Enc.int4))
+         contramap (\(a,_,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nullable Enc.uuid))
+      <> contramap (\(_,b,_,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.int2))
+      <> contramap (\(_,_,c,_,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.int4))
+      <> contramap (\(_,_,_,d,_,_,_,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,e,_,_,_,_,_,_) -> e) (Enc.param (Enc.nullable (Enc.foldableArray (Enc.nonNullable Enc.text))))
+      <> contramap (\(_,_,_,_,_,f,_,_,_,_,_) -> f) (Enc.param (Enc.nullable Enc.uuid))
+      <> contramap (\(_,_,_,_,_,_,g,_,_,_,_) -> g) (Enc.param (Enc.nullable Enc.bool))
+      <> contramap (\(_,_,_,_,_,_,_,h,_,_,_) -> h) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,_,i,_,_) -> i) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,_,_,j,_) -> j) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,_,_,_,_,k) -> k) (Enc.param (Enc.nonNullable Enc.int4))
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
 -- | Find all memory links within a workspace (any relation type).

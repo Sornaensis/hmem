@@ -87,6 +87,8 @@ type WorkspaceAPI =
 type MemoryAPI =
        QueryParam "workspace_id" UUID
          :> QueryParam "type" MemoryType
+         :> QueryParam "min_access_count" Int
+         :> QueryParam "sort_by" MemorySortBy
          :> QueryParam "created_after" UTCTime
          :> QueryParam "created_before" UTCTime
          :> QueryParam "updated_after" UTCTime
@@ -325,6 +327,12 @@ instance FromHttpApiData MemoryType where
   parseQueryParam "short_term" = Right ShortTerm
   parseQueryParam "long_term"  = Right LongTerm
   parseQueryParam t            = Left ("Invalid memory type: " <> t)
+
+instance FromHttpApiData MemorySortBy where
+  parseQueryParam "recent"       = Right SortRecent
+  parseQueryParam "importance"   = Right SortImportance
+  parseQueryParam "access_count" = Right SortAccessCount
+  parseQueryParam t              = Left ("Invalid memory sort: " <> t)
 
 instance FromHttpApiData ProjectStatus where
   parseQueryParam "active"    = Right ProjActive
@@ -905,19 +913,33 @@ memoryHandlers pool tracker bc pgvec =
   where
     requireMemoryH mid = handleDBErrors (Mem.getMemory pool mid) >>= maybe (throwError err404) pure
 
-    listMemoriesH mws mtype mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset mcompact = do
+    listMemoriesH mws mtype mMinAccessCount mSortBy mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset mcompact = do
       let lim = capLimit mlimit
           off = capOffset moffset
           compact = mcompact == Just True
-          query = MemoryListQuery
+          query0 = MemoryListQuery
             { workspaceId = mws
             , memoryType = mtype
+            , minAccessCount = mMinAccessCount
+            , sortBy = mSortBy
             , createdAfter = mcreatedAfter
             , createdBefore = mcreatedBefore
             , updatedAfter = mupdatedAfter
             , updatedBefore = mupdatedBefore
             , limit = Just (lim + 1)
             , offset = Just off
+            }
+          query = MemoryListQuery
+            { workspaceId = query0.workspaceId
+            , memoryType = query0.memoryType
+            , minAccessCount = fmap (Prelude.max 0) query0.minAccessCount
+            , sortBy = query0.sortBy
+            , createdAfter = query0.createdAfter
+            , createdBefore = query0.createdBefore
+            , updatedAfter = query0.updatedAfter
+            , updatedBefore = query0.updatedBefore
+            , limit = query0.limit
+            , offset = query0.offset
             }
       rejectValidationErrors (validateMemoryListQuery query)
       results <- handleDBErrors $ Mem.listMemoriesWithQuery pool query
@@ -936,8 +958,23 @@ memoryHandlers pool tracker bc pgvec =
           handleDBErrors $ Mem.createMemoryBatch pool cms
 
     searchMemoriesH mcompact sq = do
+      let sq' = SearchQuery
+            { workspaceId = sq.workspaceId
+            , query = sq.query
+            , memoryType = sq.memoryType
+            , tags = sq.tags
+            , minImportance = sq.minImportance
+            , minAccessCount = fmap (Prelude.max 0) sq.minAccessCount
+            , sortBy = sq.sortBy
+            , categoryId = sq.categoryId
+            , pinnedOnly = sq.pinnedOnly
+            , searchLanguage = sq.searchLanguage
+            , limit = sq.limit
+            , offset = sq.offset
+            }
       let compact = mcompact == Just True
-      results <- handleDBErrors $ Mem.searchMemories pool sq
+      rejectValidationErrors (validateSearchQuery sq')
+      results <- handleDBErrors $ Mem.searchMemories pool sq'
       pure $ if compact then map compactMemory results else results
 
     contradictionsH mws = do
@@ -1809,23 +1846,38 @@ savedViewHandlers pool bc =
           case Aeson.fromJSON @SearchQuery view.queryParams of
             Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
             Aeson.Success sq -> do
-              let sq' = SearchQuery
+              let sq0 = SearchQuery
                     { workspaceId = sq.workspaceId, query = sq.query
                     , memoryType = sq.memoryType, tags = sq.tags
-                    , minImportance = sq.minImportance, categoryId = sq.categoryId
+                    , minImportance = sq.minImportance, minAccessCount = sq.minAccessCount, sortBy = sq.sortBy, categoryId = sq.categoryId
                     , pinnedOnly = sq.pinnedOnly, searchLanguage = sq.searchLanguage
                     , limit = Just lim, offset = Just off }
+                  sq' = SearchQuery
+                    { workspaceId = sq0.workspaceId, query = sq0.query
+                    , memoryType = sq0.memoryType, tags = sq0.tags
+                    , minImportance = sq0.minImportance, minAccessCount = fmap (Prelude.max 0) sq0.minAccessCount, sortBy = sq0.sortBy, categoryId = sq0.categoryId
+                    , pinnedOnly = sq0.pinnedOnly, searchLanguage = sq0.searchLanguage
+                    , limit = sq0.limit, offset = sq0.offset }
+              rejectValidationErrors (validateSearchQuery sq')
               results <- handleDBErrors $ Mem.searchMemories pool sq'
               pure $ Aeson.toJSON $ if compact then map compactMemory results else results
         "memory_list" -> do
           case Aeson.fromJSON @MemoryListQuery view.queryParams of
             Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
             Aeson.Success mq -> do
-              let mq' = MemoryListQuery
+              let mq0 = MemoryListQuery
                     { workspaceId = mq.workspaceId, memoryType = mq.memoryType
+                    , minAccessCount = mq.minAccessCount, sortBy = mq.sortBy
                     , createdAfter = mq.createdAfter, createdBefore = mq.createdBefore
                     , updatedAfter = mq.updatedAfter, updatedBefore = mq.updatedBefore
                     , limit = Just (lim + 1), offset = Just off }
+                  mq' = MemoryListQuery
+                    { workspaceId = mq0.workspaceId, memoryType = mq0.memoryType
+                    , minAccessCount = fmap (Prelude.max 0) mq0.minAccessCount, sortBy = mq0.sortBy
+                    , createdAfter = mq0.createdAfter, createdBefore = mq0.createdBefore
+                    , updatedAfter = mq0.updatedAfter, updatedBefore = mq0.updatedBefore
+                    , limit = mq0.limit, offset = mq0.offset }
+              rejectValidationErrors (validateMemoryListQuery mq')
               results <- handleDBErrors $ Mem.listMemoriesWithQuery pool mq'
               let items = (if compact then map compactMemory else Prelude.id) $ take lim results
               pure $ Aeson.toJSON PaginatedResult { items = items, hasMore = length results > lim }

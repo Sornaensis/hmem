@@ -43,6 +43,13 @@ instance ToSchema MemoryType where
 instance ToParamSchema MemoryType where
   toParamSchema _ = mempty & type_ ?~ OpenApiString & enum_ ?~ ["short_term", "long_term"]
 
+instance ToSchema MemorySortBy where
+  declareNamedSchema _ = pure $ NamedSchema (Just "MemorySortBy") $ mempty
+    & type_ ?~ OpenApiString
+    & enum_ ?~ ["recent", "importance", "access_count"]
+instance ToParamSchema MemorySortBy where
+  toParamSchema _ = mempty & type_ ?~ OpenApiString & enum_ ?~ ["recent", "importance", "access_count"]
+
 instance ToSchema ProjectStatus where
   declareNamedSchema _ = pure $ NamedSchema (Just "ProjectStatus") $ mempty
     & type_ ?~ OpenApiString

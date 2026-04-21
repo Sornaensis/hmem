@@ -296,12 +296,15 @@ spec = do
       let sq = SearchQuery
             { workspaceId = Nothing, query = Nothing
             , memoryType = Nothing, tags = Nothing
-            , minImportance = Nothing, categoryId = Nothing
+            , minImportance = Nothing, minAccessCount = Just (-5), sortBy = Just SortAccessCount, categoryId = Nothing
             , pinnedOnly = Nothing, searchLanguage = Nothing
             , limit = Just 999, offset = Just 0
             }
       case validateToolCall (MemorySearch sq False) of
-        Right (MemorySearch sq' _) -> sq'.limit `shouldBe` Just 200
+        Right (MemorySearch sq' _) -> do
+          sq'.limit `shouldBe` Just 200
+          sq'.minAccessCount `shouldBe` Just 0
+          sq'.sortBy `shouldBe` Just SortAccessCount
         other -> expectationFailure $ "Expected MemorySearch, got: " <> show other
 
     it "rejects task_list with neither workspace_id nor project_id" $ do
@@ -702,6 +705,8 @@ spec = do
         , memoryType = Just LongTerm
         , tags = Just ["alpha", "beta"]
         , minImportance = Just 99
+        , minAccessCount = Just (-1)
+        , sortBy = Just SortImportance
         , categoryId = Just parsedUUID2
         , pinnedOnly = Just True
         , searchLanguage = Just "german"
@@ -717,6 +722,8 @@ spec = do
           sq.pinnedOnly `shouldBe` Just True
           sq.searchLanguage `shouldBe` Just "german"
           sq.minImportance `shouldBe` Just 10
+          sq.minAccessCount `shouldBe` Just 0
+          sq.sortBy `shouldBe` Just SortImportance
           sq.limit `shouldBe` Just 200
           sq.offset `shouldBe` Just 0
           detail `shouldBe` True
@@ -730,6 +737,8 @@ spec = do
       case validateToolCall (MemoryList MemoryListQuery
         { workspaceId = Just parsedUUID
         , memoryType = Just ShortTerm
+        , minAccessCount = Just (-2)
+        , sortBy = Just SortAccessCount
         , createdAfter = Just createdAfterTs
         , createdBefore = Just createdBeforeTs
         , updatedAfter = Just updatedAfterTs
@@ -740,6 +749,8 @@ spec = do
         Right (MemoryList mq detail) -> do
           mq.workspaceId `shouldBe` Just parsedUUID
           mq.memoryType `shouldBe` Just ShortTerm
+          mq.minAccessCount `shouldBe` Just 0
+          mq.sortBy `shouldBe` Just SortAccessCount
           mq.createdAfter `shouldBe` Just createdAfterTs
           mq.createdBefore `shouldBe` Just createdBeforeTs
           mq.updatedAfter `shouldBe` Just updatedAfterTs
@@ -875,6 +886,24 @@ spec = do
             , offset = Nothing
             }
       path `shouldContain` "query=caf%C3%A9"
+
+    it "preserves access_count and sort_by for memory_list" $ do
+      case validateToolCall (MemoryList MemoryListQuery
+        { workspaceId = Just parsedUUID
+        , memoryType = Just ShortTerm
+        , minAccessCount = Just 3
+        , sortBy = Just SortAccessCount
+        , createdAfter = Nothing
+        , createdBefore = Nothing
+        , updatedAfter = Nothing
+        , updatedBefore = Nothing
+        , limit = Just 50
+        , offset = Just 0
+        } False) of
+        Right (MemoryList mq _) -> do
+          mq.minAccessCount `shouldBe` Just 3
+          mq.sortBy `shouldBe` Just SortAccessCount
+        other -> expectationFailure $ "Expected MemoryList, got: " <> show other
 
   describe "toolDefinitions" $ do
 

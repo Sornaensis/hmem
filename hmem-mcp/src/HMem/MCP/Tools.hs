@@ -351,7 +351,9 @@ toolDefinitions =
   , mkTool "project_overview" "Get a project with its tasks, subprojects, and linked memories in one call. Use this to understand the full scope of a project before making changes, instead of calling project_get, task_list, and project_list_memories separately." $ object
       [ "type" .= t "object"
       , "properties" .= object
-          [ "project_id" .= prop "string" "UUID of the project" ]
+          [ "project_id" .= prop "string" "UUID of the project"
+          , "extra_context" .= prop "boolean" "If true, include workspace memories ranked using the existing connected-memory summary logic"
+          ]
       , "required" .= [t "project_id"]
       ]
 
@@ -625,7 +627,7 @@ data ToolCall
     | SavedViewRestore UUID
   | SavedViewPurge UUID
   | SavedViewExecute UUID (Maybe Int) (Maybe Int) (Maybe Bool) -- view_id, limit, offset, detail
-  | ProjectOverviewCall UUID
+  | ProjectOverviewCall UUID Bool
   -- Workflow composite tools
   | TaskStartCall UUID ContextDetailLevel
   | TaskFinishCall UUID TaskStatus (Maybe Text) (Maybe [Text])   -- task_id, status, notes, tags
@@ -786,7 +788,7 @@ parseToolCall name args = case name of
             "update"  -> SavedViewUpdate <$> need "view_id" <*> parse args
             "execute" -> SavedViewExecute <$> need "view_id" <*> opt "limit" <*> opt "offset" <*> opt "detail"
             _         -> Left $ "saved_view: invalid action: " <> T.unpack action
-    "project_overview"          -> ProjectOverviewCall <$> need "project_id"
+    "project_overview"          -> ProjectOverviewCall <$> need "project_id" <*> (maybe False id <$> opt "extra_context")
     -- Workflow composite tools
     "task_start"                -> TaskStartCall <$> need "task_id" <*> (maybe ContextMedium id <$> opt "detail_level")
     "task_finish"               -> TaskFinishCall <$> need "task_id" <*> need "status" <*> opt "notes" <*> opt "tags"
@@ -1250,7 +1252,9 @@ executeToolCall mgr base mApiKey = \case
                             , ("offset", show <$> mo)
                             , ("detail", (\b -> if b then "true" else "false") <$> md)
                             ]) (object [])
-    ProjectOverviewCall pid -> getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/overview")
+    ProjectOverviewCall pid extraContext ->
+        getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/overview" <>
+          buildQuery [("extra_context", Just $ if extraContext then "true" else "false")])
     UnifiedSearch usq -> postJSON mgr base mApiKey "/api/v1/search" usq
 
     -- ================================================================

@@ -714,6 +714,57 @@ spec = around withApp $ do
       map (.scope) extraOverview.connectedMemories `shouldBe` [ScopeTask, ScopeProject, ScopeWorkspace]
       map (.id) extraOverview.connectedMemories `shouldBe` [taskMem.id, projectMem.id, workspaceMem.id]
 
+    it "returns project overview with optional extra-context workspace memories" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("project-overview-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Project Overview" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      taskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Proj Task" :: T.Text)])
+      let Just task = decode (respBody taskResp) :: Maybe Task
+
+      projectMemResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "content" .= ("Project overview memory" :: T.Text)
+          , "summary" .= ("Project overview mem" :: T.Text)
+          , "memory_type" .= ("long_term" :: T.Text)
+          , "importance" .= (8 :: Int)
+          ])
+      let Just projectMem = decode (respBody projectMemResp) :: Maybe Memory
+
+      workspaceMemResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "content" .= ("Workspace context memory" :: T.Text)
+          , "summary" .= ("Workspace context mem" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          , "importance" .= (5 :: Int)
+          ])
+      let Just workspaceMem = decode (respBody workspaceMemResp) :: Maybe Memory
+
+      linkProjectMemResp <- postJSON app (uuidPath "/api/v1/projects" proj.id <> "/memories")
+        (object ["memory_id" .= projectMem.id])
+      respStatus linkProjectMemResp `shouldBe` 200
+
+      overviewResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/overview")
+      respStatus overviewResp `shouldBe` 200
+      let Just overview = decode (respBody overviewResp) :: Maybe ProjectOverview
+      map (.id) overview.tasks `shouldBe` [task.id]
+      map (.id) overview.linkedMemories `shouldBe` [projectMem.id]
+      map (.scope) overview.connectedMemories `shouldBe` [ScopeProject]
+      map (.id) overview.connectedMemories `shouldBe` [projectMem.id]
+
+      extraProjectResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/overview?extra_context=true")
+      respStatus extraProjectResp `shouldBe` 200
+      let Just extraProjectOverview = decode (respBody extraProjectResp) :: Maybe ProjectOverview
+      map (.scope) extraProjectOverview.connectedMemories `shouldBe` [ScopeProject, ScopeWorkspace]
+      map (.id) extraProjectOverview.connectedMemories `shouldBe` [projectMem.id, workspaceMem.id]
+
   describe "workspace update and delete" $ do
     it "updates and deletes a workspace" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"

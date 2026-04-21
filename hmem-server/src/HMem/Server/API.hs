@@ -164,7 +164,7 @@ type ProjectAPI =
          :> ReqBody '[JSON] BatchMemoryLinkRequest :> Post '[JSON] BatchResult
     :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
     :<|> "batch-update" :> ReqBody '[JSON] BatchUpdateProjectRequest :> Post '[JSON] BatchResult
-  :<|> Capture "projectId" UUID :> "overview" :> Get '[JSON] ProjectOverview
+  :<|> Capture "projectId" UUID :> "overview" :> QueryParam "extra_context" Bool :> Get '[JSON] ProjectOverview
 type TaskAPI =
        QueryParam "workspace_id" UUID
          :> QueryParam "project_id" UUID
@@ -1243,28 +1243,9 @@ projectHandlers pool bc =
       emitMany bc Updated ETProject (map (.id) bur.items)
       pure BatchResult { affected = n }
 
-    projectOverviewH pid = do
-      proj <- requireProjectH pid
-      tasks <- handleDBErrors $ Task.listTasksWithQuery pool TaskListQuery
-        { workspaceId = Nothing, projectId = Just pid, status = Nothing
-        , priority = Nothing, createdAfter = Nothing, createdBefore = Nothing
-        , updatedAfter = Nothing, updatedBefore = Nothing
-        , query = Nothing, searchLanguage = Nothing
-        , limit = Just 200, offset = Just 0 }
-      allProjects <- handleDBErrors $ Proj.listProjectsWithQuery pool ProjectListQuery
-        { workspaceId = Just proj.workspaceId, status = Nothing
-        , createdAfter = Nothing, createdBefore = Nothing
-        , updatedAfter = Nothing, updatedBefore = Nothing
-        , query = Nothing, searchLanguage = Nothing
-        , limit = Just 200, offset = Just 0 }
-      let childProjects = Prelude.filter (\p -> p.parentId == Just pid) allProjects
-      mems <- handleDBErrors $ Mem.getProjectMemories pool pid (LinkedMemoryListQuery Nothing Nothing Nothing Nothing Nothing)
-      pure ProjectOverview
-        { project = proj
-        , tasks = tasks
-        , subprojects = childProjects
-        , linkedMemories = mems
-        }
+    projectOverviewH pid mExtraContext = do
+      let extraContext = fromMaybe False mExtraContext
+      handleDBErrors (Overview.getProjectOverview pool pid extraContext) >>= maybe (throwError err404) pure
 
 -- Task handlers ----------------------------------------------------
 

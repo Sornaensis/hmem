@@ -1,5 +1,6 @@
 module HMem.DB.Overview
   ( getTaskOverview
+  , getProjectOverview
   , getContextInfo
   ) where
 
@@ -106,6 +107,44 @@ collectProjectMemories pool (Just projId) acc = do
   mProj <- Proj.getProject pool projId
   let parentId = mProj >>= (.parentId)
   collectProjectMemories pool parentId (acc <> candidates)
+
+getProjectOverview :: Pool Hasql.Connection -> UUID -> Bool -> IO (Maybe ProjectOverview)
+getProjectOverview pool projId extraContext = do
+  mProj <- Proj.getProject pool projId
+  case mProj of
+    Nothing -> pure Nothing
+    Just proj -> do
+      tasks <- Task.listTasksWithQuery pool TaskListQuery
+        { workspaceId = Nothing, projectId = Just projId, status = Nothing
+        , priority = Nothing, query = Nothing, searchLanguage = Nothing
+        , createdAfter = Nothing, createdBefore = Nothing
+        , updatedAfter = Nothing, updatedBefore = Nothing
+        , limit = Just 200, offset = Just 0
+        }
+      allProjects <- Proj.listProjectsWithQuery pool ProjectListQuery
+        { workspaceId = Just proj.workspaceId, status = Nothing
+        , query = Nothing, searchLanguage = Nothing
+        , createdAfter = Nothing, createdBefore = Nothing
+        , updatedAfter = Nothing, updatedBefore = Nothing
+        , limit = Just 200, offset = Just 0
+        }
+      let childProjects = Prelude.filter (\p -> p.parentId == Just projId) allProjects
+      directMemories <- Mem.getProjectMemories pool projId emptyLq
+      workspaceMemories <-
+        if extraContext
+          then listWorkspaceMemoryCandidates pool proj.workspaceId
+          else pure []
+      let candidates =
+            [ memoryCandidateFromMemory ScopeProject memory | memory <- directMemories ]
+            <> workspaceMemories
+          connectedMemories = summarizeCandidates candidates
+      pure $ Just ProjectOverview
+        { project = proj
+        , tasks = tasks
+        , subprojects = childProjects
+        , linkedMemories = directMemories
+        , connectedMemories = connectedMemories
+        }
 
 listTaskDependencySummaries :: Pool Hasql.Connection -> UUID -> IO [TaskDependencySummary]
 listTaskDependencySummaries pool taskId = do

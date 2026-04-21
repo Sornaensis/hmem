@@ -917,10 +917,13 @@ data ProjectOverview = ProjectOverview
   , tasks          :: [Task]
   , subprojects    :: [Project]
   , linkedMemories :: [Memory]
+  , connectedMemories :: [ConnectedMemorySummary]
   } deriving (Show, Eq, Generic)
 
 instance ToJSON ProjectOverview where
   toJSON     = genericToJSON jsonOptions
+instance FromJSON ProjectOverview where
+  parseJSON  = genericParseJSON jsonOptions
 
 data TaskListQuery = TaskListQuery
   { workspaceId     :: Maybe UUID

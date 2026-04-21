@@ -466,6 +466,14 @@ spec = do
         Right (ProjectUpdateBatch items) -> length items `shouldBe` 1
         other -> expectationFailure $ "Expected ProjectUpdateBatch, got: " <> show other
 
+    it "parses project_overview with extra_context" $ do
+      let args = object [ "project_id" .= testUUID, "extra_context" .= True ]
+      case parseToolCall "project_overview" args of
+        Right (ProjectOverviewCall pid extraContext) -> do
+          pid `shouldBe` parsedUUID
+          extraContext `shouldBe` True
+        other -> expectationFailure $ "Expected ProjectOverviewCall, got: " <> show other
+
   describe "parseToolCall (task tools)" $ do
 
     it "parses task_create" $ do

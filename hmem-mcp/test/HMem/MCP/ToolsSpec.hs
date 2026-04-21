@@ -953,6 +953,25 @@ spec = do
       taskOverviewProps <- requireJust "task_overview properties" (objectField "properties" taskOverviewSchema)
       objectField "extra_context" taskOverviewProps `shouldSatisfy` (/= Nothing)
 
+    it "defines project_overview extra_context and memory search/list access_count fields" $ do
+      projectOverviewSchema <- requireJust "project_overview schema" (inputSchemaFor "project_overview")
+      projectOverviewProps <- requireJust "project_overview properties" (objectField "properties" projectOverviewSchema)
+      memorySearchSchema <- requireJust "memory_search schema" (inputSchemaFor "memory_search")
+      memorySearchProps <- requireJust "memory_search properties" (objectField "properties" memorySearchSchema)
+      memoryListSchema <- requireJust "memory_list schema" (inputSchemaFor "memory_list")
+      memoryListProps <- requireJust "memory_list properties" (objectField "properties" memoryListSchema)
+      entityMemsSchema <- requireJust "list_entity_memories schema" (inputSchemaFor "list_entity_memories")
+      entityMemsProps <- requireJust "list_entity_memories properties" (objectField "properties" entityMemsSchema)
+      objectField "extra_context" projectOverviewProps `shouldSatisfy` (/= Nothing)
+      (objectField "extra_context" projectOverviewProps >>= textField "type") `shouldBe` Just "boolean"
+      (objectField "min_access_count" memorySearchProps >>= textField "type") `shouldBe` Just "integer"
+      (objectField "sort_by" memorySearchProps >>= objectField "enum") `shouldBe`
+        Just (toJSON (["recent", "importance", "access_count"] :: [Text]))
+      (objectField "min_access_count" memoryListProps >>= textField "type") `shouldBe` Just "integer"
+      (objectField "sort_by" memoryListProps >>= objectField "enum") `shouldBe`
+        Just (toJSON (["recent", "importance", "access_count"] :: [Text]))
+      (objectField "min_access_count" entityMemsProps >>= textField "type") `shouldBe` Just "integer"
+
   describe "parseToolCall (saved view tools)" $ do
 
     it "parses saved_view with action=create" $ do

@@ -18,6 +18,7 @@ import Test.Hspec
 
 import HMem.Config (CorsConfig(..))
 import HMem.Config qualified as Config
+import HMem.DB.Memory qualified as Mem
 import HMem.DB.TestHarness
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkApp)
@@ -544,6 +545,218 @@ spec = around withApp $ do
       let Just page = decode (respBody resp) :: Maybe (PaginatedResult Task)
       map (\item -> item.id) page.items `shouldBe` [highTask.id]
       page.items `shouldNotSatisfy` any ((== lowTask.id) . (\item -> item.id))
+
+    it "filters and sorts memories by access_count" $ \_ ->
+      withAppEnv $ \env app -> do
+        wsResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("memory-access-filter-ws" :: T.Text)])
+        let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+        lowMemResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("low access" :: T.Text)
+            , "memory_type" .= ("short_term" :: T.Text)
+            ])
+        highMemResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("high access" :: T.Text)
+            , "memory_type" .= ("short_term" :: T.Text)
+            ])
+        untouchedMemResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("untouched access" :: T.Text)
+            , "memory_type" .= ("short_term" :: T.Text)
+            ])
+        let Just lowMem = decode (respBody lowMemResp) :: Maybe Memory
+        let Just highMem = decode (respBody highMemResp) :: Maybe Memory
+        let Just untouchedMem = decode (respBody untouchedMemResp) :: Maybe Memory
+        Mem.touchMemory env.pool lowMem.id
+        Mem.touchMemory env.pool highMem.id
+        Mem.touchMemory env.pool highMem.id
+
+        resp <- get_ app
+          ( "/api/v1/memories?workspace_id=" <> encodeUtf8 (T.pack (show ws.id))
+         <> "&min_access_count=1&sort_by=access_count"
+          )
+        respStatus resp `shouldBe` 200
+        let Just page = decode (respBody resp) :: Maybe (PaginatedResult Memory)
+        map (.id) page.items `shouldBe` [highMem.id, lowMem.id]
+        page.items `shouldNotSatisfy` any ((== untouchedMem.id) . (.id))
+
+  describe "linked memory list filters" $ do
+    it "filters project-linked memories by query, tag, importance, type, and access_count" $ \_ ->
+      withAppEnv $ \env app -> do
+        wsResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("project-linked-filter-ws" :: T.Text)])
+        let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+        projResp <- postJSON app "/api/v1/projects"
+          (object ["workspace_id" .= ws.id, "name" .= ("Filter Project" :: T.Text)])
+        let Just proj = decode (respBody projResp) :: Maybe Project
+
+        matchingResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("alpha haskell note" :: T.Text)
+            , "memory_type" .= ("long_term" :: T.Text)
+            , "importance" .= (8 :: Int)
+            , "tags" .= (["keep"] :: [T.Text])
+            ])
+        wrongTagResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("alpha haskell note" :: T.Text)
+            , "memory_type" .= ("long_term" :: T.Text)
+            , "importance" .= (8 :: Int)
+            , "tags" .= (["drop"] :: [T.Text])
+            ])
+        lowImportanceResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("alpha haskell note" :: T.Text)
+            , "memory_type" .= ("long_term" :: T.Text)
+            , "importance" .= (2 :: Int)
+            , "tags" .= (["keep"] :: [T.Text])
+            ])
+        wrongTypeResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("alpha haskell note" :: T.Text)
+            , "memory_type" .= ("short_term" :: T.Text)
+            , "importance" .= (8 :: Int)
+            , "tags" .= (["keep"] :: [T.Text])
+            ])
+        lowAccessResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("alpha haskell note" :: T.Text)
+            , "memory_type" .= ("long_term" :: T.Text)
+            , "importance" .= (8 :: Int)
+            , "tags" .= (["keep"] :: [T.Text])
+            ])
+        wrongQueryResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("gamma note" :: T.Text)
+            , "memory_type" .= ("long_term" :: T.Text)
+            , "importance" .= (8 :: Int)
+            , "tags" .= (["keep"] :: [T.Text])
+            ])
+        let Just matchingMem = decode (respBody matchingResp) :: Maybe Memory
+        let Just wrongTagMem = decode (respBody wrongTagResp) :: Maybe Memory
+        let Just lowImportanceMem = decode (respBody lowImportanceResp) :: Maybe Memory
+        let Just wrongTypeMem = decode (respBody wrongTypeResp) :: Maybe Memory
+        let Just lowAccessMem = decode (respBody lowAccessResp) :: Maybe Memory
+        let Just wrongQueryMem = decode (respBody wrongQueryResp) :: Maybe Memory
+        Mem.touchMemory env.pool matchingMem.id
+        Mem.touchMemory env.pool wrongTagMem.id
+        Mem.touchMemory env.pool lowImportanceMem.id
+        Mem.touchMemory env.pool wrongTypeMem.id
+        Mem.touchMemory env.pool wrongQueryMem.id
+
+        linkProjectMemResp <- postJSON app (uuidPath "/api/v1/projects" proj.id <> "/memories")
+          (object ["memory_id" .= matchingMem.id])
+        respStatus linkProjectMemResp `shouldBe` 200
+        mapM_ (\mid -> do
+            linkResp <- postJSON app (uuidPath "/api/v1/projects" proj.id <> "/memories") (object ["memory_id" .= mid])
+            respStatus linkResp `shouldBe` 200)
+          [wrongTagMem.id, lowImportanceMem.id, wrongTypeMem.id, lowAccessMem.id, wrongQueryMem.id]
+
+        resp <- get_ app
+          ( uuidPath "/api/v1/projects" proj.id <> "/memories?query=alpha%20haskell&tag=keep&min_importance=5&memory_type=long_term&min_access_count=1" )
+        respStatus resp `shouldBe` 200
+        let Just mems = decode (respBody resp) :: Maybe [Memory]
+        map (.id) mems `shouldBe` [matchingMem.id]
+
+    it "filters task-linked memories by query, tag, importance, type, and access_count" $ \_ ->
+      withAppEnv $ \env app -> do
+        wsResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("task-linked-filter-ws" :: T.Text)])
+        let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+        projResp <- postJSON app "/api/v1/projects"
+          (object ["workspace_id" .= ws.id, "name" .= ("Task Filter Project" :: T.Text)])
+        let Just proj = decode (respBody projResp) :: Maybe Project
+        taskResp <- postJSON app "/api/v1/tasks"
+          (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Filter Task" :: T.Text)])
+        let Just task = decode (respBody taskResp) :: Maybe Task
+
+        matchingResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("beta haskell note" :: T.Text)
+            , "memory_type" .= ("long_term" :: T.Text)
+            , "importance" .= (7 :: Int)
+            , "tags" .= (["keep"] :: [T.Text])
+            ])
+        wrongTagResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("beta haskell note" :: T.Text)
+            , "memory_type" .= ("long_term" :: T.Text)
+            , "importance" .= (7 :: Int)
+            , "tags" .= (["drop"] :: [T.Text])
+            ])
+        lowImportanceResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("beta haskell note" :: T.Text)
+            , "memory_type" .= ("long_term" :: T.Text)
+            , "importance" .= (2 :: Int)
+            , "tags" .= (["keep"] :: [T.Text])
+            ])
+        wrongTypeResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("beta haskell note" :: T.Text)
+            , "memory_type" .= ("short_term" :: T.Text)
+            , "importance" .= (7 :: Int)
+            , "tags" .= (["keep"] :: [T.Text])
+            ])
+        lowAccessResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("beta haskell note" :: T.Text)
+            , "memory_type" .= ("long_term" :: T.Text)
+            , "importance" .= (7 :: Int)
+            , "tags" .= (["keep"] :: [T.Text])
+            ])
+        wrongQueryResp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= ("gamma note" :: T.Text)
+            , "memory_type" .= ("long_term" :: T.Text)
+            , "importance" .= (7 :: Int)
+            , "tags" .= (["keep"] :: [T.Text])
+            ])
+        let Just matchingMem = decode (respBody matchingResp) :: Maybe Memory
+        let Just wrongTagMem = decode (respBody wrongTagResp) :: Maybe Memory
+        let Just lowImportanceMem = decode (respBody lowImportanceResp) :: Maybe Memory
+        let Just wrongTypeMem = decode (respBody wrongTypeResp) :: Maybe Memory
+        let Just lowAccessMem = decode (respBody lowAccessResp) :: Maybe Memory
+        let Just wrongQueryMem = decode (respBody wrongQueryResp) :: Maybe Memory
+        Mem.touchMemory env.pool matchingMem.id
+        Mem.touchMemory env.pool wrongTagMem.id
+        Mem.touchMemory env.pool lowImportanceMem.id
+        Mem.touchMemory env.pool wrongTypeMem.id
+        Mem.touchMemory env.pool wrongQueryMem.id
+
+        linkTaskMemResp <- postJSON app (uuidPath "/api/v1/tasks" task.id <> "/memories")
+          (object ["memory_id" .= matchingMem.id])
+        respStatus linkTaskMemResp `shouldBe` 200
+        mapM_ (\mid -> do
+            linkResp <- postJSON app (uuidPath "/api/v1/tasks" task.id <> "/memories") (object ["memory_id" .= mid])
+            respStatus linkResp `shouldBe` 200)
+          [wrongTagMem.id, lowImportanceMem.id, wrongTypeMem.id, lowAccessMem.id, wrongQueryMem.id]
+
+        resp <- get_ app
+          ( uuidPath "/api/v1/tasks" task.id <> "/memories?query=beta%20haskell&tag=keep&min_importance=5&memory_type=long_term&min_access_count=1" )
+        respStatus resp `shouldBe` 200
+        let Just mems = decode (respBody resp) :: Maybe [Memory]
+        map (.id) mems `shouldBe` [matchingMem.id]
 
   describe "memory links" $ do
     it "creates and retrieves memory links" $ \app -> do

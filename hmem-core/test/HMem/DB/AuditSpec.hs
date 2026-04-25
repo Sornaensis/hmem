@@ -10,6 +10,7 @@ import Data.Text qualified as T
 import Test.Hspec
 
 import HMem.DB.Memory
+import HMem.DB.RequestContext
 import HMem.DB.TestHarness
 import HMem.Types
 
@@ -72,6 +73,38 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
       rows <- getAuditLogRows env.pool "memory" (T.pack (show mem.id))
       map (.action) rows `shouldBe` ["create"]
+
+    it "persists actor and workspace request context into audit rows" $ \env -> do
+      ws <- createTestWorkspace env "ctx-ws"
+      mem <- withRequestIdContext (Just "req-ctx-1") $
+        withPrincipalContext (Just Principal
+          { actorType = ActorBot
+          , actorId = "bot-test"
+          , actorLabel = "Bot Test"
+          }) $
+        withWorkspaceIdContext (Just ws.id) $
+          createMemory env.pool CreateMemory
+            { workspaceId = ws.id
+            , content = "contextful"
+            , summary = Nothing
+            , memoryType = ShortTerm
+            , importance = Nothing
+            , metadata = Nothing
+            , expiresAt = Nothing
+            , source = Nothing
+            , confidence = Nothing
+            , pinned = Nothing
+            , tags = Nothing
+            , ftsLanguage = Nothing
+            }
+
+      rows <- getAuditLogRows env.pool "memory" (T.pack (show mem.id))
+      let [created] = rows
+      created.requestId `shouldBe` Just "req-ctx-1"
+      created.workspaceId `shouldBe` Just ws.id
+      created.actorType `shouldBe` Just "bot"
+      created.actorId `shouldBe` Just "bot-test"
+      created.actorLabel `shouldBe` Just "Bot Test"
 
 lookupField :: T.Text -> Value -> Maybe Value
 lookupField key (Object obj) = KM.lookup (fromText key) obj

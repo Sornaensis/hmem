@@ -122,7 +122,7 @@ runDevMode opts = do
     logInfo logger "[dev] Auth: disabled"
     logInfo logger "[dev] Press Ctrl-C to stop (ephemeral DB will be destroyed)"
 
-    let devAuth = Config.AuthConfig { enabled = False, apiKey = Nothing }
+    let devAuth = Config.defaultConfig.auth { Config.enabled = False, Config.apiKey = Nothing }
         devCors = Config.CorsConfig { allowedOrigins = ["*"] }
         devRateLimit = Config.RateLimitConfig { rlEnabled = False, rlRequestsPerSecond = 100, rlBurst = 200 }
         settings = setHost (fromString "127.0.0.1") $ setPort port $ setTimeout 60 $ setGracefulShutdownTimeout (Just 5) $ defaultSettings
@@ -286,7 +286,7 @@ runNormalMode opts = do
   logInfo logger $ "Rotation: " <> T.pack (show cfg.logging.maxSizeMB) <> " MB, "
                                <> T.pack (show cfg.logging.backupCount) <> " backups"
   logInfo logger $ "Log level: " <> cfg.logging.level
-  logInfo logger $ "API auth: " <> if cfg.auth.enabled then "enabled" else "disabled"
+  logInfo logger $ "API auth (legacy static bearer path): " <> if Config.authStaticBearerEnabled cfg.auth then "enabled" else "disabled"
   logInfo logger $ "Rate limiting: " <> if cfg.rateLimit.rlEnabled then "enabled" else "disabled"
   logInfo logger $ "pgvector: " <> if pgvec then "available" else "not installed (similarity search disabled)"
   logInfo logger $ "Web UI: " <> case mStaticDir of

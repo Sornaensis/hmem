@@ -28,7 +28,7 @@ import Hasql.Statement qualified as Statement
 import System.IO (hPutStrLn, stderr)
 import System.IO.Unsafe (unsafePerformIO)
 
-import HMem.DB.RequestContext (currentRequestId)
+import HMem.DB.RequestContext (ActorType(..), Principal(..), RequestContext(..), currentRequestContext)
 
 ------------------------------------------------------------------------
 -- Pool metrics (process-wide)
@@ -173,16 +173,16 @@ runTransaction = runManagedSession
 runManagedSession :: Pool Hasql.Connection -> Session.Session a -> IO a
 runManagedSession pool sess = withConn pool $ \conn -> do
   testMode <- readIORef testTransactionModeRef
-  mRequestId <- currentRequestId
+  reqCtx <- currentRequestContext
   if testMode
-    then runWithSavepoint conn mRequestId sess
-    else runWithTransaction conn mRequestId sess
+    then runWithSavepoint conn reqCtx sess
+    else runWithTransaction conn reqCtx sess
 
-runWithTransaction :: Hasql.Connection -> Maybe Text -> Session.Session a -> IO a
-runWithTransaction conn mRequestId sess = do
+runWithTransaction :: Hasql.Connection -> RequestContext -> Session.Session a -> IO a
+runWithTransaction conn reqCtx sess = do
   let txn = do
         Session.sql "BEGIN"
-        applyRequestIdContext mRequestId
+        applyRequestContext reqCtx
         a <- sess
         Session.sql "COMMIT"
         pure a
@@ -196,13 +196,13 @@ runWithTransaction conn mRequestId sess = do
       _ <- try @SomeException $ Session.run (Session.sql "ROLLBACK") conn
       throwIO (classifyError err)
 
-runWithSavepoint :: Hasql.Connection -> Maybe Text -> Session.Session a -> IO a
-runWithSavepoint conn mRequestId sess = do
+runWithSavepoint :: Hasql.Connection -> RequestContext -> Session.Session a -> IO a
+runWithSavepoint conn reqCtx sess = do
   spId <- atomicModifyIORef' savepointCounterRef $ \n -> let n' = n + 1 in (n', n')
   let spName = "sp_" <> TE.encodeUtf8 (T.pack (show spId))
       txn = do
         Session.sql $ "SAVEPOINT " <> spName
-        applyRequestIdContext mRequestId
+        applyRequestContext reqCtx
         a <- sess
         Session.sql $ "RELEASE SAVEPOINT " <> spName
         pure a
@@ -213,14 +213,68 @@ runWithSavepoint conn mRequestId sess = do
       _ <- try @SomeException $ Session.run (Session.sql $ "ROLLBACK TO SAVEPOINT " <> spName) conn
       throwIO (classifyError err)
 
-applyRequestIdContext :: Maybe Text -> Session.Session ()
-applyRequestIdContext Nothing = pure ()
-applyRequestIdContext (Just requestId) =
-  void $ Session.statement requestId setRequestIdStatement
+applyRequestContext :: RequestContext -> Session.Session ()
+applyRequestContext reqCtx = do
+  let mRequestId = case reqCtx of
+        RequestContext { requestId = rid } -> rid
+      mPrincipal = case reqCtx of
+        RequestContext { principal = p } -> p
+      mWorkspaceId = case reqCtx of
+        RequestContext { workspaceId = wsId } -> wsId
+  void $ Session.statement (maybe "" id mRequestId) setRequestIdStatement
+  maybe clearPrincipalContext applyPrincipalContext mPrincipal
+  void $ Session.statement (maybe "" (T.pack . show) mWorkspaceId) setWorkspaceIdStatement
+
+applyPrincipalContext :: Principal -> Session.Session ()
+applyPrincipalContext principal = do
+  let pActorType = case principal of Principal { actorType = a } -> a
+      pActorId = case principal of Principal { actorId = a } -> a
+      pActorLabel = case principal of Principal { actorLabel = a } -> a
+  void $ Session.statement (actorTypeToText pActorType) setActorTypeStatement
+  void $ Session.statement pActorId setActorIdStatement
+  void $ Session.statement pActorLabel setActorLabelStatement
+
+clearPrincipalContext :: Session.Session ()
+clearPrincipalContext = do
+  void $ Session.statement "" setActorTypeStatement
+  void $ Session.statement "" setActorIdStatement
+  void $ Session.statement "" setActorLabelStatement
+
+actorTypeToText :: ActorType -> Text
+actorTypeToText ActorUser = "user"
+actorTypeToText ActorBot  = "bot"
 
 setRequestIdStatement :: Statement.Statement Text Text
 setRequestIdStatement = Statement.Statement
   "SELECT set_config('hmem.request_id', $1, true)"
+  (E.param (E.nonNullable E.text))
+  (D.singleRow (D.column (D.nonNullable D.text)))
+  True
+
+setActorTypeStatement :: Statement.Statement Text Text
+setActorTypeStatement = Statement.Statement
+  "SELECT set_config('hmem.actor_type', $1, true)"
+  (E.param (E.nonNullable E.text))
+  (D.singleRow (D.column (D.nonNullable D.text)))
+  True
+
+setActorIdStatement :: Statement.Statement Text Text
+setActorIdStatement = Statement.Statement
+  "SELECT set_config('hmem.actor_id', $1, true)"
+  (E.param (E.nonNullable E.text))
+  (D.singleRow (D.column (D.nonNullable D.text)))
+  True
+
+setActorLabelStatement :: Statement.Statement Text Text
+setActorLabelStatement = Statement.Statement
+  "SELECT set_config('hmem.actor_label', $1, true)"
+  (E.param (E.nonNullable E.text))
+  (D.singleRow (D.column (D.nonNullable D.text)))
+  True
+
+setWorkspaceIdStatement :: Statement.Statement Text Text
+setWorkspaceIdStatement = Statement.Statement
+  "SELECT set_config('hmem.workspace_id', $1, true)"
   (E.param (E.nonNullable E.text))
   (D.singleRow (D.column (D.nonNullable D.text)))
   True

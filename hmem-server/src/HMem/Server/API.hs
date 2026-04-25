@@ -17,6 +17,7 @@ import Data.Aeson.Key qualified as Aeson (fromText)
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Functor.Contravariant ((>$<))
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Pool (Pool, tryWithResource)
 import Data.String (fromString)
@@ -40,7 +41,7 @@ import HMem.DB.Memory qualified as Mem
 import HMem.DB.Overview qualified as Overview
 import HMem.DB.Pool (runSession, runTransaction, DBException(..), PoolMetrics(..), getPoolMetrics)
 import HMem.DB.Project qualified as Proj
-import HMem.DB.RequestContext (currentRequestId)
+import HMem.DB.RequestContext (currentRequestId, withWorkspaceIdContext)
 import HMem.DB.SavedView qualified as SV
 import HMem.DB.Schema
 import HMem.DB.Search qualified as Search
@@ -444,6 +445,9 @@ dbErrorDetail = \case
   DBStatementTimeout -> Nothing
   DBOtherError detail -> Just detail
 
+handleDBErrorsInWorkspace :: UUID -> IO a -> Handler a
+handleDBErrorsInWorkspace wsId io = handleDBErrors (withWorkspaceIdContext (Just wsId) io)
+
 purgeConflict :: ServerError
 purgeConflict = err409
   { errBody = Aeson.encode $ object
@@ -614,7 +618,7 @@ workspaceHandlers pool bc =
 
     deleteWorkspaceH :: UUID -> Handler NoContent
     deleteWorkspaceH wsId = do
-      ok <- handleDBErrors $ runTransaction pool $ do
+      ok <- handleDBErrorsInWorkspace wsId $ runTransaction pool $ do
         n <- Session.statement () $ runN $
           update Update
             { target = workspaceSchema
@@ -1036,15 +1040,15 @@ memoryHandlers pool tracker bc pgvec =
       handleDBErrors $ Mem.getMemoryLinks pool mid
 
     createLinkH mid cml = do
-      _ <- requireMemoryH mid
+      mem <- requireMemoryH mid
       _ <- requireMemoryH cml.targetId
-      handleDBErrors $ Mem.linkMemories pool mid cml
+      handleDBErrorsInWorkspace mem.workspaceId $ Mem.linkMemories pool mid cml
       emit bc Created ETMemoryLink mid (Just $ object ["source_id" .= mid, "target_id" .= cml.targetId])
       pure NoContent
 
     unlinkH mid tid rt = do
-      _ <- requireMemoryH mid
-      ok <- handleDBErrors $ Mem.unlinkMemories pool mid tid rt
+      mem <- requireMemoryH mid
+      ok <- handleDBErrorsInWorkspace mem.workspaceId $ Mem.unlinkMemories pool mid tid rt
       if ok then do emit bc Deleted ETMemoryLink mid (Just $ object ["source_id" .= mid, "target_id" .= tid]); pure NoContent else throwError err404
 
     getTagsH mid = do
@@ -1052,8 +1056,8 @@ memoryHandlers pool tracker bc pgvec =
       handleDBErrors $ Mem.getTags pool mid
 
     setTagsH mid tags = do
-      _ <- requireMemoryH mid
-      handleDBErrors $ Mem.setTags pool mid tags
+      mem <- requireMemoryH mid
+      handleDBErrorsInWorkspace mem.workspaceId $ Mem.setTags pool mid tags
       emit bc Updated ETTag mid (Just $ object ["memory_id" .= mid, "tags" .= tags])
       pure NoContent
 
@@ -1099,9 +1103,15 @@ memoryHandlers pool tracker bc pgvec =
 
     batchSetTagsH bst = do
       rejectValidationErrors (validateBatchSetTagsRequest bst)
-      n <- handleDBErrors $ Mem.setTagsBatch pool [(item.memoryId, item.tags) | item <- bst.items]
+      groupedItems <- fmap (Map.toList . Map.fromListWith (<>)) $ mapM resolveTagBatchItem bst.items
+      counts <- mapM (\(wsId, items) -> handleDBErrorsInWorkspace wsId $ Mem.setTagsBatch pool items) groupedItems
+      let n = Prelude.sum counts
       emitMany bc Updated ETTag (map (.memoryId) bst.items)
       pure BatchResult { affected = n }
+
+    resolveTagBatchItem item = do
+      mem <- handleDBErrors (Mem.getMemory pool item.memoryId) >>= maybe (throwError err404) pure
+      pure (mem.workspaceId, [(item.memoryId, item.tags)])
 
     batchUpdateH bur = do
       rejectValidationErrors (validateBatchUpdateMemoryRequest bur)
@@ -1193,15 +1203,15 @@ projectHandlers pool bc =
               pure NoContent
 
     linkMemoryH pid lm = do
-      _ <- requireProjectH pid
+      proj <- requireProjectH pid
       _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
-      handleDBErrors $ Proj.linkProjectMemory pool pid lm.memoryId
+      handleDBErrorsInWorkspace proj.workspaceId $ Proj.linkProjectMemory pool pid lm.memoryId
       emit bc Updated ETProject pid (Just $ object ["linked_memory" .= lm.memoryId])
       pure NoContent
 
     unlinkMemoryH pid mid = do
-      _ <- requireProjectH pid
-      handleDBErrors $ Proj.unlinkProjectMemory pool pid mid
+      proj <- requireProjectH pid
+      handleDBErrorsInWorkspace proj.workspaceId $ Proj.unlinkProjectMemory pool pid mid
       emit bc Updated ETProject pid (Just $ object ["unlinked_memory" .= mid])
       pure NoContent
 
@@ -1225,9 +1235,9 @@ projectHandlers pool bc =
       handleDBErrors $ Mem.getProjectMemories pool pid lq
 
     batchLinkMemoriesH pid blr = do
-      _ <- requireProjectH pid
+      proj <- requireProjectH pid
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
-      n <- handleDBErrors $ Proj.linkProjectMemoryBatch pool pid blr.memoryIds
+      n <- handleDBErrorsInWorkspace proj.workspaceId $ Proj.linkProjectMemoryBatch pool pid blr.memoryIds
       emit bc Updated ETProject pid Nothing
       pure BatchResult { affected = n }
 
@@ -1337,28 +1347,28 @@ taskHandlers pool bc =
               pure NoContent
 
     linkMemoryH tid lm = do
-      _ <- requireTaskH tid
+      task <- requireTaskH tid
       _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
-      handleDBErrors $ Task.linkTaskMemory pool tid lm.memoryId
+      handleDBErrorsInWorkspace task.workspaceId $ Task.linkTaskMemory pool tid lm.memoryId
       emit bc Updated ETTask tid (Just $ object ["linked_memory" .= lm.memoryId])
       pure NoContent
 
     unlinkMemoryH tid mid = do
-      _ <- requireTaskH tid
-      handleDBErrors $ Task.unlinkTaskMemory pool tid mid
+      task <- requireTaskH tid
+      handleDBErrorsInWorkspace task.workspaceId $ Task.unlinkTaskMemory pool tid mid
       emit bc Updated ETTask tid (Just $ object ["unlinked_memory" .= mid])
       pure NoContent
 
     addDepH tid ld = do
-      _ <- requireTaskH tid
+      task <- requireTaskH tid
       _ <- requireTaskH ld.dependsOnId
-      handleDBErrors $ Task.addDependency pool tid ld.dependsOnId
+      handleDBErrorsInWorkspace task.workspaceId $ Task.addDependency pool tid ld.dependsOnId
       emit bc Created ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= ld.dependsOnId])
       pure NoContent
 
     removeDepH tid depId = do
-      _ <- requireTaskH tid
-      handleDBErrors $ Task.removeDependency pool tid depId
+      task <- requireTaskH tid
+      handleDBErrorsInWorkspace task.workspaceId $ Task.removeDependency pool tid depId
       emit bc Deleted ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= depId])
       pure NoContent
 
@@ -1408,9 +1418,9 @@ taskHandlers pool bc =
       pure BatchResult { affected = n }
 
     batchLinkMemoriesH tid blr = do
-      _ <- requireTaskH tid
+      task <- requireTaskH tid
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
-      n <- handleDBErrors $ Task.linkTaskMemoryBatch pool tid blr.memoryIds
+      n <- handleDBErrorsInWorkspace task.workspaceId $ Task.linkTaskMemoryBatch pool tid blr.memoryIds
       emit bc Updated ETTask tid Nothing
       pure BatchResult { affected = n }
 
@@ -1451,6 +1461,26 @@ categoryHandlers pool bc =
   where
     requireCategoryH :: UUID -> Handler MemoryCategory
     requireCategoryH cid = handleDBErrors (Cat.getCategory pool cid) >>= maybe (throwError err404) pure
+
+    categoryWorkspaceIdH :: MemoryCategory -> [UUID] -> Handler UUID
+    categoryWorkspaceIdH cat memoryIds =
+      case cat.workspaceId of
+        Just wsId -> pure wsId
+        Nothing -> case memoryIds of
+          [] -> throwError err400
+          (mid:_) -> do
+            mem <- handleDBErrors (Mem.getMemory pool mid) >>= maybe (throwError err404) pure
+            pure mem.workspaceId
+
+    categoryMemoryIdsByWorkspaceH :: MemoryCategory -> [UUID] -> Handler [(UUID, [UUID])]
+    categoryMemoryIdsByWorkspaceH cat memoryIds =
+      case cat.workspaceId of
+        Just wsId -> pure [(wsId, memoryIds)]
+        Nothing -> fmap (Map.toList . Map.fromListWith (<>)) $ mapM resolve memoryIds
+      where
+        resolve mid = do
+          mem <- handleDBErrors (Mem.getMemory pool mid) >>= maybe (throwError err404) pure
+          pure (mem.workspaceId, [mid])
 
     listCategoriesH mws mlimit moffset = do
       let lim = capLimit mlimit
@@ -1513,9 +1543,11 @@ categoryHandlers pool bc =
       handleDBErrors $ Mem.getCategoryMemories pool cid
 
     batchLinkMemoriesH cid blr = do
-      _ <- requireCategoryH cid
+      cat <- requireCategoryH cid
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
-      n <- handleDBErrors $ Cat.linkMemoryCategoryBatch pool cid blr.memoryIds
+      groupedIds <- categoryMemoryIdsByWorkspaceH cat blr.memoryIds
+      counts <- mapM (\(wsId, mids) -> handleDBErrorsInWorkspace wsId $ Cat.linkMemoryCategoryBatch pool cid mids) groupedIds
+      let n = Prelude.sum counts
       emit bc Updated ETCategory cid Nothing
       pure BatchResult { affected = n }
 
@@ -1526,15 +1558,17 @@ categoryHandlers pool bc =
       pure BatchResult { affected = n }
 
     linkH cl = do
-      _ <- requireCategoryH cl.categoryId
+      cat <- requireCategoryH cl.categoryId
       _ <- handleDBErrors (Mem.getMemory pool cl.memoryId) >>= maybe (throwError err404) pure
-      handleDBErrors $ Cat.linkMemoryCategory pool cl.memoryId cl.categoryId
+      wsId <- categoryWorkspaceIdH cat [cl.memoryId]
+      handleDBErrorsInWorkspace wsId $ Cat.linkMemoryCategory pool cl.memoryId cl.categoryId
       emit bc Created ETCategoryLink cl.categoryId (Just $ object ["category_id" .= cl.categoryId, "memory_id" .= cl.memoryId])
       pure NoContent
 
     unlinkH cl = do
-      _ <- requireCategoryH cl.categoryId
-      handleDBErrors $ Cat.unlinkMemoryCategory pool cl.memoryId cl.categoryId
+      cat <- requireCategoryH cl.categoryId
+      wsId <- categoryWorkspaceIdH cat [cl.memoryId]
+      handleDBErrorsInWorkspace wsId $ Cat.unlinkMemoryCategory pool cl.memoryId cl.categoryId
       emit bc Deleted ETCategoryLink cl.categoryId (Just $ object ["category_id" .= cl.categoryId, "memory_id" .= cl.memoryId])
       pure NoContent
 

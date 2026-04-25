@@ -1,14 +1,17 @@
 module HMem.Server.App
   ( mkApp
   , requestIdMiddleware
+  , resolveRequestPrincipal
   , authMiddleware
   ) where
 
 import Control.Applicative ((<|>))
 import Data.IORef (atomicModifyIORef', newIORef)
+import Data.Maybe (isJust)
 import Data.Map.Strict qualified as Map
 import Data.Aeson (encode, object, (.=))
 import Data.ByteString.Char8 qualified as BS8
+import Data.List (find)
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -25,8 +28,8 @@ import Network.Wai.Middleware.Cors
     (cors, simpleCorsResourcePolicy, corsRequestHeaders, corsMethods, corsOrigins, CorsResourcePolicy(..))
 import Servant (Proxy (..), serve)
 
-import HMem.Config (AuthConfig(..), CorsConfig(..), RateLimitConfig(..))
-import HMem.DB.RequestContext (withRequestIdContext)
+import HMem.Config (AuthConfig(..), AuthMode(..), LocalAuthConfig(..), LocalBotTokenConfig(..), CorsConfig(..), RateLimitConfig(..), authStaticBearerEnabled, authStaticBearerToken)
+import HMem.DB.RequestContext (ActorType(..), Principal(..), RequestContext(..), withRequestContext, emptyRequestContext)
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Server.API (HMemAPI, server)
 import HMem.Server.OpenAPI (openApiSpec)
@@ -38,7 +41,7 @@ mkApp :: Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql
 mkApp logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
   rateLimit <- rateLimitMiddleware rateLimitCfg
   let bc = broadcast wsState
-  pure $ requestIdMiddleware
+  pure $ requestIdMiddleware authCfg
        $ logger
        $ wsMiddleware authCfg wsState
        $ staticMiddleware mStaticDir
@@ -52,21 +55,87 @@ mkApp logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec 
 -- If the incoming request already has an X-Request-Id header, it is
 -- preserved; otherwise a new UUID v4 is generated.  The chosen id is
 -- echoed back in the response headers so callers can correlate logs.
-requestIdMiddleware :: Middleware
-requestIdMiddleware app req respond = do
+requestIdMiddleware :: AuthConfig -> Middleware
+requestIdMiddleware authCfg app req respond = do
   rid <- case lookup "X-Request-Id" (Wai.requestHeaders req) <|> lookup "X-Request-ID" (Wai.requestHeaders req) of
     Just existing -> pure existing
     Nothing       -> TE.encodeUtf8 . UUID.toText <$> UUID.nextRandom
   let req' = req { Wai.requestHeaders = ("X-Request-Id", rid) : Wai.requestHeaders req }
-  withRequestIdContext (Just (TE.decodeUtf8Lenient rid)) $
+      reqCtx = emptyRequestContext
+        { requestId = Just (TE.decodeUtf8Lenient rid)
+        , principal = resolveRequestPrincipal authCfg req
+        }
+  withRequestContext reqCtx $
     app req' $ \resp -> respond $ Wai.mapResponseHeaders (("X-Request-Id", rid) :) resp
 
--- | Optional Bearer-token auth. When disabled, requests pass through.
--- When enabled, all non-OPTIONS requests must supply a matching
+resolveRequestPrincipal :: AuthConfig -> Wai.Request -> Maybe Principal
+resolveRequestPrincipal authCfg req =
+  resolveBearerPrincipal authCfg req <|> defaultPrincipal authCfg
+  where
+    defaultPrincipal cfg
+      | cfg.mode == AuthModeLocal
+      , localBootstrapEnabled cfg = Just localUserPrincipal
+      | otherwise = Nothing
+
+    localBootstrapEnabled cfg = case cfg of
+      AuthConfig { local = LocalAuthConfig { bootstrapEnabled = enabled } } -> enabled
+
+localUserPrincipal :: Principal
+localUserPrincipal = Principal
+  { actorType = ActorUser
+  , actorId = "local-user"
+  , actorLabel = "Local User"
+  }
+
+resolveBearerPrincipal :: AuthConfig -> Wai.Request -> Maybe Principal
+resolveBearerPrincipal authCfg req = do
+  token <- bearerToken req
+  localBotPrincipal authCfg token <|> legacyPrincipal authCfg token
+
+localBotPrincipal :: AuthConfig -> Text -> Maybe Principal
+localBotPrincipal authCfg token
+  | authCfg.mode /= AuthModeLocal = Nothing
+  | otherwise = do
+  let configuredBotTokens = case authCfg of
+        AuthConfig { local = LocalAuthConfig { botTokens = tokens } } -> tokens
+  cfg <- find matchesToken configuredBotTokens
+  pure Principal
+    { actorType = ActorBot
+    , actorId = "local-bot:" <> botLabel cfg
+    , actorLabel = botLabel cfg
+    }
+  where
+    matchesToken bot = case bot of
+      LocalBotTokenConfig { token = botToken } -> botToken == token
+
+    botLabel bot = case bot of
+      LocalBotTokenConfig { label = lbl } -> lbl
+
+localBotTokenAuthorized :: AuthConfig -> Text -> Bool
+localBotTokenAuthorized authCfg token = isJust (localBotPrincipal authCfg token)
+
+legacyPrincipal :: AuthConfig -> Text -> Maybe Principal
+legacyPrincipal authCfg token = do
+  expected <- authStaticBearerToken authCfg
+  if token == expected
+    then Just Principal
+      { actorType = ActorBot
+      , actorId = "legacy-static-bearer"
+      , actorLabel = "Legacy Static Bearer"
+      }
+    else Nothing
+
+bearerToken :: Wai.Request -> Maybe Text
+bearerToken request = do
+  raw <- lookup "Authorization" (Wai.requestHeaders request)
+  BS8.stripPrefix "Bearer " raw >>= Just . TE.decodeUtf8
+
+-- | Current legacy static bearer auth path. When inactive, requests pass
+-- through. When active, all non-OPTIONS requests must supply a matching
 -- Authorization header of the form @Bearer <token>@.
 authMiddleware :: AuthConfig -> Middleware
 authMiddleware authCfg app req respond
-  | not authCfg.enabled = app req respond
+  | not (authStaticBearerEnabled authCfg) = app req respond
   | Wai.requestMethod req == methodOptions = app req respond
   | authorized = app req respond
   | otherwise = respond $ Wai.responseLBS status401
@@ -75,18 +144,16 @@ authMiddleware authCfg app req respond
       ]
       (encode unauthorizedBody)
   where
-    authorized = case (authCfg.apiKey, bearerToken req) of
-      (Just expected, Just actual) -> actual == expected
-      _                            -> False
-
     unauthorizedBody = object
       [ "error" .= ("unauthorized" :: Text)
       , "message" .= ("Missing or invalid bearer token" :: Text)
       ]
 
-    bearerToken request = do
-      raw <- lookup "Authorization" (Wai.requestHeaders request)
-      BS8.stripPrefix "Bearer " raw >>= Just . TE.decodeUtf8
+    authorizedToken token = localBotTokenAuthorized authCfg token || maybe False (== token) (authStaticBearerToken authCfg)
+
+    authorized = case bearerToken req of
+      Just actual -> authorizedToken actual
+      Nothing     -> False
 
 -- | Serve /api/v1/openapi.json directly at the WAI level to avoid
 -- a circular module dependency with the Servant API type.

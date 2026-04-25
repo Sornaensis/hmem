@@ -1,4 +1,37 @@
 ```
+  ╔════════════════════════════════════════════════════════════════════════════╗
+  ║                            AUTH / ACCESS                                  ║
+  ╠════════════════════════════════════════════════════════════════════════════╣
+  ║  users                                                                    ║
+  ║    PK id                   UUID                                            ║
+  ║       auth_subject         TEXT (UNIQUE when not null)                    ║
+  ║       email                TEXT                                            ║
+  ║       display_name         TEXT                                            ║
+  ║       can_create_workspace BOOLEAN                                         ║
+  ║       is_superadmin        BOOLEAN                                         ║
+  ║       created_at           TIMESTAMPTZ                                     ║
+  ║       updated_at           TIMESTAMPTZ                                     ║
+  ║                                                                            ║
+  ║  workspace_memberships                                                    ║
+  ║    PK/FK workspace_id      UUID ──► workspaces                            ║
+  ║    PK/FK user_id           UUID ──► users                                 ║
+  ║       role                 workspace_role_enum                            ║
+  ║    FK granted_by           UUID ──► users                                 ║
+  ║       created_at           TIMESTAMPTZ                                     ║
+  ║       updated_at           TIMESTAMPTZ                                     ║
+  ║                                                                            ║
+  ║  access_tokens                                                            ║
+  ║    PK id                   UUID                                            ║
+  ║    FK grant_user_id        UUID ──► users                                 ║
+  ║       actor_type           actor_type_enum                                ║
+  ║       actor_label          TEXT                                            ║
+  ║       token_hash           TEXT (UNIQUE)                                   ║
+  ║       expires_at           TIMESTAMPTZ                                     ║
+  ║       revoked_at           TIMESTAMPTZ                                     ║
+  ║       last_used_at         TIMESTAMPTZ                                     ║
+  ║       created_at           TIMESTAMPTZ                                     ║
+  ╚════════════════════════════════════════════════════════════════════════════╝
+
                               ╔══════════════════════════════════╗
                               ║        workspace_groups          ║
                               ╠══════════════════════════════════╣
@@ -164,9 +197,13 @@
  ║           audit_log              ║
  ╠══════════════════════════════════╣
  ║ PK id           UUID             ║
+ ║    workspace_id  UUID             ║
  ║    entity_type  TEXT             ║
  ║    entity_id    TEXT             ║
  ║    action       audit_action     ║
+ ║    actor_type   actor_type_enum  ║
+ ║    actor_id     TEXT             ║
+ ║    actor_label  TEXT             ║
  ║    old_values   JSONB            ║
  ║    new_values   JSONB            ║
  ║    request_id   TEXT             ║
@@ -191,5 +228,9 @@
                                   │   alternative_to                                      │
                                   │ audit_action_enum:                                    │
                                   │   create │ update │ delete                            │
+                                  │ workspace_role_enum:                                  │
+                                  │   read │ edit │ admin                                │
+                                  │ actor_type_enum:                                      │
+                                  │   user │ bot                                          │
                                   └───────────────────────────────────────────────────────┘
 ```

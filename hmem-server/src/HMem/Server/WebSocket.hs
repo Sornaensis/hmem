@@ -17,6 +17,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
@@ -25,7 +26,7 @@ import Network.Wai qualified as Wai
 import Network.Wai.Handler.WebSockets (websocketsOr)
 import Network.WebSockets qualified as WS
 
-import HMem.Config (AuthConfig(..))
+import HMem.Config (AuthConfig(..), AuthMode(..), LocalAuthConfig(..), LocalBotTokenConfig(..), authStaticBearerEnabled, authStaticBearerToken)
 import HMem.Server.Event (ChangeEvent)
 
 -- | Server-wide WebSocket state: a map of connection IDs to live
@@ -92,17 +93,16 @@ wsMiddleware authCfg st app req respond
 
 -- | Handle a new WebSocket connection:
 --
---   1. Authenticate (if auth is enabled) via @?token=…@ query param.
+--   1. Authenticate (if the current legacy static bearer path is active) via @?token=…@ query param.
 --   2. Accept or reject the pending connection.
 --   3. Register in the connection map.
 --   4. Keep alive with ping/pong; discard incoming messages.
 --   5. Unregister on disconnect.
 wsApp :: AuthConfig -> WSState -> WS.ServerApp
 wsApp authCfg st pending
-  | authCfg.enabled = case tokenFromRequest (WS.pendingRequest pending) of
+  | authStaticBearerEnabled authCfg = case tokenFromRequest (WS.pendingRequest pending) of
       Just token
-        | Just expected <- authCfg.apiKey
-        , TE.decodeUtf8Lenient token == expected -> accept
+        | authorizedToken authCfg (TE.decodeUtf8Lenient token) -> accept
       _ -> WS.rejectRequest pending "Unauthorized"
   | otherwise = accept
   where
@@ -128,3 +128,15 @@ tokenFromRequest rh =
   in case lookup "token" (parseQuery qs) of
        Just mVal -> mVal   -- Maybe ByteString inside the Maybe
        Nothing   -> Nothing
+
+authorizedToken :: AuthConfig -> Text -> Bool
+authorizedToken authCfg token = localBotTokenAuthorized authCfg token || maybe False (== token) (authStaticBearerToken authCfg)
+
+localBotTokenAuthorized :: AuthConfig -> Text -> Bool
+localBotTokenAuthorized authCfg token
+  | authCfg.mode /= AuthModeLocal = False
+  | otherwise = case authCfg of
+      AuthConfig { local = LocalAuthConfig { botTokens = tokens } } -> any matches tokens
+  where
+    matches bot = case bot of
+      LocalBotTokenConfig { token = botToken } -> botToken == token

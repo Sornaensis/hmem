@@ -2,6 +2,11 @@
 
 A PostgreSQL-backed memory and task management system for LLMs, written in Haskell.
 
+See also:
+
+- `auth.md` — canonical auth specification for local/deployed auth modes, principals, permissions, and policy rules
+- `database.md` — current database schema overview
+
 ## Architecture
 
 ```

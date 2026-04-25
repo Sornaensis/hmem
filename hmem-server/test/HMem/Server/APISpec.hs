@@ -49,8 +49,17 @@ withAppEnvConfig cfg action = withTestEnv $ \env -> do
 testAuthCfg :: Config.HMemConfig
 testAuthCfg = Config.defaultConfig
   { Config.auth = Config.AuthConfig
-      { Config.enabled = True
+      { Config.mode = Config.AuthModeLocal
+      , Config.enabled = True
       , Config.apiKey = Just "test-secret"
+      , Config.local = Config.LocalAuthConfig { Config.bootstrapEnabled = True, Config.botTokens = [] }
+      , Config.deployed = Config.DeployedAuthConfig
+          { Config.issuer = Nothing
+          , Config.audience = Nothing
+          , Config.discoveryUrl = Nothing
+          , Config.jwksUrl = Nothing
+          , Config.tokenLookup = Config.TokenLookupDatabase
+          }
       }
   }
 
@@ -449,6 +458,34 @@ spec = around withApp $ do
           [("Authorization", "Bearer test-secret")]
           ""
         respStatus resp `shouldBe` 200
+
+  describe "request context actor attribution" $ do
+    it "records the synthetic local user for normal local HTTP requests" $ \_ ->
+      withAppEnv $ \env app -> do
+        wsResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("ctx-local-ws" :: T.Text)])
+        respStatus wsResp `shouldBe` 200
+        let Just ws = decode (respBody wsResp) :: Maybe Workspace
+        rows <- getAuditLogRows env.pool "workspace" (T.pack (show ws.id))
+        let [created] = rows
+        created.actorType `shouldBe` Just "user"
+        created.actorId `shouldBe` Just "local-user"
+        created.actorLabel `shouldBe` Just "Local User"
+        created.workspaceId `shouldBe` Just ws.id
+
+    it "records the legacy static bearer actor for authenticated local token requests" $ \_ ->
+      withAppEnvConfig testAuthCfg $ \env app -> do
+        wsResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer test-secret")]
+          (encode (object ["name" .= ("ctx-bot-ws" :: T.Text)]))
+        respStatus wsResp `shouldBe` 200
+        let Just ws = decode (respBody wsResp) :: Maybe Workspace
+        rows <- getAuditLogRows env.pool "workspace" (T.pack (show ws.id))
+        let [created] = rows
+        created.actorType `shouldBe` Just "bot"
+        created.actorId `shouldBe` Just "legacy-static-bearer"
+        created.actorLabel `shouldBe` Just "Legacy Static Bearer"
+        created.workspaceId `shouldBe` Just ws.id
 
   describe "rate limiting" $ do
     it "returns 429 when the configured burst is exceeded" $ \_ ->

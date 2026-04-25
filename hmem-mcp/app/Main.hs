@@ -28,4 +28,4 @@ main = do
     )
   cfg <- Config.loadConfig
   let url = maybe (T.unpack (Config.serverUrl cfg.server)) id opts.optServerUrl
-  runMCPServer url cfg.auth.apiKey
+  runMCPServer url (Config.authStaticBearerToken cfg.auth)

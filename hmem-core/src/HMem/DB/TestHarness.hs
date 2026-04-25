@@ -24,14 +24,13 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, bracket, finally, try)
 import Control.Monad (void)
 import Data.Aeson (Value)
-import Data.ByteString qualified as BS
 import Data.Functor.Contravariant (contramap)
-import Data.List (sort)
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.UUID (UUID)
 import System.Directory (doesDirectoryExist, findExecutable, getCurrentDirectory,
-                         listDirectory, removeDirectoryRecursive)
+                         removeDirectoryRecursive)
 import System.Environment (lookupEnv, setEnv)
 import System.FilePath ((</>))
 import System.IO (hFlush, hPutStrLn, stderr)
@@ -45,6 +44,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Rel8
 
+import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool (createPool, runSession, setTestTransactionMode, withConn)
 import HMem.DB.Schema
 import HMem.Types
@@ -58,6 +58,10 @@ data AuditLogRow = AuditLogRow
   { entityType :: Text
   , entityId :: Text
   , action :: Text
+  , workspaceId :: Maybe UUID
+  , actorType :: Maybe Text
+  , actorId :: Maybe Text
+  , actorLabel :: Maybe Text
   , requestId :: Maybe Text
   , oldValues :: Maybe Value
   , newValues :: Maybe Value
@@ -140,33 +144,12 @@ withTestTransaction action env = do
 -- | Check whether the schema has been applied and apply it if not.
 -- Looks for @hmem-server/migrations/@ relative to the working directory.
 ensureSchema :: TestEnv -> IO ()
-ensureSchema env = withConn env.pool $ \conn -> do
-  let checkStmt =
-        Statement.Statement
-          "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'workspaces') \
-          \AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'audit_log')"
-          E.noParams
-          (D.singleRow (D.column (D.nonNullable D.bool)))
-          True
-  result <- Session.run (Session.statement () checkStmt) conn
-  case result of
-    Right True -> pure ()  -- schema already applied
-    _ -> applyMigrations conn
-
--- | Find the migrations directory and apply all SQL files in order.
-applyMigrations :: Hasql.Connection -> IO ()
-applyMigrations conn = do
+ensureSchema env = do
   dir <- findMigrationsDir
-  files <- sort . Prelude.filter isMigration <$> listDirectory dir
-  mapM_ (applyOne dir) files
-  where
-    isMigration f = take 1 f == "V" && drop (length f - 4) f == ".sql"
-    applyOne dir f = do
-      sql <- BS.readFile (dir </> f)
-      result <- Session.run (Session.sql sql) conn
-      case result of
-        Left err -> fail $ "Failed to apply migration " <> f <> ": " <> show err
-        Right _  -> pure ()
+  result <- Migration.runMigrations env.pool dir
+  case result.failed of
+    Just (file, err) -> fail $ "Failed to apply migration " <> file <> ": " <> err
+    Nothing          -> pure ()
 
 -- | Search a few candidate paths for @hmem-server/migrations/@.
 findMigrationsDir :: IO FilePath
@@ -189,9 +172,12 @@ cleanDB :: TestEnv -> IO ()
 cleanDB env = withConn env.pool $ \conn -> do
   let stmt = Statement.Statement sql E.noParams D.noResult True
       sql = "TRUNCATE \
-            \  audit_log, \
-            \  workspace_group_members, \
-            \  workspace_groups, \
+             \  audit_log, \
+             \  access_tokens, \
+             \  workspace_memberships, \
+             \  users, \
+             \  workspace_group_members, \
+             \  workspace_groups, \
             \  task_memory_links, \
             \  project_memory_links, \
             \  task_dependencies, \
@@ -217,7 +203,7 @@ getAuditLogRows pool entityType entityId =
 auditLogRowsStatement :: Statement.Statement (Text, Text) [AuditLogRow]
 auditLogRowsStatement = Statement.Statement sql encoder decoder True
   where
-    sql = "SELECT entity_type, entity_id, action::text, request_id, old_values, new_values \
+    sql = "SELECT entity_type, entity_id, action::text, workspace_id, actor_type::text, actor_id, actor_label, request_id, old_values, new_values \
           \FROM audit_log \
           \WHERE entity_type = $1 AND entity_id = $2 \
           \ORDER BY changed_at ASC, id ASC"
@@ -228,6 +214,10 @@ auditLogRowsStatement = Statement.Statement sql encoder decoder True
       <$> D.column (D.nonNullable D.text)
       <*> D.column (D.nonNullable D.text)
       <*> D.column (D.nonNullable D.text)
+      <*> D.column (D.nullable D.uuid)
+      <*> D.column (D.nullable D.text)
+      <*> D.column (D.nullable D.text)
+      <*> D.column (D.nullable D.text)
       <*> D.column (D.nullable D.text)
       <*> D.column (D.nullable D.jsonb)
       <*> D.column (D.nullable D.jsonb)

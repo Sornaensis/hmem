@@ -7,6 +7,11 @@ module HMem.Config
   , LogConfig(..)
   , CorsConfig(..)
   , AuthConfig(..)
+  , AuthMode(..)
+  , LocalAuthConfig(..)
+  , LocalBotTokenConfig(..)
+  , DeployedAuthConfig(..)
+  , TokenLookupMode(..)
   , RateLimitConfig(..)
   , TlsConfig(..)
   , WebConfig(..)
@@ -25,11 +30,14 @@ module HMem.Config
     -- * Derived helpers
   , connectionString
   , serverUrl
+  , authStaticBearerEnabled
+  , authStaticBearerToken
   ) where
 
 import Control.Applicative ((<|>))
-import Data.Aeson (FromJSON(..), ToJSON(..), (.:?), (.!=), (.=))
+import Data.Aeson (FromJSON(..), ToJSON(..), (.:), (.:?), (.!=), (.=))
 import Data.Aeson qualified as Aeson
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Yaml qualified as Yaml
@@ -72,9 +80,39 @@ data CorsConfig = CorsConfig
   { allowedOrigins :: ![Text]
   } deriving stock (Show, Eq)
 
+data AuthMode
+  = AuthModeLocal
+  | AuthModeDeployed
+  deriving stock (Show, Eq)
+
+data TokenLookupMode
+  = TokenLookupDatabase
+  deriving stock (Show, Eq)
+
+data LocalBotTokenConfig = LocalBotTokenConfig
+  { label :: !Text
+  , token :: !Text
+  } deriving stock (Show, Eq)
+
+data LocalAuthConfig = LocalAuthConfig
+  { bootstrapEnabled :: !Bool
+  , botTokens        :: ![LocalBotTokenConfig]
+  } deriving stock (Show, Eq)
+
+data DeployedAuthConfig = DeployedAuthConfig
+  { issuer      :: !(Maybe Text)
+  , audience    :: !(Maybe Text)
+  , discoveryUrl :: !(Maybe Text)
+  , jwksUrl     :: !(Maybe Text)
+  , tokenLookup :: !TokenLookupMode
+  } deriving stock (Show, Eq)
+
 data AuthConfig = AuthConfig
-  { enabled :: !Bool
-  , apiKey  :: !(Maybe Text)
+  { mode     :: !AuthMode
+  , enabled  :: !Bool
+  , apiKey   :: !(Maybe Text)
+  , local    :: !LocalAuthConfig
+  , deployed :: !DeployedAuthConfig
   } deriving stock (Show, Eq)
 
 data RateLimitConfig = RateLimitConfig
@@ -172,14 +210,79 @@ instance ToJSON CorsConfig where
     [ "allowed_origins" .= cc.allowedOrigins
     ]
 
+instance FromJSON AuthMode where
+  parseJSON = Aeson.withText "AuthMode" $ \case
+    "local"    -> pure AuthModeLocal
+    "deployed" -> pure AuthModeDeployed
+    other       -> fail $ "invalid auth mode: " <> T.unpack other
+
+instance ToJSON AuthMode where
+  toJSON = \case
+    AuthModeLocal    -> Aeson.String "local"
+    AuthModeDeployed -> Aeson.String "deployed"
+
+instance FromJSON TokenLookupMode where
+  parseJSON = Aeson.withText "TokenLookupMode" $ \case
+    "database" -> pure TokenLookupDatabase
+    other       -> fail $ "invalid token lookup mode: " <> T.unpack other
+
+instance ToJSON TokenLookupMode where
+  toJSON TokenLookupDatabase = Aeson.String "database"
+
+instance FromJSON LocalBotTokenConfig where
+  parseJSON = Aeson.withObject "LocalBotTokenConfig" $ \o -> LocalBotTokenConfig
+    <$> o .: "label"
+    <*> o .: "token"
+
+instance ToJSON LocalBotTokenConfig where
+  toJSON bot = Aeson.object
+    [ "label" .= bot.label
+    , "token" .= bot.token
+    ]
+
+instance FromJSON LocalAuthConfig where
+  parseJSON = Aeson.withObject "LocalAuthConfig" $ \o -> LocalAuthConfig
+    <$> o .:? "bootstrap_enabled" .!= True
+    <*> o .:? "bot_tokens" .!= []
+
+instance ToJSON LocalAuthConfig where
+  toJSON localCfg = Aeson.object
+    [ "bootstrap_enabled" .= localCfg.bootstrapEnabled
+    , "bot_tokens" .= localCfg.botTokens
+    ]
+
+instance FromJSON DeployedAuthConfig where
+  parseJSON = Aeson.withObject "DeployedAuthConfig" $ \o -> DeployedAuthConfig
+    <$> o .:? "issuer"
+    <*> o .:? "audience"
+    <*> o .:? "discovery_url"
+    <*> o .:? "jwks_url"
+    <*> o .:? "token_lookup" .!= TokenLookupDatabase
+
+instance ToJSON DeployedAuthConfig where
+  toJSON deployedCfg = Aeson.object $ concat
+    [ maybe [] (\v -> ["issuer" .= v]) deployedCfg.issuer
+    , maybe [] (\v -> ["audience" .= v]) deployedCfg.audience
+    , maybe [] (\v -> ["discovery_url" .= v]) deployedCfg.discoveryUrl
+    , maybe [] (\v -> ["jwks_url" .= v]) deployedCfg.jwksUrl
+    , ["token_lookup" .= deployedCfg.tokenLookup]
+    ]
+
 instance FromJSON AuthConfig where
   parseJSON = Aeson.withObject "AuthConfig" $ \o -> AuthConfig
-    <$> o .:? "enabled" .!= False
+    <$> o .:? "mode" .!= AuthModeLocal
+    <*> o .:? "enabled" .!= False
     <*> o .:? "api_key"
+    <*> o .:? "local" .!= defLocalAuth
+    <*> o .:? "deployed" .!= defDeployedAuth
 
 instance ToJSON AuthConfig where
   toJSON ac = Aeson.object $
-    [ "enabled" .= ac.enabled ]
+    [ "mode" .= ac.mode
+    , "enabled" .= ac.enabled
+    , "local" .= ac.local
+    , "deployed" .= ac.deployed
+    ]
     <> maybe [] (\k -> ["api_key" .= k]) ac.apiKey
 
 instance FromJSON RateLimitConfig where
@@ -263,8 +366,29 @@ defCorsOrigins = ["http://localhost", "http://127.0.0.1"]
 defCors :: CorsConfig
 defCors = CorsConfig { allowedOrigins = defCorsOrigins }
 
+defLocalAuth :: LocalAuthConfig
+defLocalAuth = LocalAuthConfig
+  { bootstrapEnabled = True
+  , botTokens = []
+  }
+
+defDeployedAuth :: DeployedAuthConfig
+defDeployedAuth = DeployedAuthConfig
+  { issuer = Nothing
+  , audience = Nothing
+  , discoveryUrl = Nothing
+  , jwksUrl = Nothing
+  , tokenLookup = TokenLookupDatabase
+  }
+
 defAuth :: AuthConfig
-defAuth = AuthConfig { enabled = False, apiKey = Nothing }
+defAuth = AuthConfig
+  { mode = AuthModeLocal
+  , enabled = False
+  , apiKey = Nothing
+  , local = defLocalAuth
+  , deployed = defDeployedAuth
+  }
 
 defRateLimit :: RateLimitConfig
 defRateLimit = RateLimitConfig
@@ -407,12 +531,22 @@ validateConfig cfg = (warnings, corrected)
           (ws2, bc) = clampField "logging.backup_count" 0 100 l.backupCount
       in  (ws1 <> ws2, LogConfig { level = l.level, maxSizeMB = ms, backupCount = bc })
 
-    validateAuth a
-      | a.enabled, Nothing <- a.apiKey =
-          ( ["auth.enabled is true but no auth.api_key or HMEM_API_KEY is configured; disabling auth"]
-          , a { enabled = False }
-          )
-      | otherwise = ([], a)
+    validateAuth a = (missingLegacyWarn <> deployedWarns, a)
+      where
+        missingLegacyWarn
+          | a.mode == AuthModeLocal
+          , a.enabled
+          , Nothing <- a.apiKey =
+              ["auth.enabled is true but no auth.api_key or HMEM_API_KEY is configured; current runtime will not enable legacy static bearer auth until richer mode-specific auth is implemented"]
+          | otherwise = []
+
+        deployedWarns
+          | a.mode == AuthModeDeployed
+          , a.deployed.issuer == Nothing
+          , a.deployed.discoveryUrl == Nothing
+          , a.deployed.jwksUrl == Nothing =
+              ["auth.mode is deployed but no issuer, discovery_url, or jwks_url is configured"]
+          | otherwise = []
 
     validateRateLimit rateLimitCfg =
       let (ws1, rps) = clampFieldD "rate_limit.requests_per_second" 0.1 10000.0 rateLimitCfg.rlRequestsPerSecond
@@ -458,3 +592,15 @@ connectionString dc = T.intercalate " " $ concat
 -- | Build the server base URL, e.g. @http:\/\/127.0.0.1:8420@.
 serverUrl :: ServerConfig -> Text
 serverUrl sc = "http://" <> sc.host <> ":" <> T.pack (show sc.port)
+
+-- | Whether the currently implemented legacy static bearer auth path can
+-- actually be enforced with the loaded config.
+authStaticBearerEnabled :: AuthConfig -> Bool
+authStaticBearerEnabled authCfg = authCfg.mode == AuthModeLocal && authCfg.enabled && isJust authCfg.apiKey
+
+-- | The bearer token used by the currently implemented legacy static
+-- bearer auth path. Returns 'Nothing' when that path is not active.
+authStaticBearerToken :: AuthConfig -> Maybe Text
+authStaticBearerToken authCfg
+  | authStaticBearerEnabled authCfg = authCfg.apiKey
+  | otherwise = Nothing

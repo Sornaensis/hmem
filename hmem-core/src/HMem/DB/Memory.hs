@@ -659,6 +659,14 @@ getMemoryLinks pool mid = do
         tgt <- each memorySchema
         where_ $ tgt.memId ==. row.mlTargetId
         where_ $ activeMemory tgt
+      present $ do
+        base <- each memorySchema
+        peer <- each memorySchema
+        where_ $ base.memId ==. lit mid
+        where_ $ activeMemory base
+        where_ $ (peer.memId ==. row.mlSourceId ||. peer.memId ==. row.mlTargetId) &&. peer.memId /=. lit mid
+        where_ $ peer.memWorkspaceId ==. base.memWorkspaceId
+        where_ $ activeMemory peer
       where_ $ row.mlSourceId ==. lit mid ||. row.mlTargetId ==. lit mid
       pure row
   pure $ map linkRowToMemoryLink rows
@@ -947,19 +955,14 @@ findLinksForWorkspace :: Pool Hasql.Connection -> UUID -> IO [MemoryLink]
 findLinksForWorkspace pool wsId = do
   rows <- runSession pool $ Session.statement () $ run $ select $ do
     link <- each memoryLinkSchema
-    present $ do
-      src <- each memorySchema
-      where_ $ src.memId ==. link.mlSourceId
-      where_ $ activeMemory src
-    present $ do
-      tgt <- each memorySchema
-      where_ $ tgt.memId ==. link.mlTargetId
-      where_ $ activeMemory tgt
-    present $ do
-      mem <- each memorySchema
-      where_ $ mem.memWorkspaceId ==. lit wsId
-      where_ $ activeMemory mem
-      where_ $ mem.memId ==. link.mlSourceId ||. mem.memId ==. link.mlTargetId
+    src <- each memorySchema
+    where_ $ src.memId ==. link.mlSourceId
+    where_ $ src.memWorkspaceId ==. lit wsId
+    where_ $ activeMemory src
+    tgt <- each memorySchema
+    where_ $ tgt.memId ==. link.mlTargetId
+    where_ $ tgt.memWorkspaceId ==. lit wsId
+    where_ $ activeMemory tgt
     pure link
   pure $ map linkRowToMemoryLink rows
 
@@ -968,21 +971,15 @@ findByRelation :: Pool Hasql.Connection -> UUID -> RelationType -> IO [MemoryLin
 findByRelation pool wsId relType = do
   rows <- runSession pool $ Session.statement () $ run $ select $ do
     link <- each memoryLinkSchema
-    present $ do
-      src <- each memorySchema
-      where_ $ src.memId ==. link.mlSourceId
-      where_ $ activeMemory src
-    present $ do
-      tgt <- each memorySchema
-      where_ $ tgt.memId ==. link.mlTargetId
-      where_ $ activeMemory tgt
+    src <- each memorySchema
+    where_ $ src.memId ==. link.mlSourceId
+    where_ $ src.memWorkspaceId ==. lit wsId
+    where_ $ activeMemory src
+    tgt <- each memorySchema
+    where_ $ tgt.memId ==. link.mlTargetId
+    where_ $ tgt.memWorkspaceId ==. lit wsId
+    where_ $ activeMemory tgt
     where_ $ link.mlRelationType ==. lit relType
-    -- Match links where at least one endpoint is in the workspace
-    present $ do
-      mem <- each memorySchema
-      where_ $ mem.memWorkspaceId ==. lit wsId
-      where_ $ activeMemory mem
-      where_ $ mem.memId ==. link.mlSourceId ||. mem.memId ==. link.mlTargetId
     pure link
   pure $ map linkRowToMemoryLink rows
 

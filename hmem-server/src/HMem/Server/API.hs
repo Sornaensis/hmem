@@ -35,13 +35,14 @@ import Servant
 import System.IO (stderr)
 
 import HMem.DB.Audit qualified as Audit
+import HMem.DB.Auth qualified as Auth
 import HMem.DB.Category qualified as Cat
 import HMem.DB.Cleanup qualified as Cleanup
 import HMem.DB.Memory qualified as Mem
 import HMem.DB.Overview qualified as Overview
 import HMem.DB.Pool (runSession, runTransaction, DBException(..), PoolMetrics(..), getPoolMetrics)
 import HMem.DB.Project qualified as Proj
-import HMem.DB.RequestContext (currentRequestId, withWorkspaceIdContext)
+import HMem.DB.RequestContext (currentPrincipal, currentRequestId, withWorkspaceIdContext)
 import HMem.DB.SavedView qualified as SV
 import HMem.DB.Schema
 import HMem.DB.Search qualified as Search
@@ -448,6 +449,68 @@ dbErrorDetail = \case
 handleDBErrorsInWorkspace :: UUID -> IO a -> Handler a
 handleDBErrorsInWorkspace wsId io = handleDBErrors (withWorkspaceIdContext (Just wsId) io)
 
+requireGlobalPermissionH :: Pool Hasql.Connection -> Auth.GlobalPermission -> Handler ()
+requireGlobalPermissionH pool permission = do
+  mPrincipal <- liftIO currentPrincipal
+  result <- liftIO $ Auth.authorizeGlobal pool mPrincipal permission
+  either (throwError . authErrorToServerError) pure result
+
+requireAuthenticatedH :: Handler ()
+requireAuthenticatedH = do
+  mPrincipal <- liftIO currentPrincipal
+  case mPrincipal of
+    Just _  -> pure ()
+    Nothing -> throwError (authErrorToServerError Auth.MissingPrincipal)
+
+requireWorkspaceRoleH :: Pool Hasql.Connection -> UUID -> Auth.WorkspaceRole -> Handler ()
+requireWorkspaceRoleH pool wsId role = do
+  mPrincipal <- liftIO currentPrincipal
+  result <- liftIO $ Auth.authorizeWorkspace pool mPrincipal wsId role
+  either (throwError . authErrorToServerError) pure result
+
+requireEntityRoleH :: Pool Hasql.Connection -> Auth.EntityKind -> UUID -> Auth.WorkspaceRole -> Handler Auth.EntityScope
+requireEntityRoleH pool kind entityId role = do
+  scopeResult <- liftIO $ Auth.resolveEntityScopeRequired pool kind entityId
+  scope <- either (throwError . authErrorToServerError) pure scopeResult
+  mPrincipal <- liftIO currentPrincipal
+  authResult <- liftIO $ Auth.authorizeScope pool mPrincipal scope role
+  either (throwError . authErrorToServerError) (const $ pure scope) authResult
+
+requireOptionalWorkspaceRoleH :: Pool Hasql.Connection -> Maybe UUID -> Auth.WorkspaceRole -> Handler ()
+requireOptionalWorkspaceRoleH pool mWsId role = case mWsId of
+  Just wsId -> requireWorkspaceRoleH pool wsId role
+  Nothing   -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
+
+authErrorToServerError :: Auth.AuthorizationError -> ServerError
+authErrorToServerError = \case
+  Auth.MissingPrincipal -> err401
+    { errBody = Aeson.encode $ authErrorBody "unauthorized" "Authentication is required" }
+  Auth.EntityScopeNotFound{} -> err404
+  Auth.MissingGlobalPermission{} -> forbidden "forbidden" "Insufficient global permissions"
+  Auth.MissingWorkspaceRole{} -> forbidden "forbidden" "Insufficient workspace role"
+  Auth.GlobalScopeRequiresSuperadmin -> forbidden "forbidden" "Superadmin permission is required for global scope"
+  where
+    forbidden errType msg = err403 { errBody = Aeson.encode $ authErrorBody errType msg }
+
+    authErrorBody errType msg = object
+      [ "error" .= (errType :: Text)
+      , "message" .= (msg :: Text)
+      ]
+
+requireSameWorkspaceScopesH :: Auth.EntityScope -> Auth.EntityScope -> Handler UUID
+requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope left) (Auth.EntityWorkspaceScope right)
+  | left == right = pure left
+  | otherwise = throwError crossWorkspaceRelationshipError
+requireSameWorkspaceScopesH _ _ = throwError crossWorkspaceRelationshipError
+
+crossWorkspaceRelationshipError :: ServerError
+crossWorkspaceRelationshipError = err400
+  { errBody = Aeson.encode $ object
+      [ "error" .= ("cross_workspace_relationship" :: Text)
+      , "message" .= ("Relationship endpoints require all participating resources to belong to the same workspace" :: Text)
+      ]
+  }
+
 purgeConflict :: ServerError
 purgeConflict = err409
   { errBody = Aeson.encode $ object
@@ -543,10 +606,11 @@ workspaceHandlers pool bc =
   :<|> purgeWorkspaceH
   where
     listWorkspacesH :: Maybe Int -> Maybe Int -> Handler (PaginatedResult Workspace)
-    listWorkspacesH mlimit moffset = handleDBErrors $ do
+    listWorkspacesH mlimit moffset = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
       let lim = capLimit mlimit
           off = capOffset moffset
-      rows <- runSession pool $ Session.statement () $ run $ select $
+      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $
         limit (fromIntegral lim + 1) $ offset (fromIntegral off) $
         orderBy ((\row -> row.wsName) >$< asc) $ do
           row <- each workspaceSchema
@@ -557,6 +621,7 @@ workspaceHandlers pool bc =
 
     createWorkspaceH :: CreateWorkspace -> Handler Workspace
     createWorkspaceH cw = do
+      requireGlobalPermissionH pool Auth.GlobalCreateWorkspace
       rejectValidationErrors (validateCreateWorkspaceInput cw)
       ws <- handleDBErrors $ do
         rows <- runSession pool $ Session.statement () $ run $
@@ -585,6 +650,7 @@ workspaceHandlers pool bc =
 
     getWorkspaceH :: UUID -> Handler Workspace
     getWorkspaceH wsId = do
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
         row <- each workspaceSchema
         where_ $ row.wsId ==. lit wsId
@@ -596,6 +662,7 @@ workspaceHandlers pool bc =
 
     updateWorkspaceH :: UUID -> UpdateWorkspace -> Handler Workspace
     updateWorkspaceH wsId uw = do
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
       rejectValidationErrors (validateUpdateWorkspaceInput uw)
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $
         update Update
@@ -618,6 +685,7 @@ workspaceHandlers pool bc =
 
     deleteWorkspaceH :: UUID -> Handler NoContent
     deleteWorkspaceH wsId = do
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
       ok <- handleDBErrorsInWorkspace wsId $ runTransaction pool $ do
         n <- Session.statement () $ runN $
           update Update
@@ -796,6 +864,7 @@ workspaceHandlers pool bc =
 
     restoreWorkspaceH :: UUID -> Handler NoContent
     restoreWorkspaceH wsId = do
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
       ok <- handleDBErrors $ runTransaction pool $ do
         rows <- Session.statement () $ run $ select $ do
           row <- each workspaceSchema
@@ -859,6 +928,7 @@ workspaceHandlers pool bc =
 
     purgeWorkspaceH :: UUID -> Handler NoContent
     purgeWorkspaceH wsId = do
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
         row <- each workspaceSchema
         where_ $ row.wsId ==. lit wsId
@@ -918,6 +988,7 @@ memoryHandlers pool tracker bc pgvec =
     requireMemoryH mid = handleDBErrors (Mem.getMemory pool mid) >>= maybe (throwError err404) pure
 
     listMemoriesH mws mtype mMinAccessCount mSortBy mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset mcompact = do
+      requireOptionalWorkspaceRoleH pool mws Auth.WorkspaceRoleRead
       let lim = capLimit mlimit
           off = capOffset moffset
           compact = mcompact == Just True
@@ -951,6 +1022,7 @@ memoryHandlers pool tracker bc pgvec =
       pure PaginatedResult { items = items, hasMore = length results > lim }
 
     createMemoryH cm = do
+      requireWorkspaceRoleH pool cm.workspaceId Auth.WorkspaceRoleEdit
       rejectValidationErrors (validateCreateMemoryInput cm)
       mem <- handleDBErrors $ Mem.createMemory pool cm
       emit bc Created ETMemory mem.id (Just $ toJSON mem)
@@ -958,6 +1030,8 @@ memoryHandlers pool tracker bc pgvec =
 
     createMemoryBatchH cms
       | otherwise = do
+          requireAuthenticatedH
+          mapM_ (\wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleEdit) (dedupe $ map (.workspaceId) cms)
           rejectValidationErrors (validateCreateMemoryBatchInput cms)
           handleDBErrors $ Mem.createMemoryBatch pool cms
 
@@ -977,29 +1051,41 @@ memoryHandlers pool tracker bc pgvec =
             , offset = sq.offset
             }
       let compact = mcompact == Just True
+      case sq'.workspaceId of
+        Just wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
+        Nothing -> case sq'.categoryId of
+          Just cid -> do
+            _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleRead
+            pure ()
+          Nothing -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
       rejectValidationErrors (validateSearchQuery sq')
       results <- handleDBErrors $ Mem.searchMemories pool sq'
       pure $ if compact then map compactMemory results else results
 
     contradictionsH mws = do
       wsId <- requireParam "workspace_id" mws
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
       handleDBErrors $ Mem.findByRelation pool wsId Contradicts
 
     byRelationH mws mrt = do
       wsId <- requireParam "workspace_id" mws
       rt   <- requireParam "relation_type" mrt
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
       handleDBErrors $ Mem.findByRelation pool wsId rt
 
     workspaceLinksH mws = do
       wsId <- requireParam "workspace_id" mws
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
       handleDBErrors $ Mem.findLinksForWorkspace pool wsId
 
     getMemoryH mid = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
       mem <- requireMemoryH mid
       liftIO $ trackAccess tracker mid
       pure mem
 
     updateMemoryH mid um = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
       rejectValidationErrors (validateUpdateMemoryInput um)
       mm <- handleDBErrors $ Mem.updateMemory pool mid um
       case mm of
@@ -1009,14 +1095,17 @@ memoryHandlers pool tracker bc pgvec =
           pure mem
 
     deleteMemoryH mid = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Mem.deleteMemory pool mid
       if ok then do emit bc Deleted ETMemory mid Nothing; pure NoContent else throwError err404
 
     restoreMemoryH mid = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Mem.restoreMemory pool mid
       if ok then do emit bc Updated ETMemory mid Nothing; pure NoContent else throwError err404
 
     purgeMemoryH mid = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleAdmin
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
         row <- each memorySchema
         where_ $ row.memId ==. lit mid
@@ -1036,10 +1125,14 @@ memoryHandlers pool tracker bc pgvec =
               pure NoContent
 
     getLinksH mid = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
       _ <- requireMemoryH mid
       handleDBErrors $ Mem.getMemoryLinks pool mid
 
     createLinkH mid cml = do
+      sourceScope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
+      targetScope <- requireEntityRoleH pool Auth.EntityMemory cml.targetId Auth.WorkspaceRoleRead
+      _ <- requireSameWorkspaceScopesH sourceScope targetScope
       mem <- requireMemoryH mid
       _ <- requireMemoryH cml.targetId
       handleDBErrorsInWorkspace mem.workspaceId $ Mem.linkMemories pool mid cml
@@ -1047,26 +1140,34 @@ memoryHandlers pool tracker bc pgvec =
       pure NoContent
 
     unlinkH mid tid rt = do
+      sourceScope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
+      targetScope <- requireEntityRoleH pool Auth.EntityMemory tid Auth.WorkspaceRoleRead
+      _ <- requireSameWorkspaceScopesH sourceScope targetScope
       mem <- requireMemoryH mid
       ok <- handleDBErrorsInWorkspace mem.workspaceId $ Mem.unlinkMemories pool mid tid rt
       if ok then do emit bc Deleted ETMemoryLink mid (Just $ object ["source_id" .= mid, "target_id" .= tid]); pure NoContent else throwError err404
 
     getTagsH mid = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
       _ <- requireMemoryH mid
       handleDBErrors $ Mem.getTags pool mid
 
     setTagsH mid tags = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
       mem <- requireMemoryH mid
       handleDBErrorsInWorkspace mem.workspaceId $ Mem.setTags pool mid tags
       emit bc Updated ETTag mid (Just $ object ["memory_id" .= mid, "tags" .= tags])
       pure NoContent
 
     graphH mid mdepth = do
-      _ <- requireMemoryH mid
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
+      mem <- requireMemoryH mid
       let depth = fromMaybe 2 mdepth
-      handleDBErrors $ Mem.getRelatedGraph pool mid depth
+      graph <- handleDBErrors $ Mem.getRelatedGraph pool mid depth
+      pure $ filterMemoryGraphToWorkspace mem.workspaceId graph
 
     adjustImportanceH mid adj = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
       mm <- handleDBErrors $ Mem.adjustImportance pool mid adj.importance
       case mm of
         Nothing -> throwError err404
@@ -1075,45 +1176,56 @@ memoryHandlers pool tracker bc pgvec =
           pure mem
 
     pinH mid = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
       mm <- handleDBErrors $ Mem.togglePin pool mid True
       maybe (throwError err404) pure mm
 
     unpinH mid = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
       mm <- handleDBErrors $ Mem.togglePin pool mid False
       maybe (throwError err404) pure mm
 
     similarH sq
       | not pgvec = throwError err501
           { errBody = "pgvector extension is not installed; similarity search is unavailable" }
-      | otherwise = handleDBErrors $ Mem.similarMemories pool sq
+      | otherwise = do
+          requireWorkspaceRoleH pool sq.workspaceId Auth.WorkspaceRoleRead
+          handleDBErrors $ Mem.similarMemories pool sq
 
     setEmbeddingH mid vec
       | not pgvec = throwError err501
           { errBody = "pgvector extension is not installed; embeddings are unavailable" }
       | otherwise = do
+          _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
           _ <- requireMemoryH mid
           handleDBErrors $ Mem.setEmbedding pool mid vec
           pure NoContent
 
     batchDeleteH br = do
+      requireAuthenticatedH
+      mapM_ (\mid -> requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit) br.ids
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Mem.deleteMemoryBatch pool br.ids
       emitMany bc Deleted ETMemory br.ids
       pure BatchResult { affected = n }
 
     batchSetTagsH bst = do
-      rejectValidationErrors (validateBatchSetTagsRequest bst)
+      requireAuthenticatedH
       groupedItems <- fmap (Map.toList . Map.fromListWith (<>)) $ mapM resolveTagBatchItem bst.items
+      rejectValidationErrors (validateBatchSetTagsRequest bst)
       counts <- mapM (\(wsId, items) -> handleDBErrorsInWorkspace wsId $ Mem.setTagsBatch pool items) groupedItems
       let n = Prelude.sum counts
       emitMany bc Updated ETTag (map (.memoryId) bst.items)
       pure BatchResult { affected = n }
 
     resolveTagBatchItem item = do
+      _ <- requireEntityRoleH pool Auth.EntityMemory item.memoryId Auth.WorkspaceRoleEdit
       mem <- handleDBErrors (Mem.getMemory pool item.memoryId) >>= maybe (throwError err404) pure
       pure (mem.workspaceId, [(item.memoryId, item.tags)])
 
     batchUpdateH bur = do
+      requireAuthenticatedH
+      mapM_ (\item -> requireEntityRoleH pool Auth.EntityMemory item.id Auth.WorkspaceRoleEdit) bur.items
       rejectValidationErrors (validateBatchUpdateMemoryRequest bur)
       n <- handleDBErrors $ Mem.updateMemoryBatch pool [(item.id, item.update) | item <- bur.items]
       emitMany bc Updated ETMemory (map (.id) bur.items)
@@ -1142,6 +1254,7 @@ projectHandlers pool bc =
     requireProjectH pid = handleDBErrors (Proj.getProject pool pid) >>= maybe (throwError err404) pure
 
     listProjectsH mws mstatus mquery msearchLang mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset = do
+      requireOptionalWorkspaceRoleH pool mws Auth.WorkspaceRoleRead
       let lim = capLimit mlimit
           off = capOffset moffset
           query = ProjectListQuery
@@ -1161,12 +1274,26 @@ projectHandlers pool bc =
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
     createProjectH cp = do
+      requireWorkspaceRoleH pool cp.workspaceId Auth.WorkspaceRoleEdit
+      mapM_ (\parentId -> do
+        parentScope <- requireEntityRoleH pool Auth.EntityProject parentId Auth.WorkspaceRoleRead
+        _ <- requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope cp.workspaceId) parentScope
+        pure ()) cp.parentId
       rejectValidationErrors (validateCreateProjectInput cp)
       proj <- handleDBErrors $ Proj.createProject pool cp
       emit bc Created ETProject proj.id (Just $ toJSON proj)
       pure proj
-    getProjectH pid     = requireProjectH pid
+    getProjectH pid = do
+      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
+      requireProjectH pid
     updateProjectH pid up = do
+      projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
+      case up.parentId of
+        SetTo parentId -> do
+          parentScope <- requireEntityRoleH pool Auth.EntityProject parentId Auth.WorkspaceRoleRead
+          _ <- requireSameWorkspaceScopesH projectScope parentScope
+          pure ()
+        _ -> pure ()
       rejectValidationErrors (validateUpdateProjectInput up)
       mp <- handleDBErrors (Proj.updateProject pool pid up)
       case mp of
@@ -1176,14 +1303,17 @@ projectHandlers pool bc =
           pure proj
 
     deleteProjectH pid = do
+      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Proj.deleteProject pool pid
       if ok then do emit bc Deleted ETProject pid Nothing; pure NoContent else throwError err404
 
     restoreProjectH pid = do
+      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Proj.restoreProject pool pid
       if ok then do emit bc Updated ETProject pid Nothing; pure NoContent else throwError err404
 
     purgeProjectH pid = do
+      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleAdmin
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
         row <- each projectSchema
         where_ $ row.projId ==. lit pid
@@ -1203,6 +1333,9 @@ projectHandlers pool bc =
               pure NoContent
 
     linkMemoryH pid lm = do
+      projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
+      memoryScope <- requireEntityRoleH pool Auth.EntityMemory lm.memoryId Auth.WorkspaceRoleRead
+      _ <- requireSameWorkspaceScopesH projectScope memoryScope
       proj <- requireProjectH pid
       _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
       handleDBErrorsInWorkspace proj.workspaceId $ Proj.linkProjectMemory pool pid lm.memoryId
@@ -1210,13 +1343,17 @@ projectHandlers pool bc =
       pure NoContent
 
     unlinkMemoryH pid mid = do
+      projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
+      memoryScope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
+      _ <- requireSameWorkspaceScopesH projectScope memoryScope
       proj <- requireProjectH pid
       handleDBErrorsInWorkspace proj.workspaceId $ Proj.unlinkProjectMemory pool pid mid
       emit bc Updated ETProject pid (Just $ object ["unlinked_memory" .= mid])
       pure NoContent
 
     getProjectMemoriesH pid mQuery mTags mMinImportance mMemoryType mMinAccessCount = do
-      _ <- requireProjectH pid
+      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
+      project <- requireProjectH pid
       let lq0 = LinkedMemoryListQuery
             { query = mQuery
             , tags = case mTags of [] -> Nothing; xs -> Just xs
@@ -1232,9 +1369,14 @@ projectHandlers pool bc =
             , minAccessCount = fmap (Prelude.max 0) lq0.minAccessCount
             }
       rejectValidationErrors (validateLinkedMemoryListQuery lq)
-      handleDBErrors $ Mem.getProjectMemories pool pid lq
+      mems <- handleDBErrors $ Mem.getProjectMemories pool pid lq
+      pure $ Prelude.filter ((== project.workspaceId) . (.workspaceId)) mems
 
     batchLinkMemoriesH pid blr = do
+      requireAuthenticatedH
+      projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
+      memoryScopes <- mapM (\mid -> requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead) blr.memoryIds
+      mapM_ (requireSameWorkspaceScopesH projectScope) memoryScopes
       proj <- requireProjectH pid
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
       n <- handleDBErrorsInWorkspace proj.workspaceId $ Proj.linkProjectMemoryBatch pool pid blr.memoryIds
@@ -1242,20 +1384,34 @@ projectHandlers pool bc =
       pure BatchResult { affected = n }
 
     batchDeleteH br = do
+      requireAuthenticatedH
+      mapM_ (\pid -> requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit) br.ids
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Proj.deleteProjectBatch pool br.ids
       emitMany bc Deleted ETProject br.ids
       pure BatchResult { affected = n }
 
     batchUpdateH bur = do
+      requireAuthenticatedH
+      mapM_ authorizeProjectUpdateItem bur.items
       rejectValidationErrors (validateBatchUpdateProjectRequest bur)
       n <- handleDBErrors $ Proj.updateProjectBatch pool [(item.id, item.update) | item <- bur.items]
       emitMany bc Updated ETProject (map (.id) bur.items)
       pure BatchResult { affected = n }
 
     projectOverviewH pid mExtraContext = do
+      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
       let extraContext = fromMaybe False mExtraContext
       handleDBErrors (Overview.getProjectOverview pool pid extraContext) >>= maybe (throwError err404) pure
+
+    authorizeProjectUpdateItem item = do
+      projectScope <- requireEntityRoleH pool Auth.EntityProject item.id Auth.WorkspaceRoleEdit
+      case item.update.parentId of
+        SetTo parentId -> do
+          parentScope <- requireEntityRoleH pool Auth.EntityProject parentId Auth.WorkspaceRoleRead
+          _ <- requireSameWorkspaceScopesH projectScope parentScope
+          pure ()
+        _ -> pure ()
 
 -- Task handlers ----------------------------------------------------
 
@@ -1284,6 +1440,12 @@ taskHandlers pool bc =
     requireTaskH tid = handleDBErrors (Task.getTask pool tid) >>= maybe (throwError err404) pure
 
     listTasksH mws mpid mstatus mpriority mquery msearchLang mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset = do
+      case (mws, mpid) of
+        (Just wsId, _) -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
+        (Nothing, Just pid) -> do
+          _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
+          pure ()
+        (Nothing, Nothing) -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
       let lim = capLimit mlimit
           off = capOffset moffset
           query = TaskListQuery
@@ -1305,12 +1467,36 @@ taskHandlers pool bc =
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
     createTaskH ct = do
+      requireWorkspaceRoleH pool ct.workspaceId Auth.WorkspaceRoleEdit
+      mapM_ (\pid -> do
+        projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
+        _ <- requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope ct.workspaceId) projectScope
+        pure ()) ct.projectId
+      mapM_ (\parentId -> do
+        parentScope <- requireEntityRoleH pool Auth.EntityTask parentId Auth.WorkspaceRoleRead
+        _ <- requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope ct.workspaceId) parentScope
+        pure ()) ct.parentId
       rejectValidationErrors (validateCreateTaskInput ct)
       task <- handleDBErrors $ Task.createTask pool ct
       emit bc Created ETTask task.id (Just $ toJSON task)
       pure task
-    getTaskH tid     = requireTaskH tid
+    getTaskH tid = do
+      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleRead
+      requireTaskH tid
     updateTaskH tid ut = do
+      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
+      case ut.projectId of
+        SetTo pid -> do
+          projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
+          _ <- requireSameWorkspaceScopesH taskScope projectScope
+          pure ()
+        _ -> pure ()
+      case ut.parentId of
+        SetTo parentId -> do
+          parentScope <- requireEntityRoleH pool Auth.EntityTask parentId Auth.WorkspaceRoleRead
+          _ <- requireSameWorkspaceScopesH taskScope parentScope
+          pure ()
+        _ -> pure ()
       rejectValidationErrors (validateUpdateTaskInput ut)
       mt <- handleDBErrors (Task.updateTask pool tid ut)
       case mt of
@@ -1320,14 +1506,17 @@ taskHandlers pool bc =
           pure task
 
     deleteTaskH tid = do
+      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Task.deleteTask pool tid
       if ok then do emit bc Deleted ETTask tid Nothing; pure NoContent else throwError err404
 
     restoreTaskH tid = do
+      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Task.restoreTask pool tid
       if ok then do emit bc Updated ETTask tid Nothing; pure NoContent else throwError err404
 
     purgeTaskH tid = do
+      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleAdmin
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
         row <- each taskSchema
         where_ $ row.taskId ==. lit tid
@@ -1347,6 +1536,9 @@ taskHandlers pool bc =
               pure NoContent
 
     linkMemoryH tid lm = do
+      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
+      memoryScope <- requireEntityRoleH pool Auth.EntityMemory lm.memoryId Auth.WorkspaceRoleRead
+      _ <- requireSameWorkspaceScopesH taskScope memoryScope
       task <- requireTaskH tid
       _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
       handleDBErrorsInWorkspace task.workspaceId $ Task.linkTaskMemory pool tid lm.memoryId
@@ -1354,12 +1546,18 @@ taskHandlers pool bc =
       pure NoContent
 
     unlinkMemoryH tid mid = do
+      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
+      memoryScope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
+      _ <- requireSameWorkspaceScopesH taskScope memoryScope
       task <- requireTaskH tid
       handleDBErrorsInWorkspace task.workspaceId $ Task.unlinkTaskMemory pool tid mid
       emit bc Updated ETTask tid (Just $ object ["unlinked_memory" .= mid])
       pure NoContent
 
     addDepH tid ld = do
+      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
+      depScope <- requireEntityRoleH pool Auth.EntityTask ld.dependsOnId Auth.WorkspaceRoleRead
+      _ <- requireSameWorkspaceScopesH taskScope depScope
       task <- requireTaskH tid
       _ <- requireTaskH ld.dependsOnId
       handleDBErrorsInWorkspace task.workspaceId $ Task.addDependency pool tid ld.dependsOnId
@@ -1367,13 +1565,17 @@ taskHandlers pool bc =
       pure NoContent
 
     removeDepH tid depId = do
+      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
+      depScope <- requireEntityRoleH pool Auth.EntityTask depId Auth.WorkspaceRoleRead
+      _ <- requireSameWorkspaceScopesH taskScope depScope
       task <- requireTaskH tid
       handleDBErrorsInWorkspace task.workspaceId $ Task.removeDependency pool tid depId
       emit bc Deleted ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= depId])
       pure NoContent
 
     getTaskMemoriesH tid mQuery mTags mMinImportance mMemoryType mMinAccessCount = do
-      _ <- requireTaskH tid
+      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleRead
+      task <- requireTaskH tid
       let lq0 = LinkedMemoryListQuery
             { query = mQuery
             , tags = case mTags of [] -> Nothing; xs -> Just xs
@@ -1389,40 +1591,71 @@ taskHandlers pool bc =
             , minAccessCount = fmap (Prelude.max 0) lq0.minAccessCount
             }
       rejectValidationErrors (validateLinkedMemoryListQuery lq)
-      handleDBErrors $ Mem.getTaskMemories pool tid lq
+      mems <- handleDBErrors $ Mem.getTaskMemories pool tid lq
+      pure $ Prelude.filter ((== task.workspaceId) . (.workspaceId)) mems
 
     taskOverviewH tid mExtraContext = do
+      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleRead
       let extraContext = fromMaybe False mExtraContext
       handleDBErrors (Overview.getTaskOverview pool tid extraContext) >>= maybe (throwError err404) pure
 
     contextInfoH tid mDetailLevel = do
+      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleRead
       let level = fromMaybe ContextMedium mDetailLevel
       handleDBErrors (Overview.getContextInfo pool tid level) >>= maybe (throwError err404) pure
 
     batchDeleteH br = do
+      requireAuthenticatedH
+      mapM_ (\tid -> requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit) br.ids
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Task.deleteTaskBatch pool br.ids
       emitMany bc Deleted ETTask br.ids
       pure BatchResult { affected = n }
 
     batchMoveH bmr = do
+      requireAuthenticatedH
+      taskScopes <- mapM (\tid -> requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit) bmr.taskIds
+      mapM_ (\pid -> do
+        projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
+        mapM_ (requireSameWorkspaceScopesH projectScope) taskScopes) bmr.projectId
       rejectValidationErrors (validateBatchMoveTasksRequest bmr)
       n <- handleDBErrors $ Task.moveTasksBatch pool bmr.taskIds bmr.projectId
       emitMany bc Updated ETTask bmr.taskIds
       pure BatchResult { affected = n }
 
     batchUpdateH bur = do
+      requireAuthenticatedH
+      mapM_ authorizeTaskUpdateItem bur.items
       rejectValidationErrors (validateBatchUpdateTaskRequest bur)
       n <- handleDBErrors $ Task.updateTaskBatch pool [(item.id, item.update) | item <- bur.items]
       emitMany bc Updated ETTask (map (.id) bur.items)
       pure BatchResult { affected = n }
 
     batchLinkMemoriesH tid blr = do
+      requireAuthenticatedH
+      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
+      memoryScopes <- mapM (\mid -> requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead) blr.memoryIds
+      mapM_ (requireSameWorkspaceScopesH taskScope) memoryScopes
       task <- requireTaskH tid
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
       n <- handleDBErrorsInWorkspace task.workspaceId $ Task.linkTaskMemoryBatch pool tid blr.memoryIds
       emit bc Updated ETTask tid Nothing
       pure BatchResult { affected = n }
+
+    authorizeTaskUpdateItem item = do
+      taskScope <- requireEntityRoleH pool Auth.EntityTask item.id Auth.WorkspaceRoleEdit
+      case item.update.projectId of
+        SetTo pid -> do
+          projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
+          _ <- requireSameWorkspaceScopesH taskScope projectScope
+          pure ()
+        _ -> pure ()
+      case item.update.parentId of
+        SetTo parentId -> do
+          parentScope <- requireEntityRoleH pool Auth.EntityTask parentId Auth.WorkspaceRoleRead
+          _ <- requireSameWorkspaceScopesH taskScope parentScope
+          pure ()
+        _ -> pure ()
 
 -- Cleanup handlers -------------------------------------------------
 
@@ -1432,14 +1665,19 @@ cleanupHandlers pool _bc =
   :<|> getPoliciesH
   :<|> upsertPolicyH
   where
-    runCleanupH req = handleDBErrors $ Cleanup.runCleanup pool req.workspaceId
+    runCleanupH req = do
+      requireWorkspaceRoleH pool req.workspaceId Auth.WorkspaceRoleEdit
+      handleDBErrors $ Cleanup.runCleanup pool req.workspaceId
     getPoliciesH mws mlimit moffset = do
       wsId <- requireParam "workspace_id" mws
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
       let lim = capLimit mlimit
           off = capOffset moffset
       results <- handleDBErrors $ Cleanup.getCleanupPolicies pool wsId (Just (lim + 1)) (Just off)
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-    upsertPolicyH p = handleDBErrors $ Cleanup.upsertCleanupPolicy pool p
+    upsertPolicyH p = do
+      requireWorkspaceRoleH pool p.workspaceId Auth.WorkspaceRoleEdit
+      handleDBErrors $ Cleanup.upsertCleanupPolicy pool p
 
 -- Category handlers ------------------------------------------------
 
@@ -1483,6 +1721,7 @@ categoryHandlers pool bc =
           pure (mem.workspaceId, [mid])
 
     listCategoriesH mws mlimit moffset = do
+      requireOptionalWorkspaceRoleH pool mws Auth.WorkspaceRoleRead
       let lim = capLimit mlimit
           off = capOffset moffset
       results <- case mws of
@@ -1491,18 +1730,23 @@ categoryHandlers pool bc =
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
     listGlobalCategoriesH mlimit moffset = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
       let lim = capLimit mlimit
           off = capOffset moffset
       results <- handleDBErrors $ Cat.listGlobalCategories pool (Just (lim + 1)) (Just off)
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
     createCategoryH cc = do
+      requireOptionalWorkspaceRoleH pool cc.workspaceId Auth.WorkspaceRoleEdit
       rejectValidationErrors (validateCreateMemoryCategoryInput cc)
       cat <- handleDBErrors $ Cat.createCategory pool cc
       emit bc Created ETCategory cat.id (Just $ toJSON cat)
       pure cat
-    getCategoryH cid   = requireCategoryH cid
+    getCategoryH cid = do
+      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleRead
+      requireCategoryH cid
     updateCategoryH cid uc = do
+      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
       rejectValidationErrors (validateUpdateMemoryCategoryInput uc)
       mc <- handleDBErrors (Cat.updateCategory pool cid uc)
       case mc of
@@ -1512,14 +1756,17 @@ categoryHandlers pool bc =
           pure cat
 
     deleteCategoryH cid = do
+      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Cat.deleteCategory pool cid
       if ok then do emit bc Deleted ETCategory cid Nothing; pure NoContent else throwError err404
 
     restoreCategoryH cid = do
+      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Cat.restoreCategory pool cid
       if ok then do emit bc Updated ETCategory cid Nothing; pure NoContent else throwError err404
 
     purgeCategoryH cid = do
+      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleAdmin
       rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
         row <- each memoryCategorySchema
         where_ $ row.mcId ==. lit cid
@@ -1539,10 +1786,20 @@ categoryHandlers pool bc =
               pure NoContent
 
     getCategoryMemoriesH cid = do
-      _ <- requireCategoryH cid
-      handleDBErrors $ Mem.getCategoryMemories pool cid
+      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleRead
+      cat <- requireCategoryH cid
+      mems <- handleDBErrors $ Mem.getCategoryMemories pool cid
+      pure $ case cat.workspaceId of
+        Just wsId -> Prelude.filter ((== wsId) . (.workspaceId)) mems
+        Nothing   -> mems
 
     batchLinkMemoriesH cid blr = do
+      requireAuthenticatedH
+      catScope <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
+      memoryScopes <- mapM (\mid -> requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead) blr.memoryIds
+      case catScope of
+        Auth.EntityWorkspaceScope{} -> mapM_ (requireSameWorkspaceScopesH catScope) memoryScopes
+        Auth.EntityGlobalScope -> pure ()
       cat <- requireCategoryH cid
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
       groupedIds <- categoryMemoryIdsByWorkspaceH cat blr.memoryIds
@@ -1552,12 +1809,21 @@ categoryHandlers pool bc =
       pure BatchResult { affected = n }
 
     batchDeleteH br = do
+      requireAuthenticatedH
+      mapM_ (\cid -> requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit) br.ids
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Cat.deleteCategoryBatch pool br.ids
       emitMany bc Deleted ETCategory br.ids
       pure BatchResult { affected = n }
 
     linkH cl = do
+      catScope <- requireEntityRoleH pool Auth.EntityCategory cl.categoryId Auth.WorkspaceRoleEdit
+      memoryScope <- requireEntityRoleH pool Auth.EntityMemory cl.memoryId Auth.WorkspaceRoleEdit
+      case catScope of
+        Auth.EntityWorkspaceScope{} -> do
+          _ <- requireSameWorkspaceScopesH catScope memoryScope
+          pure ()
+        Auth.EntityGlobalScope -> pure ()
       cat <- requireCategoryH cl.categoryId
       _ <- handleDBErrors (Mem.getMemory pool cl.memoryId) >>= maybe (throwError err404) pure
       wsId <- categoryWorkspaceIdH cat [cl.memoryId]
@@ -1566,6 +1832,13 @@ categoryHandlers pool bc =
       pure NoContent
 
     unlinkH cl = do
+      catScope <- requireEntityRoleH pool Auth.EntityCategory cl.categoryId Auth.WorkspaceRoleEdit
+      memoryScope <- requireEntityRoleH pool Auth.EntityMemory cl.memoryId Auth.WorkspaceRoleEdit
+      case catScope of
+        Auth.EntityWorkspaceScope{} -> do
+          _ <- requireSameWorkspaceScopesH catScope memoryScope
+          pure ()
+        Auth.EntityGlobalScope -> pure ()
       cat <- requireCategoryH cl.categoryId
       wsId <- categoryWorkspaceIdH cat [cl.memoryId]
       handleDBErrorsInWorkspace wsId $ Cat.unlinkMemoryCategory pool cl.memoryId cl.categoryId
@@ -1585,36 +1858,44 @@ workspaceGroupHandlers pool bc =
   :<|> listMembersH
   where
     listGroupsH mlimit moffset = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
       let lim = capLimit mlimit
           off = capOffset moffset
       results <- handleDBErrors $ WG.listGroups pool (Just (lim + 1)) (Just off)
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
     createGroupH cg = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
       rejectValidationErrors (validateCreateWorkspaceGroupInput cg)
       grp <- handleDBErrors $ WG.createGroup pool cg
       emit bc Created ETWorkspaceGroup grp.id (Just $ toJSON grp)
       pure grp
 
     getGroupH gid = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
       mg <- handleDBErrors $ WG.getGroup pool gid
       maybe (throwError err404) pure mg
 
     deleteGroupH gid = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
       ok <- handleDBErrors $ WG.deleteGroup pool gid
       if ok then do emit bc Deleted ETWorkspaceGroup gid Nothing; pure NoContent else throwError err404
 
     addMemberH gid req = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
       handleDBErrors $ WG.addMember pool gid req.workspaceId
       emit bc Updated ETWorkspaceGroup gid (Just $ object ["added_workspace" .= req.workspaceId])
       pure NoContent
 
     removeMemberH gid wsId = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
       handleDBErrors $ WG.removeMember pool gid wsId
       emit bc Updated ETWorkspaceGroup gid (Just $ object ["removed_workspace" .= wsId])
       pure NoContent
 
-    listMembersH gid = handleDBErrors $ WG.listGroupMembers pool gid
+    listMembersH gid = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
+      handleDBErrors $ WG.listGroupMembers pool gid
 
 -- Audit log handlers -----------------------------------------------
 
@@ -1627,6 +1908,7 @@ auditHandlers pool bc =
     listAuditH :: Maybe Text -> Maybe Text -> Maybe AuditAction -> Maybe UTCTime -> Maybe UTCTime
                -> Maybe Int -> Maybe Int -> Handler (PaginatedResult AuditLogEntry)
     listAuditH mEntityType mEntityId mAction mSince mUntil mlimit moffset = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
       let lim = capLimit mlimit
           off = capOffset moffset
           q = AuditLogQuery
@@ -1643,6 +1925,7 @@ auditHandlers pool bc =
 
     getAuditH :: UUID -> Handler AuditLogEntry
     getAuditH auditId = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
       mEntry <- handleDBErrors $ Audit.getAuditEntry pool auditId
       case mEntry of
         Just entry -> pure entry
@@ -1650,6 +1933,7 @@ auditHandlers pool bc =
 
     revertAuditH :: UUID -> Handler RevertResult
     revertAuditH auditId = do
+      requireGlobalPermissionH pool Auth.GlobalSuperadmin
       mEntry <- handleDBErrors $ Audit.getAuditEntry pool auditId
       entry <- case mEntry of
         Just e  -> pure e
@@ -1790,6 +2074,7 @@ auditHandlers pool bc =
 
 activityHandlers :: Pool Hasql.Connection -> Server ActivityAPI
 activityHandlers pool mws mEntityType mlimit = do
+  requireOptionalWorkspaceRoleH pool mws Auth.WorkspaceRoleRead
   let lim = capLimit mlimit
   results <- handleDBErrors $ Mem.getRecentActivity pool mws mEntityType (Just (lim + 1))
   pure PaginatedResult { items = take lim results, hasMore = length results > lim }
@@ -1812,20 +2097,25 @@ savedViewHandlers pool bc =
 
     listViewsH mws mlimit moffset = do
       wsId <- requireParam "workspace_id" mws
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
       let lim = capLimit mlimit
           off = capOffset moffset
       results <- handleDBErrors $ SV.listSavedViews pool wsId (Just (lim + 1)) (Just off)
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
     createViewH csv = do
+      requireWorkspaceRoleH pool csv.workspaceId Auth.WorkspaceRoleEdit
       rejectValidationErrors (validateCreateSavedViewInput csv)
       sv <- handleDBErrors $ SV.createSavedView pool csv
       emit bc Created ETSavedView sv.id (Just $ toJSON sv)
       pure sv
 
-    getViewH vid = requireViewH vid
+    getViewH vid = do
+      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleRead
+      requireViewH vid
 
     updateViewH vid usv = do
+      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleEdit
       rejectValidationErrors (validateUpdateSavedViewInput usv)
       msv <- handleDBErrors (SV.updateSavedView pool vid usv)
       case msv of
@@ -1835,14 +2125,17 @@ savedViewHandlers pool bc =
           pure sv
 
     deleteViewH vid = do
+      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ SV.deleteSavedView pool vid
       if ok then do emit bc Deleted ETSavedView vid Nothing; pure NoContent else throwError err404
 
     restoreViewH vid = do
+      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ SV.restoreSavedView pool vid
       if ok then do emit bc Updated ETSavedView vid Nothing; pure NoContent else throwError err404
 
     purgeViewH vid = do
+      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleAdmin
       ok <- handleDBErrors $ SV.purgeSavedView pool vid
       if ok then pure NoContent else throwError err409
         { errBody = Aeson.encode $ object
@@ -1852,6 +2145,7 @@ savedViewHandlers pool bc =
         }
 
     executeViewH vid mlimit' moffset' mdetail = do
+      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleRead
       view <- requireViewH vid
       let lim = capLimit mlimit'
           off = capOffset moffset'
@@ -1861,6 +2155,13 @@ savedViewHandlers pool bc =
           case Aeson.fromJSON @SearchQuery view.queryParams of
             Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
             Aeson.Success sq -> do
+              case sq.workspaceId of
+                Just wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
+                Nothing -> case sq.categoryId of
+                  Just cid -> do
+                    _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleRead
+                    pure ()
+                  Nothing -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
               let sq0 = SearchQuery
                     { workspaceId = sq.workspaceId, query = sq.query
                     , memoryType = sq.memoryType, tags = sq.tags
@@ -1880,6 +2181,7 @@ savedViewHandlers pool bc =
           case Aeson.fromJSON @MemoryListQuery view.queryParams of
             Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
             Aeson.Success mq -> do
+              requireOptionalWorkspaceRoleH pool mq.workspaceId Auth.WorkspaceRoleRead
               let mq0 = MemoryListQuery
                     { workspaceId = mq.workspaceId, memoryType = mq.memoryType
                     , minAccessCount = mq.minAccessCount, sortBy = mq.sortBy
@@ -1900,6 +2202,7 @@ savedViewHandlers pool bc =
           case Aeson.fromJSON @ProjectListQuery view.queryParams of
             Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
             Aeson.Success pq -> do
+              requireOptionalWorkspaceRoleH pool pq.workspaceId Auth.WorkspaceRoleRead
               let pq' = ProjectListQuery
                     { workspaceId = pq.workspaceId, status = pq.status
                     , query = pq.query, searchLanguage = pq.searchLanguage
@@ -1912,6 +2215,12 @@ savedViewHandlers pool bc =
           case Aeson.fromJSON @TaskListQuery view.queryParams of
             Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
             Aeson.Success tq -> do
+              case (tq.workspaceId, tq.projectId) of
+                (Just wsId, _) -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
+                (Nothing, Just pid) -> do
+                  _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
+                  pure ()
+                (Nothing, Nothing) -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
               let tq' = TaskListQuery
                     { workspaceId = tq.workspaceId, projectId = tq.projectId
                     , status = tq.status, priority = tq.priority
@@ -1932,6 +2241,7 @@ savedViewHandlers pool bc =
                 _ -> Nothing
               mws = parseField "workspace_id"
               met = parseField "entity_type"
+          requireOptionalWorkspaceRoleH pool mws Auth.WorkspaceRoleRead
           results <- handleDBErrors $ Mem.getRecentActivity pool mws met (Just (lim + 1))
           pure $ Aeson.toJSON PaginatedResult { items = take lim results, hasMore = length results > lim }
         other -> throwError err400
@@ -1947,6 +2257,16 @@ savedViewHandlers pool bc =
 
 searchHandler :: Pool Hasql.Connection -> Server SearchAPI
 searchHandler pool usq = do
+  case usq.workspaceId of
+    Just wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
+    Nothing -> case (usq.categoryId, usq.projectId) of
+      (Just cid, _) -> do
+        _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleRead
+        pure ()
+      (Nothing, Just pid) -> do
+        _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
+        pure ()
+      (Nothing, Nothing) -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
   rejectValidationErrors (validateUnifiedSearchQuery usq)
   handleDBErrors $ Search.searchAll pool usq
 
@@ -1967,6 +2287,16 @@ rejectValidationErrors errs = throwError err400
       , "details" .= errs
       ]
   }
+
+dedupe :: Ord a => [a] -> [a]
+dedupe = Map.keys . Map.fromList . map (\x -> (x, ()))
+
+filterMemoryGraphToWorkspace :: UUID -> MemoryGraph -> MemoryGraph
+filterMemoryGraphToWorkspace wsId graph =
+  let scopedMemories = Prelude.filter ((== wsId) . (.workspaceId)) graph.memories
+      scopedIds = map (.id) scopedMemories
+      scopedLinks = Prelude.filter (\link -> link.sourceId `elem` scopedIds && link.targetId `elem` scopedIds) graph.links
+  in graph { memories = scopedMemories, links = scopedLinks }
 
 -- | Clamp a user-supplied limit to [1, 200], defaulting to 50.
 capLimit :: Maybe Int -> Int

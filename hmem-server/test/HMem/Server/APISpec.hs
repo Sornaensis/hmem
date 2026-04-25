@@ -73,6 +73,16 @@ testRateLimitCfg = Config.defaultConfig
       }
   }
 
+deployedAuthCfg :: Config.HMemConfig
+deployedAuthCfg = Config.defaultConfig
+  { Config.auth = Config.defaultConfig.auth
+      { Config.mode = Config.AuthModeDeployed
+      , Config.enabled = False
+      , Config.apiKey = Nothing
+      , Config.local = Config.LocalAuthConfig { Config.bootstrapEnabled = False, Config.botTokens = [] }
+      }
+  }
+
 runReqWithHeaders :: Application -> Method -> BS.ByteString -> [(HeaderName, BS.ByteString)] -> LBS.ByteString -> IO SResponse
 runReqWithHeaders app method fullPath headers body =
   runSession (srequest $ SRequest req body) app
@@ -275,6 +285,35 @@ spec = around withApp $ do
         (object ["parent_id" .= grandchild.id])
       respStatus cycleResp `shouldBe` 409
 
+    it "rejects cross-workspace project parents" $ \app -> do
+      wsAResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("project-parent-ws-a" :: T.Text)])
+      let Just wsA = decode (respBody wsAResp) :: Maybe Workspace
+
+      wsBResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("project-parent-ws-b" :: T.Text)])
+      let Just wsB = decode (respBody wsBResp) :: Maybe Workspace
+
+      parentResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= wsB.id, "name" .= ("Parent B" :: T.Text)])
+      let Just parentB = decode (respBody parentResp) :: Maybe Project
+
+      createResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= wsA.id, "name" .= ("Child A" :: T.Text), "parent_id" .= parentB.id])
+      respStatus createResp `shouldBe` 400
+
+      childResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= wsA.id, "name" .= ("Existing Child A" :: T.Text)])
+      let Just childA = decode (respBody childResp) :: Maybe Project
+
+      updateResp <- putJSON app (uuidPath "/api/v1/projects" childA.id)
+        (object ["parent_id" .= parentB.id])
+      respStatus updateResp `shouldBe` 400
+
+      batchResp <- postJSON app "/api/v1/projects/batch-update"
+        (object ["items" .= [object ["id" .= childA.id, "parent_id" .= parentB.id]]])
+      respStatus batchResp `shouldBe` 400
+
   describe "task flow" $ do
     it "creates project, task, marks done" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"
@@ -378,6 +417,55 @@ spec = around withApp $ do
         (object ["parent_id" .= grandchild.id])
       respStatus cycleResp `shouldBe` 409
 
+    it "rejects cross-workspace task project and parent moves" $ \app -> do
+      wsAResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-parent-ws-a" :: T.Text)])
+      let Just wsA = decode (respBody wsAResp) :: Maybe Workspace
+
+      wsBResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-parent-ws-b" :: T.Text)])
+      let Just wsB = decode (respBody wsBResp) :: Maybe Workspace
+
+      projAResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= wsA.id, "name" .= ("Project A" :: T.Text)])
+      let Just projA = decode (respBody projAResp) :: Maybe Project
+
+      projBResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= wsB.id, "name" .= ("Project B" :: T.Text)])
+      let Just projB = decode (respBody projBResp) :: Maybe Project
+
+      parentBResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= wsB.id, "project_id" .= projB.id, "title" .= ("Parent B" :: T.Text)])
+      let Just parentB = decode (respBody parentBResp) :: Maybe Task
+
+      createWithProjectResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= wsA.id, "project_id" .= projB.id, "title" .= ("Bad Project" :: T.Text)])
+      respStatus createWithProjectResp `shouldBe` 400
+
+      createWithParentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= wsA.id, "project_id" .= projA.id, "parent_id" .= parentB.id, "title" .= ("Bad Parent" :: T.Text)])
+      respStatus createWithParentResp `shouldBe` 400
+
+      taskAResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= wsA.id, "project_id" .= projA.id, "title" .= ("Task A" :: T.Text)])
+      let Just taskA = decode (respBody taskAResp) :: Maybe Task
+
+      updateProjectResp <- putJSON app (uuidPath "/api/v1/tasks" taskA.id)
+        (object ["project_id" .= projB.id])
+      respStatus updateProjectResp `shouldBe` 400
+
+      updateParentResp <- putJSON app (uuidPath "/api/v1/tasks" taskA.id)
+        (object ["parent_id" .= parentB.id])
+      respStatus updateParentResp `shouldBe` 400
+
+      batchUpdateResp <- postJSON app "/api/v1/tasks/batch-update"
+        (object ["items" .= [object ["id" .= taskA.id, "project_id" .= projB.id]]])
+      respStatus batchUpdateResp `shouldBe` 400
+
+      batchMoveResp <- postJSON app "/api/v1/tasks/batch-move"
+        (object ["task_ids" .= [taskA.id], "project_id" .= projB.id])
+      respStatus batchMoveResp `shouldBe` 400
+
   describe "search" $ do
     it "full-text search finds matching memories" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"
@@ -465,6 +553,114 @@ spec = around withApp $ do
           [("Authorization", "Bearer test-secret")]
           ""
         respStatus resp `shouldBe` 200
+
+  describe "server authorization enforcement" $ do
+    it "leaves health unauthenticated in deployed mode" $ \_ ->
+      withAppConfig deployedAuthCfg $ \app -> do
+        resp <- get_ app "/api/v1/health"
+        respStatus resp `shouldBe` 200
+
+    it "denies protected endpoints without a principal in deployed mode" $ \_ ->
+      withAppConfig deployedAuthCfg $ \app -> do
+        listResp <- get_ app "/api/v1/workspaces"
+        respStatus listResp `shouldBe` 401
+
+        createResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("denied-ws" :: T.Text)])
+        respStatus createResp `shouldBe` 401
+
+    it "authorizes protected endpoints before semantic validation" $ \_ ->
+      withAppEnvConfig deployedAuthCfg $ \env app -> do
+        ws <- createTestWorkspace env "auth-before-validation"
+        resp <- postJSON app "/api/v1/memories"
+          (object
+            [ "workspace_id" .= ws.id
+            , "content" .= T.replicate (maxMemoryContentBytes + 1) "x"
+            , "memory_type" .= ("short_term" :: T.Text)
+            ])
+        respStatus resp `shouldBe` 401
+
+        memorySearchResp <- postJSON app "/api/v1/memories/search"
+          (object ["min_access_count" .= (-1 :: Int)])
+        respStatus memorySearchResp `shouldBe` 401
+
+        unifiedSearchResp <- postJSON app "/api/v1/search"
+          (object ["query" .= ("" :: T.Text)])
+        respStatus unifiedSearchResp `shouldBe` 401
+
+        memoryBatchResp <- postJSON app "/api/v1/memories/batch"
+          (toJSON ([] :: [Value]))
+        respStatus memoryBatchResp `shouldBe` 401
+
+        projectBatchResp <- postJSON app "/api/v1/projects/batch-delete"
+          (object ["ids" .= ([] :: [UUID])])
+        respStatus projectBatchResp `shouldBe` 401
+
+        taskBatchResp <- postJSON app "/api/v1/tasks/batch-move"
+          (object ["task_ids" .= ([] :: [UUID])])
+        respStatus taskBatchResp `shouldBe` 401
+
+        categoryBatchResp <- postJSON app "/api/v1/categories/batch-delete"
+          (object ["ids" .= ([] :: [UUID])])
+        respStatus categoryBatchResp `shouldBe` 401
+
+    it "rejects cross-workspace project-memory links" $ \app -> do
+      wsAResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("link-ws-a" :: T.Text)])
+      let Just wsA = decode (respBody wsAResp) :: Maybe Workspace
+
+      wsBResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("link-ws-b" :: T.Text)])
+      let Just wsB = decode (respBody wsBResp) :: Maybe Workspace
+
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= wsA.id, "name" .= ("Project A" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      memResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= wsB.id
+          , "content" .= ("Memory B" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          ])
+      let Just mem = decode (respBody memResp) :: Maybe Memory
+
+      linkResp <- postJSON app (uuidPath "/api/v1/projects" proj.id <> "/memories")
+        (object ["memory_id" .= mem.id])
+      respStatus linkResp `shouldBe` 400
+
+    it "rejects cross-workspace memory links and task dependencies" $ \app -> do
+      wsAResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("relation-ws-a" :: T.Text)])
+      let Just wsA = decode (respBody wsAResp) :: Maybe Workspace
+
+      wsBResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("relation-ws-b" :: T.Text)])
+      let Just wsB = decode (respBody wsBResp) :: Maybe Workspace
+
+      memAResp <- postJSON app "/api/v1/memories"
+        (object ["workspace_id" .= wsA.id, "content" .= ("A" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
+      let Just memA = decode (respBody memAResp) :: Maybe Memory
+
+      memBResp <- postJSON app "/api/v1/memories"
+        (object ["workspace_id" .= wsB.id, "content" .= ("B" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
+      let Just memB = decode (respBody memBResp) :: Maybe Memory
+
+      memoryLinkResp <- postJSON app (uuidPath "/api/v1/memories" memA.id <> "/links")
+        (object ["target_id" .= memB.id, "relation_type" .= ("related" :: T.Text)])
+      respStatus memoryLinkResp `shouldBe` 400
+
+      taskAResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= wsA.id, "title" .= ("Task A" :: T.Text)])
+      let Just taskA = decode (respBody taskAResp) :: Maybe Task
+
+      taskBResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= wsB.id, "title" .= ("Task B" :: T.Text)])
+      let Just taskB = decode (respBody taskBResp) :: Maybe Task
+
+      depResp <- postJSON app (uuidPath "/api/v1/tasks" taskA.id <> "/dependencies")
+        (object ["depends_on_id" .= taskB.id])
+      respStatus depResp `shouldBe` 400
 
   describe "request principal resolution" $ do
     it "keeps local bot synthetic authority local-mode only" $ \_ -> do

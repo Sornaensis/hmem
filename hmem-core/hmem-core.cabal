@@ -18,6 +18,7 @@ library
   exposed-modules:
       HMem.Config
       HMem.DB.Audit
+      HMem.DB.Auth
       HMem.DB.Category
       HMem.DB.Cleanup
       HMem.DB.Memory
@@ -129,6 +130,7 @@ test-suite hmem-core-test
   other-modules:
       HMem.ConfigSpec
       HMem.DB.AuditSpec
+      HMem.DB.AuthSpec
       HMem.DB.CleanupSpec
       HMem.DB.MemorySpec
       HMem.DB.ProjectSpec

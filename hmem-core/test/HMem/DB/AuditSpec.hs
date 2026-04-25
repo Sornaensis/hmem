@@ -81,6 +81,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
           { actorType = ActorBot
           , actorId = "bot-test"
           , actorLabel = "Bot Test"
+          , authority = PrincipalNoAuthority
           }) $
         withWorkspaceIdContext (Just ws.id) $
           createMemory env.pool CreateMemory

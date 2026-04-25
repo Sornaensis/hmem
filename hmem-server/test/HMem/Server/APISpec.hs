@@ -19,9 +19,10 @@ import Test.Hspec
 import HMem.Config (CorsConfig(..))
 import HMem.Config qualified as Config
 import HMem.DB.Memory qualified as Mem
+import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
 import HMem.DB.TestHarness
 import HMem.Server.AccessTracker (newAccessTracker)
-import HMem.Server.App (mkApp)
+import HMem.Server.App (mkApp, resolveRequestPrincipal)
 import HMem.Server.WebSocket (newWSState)
 import HMem.Types
 
@@ -108,6 +109,12 @@ respStatus = statusCode . simpleStatus
 
 respBody :: SResponse -> LBS.ByteString
 respBody = simpleBody
+
+principalActorType :: Principal -> ActorType
+principalActorType Principal { actorType = value } = value
+
+principalAuthority :: Principal -> PrincipalAuthority
+principalAuthority Principal { authority = value } = value
 
 uuidPath :: BS.ByteString -> UUID -> BS.ByteString
 uuidPath prefix uid = prefix <> "/" <> encodeUtf8 (T.pack (show uid))
@@ -458,6 +465,39 @@ spec = around withApp $ do
           [("Authorization", "Bearer test-secret")]
           ""
         respStatus resp `shouldBe` 200
+
+  describe "request principal resolution" $ do
+    it "keeps local bot synthetic authority local-mode only" $ \_ -> do
+      let localCfg = Config.defaultConfig
+            { Config.auth = Config.defaultConfig.auth
+                { Config.mode = Config.AuthModeLocal
+                , Config.local = Config.LocalAuthConfig
+                    { Config.bootstrapEnabled = True
+                    , Config.botTokens = [Config.LocalBotTokenConfig { Config.label = "Agent", Config.token = "bot-secret" }]
+                    }
+                }
+            }
+          deployedCfg = localCfg
+            { Config.auth = localCfg.auth { Config.mode = Config.AuthModeDeployed }
+            }
+          req = defaultRequest
+            { Wai.requestHeaders = [("Authorization", "Bearer bot-secret")]
+            }
+
+      fmap principalActorType (resolveRequestPrincipal localCfg.auth req) `shouldBe` Just ActorBot
+      fmap principalAuthority (resolveRequestPrincipal localCfg.auth req) `shouldBe` Just PrincipalSyntheticLocalSuperadmin
+      resolveRequestPrincipal deployedCfg.auth req `shouldBe` Nothing
+
+    it "keeps legacy static bearer synthetic authority local-mode only" $ \_ -> do
+      let deployedCfg = testAuthCfg
+            { Config.auth = testAuthCfg.auth { Config.mode = Config.AuthModeDeployed }
+            }
+          req = defaultRequest
+            { Wai.requestHeaders = [("Authorization", "Bearer test-secret")]
+            }
+
+      fmap principalAuthority (resolveRequestPrincipal testAuthCfg.auth req) `shouldBe` Just PrincipalSyntheticLocalSuperadmin
+      resolveRequestPrincipal deployedCfg.auth req `shouldBe` Nothing
 
   describe "request context actor attribution" $ do
     it "records the synthetic local user for normal local HTTP requests" $ \_ ->

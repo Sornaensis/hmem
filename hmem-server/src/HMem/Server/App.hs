@@ -29,7 +29,7 @@ import Network.Wai.Middleware.Cors
 import Servant (Proxy (..), serve)
 
 import HMem.Config (AuthConfig(..), AuthMode(..), LocalAuthConfig(..), LocalBotTokenConfig(..), CorsConfig(..), RateLimitConfig(..), authStaticBearerEnabled, authStaticBearerToken)
-import HMem.DB.RequestContext (ActorType(..), Principal(..), RequestContext(..), withRequestContext, emptyRequestContext)
+import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), RequestContext(..), withRequestContext, emptyRequestContext)
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Server.API (HMemAPI, server)
 import HMem.Server.OpenAPI (openApiSpec)
@@ -85,6 +85,7 @@ localUserPrincipal = Principal
   { actorType = ActorUser
   , actorId = "local-user"
   , actorLabel = "Local User"
+  , authority = PrincipalSyntheticLocalSuperadmin
   }
 
 resolveBearerPrincipal :: AuthConfig -> Wai.Request -> Maybe Principal
@@ -99,10 +100,15 @@ localBotPrincipal authCfg token
   let configuredBotTokens = case authCfg of
         AuthConfig { local = LocalAuthConfig { botTokens = tokens } } -> tokens
   cfg <- find matchesToken configuredBotTokens
+  -- Transitional local compatibility: configured local bot tokens keep the
+  -- same broad local authority as the implicit local user while preserving
+  -- bot attribution. Deployed bot/PAT resolution should use PrincipalGrantUser
+  -- so the DB user/membership grant model remains authoritative.
   pure Principal
     { actorType = ActorBot
     , actorId = "local-bot:" <> botLabel cfg
     , actorLabel = botLabel cfg
+    , authority = PrincipalSyntheticLocalSuperadmin
     }
   where
     matchesToken bot = case bot of
@@ -118,10 +124,13 @@ legacyPrincipal :: AuthConfig -> Text -> Maybe Principal
 legacyPrincipal authCfg token = do
   expected <- authStaticBearerToken authCfg
   if token == expected
+    -- Transitional local compatibility for the legacy static-bearer path.
+    -- This path is config-gated to AuthModeLocal by authStaticBearerToken.
     then Just Principal
       { actorType = ActorBot
       , actorId = "legacy-static-bearer"
       , actorLabel = "Legacy Static Bearer"
+      , authority = PrincipalSyntheticLocalSuperadmin
       }
     else Nothing
 

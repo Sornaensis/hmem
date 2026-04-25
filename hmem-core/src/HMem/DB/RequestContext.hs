@@ -1,5 +1,6 @@
 module HMem.DB.RequestContext
   ( ActorType(..)
+  , PrincipalAuthority(..)
   , Principal(..)
   , RequestContext(..)
   , emptyRequestContext
@@ -27,10 +28,17 @@ data ActorType
   | ActorBot
   deriving stock (Show, Eq)
 
+data PrincipalAuthority
+  = PrincipalNoAuthority
+  | PrincipalGrantUser !UUID
+  | PrincipalSyntheticLocalSuperadmin
+  deriving stock (Show, Eq)
+
 data Principal = Principal
   { actorType  :: !ActorType
   , actorId    :: !Text
   , actorLabel :: !Text
+  , authority  :: !PrincipalAuthority
   } deriving stock (Show, Eq)
 
 data RequestContext = RequestContext

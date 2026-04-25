@@ -104,6 +104,7 @@ data DeployedAuthConfig = DeployedAuthConfig
   , audience    :: !(Maybe Text)
   , discoveryUrl :: !(Maybe Text)
   , jwksUrl     :: !(Maybe Text)
+  , jwks        :: !(Maybe Aeson.Value)
   , tokenLookup :: !TokenLookupMode
   } deriving stock (Show, Eq)
 
@@ -257,6 +258,7 @@ instance FromJSON DeployedAuthConfig where
     <*> o .:? "audience"
     <*> o .:? "discovery_url"
     <*> o .:? "jwks_url"
+    <*> o .:? "jwks"
     <*> o .:? "token_lookup" .!= TokenLookupDatabase
 
 instance ToJSON DeployedAuthConfig where
@@ -265,6 +267,7 @@ instance ToJSON DeployedAuthConfig where
     , maybe [] (\v -> ["audience" .= v]) deployedCfg.audience
     , maybe [] (\v -> ["discovery_url" .= v]) deployedCfg.discoveryUrl
     , maybe [] (\v -> ["jwks_url" .= v]) deployedCfg.jwksUrl
+    , maybe [] (\v -> ["jwks" .= v]) deployedCfg.jwks
     , ["token_lookup" .= deployedCfg.tokenLookup]
     ]
 
@@ -378,6 +381,7 @@ defDeployedAuth = DeployedAuthConfig
   , audience = Nothing
   , discoveryUrl = Nothing
   , jwksUrl = Nothing
+  , jwks = Nothing
   , tokenLookup = TokenLookupDatabase
   }
 
@@ -541,12 +545,16 @@ validateConfig cfg = (warnings, corrected)
           | otherwise = []
 
         deployedWarns
-          | a.mode == AuthModeDeployed
-          , a.deployed.issuer == Nothing
-          , a.deployed.discoveryUrl == Nothing
-          , a.deployed.jwksUrl == Nothing =
-              ["auth.mode is deployed but no issuer, discovery_url, or jwks_url is configured"]
-          | otherwise = []
+          | a.mode /= AuthModeDeployed = []
+          | otherwise = concat
+              [ ["auth.mode is deployed but JWT issuer is not configured; provider JWTs will not resolve" | a.deployed.issuer == Nothing]
+              , ["auth.mode is deployed but JWT audience is not configured; provider JWTs will not resolve" | a.deployed.audience == Nothing]
+              , ["auth.mode is deployed but no discovery_url, jwks_url, or inline jwks is configured; provider JWTs will not resolve" | noJwksSource]
+              , ["auth.deployed.discovery_url should use https" | maybe False (not . T.isPrefixOf "https://") a.deployed.discoveryUrl]
+              , ["auth.deployed.jwks_url should use https" | maybe False (not . T.isPrefixOf "https://") a.deployed.jwksUrl]
+              ]
+          where
+            noJwksSource = a.deployed.discoveryUrl == Nothing && a.deployed.jwksUrl == Nothing && a.deployed.jwks == Nothing
 
     validateRateLimit rateLimitCfg =
       let (ws1, rps) = clampFieldD "rate_limit.requests_per_second" 0.1 10000.0 rateLimitCfg.rlRequestsPerSecond

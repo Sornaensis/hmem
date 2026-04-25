@@ -63,6 +63,7 @@ library
     , base >=4.7 && <5
     , bytestring
     , containers
+    , crypton
     , directory
     , filepath
     , hasql
@@ -109,6 +110,7 @@ executable run-integration-tests
     , base >=4.7 && <5
     , bytestring
     , containers
+    , crypton
     , directory
     , filepath
     , hasql
@@ -166,6 +168,7 @@ test-suite hmem-core-test
     , base >=4.7 && <5
     , bytestring
     , containers
+    , crypton
     , directory
     , filepath
     , hasql

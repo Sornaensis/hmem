@@ -11,6 +11,7 @@ dependencies:
   - aeson >= 2.0
   - async
   - containers
+  - crypton
   - text
   - bytestring
   - time

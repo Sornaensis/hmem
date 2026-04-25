@@ -136,6 +136,7 @@ spec = do
                     , audience = Just "hmem-web"
                     , discoveryUrl = Nothing
                     , jwksUrl = Just "https://issuer.example/.well-known/jwks.json"
+                    , jwks = Nothing
                     , tokenLookup = TokenLookupDatabase
                     }
                 }

@@ -100,6 +100,11 @@ wsMiddleware authCfg st app req respond
 --   5. Unregister on disconnect.
 wsApp :: AuthConfig -> WSState -> WS.ServerApp
 wsApp authCfg st pending
+  | authCfg.mode == AuthModeDeployed =
+      -- Deployed WebSocket ticket/session auth and workspace-scoped delivery are
+      -- tracked separately. Until that lands, fail closed rather than accepting
+      -- unauthenticated deployed event streams.
+      WS.rejectRequest pending "WebSocket auth is not enabled in deployed mode"
   | authStaticBearerEnabled authCfg = case tokenFromRequest (WS.pendingRequest pending) of
       Just token
         | authorizedToken authCfg (TE.decodeUtf8Lenient token) -> accept

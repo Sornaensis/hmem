@@ -23,7 +23,10 @@ dependencies:
   - websockets
   - fast-logger
   - http-types
+  - http-client
+  - http-client-tls
   - openapi3
+  - jose
   - servant-openapi3
   - lens
   - insert-ordered-containers
@@ -108,6 +111,8 @@ tests:
       - hspec-discover
       - QuickCheck
       - aeson
+      - jose
+      - lens
       - text
       - uuid
       - hasql

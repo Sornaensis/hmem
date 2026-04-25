@@ -5,8 +5,10 @@ module HMem.Server.APISpec (spec) where
 import Data.Aeson (decode, encode, object, (.=), toJSON, Value(..))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Control.Lens ((&), (?~))
 import Data.Functor.Contravariant (contramap)
 import Data.Maybe (isJust)
+import Data.String (fromString)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Time.Format.ISO8601 (iso8601Show)
@@ -21,6 +23,9 @@ import Network.Wai qualified as Wai
 import Network.Wai.Test (SResponse(..), runSession, srequest, SRequest(..))
 import Test.Hspec
 
+import Crypto.JWT qualified as JWT
+import Crypto.JOSE.JWK qualified as JWK
+import Crypto.JOSE.JWS qualified as JWS
 import HMem.Config (CorsConfig(..))
 import HMem.Config qualified as Config
 import HMem.DB.Auth qualified as Auth
@@ -73,6 +78,7 @@ testAuthCfg = Config.defaultConfig
           , Config.audience = Nothing
           , Config.discoveryUrl = Nothing
           , Config.jwksUrl = Nothing
+          , Config.jwks = Nothing
           , Config.tokenLookup = Config.TokenLookupDatabase
           }
       }
@@ -155,6 +161,113 @@ createTestUserStatement = Statement.Statement sql encoder decoder True
       contramap fst (Enc.param (Enc.nonNullable Enc.bool)) <>
       contramap snd (Enc.param (Enc.nonNullable Enc.bool))
     decoder = Dec.singleRow (Dec.column (Dec.nonNullable Dec.uuid))
+
+createTestUserWithSubject :: TestEnv -> T.Text -> Bool -> Bool -> IO UUID
+createTestUserWithSubject env authSubject canCreateWorkspace isSuperadmin =
+  DBPool.runSession env.pool $ Session.statement (authSubject, canCreateWorkspace, isSuperadmin) createTestUserWithSubjectStatement
+
+createTestUserWithSubjectStatement :: Statement.Statement (T.Text, Bool, Bool) UUID
+createTestUserWithSubjectStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "INSERT INTO users (auth_subject, display_name, can_create_workspace, is_superadmin) \
+          \VALUES ($1, $1, $2, $3) RETURNING id"
+    encoder =
+      contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.text)) <>
+      contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.bool)) <>
+      contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.bool))
+    decoder = Dec.singleRow (Dec.column (Dec.nonNullable Dec.uuid))
+
+createAccessToken :: TestEnv -> UUID -> ActorType -> T.Text -> T.Text -> IO UUID
+createAccessToken env grantUserId actor tokenLabel token =
+  DBPool.runSession env.pool $ Session.statement
+    (grantUserId, actorTypeText actor, tokenLabel, Auth.accessTokenHash token)
+    createAccessTokenStatement
+
+createAccessTokenStatement :: Statement.Statement (UUID, T.Text, T.Text, T.Text) UUID
+createAccessTokenStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "INSERT INTO access_tokens (grant_user_id, actor_type, actor_label, token_hash) \
+          \VALUES ($1, $2::actor_type_enum, $3, $4) RETURNING id"
+    encoder =
+      contramap (\(a,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text)) <>
+      contramap (\(_,_,c,_) -> c) (Enc.param (Enc.nonNullable Enc.text)) <>
+      contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nonNullable Enc.text))
+    decoder = Dec.singleRow (Dec.column (Dec.nonNullable Dec.uuid))
+
+revokeAccessToken :: TestEnv -> UUID -> IO ()
+revokeAccessToken env tokenId =
+  DBPool.runSession env.pool $ Session.statement tokenId revokeAccessTokenStatement
+
+revokeAccessTokenStatement :: Statement.Statement UUID ()
+revokeAccessTokenStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "UPDATE access_tokens SET revoked_at = now() WHERE id = $1"
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.noResult
+
+expireAccessToken :: TestEnv -> UUID -> IO ()
+expireAccessToken env tokenId =
+  DBPool.runSession env.pool $ Session.statement tokenId expireAccessTokenStatement
+
+expireAccessTokenStatement :: Statement.Statement UUID ()
+expireAccessTokenStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "UPDATE access_tokens \
+          \SET created_at = now() - interval '2 seconds', expires_at = now() - interval '1 second' \
+          \WHERE id = $1"
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.noResult
+
+accessTokenLastUsedIsSet :: TestEnv -> UUID -> IO Bool
+accessTokenLastUsedIsSet env tokenId =
+  DBPool.runSession env.pool $ Session.statement tokenId accessTokenLastUsedIsSetStatement
+
+accessTokenLastUsedIsSetStatement :: Statement.Statement UUID Bool
+accessTokenLastUsedIsSetStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT last_used_at IS NOT NULL FROM access_tokens WHERE id = $1"
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))
+
+actorTypeText :: ActorType -> T.Text
+actorTypeText ActorUser = "user"
+actorTypeText ActorBot = "bot"
+
+deployedJwtCfg :: JWK.JWKSet -> Config.HMemConfig
+deployedJwtCfg jwkSet = deployedAuthCfg
+  { Config.auth = deployedAuthCfg.auth
+      { Config.deployed = deployedAuthCfg.auth.deployed
+          { Config.issuer = Just testJwtIssuer
+          , Config.audience = Just testJwtAudience
+          , Config.jwks = Just (toJSON jwkSet)
+          }
+      }
+  }
+
+testJwtIssuer :: T.Text
+testJwtIssuer = "https://issuer.example"
+
+testJwtAudience :: T.Text
+testJwtAudience = "hmem-web"
+
+testJwtSecret :: T.Text
+testJwtSecret = "0123456789abcdef0123456789abcdef"
+
+signTestJwt :: T.Text -> T.Text -> IO T.Text
+signTestJwt secret subject = do
+  let jwk = JWK.fromOctets (encodeUtf8 secret)
+      asStringOrUri = fromString . T.unpack
+      claims = JWT.emptyClaimsSet
+        & JWT.claimIss ?~ asStringOrUri testJwtIssuer
+        & JWT.claimAud ?~ JWT.Audience [asStringOrUri testJwtAudience]
+        & JWT.claimSub ?~ asStringOrUri subject
+  signedResult <- (JWT.runJOSE $ do
+    alg <- JWK.bestJWSAlg jwk
+    JWT.signClaims jwk (JWS.newJWSHeader ((), alg)) claims) :: IO (Either JWT.JWTError JWT.SignedJWT)
+  case signedResult of
+    Left err -> expectationFailure (show err) >> pure ""
+    Right signed -> pure . decodeUtf8 . LBS.toStrict $ JWT.encodeCompact signed
 
 grantPrincipal :: UUID -> Principal
 grantPrincipal userId = Principal
@@ -832,6 +945,130 @@ spec = around withApp $ do
 
       fmap principalAuthority (resolveRequestPrincipal testAuthCfg.auth req) `shouldBe` Just PrincipalSyntheticLocalSuperadmin
       resolveRequestPrincipal deployedCfg.auth req `shouldBe` Nothing
+
+    it "resolves deployed PATs through persisted access_tokens" $ \_ ->
+      withTestEnv $ \env -> do
+        grantUserId <- createTestUser env True False
+        tokenId <- createAccessToken env grantUserId ActorBot "Deploy Bot" "pat-secret"
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        let cfg = deployedAuthCfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
+        app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        wsResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer pat-secret")]
+          (encode (object ["name" .= ("pat-principal-ws" :: T.Text)]))
+        respStatus wsResp `shouldBe` 200
+        accessTokenLastUsedIsSet env tokenId >>= (`shouldBe` True)
+        let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+        tokenAuditRows <- getAuditLogRows env.pool "access_token" (T.pack $ show tokenId)
+        let lastTokenAudit = last tokenAuditRows
+        lastTokenAudit.actorType `shouldBe` Just "bot"
+        lastTokenAudit.actorId `shouldBe` Just (T.pack $ show tokenId)
+        lastTokenAudit.actorLabel `shouldBe` Just "Deploy Bot"
+
+        rows <- getAuditLogRows env.pool "workspace" (T.pack (show ws.id))
+        let [created] = rows
+        created.actorType `shouldBe` Just "bot"
+        created.actorId `shouldBe` Just (T.pack $ show tokenId)
+        created.actorLabel `shouldBe` Just "Deploy Bot"
+
+    it "rejects revoked deployed PATs" $ \_ ->
+      withTestEnv $ \env -> do
+        grantUserId <- createTestUser env True False
+        tokenId <- createAccessToken env grantUserId ActorBot "Revoked Bot" "revoked-pat-secret"
+        revokeAccessToken env tokenId
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        let cfg = deployedAuthCfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
+        app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        wsResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer revoked-pat-secret")]
+          (encode (object ["name" .= ("revoked-pat-ws" :: T.Text)]))
+        respStatus wsResp `shouldBe` 401
+
+    it "rejects expired deployed PATs" $ \_ ->
+      withTestEnv $ \env -> do
+        grantUserId <- createTestUser env True False
+        tokenId <- createAccessToken env grantUserId ActorBot "Expired Bot" "expired-pat-secret"
+        expireAccessToken env tokenId
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        let cfg = deployedAuthCfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
+        app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        wsResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer expired-pat-secret")]
+          (encode (object ["name" .= ("expired-pat-ws" :: T.Text)]))
+        respStatus wsResp `shouldBe` 401
+
+    it "validates deployed JWTs and maps subject claims to users" $ \_ ->
+      withTestEnv $ \env -> do
+        userId <- createTestUserWithSubject env "provider-user-1" True False
+        let jwk = JWK.fromOctets (encodeUtf8 testJwtSecret)
+            cfg = (deployedJwtCfg (JWK.JWKSet [jwk])) { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
+        token <- signTestJwt testJwtSecret "provider-user-1"
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        wsResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer " <> encodeUtf8 token)]
+          (encode (object ["name" .= ("jwt-principal-ws" :: T.Text)]))
+        respStatus wsResp `shouldBe` 200
+        let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+        rows <- getAuditLogRows env.pool "workspace" (T.pack (show ws.id))
+        let [created] = rows
+        created.actorType `shouldBe` Just "user"
+        created.actorId `shouldBe` Just (T.pack $ show userId)
+        created.actorLabel `shouldBe` Just "provider-user-1"
+
+    it "rejects deployed JWTs that fail validation" $ \_ ->
+      withTestEnv $ \env -> do
+        _userId <- createTestUserWithSubject env "provider-user-2" True False
+        let jwk = JWK.fromOctets (encodeUtf8 testJwtSecret)
+            cfg = (deployedJwtCfg (JWK.JWKSet [jwk]))
+              { Config.auth = (deployedJwtCfg (JWK.JWKSet [jwk])).auth
+                  { Config.deployed = (deployedJwtCfg (JWK.JWKSet [jwk])).auth.deployed
+                      { Config.audience = Just "different-audience" }
+                  }
+              , Config.cors = CorsConfig { allowedOrigins = ["*"] }
+              }
+        token <- signTestJwt testJwtSecret "provider-user-2"
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        wsResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer " <> encodeUtf8 token)]
+          (encode (object ["name" .= ("jwt-denied-ws" :: T.Text)]))
+        respStatus wsResp `shouldBe` 401
+
+    it "fails closed for non-HTTPS deployed JWKS URLs" $ \_ ->
+      withTestEnv $ \env -> do
+        _userId <- createTestUserWithSubject env "provider-user-3" True False
+        let cfg = deployedAuthCfg
+              { Config.auth = deployedAuthCfg.auth
+                  { Config.deployed = deployedAuthCfg.auth.deployed
+                      { Config.issuer = Just testJwtIssuer
+                      , Config.audience = Just testJwtAudience
+                      , Config.jwksUrl = Just "http://issuer.example/jwks.json"
+                      }
+                  }
+              , Config.cors = CorsConfig { allowedOrigins = ["*"] }
+              }
+        token <- signTestJwt testJwtSecret "provider-user-3"
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        wsResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer " <> encodeUtf8 token)]
+          (encode (object ["name" .= ("jwt-http-jwks-denied-ws" :: T.Text)]))
+        respStatus wsResp `shouldBe` 401
 
   describe "request context actor attribution" $ do
     it "records the synthetic local user for normal local HTTP requests" $ \_ ->

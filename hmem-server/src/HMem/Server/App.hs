@@ -2,15 +2,20 @@ module HMem.Server.App
   ( mkApp
   , requestIdMiddleware
   , resolveRequestPrincipal
+  , resolveRequestPrincipalIO
   , authMiddleware
   ) where
 
 import Control.Applicative ((<|>))
-import Data.IORef (atomicModifyIORef', newIORef)
+import Control.Exception (SomeException, try)
+import Control.Lens ((&), (.~), (^.), preview)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
 import Data.Map.Strict qualified as Map
-import Data.Aeson (encode, object, (.=))
+import Data.Aeson (FromJSON, Value(..), decode, encode, fromJSON, object, Result(..), (.:), (.=))
+import Data.Aeson qualified as Aeson
 import Data.ByteString.Char8 qualified as BS8
+import Data.ByteString.Lazy qualified as LBS
 import Data.List (find)
 import Data.Pool (Pool)
 import Data.Text (Text)
@@ -20,6 +25,8 @@ import Data.Time (UTCTime, NominalDiffTime, diffUTCTime, getCurrentTime)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import Hasql.Connection qualified as Hasql
+import Network.HTTP.Client (httpLbs, newManager, parseRequest, responseBody)
+import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.Wai (Application, Middleware)
 import Network.Wai qualified as Wai
 import Data.ByteString (isPrefixOf)
@@ -28,8 +35,11 @@ import Network.Wai.Middleware.Cors
     (cors, simpleCorsResourcePolicy, corsRequestHeaders, corsMethods, corsOrigins, CorsResourcePolicy(..))
 import Servant (Proxy (..), serve)
 
-import HMem.Config (AuthConfig(..), AuthMode(..), LocalAuthConfig(..), LocalBotTokenConfig(..), CorsConfig(..), RateLimitConfig(..), authStaticBearerEnabled, authStaticBearerToken)
-import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), RequestContext(..), withRequestContext, emptyRequestContext)
+import Crypto.JWT qualified as JWT
+import Crypto.JOSE.JWK qualified as JWK
+import HMem.Config (AuthConfig(..), AuthMode(..), DeployedAuthConfig(..), LocalAuthConfig(..), LocalBotTokenConfig(..), CorsConfig(..), RateLimitConfig(..), TokenLookupMode(..), authStaticBearerEnabled, authStaticBearerToken)
+import HMem.DB.Auth qualified as Auth
+import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, withPrincipalContext, withRequestContext, emptyRequestContext)
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Server.API (HMemAPI, server)
 import HMem.Server.OpenAPI (openApiSpec)
@@ -40,13 +50,15 @@ import HMem.Server.WebSocket (WSState, broadcast, wsMiddleware)
 mkApp :: Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
 mkApp logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
   rateLimit <- rateLimitMiddleware rateLimitCfg
+  jwksCache <- newIORef Nothing
   let bc = broadcast wsState
-  pure $ requestIdMiddleware authCfg
+  pure $ requestIdMiddleware
        $ logger
-       $ wsMiddleware authCfg wsState
        $ staticMiddleware mStaticDir
        $ corsMiddleware corsCfg
        $ rateLimit
+       $ wsMiddleware authCfg wsState
+       $ principalContextMiddleware jwksCache authCfg pool
        $ authMiddleware authCfg
        $ openApiMiddleware
        $ serve (Proxy @HMemAPI) (server pool tracker bc pgvec)
@@ -55,18 +67,27 @@ mkApp logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec 
 -- If the incoming request already has an X-Request-Id header, it is
 -- preserved; otherwise a new UUID v4 is generated.  The chosen id is
 -- echoed back in the response headers so callers can correlate logs.
-requestIdMiddleware :: AuthConfig -> Middleware
-requestIdMiddleware authCfg app req respond = do
+requestIdMiddleware :: Middleware
+requestIdMiddleware app req respond = do
   rid <- case lookup "X-Request-Id" (Wai.requestHeaders req) <|> lookup "X-Request-ID" (Wai.requestHeaders req) of
     Just existing -> pure existing
     Nothing       -> TE.encodeUtf8 . UUID.toText <$> UUID.nextRandom
   let req' = req { Wai.requestHeaders = ("X-Request-Id", rid) : Wai.requestHeaders req }
       reqCtx = emptyRequestContext
         { requestId = Just (TE.decodeUtf8Lenient rid)
-        , principal = resolveRequestPrincipal authCfg req
         }
   withRequestContext reqCtx $
     app req' $ \resp -> respond $ Wai.mapResponseHeaders (("X-Request-Id", rid) :) resp
+
+type JWKSetCache = IORef (Maybe (UTCTime, JWK.JWKSet))
+
+principalContextMiddleware :: JWKSetCache -> AuthConfig -> Pool Hasql.Connection -> Middleware
+principalContextMiddleware jwksCache authCfg pool app req respond = do
+  existingPrincipal <- currentPrincipal
+  resolvedPrincipal <- case existingPrincipal of
+    Just principal -> pure (Just principal)
+    Nothing -> resolveRequestPrincipalWithCache jwksCache pool authCfg req
+  withPrincipalContext resolvedPrincipal (app req respond)
 
 resolveRequestPrincipal :: AuthConfig -> Wai.Request -> Maybe Principal
 resolveRequestPrincipal authCfg req =
@@ -77,8 +98,120 @@ resolveRequestPrincipal authCfg req =
       , localBootstrapEnabled cfg = Just localUserPrincipal
       | otherwise = Nothing
 
-    localBootstrapEnabled cfg = case cfg of
-      AuthConfig { local = LocalAuthConfig { bootstrapEnabled = enabled } } -> enabled
+resolveRequestPrincipalIO :: Pool Hasql.Connection -> AuthConfig -> Wai.Request -> IO (Maybe Principal)
+resolveRequestPrincipalIO pool authCfg req = do
+  jwksCache <- newIORef Nothing
+  resolveRequestPrincipalWithCache jwksCache pool authCfg req
+
+resolveRequestPrincipalWithCache :: JWKSetCache -> Pool Hasql.Connection -> AuthConfig -> Wai.Request -> IO (Maybe Principal)
+resolveRequestPrincipalWithCache jwksCache pool authCfg req = case authCfg.mode of
+  AuthModeLocal -> pure (resolveRequestPrincipal authCfg req)
+  AuthModeDeployed -> do
+    mBearerPrincipal <- case bearerToken req of
+      Nothing -> pure Nothing
+      Just token -> resolveDeployedBearerPrincipal jwksCache pool authCfg.deployed token
+    pure mBearerPrincipal
+
+resolveDeployedBearerPrincipal :: JWKSetCache -> Pool Hasql.Connection -> DeployedAuthConfig -> Text -> IO (Maybe Principal)
+resolveDeployedBearerPrincipal jwksCache pool deployedCfg token = do
+  mPatPrincipal <- case deployedCfg.tokenLookup of
+    TokenLookupDatabase -> Auth.resolveAccessTokenPrincipal pool token
+  case mPatPrincipal of
+    Just resolved -> do
+      withPrincipalContext (Just resolved.principal) $
+        Auth.touchAccessTokenLastUsed pool resolved.tokenId
+      pure (Just resolved.principal)
+    Nothing        -> resolveJwtPrincipal jwksCache pool deployedCfg token
+
+resolveJwtPrincipal :: JWKSetCache -> Pool Hasql.Connection -> DeployedAuthConfig -> Text -> IO (Maybe Principal)
+resolveJwtPrincipal jwksCache pool deployedCfg token = case (deployedCfg.issuer, deployedCfg.audience) of
+  (Just expectedIssuer, Just expectedAudience) -> do
+    decoded <- JWT.runJOSE (JWT.decodeCompact (LBS.fromStrict $ TE.encodeUtf8 token)) :: IO (Either JWT.JWTError JWT.SignedJWT)
+    case decoded of
+      Left _err -> pure Nothing
+      Right signedJwt -> do
+        mJwkSet <- loadJWKSet jwksCache deployedCfg
+        case mJwkSet of
+          Nothing -> pure Nothing
+          Just jwkSet -> do
+            let settings = jwtValidationSettings expectedIssuer expectedAudience
+            verified <- JWT.runJOSE (JWT.verifyClaims settings jwkSet signedJwt) :: IO (Either JWT.JWTError JWT.ClaimsSet)
+            case verified of
+              Left _err -> pure Nothing
+              Right claims -> case preview JWT.string =<< (claims ^. JWT.claimSub) of
+                Nothing -> pure Nothing
+                Just subject -> Auth.resolveUserPrincipalByAuthSubject pool subject
+  _ -> pure Nothing
+
+jwtValidationSettings :: Text -> Text -> JWT.JWTValidationSettings
+jwtValidationSettings expectedIssuer expectedAudience =
+  JWT.defaultJWTValidationSettings audienceMatches
+    & JWT.issuerPredicate .~ issuerMatches
+  where
+    audienceMatches value = stringOrUriText value == Just expectedAudience
+
+    issuerMatches value = stringOrUriText value == Just expectedIssuer
+
+    stringOrUriText value =
+      preview JWT.string value <|> fmap (T.pack . show) (preview JWT.uri value)
+
+loadJWKSet :: JWKSetCache -> DeployedAuthConfig -> IO (Maybe JWK.JWKSet)
+loadJWKSet jwksCache deployedCfg = case deployedCfg.jwks of
+  Just inline -> pure (parseJWKSet inline)
+  Nothing -> do
+    now <- getCurrentTime
+    cached <- readIORef jwksCache
+    case cached of
+      Just (loadedAt, jwkSet)
+        | diffUTCTime now loadedAt < jwksCacheTtl -> pure (Just jwkSet)
+      _ -> do
+        mBody <- loadJWKSetBody deployedCfg
+        let mJwkSet = mBody >>= decode
+        maybe (pure ()) (\jwkSet -> writeIORef jwksCache (Just (now, jwkSet))) mJwkSet
+        pure mJwkSet
+
+jwksCacheTtl :: NominalDiffTime
+jwksCacheTtl = 300
+
+parseJWKSet :: Value -> Maybe JWK.JWKSet
+parseJWKSet value = case fromJSON value of
+  Success jwkSet -> Just jwkSet
+  Error _ -> Nothing
+
+loadJWKSetBody :: DeployedAuthConfig -> IO (Maybe LBS.ByteString)
+loadJWKSetBody deployedCfg = case deployedCfg.jwksUrl of
+  Just url -> fetchJson url
+  Nothing -> case deployedCfg.discoveryUrl of
+    Nothing -> pure Nothing
+    Just discovery -> do
+      mDiscoveryBody <- fetchJson discovery
+      case mDiscoveryBody >>= decode of
+        Just (OidcDiscovery discoveredIssuer jwksUri)
+          | Just discoveredIssuer == deployedCfg.issuer -> fetchJson jwksUri
+        _ -> pure Nothing
+
+data OidcDiscovery = OidcDiscovery Text Text
+
+instance FromJSON OidcDiscovery where
+  parseJSON = Aeson.withObject "OidcDiscovery" $ \o -> OidcDiscovery
+    <$> o .: "issuer"
+    <*> o .: "jwks_uri"
+
+fetchJson :: Text -> IO (Maybe LBS.ByteString)
+fetchJson url
+  | not ("https://" `T.isPrefixOf` url) = pure Nothing
+  | otherwise = do
+      result <- try $ do
+        parsed <- parseRequest (T.unpack url)
+        manager <- newManager tlsManagerSettings
+        responseBody <$> httpLbs parsed manager
+      case result of
+        Left (_ :: SomeException) -> pure Nothing
+        Right body -> pure (Just body)
+
+localBootstrapEnabled :: AuthConfig -> Bool
+localBootstrapEnabled cfg = case cfg of
+  AuthConfig { local = LocalAuthConfig { bootstrapEnabled = enabled } } -> enabled
 
 localUserPrincipal :: Principal
 localUserPrincipal = Principal

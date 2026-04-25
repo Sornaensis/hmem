@@ -6,6 +6,7 @@ module HMem.DB.Auth
   , roleSatisfies
   , GlobalPermission(..)
   , UserGrants(..)
+  , ResolvedAccessToken(..)
   , WorkspaceMembership(..)
   , UpsertWorkspaceMembership(..)
 
@@ -20,6 +21,10 @@ module HMem.DB.Auth
     -- * Grant lookup
   , getUserGrants
   , getWorkspaceRole
+  , accessTokenHash
+  , resolveAccessTokenPrincipal
+  , touchAccessTokenLastUsed
+  , resolveUserPrincipalByAuthSubject
   , listWorkspaceMemberships
   , upsertWorkspaceMembership
   , deleteWorkspaceMembership
@@ -39,9 +44,13 @@ import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32, Int64)
 import Data.Pool (Pool)
 import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
+import Data.UUID qualified as UUID
 import Control.Monad (void)
+import Crypto.Hash (Digest, SHA256, hash)
 import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
@@ -50,7 +59,7 @@ import Hasql.Statement qualified as Statement
 import GHC.Generics (Generic)
 
 import HMem.DB.Pool (runSession)
-import HMem.DB.RequestContext (Principal(..), PrincipalAuthority(..))
+import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
 
 ------------------------------------------------------------------------
 -- Roles and permissions
@@ -91,6 +100,11 @@ data GlobalPermission
 data UserGrants = UserGrants
   { userCanCreateWorkspace :: !Bool
   , userIsSuperadmin       :: !Bool
+  } deriving stock (Show, Eq)
+
+data ResolvedAccessToken = ResolvedAccessToken
+  { tokenId   :: !UUID
+  , principal :: !Principal
   } deriving stock (Show, Eq)
 
 data WorkspaceMembership = WorkspaceMembership
@@ -222,6 +236,26 @@ getWorkspaceRole pool workspaceId userId = do
   mRoleText <- runSession pool $ Session.statement (workspaceId, userId) workspaceRoleStatement
   pure (mRoleText >>= roleFromText)
 
+-- | Canonical v1 access-token digest format for persisted PAT/bot tokens.
+-- Operators should store this value in @access_tokens.token_hash@ rather than
+-- raw bearer material.
+accessTokenHash :: Text -> Text
+accessTokenHash token = "sha256:" <> T.pack (show digest)
+  where
+    digest = hash (TE.encodeUtf8 token) :: Digest SHA256
+
+resolveAccessTokenPrincipal :: Pool Hasql.Connection -> Text -> IO (Maybe ResolvedAccessToken)
+resolveAccessTokenPrincipal pool token =
+  runSession pool $ Session.statement (accessTokenHash token) accessTokenPrincipalStatement
+
+touchAccessTokenLastUsed :: Pool Hasql.Connection -> UUID -> IO ()
+touchAccessTokenLastUsed pool tokenId =
+  runSession pool $ Session.statement tokenId touchAccessTokenLastUsedStatement
+
+resolveUserPrincipalByAuthSubject :: Pool Hasql.Connection -> Text -> IO (Maybe Principal)
+resolveUserPrincipalByAuthSubject pool authSubject =
+  runSession pool $ Session.statement authSubject userPrincipalByAuthSubjectStatement
+
 listWorkspaceMemberships :: Pool Hasql.Connection -> UUID -> Maybe Int -> Maybe Int -> IO [WorkspaceMembership]
 listWorkspaceMemberships pool workspaceId mlimit moffset = do
   let lim = fromIntegral (maybe 50 (max 1 . min 201) mlimit) :: Int32
@@ -280,6 +314,64 @@ workspaceRoleStatement = Statement.Statement sql encoder decoder True
       contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
       contramap snd (Enc.param (Enc.nonNullable Enc.uuid))
     decoder = Dec.rowMaybe (Dec.column (Dec.nonNullable Dec.text))
+
+accessTokenPrincipalStatement :: Statement.Statement Text (Maybe ResolvedAccessToken)
+accessTokenPrincipalStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT id, grant_user_id, actor_type::text, actor_label \
+          \FROM access_tokens \
+          \WHERE token_hash = $1 \
+          \  AND revoked_at IS NULL \
+          \  AND (expires_at IS NULL OR expires_at > now())"
+    encoder = Enc.param (Enc.nonNullable Enc.text)
+    decoder = Dec.rowMaybe $ do
+      tokenId <- Dec.column (Dec.nonNullable Dec.uuid)
+      grantUserId <- Dec.column (Dec.nonNullable Dec.uuid)
+      actorTypeText <- Dec.column (Dec.nonNullable Dec.text)
+      label <- Dec.column (Dec.nonNullable Dec.text)
+      actorType <- case actorTypeFromText actorTypeText of
+        Just parsed -> pure parsed
+        Nothing -> fail $ "Unexpected actor_type_enum value: " <> show actorTypeText
+      let actorId = case actorType of
+            ActorUser -> UUID.toText grantUserId
+            ActorBot  -> UUID.toText tokenId
+      pure ResolvedAccessToken
+        { tokenId = tokenId
+        , principal = Principal
+            { actorType = actorType
+            , actorId = actorId
+            , actorLabel = label
+            , authority = PrincipalGrantUser grantUserId
+            }
+        }
+
+touchAccessTokenLastUsedStatement :: Statement.Statement UUID ()
+touchAccessTokenLastUsedStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "UPDATE access_tokens SET last_used_at = now() WHERE id = $1"
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.noResult
+
+userPrincipalByAuthSubjectStatement :: Statement.Statement Text (Maybe Principal)
+userPrincipalByAuthSubjectStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT id, COALESCE(display_name, email, auth_subject, id::text) \
+          \FROM users WHERE auth_subject = $1"
+    encoder = Enc.param (Enc.nonNullable Enc.text)
+    decoder = Dec.rowMaybe $ do
+      userId <- Dec.column (Dec.nonNullable Dec.uuid)
+      label <- Dec.column (Dec.nonNullable Dec.text)
+      pure Principal
+        { actorType = ActorUser
+        , actorId = UUID.toText userId
+        , actorLabel = label
+        , authority = PrincipalGrantUser userId
+        }
+
+actorTypeFromText :: Text -> Maybe ActorType
+actorTypeFromText "user" = Just ActorUser
+actorTypeFromText "bot"  = Just ActorBot
+actorTypeFromText _      = Nothing
 
 workspaceMembershipRowDecoder :: Dec.Row WorkspaceMembership
 workspaceMembershipRowDecoder = do

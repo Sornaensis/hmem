@@ -66,9 +66,12 @@ library
     , filepath
     , hasql
     , hmem-core
+    , http-client
+    , http-client-tls
     , http-media
     , http-types
     , insert-ordered-containers
+    , jose
     , lens
     , openapi3
     , optparse-applicative
@@ -126,9 +129,12 @@ executable build-frontend
     , filepath
     , hasql
     , hmem-core
+    , http-client
+    , http-client-tls
     , http-media
     , http-types
     , insert-ordered-containers
+    , jose
     , lens
     , openapi3
     , optparse-applicative
@@ -190,9 +196,11 @@ executable hmem-ctl
     , hmem-core
     , hmem-server
     , http-client
+    , http-client-tls
     , http-media
     , http-types
     , insert-ordered-containers
+    , jose
     , lens
     , openapi3
     , optparse-applicative
@@ -256,9 +264,12 @@ executable hmem-server
     , hasql
     , hmem-core
     , hmem-server
+    , http-client
+    , http-client-tls
     , http-media
     , http-types
     , insert-ordered-containers
+    , jose
     , lens
     , openapi3
     , optparse-applicative
@@ -325,9 +336,12 @@ test-suite hmem-server-test
     , hmem-server
     , hspec
     , hspec-discover
+    , http-client
+    , http-client-tls
     , http-media
     , http-types
     , insert-ordered-containers
+    , jose
     , lens
     , openapi3
     , optparse-applicative

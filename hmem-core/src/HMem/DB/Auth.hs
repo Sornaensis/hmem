@@ -6,6 +6,8 @@ module HMem.DB.Auth
   , roleSatisfies
   , GlobalPermission(..)
   , UserGrants(..)
+  , WorkspaceMembership(..)
+  , UpsertWorkspaceMembership(..)
 
     -- * Authorization decisions
   , AuthorizationError(..)
@@ -18,6 +20,11 @@ module HMem.DB.Auth
     -- * Grant lookup
   , getUserGrants
   , getWorkspaceRole
+  , listWorkspaceMemberships
+  , upsertWorkspaceMembership
+  , deleteWorkspaceMembership
+  , grantWorkspaceAdminToCreator
+  , grantWorkspaceAdminToCreatorSession
 
     -- * Entity-to-workspace resolution
   , EntityKind(..)
@@ -26,16 +33,21 @@ module HMem.DB.Auth
   , resolveEntityScopeRequired
   ) where
 
+import Data.Aeson (FromJSON(..), ToJSON(..), Value(String), object, withObject, withText, (.:), (.=))
 import Data.ByteString (ByteString)
 import Data.Functor.Contravariant (contramap)
+import Data.Int (Int32, Int64)
 import Data.Pool (Pool)
 import Data.Text (Text)
+import Data.Time (UTCTime)
 import Data.UUID (UUID)
+import Control.Monad (void)
 import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
+import GHC.Generics (Generic)
 
 import HMem.DB.Pool (runSession)
 import HMem.DB.RequestContext (Principal(..), PrincipalAuthority(..))
@@ -64,6 +76,13 @@ roleFromText _       = Nothing
 roleSatisfies :: WorkspaceRole -> WorkspaceRole -> Bool
 roleSatisfies actual required = fromEnum actual >= fromEnum required
 
+instance ToJSON WorkspaceRole where
+  toJSON = String . roleToText
+
+instance FromJSON WorkspaceRole where
+  parseJSON = withText "WorkspaceRole" $ \t ->
+    maybe (fail "Invalid workspace role (expected read, edit, or admin)") pure (roleFromText t)
+
 data GlobalPermission
   = GlobalCreateWorkspace
   | GlobalSuperadmin
@@ -73,6 +92,52 @@ data UserGrants = UserGrants
   { userCanCreateWorkspace :: !Bool
   , userIsSuperadmin       :: !Bool
   } deriving stock (Show, Eq)
+
+data WorkspaceMembership = WorkspaceMembership
+  { membershipWorkspaceId :: !UUID
+  , membershipUserId      :: !UUID
+  , membershipRole        :: !WorkspaceRole
+  , membershipGrantedBy   :: !(Maybe UUID)
+  , membershipCreatedAt   :: !UTCTime
+  , membershipUpdatedAt   :: !UTCTime
+  } deriving stock (Show, Eq, Generic)
+
+instance ToJSON WorkspaceMembership where
+  toJSON membership = object
+    [ "workspace_id" .= membership.membershipWorkspaceId
+    , "user_id" .= membership.membershipUserId
+    , "role" .= membership.membershipRole
+    , "granted_by" .= membership.membershipGrantedBy
+    , "created_at" .= membership.membershipCreatedAt
+    , "updated_at" .= membership.membershipUpdatedAt
+    ]
+
+instance FromJSON WorkspaceMembership where
+  parseJSON = withObject "WorkspaceMembership" $ \o ->
+    WorkspaceMembership
+      <$> o .: "workspace_id"
+      <*> o .: "user_id"
+      <*> o .: "role"
+      <*> o .: "granted_by"
+      <*> o .: "created_at"
+      <*> o .: "updated_at"
+
+data UpsertWorkspaceMembership = UpsertWorkspaceMembership
+  { membershipUserIdInput :: !UUID
+  , membershipRoleInput   :: !WorkspaceRole
+  } deriving stock (Show, Eq, Generic)
+
+instance FromJSON UpsertWorkspaceMembership where
+  parseJSON = withObject "UpsertWorkspaceMembership" $ \o ->
+    UpsertWorkspaceMembership
+      <$> o .: "user_id"
+      <*> o .: "role"
+
+instance ToJSON UpsertWorkspaceMembership where
+  toJSON req = object
+    [ "user_id" .= req.membershipUserIdInput
+    , "role" .= req.membershipRoleInput
+    ]
 
 ------------------------------------------------------------------------
 -- Authorization decisions
@@ -157,6 +222,47 @@ getWorkspaceRole pool workspaceId userId = do
   mRoleText <- runSession pool $ Session.statement (workspaceId, userId) workspaceRoleStatement
   pure (mRoleText >>= roleFromText)
 
+listWorkspaceMemberships :: Pool Hasql.Connection -> UUID -> Maybe Int -> Maybe Int -> IO [WorkspaceMembership]
+listWorkspaceMemberships pool workspaceId mlimit moffset = do
+  let lim = fromIntegral (maybe 50 (max 1 . min 201) mlimit) :: Int32
+      off = fromIntegral (maybe 0 (max 0) moffset) :: Int32
+  runSession pool $ Session.statement (workspaceId, lim, off) listWorkspaceMembershipsStatement
+
+upsertWorkspaceMembership
+  :: Pool Hasql.Connection
+  -> UUID
+  -> UpsertWorkspaceMembership
+  -> Maybe UUID
+  -> IO WorkspaceMembership
+upsertWorkspaceMembership pool workspaceId req grantedBy =
+  runSession pool $ Session.statement
+    (workspaceId, req.membershipUserIdInput, roleToText req.membershipRoleInput, grantedBy)
+    upsertWorkspaceMembershipStatement
+
+deleteWorkspaceMembership :: Pool Hasql.Connection -> UUID -> UUID -> IO Bool
+deleteWorkspaceMembership pool workspaceId userId = do
+  n <- runSession pool $ Session.statement (workspaceId, userId) deleteWorkspaceMembershipStatement
+  pure (n > 0)
+
+grantWorkspaceAdminToCreator :: Pool Hasql.Connection -> UUID -> Principal -> IO ()
+grantWorkspaceAdminToCreator pool workspaceId principal =
+  runSession pool $ grantWorkspaceAdminToCreatorSession workspaceId principal
+
+grantWorkspaceAdminToCreatorSession :: UUID -> Principal -> Session.Session ()
+grantWorkspaceAdminToCreatorSession workspaceId principal = case principal.authority of
+  PrincipalGrantUser userId -> do
+    mGrants <- Session.statement userId userGrantsStatement
+    case mGrants of
+      Just UserGrants { userIsSuperadmin = True } -> pure ()
+      _ -> void $ Session.statement
+        ( workspaceId
+        , userId
+        , roleToText WorkspaceRoleAdmin
+        , Just userId
+        )
+        upsertWorkspaceMembershipStatement
+  _ -> pure ()
+
 userGrantsStatement :: Statement.Statement UUID (Maybe UserGrants)
 userGrantsStatement = Statement.Statement sql encoder decoder True
   where
@@ -174,6 +280,62 @@ workspaceRoleStatement = Statement.Statement sql encoder decoder True
       contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
       contramap snd (Enc.param (Enc.nonNullable Enc.uuid))
     decoder = Dec.rowMaybe (Dec.column (Dec.nonNullable Dec.text))
+
+workspaceMembershipRowDecoder :: Dec.Row WorkspaceMembership
+workspaceMembershipRowDecoder = do
+  workspaceId <- Dec.column (Dec.nonNullable Dec.uuid)
+  userId <- Dec.column (Dec.nonNullable Dec.uuid)
+  roleText <- Dec.column (Dec.nonNullable Dec.text)
+  grantedBy <- Dec.column (Dec.nullable Dec.uuid)
+  createdAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
+  updatedAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
+  role <- case roleFromText roleText of
+    Just parsed -> pure parsed
+    Nothing -> fail $ "Unexpected workspace_role_enum value: " <> show roleText
+  pure WorkspaceMembership
+    { membershipWorkspaceId = workspaceId
+    , membershipUserId = userId
+    , membershipRole = role
+    , membershipGrantedBy = grantedBy
+    , membershipCreatedAt = createdAt
+    , membershipUpdatedAt = updatedAt
+    }
+
+listWorkspaceMembershipsStatement :: Statement.Statement (UUID, Int32, Int32) [WorkspaceMembership]
+listWorkspaceMembershipsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT workspace_id, user_id, role::text, granted_by, created_at, updated_at \
+          \FROM workspace_memberships WHERE workspace_id = $1 \
+          \ORDER BY created_at ASC, user_id ASC LIMIT $2 OFFSET $3"
+    encoder =
+      contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.int4))
+    decoder = Dec.rowList workspaceMembershipRowDecoder
+
+upsertWorkspaceMembershipStatement :: Statement.Statement (UUID, UUID, Text, Maybe UUID) WorkspaceMembership
+upsertWorkspaceMembershipStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "INSERT INTO workspace_memberships (workspace_id, user_id, role, granted_by) \
+          \VALUES ($1, $2, $3::workspace_role_enum, $4) \
+          \ON CONFLICT (workspace_id, user_id) DO UPDATE \
+          \SET role = EXCLUDED.role, granted_by = EXCLUDED.granted_by \
+          \RETURNING workspace_id, user_id, role::text, granted_by, created_at, updated_at"
+    encoder =
+      contramap (\(a,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,_,c,_) -> c) (Enc.param (Enc.nonNullable Enc.text)) <>
+      contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nullable Enc.uuid))
+    decoder = Dec.singleRow workspaceMembershipRowDecoder
+
+deleteWorkspaceMembershipStatement :: Statement.Statement (UUID, UUID) Int64
+deleteWorkspaceMembershipStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "DELETE FROM workspace_memberships WHERE workspace_id = $1 AND user_id = $2"
+    encoder =
+      contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap snd (Enc.param (Enc.nonNullable Enc.uuid))
+    decoder = Dec.rowsAffected
 
 ------------------------------------------------------------------------
 -- Entity-to-workspace resolution

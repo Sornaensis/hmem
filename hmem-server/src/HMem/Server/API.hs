@@ -9,7 +9,7 @@ module HMem.Server.API
   , CategoryLink(..)
   ) where
 
-import Control.Exception (throwIO, try)
+import Control.Exception (try)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON (..), ToJSON (..), genericToJSON, genericParseJSON, Value(..), object, (.=))
 import Data.Aeson qualified as Aeson
@@ -42,7 +42,7 @@ import HMem.DB.Memory qualified as Mem
 import HMem.DB.Overview qualified as Overview
 import HMem.DB.Pool (runSession, runTransaction, DBException(..), PoolMetrics(..), getPoolMetrics)
 import HMem.DB.Project qualified as Proj
-import HMem.DB.RequestContext (currentPrincipal, currentRequestId, withWorkspaceIdContext)
+import HMem.DB.RequestContext (Principal(..), PrincipalAuthority(..), currentPrincipal, currentRequestId, withWorkspaceIdContext)
 import HMem.DB.SavedView qualified as SV
 import HMem.DB.Schema
 import HMem.DB.Search qualified as Search
@@ -84,6 +84,14 @@ type WorkspaceAPI =
   :<|> Capture "workspaceId" UUID :> Delete '[JSON] NoContent
   :<|> Capture "workspaceId" UUID :> "restore" :> Post '[JSON] NoContent
   :<|> Capture "workspaceId" UUID :> "purge" :> Delete '[JSON] NoContent
+  :<|> Capture "workspaceId" UUID :> "memberships"
+         :> QueryParam "limit" Int :> QueryParam "offset" Int
+         :> Get '[JSON] (PaginatedResult Auth.WorkspaceMembership)
+  :<|> Capture "workspaceId" UUID :> "memberships"
+         :> ReqBody '[JSON] Auth.UpsertWorkspaceMembership
+         :> Post '[JSON] Auth.WorkspaceMembership
+  :<|> Capture "workspaceId" UUID :> "memberships" :> Capture "userId" UUID
+         :> Delete '[JSON] NoContent
 
 -- Memories
 type MemoryAPI =
@@ -468,6 +476,17 @@ requireWorkspaceRoleH pool wsId role = do
   result <- liftIO $ Auth.authorizeWorkspace pool mPrincipal wsId role
   either (throwError . authErrorToServerError) pure result
 
+requireActiveWorkspaceH :: Pool Hasql.Connection -> UUID -> Handler ()
+requireActiveWorkspaceH pool wsId = do
+  rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
+    row <- each workspaceSchema
+    where_ $ row.wsId ==. lit wsId
+    where_ $ activeWorkspace row
+    pure row.wsId
+  case rows of
+    (_:_) -> pure ()
+    []    -> throwError err404
+
 requireEntityRoleH :: Pool Hasql.Connection -> Auth.EntityKind -> UUID -> Auth.WorkspaceRole -> Handler Auth.EntityScope
 requireEntityRoleH pool kind entityId role = do
   scopeResult <- liftIO $ Auth.resolveEntityScopeRequired pool kind entityId
@@ -604,6 +623,9 @@ workspaceHandlers pool bc =
   :<|> deleteWorkspaceH
   :<|> restoreWorkspaceH
   :<|> purgeWorkspaceH
+  :<|> listMembershipsH
+  :<|> upsertMembershipH
+  :<|> deleteMembershipH
   where
     listWorkspacesH :: Maybe Int -> Maybe Int -> Handler (PaginatedResult Workspace)
     listWorkspacesH mlimit moffset = do
@@ -622,9 +644,10 @@ workspaceHandlers pool bc =
     createWorkspaceH :: CreateWorkspace -> Handler Workspace
     createWorkspaceH cw = do
       requireGlobalPermissionH pool Auth.GlobalCreateWorkspace
+      mCreator <- liftIO currentPrincipal
       rejectValidationErrors (validateCreateWorkspaceInput cw)
-      ws <- handleDBErrors $ do
-        rows <- runSession pool $ Session.statement () $ run $
+      mWs <- handleDBErrors $ runTransaction pool $ do
+        rows <- Session.statement () $ run $
           insert Insert
             { into = workspaceSchema
             , rows = values
@@ -643,8 +666,11 @@ workspaceHandlers pool bc =
             , returning  = Returning id
             }
         case rows of
-          (r:_) -> pure $ rowToWorkspace r
-          []    -> throwIO $ DBOtherError "Insert failed"
+          (r:_) -> do
+            mapM_ (Auth.grantWorkspaceAdminToCreatorSession r.wsId) mCreator
+            pure . Just $ rowToWorkspace r
+          [] -> pure Nothing
+      ws <- maybe (throwError err500) pure mWs
       emit bc Created ETWorkspace ws.id (Just $ toJSON ws)
       pure ws
 
@@ -953,6 +979,34 @@ workspaceHandlers pool bc =
                   , returning = NoReturning
                   }
               pure NoContent
+
+    listMembershipsH :: UUID -> Maybe Int -> Maybe Int -> Handler (PaginatedResult Auth.WorkspaceMembership)
+    listMembershipsH wsId mlimit moffset = do
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
+      requireActiveWorkspaceH pool wsId
+      let lim = capLimit mlimit
+          off = capOffset moffset
+      rows <- handleDBErrors $ Auth.listWorkspaceMemberships pool wsId (Just (lim + 1)) (Just off)
+      pure PaginatedResult { items = take lim rows, hasMore = length rows > lim }
+
+    upsertMembershipH :: UUID -> Auth.UpsertWorkspaceMembership -> Handler Auth.WorkspaceMembership
+    upsertMembershipH wsId req = do
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
+      requireActiveWorkspaceH pool wsId
+      mActor <- liftIO currentPrincipal
+      let grantedBy = case mActor of
+            Just principal -> case principal.authority of
+              PrincipalGrantUser userId -> Just userId
+              _                         -> Nothing
+            Nothing -> Nothing
+      handleDBErrorsInWorkspace wsId $ Auth.upsertWorkspaceMembership pool wsId req grantedBy
+
+    deleteMembershipH :: UUID -> UUID -> Handler NoContent
+    deleteMembershipH wsId userId = do
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
+      requireActiveWorkspaceH pool wsId
+      ok <- handleDBErrorsInWorkspace wsId $ Auth.deleteWorkspaceMembership pool wsId userId
+      if ok then pure NoContent else throwError err404
 
 -- Memory handlers --------------------------------------------------
 
@@ -1353,7 +1407,7 @@ projectHandlers pool bc =
 
     getProjectMemoriesH pid mQuery mTags mMinImportance mMemoryType mMinAccessCount = do
       _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
-      project <- requireProjectH pid
+      proj <- requireProjectH pid
       let lq0 = LinkedMemoryListQuery
             { query = mQuery
             , tags = case mTags of [] -> Nothing; xs -> Just xs
@@ -1370,7 +1424,7 @@ projectHandlers pool bc =
             }
       rejectValidationErrors (validateLinkedMemoryListQuery lq)
       mems <- handleDBErrors $ Mem.getProjectMemories pool pid lq
-      pure $ Prelude.filter ((== project.workspaceId) . (.workspaceId)) mems
+      pure $ Prelude.filter ((== proj.workspaceId) . (.workspaceId)) mems
 
     batchLinkMemoriesH pid blr = do
       requireAuthenticatedH

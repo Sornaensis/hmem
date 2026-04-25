@@ -5,21 +5,28 @@ module HMem.Server.APISpec (spec) where
 import Data.Aeson (decode, encode, object, (.=), toJSON, Value(..))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.Functor.Contravariant (contramap)
 import Data.Maybe (isJust)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Data.UUID (UUID)
+import Hasql.Decoders qualified as Dec
+import Hasql.Encoders qualified as Enc
+import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import Network.HTTP.Types
-import Network.Wai (Application, defaultRequest)
+import Network.Wai (Application, Middleware, defaultRequest)
 import Network.Wai qualified as Wai
 import Network.Wai.Test (SResponse(..), runSession, srequest, SRequest(..))
 import Test.Hspec
 
 import HMem.Config (CorsConfig(..))
 import HMem.Config qualified as Config
+import HMem.DB.Auth qualified as Auth
 import HMem.DB.Memory qualified as Mem
-import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
+import HMem.DB.Pool qualified as DBPool
+import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
 import HMem.DB.TestHarness
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkApp, resolveRequestPrincipal)
@@ -40,12 +47,19 @@ withAppEnv :: (TestEnv -> Application -> IO a) -> IO a
 withAppEnv = withAppEnvConfig Config.defaultConfig
 
 withAppEnvConfig :: Config.HMemConfig -> (TestEnv -> Application -> IO a) -> IO a
-withAppEnvConfig cfg action = withTestEnv $ \env -> do
+withAppEnvConfig cfg = withAppEnvConfigAndMiddleware cfg id
+
+withAppEnvConfigAndMiddleware :: Config.HMemConfig -> Middleware -> (TestEnv -> Application -> IO a) -> IO a
+withAppEnvConfigAndMiddleware cfg middleware action = withTestEnv $ \env -> do
   tracker <- newAccessTracker env.pool 3600
   wsState <- newWSState
   let cfg' = cfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
-  app <- mkApp id cfg'.auth cfg'.cors cfg'.rateLimit env.pool tracker wsState Nothing True
+  app <- mkApp middleware cfg'.auth cfg'.cors cfg'.rateLimit env.pool tracker wsState Nothing True
   action env app
+
+principalMiddleware :: Principal -> Middleware
+principalMiddleware principal app req respond =
+  withPrincipalContext (Just principal) (app req respond)
 
 testAuthCfg :: Config.HMemConfig
 testAuthCfg = Config.defaultConfig
@@ -129,6 +143,30 @@ principalAuthority Principal { authority = value } = value
 uuidPath :: BS.ByteString -> UUID -> BS.ByteString
 uuidPath prefix uid = prefix <> "/" <> encodeUtf8 (T.pack (show uid))
 
+createTestUser :: TestEnv -> Bool -> Bool -> IO UUID
+createTestUser env canCreateWorkspace isSuperadmin =
+  DBPool.runSession env.pool $ Session.statement (canCreateWorkspace, isSuperadmin) createTestUserStatement
+
+createTestUserStatement :: Statement.Statement (Bool, Bool) UUID
+createTestUserStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "INSERT INTO users (can_create_workspace, is_superadmin) VALUES ($1, $2) RETURNING id"
+    encoder =
+      contramap fst (Enc.param (Enc.nonNullable Enc.bool)) <>
+      contramap snd (Enc.param (Enc.nonNullable Enc.bool))
+    decoder = Dec.singleRow (Dec.column (Dec.nonNullable Dec.uuid))
+
+grantPrincipal :: UUID -> Principal
+grantPrincipal userId = Principal
+  { actorType = ActorUser
+  , actorId = T.pack (show userId)
+  , actorLabel = "Grant User"
+  , authority = PrincipalGrantUser userId
+  }
+
+membershipUserRole :: Auth.WorkspaceMembership -> (UUID, Auth.WorkspaceRole)
+membershipUserRole Auth.WorkspaceMembership { membershipUserId = userId, membershipRole = role } = (userId, role)
+
 ------------------------------------------------------------------------
 -- Tests
 ------------------------------------------------------------------------
@@ -155,6 +193,106 @@ spec = around withApp $ do
       resp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= T.replicate (maxNameBytes + 1) "a"])
       respStatus resp `shouldBe` 400
+
+  describe "workspace membership administration" $ do
+    it "allows workspace admins to add, list, update, and remove memberships" $ \_ ->
+      withAppEnv $ \env app -> do
+        userId <- createTestUser env False False
+        wsResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("membership-admin-ws" :: T.Text)])
+        respStatus wsResp `shouldBe` 200
+        let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+        createResp <- postJSON app (uuidPath "/api/v1/workspaces" ws.id <> "/memberships")
+          (object ["user_id" .= userId, "role" .= ("edit" :: T.Text)])
+        respStatus createResp `shouldBe` 200
+        let Just createdMembership = decode (respBody createResp) :: Maybe Auth.WorkspaceMembership
+        membershipUserRole createdMembership `shouldBe` (userId, Auth.WorkspaceRoleEdit)
+
+        updateResp <- postJSON app (uuidPath "/api/v1/workspaces" ws.id <> "/memberships")
+          (object ["user_id" .= userId, "role" .= ("admin" :: T.Text)])
+        respStatus updateResp `shouldBe` 200
+        let Just updatedMembership = decode (respBody updateResp) :: Maybe Auth.WorkspaceMembership
+        membershipUserRole updatedMembership `shouldBe` (userId, Auth.WorkspaceRoleAdmin)
+
+        listResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/memberships")
+        respStatus listResp `shouldBe` 200
+        let Just memberships = decode (respBody listResp) :: Maybe (PaginatedResult Auth.WorkspaceMembership)
+        map membershipUserRole memberships.items `shouldContain` [(userId, Auth.WorkspaceRoleAdmin)]
+
+        deleteResp <- del app (uuidPath "/api/v1/workspaces" ws.id <> "/memberships/" <> encodeUtf8 (T.pack (show userId)))
+        respStatus deleteResp `shouldBe` 200
+
+        listAfterDeleteResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/memberships")
+        let Just afterDelete = decode (respBody listAfterDeleteResp) :: Maybe (PaginatedResult Auth.WorkspaceMembership)
+        map membershipUserRole afterDelete.items `shouldNotContain` [(userId, Auth.WorkspaceRoleAdmin)]
+
+    it "auto-grants workspace admin to a grant-bearing creator" $ \_ ->
+      withTestEnv $ \env -> do
+        userId <- createTestUser env True False
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        let cfg = deployedAuthCfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
+            principal = grantPrincipal userId
+        app <- mkApp (principalMiddleware principal) cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        createResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("auto-admin-ws" :: T.Text)])
+        respStatus createResp `shouldBe` 200
+        let Just ws = decode (respBody createResp) :: Maybe Workspace
+
+        listResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/memberships")
+        respStatus listResp `shouldBe` 200
+        let Just memberships = decode (respBody listResp) :: Maybe (PaginatedResult Auth.WorkspaceMembership)
+        map membershipUserRole memberships.items `shouldContain` [(userId, Auth.WorkspaceRoleAdmin)]
+
+    it "requires real workspace admin role for deployed membership administration" $ \_ ->
+      withTestEnv $ \env -> do
+        adminUserId <- createTestUser env False False
+        readerUserId <- createTestUser env False False
+        targetUserId <- createTestUser env False False
+        ws <- createTestWorkspace env "deployed-membership-admin"
+        _ <- Auth.upsertWorkspaceMembership env.pool ws.id
+          Auth.UpsertWorkspaceMembership
+            { Auth.membershipUserIdInput = adminUserId
+            , Auth.membershipRoleInput = Auth.WorkspaceRoleAdmin
+            }
+          Nothing
+        _ <- Auth.upsertWorkspaceMembership env.pool ws.id
+          Auth.UpsertWorkspaceMembership
+            { Auth.membershipUserIdInput = readerUserId
+            , Auth.membershipRoleInput = Auth.WorkspaceRoleRead
+            }
+          Nothing
+
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        let cfg = deployedAuthCfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
+        adminApp <- mkApp (principalMiddleware $ grantPrincipal adminUserId) cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+        readerApp <- mkApp (principalMiddleware $ grantPrincipal readerUserId) cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        deniedListResp <- get_ readerApp (uuidPath "/api/v1/workspaces" ws.id <> "/memberships")
+        respStatus deniedListResp `shouldBe` 403
+
+        deniedUpsertResp <- postJSON readerApp (uuidPath "/api/v1/workspaces" ws.id <> "/memberships")
+          (object ["user_id" .= targetUserId, "role" .= ("edit" :: T.Text)])
+        respStatus deniedUpsertResp `shouldBe` 403
+
+        allowedUpsertResp <- postJSON adminApp (uuidPath "/api/v1/workspaces" ws.id <> "/memberships")
+          (object ["user_id" .= targetUserId, "role" .= ("edit" :: T.Text)])
+        respStatus allowedUpsertResp `shouldBe` 200
+
+    it "returns 404 for membership administration on deleted workspaces" $ \_ ->
+      withAppEnv $ \_env app -> do
+        wsResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("deleted-membership-ws" :: T.Text)])
+        let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+        deleteResp <- del app (uuidPath "/api/v1/workspaces" ws.id)
+        respStatus deleteResp `shouldBe` 200
+
+        listResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/memberships")
+        respStatus listResp `shouldBe` 404
 
   describe "workspace + memory flow" $ do
     it "creates workspace, memory, retrieves, updates, deletes" $ \app -> do

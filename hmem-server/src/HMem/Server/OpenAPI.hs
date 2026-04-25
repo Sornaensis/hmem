@@ -11,6 +11,7 @@ import Data.OpenApi
 import Data.Proxy (Proxy (..))
 import Servant.OpenApi (toOpenApi)
 
+import HMem.DB.Auth qualified as Auth
 import HMem.Server.API (HMemAPI, CleanupRunReq, GroupMemberReq, CategoryLink)
 import HMem.Types
 
@@ -81,6 +82,25 @@ instance ToSchema WorkspaceType where
 instance ToParamSchema WorkspaceType where
   toParamSchema _ = mempty & type_ ?~ OpenApiString & enum_ ?~ ["repository", "planning", "personal", "organization"]
 
+instance ToSchema Auth.WorkspaceRole where
+  declareNamedSchema _ = pure $ NamedSchema (Just "WorkspaceRole") $ mempty
+    & type_ ?~ OpenApiString
+    & enum_ ?~ ["read", "edit", "admin"]
+
+membershipOpts :: SchemaOptions
+membershipOpts = opts
+  { fieldLabelModifier = \case
+      "membershipWorkspaceId" -> "workspace_id"
+      "membershipUserId"      -> "user_id"
+      "membershipRole"        -> "role"
+      "membershipGrantedBy"   -> "granted_by"
+      "membershipCreatedAt"   -> "created_at"
+      "membershipUpdatedAt"   -> "updated_at"
+      "membershipUserIdInput" -> "user_id"
+      "membershipRoleInput"   -> "role"
+      other                   -> camelToSnakeField other
+  }
+
 instance ToSchema ContextMemoryScope where
   declareNamedSchema _ = pure $ NamedSchema (Just "ContextMemoryScope") $ mempty
     & type_ ?~ OpenApiString
@@ -111,6 +131,8 @@ instance ToSchema SimilarMemory        where declareNamedSchema = genericDeclare
 instance ToSchema Workspace            where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CreateWorkspace      where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema UpdateWorkspace      where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema Auth.WorkspaceMembership where declareNamedSchema = genericDeclareNamedSchema membershipOpts
+instance ToSchema Auth.UpsertWorkspaceMembership where declareNamedSchema = genericDeclareNamedSchema membershipOpts
 instance ToSchema WorkspaceGroup       where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CreateWorkspaceGroup where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema Project              where declareNamedSchema = genericDeclareNamedSchema opts

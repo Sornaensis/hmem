@@ -36,6 +36,9 @@ auditLogRowDecoder = do
   alOldValues  <- Dec.column (Dec.nullable Dec.jsonb)
   alNewValues  <- Dec.column (Dec.nullable Dec.jsonb)
   alRequestId  <- Dec.column (Dec.nullable Dec.text)
+  alActorType  <- Dec.column (Dec.nullable Dec.text)
+  alActorId    <- Dec.column (Dec.nullable Dec.text)
+  alActorLabel <- Dec.column (Dec.nullable Dec.text)
   alChangedAt  <- Dec.column (Dec.nonNullable Dec.timestamptz)
   let alAction = case auditActionFromText alActionText of
         Just a  -> a
@@ -48,6 +51,9 @@ auditLogRowDecoder = do
     , oldValues  = alOldValues
     , newValues  = alNewValues
     , requestId  = alRequestId
+    , actorType  = alActorType
+    , actorId    = alActorId
+    , actorLabel = alActorLabel
     , changedAt  = alChangedAt
     }
 
@@ -63,7 +69,7 @@ getAuditEntryStatement :: Statement.Statement UUID (Maybe AuditLogEntry)
 getAuditEntryStatement = Statement.Statement sql encoder decoder True
   where
     sql = "SELECT id, entity_type, entity_id, action::text, old_values, new_values, \
-          \request_id, changed_at \
+          \request_id, actor_type::text, actor_id, actor_label, changed_at \
           \FROM audit_log WHERE id = $1"
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowMaybe auditLogRowDecoder
@@ -86,7 +92,7 @@ getAuditByEntityStatement :: Statement.Statement (Text, Text, Int32) [AuditLogEn
 getAuditByEntityStatement = Statement.Statement sql encoder decoder True
   where
     sql = "SELECT id, entity_type, entity_id, action::text, old_values, new_values, \
-          \request_id, changed_at \
+          \request_id, actor_type::text, actor_id, actor_label, changed_at \
           \FROM audit_log \
           \WHERE entity_type = $1 AND entity_id = $2 \
           \ORDER BY changed_at DESC, id DESC \
@@ -121,7 +127,7 @@ getAuditLogStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
       [ "SELECT id, entity_type, entity_id, action::text, old_values, new_values,"
-      , "       request_id, changed_at"
+      , "       request_id, actor_type::text, actor_id, actor_label, changed_at"
       , "FROM audit_log"
       , "WHERE ($1::text IS NULL OR entity_type = $1)"
       , "  AND ($2::text IS NULL OR entity_id = $2)"

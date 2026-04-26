@@ -181,6 +181,9 @@ type alias AuditLogEntry =
     , oldValues : Maybe D.Value
     , newValues : Maybe D.Value
     , requestId : Maybe String
+    , actorType : Maybe String
+    , actorId : Maybe String
+    , actorLabel : Maybe String
     , changedAt : String
     }
 
@@ -614,6 +617,9 @@ auditLogEntryDecoder =
         |> optional "old_values" (D.nullable D.value) Nothing
         |> optional "new_values" (D.nullable D.value) Nothing
         |> optional "request_id" (D.nullable D.string) Nothing
+        |> optional "actor_type" (D.nullable D.string) Nothing
+        |> optional "actor_id" (D.nullable D.string) Nothing
+        |> optional "actor_label" (D.nullable D.string) Nothing
         |> required "changed_at" D.string
 
 
@@ -634,6 +640,9 @@ type alias ChangeEvent =
     , entityId : String
     , timestamp : String
     , requestId : Maybe String
+    , actorType : Maybe String
+    , actorId : Maybe String
+    , actorLabel : Maybe String
     , payload : Maybe D.Value
     }
 
@@ -673,6 +682,9 @@ changeEventDecoder =
         |> required "entity_id" D.string
         |> required "timestamp" D.string
         |> optional "request_id" (D.nullable D.string) Nothing
+        |> optional "actor_type" (D.nullable D.string) Nothing
+        |> optional "actor_id" (D.nullable D.string) Nothing
+        |> optional "actor_label" (D.nullable D.string) Nothing
         |> optional "data" (D.nullable D.value) Nothing
 
 

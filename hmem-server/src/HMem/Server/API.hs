@@ -42,7 +42,7 @@ import HMem.DB.Memory qualified as Mem
 import HMem.DB.Overview qualified as Overview
 import HMem.DB.Pool (runSession, runTransaction, DBException(..), PoolMetrics(..), getPoolMetrics)
 import HMem.DB.Project qualified as Proj
-import HMem.DB.RequestContext (Principal(..), PrincipalAuthority(..), currentPrincipal, currentRequestId, withWorkspaceIdContext)
+import HMem.DB.RequestContext (Principal(..), PrincipalAuthority(..), actorTypeToText, currentPrincipal, currentRequestId, withWorkspaceIdContext)
 import HMem.DB.SavedView qualified as SV
 import HMem.DB.Schema
 import HMem.DB.Search qualified as Search
@@ -562,7 +562,21 @@ emit :: Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler 
 emit bc ct et eid mpayload = liftIO $ do
   now <- getCurrentTime
   reqId <- currentRequestId
-  bc ChangeEvent { changeType = ct, entityType = et, entityId = eid, timestamp = now, requestId = reqId, payload = mpayload }
+  mPrincipal <- currentPrincipal
+  let mActorType = actorTypeToText . (.actorType) <$> mPrincipal
+      mActorId = (.actorId) <$> mPrincipal
+      mActorLabel = (.actorLabel) <$> mPrincipal
+  bc ChangeEvent
+    { changeType = ct
+    , entityType = et
+    , entityId = eid
+    , timestamp = now
+    , requestId = reqId
+    , actorType = mActorType
+    , actorId = mActorId
+    , actorLabel = mActorLabel
+    , payload = mpayload
+    }
 
 -- | Emit one event per ID in a list. Used by batch handlers.
 emitMany :: Broadcast -> ChangeType -> EntityType -> [UUID] -> Handler ()

@@ -595,6 +595,7 @@ viewAuditLogEntry model entry =
                 , div [ class "audit-entry-meta" ]
                     [ span [ class "audit-entry-id" ] [ text ("Entry: " ++ String.left 8 entry.id) ]
                     , span [ class "audit-entity-id" ] [ text ("Entity: " ++ String.left 8 entry.entityId) ]
+                    , span [ class "audit-actor" ] [ text ("Actor: " ++ auditActorSummary entry) ]
                     , if isRevertableEntityType entry.entityType then
                         button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩ Revert" ]
 
@@ -606,6 +607,21 @@ viewAuditLogEntry model entry =
           else
             text ""
         ]
+
+
+auditActorSummary : Api.AuditLogEntry -> String
+auditActorSummary entry =
+    case entry.actorLabel of
+        Just label ->
+            label
+
+        Nothing ->
+            case entry.actorId of
+                Just actorId ->
+                    String.left 12 actorId
+
+                Nothing ->
+                    "unknown"
 
 
 

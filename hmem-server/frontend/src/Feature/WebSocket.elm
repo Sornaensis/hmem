@@ -500,4 +500,14 @@ changeEventDescription event =
                 Api.EOther s ->
                     s
     in
-    entity ++ " " ++ action
+    entity ++ " " ++ action ++ actorSuffix event
+
+
+actorSuffix : Api.ChangeEvent -> String
+actorSuffix event =
+    case event.actorLabel of
+        Just label ->
+            " by " ++ label
+
+        Nothing ->
+            ""

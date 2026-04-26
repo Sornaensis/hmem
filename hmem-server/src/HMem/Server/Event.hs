@@ -45,6 +45,9 @@ data ChangeEvent = ChangeEvent
   , entityId    :: !UUID
   , timestamp   :: !UTCTime
   , requestId   :: !(Maybe Text)
+  , actorType   :: !(Maybe Text)
+  , actorId     :: !(Maybe Text)
+  , actorLabel  :: !(Maybe Text)
   , payload     :: !(Maybe Value)
   } deriving (Show, Generic)
 
@@ -79,4 +82,7 @@ instance ToJSON ChangeEvent where
     , "timestamp"   .= ev.timestamp
     ]
     ++ maybe [] (\rid -> ["request_id" .= rid]) ev.requestId
+    ++ maybe [] (\typ -> ["actor_type" .= typ]) ev.actorType
+    ++ maybe [] (\aid -> ["actor_id" .= aid]) ev.actorId
+    ++ maybe [] (\lbl -> ["actor_label" .= lbl]) ev.actorLabel
     ++ maybe [] (\d -> ["data" .= d]) ev.payload

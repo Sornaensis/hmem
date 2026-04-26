@@ -5,7 +5,9 @@ module HMem.Server.APISpec (spec) where
 import Data.Aeson (decode, encode, object, (.=), toJSON, Value(..))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Control.Lens ((&), (?~))
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Functor.Contravariant (contramap)
 import Data.Maybe (isJust)
 import Data.String (fromString)
@@ -21,6 +23,7 @@ import Network.HTTP.Types
 import Network.Wai (Application, Middleware, defaultRequest)
 import Network.Wai qualified as Wai
 import Network.Wai.Test (SResponse(..), runSession, srequest, SRequest(..))
+import Servant (Proxy(..), serve)
 import Test.Hspec
 
 import Crypto.JWT qualified as JWT
@@ -35,10 +38,12 @@ import HMem.DB.Pool qualified as DBPool
 import HMem.DB.Project qualified as Proj
 import HMem.DB.SavedView qualified as SV
 import HMem.DB.Task qualified as Task
-import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
+import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), actorTypeToText, withPrincipalContext)
 import HMem.DB.TestHarness
 import HMem.Server.AccessTracker (newAccessTracker)
-import HMem.Server.App (mkApp, resolveRequestPrincipal)
+import HMem.Server.API (HMemAPI, server)
+import HMem.Server.App (mkApp, requestIdMiddleware, resolveRequestPrincipal)
+import HMem.Server.Event (ChangeEvent(..))
 import HMem.Server.WebSocket (newWSState)
 import HMem.Types
 
@@ -184,7 +189,7 @@ createTestUserWithSubjectStatement = Statement.Statement sql encoder decoder Tru
 createAccessToken :: TestEnv -> UUID -> ActorType -> T.Text -> T.Text -> IO UUID
 createAccessToken env grantUserId actor tokenLabel token =
   DBPool.runSession env.pool $ Session.statement
-    (grantUserId, actorTypeText actor, tokenLabel, Auth.accessTokenHash token)
+    (grantUserId, actorTypeToText actor, tokenLabel, Auth.accessTokenHash token)
     createAccessTokenStatement
 
 createAccessTokenStatement :: Statement.Statement (UUID, T.Text, T.Text, T.Text) UUID
@@ -233,10 +238,6 @@ accessTokenLastUsedIsSetStatement = Statement.Statement sql encoder decoder True
     sql = "SELECT last_used_at IS NOT NULL FROM access_tokens WHERE id = $1"
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))
-
-actorTypeText :: ActorType -> T.Text
-actorTypeText ActorUser = "user"
-actorTypeText ActorBot = "bot"
 
 deployedJwtCfg :: JWK.JWKSet -> Config.HMemConfig
 deployedJwtCfg jwkSet = deployedAuthCfg
@@ -288,6 +289,16 @@ withPrincipalApp env cfg principal action = do
   let cfg' = cfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
   app <- mkApp (principalMiddleware principal) cfg'.auth cfg'.cors cfg'.rateLimit env.pool tracker wsState Nothing True
   action app
+
+withCapturedBroadcastApp :: TestEnv -> Principal -> (Application -> IORef [ChangeEvent] -> IO a) -> IO a
+withCapturedBroadcastApp env principal action = do
+  tracker <- newAccessTracker env.pool 3600
+  eventsRef <- newIORef []
+  let capture event = modifyIORef' eventsRef (<> [event])
+      app = requestIdMiddleware
+          $ principalMiddleware principal
+          $ serve (Proxy @HMemAPI) (server env.pool tracker capture True)
+  action app eventsRef
 
 grantWorkspaceRole :: TestEnv -> UUID -> UUID -> Auth.WorkspaceRole -> IO Auth.WorkspaceMembership
 grantWorkspaceRole env workspaceId userId role =
@@ -2535,3 +2546,57 @@ spec = around withApp $ do
         let [created] = rows
         created.action `shouldBe` "create"
         created.requestId `shouldBe` Just "audit-req-1"
+
+    it "exposes canonical actor attribution through audit API responses" $ \_ -> do
+      withAppEnv $ \_env app -> do
+        resp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("X-Request-Id", "audit-actor-req")]
+          (encode (object ["name" .= ("audit-actor-api-ws" :: T.Text)]))
+        respStatus resp `shouldBe` 200
+        let Just ws = decode (respBody resp) :: Maybe Workspace
+
+        listResp <- get_ app
+          ( "/api/v1/audit?entity_type=workspace&entity_id="
+         <> encodeUtf8 (T.pack (show ws.id))
+          )
+        respStatus listResp `shouldBe` 200
+        let Just auditPage = decode (respBody listResp) :: Maybe (PaginatedResult AuditLogEntry)
+        length auditPage.items `shouldBe` 1
+        let [entry] = auditPage.items
+        entry.requestId `shouldBe` Just "audit-actor-req"
+        entry.actorType `shouldBe` Just "user"
+        entry.actorId `shouldBe` Just "local-user"
+        entry.actorLabel `shouldBe` Just "Local User"
+
+        getResp <- get_ app (uuidPath "/api/v1/audit" entry.id)
+        respStatus getResp `shouldBe` 200
+        let Just fetchedEntry = decode (respBody getResp) :: Maybe AuditLogEntry
+        fetchedEntry.actorType `shouldBe` Just "user"
+        fetchedEntry.actorId `shouldBe` Just "local-user"
+        fetchedEntry.actorLabel `shouldBe` Just "Local User"
+
+    it "includes canonical actor hints in emitted change events" $ \_ -> do
+      withTestEnv $ \env -> do
+        let principal = Principal
+              { actorType = ActorBot
+              , actorId = "event-bot-1"
+              , actorLabel = "Event Bot"
+              , authority = PrincipalSyntheticLocalSuperadmin
+              }
+        withCapturedBroadcastApp env principal $ \app eventsRef -> do
+          resp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+            [("X-Request-Id", "event-actor-req")]
+            (encode (object ["name" .= ("event-actor-ws" :: T.Text)]))
+          respStatus resp `shouldBe` 200
+
+          events <- readIORef eventsRef
+          length events `shouldBe` 1
+          let [event@ChangeEvent { requestId = eventRequestId, actorType = eventActorType, actorId = eventActorId, actorLabel = eventActorLabel }] = events
+          eventRequestId `shouldBe` Just "event-actor-req"
+          eventActorType `shouldBe` Just "bot"
+          eventActorId `shouldBe` Just "event-bot-1"
+          eventActorLabel `shouldBe` Just "Event Bot"
+          let eventJson = LBS8.unpack (encode event)
+          eventJson `shouldContain` "\"actor_type\":\"bot\""
+          eventJson `shouldContain` "\"actor_id\":\"event-bot-1\""
+          eventJson `shouldContain` "\"actor_label\":\"Event Bot\""

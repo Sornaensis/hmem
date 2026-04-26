@@ -1,5 +1,6 @@
 module HMem.DB.RequestContext
   ( ActorType(..)
+  , actorTypeToText
   , PrincipalAuthority(..)
   , Principal(..)
   , RequestContext(..)
@@ -27,6 +28,10 @@ data ActorType
   = ActorUser
   | ActorBot
   deriving stock (Show, Eq)
+
+actorTypeToText :: ActorType -> Text
+actorTypeToText ActorUser = "user"
+actorTypeToText ActorBot  = "bot"
 
 data PrincipalAuthority
   = PrincipalNoAuthority

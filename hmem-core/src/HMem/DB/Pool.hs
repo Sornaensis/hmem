@@ -28,7 +28,7 @@ import Hasql.Statement qualified as Statement
 import System.IO (hPutStrLn, stderr)
 import System.IO.Unsafe (unsafePerformIO)
 
-import HMem.DB.RequestContext (ActorType(..), Principal(..), RequestContext(..), currentRequestContext)
+import HMem.DB.RequestContext (Principal(..), RequestContext(..), actorTypeToText, currentRequestContext)
 
 ------------------------------------------------------------------------
 -- Pool metrics (process-wide)
@@ -239,10 +239,6 @@ clearPrincipalContext = do
   void $ Session.statement "" setActorTypeStatement
   void $ Session.statement "" setActorIdStatement
   void $ Session.statement "" setActorLabelStatement
-
-actorTypeToText :: ActorType -> Text
-actorTypeToText ActorUser = "user"
-actorTypeToText ActorBot  = "bot"
 
 setRequestIdStatement :: Statement.Statement Text Text
 setRequestIdStatement = Statement.Statement

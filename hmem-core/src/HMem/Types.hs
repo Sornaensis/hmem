@@ -1517,6 +1517,9 @@ data AuditLogEntry = AuditLogEntry
   , oldValues  :: Maybe Value
   , newValues  :: Maybe Value
   , requestId  :: Maybe Text
+  , actorType  :: Maybe Text
+  , actorId    :: Maybe Text
+  , actorLabel :: Maybe Text
   , changedAt  :: UTCTime
   } deriving (Show, Eq, Generic)
 

@@ -29,8 +29,12 @@ import Crypto.JOSE.JWS qualified as JWS
 import HMem.Config (CorsConfig(..))
 import HMem.Config qualified as Config
 import HMem.DB.Auth qualified as Auth
+import HMem.DB.Category qualified as Cat
 import HMem.DB.Memory qualified as Mem
 import HMem.DB.Pool qualified as DBPool
+import HMem.DB.Project qualified as Proj
+import HMem.DB.SavedView qualified as SV
+import HMem.DB.Task qualified as Task
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
 import HMem.DB.TestHarness
 import HMem.Server.AccessTracker (newAccessTracker)
@@ -276,6 +280,23 @@ grantPrincipal userId = Principal
   , actorLabel = "Grant User"
   , authority = PrincipalGrantUser userId
   }
+
+withPrincipalApp :: TestEnv -> Config.HMemConfig -> Principal -> (Application -> IO a) -> IO a
+withPrincipalApp env cfg principal action = do
+  tracker <- newAccessTracker env.pool 3600
+  wsState <- newWSState
+  let cfg' = cfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
+  app <- mkApp (principalMiddleware principal) cfg'.auth cfg'.cors cfg'.rateLimit env.pool tracker wsState Nothing True
+  action app
+
+grantWorkspaceRole :: TestEnv -> UUID -> UUID -> Auth.WorkspaceRole -> IO Auth.WorkspaceMembership
+grantWorkspaceRole env workspaceId userId role =
+  Auth.upsertWorkspaceMembership env.pool workspaceId
+    Auth.UpsertWorkspaceMembership
+      { Auth.membershipUserIdInput = userId
+      , Auth.membershipRoleInput = role
+      }
+    Nothing
 
 membershipUserRole :: Auth.WorkspaceMembership -> (UUID, Auth.WorkspaceRole)
 membershipUserRole Auth.WorkspaceMembership { membershipUserId = userId, membershipRole = role } = (userId, role)
@@ -855,6 +876,202 @@ spec = around withApp $ do
           (object ["ids" .= ([] :: [UUID])])
         respStatus categoryBatchResp `shouldBe` 401
 
+    it "enforces deployed create_workspace and superadmin global permissions" $ \_ ->
+      withTestEnv $ \env -> do
+        plainUserId <- createTestUser env False False
+        creatorUserId <- createTestUser env True False
+        superadminUserId <- createTestUser env False True
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal plainUserId) $ \plainApp -> do
+          deniedCreateResp <- postJSON plainApp "/api/v1/workspaces"
+            (object ["name" .= ("plain-create-denied" :: T.Text)])
+          respStatus deniedCreateResp `shouldBe` 403
+
+          deniedGlobalListResp <- get_ plainApp "/api/v1/workspaces"
+          respStatus deniedGlobalListResp `shouldBe` 403
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal creatorUserId) $ \creatorApp -> do
+          allowedCreateResp <- postJSON creatorApp "/api/v1/workspaces"
+            (object ["name" .= ("creator-create-allowed" :: T.Text)])
+          respStatus allowedCreateResp `shouldBe` 200
+
+          deniedGlobalListResp <- get_ creatorApp "/api/v1/workspaces"
+          respStatus deniedGlobalListResp `shouldBe` 403
+
+        ws <- createTestWorkspace env "superadmin-bypass-ws"
+        withPrincipalApp env deployedAuthCfg (grantPrincipal superadminUserId) $ \superApp -> do
+          superCreateResp <- postJSON superApp "/api/v1/workspaces"
+            (object ["name" .= ("superadmin-create-allowed" :: T.Text)])
+          respStatus superCreateResp `shouldBe` 200
+
+          listMembershipsResp <- get_ superApp (uuidPath "/api/v1/workspaces" ws.id <> "/memberships")
+          respStatus listMembershipsResp `shouldBe` 200
+
+          globalWorkspacesResp <- get_ superApp "/api/v1/workspaces"
+          respStatus globalWorkspacesResp `shouldBe` 200
+          let Just globalWorkspaces = decode (respBody globalWorkspacesResp) :: Maybe (PaginatedResult Workspace)
+          map (.id) globalWorkspaces.items `shouldContain` [ws.id]
+
+    it "enforces deployed read edit and admin workspace roles" $ \_ ->
+      withTestEnv $ \env -> do
+        ws <- createTestWorkspace env "deployed-role-matrix"
+        readUserId <- createTestUser env False False
+        editUserId <- createTestUser env False False
+        adminUserId <- createTestUser env False False
+        outsiderUserId <- createTestUser env False False
+        _ <- grantWorkspaceRole env ws.id readUserId Auth.WorkspaceRoleRead
+        _ <- grantWorkspaceRole env ws.id editUserId Auth.WorkspaceRoleEdit
+        _ <- grantWorkspaceRole env ws.id adminUserId Auth.WorkspaceRoleAdmin
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal readUserId) $ \readApp -> do
+          getWsResp <- get_ readApp (uuidPath "/api/v1/workspaces" ws.id)
+          respStatus getWsResp `shouldBe` 200
+          deniedCreateMemoryResp <- postJSON readApp "/api/v1/memories"
+            (object ["workspace_id" .= ws.id, "content" .= ("read denied" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
+          respStatus deniedCreateMemoryResp `shouldBe` 403
+
+          deniedCreateProjectResp <- postJSON readApp "/api/v1/projects"
+            (object ["workspace_id" .= ws.id, "name" .= ("read-project-denied" :: T.Text)])
+          respStatus deniedCreateProjectResp `shouldBe` 403
+
+        mem <- withPrincipalApp env deployedAuthCfg (grantPrincipal editUserId) $ \editApp -> do
+          createMemoryResp <- postJSON editApp "/api/v1/memories"
+            (object ["workspace_id" .= ws.id, "content" .= ("edit allowed" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
+          respStatus createMemoryResp `shouldBe` 200
+          let Just createdMem = decode (respBody createMemoryResp) :: Maybe Memory
+
+          createProjectResp <- postJSON editApp "/api/v1/projects"
+            (object ["workspace_id" .= ws.id, "name" .= ("edit-project-allowed" :: T.Text)])
+          respStatus createProjectResp `shouldBe` 200
+          let Just createdProject = decode (respBody createProjectResp) :: Maybe Project
+
+          createTaskResp <- postJSON editApp "/api/v1/tasks"
+            (object ["workspace_id" .= ws.id, "project_id" .= createdProject.id, "title" .= ("edit-task-allowed" :: T.Text)])
+          respStatus createTaskResp `shouldBe` 200
+
+          deleteMemoryResp <- del editApp (uuidPath "/api/v1/memories" createdMem.id)
+          respStatus deleteMemoryResp `shouldBe` 200
+          deniedPurgeResp <- del editApp (uuidPath "/api/v1/memories" createdMem.id <> "/purge")
+          respStatus deniedPurgeResp `shouldBe` 403
+          pure createdMem
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal adminUserId) $ \adminApp -> do
+          listMembershipsResp <- get_ adminApp (uuidPath "/api/v1/workspaces" ws.id <> "/memberships")
+          respStatus listMembershipsResp `shouldBe` 200
+
+          purgeResp <- del adminApp (uuidPath "/api/v1/memories" mem.id <> "/purge")
+          respStatus purgeResp `shouldBe` 200
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal outsiderUserId) $ \outsiderApp -> do
+          deniedGetResp <- get_ outsiderApp (uuidPath "/api/v1/workspaces" ws.id)
+          respStatus deniedGetResp `shouldBe` 403
+
+    it "denies deployed entity-by-id reads across workspace boundaries" $ \_ ->
+      withTestEnv $ \env -> do
+        wsA <- createTestWorkspace env "entity-denial-a"
+        wsB <- createTestWorkspace env "entity-denial-b"
+        userId <- createTestUser env False False
+        _ <- grantWorkspaceRole env wsA.id userId Auth.WorkspaceRoleRead
+        memB <- Mem.createMemory env.pool CreateMemory
+          { workspaceId = wsB.id
+          , content = "workspace b secret"
+          , summary = Nothing
+          , memoryType = ShortTerm
+          , importance = Nothing
+          , metadata = Nothing
+          , expiresAt = Nothing
+          , source = Nothing
+          , confidence = Nothing
+          , pinned = Nothing
+          , tags = Nothing
+          , ftsLanguage = Nothing
+          }
+        projectB <- Proj.createProject env.pool CreateProject
+          { workspaceId = wsB.id
+          , name = "workspace b project"
+          , description = Nothing
+          , parentId = Nothing
+          , priority = Nothing
+          , metadata = Nothing
+          }
+        taskB <- Task.createTask env.pool CreateTask
+          { workspaceId = wsB.id
+          , projectId = Just projectB.id
+          , parentId = Nothing
+          , title = "workspace b task"
+          , description = Nothing
+          , priority = Nothing
+          , metadata = Nothing
+          , dueAt = Nothing
+          }
+        categoryB <- Cat.createCategory env.pool CreateMemoryCategory
+          { workspaceId = Just wsB.id
+          , name = "workspace-b-category"
+          , description = Nothing
+          , parentId = Nothing
+          }
+        viewB <- SV.createSavedView env.pool CreateSavedView
+          { workspaceId = wsB.id
+          , name = "workspace-b-view"
+          , description = Nothing
+          , entityType = "memory_list"
+          , queryParams = object ["workspace_id" .= wsB.id]
+          }
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal userId) $ \app -> do
+          deniedGetResp <- get_ app (uuidPath "/api/v1/memories" memB.id)
+          respStatus deniedGetResp `shouldBe` 403
+
+          deniedProjectResp <- get_ app (uuidPath "/api/v1/projects" projectB.id)
+          respStatus deniedProjectResp `shouldBe` 403
+
+          deniedTaskResp <- get_ app (uuidPath "/api/v1/tasks" taskB.id)
+          respStatus deniedTaskResp `shouldBe` 403
+
+          deniedCategoryResp <- get_ app (uuidPath "/api/v1/categories" categoryB.id)
+          respStatus deniedCategoryResp `shouldBe` 403
+
+          deniedSavedViewResp <- get_ app (uuidPath "/api/v1/saved-views" viewB.id)
+          respStatus deniedSavedViewResp `shouldBe` 403
+
+          deniedWorkspaceListResp <- get_ app ("/api/v1/memories?workspace_id=" <> encodeUtf8 (T.pack (show wsB.id)))
+          respStatus deniedWorkspaceListResp `shouldBe` 403
+
+          deniedProjectListResp <- get_ app ("/api/v1/projects?workspace_id=" <> encodeUtf8 (T.pack (show wsB.id)))
+          respStatus deniedProjectListResp `shouldBe` 403
+
+          deniedTaskListResp <- get_ app ("/api/v1/tasks?workspace_id=" <> encodeUtf8 (T.pack (show wsB.id)))
+          respStatus deniedTaskListResp `shouldBe` 403
+
+          deniedTaskProjectListResp <- get_ app ("/api/v1/tasks?project_id=" <> encodeUtf8 (T.pack (show projectB.id)))
+          respStatus deniedTaskProjectListResp `shouldBe` 403
+
+          deniedCategoryListResp <- get_ app ("/api/v1/categories?workspace_id=" <> encodeUtf8 (T.pack (show wsB.id)))
+          respStatus deniedCategoryListResp `shouldBe` 403
+
+          deniedSavedViewListResp <- get_ app ("/api/v1/saved-views?workspace_id=" <> encodeUtf8 (T.pack (show wsB.id)))
+          respStatus deniedSavedViewListResp `shouldBe` 403
+
+          deniedMemorySearchResp <- postJSON app "/api/v1/memories/search"
+            (object ["workspace_id" .= wsB.id, "query" .= ("workspace" :: T.Text)])
+          respStatus deniedMemorySearchResp `shouldBe` 403
+
+          deniedCategorySearchResp <- postJSON app "/api/v1/memories/search"
+            (object ["category_id" .= categoryB.id, "query" .= ("workspace" :: T.Text)])
+          respStatus deniedCategorySearchResp `shouldBe` 403
+
+          deniedUnifiedWorkspaceSearchResp <- postJSON app "/api/v1/search"
+            (object ["workspace_id" .= wsB.id, "query" .= ("workspace" :: T.Text)])
+          respStatus deniedUnifiedWorkspaceSearchResp `shouldBe` 403
+
+          deniedUnifiedProjectSearchResp <- postJSON app "/api/v1/search"
+            (object ["project_id" .= projectB.id, "query" .= ("workspace" :: T.Text)])
+          respStatus deniedUnifiedProjectSearchResp `shouldBe` 403
+
+          deniedUnifiedCategorySearchResp <- postJSON app "/api/v1/search"
+            (object ["category_id" .= categoryB.id, "query" .= ("workspace" :: T.Text)])
+          respStatus deniedUnifiedCategorySearchResp `shouldBe` 403
+
     it "rejects cross-workspace project-memory links" $ \app -> do
       wsAResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("link-ws-a" :: T.Text)])
@@ -1096,6 +1313,32 @@ spec = around withApp $ do
         created.actorType `shouldBe` Just "bot"
         created.actorId `shouldBe` Just "legacy-static-bearer"
         created.actorLabel `shouldBe` Just "Legacy Static Bearer"
+        created.workspaceId `shouldBe` Just ws.id
+
+    it "records configured local bot actors while preserving local superadmin behavior" $ \_ -> do
+      let localBotCfg = Config.defaultConfig
+            { Config.auth = Config.defaultConfig.auth
+                { Config.mode = Config.AuthModeLocal
+                , Config.local = Config.LocalAuthConfig
+                    { Config.bootstrapEnabled = True
+                    , Config.botTokens = [Config.LocalBotTokenConfig { Config.label = "Codex Bot", Config.token = "codex-secret" }]
+                    }
+                }
+            }
+      withAppEnvConfig localBotCfg $ \env app -> do
+        wsResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer codex-secret")]
+          (encode (object ["name" .= ("ctx-local-bot-ws" :: T.Text)]))
+        respStatus wsResp `shouldBe` 200
+        let Just ws = decode (respBody wsResp) :: Maybe Workspace
+        purgeActiveResp <- del app (uuidPath "/api/v1/workspaces" ws.id <> "/purge")
+        respStatus purgeActiveResp `shouldBe` 409
+
+        rows <- getAuditLogRows env.pool "workspace" (T.pack (show ws.id))
+        let created = head rows
+        created.actorType `shouldBe` Just "bot"
+        created.actorId `shouldBe` Just "local-bot:Codex Bot"
+        created.actorLabel `shouldBe` Just "Codex Bot"
         created.workspaceId `shouldBe` Just ws.id
 
   describe "rate limiting" $ do

@@ -103,6 +103,10 @@ module HMem.Types
   , auditActionToText
   , auditActionFromText
 
+    -- * WebSocket auth
+  , WebSocketTicketRequest(..)
+  , WebSocketTicketResponse(..)
+
     -- * Pagination
   , PaginatedResult(..)
 
@@ -1552,6 +1556,29 @@ instance ToJSON RevertResult where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON RevertResult where
   parseJSON  = genericParseJSON jsonOptions
+
+------------------------------------------------------------------------
+-- WebSocket auth
+------------------------------------------------------------------------
+
+newtype WebSocketTicketRequest = WebSocketTicketRequest
+  { workspaceId :: UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WebSocketTicketRequest where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON WebSocketTicketRequest where
+  parseJSON = genericParseJSON jsonOptions
+
+data WebSocketTicketResponse = WebSocketTicketResponse
+  { ticket    :: Text
+  , expiresAt :: UTCTime
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WebSocketTicketResponse where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON WebSocketTicketResponse where
+  parseJSON = genericParseJSON jsonOptions
 
 ------------------------------------------------------------------------
 -- Pagination

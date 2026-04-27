@@ -10,6 +10,7 @@ module HMem.Server.API
   ) where
 
 import Control.Exception (try)
+import Control.Applicative ((<|>))
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON (..), ToJSON (..), genericToJSON, genericParseJSON, Value(..), object, (.=))
 import Data.Aeson qualified as Aeson
@@ -50,6 +51,7 @@ import HMem.DB.Task qualified as Task
 import HMem.DB.WorkspaceGroup qualified as WG
 import HMem.Server.AccessTracker (AccessTracker, trackAccess, bufferSize)
 import HMem.Server.Event (Broadcast, ChangeEvent(..), ChangeType(..), EntityType(..))
+import HMem.Server.WebSocket qualified as WS
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -58,6 +60,7 @@ import HMem.Types
 
 type HMemAPI = "api" :> "v1" :>
   (    "health"      :> HealthAPI
+  :<|> "ws-ticket"   :> WebSocketTicketAPI
   :<|> "workspaces"  :> WorkspaceAPI
   :<|> "memories"    :> MemoryAPI
   :<|> "projects"    :> ProjectAPI
@@ -73,6 +76,8 @@ type HMemAPI = "api" :> "v1" :>
 
 -- Health check
 type HealthAPI = Get '[JSON] Value
+
+type WebSocketTicketAPI = ReqBody '[JSON] WebSocketTicketRequest :> Post '[JSON] WebSocketTicketResponse
 
 -- Workspaces
 type WorkspaceAPI =
@@ -542,9 +547,10 @@ purgeConflict = err409
 -- Server implementation
 ------------------------------------------------------------------------
 
-server :: Pool Hasql.Connection -> AccessTracker -> Broadcast -> Bool -> Server HMemAPI
-server pool tracker bc pgvec =
+server :: Pool Hasql.Connection -> AccessTracker -> Broadcast -> WS.WSState -> Bool -> Server HMemAPI
+server pool tracker bc wsState pgvec =
        healthHandler pool tracker
+  :<|> webSocketTicketHandler pool wsState
   :<|> workspaceHandlers pool bc
   :<|> memoryHandlers pool tracker bc pgvec
   :<|> projectHandlers pool bc
@@ -557,19 +563,45 @@ server pool tracker bc pgvec =
   :<|> searchHandler pool
   :<|> auditHandlers pool bc
 
+webSocketTicketHandler :: Pool Hasql.Connection -> WS.WSState -> WebSocketTicketRequest -> Handler WebSocketTicketResponse
+webSocketTicketHandler pool wsState req = do
+  requireActiveWorkspaceH pool req.workspaceId
+  requireWorkspaceRoleH pool req.workspaceId Auth.WorkspaceRoleRead
+  mPrincipal <- liftIO currentPrincipal
+  principal <- case mPrincipal of
+    Just p -> pure p
+    Nothing -> throwError (authErrorToServerError Auth.MissingPrincipal)
+  liftIO $ WS.createTicket wsState principal req.workspaceId
+
 -- | Emit a change event to all connected WebSocket clients.
 emit :: Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
-emit bc ct et eid mpayload = liftIO $ do
+emit = emitWithWorkspace Nothing
+
+emitInWorkspace :: UUID -> Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
+emitInWorkspace wsId = emitWithWorkspace (Just wsId)
+
+emitInScope :: Auth.EntityScope -> Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
+emitInScope scope = emitWithWorkspace (scopeWorkspaceId scope)
+
+scopeWorkspaceId :: Auth.EntityScope -> Maybe UUID
+scopeWorkspaceId = \case
+  Auth.EntityWorkspaceScope wsId -> Just wsId
+  Auth.EntityGlobalScope -> Nothing
+
+emitWithWorkspace :: Maybe UUID -> Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
+emitWithWorkspace explicitWsId bc ct et eid mpayload = liftIO $ do
   now <- getCurrentTime
   reqId <- currentRequestId
   mPrincipal <- currentPrincipal
   let mActorType = actorTypeToText . (.actorType) <$> mPrincipal
       mActorId = (.actorId) <$> mPrincipal
       mActorLabel = (.actorLabel) <$> mPrincipal
+      mWorkspaceId = explicitWsId <|> inferEventWorkspace et eid mpayload
   bc ChangeEvent
     { changeType = ct
     , entityType = et
     , entityId = eid
+    , workspaceId = mWorkspaceId
     , timestamp = now
     , requestId = reqId
     , actorType = mActorType
@@ -578,9 +610,18 @@ emit bc ct et eid mpayload = liftIO $ do
     , payload = mpayload
     }
 
--- | Emit one event per ID in a list. Used by batch handlers.
-emitMany :: Broadcast -> ChangeType -> EntityType -> [UUID] -> Handler ()
-emitMany bc ct et ids = mapM_ (\eid -> emit bc ct et eid Nothing) ids
+inferEventWorkspace :: EntityType -> UUID -> Maybe Value -> Maybe UUID
+inferEventWorkspace ETWorkspace entityId _ = Just entityId
+inferEventWorkspace _ _ (Just (Object obj)) = do
+  value <- KeyMap.lookup (Aeson.fromText "workspace_id") obj
+  case Aeson.fromJSON value of
+    Aeson.Success wsId -> Just wsId
+    Aeson.Error _ -> Nothing
+inferEventWorkspace _ _ _ = Nothing
+
+emitManyInScopes :: Broadcast -> ChangeType -> EntityType -> [(UUID, Auth.EntityScope)] -> Handler ()
+emitManyInScopes bc ct et entries =
+  mapM_ (\(eid, scope) -> emitInScope scope bc ct et eid Nothing) entries
 
 -- Health handler ---------------------------------------------------
 
@@ -1163,14 +1204,14 @@ memoryHandlers pool tracker bc pgvec =
           pure mem
 
     deleteMemoryH mid = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
+      scope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Mem.deleteMemory pool mid
-      if ok then do emit bc Deleted ETMemory mid Nothing; pure NoContent else throwError err404
+      if ok then do emitInScope scope bc Deleted ETMemory mid Nothing; pure NoContent else throwError err404
 
     restoreMemoryH mid = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
+      scope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Mem.restoreMemory pool mid
-      if ok then do emit bc Updated ETMemory mid Nothing; pure NoContent else throwError err404
+      if ok then do emitInScope scope bc Updated ETMemory mid Nothing; pure NoContent else throwError err404
 
     purgeMemoryH mid = do
       _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleAdmin
@@ -1204,7 +1245,7 @@ memoryHandlers pool tracker bc pgvec =
       mem <- requireMemoryH mid
       _ <- requireMemoryH cml.targetId
       handleDBErrorsInWorkspace mem.workspaceId $ Mem.linkMemories pool mid cml
-      emit bc Created ETMemoryLink mid (Just $ object ["source_id" .= mid, "target_id" .= cml.targetId])
+      emitInWorkspace mem.workspaceId bc Created ETMemoryLink mid (Just $ object ["source_id" .= mid, "target_id" .= cml.targetId])
       pure NoContent
 
     unlinkH mid tid rt = do
@@ -1213,7 +1254,7 @@ memoryHandlers pool tracker bc pgvec =
       _ <- requireSameWorkspaceScopesH sourceScope targetScope
       mem <- requireMemoryH mid
       ok <- handleDBErrorsInWorkspace mem.workspaceId $ Mem.unlinkMemories pool mid tid rt
-      if ok then do emit bc Deleted ETMemoryLink mid (Just $ object ["source_id" .= mid, "target_id" .= tid]); pure NoContent else throwError err404
+      if ok then do emitInWorkspace mem.workspaceId bc Deleted ETMemoryLink mid (Just $ object ["source_id" .= mid, "target_id" .= tid]); pure NoContent else throwError err404
 
     getTagsH mid = do
       _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
@@ -1224,7 +1265,7 @@ memoryHandlers pool tracker bc pgvec =
       _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
       mem <- requireMemoryH mid
       handleDBErrorsInWorkspace mem.workspaceId $ Mem.setTags pool mid tags
-      emit bc Updated ETTag mid (Just $ object ["memory_id" .= mid, "tags" .= tags])
+      emitInWorkspace mem.workspaceId bc Updated ETTag mid (Just $ object ["memory_id" .= mid, "tags" .= tags])
       pure NoContent
 
     graphH mid mdepth = do
@@ -1271,19 +1312,20 @@ memoryHandlers pool tracker bc pgvec =
 
     batchDeleteH br = do
       requireAuthenticatedH
-      mapM_ (\mid -> requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit) br.ids
+      scopes <- mapM (\mid -> requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit) br.ids
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Mem.deleteMemoryBatch pool br.ids
-      emitMany bc Deleted ETMemory br.ids
+      emitManyInScopes bc Deleted ETMemory (zip br.ids scopes)
       pure BatchResult { affected = n }
 
     batchSetTagsH bst = do
       requireAuthenticatedH
-      groupedItems <- fmap (Map.toList . Map.fromListWith (<>)) $ mapM resolveTagBatchItem bst.items
+      resolvedItems <- mapM resolveTagBatchItem bst.items
+      let groupedItems = Map.toList $ Map.fromListWith (<>) resolvedItems
       rejectValidationErrors (validateBatchSetTagsRequest bst)
       counts <- mapM (\(wsId, items) -> handleDBErrorsInWorkspace wsId $ Mem.setTagsBatch pool items) groupedItems
       let n = Prelude.sum counts
-      emitMany bc Updated ETTag (map (.memoryId) bst.items)
+      mapM_ (\(wsId, items) -> mapM_ (\(mid, _) -> emitInWorkspace wsId bc Updated ETTag mid Nothing) items) groupedItems
       pure BatchResult { affected = n }
 
     resolveTagBatchItem item = do
@@ -1293,10 +1335,10 @@ memoryHandlers pool tracker bc pgvec =
 
     batchUpdateH bur = do
       requireAuthenticatedH
-      mapM_ (\item -> requireEntityRoleH pool Auth.EntityMemory item.id Auth.WorkspaceRoleEdit) bur.items
+      scopes <- mapM (\item -> requireEntityRoleH pool Auth.EntityMemory item.id Auth.WorkspaceRoleEdit) bur.items
       rejectValidationErrors (validateBatchUpdateMemoryRequest bur)
       n <- handleDBErrors $ Mem.updateMemoryBatch pool [(item.id, item.update) | item <- bur.items]
-      emitMany bc Updated ETMemory (map (.id) bur.items)
+      emitManyInScopes bc Updated ETMemory (zip (map (.id) bur.items) scopes)
       pure BatchResult { affected = n }
 
 -- Project handlers -------------------------------------------------
@@ -1371,14 +1413,14 @@ projectHandlers pool bc =
           pure proj
 
     deleteProjectH pid = do
-      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
+      scope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Proj.deleteProject pool pid
-      if ok then do emit bc Deleted ETProject pid Nothing; pure NoContent else throwError err404
+      if ok then do emitInScope scope bc Deleted ETProject pid Nothing; pure NoContent else throwError err404
 
     restoreProjectH pid = do
-      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
+      scope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Proj.restoreProject pool pid
-      if ok then do emit bc Updated ETProject pid Nothing; pure NoContent else throwError err404
+      if ok then do emitInScope scope bc Updated ETProject pid Nothing; pure NoContent else throwError err404
 
     purgeProjectH pid = do
       _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleAdmin
@@ -1407,7 +1449,7 @@ projectHandlers pool bc =
       proj <- requireProjectH pid
       _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
       handleDBErrorsInWorkspace proj.workspaceId $ Proj.linkProjectMemory pool pid lm.memoryId
-      emit bc Updated ETProject pid (Just $ object ["linked_memory" .= lm.memoryId])
+      emitInWorkspace proj.workspaceId bc Updated ETProject pid (Just $ object ["linked_memory" .= lm.memoryId])
       pure NoContent
 
     unlinkMemoryH pid mid = do
@@ -1416,7 +1458,7 @@ projectHandlers pool bc =
       _ <- requireSameWorkspaceScopesH projectScope memoryScope
       proj <- requireProjectH pid
       handleDBErrorsInWorkspace proj.workspaceId $ Proj.unlinkProjectMemory pool pid mid
-      emit bc Updated ETProject pid (Just $ object ["unlinked_memory" .= mid])
+      emitInWorkspace proj.workspaceId bc Updated ETProject pid (Just $ object ["unlinked_memory" .= mid])
       pure NoContent
 
     getProjectMemoriesH pid mQuery mTags mMinImportance mMemoryType mMinAccessCount = do
@@ -1448,23 +1490,23 @@ projectHandlers pool bc =
       proj <- requireProjectH pid
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
       n <- handleDBErrorsInWorkspace proj.workspaceId $ Proj.linkProjectMemoryBatch pool pid blr.memoryIds
-      emit bc Updated ETProject pid Nothing
+      emitInWorkspace proj.workspaceId bc Updated ETProject pid Nothing
       pure BatchResult { affected = n }
 
     batchDeleteH br = do
       requireAuthenticatedH
-      mapM_ (\pid -> requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit) br.ids
+      scopes <- mapM (\pid -> requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit) br.ids
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Proj.deleteProjectBatch pool br.ids
-      emitMany bc Deleted ETProject br.ids
+      emitManyInScopes bc Deleted ETProject (zip br.ids scopes)
       pure BatchResult { affected = n }
 
     batchUpdateH bur = do
       requireAuthenticatedH
-      mapM_ authorizeProjectUpdateItem bur.items
+      scopes <- mapM authorizeProjectUpdateItem bur.items
       rejectValidationErrors (validateBatchUpdateProjectRequest bur)
       n <- handleDBErrors $ Proj.updateProjectBatch pool [(item.id, item.update) | item <- bur.items]
-      emitMany bc Updated ETProject (map (.id) bur.items)
+      emitManyInScopes bc Updated ETProject (zip (map (.id) bur.items) scopes)
       pure BatchResult { affected = n }
 
     projectOverviewH pid mExtraContext = do
@@ -1480,6 +1522,7 @@ projectHandlers pool bc =
           _ <- requireSameWorkspaceScopesH projectScope parentScope
           pure ()
         _ -> pure ()
+      pure projectScope
 
 -- Task handlers ----------------------------------------------------
 
@@ -1574,14 +1617,14 @@ taskHandlers pool bc =
           pure task
 
     deleteTaskH tid = do
-      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
+      scope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Task.deleteTask pool tid
-      if ok then do emit bc Deleted ETTask tid Nothing; pure NoContent else throwError err404
+      if ok then do emitInScope scope bc Deleted ETTask tid Nothing; pure NoContent else throwError err404
 
     restoreTaskH tid = do
-      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
+      scope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Task.restoreTask pool tid
-      if ok then do emit bc Updated ETTask tid Nothing; pure NoContent else throwError err404
+      if ok then do emitInScope scope bc Updated ETTask tid Nothing; pure NoContent else throwError err404
 
     purgeTaskH tid = do
       _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleAdmin
@@ -1610,7 +1653,7 @@ taskHandlers pool bc =
       task <- requireTaskH tid
       _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
       handleDBErrorsInWorkspace task.workspaceId $ Task.linkTaskMemory pool tid lm.memoryId
-      emit bc Updated ETTask tid (Just $ object ["linked_memory" .= lm.memoryId])
+      emitInWorkspace task.workspaceId bc Updated ETTask tid (Just $ object ["linked_memory" .= lm.memoryId])
       pure NoContent
 
     unlinkMemoryH tid mid = do
@@ -1619,7 +1662,7 @@ taskHandlers pool bc =
       _ <- requireSameWorkspaceScopesH taskScope memoryScope
       task <- requireTaskH tid
       handleDBErrorsInWorkspace task.workspaceId $ Task.unlinkTaskMemory pool tid mid
-      emit bc Updated ETTask tid (Just $ object ["unlinked_memory" .= mid])
+      emitInWorkspace task.workspaceId bc Updated ETTask tid (Just $ object ["unlinked_memory" .= mid])
       pure NoContent
 
     addDepH tid ld = do
@@ -1629,7 +1672,7 @@ taskHandlers pool bc =
       task <- requireTaskH tid
       _ <- requireTaskH ld.dependsOnId
       handleDBErrorsInWorkspace task.workspaceId $ Task.addDependency pool tid ld.dependsOnId
-      emit bc Created ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= ld.dependsOnId])
+      emitInWorkspace task.workspaceId bc Created ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= ld.dependsOnId])
       pure NoContent
 
     removeDepH tid depId = do
@@ -1638,7 +1681,7 @@ taskHandlers pool bc =
       _ <- requireSameWorkspaceScopesH taskScope depScope
       task <- requireTaskH tid
       handleDBErrorsInWorkspace task.workspaceId $ Task.removeDependency pool tid depId
-      emit bc Deleted ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= depId])
+      emitInWorkspace task.workspaceId bc Deleted ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= depId])
       pure NoContent
 
     getTaskMemoriesH tid mQuery mTags mMinImportance mMemoryType mMinAccessCount = do
@@ -1674,10 +1717,10 @@ taskHandlers pool bc =
 
     batchDeleteH br = do
       requireAuthenticatedH
-      mapM_ (\tid -> requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit) br.ids
+      scopes <- mapM (\tid -> requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit) br.ids
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Task.deleteTaskBatch pool br.ids
-      emitMany bc Deleted ETTask br.ids
+      emitManyInScopes bc Deleted ETTask (zip br.ids scopes)
       pure BatchResult { affected = n }
 
     batchMoveH bmr = do
@@ -1688,15 +1731,15 @@ taskHandlers pool bc =
         mapM_ (requireSameWorkspaceScopesH projectScope) taskScopes) bmr.projectId
       rejectValidationErrors (validateBatchMoveTasksRequest bmr)
       n <- handleDBErrors $ Task.moveTasksBatch pool bmr.taskIds bmr.projectId
-      emitMany bc Updated ETTask bmr.taskIds
+      emitManyInScopes bc Updated ETTask (zip bmr.taskIds taskScopes)
       pure BatchResult { affected = n }
 
     batchUpdateH bur = do
       requireAuthenticatedH
-      mapM_ authorizeTaskUpdateItem bur.items
+      scopes <- mapM authorizeTaskUpdateItem bur.items
       rejectValidationErrors (validateBatchUpdateTaskRequest bur)
       n <- handleDBErrors $ Task.updateTaskBatch pool [(item.id, item.update) | item <- bur.items]
-      emitMany bc Updated ETTask (map (.id) bur.items)
+      emitManyInScopes bc Updated ETTask (zip (map (.id) bur.items) scopes)
       pure BatchResult { affected = n }
 
     batchLinkMemoriesH tid blr = do
@@ -1707,7 +1750,7 @@ taskHandlers pool bc =
       task <- requireTaskH tid
       rejectValidationErrors (validateBatchMemoryLinkRequest blr)
       n <- handleDBErrorsInWorkspace task.workspaceId $ Task.linkTaskMemoryBatch pool tid blr.memoryIds
-      emit bc Updated ETTask tid Nothing
+      emitInWorkspace task.workspaceId bc Updated ETTask tid Nothing
       pure BatchResult { affected = n }
 
     authorizeTaskUpdateItem item = do
@@ -1724,6 +1767,7 @@ taskHandlers pool bc =
           _ <- requireSameWorkspaceScopesH taskScope parentScope
           pure ()
         _ -> pure ()
+      pure taskScope
 
 -- Cleanup handlers -------------------------------------------------
 
@@ -1824,14 +1868,14 @@ categoryHandlers pool bc =
           pure cat
 
     deleteCategoryH cid = do
-      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
+      scope <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Cat.deleteCategory pool cid
-      if ok then do emit bc Deleted ETCategory cid Nothing; pure NoContent else throwError err404
+      if ok then do emitInScope scope bc Deleted ETCategory cid Nothing; pure NoContent else throwError err404
 
     restoreCategoryH cid = do
-      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
+      scope <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ Cat.restoreCategory pool cid
-      if ok then do emit bc Updated ETCategory cid Nothing; pure NoContent else throwError err404
+      if ok then do emitInScope scope bc Updated ETCategory cid Nothing; pure NoContent else throwError err404
 
     purgeCategoryH cid = do
       _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleAdmin
@@ -1873,15 +1917,17 @@ categoryHandlers pool bc =
       groupedIds <- categoryMemoryIdsByWorkspaceH cat blr.memoryIds
       counts <- mapM (\(wsId, mids) -> handleDBErrorsInWorkspace wsId $ Cat.linkMemoryCategoryBatch pool cid mids) groupedIds
       let n = Prelude.sum counts
-      emit bc Updated ETCategory cid Nothing
+      case groupedIds of
+        [] -> emitInScope catScope bc Updated ETCategory cid Nothing
+        _  -> mapM_ (\(wsId, _) -> emitInWorkspace wsId bc Updated ETCategory cid Nothing) groupedIds
       pure BatchResult { affected = n }
 
     batchDeleteH br = do
       requireAuthenticatedH
-      mapM_ (\cid -> requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit) br.ids
+      scopes <- mapM (\cid -> requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit) br.ids
       rejectValidationErrors (validateBatchDeleteRequest br)
       n <- handleDBErrors $ Cat.deleteCategoryBatch pool br.ids
-      emitMany bc Deleted ETCategory br.ids
+      emitManyInScopes bc Deleted ETCategory (zip br.ids scopes)
       pure BatchResult { affected = n }
 
     linkH cl = do
@@ -1896,7 +1942,7 @@ categoryHandlers pool bc =
       _ <- handleDBErrors (Mem.getMemory pool cl.memoryId) >>= maybe (throwError err404) pure
       wsId <- categoryWorkspaceIdH cat [cl.memoryId]
       handleDBErrorsInWorkspace wsId $ Cat.linkMemoryCategory pool cl.memoryId cl.categoryId
-      emit bc Created ETCategoryLink cl.categoryId (Just $ object ["category_id" .= cl.categoryId, "memory_id" .= cl.memoryId])
+      emitInWorkspace wsId bc Created ETCategoryLink cl.categoryId (Just $ object ["category_id" .= cl.categoryId, "memory_id" .= cl.memoryId])
       pure NoContent
 
     unlinkH cl = do
@@ -1910,7 +1956,7 @@ categoryHandlers pool bc =
       cat <- requireCategoryH cl.categoryId
       wsId <- categoryWorkspaceIdH cat [cl.memoryId]
       handleDBErrorsInWorkspace wsId $ Cat.unlinkMemoryCategory pool cl.memoryId cl.categoryId
-      emit bc Deleted ETCategoryLink cl.categoryId (Just $ object ["category_id" .= cl.categoryId, "memory_id" .= cl.memoryId])
+      emitInWorkspace wsId bc Deleted ETCategoryLink cl.categoryId (Just $ object ["category_id" .= cl.categoryId, "memory_id" .= cl.memoryId])
       pure NoContent
 
 -- Workspace group handlers -----------------------------------------
@@ -2193,14 +2239,14 @@ savedViewHandlers pool bc =
           pure sv
 
     deleteViewH vid = do
-      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleEdit
+      scope <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ SV.deleteSavedView pool vid
-      if ok then do emit bc Deleted ETSavedView vid Nothing; pure NoContent else throwError err404
+      if ok then do emitInScope scope bc Deleted ETSavedView vid Nothing; pure NoContent else throwError err404
 
     restoreViewH vid = do
-      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleEdit
+      scope <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleEdit
       ok <- handleDBErrors $ SV.restoreSavedView pool vid
-      if ok then do emit bc Updated ETSavedView vid Nothing; pure NoContent else throwError err404
+      if ok then do emitInScope scope bc Updated ETSavedView vid Nothing; pure NoContent else throwError err404
 
     purgeViewH vid = do
       _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleAdmin

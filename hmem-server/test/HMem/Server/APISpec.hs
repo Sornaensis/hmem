@@ -13,8 +13,10 @@ import Data.Maybe (isJust)
 import Data.String (fromString)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Time (getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Data.UUID (UUID)
+import Data.UUID.V4 qualified as UUIDv4
 import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
@@ -43,8 +45,8 @@ import HMem.DB.TestHarness
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.API (HMemAPI, server)
 import HMem.Server.App (mkApp, requestIdMiddleware, resolveRequestPrincipal)
-import HMem.Server.Event (ChangeEvent(..))
-import HMem.Server.WebSocket (newWSState)
+import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..))
+import HMem.Server.WebSocket (WorkspaceSubscription(..), consumeTicket, createTicket, eventVisibleToSubscription, newWSState)
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -293,11 +295,12 @@ withPrincipalApp env cfg principal action = do
 withCapturedBroadcastApp :: TestEnv -> Principal -> (Application -> IORef [ChangeEvent] -> IO a) -> IO a
 withCapturedBroadcastApp env principal action = do
   tracker <- newAccessTracker env.pool 3600
+  wsState <- newWSState
   eventsRef <- newIORef []
   let capture event = modifyIORef' eventsRef (<> [event])
       app = requestIdMiddleware
           $ principalMiddleware principal
-          $ serve (Proxy @HMemAPI) (server env.pool tracker capture True)
+          $ serve (Proxy @HMemAPI) (server env.pool tracker capture wsState True)
   action app eventsRef
 
 grantWorkspaceRole :: TestEnv -> UUID -> UUID -> Auth.WorkspaceRole -> IO Auth.WorkspaceMembership
@@ -836,6 +839,67 @@ spec = around withApp $ do
           [("Authorization", "Bearer test-secret")]
           ""
         respStatus resp `shouldBe` 200
+
+  describe "WebSocket auth and event scoping" $ do
+    it "denies deployed WebSocket ticket issuance without a principal" $ \_ ->
+      withAppEnvConfig deployedAuthCfg $ \env app -> do
+        ws <- createTestWorkspace env "ws-ticket-unauthenticated"
+        resp <- postJSON app "/api/v1/ws-ticket"
+          (object ["workspace_id" .= ws.id])
+        respStatus resp `shouldBe` 401
+
+    it "issues deployed WebSocket tickets to workspace readers only" $ \_ ->
+      withTestEnv $ \env -> do
+        ws <- createTestWorkspace env "ws-ticket-reader"
+        readerUserId <- createTestUser env False False
+        outsiderUserId <- createTestUser env False False
+        _ <- grantWorkspaceRole env ws.id readerUserId Auth.WorkspaceRoleRead
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal readerUserId) $ \readerApp -> do
+          resp <- postJSON readerApp "/api/v1/ws-ticket"
+            (object ["workspace_id" .= ws.id])
+          respStatus resp `shouldBe` 200
+          let Just ticketResp = decode (respBody resp) :: Maybe WebSocketTicketResponse
+          ticketResp.ticket `shouldSatisfy` (not . T.null)
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal outsiderUserId) $ \outsiderApp -> do
+          deniedResp <- postJSON outsiderApp "/api/v1/ws-ticket"
+            (object ["workspace_id" .= ws.id])
+          respStatus deniedResp `shouldBe` 403
+
+    it "matches events only to subscribed workspace connections" $ \_ -> do
+      now <- getCurrentTime
+      wsA <- UUIDv4.nextRandom
+      wsB <- UUIDv4.nextRandom
+      entityId <- UUIDv4.nextRandom
+      let event = ChangeEvent
+            { changeType = Updated
+            , entityType = ETMemory
+            , entityId = entityId
+            , workspaceId = Just wsA
+            , timestamp = now
+            , requestId = Nothing
+            , actorType = Nothing
+            , actorId = Nothing
+            , actorLabel = Nothing
+            , payload = Nothing
+            }
+
+      eventVisibleToSubscription SubscribeAllWorkspaces event `shouldBe` True
+      eventVisibleToSubscription (SubscribeWorkspace wsA) event `shouldBe` True
+      eventVisibleToSubscription (SubscribeWorkspace wsB) event `shouldBe` False
+
+    it "uses WebSocket tickets only once" $ \_ -> do
+      wsState <- newWSState
+      workspaceId <- UUIDv4.nextRandom
+      userId <- UUIDv4.nextRandom
+      ticketResp <- createTicket wsState (grantPrincipal userId) workspaceId
+
+      firstUse <- consumeTicket wsState ticketResp.ticket
+      secondUse <- consumeTicket wsState ticketResp.ticket
+
+      isJust firstUse `shouldBe` True
+      isJust secondUse `shouldBe` False
 
   describe "server authorization enforcement" $ do
     it "leaves health unauthenticated in deployed mode" $ \_ ->

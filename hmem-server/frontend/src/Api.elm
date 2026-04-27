@@ -638,6 +638,7 @@ type alias ChangeEvent =
     { changeType : ChangeType
     , entityType : EntityType
     , entityId : String
+    , workspaceId : Maybe String
     , timestamp : String
     , requestId : Maybe String
     , actorType : Maybe String
@@ -680,6 +681,7 @@ changeEventDecoder =
         |> required "type" changeTypeDecoder
         |> required "entity_type" entityTypeDecoder
         |> required "entity_id" D.string
+        |> optional "workspace_id" (D.nullable D.string) Nothing
         |> required "timestamp" D.string
         |> optional "request_id" (D.nullable D.string) Nothing
         |> optional "actor_type" (D.nullable D.string) Nothing

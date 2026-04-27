@@ -193,6 +193,8 @@ instance ToParamSchema AuditAction where
   toParamSchema _ = mempty & type_ ?~ OpenApiString & enum_ ?~ ["create", "update", "delete"]
 instance ToSchema AuditLogEntry          where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema RevertResult           where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema WebSocketTicketRequest  where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema WebSocketTicketResponse where declareNamedSchema = genericDeclareNamedSchema opts
 
 ------------------------------------------------------------------------
 -- Helper

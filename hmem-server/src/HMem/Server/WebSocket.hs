@@ -3,6 +3,10 @@ module HMem.Server.WebSocket
     WSState
   , newWSState
   , connectionCount
+  , WorkspaceSubscription(..)
+  , createTicket
+  , consumeTicket
+  , eventVisibleToSubscription
     -- * Broadcast
   , broadcast
     -- * WAI integration
@@ -12,32 +16,56 @@ module HMem.Server.WebSocket
 import Control.Concurrent.STM (TVar, newTVarIO, readTVarIO, modifyTVar')
 import Control.Concurrent.STM qualified as STM
 import Control.Exception (SomeException, catch, finally)
+import Control.Applicative ((<|>))
 import Data.Aeson (encode)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS8
+import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text.Encoding qualified as TE
+import Data.Time (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 import Data.UUID (UUID)
-import Data.UUID.V4 qualified as UUID
+import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUIDv4
 import Network.HTTP.Types.URI (parseQuery)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.WebSockets (websocketsOr)
 import Network.WebSockets qualified as WS
 
 import HMem.Config (AuthConfig(..), AuthMode(..), LocalAuthConfig(..), LocalBotTokenConfig(..), authStaticBearerEnabled, authStaticBearerToken)
-import HMem.Server.Event (ChangeEvent)
+import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
+import HMem.Server.Event (ChangeEvent(..))
+import HMem.Types (WebSocketTicketResponse(..))
 
 -- | Server-wide WebSocket state: a map of connection IDs to live
 -- WebSocket connections, protected by a TVar for concurrent access.
 data WSState = WSState
-  { connections :: !(TVar (Map UUID WS.Connection))
+  { connections :: !(TVar (Map UUID WSClient))
+  , tickets     :: !(TVar (Map Text WebSocketTicket))
+  }
+
+data WSClient = WSClient
+  { clientConnection   :: !WS.Connection
+  , clientPrincipal    :: !(Maybe Principal)
+  , clientSubscription :: !WorkspaceSubscription
+  }
+
+data WorkspaceSubscription
+  = SubscribeAllWorkspaces
+  | SubscribeWorkspace !UUID
+  deriving (Show, Eq)
+
+data WebSocketTicket = WebSocketTicket
+  { ticketPrincipal   :: !Principal
+  , ticketWorkspaceId :: !UUID
+  , ticketExpiresAt   :: !UTCTime
   }
 
 -- | Create a fresh (empty) WebSocket state.
 newWSState :: IO WSState
-newWSState = WSState <$> newTVarIO Map.empty
+newWSState = WSState <$> newTVarIO Map.empty <*> newTVarIO Map.empty
 
 -- | Number of currently connected clients.
 connectionCount :: WSState -> IO Int
@@ -47,10 +75,15 @@ connectionCount st = Map.size <$> readTVarIO st.connections
 -- Connection management
 ------------------------------------------------------------------------
 
-addConnection :: WSState -> WS.Connection -> IO UUID
-addConnection st conn = do
-  connId <- UUID.nextRandom
-  STM.atomically $ modifyTVar' st.connections (Map.insert connId conn)
+addConnection :: WSState -> WS.Connection -> Maybe Principal -> WorkspaceSubscription -> IO UUID
+addConnection st conn principal subscription = do
+  connId <- UUIDv4.nextRandom
+  let client = WSClient
+        { clientConnection = conn
+        , clientPrincipal = principal
+        , clientSubscription = subscription
+        }
+  STM.atomically $ modifyTVar' st.connections (Map.insert connId client)
   pure connId
 
 removeConnection :: WSState -> UUID -> IO ()
@@ -68,11 +101,46 @@ broadcast :: WSState -> ChangeEvent -> IO ()
 broadcast st event = do
   let msg = encode event
   conns <- readTVarIO st.connections
-  mapM_ (trySend msg) (Map.elems conns)
+  mapM_ (trySend msg) (filter (\client -> eventVisibleToSubscription client.clientSubscription event) (Map.elems conns))
   where
-    trySend msg conn =
-      WS.sendTextData conn msg
+    trySend msg client =
+      WS.sendTextData client.clientConnection msg
         `catch` \(_ :: SomeException) -> pure ()
+
+eventVisibleToSubscription :: WorkspaceSubscription -> ChangeEvent -> Bool
+eventVisibleToSubscription SubscribeAllWorkspaces _ = True
+eventVisibleToSubscription (SubscribeWorkspace workspaceId) event =
+  event.workspaceId == Just workspaceId
+
+createTicket :: WSState -> Principal -> UUID -> IO WebSocketTicketResponse
+createTicket st principal workspaceId = do
+  now <- getCurrentTime
+  ticketId <- UUID.toText <$> UUIDv4.nextRandom
+  let expires = addUTCTime ticketTtlSeconds now
+      ticket = WebSocketTicket
+        { ticketPrincipal = principal
+        , ticketWorkspaceId = workspaceId
+        , ticketExpiresAt = expires
+        }
+  STM.atomically $ do
+    allTickets <- STM.readTVar st.tickets
+    let pruned = Map.filter (\existing -> existing.ticketExpiresAt > now) allTickets
+    STM.writeTVar st.tickets (Map.insert ticketId ticket pruned)
+  pure WebSocketTicketResponse { ticket = ticketId, expiresAt = expires }
+
+consumeTicket :: WSState -> Text -> IO (Maybe WebSocketTicket)
+consumeTicket st ticketId = do
+  now <- getCurrentTime
+  STM.atomically $ do
+    allTickets <- STM.readTVar st.tickets
+    let pruned = Map.filter (\ticket -> ticket.ticketExpiresAt > now) allTickets
+        found = Map.lookup ticketId pruned
+        remaining = Map.delete ticketId pruned
+    STM.writeTVar st.tickets remaining
+    pure found
+
+ticketTtlSeconds :: NominalDiffTime
+ticketTtlSeconds = 60
 
 ------------------------------------------------------------------------
 -- WAI middleware
@@ -100,20 +168,23 @@ wsMiddleware authCfg st app req respond
 --   5. Unregister on disconnect.
 wsApp :: AuthConfig -> WSState -> WS.ServerApp
 wsApp authCfg st pending
-  | authCfg.mode == AuthModeDeployed =
-      -- Deployed WebSocket ticket/session auth and workspace-scoped delivery are
-      -- tracked separately. Until that lands, fail closed rather than accepting
-      -- unauthenticated deployed event streams.
-      WS.rejectRequest pending "WebSocket auth is not enabled in deployed mode"
+  | authCfg.mode == AuthModeDeployed = case ticketFromRequest (WS.pendingRequest pending) of
+      Just ticketText -> do
+        mTicket <- consumeTicket st (TE.decodeUtf8Lenient ticketText)
+        case mTicket of
+          Just ticket -> accept (Just ticket.ticketPrincipal) (SubscribeWorkspace ticket.ticketWorkspaceId)
+          Nothing -> WS.rejectRequest pending "Unauthorized"
+      Nothing -> WS.rejectRequest pending "Unauthorized"
   | authStaticBearerEnabled authCfg = case tokenFromRequest (WS.pendingRequest pending) of
       Just token
-        | authorizedToken authCfg (TE.decodeUtf8Lenient token) -> accept
+        | Just principal <- authorizedTokenPrincipal authCfg (TE.decodeUtf8Lenient token) ->
+            accept (Just principal) SubscribeAllWorkspaces
       _ -> WS.rejectRequest pending "Unauthorized"
-  | otherwise = accept
+  | otherwise = accept (defaultLocalPrincipal authCfg) SubscribeAllWorkspaces
   where
-    accept = do
+    accept principal subscription = do
       conn <- WS.acceptRequest pending
-      connId <- addConnection st conn
+      connId <- addConnection st conn principal subscription
       WS.withPingThread conn 30 (pure ()) $
         sinkMessages conn
           `finally` removeConnection st connId
@@ -134,14 +205,57 @@ tokenFromRequest rh =
        Just mVal -> mVal   -- Maybe ByteString inside the Maybe
        Nothing   -> Nothing
 
-authorizedToken :: AuthConfig -> Text -> Bool
-authorizedToken authCfg token = localBotTokenAuthorized authCfg token || maybe False (== token) (authStaticBearerToken authCfg)
+ticketFromRequest :: WS.RequestHead -> Maybe ByteString
+ticketFromRequest rh =
+  let raw = WS.requestPath rh
+      qs  = BS8.drop 1 (BS8.dropWhile (/= '?') raw)
+  in case lookup "ticket" (parseQuery qs) of
+       Just mVal -> mVal
+       Nothing   -> Nothing
 
-localBotTokenAuthorized :: AuthConfig -> Text -> Bool
-localBotTokenAuthorized authCfg token
-  | authCfg.mode /= AuthModeLocal = False
+authorizedTokenPrincipal :: AuthConfig -> Text -> Maybe Principal
+authorizedTokenPrincipal authCfg token =
+  localBotPrincipal authCfg token <|> legacyPrincipal authCfg token
+
+localBotPrincipal :: AuthConfig -> Text -> Maybe Principal
+localBotPrincipal authCfg token
+  | authCfg.mode /= AuthModeLocal = Nothing
   | otherwise = case authCfg of
-      AuthConfig { local = LocalAuthConfig { botTokens = tokens } } -> any matches tokens
+      AuthConfig { local = LocalAuthConfig { botTokens = tokens } } -> do
+        cfg <- find matches tokens
+        pure Principal
+          { actorType = ActorBot
+          , actorId = "local-bot:" <> botLabel cfg
+          , actorLabel = botLabel cfg
+          , authority = PrincipalSyntheticLocalSuperadmin
+          }
   where
     matches bot = case bot of
       LocalBotTokenConfig { token = botToken } -> botToken == token
+
+    botLabel bot = case bot of
+      LocalBotTokenConfig { label = lbl } -> lbl
+
+legacyPrincipal :: AuthConfig -> Text -> Maybe Principal
+legacyPrincipal authCfg token = do
+  expected <- authStaticBearerToken authCfg
+  if token == expected
+    then Just Principal
+      { actorType = ActorBot
+      , actorId = "legacy-static-bearer"
+      , actorLabel = "Legacy Static Bearer"
+      , authority = PrincipalSyntheticLocalSuperadmin
+      }
+    else Nothing
+
+defaultLocalPrincipal :: AuthConfig -> Maybe Principal
+defaultLocalPrincipal authCfg
+  | authCfg.mode == AuthModeLocal
+  , AuthConfig { local = LocalAuthConfig { bootstrapEnabled = True } } <- authCfg =
+      Just Principal
+        { actorType = ActorUser
+        , actorId = "local-user"
+        , actorLabel = "Local User"
+        , authority = PrincipalSyntheticLocalSuperadmin
+        }
+  | otherwise = Nothing

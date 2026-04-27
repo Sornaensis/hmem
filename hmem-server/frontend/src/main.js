@@ -39,33 +39,76 @@ const app = Elm.Main.init({
 
 let ws = null
 let reconnectTimer = null
+let connectGeneration = 0
+
+function currentWorkspaceId() {
+  const match = window.location.pathname.match(/^\/workspace\/([^/]+)/)
+  return match ? decodeURIComponent(match[1]) : null
+}
+
+function wsUrlWithTicket(url, ticket) {
+  const parsed = new URL(url, window.location.href)
+  parsed.searchParams.set('ticket', ticket)
+  return parsed.toString()
+}
+
+async function resolveWsUrl(url) {
+  const workspaceId = currentWorkspaceId()
+  if (!workspaceId) return url
+
+  const response = await fetch('/api/v1/ws-ticket', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ workspace_id: workspaceId })
+  })
+
+  if (!response.ok) return url
+
+  const body = await response.json()
+  return body && body.ticket ? wsUrlWithTicket(url, body.ticket) : url
+}
 
 function connectWs(url) {
+  connectGeneration += 1
+  const generation = connectGeneration
   if (ws) { ws.close() }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
 
-  ws = new WebSocket(url)
+  resolveWsUrl(url).then(function (resolvedUrl) {
+    if (generation !== connectGeneration) return
 
-  ws.onopen = function () {
-    app.ports.wsConnected.send(null)
-  }
+    const socket = new WebSocket(resolvedUrl)
+    ws = socket
 
-  ws.onmessage = function (event) {
-    app.ports.wsMessage.send(event.data)
-  }
+    socket.onopen = function () {
+      app.ports.wsConnected.send(null)
+    }
 
-  ws.onclose = function () {
+    socket.onmessage = function (event) {
+      app.ports.wsMessage.send(event.data)
+    }
+
+    socket.onclose = function () {
+      if (generation !== connectGeneration || ws !== socket) return
+      app.ports.wsDisconnected.send(null)
+      ws = null
+      // Auto-reconnect after 3 seconds. Resolve a fresh ticket each time.
+      reconnectTimer = setTimeout(function () {
+        connectWs(url)
+      }, 3000)
+    }
+
+    socket.onerror = function () {
+      // onclose will fire after onerror
+    }
+  }).catch(function () {
+    if (generation !== connectGeneration) return
     app.ports.wsDisconnected.send(null)
-    ws = null
-    // Auto-reconnect after 3 seconds
     reconnectTimer = setTimeout(function () {
       connectWs(url)
     }, 3000)
-  }
-
-  ws.onerror = function () {
-    // onclose will fire after onerror
-  }
+  })
 }
 
 app.ports.connectWebSocket.subscribe(connectWs)

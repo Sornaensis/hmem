@@ -43,6 +43,7 @@ data ChangeEvent = ChangeEvent
   { changeType  :: !ChangeType
   , entityType  :: !EntityType
   , entityId    :: !UUID
+  , workspaceId :: !(Maybe UUID)
   , timestamp   :: !UTCTime
   , requestId   :: !(Maybe Text)
   , actorType   :: !(Maybe Text)
@@ -81,6 +82,7 @@ instance ToJSON ChangeEvent where
     , "entity_id"   .= UUID.toText ev.entityId
     , "timestamp"   .= ev.timestamp
     ]
+    ++ maybe [] (\wid -> ["workspace_id" .= UUID.toText wid]) ev.workspaceId
     ++ maybe [] (\rid -> ["request_id" .= rid]) ev.requestId
     ++ maybe [] (\typ -> ["actor_type" .= typ]) ev.actorType
     ++ maybe [] (\aid -> ["actor_id" .= aid]) ev.actorId

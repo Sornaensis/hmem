@@ -5,7 +5,7 @@ import Browser
 import Browser.Navigation as Nav
 import Dict
 import Helpers exposing (localStorageKey, parseFragment)
-import Ports exposing (destroyCytoscape, requestLocalStorage)
+import Ports exposing (connectWebSocket, destroyCytoscape, requestLocalStorage)
 import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
@@ -294,6 +294,7 @@ handleUrlChange url model =
                 , Cmd.batch
                     [ loadWorkspaceData model.flags.apiUrl wsId updatedDataLoading.activeWorkspaceLoadToken
                     , requestLocalStorage (localStorageKey wsId)
+                    , connectWebSocket model.flags.wsUrl
                     , destroyCmd
                     ]
                 )

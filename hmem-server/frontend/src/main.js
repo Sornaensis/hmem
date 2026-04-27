@@ -12,6 +12,19 @@ function createSessionId() {
 const runtimeConfig = window.HMEM_CONFIG || {}
 const authTokenStorageKey = runtimeConfig.authTokenStorageKey || 'hmem-auth-token'
 const runtimeMode = runtimeConfig.authMode || runtimeConfig.runtimeMode || import.meta.env.VITE_HMEM_AUTH_MODE || 'unknown'
+const defaultAuthTokenUrlParams = ['hmem_token', 'auth_token', 'access_token']
+function normalizeStringArray(value, fallback) {
+  if (Array.isArray(value)) return value.filter((item) => typeof item === 'string' && item.length > 0)
+  if (typeof value === 'string' && value.length > 0) return [value]
+  return fallback
+}
+const authTokenUrlParams = normalizeStringArray(runtimeConfig.authTokenUrlParams, defaultAuthTokenUrlParams)
+const sensitiveAuthUrlParams = Array.from(new Set([...defaultAuthTokenUrlParams, ...authTokenUrlParams, 'access_token', 'id_token', 'refresh_token']))
+const authCallbackUrlParams = Array.from(new Set([...sensitiveAuthUrlParams, ...normalizeStringArray(runtimeConfig.authCallbackUrlParams, []), 'code', 'state', 'token_type', 'expires_in', 'scope', 'error', 'error_description']))
+const authLoginStateStorageKey = runtimeConfig.authLoginStateStorageKey || 'hmem-auth-login-state'
+const requireAuthState = runtimeConfig.requireAuthState !== false
+let pendingAuthSessionError = null
+let ignoreStoredAuthToken = false
 
 function configuredApiUrl() {
   return runtimeConfig.apiUrl || import.meta.env.VITE_HMEM_API_URL || window.location.origin
@@ -43,8 +56,167 @@ function apiResourceUrl(path) {
   return new URL(apiPath(path), apiUrl).toString()
 }
 
+function safeLocalStorageGet(key) {
+  try {
+    return localStorage.getItem(key)
+  } catch (e) {
+    return null
+  }
+}
+
+function safeLocalStorageSet(key, value) {
+  try {
+    localStorage.setItem(key, value)
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
+function safeLocalStorageRemove(key) {
+  try {
+    localStorage.removeItem(key)
+    return true
+  } catch (e) {}
+  return false
+}
+
+function safeSessionStorageGet(key) {
+  try {
+    return sessionStorage.getItem(key)
+  } catch (e) {
+    return null
+  }
+}
+
+function safeSessionStorageSet(key, value) {
+  try {
+    sessionStorage.setItem(key, value)
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
+function safeSessionStorageRemove(key) {
+  try {
+    sessionStorage.removeItem(key)
+  } catch (e) {}
+}
+
+function extractTokenFromParams(params) {
+  for (const name of authTokenUrlParams) {
+    const value = params.get(name)
+    if (value) return { name, value }
+  }
+  return null
+}
+
+function extractSensitiveAuthParam(params) {
+  for (const name of sensitiveAuthUrlParams) {
+    const value = params.get(name)
+    if (value) return { name, value }
+  }
+  return null
+}
+
+function scrubAuthCallbackParams(url, hashParams, hashPrefix) {
+  for (const name of authCallbackUrlParams) {
+    url.searchParams.delete(name)
+    if (hashParams) hashParams.delete(name)
+  }
+  if (hashParams) {
+    const nextHash = hashParams.toString()
+    const cleanPrefix = hashPrefix && hashPrefix.endsWith('?') ? hashPrefix.slice(0, -1) : hashPrefix
+    url.hash = nextHash ? `#${hashPrefix || ''}${nextHash}` : (cleanPrefix ? `#${cleanPrefix}` : '')
+  }
+}
+
+function parseHashParams(hash) {
+  if (!hash) return { params: null, prefix: '' }
+  const raw = hash.replace(/^#/, '')
+  const queryIndex = raw.indexOf('?')
+  if (queryIndex >= 0) {
+    return { prefix: raw.slice(0, queryIndex + 1), params: new URLSearchParams(raw.slice(queryIndex + 1)) }
+  }
+  if (raw.includes('=')) return { prefix: '', params: new URLSearchParams(raw) }
+  return { params: null, prefix: '' }
+}
+
+function captureAuthTokenFromUrl() {
+  const url = new URL(window.location.href)
+  const blockedSearchToken = extractSensitiveAuthParam(url.searchParams)
+  const fromSearch = null
+  const hasSearchCallbackMetadata = authCallbackUrlParams.some((name) => url.searchParams.has(name))
+
+  let fromHash = null
+  let hasHashCallbackMetadata = false
+  const parsedHash = parseHashParams(url.hash)
+  const hashParams = parsedHash.params
+  const hashPrefix = parsedHash.prefix
+  if (hashParams) {
+    fromHash = extractTokenFromParams(hashParams)
+    hasHashCallbackMetadata = authCallbackUrlParams.some((name) => hashParams.has(name))
+  }
+
+  const found = fromSearch || fromHash
+  if (!found && !blockedSearchToken && !hasSearchCallbackMetadata && !hasHashCallbackMetadata) return null
+
+  if (blockedSearchToken) {
+    scrubAuthCallbackParams(url, hashParams, hashPrefix)
+    window.history.replaceState(window.history.state, document.title, url.toString())
+    pendingAuthSessionError = 'Ignored auth token in URL query string. Use a fragment-based provider callback instead.'
+    return null
+  }
+
+  if (!found) {
+    const callbackError = url.searchParams.get('error') || (hashParams ? hashParams.get('error') : null)
+    const callbackErrorDescription = url.searchParams.get('error_description') || (hashParams ? hashParams.get('error_description') : null)
+    scrubAuthCallbackParams(url, hashParams, hashPrefix)
+    window.history.replaceState(window.history.state, document.title, url.toString())
+    if (callbackError || callbackErrorDescription) {
+      pendingAuthSessionError = 'Login provider did not return a usable token. Please sign in again.'
+    }
+    return null
+  }
+
+  const returnedState = (fromSearch ? url.searchParams.get('state') : null) || (hashParams ? hashParams.get('state') : null)
+  const expectedState = safeSessionStorageGet(authLoginStateStorageKey)
+  const stateAccepted = !requireAuthState || (expectedState !== null && returnedState === expectedState)
+
+  if (stateAccepted) {
+    ignoreStoredAuthToken = false
+    if (!safeLocalStorageSet(authTokenStorageKey, found.value)) {
+      runtimeConfig.authToken = found.value
+      pendingAuthSessionError = 'Browser storage is unavailable; using the returned auth token for this tab only.'
+    }
+    safeSessionStorageRemove(authLoginStateStorageKey)
+  } else {
+    pendingAuthSessionError = 'Ignored auth callback because login state did not match. Please sign in again.'
+    scrubAuthCallbackParams(url, hashParams, hashPrefix)
+    window.history.replaceState(window.history.state, document.title, url.toString())
+    return null
+  }
+
+  scrubAuthCallbackParams(url, hashParams, hashPrefix)
+  window.history.replaceState(window.history.state, document.title, url.toString())
+  return found.value
+}
+
+captureAuthTokenFromUrl()
+
 function currentAuthToken() {
-  return runtimeConfig.authToken || localStorage.getItem(authTokenStorageKey) || null
+  const storedToken = ignoreStoredAuthToken ? null : safeLocalStorageGet(authTokenStorageKey)
+  if (runtimeMode === 'deployed') return storedToken || runtimeConfig.authToken || null
+  return runtimeConfig.authToken || storedToken || null
+}
+
+function authTokenPresent() {
+  return currentAuthToken() !== null
+}
+
+function authTokenSignature() {
+  return currentAuthToken() || null
 }
 
 function authHeaderObject() {
@@ -56,6 +228,8 @@ const apiUrl = normalizeBaseUrl(configuredApiUrl())
 const wsUrl = configuredWsUrl(apiUrl)
 let lastUnauthorizedNotificationAt = 0
 let notifyUnauthorized = function () {}
+let lastAuthTokenSignature = authTokenSignature()
+let authTokenGeneration = 0
 
 function isApiRequestUrl(rawUrl) {
   try {
@@ -89,6 +263,8 @@ function installAuthHeaderInterceptor() {
   }
 
   XMLHttpRequest.prototype.send = function () {
+    const requestAuthSignature = authTokenSignature()
+    const requestAuthGeneration = authTokenGeneration
     if (isApiRequestUrl(this.__hmemRequestUrl)) {
       const token = currentAuthToken()
       const hasAuthorization = this.__hmemHeaders && this.__hmemHeaders.authorization
@@ -97,7 +273,7 @@ function installAuthHeaderInterceptor() {
       }
 
       this.addEventListener('loadend', function () {
-        if (this.status === 401) notifyUnauthorized()
+        if (this.status === 401 && requestAuthGeneration === authTokenGeneration && requestAuthSignature === authTokenSignature()) notifyUnauthorized()
       })
     }
 
@@ -128,7 +304,7 @@ const app = Elm.Main.init({
     sessionId: createSessionId(),
     runtimeMode,
     authTokenStorageKey,
-    authTokenPresent: currentAuthToken() !== null,
+    authTokenPresent: authTokenPresent(),
     loginUrl: runtimeConfig.loginUrl || import.meta.env.VITE_HMEM_LOGIN_URL || null,
     logoutUrl: runtimeConfig.logoutUrl || import.meta.env.VITE_HMEM_LOGOUT_URL || null,
     storedFilters: getWorkspaceFilters()
@@ -140,6 +316,79 @@ notifyUnauthorized = function () {
   if (now - lastUnauthorizedNotificationAt < 2000) return
   lastUnauthorizedNotificationAt = now
   if (app.ports.authUnauthorized) app.ports.authUnauthorized.send(null)
+}
+
+function notifyAuthTokenChanged(force) {
+  const signature = authTokenSignature()
+  if (!force && signature === lastAuthTokenSignature) return
+  if (signature !== lastAuthTokenSignature) authTokenGeneration += 1
+  lastAuthTokenSignature = signature
+  if (app.ports.authTokenChanged) app.ports.authTokenChanged.send(signature !== null)
+}
+
+function notifyAuthSessionError(message) {
+  if (app.ports.authSessionError) app.ports.authSessionError.send(message)
+}
+
+if (pendingAuthSessionError) {
+  setTimeout(function () {
+    notifyAuthSessionError(pendingAuthSessionError)
+    pendingAuthSessionError = null
+  }, 0)
+}
+
+function createAuthState() {
+  if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID()
+  if (window.crypto && window.crypto.getRandomValues) {
+    const bytes = new Uint8Array(16)
+    window.crypto.getRandomValues(bytes)
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  }
+  return `auth-state-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+window.addEventListener('storage', function (event) {
+  if (event.key === authTokenStorageKey) {
+    if (event.newValue !== null) ignoreStoredAuthToken = false
+    if (runtimeMode === 'deployed' && event.newValue === null) runtimeConfig.authToken = null
+    notifyAuthTokenChanged(false)
+  }
+})
+
+window.addEventListener('focus', function () {
+  notifyAuthTokenChanged(false)
+})
+
+setInterval(function () {
+  notifyAuthTokenChanged(false)
+}, 5000)
+
+if (app.ports.logoutAuth) {
+  app.ports.logoutAuth.subscribe(function () {
+    ignoreStoredAuthToken = true
+    safeLocalStorageRemove(authTokenStorageKey)
+    runtimeConfig.authToken = null
+    notifyAuthTokenChanged(true)
+
+    const logoutUrl = runtimeConfig.logoutUrl || import.meta.env.VITE_HMEM_LOGOUT_URL || null
+    if (logoutUrl) window.location.assign(logoutUrl)
+  })
+}
+
+if (app.ports.loginAuth) {
+  app.ports.loginAuth.subscribe(function (returnPath) {
+    const loginUrl = runtimeConfig.loginUrl || import.meta.env.VITE_HMEM_LOGIN_URL || null
+    if (!loginUrl) return
+    const state = createAuthState()
+    if (requireAuthState && !safeSessionStorageSet(authLoginStateStorageKey, state)) {
+      notifyAuthSessionError('Browser session storage is unavailable, so a secure provider login cannot be started.')
+      return
+    }
+    const parsed = new URL(loginUrl, window.location.href)
+    parsed.searchParams.set('state', state)
+    if (!parsed.searchParams.has('return_to')) parsed.searchParams.set('return_to', new URL(returnPath || '/', window.location.href).toString())
+    window.location.assign(parsed.toString())
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +463,8 @@ async function resolveWsUrl(config) {
     return wsUrlWithLocalToken(config.url)
   }
 
+  const requestAuthSignature = authTokenSignature()
+  const requestAuthGeneration = authTokenGeneration
   const response = await fetch(apiResourceUrl('/api/v1/ws-ticket'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaderObject() },
@@ -223,7 +474,11 @@ async function resolveWsUrl(config) {
 
   if (!response.ok) {
     if (response.status === 401) {
-      notifyUnauthorized()
+      if (requestAuthGeneration === authTokenGeneration && requestAuthSignature === authTokenSignature()) {
+        notifyUnauthorized()
+      } else {
+        throw new Error('ws-ticket-transient:stale-401')
+      }
       throw new Error('ws-auth:unauthorized')
     }
     if (response.status === 403) throw new Error('ws-auth:forbidden')

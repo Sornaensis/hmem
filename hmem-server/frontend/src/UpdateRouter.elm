@@ -49,6 +49,18 @@ update msg model =
         AuthUnauthorized ->
             Err (HandleInAppShell AppShell.AuthUnauthorizedMsg)
 
+        AuthTokenChanged present ->
+            Err (HandleInAppShell (AppShell.AuthTokenChangedMsg present))
+
+        AuthSessionError message ->
+            Err (HandleInAppShell (AppShell.AuthSessionErrorMsg message))
+
+        LoginRequested ->
+            Err (HandleInAppShell AppShell.LoginRequestedMsg)
+
+        LogoutRequested ->
+            Err (HandleInAppShell AppShell.LogoutRequestedMsg)
+
         -- Cytoscape
         CytoscapeNodeClicked _ ->
             Ok (Feature.Graph.update msg model)

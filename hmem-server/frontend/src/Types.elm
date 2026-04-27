@@ -348,6 +348,10 @@ type Msg
     | WsConnectionFailed String
     | WsMessageReceived String
     | AuthUnauthorized
+    | AuthTokenChanged Bool
+    | AuthSessionError String
+    | LoginRequested
+    | LogoutRequested
       -- Cytoscape
     | CytoscapeNodeClicked String
     | CytoscapeEdgeClicked String

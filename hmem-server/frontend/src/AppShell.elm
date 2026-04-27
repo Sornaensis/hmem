@@ -23,13 +23,14 @@ import Helpers exposing (applyStoredFiltersIfCurrentWorkspace, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (class, href, id)
 import Html.Keyed as Keyed
+import Html.Events exposing (onClick)
 import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Page.Home
 import Page.Workspace
 import Permissions
-import Ports exposing (authUnauthorized, cytoscapeEdgeClicked, cytoscapeNodeClicked, disconnectWebSocket, localStorageReceived, onMainContentScroll)
+import Ports exposing (authSessionError, authTokenChanged, authUnauthorized, cytoscapeEdgeClicked, cytoscapeNodeClicked, disconnectWebSocket, localStorageReceived, loginAuth, logoutAuth, onMainContentScroll)
 import Route exposing (loadWorkspaceData)
 import Toast
 import Types exposing (..)
@@ -41,6 +42,10 @@ type AppShellOwnedMsg
     | SwitchTabMsg WorkspaceTab
     | SessionContextLoadedMsg (Maybe String) (Result Http.Error Api.SessionContext)
     | AuthUnauthorizedMsg
+    | AuthTokenChangedMsg Bool
+    | AuthSessionErrorMsg String
+    | LoginRequestedMsg
+    | LogoutRequestedMsg
     | LocalStorageLoadedMsg Encode.Value
     | GlobalKeyDownMsg Int
     | MainContentScrolledMsg Float
@@ -212,6 +217,66 @@ handleOwned ownedMsg model =
             in
             ( toastedModel, Cmd.batch [ toastCmd, disconnectWebSocket () ] )
 
+        AuthTokenChangedMsg present ->
+            let
+                updatedFlags =
+                    let
+                        flags =
+                            model.flags
+                    in
+                    { flags | authTokenPresent = present }
+
+                expectedWorkspace =
+                    currentSessionWorkspace model
+            in
+            if present then
+                let
+                    rebootModel =
+                        clearSessionScopedState
+                            { model
+                                | flags = updatedFlags
+                                , auth = { status = AuthBooting, mode = model.auth.mode }
+                                , sessionContext = Nothing
+                            }
+
+                    preparedModel =
+                        { rebootModel | dataLoading = Feature.DataLoading.prepareForPageLoad model.page rebootModel.dataLoading }
+                in
+                ( preparedModel
+                , Cmd.batch [ disconnectWebSocket (), Api.fetchSessionContext model.flags.apiUrl expectedWorkspace (GotSessionContext expectedWorkspace) ]
+                )
+
+            else
+                let
+                    ( toastedModel, toastCmd ) =
+                        if Permissions.isLocalMode model then
+                            Toast.addToast Warning "Local auth token was removed; local session will be refreshed when credentials are restored."
+                                (clearSessionScopedState { model | flags = updatedFlags, auth = { status = AuthRequired, mode = model.auth.mode }, sessionContext = Nothing })
+
+                        else
+                            Toast.addToast Warning "Signed out. Sign in again to continue."
+                                (clearSessionScopedState { model | flags = updatedFlags, auth = { status = AuthRequired, mode = model.auth.mode }, sessionContext = Nothing })
+                in
+                ( toastedModel, Cmd.batch [ toastCmd, disconnectWebSocket () ] )
+
+        AuthSessionErrorMsg message ->
+            Toast.addToast Warning message model
+
+        LoginRequestedMsg ->
+            ( model, loginAuth (Url.toString model.url) )
+
+        LogoutRequestedMsg ->
+            let
+                flags =
+                    model.flags
+
+                updatedFlags =
+                    { flags | authTokenPresent = False }
+            in
+            ( clearSessionScopedState { model | flags = updatedFlags, auth = { status = AuthRequired, mode = model.auth.mode }, sessionContext = Nothing }
+            , Cmd.batch [ disconnectWebSocket (), logoutAuth () ]
+            )
+
         LocalStorageLoadedMsg json ->
             ( applyStoredFiltersIfCurrentWorkspace json model, Cmd.none )
 
@@ -266,6 +331,19 @@ sessionContextResponseMatches expectedWorkspace model =
 
                 _ ->
                     True
+
+
+currentSessionWorkspace : Model -> Maybe String
+currentSessionWorkspace model =
+    case model.page of
+        WorkspacePage wsId ->
+            Just wsId
+
+        MemoryGraphPage ->
+            model.selectedWorkspaceId
+
+        _ ->
+            Nothing
 
 
 bootstrapAfterSession : Maybe String -> Api.SessionContext -> Model -> Cmd Msg
@@ -446,6 +524,8 @@ subscriptions =
     Sub.batch
         [ Feature.WebSocket.subscriptions
         , authUnauthorized (\_ -> AuthUnauthorized)
+        , authTokenChanged AuthTokenChanged
+        , authSessionError AuthSessionError
         , cytoscapeNodeClicked CytoscapeNodeClicked
         , cytoscapeEdgeClicked CytoscapeEdgeClicked
         , Browser.Events.onKeyDown (Decode.map GlobalKeyDown (Decode.field "keyCode" Decode.int))
@@ -595,9 +675,17 @@ viewAuthRequiredPage model =
             [ h2 [] [ text "Authentication required" ]
             , p [] [ text "The server did not return an authenticated session. Sign in, then retry this page." ]
             , p [] [ text ("Runtime mode: " ++ Permissions.authModeLabel model) ]
+            , if model.flags.authTokenPresent then
+                p [ class "help-text" ] [ text "A token is present in the frontend runtime, but the server did not accept it for this session." ]
+
+              else
+                p [ class "help-text" ] [ text "No token is present in the frontend runtime." ]
             , case model.flags.loginUrl of
-                Just loginUrl ->
-                    p [] [ a [ href loginUrl ] [ text "Sign in" ] ]
+                Just _ ->
+                    div [ class "auth-actions" ]
+                        [ button [ class "btn-primary", onClick LoginRequested ] [ text "Sign in" ]
+                        , p [ class "help-text" ] [ text "A login provider is configured for this deployment." ]
+                        ]
 
                 Nothing ->
                     p [] [ text ("No login URL is configured. Auth token storage key: " ++ model.flags.authTokenStorageKey) ]

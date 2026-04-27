@@ -314,6 +314,11 @@ viewSessionFooter model =
                         )
                     ]
                 , div [ class "sidebar-session-principal" ] [ text attribution ]
+                , if not (Permissions.isLocalMode model) && (model.flags.authTokenPresent || model.flags.logoutUrl /= Nothing) then
+                    button [ class "sidebar-session-action", onClick LogoutRequested ] [ text "Sign out" ]
+
+                  else
+                    text ""
                 ]
 
         Nothing ->

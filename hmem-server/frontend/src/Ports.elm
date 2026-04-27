@@ -34,6 +34,18 @@ port wsMessage : (String -> msg) -> Sub msg
 port authUnauthorized : (() -> msg) -> Sub msg
 
 
+port authTokenChanged : (Bool -> msg) -> Sub msg
+
+
+port authSessionError : (String -> msg) -> Sub msg
+
+
+port logoutAuth : () -> Cmd msg
+
+
+port loginAuth : String -> Cmd msg
+
+
 
 -- PORTS: Cytoscape
 

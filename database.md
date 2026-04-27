@@ -234,3 +234,31 @@
                                   │   user │ bot                                          │
                                   └───────────────────────────────────────────────────────┘
 ```
+
+## Auth/access table semantics
+
+The `access_tokens` table is the minimal v1 storage surface for PAT, bot, and
+service-token access. It stores token identity and lifecycle metadata, not raw
+bearer secrets.
+
+- `token_hash` stores the canonical digest of the bearer token. Raw deployed
+  token material is only available to the operator at issuance time.
+- `actor_type = bot` means requests authenticate as a bot actor for audit and
+  event attribution. The token row `id` is the stable token identity used as
+  that token's bot `actor_id`; token rotation creates a replacement actor id.
+- `actor_type = user` is reserved for PAT-style user attribution where the
+  grant-bearing user is also the actor.
+- `actor_label` is a non-secret, human-readable attribution label copied into
+  audit rows and client-visible principal summaries.
+- `grant_user_id` points to the canonical `users` row whose global permissions
+  and `workspace_memberships` are evaluated. Bot/service tokens do not have a
+  separate permissions table in v1.
+- `expires_at`, `revoked_at`, and `last_used_at` are the v1 lifecycle and
+  observability fields used for operator-managed issuance, rotation, and
+  revocation.
+- `token_hash` is omitted from `access_tokens` audit snapshots; audit rows
+  should carry actor attribution and lifecycle changes, not secret digests.
+
+Local configured bot tokens may be represented in local config/bootstrap
+material instead of `access_tokens` during the local compatibility period, but
+deployed bot/service tokens should use persisted hashed rows.

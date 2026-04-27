@@ -100,6 +100,101 @@ Bots are authenticated principals used for MCP, agent, or service access.
 - Transitional local compatibility exception: until local bootstrap provisions real grant-bearing rows for configured local bot tokens and the legacy static-bearer token, the server may resolve those local-only bot principals to the same synthetic local superadmin authority used for the implicit local user. This exception must remain local-mode-only and must not be used for deployed bot/PAT resolution.
 - Token lifecycle in v1 should default to config/bootstrap or operator-managed workflows rather than a large self-service token-management product
 
+### Minimal bot identity surface
+
+The v1 bot/service identity surface is intentionally small. A bot is not a separate account type with its own permissions table; it is an attributable actor plus a token and a grant-bearing user link.
+
+The canonical persisted identity for deployed bot/service tokens is an `access_tokens` row with:
+
+- `id` — stable token identity used as the `actor_id` for bot/service actors
+- `grant_user_id` — the `users.id` whose global permissions and workspace memberships are evaluated
+- `actor_type` — `bot` for service/agent tokens, or `user` only for user-attributed PAT-style tokens when needed
+- `actor_label` — stable, non-secret display label used in audit, session/principal APIs, events, and UI attribution
+- `token_hash` — hash of the bearer secret; raw token material is not stored in deployed token rows
+- lifecycle timestamps: `expires_at`, `revoked_at`, `last_used_at`, `created_at`
+
+For `actor_type = bot`, the resolved request principal should use:
+
+- `actor_type = bot`
+- `actor_id = access_tokens.id`
+- `actor_label = access_tokens.actor_label`
+- authorization authority from `grant_user_id`
+
+For PAT-style `actor_type = user` tokens, the resolved request principal may use the grant-bearing user as both actor and authority, with `actor_label` still available to distinguish the token in audit and operator views. This is optional v1 behavior; bot/service tokens are the primary remote-agent path.
+
+Bot labels are operator-facing attribution, not security boundaries. They should be:
+
+- human-readable and non-secret
+- stable enough that old audit rows remain meaningful after token rotation
+- specific enough to distinguish agents, environments, or deployment roles, for example `codex-local`, `ci-indexer-prod`, or `support-agent-staging`
+- shown consistently anywhere actor attribution is surfaced
+
+Changing a label only affects future events unless historical audit rows are explicitly rewritten; audit rows store the label observed at write time.
+
+### Local named bots vs deployed service tokens
+
+Local mode keeps named bots lightweight so local agent workflows remain low-friction:
+
+- `auth.local.bot_tokens[]` may define `{ label, token }` entries directly in local config or equivalent local bootstrap material.
+- Matching local bot tokens resolve to `actor_type = bot` with a local label-derived actor id such as `local-bot:<label>`.
+- During the transitional local compatibility period, these local bot principals may use the synthetic local superadmin authority for authorization while still preserving bot attribution.
+- Local bot token material is local operator configuration; it must not be treated as the deployed token storage model.
+
+Deployed mode treats agent access as governed service-token access:
+
+- Bot/service tokens are persisted as hashed `access_tokens` rows.
+- Each token must link to a `grant_user_id` with explicit global permissions and workspace memberships.
+- Deployed bot tokens must not fall back to synthetic local superadmin authority.
+- A deployed service token should normally be scoped through a least-privilege grant-bearing user rather than a broad superadmin user.
+
+This distinction keeps local mode convenient while preserving the same principal and policy model in both modes.
+
+### Token lifecycle v1
+
+V1 token lifecycle is intentionally operator-managed. The goal is safe provisioning and rotation for agents without creating a full self-service token-management product.
+
+#### Issuance
+
+- Token issuance happens through config/bootstrap/operator workflows.
+- Deployed token issuance creates a `users` grant row if needed, grants any required global permissions or workspace memberships, generates high-entropy bearer material, stores only `accessTokenHash(token)` in `access_tokens.token_hash`, and records a non-secret `actor_label`.
+- Raw deployed token material is shown or exported only at creation time and should be stored by the operator in their secret manager or agent environment.
+- Local bot token issuance may remain a local config edit or bootstrap step using `auth.local.bot_tokens[]`.
+
+#### Rotation
+
+- Create a replacement token row with the same `grant_user_id`, intended scope, and an updated or stable `actor_label`.
+- Deploy the new raw token to the agent or service.
+- Confirm use through `last_used_at` or operational checks.
+- Revoke the old token by setting `revoked_at` or, for local config tokens, removing it from the local config and restarting/reloading the server as applicable.
+
+Rotation should prefer overlapping validity windows so agents can switch without downtime, but old tokens should be revoked promptly after cutover.
+
+#### Revocation and expiry
+
+- Persisted token revocation is represented by `access_tokens.revoked_at`.
+- Expiration is represented by `expires_at`; deployed service tokens should use finite expiration when operationally feasible.
+- A token is valid only when it matches `token_hash`, `revoked_at IS NULL`, and `expires_at IS NULL OR expires_at > now()`.
+- Revoked, expired, or unknown tokens resolve to no principal and should fail as unauthenticated.
+- Local configured bot-token revocation is removal from local config/bootstrap material.
+
+#### Observability
+
+- Successful persisted token use updates `last_used_at`.
+- Audit rows record `actor_type`, `actor_id`, and `actor_label`; they do not need to expose token hashes or raw token material.
+- Operators should diagnose agent auth failures through safe auth error messages, token lifecycle fields, grant-user permissions, and workspace memberships rather than by inspecting raw tokens.
+
+### V1 token-management boundary
+
+V1 deliberately does **not** require:
+
+- a self-service token creation UI
+- end-user token rotation flows
+- a separate bot-permission editor
+- token-scoped permission grants independent of `users` and `workspace_memberships`
+- per-endpoint token grants exposed as a public permission model
+
+If a first-class token-management API is added later, it should preserve the same canonical storage and policy model: token rows provide authentication and attribution; `grant_user_id` provides authorization.
+
 ## Workspace roles
 
 Workspace-visible permissions are role-based:

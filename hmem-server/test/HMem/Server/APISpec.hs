@@ -3,6 +3,8 @@
 module HMem.Server.APISpec (spec) where
 
 import Data.Aeson (decode, encode, object, (.=), toJSON, Value(..))
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
@@ -156,6 +158,16 @@ principalActorType Principal { actorType = value } = value
 
 principalAuthority :: Principal -> PrincipalAuthority
 principalAuthority Principal { authority = value } = value
+
+containsObjectField :: T.Text -> Maybe Value -> Bool
+containsObjectField fieldName = \case
+  Just (Object obj) -> KM.member (Key.fromText fieldName) obj
+  _ -> False
+
+assertNoTokenHashAuditSnapshot :: AuditLogRow -> Expectation
+assertNoTokenHashAuditSnapshot row = do
+  row.oldValues `shouldSatisfy` (not . containsObjectField "token_hash")
+  row.newValues `shouldSatisfy` (not . containsObjectField "token_hash")
 
 uuidPath :: BS.ByteString -> UUID -> BS.ByteString
 uuidPath prefix uid = prefix <> "/" <> encodeUtf8 (T.pack (show uid))
@@ -1338,6 +1350,7 @@ spec = around withApp $ do
         let Just ws = decode (respBody wsResp) :: Maybe Workspace
 
         tokenAuditRows <- getAuditLogRows env.pool "access_token" (T.pack $ show tokenId)
+        mapM_ assertNoTokenHashAuditSnapshot tokenAuditRows
         let lastTokenAudit = last tokenAuditRows
         lastTokenAudit.actorType `shouldBe` Just "bot"
         lastTokenAudit.actorId `shouldBe` Just (T.pack $ show tokenId)

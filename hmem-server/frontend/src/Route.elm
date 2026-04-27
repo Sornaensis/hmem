@@ -5,7 +5,7 @@ import Browser
 import Browser.Navigation as Nav
 import Dict
 import Helpers exposing (localStorageKey, parseFragment)
-import Ports exposing (connectWebSocket, destroyCytoscape, requestLocalStorage)
+import Ports exposing (destroyCytoscape, disconnectWebSocket, requestLocalStorage)
 import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
@@ -276,6 +276,9 @@ handleUrlChange url model =
                 ( { model
                     | url = url
                     , page = page
+                    , auth = { status = AuthBooting }
+                    , sessionContext = Nothing
+                    , webSocket = { state = Disconnected }
                     , selectedWorkspaceId = Just wsId
                     , activeTab = frag.tab
                     , projects = Dict.empty
@@ -294,10 +297,9 @@ handleUrlChange url model =
                   }
                     |> clearRouteConfirmations
                 , Cmd.batch
-                    [ loadWorkspaceData model.flags.apiUrl wsId updatedDataLoading.activeWorkspaceLoadToken
-                    , Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (Just wsId))
+                    [ Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (Just wsId))
                     , requestLocalStorage (localStorageKey wsId)
-                    , connectWebSocket model.flags.wsUrl
+                    , disconnectWebSocket ()
                     , destroyCmd
                     ]
                 )
@@ -313,17 +315,15 @@ handleUrlChange url model =
             ( { model
                 | url = url
                 , page = page
+                , auth = { status = AuthBooting }
+                , sessionContext = Nothing
+                , webSocket = { state = Disconnected }
                 , graph = updatedGraph
               }
                 |> clearRouteConfirmations
             , Cmd.batch
-                [ case model.selectedWorkspaceId of
-                    Just wsId ->
-                        Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
-
-                    Nothing ->
-                        Cmd.none
-                , Api.fetchSessionContext model.flags.apiUrl model.selectedWorkspaceId (GotSessionContext model.selectedWorkspaceId)
+                [ Api.fetchSessionContext model.flags.apiUrl model.selectedWorkspaceId (GotSessionContext model.selectedWorkspaceId)
+                , disconnectWebSocket ()
                 ]
             )
 
@@ -355,11 +355,16 @@ handleUrlChange url model =
             ( { model
                 | url = url
                 , page = page
+                , auth = { status = AuthBooting }
+                , sessionContext = Nothing
+                , selectedWorkspaceId = Nothing
+                , webSocket = { state = Disconnected }
                 , auditLog = updatedAuditLog
               }
                 |> clearRouteConfirmations
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)
+                , disconnectWebSocket ()
                 , destroyCmd
                 ]
             )
@@ -373,10 +378,11 @@ handleUrlChange url model =
                     else
                         Cmd.none
             in
-            ( { model | url = url, page = page }
+            ( { model | url = url, page = page, auth = { status = AuthBooting }, sessionContext = Nothing, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected } }
                 |> clearRouteConfirmations
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)
+                , disconnectWebSocket ()
                 , destroyCmd
                 ]
             )
@@ -385,13 +391,33 @@ handleUrlChange url model =
 clearRouteConfirmations : Model -> Model
 clearRouteConfirmations model =
     let
+        currentEditing =
+            model.editing
+
+        currentMemory =
+            model.memory
+
+        currentDependencies =
+            model.dependencies
+
         currentCards =
             model.cards
+
+        currentDragDrop =
+            model.dragDrop
+
+        currentAuditLog =
+            model.auditLog
 
         currentWorkspaceAdmin =
             model.workspaceAdmin
     in
     { model
-        | cards = { currentCards | deleteConfirmation = Nothing }
+        | editing = { currentEditing | editState = Nothing, createForm = Nothing, inlineCreate = Nothing }
+        , memory = { currentMemory | linkingMemoryFor = Nothing, linkingEntityFor = Nothing }
+        , dependencies = { currentDependencies | addingDependencyFor = Nothing }
+        , cards = { currentCards | deleteConfirmation = Nothing }
+        , dragDrop = { currentDragDrop | dragging = Nothing, dragOver = Nothing, dropActionModal = Nothing }
+        , auditLog = { currentAuditLog | revertConfirmation = Nothing, revertInFlight = False }
         , workspaceAdmin = { currentWorkspaceAdmin | purgeConfirmation = Nothing }
     }

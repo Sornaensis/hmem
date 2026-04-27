@@ -23,48 +23,56 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         GotWorkspaceGroups result ->
-            case result of
-                Ok paginated ->
-                    let
-                        groups =
-                            indexBy .id paginated.items
+            if model.auth.status /= AuthReady || not (Permissions.isSuperadmin model) then
+                ( model, Cmd.none )
 
-                        currentGroups =
-                            model.groups
+            else
+                case result of
+                    Ok paginated ->
+                        let
+                            groups =
+                                indexBy .id paginated.items
 
-                        updatedGroups =
-                            { currentGroups
-                                | workspaceGroups = groups
-                                , groupMembers = Dict.filter (\groupId _ -> Dict.member groupId groups) currentGroups.groupMembers
-                            }
+                            currentGroups =
+                                model.groups
 
-                        fetchMembersCmds =
-                            paginated.items
-                                |> List.map (\g -> Api.fetchGroupMembers model.flags.apiUrl g.id (GotGroupMembers g.id))
-                    in
-                    ( { model | groups = updatedGroups }
-                    , Cmd.batch fetchMembersCmds
-                    )
+                            updatedGroups =
+                                { currentGroups
+                                    | workspaceGroups = groups
+                                    , groupMembers = Dict.filter (\groupId _ -> Dict.member groupId groups) currentGroups.groupMembers
+                                }
 
-                Err _ ->
-                    addToast Error "Failed to load workspace groups" model
+                            fetchMembersCmds =
+                                paginated.items
+                                    |> List.map (\g -> Api.fetchGroupMembers model.flags.apiUrl g.id (GotGroupMembers g.id))
+                        in
+                        ( { model | groups = updatedGroups }
+                        , Cmd.batch fetchMembersCmds
+                        )
+
+                    Err _ ->
+                        addToast Error "Failed to load workspace groups" model
 
         GotGroupMembers groupId result ->
-            case result of
-                Ok memberIds ->
-                    let
-                        currentGroups =
-                            model.groups
+            if model.auth.status /= AuthReady || not (Permissions.isSuperadmin model) then
+                ( model, Cmd.none )
 
-                        updatedGroups =
-                            { currentGroups | groupMembers = Dict.insert groupId memberIds model.groups.groupMembers }
-                    in
-                    ( { model | groups = updatedGroups }
-                    , Cmd.none
-                    )
+            else
+                case result of
+                    Ok memberIds ->
+                        let
+                            currentGroups =
+                                model.groups
 
-                Err _ ->
-                    ( model, Cmd.none )
+                            updatedGroups =
+                                { currentGroups | groupMembers = Dict.insert groupId memberIds model.groups.groupMembers }
+                        in
+                        ( { model | groups = updatedGroups }
+                        , Cmd.none
+                        )
+
+                    Err _ ->
+                        ( model, Cmd.none )
 
         CreateWorkspaceGroup name ->
             let

@@ -9,6 +9,7 @@ import Api
 import Dict
 import Helpers exposing (beginWorkspaceDataReload)
 import Json.Decode as Decode
+import Permissions
 import Ports exposing (connectWebSocket, wsConnected, wsDisconnected, wsMessage)
 import Toast exposing (addToast)
 import Types exposing (..)
@@ -37,14 +38,18 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         WsConnectedMsg ->
-            let
-                currentWebSocket =
-                    model.webSocket
+            if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
+                let
+                    currentWebSocket =
+                        model.webSocket
 
-                updatedWebSocket =
-                    { currentWebSocket | state = Connected }
-            in
-            ( { model | webSocket = updatedWebSocket }, Cmd.none )
+                    updatedWebSocket =
+                        { currentWebSocket | state = Connected }
+                in
+                ( { model | webSocket = updatedWebSocket }, Cmd.none )
+
+            else
+                ( { model | webSocket = { state = Disconnected } }, Cmd.none )
 
         WsDisconnectedMsg ->
             let
@@ -58,7 +63,11 @@ update msg model =
                 { model | webSocket = updatedWebSocket }
 
         WsMessageReceived raw ->
-            applyWebSocketChange raw model
+            if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
+                applyWebSocketChange raw model
+
+            else
+                ( model, Cmd.none )
 
         _ ->
             ( model, Cmd.none )
@@ -68,7 +77,11 @@ applyWebSocketChange : String -> Model -> ( Model, Cmd Msg )
 applyWebSocketChange raw model =
     case Api.decodeChangeEvent raw of
         Just event ->
-            handleChangeEvent event model
+            if eventMatchesCurrentWorkspace event model then
+                handleChangeEvent event model
+
+            else
+                ( model, Cmd.none )
 
         Nothing ->
             ( model, Cmd.none )
@@ -101,6 +114,21 @@ handleChangeEvent event model =
                 addToast Info toastMsg updatedModel
         in
         ( toastedModel, Cmd.batch [ refreshCmd, toastCmd ] )
+
+
+eventMatchesCurrentWorkspace : Api.ChangeEvent -> Model -> Bool
+eventMatchesCurrentWorkspace event model =
+    case event.workspaceId of
+        Just eventWsId ->
+            model.selectedWorkspaceId == Just eventWsId
+
+        Nothing ->
+            case event.entityType of
+                Api.EWorkspaceGroup ->
+                    Permissions.isSuperadmin model
+
+                _ ->
+                    False
 
 
 eventTouchesPendingMutation : Api.ChangeEvent -> Dict.Dict String Bool -> Dict.Dict String Bool -> Bool
@@ -153,7 +181,7 @@ applyChangeEvent event model =
 
                         Nothing ->
                             ( model
-                            , Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
+                            , Api.fetchWorkspace model.flags.apiUrl event.entityId (GotWorkspace event.entityId)
                             )
 
         Api.EProject ->
@@ -259,7 +287,7 @@ applyChangeEvent event model =
                 graphCmd =
                     case ( model.page, model.selectedWorkspaceId ) of
                         ( MemoryGraphPage, Just wsId ) ->
-                            Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
+                            Api.fetchVisualization model.flags.apiUrl wsId (GotVisualization wsId)
 
                         _ ->
                             Cmd.none
@@ -283,7 +311,7 @@ applyChangeEvent event model =
                 graphCmd =
                     case ( model.page, model.selectedWorkspaceId ) of
                         ( MemoryGraphPage, Just wsId ) ->
-                            Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
+                            Api.fetchVisualization model.flags.apiUrl wsId (GotVisualization wsId)
 
                         _ ->
                             Cmd.none
@@ -386,7 +414,7 @@ maybeGraphRefresh : Model -> Cmd Msg
 maybeGraphRefresh model =
     case ( model.page, model.selectedWorkspaceId ) of
         ( MemoryGraphPage, Just wsId ) ->
-            Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
+            Api.fetchVisualization model.flags.apiUrl wsId (GotVisualization wsId)
 
         _ ->
             Cmd.none

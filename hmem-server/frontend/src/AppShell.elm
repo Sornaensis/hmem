@@ -21,7 +21,7 @@ import Feature.WebSocket
 import Feature.WorkspaceAdmin
 import Helpers exposing (applyStoredFiltersIfCurrentWorkspace, replaceFragment)
 import Html exposing (..)
-import Html.Attributes exposing (class, id)
+import Html.Attributes exposing (class, href, id)
 import Html.Keyed as Keyed
 import Http
 import Json.Decode as Decode
@@ -29,6 +29,7 @@ import Json.Encode as Encode
 import Page.Home
 import Page.Workspace
 import Ports exposing (authUnauthorized, cytoscapeEdgeClicked, cytoscapeNodeClicked, disconnectWebSocket, localStorageReceived, onMainContentScroll)
+import Route exposing (loadWorkspaceData)
 import Toast
 import Types exposing (..)
 import Url
@@ -58,6 +59,7 @@ initModel key url page flags storedFilters frag =
             , url = url
             , page = page
             , flags = flags
+            , auth = { status = AuthBooting }
             , sessionContext = Nothing
             , selectedWorkspaceId = Nothing
             , activeTab = frag.tab
@@ -126,6 +128,9 @@ handleOwned ownedMsg model =
                 case result of
                     Ok sessionContext ->
                         let
+                            sessionBootstrapCmd =
+                                bootstrapAfterSession expectedWorkspace sessionContext model
+
                             mMembershipWorkspaceId =
                                 case sessionContext.workspace of
                                     Just workspaceContext ->
@@ -170,12 +175,19 @@ handleOwned ownedMsg model =
                                     _ ->
                                         Cmd.none
                         in
-                        ( { model | sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin }
-                        , Cmd.batch [ fetchMembershipsCmd, fetchAuditCmd ]
+                        ( { model | auth = { status = AuthReady }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin }
+                            |> updateLoadingAfterSession expectedWorkspace sessionContext
+                        , Cmd.batch [ sessionBootstrapCmd, fetchMembershipsCmd, fetchAuditCmd ]
                         )
 
                     Err _ ->
-                        ( { model | sessionContext = Nothing }, Cmd.none )
+                        ( clearSessionScopedState
+                            { model
+                                | auth = { status = authStatusFromSessionError result }
+                                , sessionContext = Nothing
+                            }
+                        , disconnectWebSocket ()
+                        )
 
             else
                 ( model, Cmd.none )
@@ -187,10 +199,13 @@ handleOwned ownedMsg model =
 
                 ( toastedModel, toastCmd ) =
                     Toast.addToast Warning "Authentication is required or has expired. Please sign in again, then retry."
-                        { model
-                            | sessionContext = Nothing
-                            , webSocket = { currentWebSocket | state = Disconnected }
-                        }
+                        (clearSessionScopedState
+                            { model
+                                | auth = { status = AuthRequired }
+                                , sessionContext = Nothing
+                                , webSocket = { currentWebSocket | state = Disconnected }
+                            }
+                        )
             in
             ( toastedModel, Cmd.batch [ toastCmd, disconnectWebSocket () ] )
 
@@ -250,6 +265,179 @@ sessionContextResponseMatches expectedWorkspace model =
                     True
 
 
+bootstrapAfterSession : Maybe String -> Api.SessionContext -> Model -> Cmd Msg
+bootstrapAfterSession expectedWorkspace sessionContext model =
+    let
+        canListGlobal =
+            sessionContext.globalPermissions.superadmin
+
+        globalCmds =
+            if canListGlobal then
+                [ Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
+                , Api.fetchWorkspaceGroups model.flags.apiUrl GotWorkspaceGroups
+                ]
+
+            else
+                []
+
+        ( workspaceCmds, shouldKeepWebSocket ) =
+            case model.page of
+                WorkspacePage currentWsId ->
+                    if expectedWorkspace == Just currentWsId && sessionCanReadWorkspace currentWsId sessionContext then
+                        ( [ Api.fetchWorkspace model.flags.apiUrl currentWsId (GotWorkspace currentWsId)
+                          , loadWorkspaceData model.flags.apiUrl currentWsId model.dataLoading.activeWorkspaceLoadToken
+                          , connectCmd model.flags.wsUrl
+                          ]
+                        , True
+                        )
+
+                    else
+                        ( [], False )
+
+                MemoryGraphPage ->
+                    case ( expectedWorkspace, model.selectedWorkspaceId ) of
+                        ( Just expectedWsId, Just selectedWsId ) ->
+                            if expectedWsId == selectedWsId && sessionCanReadWorkspace selectedWsId sessionContext then
+                                ( [ Api.fetchVisualization model.flags.apiUrl selectedWsId (GotVisualization selectedWsId) ], False )
+
+                            else
+                                ( [], False )
+
+                        _ ->
+                            ( [], False )
+
+                _ ->
+                    ( [], False )
+
+        websocketCmds =
+            if shouldKeepWebSocket then
+                []
+
+            else
+                [ disconnectWebSocket () ]
+    in
+    Cmd.batch (globalCmds ++ workspaceCmds ++ websocketCmds)
+
+
+sessionCanReadWorkspace : String -> Api.SessionContext -> Bool
+sessionCanReadWorkspace wsId sessionContext =
+    sessionContext.globalPermissions.superadmin
+        || (sessionContext.workspace
+                |> Maybe.map (\workspaceContext -> workspaceContext.workspaceId == wsId && workspaceContext.canRead)
+                |> Maybe.withDefault False
+           )
+
+
+updateLoadingAfterSession : Maybe String -> Api.SessionContext -> Model -> Model
+updateLoadingAfterSession expectedWorkspace sessionContext model =
+    let
+        currentLoading =
+            model.dataLoading
+
+        shouldLoadWorkspaceData =
+            case model.page of
+                WorkspacePage wsId ->
+                    expectedWorkspace == Just wsId && sessionCanReadWorkspace wsId sessionContext
+
+                _ ->
+                    False
+
+        nextWebSocket =
+            if shouldLoadWorkspaceData then
+                model.webSocket
+
+            else
+                { state = Disconnected }
+
+        nextWorkspaces =
+            if sessionContext.globalPermissions.superadmin then
+                model.workspaces
+
+            else
+                case expectedWorkspace of
+                    Just wsId ->
+                        Dict.filter (\id _ -> id == wsId) model.workspaces
+
+                    Nothing ->
+                        Dict.empty
+
+        nextGroups =
+            if sessionContext.globalPermissions.superadmin then
+                model.groups
+
+            else
+                Feature.Groups.init
+
+        updatedLoading =
+            { currentLoading
+                | loadingWorkspaces = sessionContext.globalPermissions.superadmin && currentLoading.loadingWorkspaces
+                , loadingWorkspaceData = shouldLoadWorkspaceData && currentLoading.loadingWorkspaceData
+                , pendingWorkspaceLoads =
+                    if shouldLoadWorkspaceData then
+                        currentLoading.pendingWorkspaceLoads
+
+                    else
+                        0
+                , activeWorkspaceLoadToken =
+                    if shouldLoadWorkspaceData then
+                        currentLoading.activeWorkspaceLoadToken
+
+                    else
+                        Nothing
+            }
+    in
+    { model | dataLoading = updatedLoading, webSocket = nextWebSocket, workspaces = nextWorkspaces, groups = nextGroups }
+
+
+stopAllLoading : DataLoadingModel -> DataLoadingModel
+stopAllLoading dataLoading =
+    { dataLoading
+        | loadingWorkspaces = False
+        , loadingWorkspaceData = False
+        , pendingWorkspaceLoads = 0
+        , activeWorkspaceLoadToken = Nothing
+    }
+
+
+clearSessionScopedState : Model -> Model
+clearSessionScopedState model =
+    { model
+        | workspaces = Dict.empty
+        , projects = Dict.empty
+        , tasks = Dict.empty
+        , memories = Dict.empty
+        , dataLoading = stopAllLoading model.dataLoading
+        , search = Feature.Search.init
+        , editing = Feature.Editing.init
+        , memory = Feature.Memory.init
+        , dependencies = Feature.Dependencies.init
+        , cards = Feature.Cards.init
+        , graph = Feature.Graph.init
+        , dragDrop = Feature.DragDrop.init
+        , focus = Feature.Focus.init Nothing
+        , groups = Feature.Groups.init
+        , auditLog = Feature.AuditLog.init
+        , workspaceAdmin = Feature.WorkspaceAdmin.init
+        , webSocket = { state = Disconnected }
+    }
+
+
+authStatusFromSessionError : Result Http.Error Api.SessionContext -> AuthStatus
+authStatusFromSessionError result =
+    case result of
+        Err (Http.BadStatus 401) ->
+            AuthRequired
+
+        Err (Http.BadStatus 403) ->
+            AuthFailed "You do not have access to this workspace or session scope"
+
+        Err _ ->
+            AuthFailed "Unable to load session context"
+
+        Ok _ ->
+            AuthReady
+
+
 subscriptions : Sub Msg
 subscriptions =
     Sub.batch
@@ -268,16 +456,26 @@ viewDocument model =
     { title = "hmem"
     , body =
         [ div [ class "app" ]
-            [ Feature.Groups.viewSidebar model
+            [ if model.auth.status == AuthReady then
+                Feature.Groups.viewSidebar model
+
+              else
+                text ""
             , Keyed.node "div" [ class "main-content", id "main-content-scroll" ]
                 [ ( pageKey model.page, viewPage model ) ]
             , Toast.view model.toast
             , viewConnectionStatus model.webSocket.state
-            , Feature.Editing.viewCreateFormModal model
-            , Feature.DragDrop.viewDropActionModal model
-            , Feature.Cards.viewDeleteConfirmModal model
-            , Feature.AuditLog.viewRevertConfirmModal model
-            , Feature.WorkspaceAdmin.viewPurgeConfirmModal model
+            , if model.auth.status == AuthReady then
+                div []
+                    [ Feature.Editing.viewCreateFormModal model
+                    , Feature.DragDrop.viewDropActionModal model
+                    , Feature.Cards.viewDeleteConfirmModal model
+                    , Feature.AuditLog.viewRevertConfirmModal model
+                    , Feature.WorkspaceAdmin.viewPurgeConfirmModal model
+                    ]
+
+              else
+                text ""
             ]
         ]
     }
@@ -319,19 +517,62 @@ pageKey page =
 
 viewPage : Model -> Html Msg
 viewPage model =
-    case model.page of
-        HomePage ->
-            Page.Home.viewHomePage model
+    case model.auth.status of
+        AuthBooting ->
+            viewAuthBootstrapPage model
 
-        WorkspacePage wsId ->
-            Page.Workspace.viewWorkspacePage wsId model
+        AuthRequired ->
+            viewAuthRequiredPage model
 
-        MemoryGraphPage ->
-            Feature.Graph.viewGraphPage model
+        AuthFailed message ->
+            viewAuthFailedPage model message
 
-        AuditLogPage ->
-            Feature.AuditLog.viewAuditLogPage model
+        AuthReady ->
+            case model.page of
+                HomePage ->
+                    Page.Home.viewHomePage model
 
-        NotFound ->
-            div [ class "page" ]
-                [ h2 [] [ text "Not Found" ] ]
+                WorkspacePage wsId ->
+                    Page.Workspace.viewWorkspacePage wsId model
+
+                MemoryGraphPage ->
+                    Feature.Graph.viewGraphPage model
+
+                AuditLogPage ->
+                    Feature.AuditLog.viewAuditLogPage model
+
+                NotFound ->
+                    div [ class "page" ]
+                        [ h2 [] [ text "Not Found" ] ]
+
+
+viewAuthBootstrapPage : Model -> Html Msg
+viewAuthBootstrapPage model =
+    div [ class "page" ]
+        [ h2 [] [ text "Loading session" ]
+        , div [ class "loading-indicator" ] [ text ("Checking " ++ model.flags.runtimeMode ++ " auth session...") ]
+        ]
+
+
+viewAuthRequiredPage : Model -> Html Msg
+viewAuthRequiredPage model =
+    div [ class "page" ]
+        [ h2 [] [ text "Authentication required" ]
+        , p [] [ text "The server did not return an authenticated session. Sign in, then retry this page." ]
+        , p [] [ text ("Runtime mode: " ++ model.flags.runtimeMode) ]
+        , case model.flags.loginUrl of
+            Just loginUrl ->
+                p [] [ a [ href loginUrl ] [ text "Sign in" ] ]
+
+            Nothing ->
+                p [] [ text ("No login URL is configured. Auth token storage key: " ++ model.flags.authTokenStorageKey) ]
+        ]
+
+
+viewAuthFailedPage : Model -> String -> Html Msg
+viewAuthFailedPage model message =
+    div [ class "page" ]
+        [ h2 [] [ text "Session unavailable" ]
+        , p [] [ text message ]
+        , p [] [ text ("Runtime mode: " ++ model.flags.runtimeMode) ]
+        ]

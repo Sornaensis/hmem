@@ -6,7 +6,7 @@ import Browser
 import Browser.Navigation as Nav
 import Helpers exposing (parseFragment)
 import Json.Decode as Decode
-import Route exposing (handleUrlChange, handleUrlRequest, loadWorkspaceData, urlToPage)
+import Route exposing (handleUrlChange, handleUrlRequest, urlToPage)
 import Types exposing (..)
 import UpdateRouter
 import Url
@@ -29,6 +29,19 @@ decodeFlags raw =
             , sessionId =
                 Decode.decodeValue (Decode.field "sessionId" Decode.string) raw
                     |> Result.withDefault "session"
+            , runtimeMode =
+                Decode.decodeValue (Decode.field "runtimeMode" Decode.string) raw
+                    |> Result.withDefault "unknown"
+            , authTokenStorageKey =
+                Decode.decodeValue (Decode.field "authTokenStorageKey" Decode.string) raw
+                    |> Result.withDefault "hmem-auth-token"
+            , authTokenPresent =
+                Decode.decodeValue (Decode.field "authTokenPresent" Decode.bool) raw
+                    |> Result.withDefault False
+            , loginUrl =
+                decodeNullableStringField "loginUrl" raw
+            , logoutUrl =
+                decodeNullableStringField "logoutUrl" raw
             }
 
         storedFilters =
@@ -46,6 +59,12 @@ decodeFlags raw =
                     )
     in
     { flags = flags, storedFilters = storedFilters }
+
+
+decodeNullableStringField : String -> Decode.Value -> Maybe String
+decodeNullableStringField fieldName raw =
+    Decode.decodeValue (Decode.field fieldName (Decode.nullable Decode.string)) raw
+        |> Result.withDefault Nothing
 
 
 
@@ -71,23 +90,12 @@ init rawFlags url key =
             AppShell.initModel key url page flags decoded.storedFilters frag
 
         cmds =
-            [ AppShell.connectCmd flags.wsUrl
-            , Api.fetchSessionContext flags.apiUrl (sessionWorkspace page) (GotSessionContext (sessionWorkspace page))
-            , Api.fetchWorkspaces flags.apiUrl GotWorkspaces
-            , Api.fetchWorkspaceGroups flags.apiUrl GotWorkspaceGroups
+            [ Api.fetchSessionContext flags.apiUrl (sessionWorkspace page) (GotSessionContext (sessionWorkspace page))
             ]
-
-        pageCmd =
-            case page of
-                WorkspacePage wsId ->
-                    loadWorkspaceData flags.apiUrl wsId (Just model.dataLoading.nextWorkspaceLoadToken)
-
-                _ ->
-                    Cmd.none
 
     in
     ( AppShell.finalizeInit page model
-    , Cmd.batch (cmds ++ [ pageCmd ])
+    , Cmd.batch cmds
     )
 
 

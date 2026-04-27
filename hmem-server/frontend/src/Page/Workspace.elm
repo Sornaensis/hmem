@@ -19,122 +19,131 @@ import Types exposing (..)
 
 viewWorkspacePage : String -> Model -> Html Msg
 viewWorkspacePage wsId model =
-    case Dict.get wsId model.workspaces of
-        Nothing ->
-            div [ class "page" ]
-                [ div [ class "loading-indicator" ] [ text "Loading..." ] ]
+    if model.auth.status == AuthReady && not (Permissions.canReadCurrentWorkspace model) then
+        viewUnauthorizedWorkspace model
 
-        Just ws ->
-            let
-                wsProjects =
-                    model.projects |> Dict.values |> List.filter (\p -> p.workspaceId == wsId)
+    else
+        case Dict.get wsId model.workspaces of
+            Nothing ->
+                div [ class "page" ]
+                    [ div [ class "loading-indicator" ] [ text "Loading..." ] ]
 
-                wsTasks =
-                    model.tasks |> Dict.values |> List.filter (\t -> t.workspaceId == wsId)
+            Just ws ->
+                viewReadableWorkspacePage wsId model ws
 
-                wsMemories =
-                    model.memories |> Dict.values |> List.filter (\m -> m.workspaceId == wsId)
 
-                activeProjects =
-                    wsProjects |> List.filter (\p -> p.status == Api.ProjActive || p.status == Api.ProjPaused) |> List.length
+viewReadableWorkspacePage : String -> Model -> Api.Workspace -> Html Msg
+viewReadableWorkspacePage wsId model ws =
+    let
+        wsProjects =
+            model.projects |> Dict.values |> List.filter (\p -> p.workspaceId == wsId)
 
-                activeTasks =
-                    wsTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length
+        wsTasks =
+            model.tasks |> Dict.values |> List.filter (\t -> t.workspaceId == wsId)
 
-                memoryCount =
-                    List.length wsMemories
+        wsMemories =
+            model.memories |> Dict.values |> List.filter (\m -> m.workspaceId == wsId)
 
-                summaryParts =
-                    List.filterMap identity
-                        [ if activeProjects > 0 then
-                            Just (String.fromInt activeProjects ++ " open " ++ (if activeProjects > 1 then "projects" else "project"))
+        activeProjects =
+            wsProjects |> List.filter (\p -> p.status == Api.ProjActive || p.status == Api.ProjPaused) |> List.length
 
-                          else
-                            Nothing
-                        , if activeTasks > 0 then
-                            Just (String.fromInt activeTasks ++ " open " ++ (if activeTasks > 1 then "tasks" else "task"))
+        activeTasks =
+            wsTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length
 
-                          else
-                            Nothing
-                        , if memoryCount > 0 then
-                            Just (String.fromInt memoryCount ++ " memor" ++ (if memoryCount > 1 then "ies" else "y"))
+        memoryCount =
+            List.length wsMemories
 
-                          else
-                            Nothing
-                        ]
-            in
-            div [ class "page" ]
-                [ viewStickyWorkspaceBar model ws summaryParts
-                , div [ class "workspace-header" ]
-                    [ div [ class "workspace-header-top" ]
-                        [ div [ class "workspace-header-title" ]
-                            [ span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
-                                [ text (Api.workspaceTypeToString ws.workspaceType) ]
-                            , Feature.Editing.viewEditableText model "workspace" ws.id "name" ws.name
-                            ]
-                        , viewCreateButton model.activeTab
-                        ]
-                    , if not (List.isEmpty summaryParts) then
-                        div [ class "workspace-summary" ] [ text (String.join " · " summaryParts) ]
-
-                      else
-                        text ""
-                    , div [ class "workspace-details" ]
-                        [ div [ class "workspace-detail" ]
-                            [ span [ class "workspace-detail-label" ] [ text "ID" ]
-                            , span [ class "workspace-detail-value card-id card-id-copy", onClick (CopyId ws.id) ] [ text ws.id ]
-                            ]
-                        , case ws.ghOwner of
-                            Just owner ->
-                                div [ class "workspace-detail" ]
-                                    [ span [ class "workspace-detail-label" ] [ text "GitHub" ]
-                                    , span [ class "workspace-detail-value" ]
-                                        [ text
-                                            (owner
-                                                ++ (case ws.ghRepo of
-                                                        Just repo ->
-                                                            "/" ++ repo
-
-                                                        Nothing ->
-                                                            ""
-                                                   )
-                                            )
-                                        ]
-                                    ]
-
-                            Nothing ->
-                                text ""
-                        , div [ class "workspace-detail" ]
-                            [ span [ class "workspace-detail-label" ] [ text "Created" ]
-                            , span [ class "workspace-detail-value" ] [ text (formatDate ws.createdAt) ]
-                            ]
-                        , div [ class "workspace-detail" ]
-                            [ span [ class "workspace-detail-label" ] [ text "Updated" ]
-                            , span [ class "workspace-detail-value" ] [ text (formatDate ws.updatedAt) ]
-                            ]
-                        ]
-                    ]
-                , Feature.WorkspaceAdmin.viewPermissionSummary model
-                , if not (Permissions.canReadCurrentWorkspace model) then
-                    viewUnauthorizedWorkspace model
+        summaryParts =
+            List.filterMap identity
+                [ if activeProjects > 0 then
+                    Just (String.fromInt activeProjects ++ " open " ++ (if activeProjects > 1 then "projects" else "project"))
 
                   else
-                    div []
-                        [ Feature.WorkspaceAdmin.viewWorkspaceAdminPanel ws model
-                        , Feature.Search.viewSearchBar model
-                        , viewTabs model.activeTab
-                        , if model.dataLoading.loadingWorkspaceData then
-                            div [ class "loading-indicator" ] [ text "Loading..." ]
+                    Nothing
+                , if activeTasks > 0 then
+                    Just (String.fromInt activeTasks ++ " open " ++ (if activeTasks > 1 then "tasks" else "task"))
 
-                          else
-                            case model.search.unifiedResults of
-                                Just results ->
-                                    Feature.Search.viewUnifiedSearchResults (Feature.Memory.viewMemoryCard model) model results
+                  else
+                    Nothing
+                , if memoryCount > 0 then
+                    Just (String.fromInt memoryCount ++ " memor" ++ (if memoryCount > 1 then "ies" else "y"))
 
-                                Nothing ->
-                                    viewTabContent wsId model
-                        ]
+                  else
+                    Nothing
                 ]
+    in
+    div [ class "page" ]
+        [ viewStickyWorkspaceBar model ws summaryParts
+        , div [ class "workspace-header" ]
+            [ div [ class "workspace-header-top" ]
+                [ div [ class "workspace-header-title" ]
+                    [ span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
+                        [ text (Api.workspaceTypeToString ws.workspaceType) ]
+                    , Feature.Editing.viewEditableText model "workspace" ws.id "name" ws.name
+                    ]
+                , viewCreateButton model.activeTab
+                ]
+            , if not (List.isEmpty summaryParts) then
+                div [ class "workspace-summary" ] [ text (String.join " · " summaryParts) ]
+
+              else
+                text ""
+            , div [ class "workspace-details" ]
+                [ div [ class "workspace-detail" ]
+                    [ span [ class "workspace-detail-label" ] [ text "ID" ]
+                    , span [ class "workspace-detail-value card-id card-id-copy", onClick (CopyId ws.id) ] [ text ws.id ]
+                    ]
+                , case ws.ghOwner of
+                    Just owner ->
+                        div [ class "workspace-detail" ]
+                            [ span [ class "workspace-detail-label" ] [ text "GitHub" ]
+                            , span [ class "workspace-detail-value" ]
+                                [ text
+                                    (owner
+                                        ++ (case ws.ghRepo of
+                                                Just repo ->
+                                                    "/" ++ repo
+
+                                                Nothing ->
+                                                    ""
+                                           )
+                                    )
+                                ]
+                            ]
+
+                    Nothing ->
+                        text ""
+                , div [ class "workspace-detail" ]
+                    [ span [ class "workspace-detail-label" ] [ text "Created" ]
+                    , span [ class "workspace-detail-value" ] [ text (formatDate ws.createdAt) ]
+                    ]
+                , div [ class "workspace-detail" ]
+                    [ span [ class "workspace-detail-label" ] [ text "Updated" ]
+                    , span [ class "workspace-detail-value" ] [ text (formatDate ws.updatedAt) ]
+                    ]
+                ]
+            ]
+        , Feature.WorkspaceAdmin.viewPermissionSummary model
+        , if not (Permissions.canReadCurrentWorkspace model) then
+            viewUnauthorizedWorkspace model
+
+          else
+            div []
+                [ Feature.WorkspaceAdmin.viewWorkspaceAdminPanel ws model
+                , Feature.Search.viewSearchBar model
+                , viewTabs model.activeTab
+                , if model.dataLoading.loadingWorkspaceData then
+                    div [ class "loading-indicator" ] [ text "Loading..." ]
+
+                  else
+                    case model.search.unifiedResults of
+                        Just results ->
+                            Feature.Search.viewUnifiedSearchResults (Feature.Memory.viewMemoryCard model) model results
+
+                        Nothing ->
+                            viewTabContent wsId model
+                ]
+        ]
 
 
 viewUnauthorizedWorkspace : Model -> Html Msg

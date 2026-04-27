@@ -11,6 +11,7 @@ function createSessionId() {
 
 const runtimeConfig = window.HMEM_CONFIG || {}
 const authTokenStorageKey = runtimeConfig.authTokenStorageKey || 'hmem-auth-token'
+const runtimeMode = runtimeConfig.authMode || runtimeConfig.runtimeMode || import.meta.env.VITE_HMEM_AUTH_MODE || 'unknown'
 
 function configuredApiUrl() {
   return runtimeConfig.apiUrl || import.meta.env.VITE_HMEM_API_URL || window.location.origin
@@ -125,6 +126,11 @@ const app = Elm.Main.init({
     apiUrl,
     wsUrl,
     sessionId: createSessionId(),
+    runtimeMode,
+    authTokenStorageKey,
+    authTokenPresent: currentAuthToken() !== null,
+    loginUrl: runtimeConfig.loginUrl || import.meta.env.VITE_HMEM_LOGIN_URL || null,
+    logoutUrl: runtimeConfig.logoutUrl || import.meta.env.VITE_HMEM_LOGOUT_URL || null,
     storedFilters: getWorkspaceFilters()
   }
 })
@@ -197,10 +203,12 @@ function connectWs(url) {
     ws = socket
 
     socket.onopen = function () {
+      if (generation !== connectGeneration || ws !== socket) return
       app.ports.wsConnected.send(null)
     }
 
     socket.onmessage = function (event) {
+      if (generation !== connectGeneration || ws !== socket) return
       app.ports.wsMessage.send(event.data)
     }
 

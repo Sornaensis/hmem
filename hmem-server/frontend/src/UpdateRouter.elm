@@ -54,6 +54,9 @@ update msg model =
         GotWorkspaces _ ->
             Ok (Feature.DataLoading.update msg model)
 
+        GotWorkspace _ _ ->
+            Ok (Feature.DataLoading.update msg model)
+
         GotSessionContext expectedWorkspace result ->
             Err (HandleInAppShell (AppShell.SessionContextLoadedMsg expectedWorkspace result))
 
@@ -69,7 +72,7 @@ update msg model =
         GotSingleMemory _ ->
             Ok (Feature.DataLoading.update msg model)
 
-        GotVisualization _ ->
+        GotVisualization _ _ ->
             Ok (Feature.Graph.update msg model)
 
         -- Mutation responses

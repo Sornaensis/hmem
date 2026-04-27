@@ -2,6 +2,7 @@ module Feature.DataLoading exposing (init, prepareForPageLoad, update)
 
 import Dict
 import Helpers exposing (indexBy)
+import Permissions
 import Toast exposing (addToast)
 import Types exposing (..)
 
@@ -91,32 +92,54 @@ update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         GotWorkspaces result ->
-            case result of
-                Ok paginated ->
-                    let
-                        currentDataLoading =
-                            model.dataLoading
+            if model.auth.status /= AuthReady || not (Permissions.isSuperadmin model) then
+                ( model, Cmd.none )
 
-                        updatedDataLoading =
-                            { currentDataLoading | loadingWorkspaces = False }
-                    in
-                    ( { model
-                        | workspaces = indexBy .id paginated.items
-                        , dataLoading = updatedDataLoading
-                      }
-                    , Cmd.none
-                    )
+            else
+                case result of
+                    Ok paginated ->
+                        let
+                            currentDataLoading =
+                                model.dataLoading
 
-                Err _ ->
-                    let
-                        currentDataLoading =
-                            model.dataLoading
+                            updatedDataLoading =
+                                { currentDataLoading | loadingWorkspaces = False }
+                        in
+                        ( { model
+                            | workspaces = indexBy .id paginated.items
+                            , dataLoading = updatedDataLoading
+                          }
+                        , Cmd.none
+                        )
 
-                        updatedDataLoading =
-                            { currentDataLoading | loadingWorkspaces = False }
-                    in
-                    addToast Error "Failed to load workspaces"
-                        { model | dataLoading = updatedDataLoading }
+                    Err _ ->
+                        let
+                            currentDataLoading =
+                                model.dataLoading
+
+                            updatedDataLoading =
+                                { currentDataLoading | loadingWorkspaces = False }
+                        in
+                        addToast Error "Failed to load workspaces"
+                            { model | dataLoading = updatedDataLoading }
+
+        GotWorkspace expectedWsId result ->
+            if model.auth.status /= AuthReady || model.selectedWorkspaceId /= Just expectedWsId || not (Permissions.canReadCurrentWorkspace model) then
+                ( model, Cmd.none )
+
+            else
+                case result of
+                    Ok workspace ->
+                        if workspace.id == expectedWsId then
+                            ( { model | workspaces = Dict.insert workspace.id workspace model.workspaces }
+                            , Cmd.none
+                            )
+
+                        else
+                            ( model, Cmd.none )
+
+                    Err _ ->
+                        addToast Error "Failed to load workspace" model
 
         GotProjects wsId maybeToken result ->
             if model.selectedWorkspaceId /= Just wsId then

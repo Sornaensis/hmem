@@ -8,6 +8,7 @@ import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Http
 import Json.Encode as Encode
+import Permissions
 import Ports exposing (initCytoscape)
 import Toast exposing (addToast)
 import Types exposing (..)
@@ -23,41 +24,45 @@ init =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        GotVisualization result ->
-            case result of
-                Ok viz ->
-                    let
-                        currentGraph =
-                            model.graph
+        GotVisualization expectedWsId result ->
+            if model.auth.status /= AuthReady || model.selectedWorkspaceId /= Just expectedWsId || not (Permissions.canReadCurrentWorkspace model) then
+                ( model, Cmd.none )
 
-                        updatedGraph =
-                            { currentGraph | visualization = Just viz, loaded = True }
+            else
+                case result of
+                    Ok viz ->
+                        let
+                            currentGraph =
+                                model.graph
 
-                        newModel =
-                            { model | graph = updatedGraph }
-                    in
-                    ( newModel, initCytoscapeGraph newModel )
+                            updatedGraph =
+                                { currentGraph | visualization = Just viz, loaded = True }
 
-                Err err ->
-                    let
-                        errorMsg =
-                            case err of
-                                Http.BadBody body ->
-                                    "Decode error: " ++ body
+                            newModel =
+                                { model | graph = updatedGraph }
+                        in
+                        ( newModel, initCytoscapeGraph newModel )
 
-                                Http.BadStatus code ->
-                                    "HTTP " ++ String.fromInt code
+                    Err err ->
+                        let
+                            errorMsg =
+                                case err of
+                                    Http.BadBody body ->
+                                        "Decode error: " ++ body
 
-                                Http.BadUrl u ->
-                                    "Bad URL: " ++ u
+                                    Http.BadStatus code ->
+                                        "HTTP " ++ String.fromInt code
 
-                                Http.Timeout ->
-                                    "Request timed out"
+                                    Http.BadUrl u ->
+                                        "Bad URL: " ++ u
 
-                                Http.NetworkError ->
-                                    "Network error"
-                    in
-                    addToast Error ("Graph load failed: " ++ errorMsg) model
+                                    Http.Timeout ->
+                                        "Request timed out"
+
+                                    Http.NetworkError ->
+                                        "Network error"
+                        in
+                        addToast Error ("Graph load failed: " ++ errorMsg) model
 
         CytoscapeNodeClicked _ ->
             ( model, Cmd.none )
@@ -75,11 +80,12 @@ update msg model =
             in
             ( { model
                 | selectedWorkspaceId = Just wsId
+                , auth = { status = AuthBooting }
+                , sessionContext = Nothing
                 , graph = updatedGraph
               }
             , Cmd.batch
-                [ Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
-                , Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (Just wsId))
+                [ Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (Just wsId))
                 ]
             )
 

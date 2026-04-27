@@ -17,6 +17,11 @@ type alias Flags =
     { apiUrl : String
     , wsUrl : String
     , sessionId : String
+    , runtimeMode : String
+    , authTokenStorageKey : String
+    , authTokenPresent : Bool
+    , loginUrl : Maybe String
+    , logoutUrl : Maybe String
     }
 
 
@@ -29,6 +34,7 @@ type alias Model =
     , url : Url.Url
     , page : Page
     , flags : Flags
+    , auth : AuthModel
     , sessionContext : Maybe Api.SessionContext
     , selectedWorkspaceId : Maybe String
     , activeTab : WorkspaceTab
@@ -59,6 +65,18 @@ type alias ToastModel =
     { toasts : List Toast
     , nextToastId : Int
     }
+
+
+type alias AuthModel =
+    { status : AuthStatus
+    }
+
+
+type AuthStatus
+    = AuthBooting
+    | AuthReady
+    | AuthRequired
+    | AuthFailed String
 
 
 type alias WebSocketModel =
@@ -330,12 +348,13 @@ type Msg
     | CytoscapeEdgeClicked String
       -- HTTP responses
     | GotWorkspaces (Result Http.Error (Api.PaginatedResult Api.Workspace))
+    | GotWorkspace String (Result Http.Error Api.Workspace)
     | GotSessionContext (Maybe String) (Result Http.Error Api.SessionContext)
     | GotProjects String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Project))
     | GotTasks String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Task))
     | GotMemories String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Memory))
     | GotSingleMemory (Result Http.Error Api.Memory)
-    | GotVisualization (Result Http.Error Api.WorkspaceVisualization)
+    | GotVisualization String (Result Http.Error Api.WorkspaceVisualization)
       -- Mutation responses
     | MutationDone String (Result Http.Error ())
     | ProjectCreated (Result Http.Error Api.Project)

@@ -12,6 +12,7 @@
 --   @hmem-ctl projects@      – list projects (with optional name/workspace filter)
 --   @hmem-ctl workspace@    – interactively select/create workspace, write .hmem.workspace
 --   @hmem-ctl auth bootstrap-superadmin@ – create/update the first deployed superadmin
+--   @hmem-ctl auth tokens issue@ – create a display-once service/PAT token
 --
 --   Requires: initdb, pg_ctl, createdb, psql on PATH (ships with PostgreSQL).
 
@@ -30,6 +31,9 @@ import Data.List          (isInfixOf, dropWhileEnd)
 import Data.Maybe         (fromMaybe)
 import Data.Text qualified as T
 import Data.UUID          (UUID)
+import Data.UUID qualified as UUID
+import Data.Time          (UTCTime)
+import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Types.Status (statusCode)
 import Options.Applicative
@@ -56,6 +60,7 @@ import HMem.Config
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool qualified as Pool
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
+import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Types
 import Paths_hmem_server qualified as Paths
 
@@ -79,12 +84,35 @@ data Command
 
 data AuthCommand
   = CmdBootstrapSuperadmin BootstrapSuperadminOpts
+  | CmdTokens TokenCommand
+
+data TokenCommand
+  = CmdIssueToken IssueTokenOpts
+  | CmdRotateToken RotateTokenOpts
+  | CmdRevokeToken RevokeTokenOpts
 
 data BootstrapSuperadminOpts = BootstrapSuperadminOpts
   { bootstrapAuthSubject :: String
   , bootstrapEmail       :: Maybe String
   , bootstrapDisplayName :: Maybe String
   , bootstrapForce       :: Bool
+  }
+
+data IssueTokenOpts = IssueTokenOpts
+  { issueGrantUserId :: String
+  , issueActorType   :: String
+  , issueActorLabel  :: String
+  , issueExpiresAt   :: Maybe String
+  }
+
+data RotateTokenOpts = RotateTokenOpts
+  { rotateTokenId   :: String
+  , rotateExpiresAt :: Maybe String
+  , rotateRevokeOld :: Bool
+  }
+
+data RevokeTokenOpts = RevokeTokenOpts
+  { revokeTokenId :: String
   }
 
 data WorkspacesOpts = WorkspacesOpts
@@ -128,7 +156,69 @@ authCommandParser :: Parser AuthCommand
 authCommandParser = subparser
   ( command "bootstrap-superadmin" (info ((CmdBootstrapSuperadmin <$> bootstrapSuperadminParser) <**> helper)
       (progDesc "Create or update the deployed first superadmin user"))
+  <> command "tokens" (info (CmdTokens <$> tokenCommandParser)
+      (progDesc "Issue, rotate, and revoke service/PAT tokens"))
   )
+
+tokenCommandParser :: Parser TokenCommand
+tokenCommandParser = subparser
+  ( command "issue" (info ((CmdIssueToken <$> issueTokenParser) <**> helper)
+      (progDesc "Issue a display-once service/PAT token"))
+  <> command "rotate" (info ((CmdRotateToken <$> rotateTokenParser) <**> helper)
+      (progDesc "Create an overlapping replacement token for an existing token"))
+  <> command "revoke" (info ((CmdRevokeToken <$> revokeTokenParser) <**> helper)
+      (progDesc "Revoke an existing service/PAT token"))
+  )
+
+issueTokenParser :: Parser IssueTokenOpts
+issueTokenParser = IssueTokenOpts
+  <$> strOption
+      ( long "grant-user-id"
+     <> metavar "UUID"
+     <> help "Grant-bearing user ID whose permissions authorize the token"
+      )
+  <*> strOption
+      ( long "actor-type"
+     <> metavar "bot|user"
+     <> value "bot"
+     <> showDefault
+     <> help "Actor type recorded in audit/events"
+      )
+  <*> strOption
+      ( long "actor-label"
+     <> metavar "LABEL"
+     <> help "Stable human-readable actor label for audit/events"
+      )
+  <*> optional (strOption
+      ( long "expires-at"
+     <> metavar "ISO8601"
+     <> help "Optional UTC expiry timestamp, e.g. 2026-05-01T00:00:00Z"
+      ))
+
+rotateTokenParser :: Parser RotateTokenOpts
+rotateTokenParser = RotateTokenOpts
+  <$> strOption
+      ( long "token-id"
+     <> metavar "UUID"
+     <> help "Existing token row to rotate"
+      )
+  <*> optional (strOption
+      ( long "expires-at"
+     <> metavar "ISO8601"
+     <> help "Optional replacement expiry; defaults to the existing token expiry"
+      ))
+  <*> switch
+      ( long "revoke-old"
+     <> help "Revoke the old token immediately instead of leaving an overlap window"
+      )
+
+revokeTokenParser :: Parser RevokeTokenOpts
+revokeTokenParser = RevokeTokenOpts
+  <$> strOption
+      ( long "token-id"
+     <> metavar "UUID"
+     <> help "Token row to revoke"
+      )
 
 bootstrapSuperadminParser :: Parser BootstrapSuperadminOpts
 bootstrapSuperadminParser = BootstrapSuperadminOpts
@@ -1157,6 +1247,13 @@ removeIfExists path = do
 doAuth :: AuthCommand -> IO ()
 doAuth = \case
   CmdBootstrapSuperadmin opts -> doBootstrapSuperadmin opts
+  CmdTokens tokenCmd -> doTokenCommand tokenCmd
+
+doTokenCommand :: TokenCommand -> IO ()
+doTokenCommand = \case
+  CmdIssueToken opts -> doIssueToken opts
+  CmdRotateToken opts -> doRotateToken opts
+  CmdRevokeToken opts -> doRevokeToken opts
 
 doBootstrapSuperadmin :: BootstrapSuperadminOpts -> IO ()
 doBootstrapSuperadmin opts = do
@@ -1205,6 +1302,102 @@ bootstrapDecisionText = \case
   AuthBootstrap.BootstrapCreated -> "created"
   AuthBootstrap.BootstrapUpdated -> "updated"
   AuthBootstrap.BootstrapAlreadySatisfied -> "already-satisfied"
+
+doIssueToken :: IssueTokenOpts -> IO ()
+doIssueToken opts = do
+  cfg <- loadAuthOperatorConfig "auth tokens issue"
+  grantUserId <- parseUuidOption "--grant-user-id" opts.issueGrantUserId
+  actorType <- parseActorTypeOption opts.issueActorType
+  expiry <- parseMaybeTimeOption "--expires-at" opts.issueExpiresAt
+  let input = AuthTokens.IssueAccessTokenInput
+        { AuthTokens.grantUserId = grantUserId
+        , AuthTokens.actorType = actorType
+        , AuthTokens.actorLabel = T.pack (strip opts.issueActorLabel)
+        , AuthTokens.expiresAt = expiry
+        }
+  pool <- Pool.createPool (connectionString cfg.database) 2 60 30000
+  result <- AuthTokens.issueAccessToken pool input
+  case result of
+    Left err -> printTokenError err >> exitFailure
+    Right issued -> printIssuedToken "Access token issued." issued
+
+doRotateToken :: RotateTokenOpts -> IO ()
+doRotateToken opts = do
+  cfg <- loadAuthOperatorConfig "auth tokens rotate"
+  tokenId <- parseUuidOption "--token-id" opts.rotateTokenId
+  expiry <- parseMaybeTimeOption "--expires-at" opts.rotateExpiresAt
+  let input = AuthTokens.RotateAccessTokenInput
+        { AuthTokens.sourceTokenId = tokenId
+        , AuthTokens.expiresAt = expiry
+        , AuthTokens.revokeOld = opts.rotateRevokeOld
+        }
+  pool <- Pool.createPool (connectionString cfg.database) 2 60 30000
+  result <- AuthTokens.rotateAccessToken pool input
+  case result of
+    Left err -> printTokenError err >> exitFailure
+    Right issued -> do
+      printIssuedToken "Replacement access token issued." issued
+      if opts.rotateRevokeOld
+        then putStrLn "Old token revoked."
+        else putStrLn "Old token remains active for overlap; revoke it after clients switch."
+
+doRevokeToken :: RevokeTokenOpts -> IO ()
+doRevokeToken opts = do
+  cfg <- loadAuthOperatorConfig "auth tokens revoke"
+  tokenId <- parseUuidOption "--token-id" opts.revokeTokenId
+  pool <- Pool.createPool (connectionString cfg.database) 2 60 30000
+  revoked <- AuthTokens.revokeAccessToken pool tokenId
+  if revoked
+    then putStrLn $ "Access token revoked: " <> show tokenId
+    else do
+      hPutStrLn stderr $ "Error: token not found or already revoked: " <> show tokenId
+      exitFailure
+
+loadAuthOperatorConfig :: String -> IO HMemConfig
+loadAuthOperatorConfig commandName = do
+  _ <- ensureInitialized commandName
+  cfg <- loadConfig
+  when (cfg.auth.mode /= AuthModeDeployed) $
+    hPutStrLn stderr "Warning: auth.mode is not 'deployed'; token operations are intended for deployed auth."
+  pure cfg
+
+parseUuidOption :: String -> String -> IO UUID
+parseUuidOption optionName raw = case UUID.fromString (strip raw) of
+  Just parsed -> pure parsed
+  Nothing -> do
+    hPutStrLn stderr $ "Error: " <> optionName <> " must be a valid UUID."
+    exitFailure
+
+parseActorTypeOption :: String -> IO AuthTokens.AccessTokenActor
+parseActorTypeOption raw = case AuthTokens.accessTokenActorFromText (T.toLower (T.pack (strip raw))) of
+  Just parsed -> pure parsed
+  Nothing -> do
+    hPutStrLn stderr "Error: --actor-type must be 'bot' or 'user'."
+    exitFailure
+
+parseMaybeTimeOption :: String -> Maybe String -> IO (Maybe UTCTime)
+parseMaybeTimeOption _optionName Nothing = pure Nothing
+parseMaybeTimeOption optionName (Just raw) = case iso8601ParseM (strip raw) of
+  Just parsed -> pure (Just parsed)
+  Nothing -> do
+    hPutStrLn stderr $ "Error: " <> optionName <> " must be an ISO8601 timestamp, e.g. 2026-05-01T00:00:00Z."
+    exitFailure
+
+printIssuedToken :: String -> AuthTokens.IssuedAccessToken -> IO ()
+printIssuedToken heading issued = do
+  putStrLn heading
+  putStrLn $ "  Token ID:  " <> show issued.tokenId
+  putStrLn $ "  Raw token: " <> T.unpack issued.rawToken
+  putStrLn "Store the raw token now; hmem stores only its hash and cannot display it again."
+
+printTokenError :: AuthTokens.AccessTokenError -> IO ()
+printTokenError = \case
+  AuthTokens.EmptyActorLabel ->
+    hPutStrLn stderr "Error: --actor-label must not be empty."
+  AuthTokens.GrantUserNotFound userId ->
+    hPutStrLn stderr $ "Error: grant-bearing user not found: " <> show userId
+  AuthTokens.SourceTokenNotFound tokenId ->
+    hPutStrLn stderr $ "Error: source token not found or already revoked: " <> show tokenId
 
 ------------------------------------------------------------------------
 -- Query commands (workspaces, projects)

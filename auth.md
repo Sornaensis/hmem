@@ -77,7 +77,7 @@ Bot and service tokens identify automated clients in audit/events. In deployed m
 2. Configure `auth.mode: deployed` and provider verification settings.
 3. Bootstrap at least one `superadmin` user using the supported operator workflow.
 4. Grant `create_workspace` or workspace roles to non-superadmin users as needed.
-5. For automated clients, create service/PAT tokens in `access_tokens` linked to a grant-bearing user.
+5. For automated clients, create service/PAT tokens linked to a grant-bearing user using the token workflow below.
 6. Store raw service tokens in your secret manager or runtime environment; hmem stores token hashes.
 7. Verify `/api/v1/session`, one protected read, and one protected write before production traffic.
 
@@ -100,6 +100,26 @@ Required behavior for the implemented workflow:
 - If a different superadmin already exists, the command refuses unless the operator passes an explicit break-glass `--force` override.
 - Logs and output identify the affected user and bootstrap decision, but never print bearer tokens or provider credentials.
 - Operators must verify the result by authenticating as that provider subject and checking that `/api/v1/session` reports `superadmin`.
+
+### Service/PAT token lifecycle
+
+Operators can issue, rotate, and revoke deployed service/PAT tokens with `hmem-ctl auth tokens`. Issuance generates a high-entropy raw token, stores only `token_hash`, and prints the raw token exactly once:
+
+```bash
+hmem-ctl auth tokens issue \
+  --grant-user-id user-uuid-with-required-permissions \
+  --actor-label deploy-bot \
+  --expires-at 2026-05-01T00:00:00Z
+```
+
+Rotation creates an overlapping replacement by default; revoke the old token after clients switch, or pass `--revoke-old` for immediate cutover:
+
+```bash
+hmem-ctl auth tokens rotate --token-id old-token-row-uuid
+hmem-ctl auth tokens revoke --token-id old-token-row-uuid
+```
+
+Tokens are operator-managed in v1, not self-service UI objects. Use `--actor-type bot|user`, stable `--actor-label` values, and least-privilege grant-bearing users so automated clients inherit only the permissions they need.
 
 ## Frontend and MCP
 

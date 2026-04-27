@@ -75,11 +75,31 @@ Bot and service tokens identify automated clients in audit/events. In deployed m
 
 1. Apply database migrations before enabling deployed auth.
 2. Configure `auth.mode: deployed` and provider verification settings.
-3. Bootstrap at least one `superadmin` user.
+3. Bootstrap at least one `superadmin` user using the supported operator workflow once the deployment tooling provides it.
 4. Grant `create_workspace` or workspace roles to non-superadmin users as needed.
 5. For automated clients, create service/PAT tokens in `access_tokens` linked to a grant-bearing user.
 6. Store raw service tokens in your secret manager or runtime environment; hmem stores token hashes.
 7. Verify `/api/v1/session`, one protected read, and one protected write before production traffic.
+
+### First superadmin bootstrap workflow
+
+The selected supported first-user bootstrap path is an operator-run `hmem-ctl` command that connects directly to the configured database after migrations have run. This section specifies the operator contract that deployment tooling must provide before deployed mode is release-ready. The command interface is:
+
+```bash
+hmem-ctl auth bootstrap-superadmin \
+  --auth-subject oidc-subject-from-provider \
+  --display-name "Primary Operator" \
+  --email operator@example.com
+```
+
+Required behavior for the implemented workflow:
+
+- `--auth-subject` is the stable subject claim that deployed bearer/JWT authentication resolves later.
+- The command creates or updates exactly that user with `is_superadmin = true` and `can_create_workspace = true`.
+- Running it again for the same `--auth-subject` is idempotent.
+- If a different superadmin already exists, the command refuses unless the operator passes an explicit break-glass `--force` override.
+- Logs and output identify the affected user and bootstrap decision, but never print bearer tokens or provider credentials.
+- Operators must verify the result by authenticating as that provider subject and checking that `/api/v1/session` reports `superadmin`.
 
 ## Frontend and MCP
 

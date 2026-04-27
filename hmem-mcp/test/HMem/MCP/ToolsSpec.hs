@@ -5,13 +5,18 @@ module HMem.MCP.ToolsSpec (spec) where
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Either (isLeft, isRight)
+import Data.Foldable (toList)
+import Data.Maybe (listToMaybe)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID qualified as UUID
 import Test.Hspec
 
+import HMem.Config qualified as Config
+import HMem.MCP.Config
 import HMem.MCP.Tools
 import HMem.Types
 
@@ -880,6 +885,95 @@ spec = do
       path `shouldContain` "limit=50"
       path `shouldContain` "offset=10"
 
+  describe "MCP auth forwarding config" $ do
+    let baseAuth = (Config.defaultConfig :: Config.HMemConfig).auth
+        localCfg = Config.defaultConfig
+          { Config.auth = baseAuth
+              { Config.mode = Config.AuthModeLocal
+              , Config.enabled = True
+              , Config.apiKey = Just "local-secret"
+              }
+          }
+        deployedCfg = Config.defaultConfig
+          { Config.auth = baseAuth
+              { Config.mode = Config.AuthModeDeployed
+              , Config.apiKey = Just "legacy-should-not-forward"
+              }
+          }
+
+    it "resolves server URL from CLI then env then config and trims trailing slashes" $ do
+      resolveServerUrl (Just " https://cli.example/ ") (Just "https://env.example") "http://config.example/"
+        `shouldBe` "https://cli.example"
+      resolveServerUrl (Just "") (Just "https://env.example/") "http://config.example/"
+        `shouldBe` "https://env.example"
+      resolveServerUrl Nothing Nothing "http://config.example/"
+        `shouldBe` "http://config.example"
+
+    it "uses explicit token precedence and ignores empty token sources" $ do
+      resolveForwardedToken deployedCfg "https://remote.example" False (Just "cli") (Just "mcp") (Just "auth")
+        `shouldBe` Just "cli"
+      resolveForwardedToken deployedCfg "https://remote.example" False (Just "") (Just "mcp") (Just "auth")
+        `shouldBe` Just "mcp"
+      resolveForwardedToken deployedCfg "https://remote.example" False (Just "Bearer cli-token") Nothing Nothing
+        `shouldBe` Just "cli-token"
+      resolveForwardedToken deployedCfg "https://remote.example" False (Just "Authorization: Bearer cli-token") Nothing Nothing
+        `shouldBe` Just "cli-token"
+      resolveForwardedToken deployedCfg "https://remote.example" False (Just "Authorization : Bearer cli-token") Nothing Nothing
+        `shouldBe` Just "cli-token"
+      resolveForwardedToken deployedCfg "https://remote.example" False (Just "Bearer\tcli-token") Nothing Nothing
+        `shouldBe` Just "cli-token"
+      resolveForwardedToken deployedCfg "https://remote.example" False (Just "Bearer ") (Just "mcp") Nothing
+        `shouldBe` Just "mcp"
+      resolveForwardedToken deployedCfg "https://remote.example" False (Just "Authorization:") (Just "mcp") Nothing
+        `shouldBe` Just "mcp"
+      resolveForwardedToken deployedCfg "https://remote.example" True (Just "cli") (Just "mcp") (Just "auth")
+        `shouldBe` Nothing
+
+    it "only forwards local legacy auth.api_key to loopback targets" $ do
+      resolveForwardedToken localCfg "http://127.0.0.1:8420" False Nothing Nothing Nothing
+        `shouldBe` Just "local-secret"
+      resolveForwardedToken localCfg "http://localhost:8420" False Nothing Nothing Nothing
+        `shouldBe` Just "local-secret"
+      resolveForwardedToken localCfg "http://[::1]:8420" False Nothing Nothing Nothing
+        `shouldBe` Just "local-secret"
+      resolveForwardedToken localCfg "https://remote.example" False Nothing Nothing Nothing
+        `shouldBe` Nothing
+      resolveForwardedToken localCfg "http://127.0.0.1.evil.example:8420" False Nothing Nothing Nothing
+        `shouldBe` Nothing
+      resolveForwardedToken localCfg "http://127.example" False Nothing Nothing Nothing
+        `shouldBe` Nothing
+
+    it "redacts server URLs for logging" $ do
+      safeServerUrlForLog "https://user:secret@example.com:8443/path?access_token=sensitive#frag"
+        `shouldBe` "https://example.com:8443"
+      safeServerUrlForLog "http://localhost:8420/api/v1?token=sensitive"
+        `shouldBe` "http://localhost:8420"
+
+    it "builds the outbound bearer Authorization header" $ do
+      bearerAuthHeaders (Just "cli-token") `shouldBe` [("Authorization", "Bearer cli-token")]
+      bearerAuthHeaders Nothing `shouldBe` []
+
+    it "redacts token-like values from server response snippets" $ do
+      let samples =
+            [ "Authorization: Bearer secret-token access_token=abc123 {'token':'xyz'}"
+            , "Authorization=Bearer secret-token"
+            , "Authorization : Basic secret-token"
+            , "{\"authorization\":\"Bearer secret-token\"}"
+            , "{\"access_token\":\"abc123\",\"refresh_token\":\"def456\"}"
+            , "{ \"token\" : \"secret\" }"
+            , "api_key: secret"
+            , "x-api-key: secret"
+            , "client_secret=secret"
+            , "Set-Cookie: session=secret"
+            ]
+      mapM_ (\sample -> sanitizeServerResponse (BL8.pack sample) `shouldBe` "[REDACTED]") samples
+
+    it "promotes composite workflow auth failures to primary auth error codes" $ do
+      let err = mcpErrorCodeFromRaw "PROJECT_CREATE_FAILED" "[AUTH_REQUIRED] hmem-server rejected the request"
+      (textField "text" =<< firstContent err) `shouldBe` Just "[AUTH_REQUIRED] hmem-server rejected the request"
+      firstRawAuthError [Right (object []), Left "[AUTH_FORBIDDEN] denied", Left "other"]
+        `shouldBe` Just "[AUTH_FORBIDDEN] denied"
+
     it "UTF-8 encodes non-ASCII project_list query text" $ do
       let path = buildProjectListPath ProjectListQuery
             { workspaceId = Just parsedUUID
@@ -1093,6 +1187,11 @@ textField key (Object obj) = case KM.lookup (Key.fromText key) obj of
   Just (String value) -> Just value
   _                   -> Nothing
 textField _ _ = Nothing
+
+firstContent :: Value -> Maybe Value
+firstContent value = case objectField "content" value of
+  Just (Array items) -> listToMaybe (toList items)
+  _ -> Nothing
 
 numberField :: Text -> Value -> Maybe Scientific
 numberField key (Object obj) = case KM.lookup (Key.fromText key) obj of

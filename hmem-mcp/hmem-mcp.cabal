@@ -16,6 +16,7 @@ build-type:     Simple
 
 library
   exposed-modules:
+      HMem.MCP.Config
       HMem.MCP.Server
       HMem.MCP.Tools
   other-modules:

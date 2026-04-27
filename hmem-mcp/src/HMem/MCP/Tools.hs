@@ -6,11 +6,14 @@ module HMem.MCP.Tools
   , validateToolCall
   , buildProjectListPath
   , buildTaskListPath
+  , sanitizeServerResponse
+  , mcpErrorCodeFromRaw
+  , firstRawAuthError
+  , bearerAuthHeaders
   , ToolCall(..)
   ) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (void)
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, parseEither)
@@ -25,6 +28,7 @@ import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Network.HTTP.Client
+import Network.HTTP.Types.Header (RequestHeaders)
 import Network.HTTP.Types.Status (statusCode)
 import Network.HTTP.Types.URI (urlEncode)
 
@@ -1265,62 +1269,71 @@ executeToolCall mgr base mApiKey = \case
 
     TaskStartCall tid level -> do
       -- 1. Update task status to in_progress (best-effort; may already be in_progress)
-      _ <- rawPutJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
-             (object ["status" .= ("in_progress" :: Text)])
-      -- 2. Load context for the task
-      let levelStr = case level of
-            ContextLight  -> "light"
-            ContextMedium -> "medium"
-            ContextHeavy  -> "heavy"
-      getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/context" <>
-        buildQuery [("detail_level", Just levelStr)])
+      updateResult <- rawPutJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+              (object ["status" .= ("in_progress" :: Text)])
+      case rawAuthErrorToMcp updateResult of
+        Just authErr -> pure authErr
+        Nothing -> do
+          -- 2. Load context for the task
+          let levelStr = case level of
+                ContextLight  -> "light"
+                ContextMedium -> "medium"
+                ContextHeavy  -> "heavy"
+          getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/context" <>
+            buildQuery [("detail_level", Just levelStr)])
 
     TaskFinishCall tid status mNotes mTags -> do
       -- 1. If notes provided, create a linked memory
-      case mNotes of
+      mAuthErr <- case mNotes of
         Just notes | not (T.null (T.strip notes)) -> do
           -- First get the task to find workspace_id
           taskResult <- rawGetJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
-          case taskResult of
-            Right taskVal -> do
-              let mWsId = case taskVal of
-                    Object o -> case KM.lookup "workspace_id" o of
-                      Just (String ws) -> Just ws
-                      _                -> Nothing
-                    _ -> Nothing
-              case mWsId of
-                Just wsId -> do
-                  -- Create the notes memory
-                  let memBody = object
-                        [ "workspace_id" .= wsId
-                        , "content"      .= notes
-                        , "memory_type"  .= ("long_term" :: Text)
-                        , "importance"   .= (6 :: Int)
-                        , "source"       .= ("inferred" :: Text)
-                        , "tags"         .= maybe ["task-notes" :: Text] id mTags
-                        ]
-                  memResult <- rawPostJSON mgr base mApiKey "/api/v1/memories" memBody
-                  -- Link memory to task
-                  case memResult of
-                    Right memVal -> do
-                      let mMemId = case memVal of
-                            Object o -> case KM.lookup "id" o of
-                              Just (String mid) -> Just mid
-                              _                 -> Nothing
-                            _ -> Nothing
-                      case mMemId of
-                        Just memId ->
-                          void $ rawPostJSON mgr base mApiKey
-                            ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
-                            (object ["memory_id" .= memId])
-                        Nothing -> pure ()
-                    Left _ -> pure ()  -- memory creation failed; still update status
-                Nothing -> pure ()  -- couldn't find workspace_id; still update status
-            Left _ -> pure ()  -- task fetch failed; still update status
-        _ -> pure ()
+          case rawAuthErrorToMcp taskResult of
+            Just authErr -> pure (Just authErr)
+            Nothing -> case taskResult of
+              Right taskVal -> do
+                let mWsId = case taskVal of
+                      Object o -> case KM.lookup "workspace_id" o of
+                        Just (String ws) -> Just ws
+                        _                -> Nothing
+                      _ -> Nothing
+                case mWsId of
+                  Just wsId -> do
+                    -- Create the notes memory
+                    let memBody = object
+                          [ "workspace_id" .= wsId
+                          , "content"      .= notes
+                          , "memory_type"  .= ("long_term" :: Text)
+                          , "importance"   .= (6 :: Int)
+                          , "source"       .= ("inferred" :: Text)
+                          , "tags"         .= maybe ["task-notes" :: Text] id mTags
+                          ]
+                    memResult <- rawPostJSON mgr base mApiKey "/api/v1/memories" memBody
+                    case rawAuthErrorToMcp memResult of
+                      Just authErr -> pure (Just authErr)
+                      Nothing -> case memResult of
+                        Right memVal -> do
+                          let mMemId = case memVal of
+                                Object o -> case KM.lookup "id" o of
+                                  Just (String mid) -> Just mid
+                                  _                 -> Nothing
+                                _ -> Nothing
+                          case mMemId of
+                            Just memId -> do
+                              linkResult <- rawPostJSON mgr base mApiKey
+                                ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
+                                (object ["memory_id" .= memId])
+                              pure (rawAuthErrorToMcp linkResult)
+                            Nothing -> pure Nothing
+                        Left _ -> pure Nothing  -- memory creation failed; still update status
+                  Nothing -> pure Nothing  -- couldn't find workspace_id; still update status
+              Left _ -> pure Nothing  -- task fetch failed; still update status
+        _ -> pure Nothing
       -- 2. Update task status
-      putJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
-        (object ["status" .= status])
+      case mAuthErr of
+        Just authErr -> pure authErr
+        Nothing -> putJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+          (object ["status" .= status])
 
     ProjectSpecCall wsId pName pDesc pPri tasks -> do
       -- 1. Create the project
@@ -1332,7 +1345,7 @@ executeToolCall mgr base mApiKey = \case
             ]
       projResult <- rawPostJSON mgr base mApiKey "/api/v1/projects" projBody
       case projResult of
-        Left err -> pure $ mcpErrorCode "PROJECT_CREATE_FAILED" err
+        Left err -> pure $ mcpErrorCodeFromRaw "PROJECT_CREATE_FAILED" err
         Right projVal -> do
           let mProjId = case projVal of
                 Object o -> case KM.lookup "id" o of
@@ -1353,23 +1366,26 @@ executeToolCall mgr base mApiKey = \case
                       ]
                 rawPostJSON mgr base mApiKey "/api/v1/tasks" taskBody
                 ) tasks
-              let createdTasks = [v | Right v <- taskResults]
-                  failedCount  = length [() | Left _ <- taskResults]
-                  result = object
-                    [ "project" .= projVal
-                    , "tasks"   .= createdTasks
-                    , "tasks_failed" .= failedCount
-                    ]
-              pure $ mcpResult (encode result)
+              case firstRawAuthError taskResults of
+                Just authErr -> pure $ mcpErrorCodeFromRaw "TASK_CREATE_FAILED" authErr
+                Nothing -> do
+                  let createdTasks = [v | Right v <- taskResults]
+                      failedCount  = length [() | Left _ <- taskResults]
+                      result = object
+                        [ "project" .= projVal
+                        , "tasks"   .= createdTasks
+                        , "tasks_failed" .= failedCount
+                        ]
+                  pure $ mcpResult (encode result)
 
     ProjectArchiveCall pid mSummary -> do
       -- 1. Get project to find workspace_id
       projResult <- rawGetJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
       case projResult of
-        Left err -> pure $ mcpErrorCode "PROJECT_NOT_FOUND" err
+        Left err -> pure $ mcpErrorCodeFromRaw "PROJECT_NOT_FOUND" err
         Right projVal -> do
           -- 2. If summary provided, create a linked memory
-          case mSummary of
+          mAuthErr <- case mSummary of
             Just summary | not (T.null (T.strip summary)) -> do
               let mWsId = case projVal of
                     Object o -> case KM.lookup "workspace_id" o of
@@ -1387,25 +1403,30 @@ executeToolCall mgr base mApiKey = \case
                         , "tags"         .= (["project-summary" :: Text])
                         ]
                   memResult <- rawPostJSON mgr base mApiKey "/api/v1/memories" memBody
-                  case memResult of
-                    Right memVal -> do
-                      let mMemId = case memVal of
-                            Object o -> case KM.lookup "id" o of
-                              Just (String mid) -> Just mid
-                              _                 -> Nothing
-                            _ -> Nothing
-                      case mMemId of
-                        Just memId ->
-                          void $ rawPostJSON mgr base mApiKey
-                            ("/api/v1/projects/" <> uuidPath pid <> "/memories")
-                            (object ["memory_id" .= memId])
-                        Nothing -> pure ()
-                    Left _ -> pure ()
-                Nothing -> pure ()
-            _ -> pure ()
+                  case rawAuthErrorToMcp memResult of
+                    Just authErr -> pure (Just authErr)
+                    Nothing -> case memResult of
+                      Right memVal -> do
+                        let mMemId = case memVal of
+                              Object o -> case KM.lookup "id" o of
+                                Just (String mid) -> Just mid
+                                _                 -> Nothing
+                              _ -> Nothing
+                        case mMemId of
+                          Just memId -> do
+                            linkResult <- rawPostJSON mgr base mApiKey
+                              ("/api/v1/projects/" <> uuidPath pid <> "/memories")
+                              (object ["memory_id" .= memId])
+                            pure (rawAuthErrorToMcp linkResult)
+                          Nothing -> pure Nothing
+                      Left _ -> pure Nothing
+                Nothing -> pure Nothing
+            _ -> pure Nothing
           -- 3. Archive the project
-          putJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
-            (object ["status" .= ("archived" :: Text)])
+          case mAuthErr of
+            Just authErr -> pure authErr
+            Nothing -> putJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
+              (object ["status" .= ("archived" :: Text)])
 
 ------------------------------------------------------------------------
 -- Typed HTTP helpers
@@ -1427,7 +1448,7 @@ httpJSON :: Manager -> Maybe Text -> String -> String -> Maybe BL.ByteString -> 
 httpJSON mgr mApiKey httpMethod url mbody = do
   result <- try $ do
     initReq <- parseRequest url
-    let authHeaders = maybe [] (\key -> [("Authorization", "Bearer " <> TE.encodeUtf8 key)]) mApiKey
+    let authHeaders = bearerAuthHeaders mApiKey
     let req = initReq
           { method         = fromString httpMethod
         , requestHeaders = [("Content-Type", "application/json")] <> authHeaders
@@ -1439,11 +1460,11 @@ httpJSON mgr mApiKey httpMethod url mbody = do
     if code >= 200 && code < 300
       then pure $ mcpResult body
       else pure $ mcpErrorCode
-        ("HTTP_" <> T.pack (show code))
-        (decodeUtf8 body)
+        (httpErrorCode code)
+        (httpErrorMessage code body)
   case result of
     Right v  -> pure v
-    Left (e :: SomeException) -> pure $ mcpErrorCode "CONNECTION_ERROR" (T.pack $ show e)
+    Left (_ :: SomeException) -> pure $ mcpErrorCode "CONNECTION_ERROR" connectionErrorMessage
 
 -- | Raw HTTP helpers for composite tools — return Either instead of MCP-wrapped values.
 -- These allow workflow handlers to chain calls and build combined responses.
@@ -1451,7 +1472,7 @@ rawHttpJSON' :: Manager -> Maybe Text -> String -> String -> Maybe BL.ByteString
 rawHttpJSON' mgr mApiKey httpMethod url mbody = do
   result <- try $ do
     initReq <- parseRequest url
-    let authHeaders = maybe [] (\key -> [("Authorization", "Bearer " <> TE.encodeUtf8 key)]) mApiKey
+    let authHeaders = bearerAuthHeaders mApiKey
     let req = initReq
           { method         = fromString httpMethod
           , requestHeaders = [("Content-Type", "application/json")] <> authHeaders
@@ -1464,10 +1485,10 @@ rawHttpJSON' mgr mApiKey httpMethod url mbody = do
       then case eitherDecode body of
         Right v  -> pure (Right v)
         Left _   -> pure (Right (String (decodeUtf8 body)))
-      else pure (Left (decodeUtf8 body))
+      else pure (Left ("[" <> httpErrorCode code <> "] " <> httpErrorMessage code body))
   case result of
     Right v  -> pure v
-    Left (e :: SomeException) -> pure (Left (T.pack $ show e))
+    Left (_ :: SomeException) -> pure (Left ("[CONNECTION_ERROR] " <> connectionErrorMessage))
 
 rawGetJSON :: Manager -> String -> Maybe Text -> String -> IO (Either Text Value)
 rawGetJSON mgr base mApiKey path = rawHttpJSON' mgr mApiKey "GET" (base <> path) Nothing
@@ -1477,6 +1498,10 @@ rawPostJSON mgr base mApiKey path body = rawHttpJSON' mgr mApiKey "POST" (base <
 
 rawPutJSON :: ToJSON a => Manager -> String -> Maybe Text -> String -> a -> IO (Either Text Value)
 rawPutJSON mgr base mApiKey path body = rawHttpJSON' mgr mApiKey "PUT" (base <> path) (Just (encode body))
+
+
+bearerAuthHeaders :: Maybe Text -> RequestHeaders
+bearerAuthHeaders = maybe [] (\key -> [("Authorization", "Bearer " <> TE.encodeUtf8 key)])
 
 ------------------------------------------------------------------------
 -- MCP content helpers
@@ -1526,6 +1551,40 @@ mcpErrorCode code msg = object
       , "text" .= ("[" <> code <> "] " <> msg)
       ]]
   ]
+
+
+mcpErrorCodeFromRaw :: Text -> Text -> Value
+mcpErrorCodeFromRaw fallbackCode rawMessage =
+  case rawErrorCode rawMessage of
+    Just authCode | authCode `elem` ["AUTH_REQUIRED", "AUTH_FORBIDDEN"] ->
+      mcpErrorCode authCode (stripRawErrorCode rawMessage)
+    _ -> mcpErrorCode fallbackCode rawMessage
+
+
+rawErrorCode :: Text -> Maybe Text
+rawErrorCode raw = case T.stripPrefix "[" raw of
+  Nothing -> Nothing
+  Just rest -> case T.breakOn "]" rest of
+    (code, suffix) | not (T.null code) && "]" `T.isPrefixOf` suffix -> Just code
+    _ -> Nothing
+
+
+stripRawErrorCode :: Text -> Text
+stripRawErrorCode raw = case rawErrorCode raw of
+  Nothing -> raw
+  Just code -> T.strip $ T.drop (T.length code + 2) raw
+
+
+firstRawAuthError :: [Either Text a] -> Maybe Text
+firstRawAuthError [] = Nothing
+firstRawAuthError (Left err : rest)
+  | rawErrorCode err `elem` [Just "AUTH_REQUIRED", Just "AUTH_FORBIDDEN"] = Just err
+  | otherwise = firstRawAuthError rest
+firstRawAuthError (Right _ : rest) = firstRawAuthError rest
+
+
+rawAuthErrorToMcp :: Either Text a -> Maybe Value
+rawAuthErrorToMcp result = mcpErrorCodeFromRaw "AUTH_FAILED" <$> firstRawAuthError [result]
 
 ------------------------------------------------------------------------
 -- Utility
@@ -1578,6 +1637,86 @@ buildProjectListPath pq = "/api/v1/projects" <> buildQuery
   , ("limit", show <$> pq.limit)
   , ("offset", show <$> pq.offset)
   ]
+
+
+httpErrorCode :: Int -> Text
+httpErrorCode code = case code of
+  401 -> "AUTH_REQUIRED"
+  403 -> "AUTH_FORBIDDEN"
+  404 -> "NOT_FOUND"
+  429 -> "RATE_LIMITED"
+  _   -> "HTTP_" <> T.pack (show code)
+
+
+httpErrorMessage :: Int -> BL.ByteString -> Text
+httpErrorMessage code body = case code of
+  401 -> "hmem-server rejected the request as unauthenticated. Configure MCP auth forwarding with --auth-token, HMEM_MCP_AUTH_TOKEN, HMEM_AUTH_TOKEN, or local legacy auth.api_key where appropriate. Server response omitted for safety."
+  403 -> "hmem-server rejected the request as unauthorized for the current principal or workspace. Check deployed PAT/service-token grants or workspace context. Server response omitted for safety."
+  _   -> responseText
+  where
+    responseText = sanitizeServerResponse body
+
+
+connectionErrorMessage :: Text
+connectionErrorMessage =
+  "Could not connect to hmem-server. Check the server URL, network/TLS settings, and MCP auth configuration."
+
+
+sanitizeServerResponse :: BL.ByteString -> Text
+sanitizeServerResponse body =
+  let compact = redactSensitiveResponseText $ T.unwords $ T.words $ decodeUtf8 body
+      maxChars = 512
+  in if T.length compact > maxChars
+    then T.take maxChars compact <> "…"
+    else compact
+
+
+redactSensitiveResponseText :: Text -> Text
+redactSensitiveResponseText text
+  | containsSensitiveMarker text = "[REDACTED]"
+  | otherwise = text
+  where
+    containsSensitiveMarker value =
+      let lowered = T.toLower value
+      in any (`T.isInfixOf` lowered)
+        [ "authorization:"
+        , "authorization="
+        , "\"authorization\""
+        , "'authorization'"
+        , "authorization"
+        , "bearer"
+        , "set-cookie"
+        , "cookie"
+        , "password"
+        , "client_secret"
+        , "client-secret"
+        , "x-api-key"
+        , "access_token="
+        , "access_token:"
+        , "\"access_token\""
+        , "'access_token'"
+        , "refresh_token="
+        , "refresh_token:"
+        , "\"refresh_token\""
+        , "'refresh_token'"
+        , "id_token="
+        , "id_token:"
+        , "\"id_token\""
+        , "'id_token'"
+        , "api_key="
+        , "api_key:"
+        , "\"api_key\""
+        , "'api_key'"
+        , "apikey="
+        , "apikey:"
+        , "\"apikey\""
+        , "'apikey'"
+        , "token"
+        , "token:"
+        , "token="
+        , "\"token\":"
+        , "'token':"
+        ]
 
 buildTaskListPath :: TaskListQuery -> String
 buildTaskListPath tq = "/api/v1/tasks" <> buildQuery

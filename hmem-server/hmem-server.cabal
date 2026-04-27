@@ -27,6 +27,7 @@ library
       HMem.Server.AccessTracker
       HMem.Server.API
       HMem.Server.App
+      HMem.Server.AuthBootstrap
       HMem.Server.Event
       HMem.Server.Logging
       HMem.Server.OpenAPI
@@ -297,6 +298,7 @@ test-suite hmem-server-test
   other-modules:
       HMem.Server.AccessTrackerSpec
       HMem.Server.APISpec
+      HMem.Server.AuthBootstrapSpec
       SpecHook
       Paths_hmem_server
   hs-source-dirs:

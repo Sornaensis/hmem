@@ -47,6 +47,7 @@ import HMem.DB.TestHarness
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.API (HMemAPI, server)
 import HMem.Server.App (mkApp, requestIdMiddleware, resolveRequestPrincipal)
+import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..))
 import HMem.Server.WebSocket (WorkspaceSubscription(..), consumeTicket, createTicket, eventVisibleToSubscription, newWSState)
 import HMem.Types
@@ -1394,7 +1395,13 @@ spec = around withApp $ do
 
     it "validates deployed JWTs and maps subject claims to users" $ \_ ->
       withTestEnv $ \env -> do
-        userId <- createTestUserWithSubject env "provider-user-1" True False
+        Right bootstrapResult <- AuthBootstrap.bootstrapSuperadmin env.pool AuthBootstrap.BootstrapSuperadminInput
+          { AuthBootstrap.authSubject = "provider-user-1"
+          , AuthBootstrap.email = Nothing
+          , AuthBootstrap.displayName = Just "provider-user-1"
+          , AuthBootstrap.force = False
+          }
+        let userId = bootstrapResult.userId
         let jwk = JWK.fromOctets (encodeUtf8 testJwtSecret)
             cfg = (deployedJwtCfg (JWK.JWKSet [jwk])) { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
         token <- signTestJwt testJwtSecret "provider-user-1"
@@ -1413,6 +1420,13 @@ spec = around withApp $ do
         created.actorType `shouldBe` Just "user"
         created.actorId `shouldBe` Just (T.pack $ show userId)
         created.actorLabel `shouldBe` Just "provider-user-1"
+
+        sessionResp <- runReqWithHeaders app methodGet "/api/v1/session"
+          [("Authorization", "Bearer " <> encodeUtf8 token)]
+          ""
+        respStatus sessionResp `shouldBe` 200
+        let Just session = decode (respBody sessionResp) :: Maybe SessionContext
+        session.globalPermissions.superadmin `shouldBe` True
 
     it "rejects deployed JWTs that fail validation" $ \_ ->
       withTestEnv $ \env -> do

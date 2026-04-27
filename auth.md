@@ -75,7 +75,7 @@ Bot and service tokens identify automated clients in audit/events. In deployed m
 
 1. Apply database migrations before enabling deployed auth.
 2. Configure `auth.mode: deployed` and provider verification settings.
-3. Bootstrap at least one `superadmin` user using the supported operator workflow once the deployment tooling provides it.
+3. Bootstrap at least one `superadmin` user using the supported operator workflow.
 4. Grant `create_workspace` or workspace roles to non-superadmin users as needed.
 5. For automated clients, create service/PAT tokens in `access_tokens` linked to a grant-bearing user.
 6. Store raw service tokens in your secret manager or runtime environment; hmem stores token hashes.
@@ -83,7 +83,7 @@ Bot and service tokens identify automated clients in audit/events. In deployed m
 
 ### First superadmin bootstrap workflow
 
-The selected supported first-user bootstrap path is an operator-run `hmem-ctl` command that connects directly to the configured database after migrations have run. This section specifies the operator contract that deployment tooling must provide before deployed mode is release-ready. The command interface is:
+The supported first-user bootstrap path is an operator-run `hmem-ctl` command that connects directly to the configured database after migrations have run:
 
 ```bash
 hmem-ctl auth bootstrap-superadmin \

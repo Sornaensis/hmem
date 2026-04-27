@@ -11,6 +11,7 @@
 --   @hmem-ctl workspaces@    – list workspaces (with optional name search)
 --   @hmem-ctl projects@      – list projects (with optional name/workspace filter)
 --   @hmem-ctl workspace@    – interactively select/create workspace, write .hmem.workspace
+--   @hmem-ctl auth bootstrap-superadmin@ – create/update the first deployed superadmin
 --
 --   Requires: initdb, pg_ctl, createdb, psql on PATH (ships with PostgreSQL).
 
@@ -54,6 +55,7 @@ import qualified Data.Vector as Vec
 import HMem.Config
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool qualified as Pool
+import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Types
 import Paths_hmem_server qualified as Paths
 
@@ -73,6 +75,17 @@ data Command
   | CmdWorkspaces WorkspacesOpts
   | CmdProjects   ProjectsOpts
   | CmdWorkspace
+  | CmdAuth AuthCommand
+
+data AuthCommand
+  = CmdBootstrapSuperadmin BootstrapSuperadminOpts
+
+data BootstrapSuperadminOpts = BootstrapSuperadminOpts
+  { bootstrapAuthSubject :: String
+  , bootstrapEmail       :: Maybe String
+  , bootstrapDisplayName :: Maybe String
+  , bootstrapForce       :: Bool
+  }
 
 data WorkspacesOpts = WorkspacesOpts
   { wsName :: Maybe String
@@ -106,8 +119,38 @@ commandParser = subparser
       (progDesc "List projects (optionally filter by name or workspace)"))
   <> command "workspace" (info (pure CmdWorkspace)
       (progDesc "Interactively select or create a workspace, write .hmem.workspace"))
+  <> command "auth" (info (CmdAuth <$> authCommandParser)
+      (progDesc "Auth operator workflows"))
   )
   <|> pure CmdSetup
+
+authCommandParser :: Parser AuthCommand
+authCommandParser = subparser
+  ( command "bootstrap-superadmin" (info ((CmdBootstrapSuperadmin <$> bootstrapSuperadminParser) <**> helper)
+      (progDesc "Create or update the deployed first superadmin user"))
+  )
+
+bootstrapSuperadminParser :: Parser BootstrapSuperadminOpts
+bootstrapSuperadminParser = BootstrapSuperadminOpts
+  <$> strOption
+      ( long "auth-subject"
+     <> metavar "SUBJECT"
+     <> help "Stable provider subject claim for the superadmin user"
+      )
+  <*> optional (strOption
+      ( long "email"
+     <> metavar "EMAIL"
+     <> help "Optional email for the bootstrapped user"
+      ))
+  <*> optional (strOption
+      ( long "display-name"
+     <> metavar "NAME"
+     <> help "Optional display name for the bootstrapped user"
+      ))
+  <*> switch
+      ( long "force"
+     <> help "Break-glass override: allow bootstrap when another superadmin already exists"
+      )
 
 workspacesParser :: Parser WorkspacesOpts
 workspacesParser = WorkspacesOpts
@@ -138,6 +181,7 @@ main = do
     CmdWorkspaces opts -> doWorkspaces opts
     CmdProjects opts   -> doProjects opts
     CmdWorkspace       -> doWorkspace
+    CmdAuth authCmd    -> doAuth authCmd
 
 ------------------------------------------------------------------------
 -- Init
@@ -1105,6 +1149,62 @@ removeIfExists :: FilePath -> IO ()
 removeIfExists path = do
   exists <- doesFileExist path
   when exists $ removeFile path
+
+------------------------------------------------------------------------
+-- Auth operator workflows
+------------------------------------------------------------------------
+
+doAuth :: AuthCommand -> IO ()
+doAuth = \case
+  CmdBootstrapSuperadmin opts -> doBootstrapSuperadmin opts
+
+doBootstrapSuperadmin :: BootstrapSuperadminOpts -> IO ()
+doBootstrapSuperadmin opts = do
+  _ <- ensureInitialized "auth bootstrap-superadmin"
+  cfg <- loadConfig
+
+  when (cfg.auth.mode /= AuthModeDeployed) $
+    hPutStrLn stderr "Warning: auth.mode is not 'deployed'; bootstrapping is allowed so operators can prepare before switching modes."
+
+  let input = AuthBootstrap.BootstrapSuperadminInput
+        { AuthBootstrap.authSubject = T.pack (strip opts.bootstrapAuthSubject)
+        , AuthBootstrap.email = normalizeOptionalText opts.bootstrapEmail
+        , AuthBootstrap.displayName = normalizeOptionalText opts.bootstrapDisplayName
+        , AuthBootstrap.force = opts.bootstrapForce
+        }
+      connStr = connectionString cfg.database
+
+  pool <- Pool.createPool connStr 2 60 30000
+  result <- AuthBootstrap.bootstrapSuperadmin pool input
+  case result of
+    Left AuthBootstrap.EmptyAuthSubject -> do
+      hPutStrLn stderr "Error: --auth-subject must not be empty."
+      exitFailure
+    Left (AuthBootstrap.DifferentSuperadminExists existing) -> do
+      hPutStrLn stderr "Error: a different superadmin already exists."
+      hPutStrLn stderr $ "  Existing user ID: " <> show existing.existingUserId
+      hPutStrLn stderr $ "  Existing label:   " <> T.unpack existing.existingLabel
+      hPutStrLn stderr "Use --force only for intentional break-glass recovery or controlled multi-superadmin bootstrap."
+      exitFailure
+    Right success -> do
+      putStrLn "Superadmin bootstrap complete."
+      putStrLn $ "  User ID:  " <> show success.userId
+      putStrLn $ "  Decision: " <> bootstrapDecisionText success.decision
+      putStrLn "Verify by authenticating with the provider subject and calling /api/v1/session."
+
+normalizeOptionalText :: Maybe String -> Maybe T.Text
+normalizeOptionalText rawValue = do
+  raw <- rawValue
+  let trimmed = strip raw
+  if null trimmed
+    then Nothing
+    else Just (T.pack trimmed)
+
+bootstrapDecisionText :: AuthBootstrap.BootstrapSuperadminDecision -> String
+bootstrapDecisionText = \case
+  AuthBootstrap.BootstrapCreated -> "created"
+  AuthBootstrap.BootstrapUpdated -> "updated"
+  AuthBootstrap.BootstrapAlreadySatisfied -> "already-satisfied"
 
 ------------------------------------------------------------------------
 -- Query commands (workspaces, projects)

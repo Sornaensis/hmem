@@ -307,6 +307,92 @@ The current `enabled/api_key` model should be treated as a legacy compatibility 
 - MCP loads config, forwards auth, preserves workspace-context behavior, and fails clearly.
 - MCP does not define its own authorization rules.
 
+## Migration and bootstrap rollout plan
+
+The auth rollout must support both fresh installs and upgrades from existing local single-token deployments. The migration and bootstrap sequence should preserve local usability by default while making deployed auth explicit and operator-controlled.
+
+### Schema rollout and backfill sequence
+
+Schema changes should be applied before any component assumes deployed auth is available.
+
+1. Apply the base auth schema migration.
+   - Create auth enum types such as `workspace_role_enum` and `actor_type_enum`.
+   - Create `users`, `workspace_memberships`, and `access_tokens`.
+   - Add canonical actor-attribution columns to `audit_log`.
+   - Install audit triggers and indexes for the new auth tables.
+2. Apply follow-up hardening migrations.
+   - Migrations after the base auth schema may tighten audit, compatibility, or rollout behavior for databases that already applied the base version.
+   - Security-sensitive corrections must be additive migrations, not edits to already-applied migration versions.
+   - Example: the access-token audit redaction migration recreates the `access_tokens` audit trigger with `token_hash` ignored and scrubs existing `access_token` audit snapshots that may have copied `token_hash` during an earlier version.
+3. Backfill only data that is safe and deterministic.
+   - Existing workspace/task/memory/project rows do not need ownership backfills for authorization; access is evaluated through new principals and workspace memberships.
+   - Existing audit rows may keep null actor fields; old rows should not be rewritten to invent principals.
+   - Secret-adjacent material such as token hashes should be removed from historical audit snapshots when discovered.
+4. Deploy auth-capable server code with compatibility defaults.
+   - `auth.mode = local` remains the safe default for existing local installations.
+   - Local bootstrap/session fallback keeps the implicit local human user usable without creating deployed user records.
+   - Deployed mode remains opt-in until operators have configured identity provider verification or persisted service/PAT tokens and first-admin bootstrap data.
+5. Switch frontend, MCP, and agents after server compatibility is present.
+   - Frontend should obtain session/principal context from the server before showing protected data.
+   - MCP should forward the configured bearer credential without defining authorization rules.
+   - Agents should be moved to named local bot tokens or deployed persisted service tokens as appropriate.
+
+All migrations must be idempotent where practical (`IF NOT EXISTS`, trigger replacement with `DROP TRIGGER IF EXISTS`, and safe cleanup statements) because local development and operator recovery often involve partially applied setup attempts.
+
+### Bootstrap strategy
+
+#### Local mode
+
+Local mode bootstraps without requiring database user setup:
+
+- The implicit local human principal is synthetic and superadmin-authorized when local bootstrap is enabled.
+- Existing no-token local usage remains low-friction through server-owned local bootstrap/session behavior.
+- `auth.local.bot_tokens[]` can define named local bot tokens for agent attribution.
+- During the transitional compatibility window, configured local bot tokens and the legacy local static-bearer path may resolve to synthetic local superadmin authority, but only in `auth.mode = local`.
+- Operators who want stricter local testing may still provision grant-bearing `users` rows and persisted `access_tokens`, but that is not required for the default local path.
+
+Local bootstrap should never be used as a deployed-mode fallback. Changing to deployed mode must fail closed unless the request resolves through deployed user-token validation or persisted token lookup.
+
+#### Deployed mode
+
+Deployed mode needs explicit operator bootstrap before it can serve real users safely:
+
+- At least one initial superadmin must be provisioned outside normal end-user authorization flows.
+- First-admin provisioning may be an operator SQL/bootstrap command that creates or updates a `users` row with `is_superadmin = true`.
+- If workspace creation should be delegated without full superadmin, bootstrap may also create grant-bearing users with `can_create_workspace = true`.
+- Deployed bot/service tokens must be inserted as hashed `access_tokens` rows linked to a grant-bearing user with explicit global permissions and workspace memberships.
+- Deployed token bootstrap should emit raw token material only once and store only `accessTokenHash(token)` in the database.
+
+Recommended first-deployed bootstrap order:
+
+1. Configure `auth.mode = deployed` plus provider verifier settings or persisted token lookup.
+2. Create the first deployed superadmin `users` row, usually keyed by `auth_subject` from the identity provider.
+3. Optionally create least-privilege grant-bearing users for service agents.
+4. Grant workspace memberships or global permissions to those users.
+5. Create persisted service/PAT tokens only after their grant-bearing user scopes are in place.
+6. Verify `/api/v1/session` and a small protected read/write smoke flow before exposing the deployment broadly.
+
+### Upgrade path from current single-token installs
+
+Existing installations that use `auth.enabled` plus `auth.api_key` are treated as local static-bearer compatibility deployments, not as the long-term deployed auth model.
+
+For local upgrades:
+
+- Keep `auth.mode = local` unless the operator intentionally opts into deployed mode.
+- Existing `auth.api_key` / `HMEM_API_KEY` continues to work only through the config-gated local legacy static-bearer path.
+- Operators should prefer `auth.local.bot_tokens[]` for named local agents so audit and events distinguish agent actions from the implicit local human user.
+- No database data migration is required to preserve the local human superadmin workflow.
+
+For deployed upgrades:
+
+- Do not reuse the legacy local static bearer as a deployed authorization mechanism.
+- Create explicit `users` rows for deployed humans and grant global permissions or workspace roles.
+- Replace shared static bearer usage with persisted hashed PAT/service-token rows linked to grant-bearing users.
+- Move agent secrets to deployment secret management and provide them to MCP/agents via `HMEM_MCP_AUTH_TOKEN`, `HMEM_AUTH_TOKEN`, or equivalent runtime configuration.
+- Revoke/remove legacy local static bearer configuration once deployed token lookup and provider-backed user auth have been verified.
+
+Operators should treat the transition as a staged cutover: schema first, server compatibility second, explicit principals and tokens third, client/agent credential switch fourth, and cleanup of legacy local-only credentials last.
+
 ## SQL schema expectations
 
 The auth rollout should be implemented as **one cohesive SQL migration by default** unless a concrete safety or implementation constraint forces a split.

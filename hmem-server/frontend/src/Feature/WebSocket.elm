@@ -9,8 +9,9 @@ import Api
 import Dict
 import Helpers exposing (beginWorkspaceDataReload)
 import Json.Decode as Decode
+import Json.Encode as Encode
 import Permissions
-import Ports exposing (connectWebSocket, wsConnected, wsDisconnected, wsMessage)
+import Ports exposing (connectWebSocket, wsConnected, wsConnecting, wsConnectionFailed, wsDisconnected, wsMessage)
 import Toast exposing (addToast)
 import Types exposing (..)
 
@@ -20,16 +21,27 @@ init =
     { state = Disconnected }
 
 
-connectCmd : String -> Cmd Msg
-connectCmd wsUrl =
-    connectWebSocket wsUrl
+connectCmd : Flags -> Api.SessionContext -> String -> Cmd Msg
+connectCmd flags sessionContext workspaceId =
+    connectWebSocket
+        (Encode.object
+            [ ( "url", Encode.string flags.wsUrl )
+            , ( "workspaceId", Encode.string workspaceId )
+            , ( "sessionId", Encode.string flags.sessionId )
+            , ( "authMode", Encode.string sessionContext.authMode )
+            , ( "runtimeMode", Encode.string flags.runtimeMode )
+            , ( "authTokenPresent", Encode.bool flags.authTokenPresent )
+            ]
+        )
 
 
 subscriptions : Sub Msg
 subscriptions =
     Sub.batch
         [ wsConnected (\_ -> WsConnectedMsg)
+        , wsConnecting (\_ -> WsConnectingMsg)
         , wsDisconnected (\_ -> WsDisconnectedMsg)
+        , wsConnectionFailed WsConnectionFailed
         , wsMessage WsMessageReceived
         ]
 
@@ -37,6 +49,13 @@ subscriptions =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        WsConnectingMsg ->
+            if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
+                ( { model | webSocket = { state = Connecting } }, Cmd.none )
+
+            else
+                ( { model | webSocket = { state = Disconnected } }, Cmd.none )
+
         WsConnectedMsg ->
             if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
                 let
@@ -52,15 +71,32 @@ update msg model =
                 ( { model | webSocket = { state = Disconnected } }, Cmd.none )
 
         WsDisconnectedMsg ->
-            let
-                currentWebSocket =
-                    model.webSocket
+            if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
+                case model.webSocket.state of
+                    Connecting ->
+                        ( model, Cmd.none )
 
-                updatedWebSocket =
-                    { currentWebSocket | state = Disconnected }
-            in
-            addToast Warning "Connection lost. Reconnecting..."
-                { model | webSocket = updatedWebSocket }
+                    _ ->
+                        addToast Warning "Connection lost. Reconnecting..."
+                            { model | webSocket = { state = Connecting } }
+
+            else
+                ( { model | webSocket = { state = Disconnected } }, Cmd.none )
+
+        WsConnectionFailed reason ->
+            if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
+                let
+                    nextModel =
+                        { model | webSocket = { state = ConnectionFailed reason } }
+                in
+                if String.startsWith "ws-auth:" reason then
+                    addToast Warning "WebSocket authentication or workspace access failed; session refresh may be required" nextModel
+
+                else
+                    addToast Warning ("WebSocket connection failed: " ++ reason) nextModel
+
+            else
+                ( { model | webSocket = { state = Disconnected } }, Cmd.none )
 
         WsMessageReceived raw ->
             if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then

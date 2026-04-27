@@ -239,7 +239,9 @@ type Page
 
 type WSState
     = Disconnected
+    | Connecting
     | Connected
+    | ConnectionFailed String
 
 
 type alias Toast =
@@ -340,7 +342,9 @@ type Msg
     | UrlChanged Url.Url
       -- WebSocket
     | WsConnectedMsg
+    | WsConnectingMsg
     | WsDisconnectedMsg
+    | WsConnectionFailed String
     | WsMessageReceived String
     | AuthUnauthorized
       -- Cytoscape

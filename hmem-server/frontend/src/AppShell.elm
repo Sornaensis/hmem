@@ -1,4 +1,4 @@
-module AppShell exposing (AppShellOwnedMsg(..), connectCmd, finalizeInit, handleOwned, initModel, subscriptions, viewDocument)
+module AppShell exposing (AppShellOwnedMsg(..), finalizeInit, handleOwned, initModel, subscriptions, viewDocument)
 
 import Api
 import Browser
@@ -44,11 +44,6 @@ type AppShellOwnedMsg
     | GlobalKeyDownMsg Int
     | MainContentScrolledMsg Float
     | NoOpMsg
-
-
-connectCmd : String -> Cmd Msg
-connectCmd =
-    Feature.WebSocket.connectCmd
 
 
 initModel : Nav.Key -> Url.Url -> Page -> Flags -> Maybe Decode.Value -> { tab : WorkspaceTab, focus : Maybe ( String, String ) } -> Model
@@ -286,7 +281,7 @@ bootstrapAfterSession expectedWorkspace sessionContext model =
                     if expectedWorkspace == Just currentWsId && sessionCanReadWorkspace currentWsId sessionContext then
                         ( [ Api.fetchWorkspace model.flags.apiUrl currentWsId (GotWorkspace currentWsId)
                           , loadWorkspaceData model.flags.apiUrl currentWsId model.dataLoading.activeWorkspaceLoadToken
-                          , connectCmd model.flags.wsUrl
+                          , Feature.WebSocket.connectCmd model.flags sessionContext currentWsId
                           ]
                         , True
                         )
@@ -491,6 +486,12 @@ viewConnectionStatus state =
 
                 Disconnected ->
                     ( "disconnected", "Disconnected" )
+
+                Connecting ->
+                    ( "connecting", "Connecting" )
+
+                ConnectionFailed _ ->
+                    ( "disconnected", "Connection failed" )
     in
     div [ class ("connection-status " ++ statusClass) ]
         [ text statusText ]

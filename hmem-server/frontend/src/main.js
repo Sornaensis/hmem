@@ -149,6 +149,10 @@ notifyUnauthorized = function () {
 let ws = null
 let reconnectTimer = null
 let connectGeneration = 0
+let ticketRetryAttempts = 0
+let socketRetryAttempts = 0
+let preOpenFailureCount = 0
+const maxPreOpenHandshakeFailures = 3
 
 function currentWorkspaceId() {
   const basePath = apiBasePath()
@@ -169,41 +173,144 @@ function wsUrlWithTicket(url, ticket) {
   return parsed.toString()
 }
 
-async function resolveWsUrl(url) {
-  const workspaceId = currentWorkspaceId()
-  if (!workspaceId) return url
+function wsUrlWithLocalToken(url) {
+  const token = currentAuthToken()
+  if (!token) return url
+  const parsed = new URL(url, window.location.href)
+  parsed.searchParams.set('token', token)
+  return parsed.toString()
+}
+
+function normalizeWsConfig(rawConfig) {
+  if (typeof rawConfig === 'string') {
+    return {
+      url: rawConfig,
+      workspaceId: currentWorkspaceId(),
+      authMode: runtimeMode,
+      sessionId: null
+    }
+  }
+
+  return {
+    url: rawConfig && rawConfig.url ? rawConfig.url : wsUrl,
+    workspaceId: rawConfig && rawConfig.workspaceId ? rawConfig.workspaceId : null,
+    authMode: rawConfig && rawConfig.authMode ? rawConfig.authMode : runtimeMode,
+    sessionId: rawConfig && rawConfig.sessionId ? rawConfig.sessionId : null
+  }
+}
+
+function notifyWsConnecting() {
+  if (app.ports.wsConnecting) app.ports.wsConnecting.send(null)
+}
+
+function notifyWsConnectionFailed(reason) {
+  if (app.ports.wsConnectionFailed) app.ports.wsConnectionFailed.send(reason)
+}
+
+async function resolveWsUrl(config) {
+  if (!config.workspaceId) throw new Error('ws-config:no-workspace')
+
+  if (config.authMode === 'local') {
+    return wsUrlWithLocalToken(config.url)
+  }
 
   const response = await fetch(apiResourceUrl('/api/v1/ws-ticket'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaderObject() },
     credentials: 'include',
-    body: JSON.stringify({ workspace_id: workspaceId })
+    body: JSON.stringify({ workspace_id: config.workspaceId })
   })
 
   if (!response.ok) {
-    if (response.status === 401) notifyUnauthorized()
-    throw new Error(`ws-ticket-failed:${response.status}`)
+    if (response.status === 401) {
+      notifyUnauthorized()
+      throw new Error('ws-auth:unauthorized')
+    }
+    if (response.status === 403) throw new Error('ws-auth:forbidden')
+    if (isTransientTicketStatus(response.status)) throw new Error(`ws-ticket-transient:${response.status}`)
+    throw new Error(`ws-config:ticket-${response.status}`)
   }
 
-  const body = await response.json()
-  if (!body || !body.ticket) throw new Error('ws-ticket-failed:missing-ticket')
-  return wsUrlWithTicket(url, body.ticket)
+  let body
+  try {
+    body = await response.json()
+  } catch (err) {
+    throw new Error('ws-config:invalid-ticket-response')
+  }
+  if (!body || !body.ticket) throw new Error('ws-config:missing-ticket')
+  return wsUrlWithTicket(config.url, body.ticket)
 }
 
-function connectWs(url) {
+function isTransientTicketStatus(status) {
+  return status === 408 || status === 429 || status >= 500
+}
+
+function retryDelayMs(attempt) {
+  return Math.min(30000, 1000 * Math.pow(2, attempt))
+}
+
+function nextTicketRetryDelayMs() {
+  const delay = retryDelayMs(ticketRetryAttempts)
+  ticketRetryAttempts += 1
+  return delay
+}
+
+function nextSocketRetryDelayMs(opened) {
+  const attempt = opened ? socketRetryAttempts : Math.max(0, preOpenFailureCount - 1)
+  const delay = retryDelayMs(attempt)
+  if (opened) socketRetryAttempts += 1
+  return delay
+}
+
+function shouldStopReconnect(reason) {
+  return reason.startsWith('ws-auth:') || reason.startsWith('ws-config:')
+}
+
+function terminalPreOpenFailureReason(config, opened) {
+  if (opened) return null
+  preOpenFailureCount += 1
+  // Treat the third consecutive pre-open close as terminal. This bounds
+  // handshake failures to one initial attempt plus two retries, independent
+  // of transient ticket-fetch retries.
+  if (preOpenFailureCount < maxPreOpenHandshakeFailures) return null
+  return config.authMode === 'local'
+    ? 'ws-auth:local-handshake-failed'
+    : 'ws-config:handshake-failed'
+}
+
+function connectWs(rawConfig, preserveRetryState) {
+  const config = normalizeWsConfig(rawConfig)
+  if (!preserveRetryState) {
+    ticketRetryAttempts = 0
+    socketRetryAttempts = 0
+    preOpenFailureCount = 0
+  }
   connectGeneration += 1
   const generation = connectGeneration
   if (ws) { ws.close() }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  notifyWsConnecting()
 
-  resolveWsUrl(url).then(function (resolvedUrl) {
+  resolveWsUrl(config).then(function (resolvedUrl) {
     if (generation !== connectGeneration) return
+    ticketRetryAttempts = 0
 
-    const socket = new WebSocket(resolvedUrl)
+    let socket
+    try {
+      socket = new WebSocket(resolvedUrl)
+    } catch (err) {
+      notifyWsConnectionFailed('connect:invalid-url')
+      return
+    }
     ws = socket
+    let opened = false
 
     socket.onopen = function () {
       if (generation !== connectGeneration || ws !== socket) return
+      opened = true
+      ticketRetryAttempts = 0
+      socketRetryAttempts = 0
+      preOpenFailureCount = 0
       app.ports.wsConnected.send(null)
     }
 
@@ -214,12 +321,17 @@ function connectWs(url) {
 
     socket.onclose = function () {
       if (generation !== connectGeneration || ws !== socket) return
-      app.ports.wsDisconnected.send(null)
       ws = null
+      const terminalPreOpenReason = terminalPreOpenFailureReason(config, opened)
+      if (terminalPreOpenReason) {
+        notifyWsConnectionFailed(terminalPreOpenReason)
+        return
+      }
+      app.ports.wsDisconnected.send(null)
       // Auto-reconnect after 3 seconds. Resolve a fresh ticket each time.
       reconnectTimer = setTimeout(function () {
-        connectWs(url)
-      }, 3000)
+        connectWs(config, true)
+      }, nextSocketRetryDelayMs(opened))
     }
 
     socket.onerror = function () {
@@ -227,11 +339,15 @@ function connectWs(url) {
     }
   }).catch(function (err) {
     if (generation !== connectGeneration) return
+    const reason = err && err.message ? String(err.message) : 'connect:failed'
+    if (shouldStopReconnect(reason)) {
+      notifyWsConnectionFailed(reason)
+      return
+    }
     app.ports.wsDisconnected.send(null)
-    if (err && String(err.message || '').startsWith('ws-ticket-failed:')) return
     reconnectTimer = setTimeout(function () {
-      connectWs(url)
-    }, 3000)
+      connectWs(config, true)
+    }, nextTicketRetryDelayMs())
   })
 }
 
@@ -248,6 +364,9 @@ if (app.ports.sendWebSocket) {
 if (app.ports.disconnectWebSocket) {
   app.ports.disconnectWebSocket.subscribe(function () {
     connectGeneration += 1
+    ticketRetryAttempts = 0
+    socketRetryAttempts = 0
+    preOpenFailureCount = 0
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
     if (ws) { ws.close(); ws = null }
   })

@@ -34,7 +34,13 @@ update msg model =
         WsConnectedMsg ->
             Ok (Feature.WebSocket.update msg model)
 
+        WsConnectingMsg ->
+            Ok (Feature.WebSocket.update msg model)
+
         WsDisconnectedMsg ->
+            Ok (Feature.WebSocket.update msg model)
+
+        WsConnectionFailed _ ->
             Ok (Feature.WebSocket.update msg model)
 
         WsMessageReceived _ ->

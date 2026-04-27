@@ -7,7 +7,7 @@ import Json.Encode as Encode
 -- PORTS: WebSocket
 
 
-port connectWebSocket : String -> Cmd msg
+port connectWebSocket : Encode.Value -> Cmd msg
 
 
 port disconnectWebSocket : () -> Cmd msg
@@ -19,7 +19,13 @@ port sendWebSocket : String -> Cmd msg
 port wsConnected : (() -> msg) -> Sub msg
 
 
+port wsConnecting : (() -> msg) -> Sub msg
+
+
 port wsDisconnected : (() -> msg) -> Sub msg
+
+
+port wsConnectionFailed : (String -> msg) -> Sub msg
 
 
 port wsMessage : (String -> msg) -> Sub msg

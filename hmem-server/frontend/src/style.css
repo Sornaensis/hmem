@@ -195,6 +195,12 @@ a:hover {
   border: 1px solid #065f46;
 }
 
+.connection-status.connecting {
+  background: #78350f;
+  color: var(--warning);
+  border: 1px solid #92400e;
+}
+
 .connection-status.disconnected {
   background: #7f1d1d;
   color: var(--error);

@@ -9,6 +9,103 @@ function createSessionId() {
   return `session-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
+const runtimeConfig = window.HMEM_CONFIG || {}
+const authTokenStorageKey = runtimeConfig.authTokenStorageKey || 'hmem-auth-token'
+
+function configuredApiUrl() {
+  return runtimeConfig.apiUrl || import.meta.env.VITE_HMEM_API_URL || window.location.origin
+}
+
+function normalizeBaseUrl(url) {
+  return new URL(url, window.location.origin).toString().replace(/\/$/, '')
+}
+
+function configuredWsUrl(apiUrl) {
+  if (runtimeConfig.wsUrl || import.meta.env.VITE_HMEM_WS_URL) {
+    return runtimeConfig.wsUrl || import.meta.env.VITE_HMEM_WS_URL
+  }
+
+  const parsed = new URL(apiPath('/api/v1/ws'), apiUrl)
+  parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:'
+  return parsed.toString()
+}
+
+function apiBasePath() {
+  return new URL(apiUrl, window.location.origin).pathname.replace(/\/$/, '')
+}
+
+function apiPath(path) {
+  return `${apiBasePath()}${path.startsWith('/') ? path : `/${path}`}` || path
+}
+
+function apiResourceUrl(path) {
+  return new URL(apiPath(path), apiUrl).toString()
+}
+
+function currentAuthToken() {
+  return runtimeConfig.authToken || localStorage.getItem(authTokenStorageKey) || null
+}
+
+function authHeaderObject() {
+  const token = currentAuthToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+const apiUrl = normalizeBaseUrl(configuredApiUrl())
+const wsUrl = configuredWsUrl(apiUrl)
+let lastUnauthorizedNotificationAt = 0
+let notifyUnauthorized = function () {}
+
+function isApiRequestUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl, window.location.href)
+    const apiBase = new URL(apiUrl, window.location.href)
+    const apiPathPrefix = `${apiBasePath()}/api/`.replace(/^\/\//, '/')
+    return parsed.origin === apiBase.origin && parsed.pathname.startsWith(apiPathPrefix)
+  } catch (e) {
+    return false
+  }
+}
+
+function installAuthHeaderInterceptor() {
+  if (XMLHttpRequest.prototype.__hmemAuthInterceptorInstalled) return
+  XMLHttpRequest.prototype.__hmemAuthInterceptorInstalled = true
+
+  const originalOpen = XMLHttpRequest.prototype.open
+  const originalSend = XMLHttpRequest.prototype.send
+  const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader
+
+  XMLHttpRequest.prototype.open = function (method, url) {
+    this.__hmemRequestUrl = url
+    this.__hmemHeaders = {}
+    return originalOpen.apply(this, arguments)
+  }
+
+  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+    this.__hmemHeaders = this.__hmemHeaders || {}
+    this.__hmemHeaders[String(name).toLowerCase()] = value
+    return originalSetRequestHeader.apply(this, arguments)
+  }
+
+  XMLHttpRequest.prototype.send = function () {
+    if (isApiRequestUrl(this.__hmemRequestUrl)) {
+      const token = currentAuthToken()
+      const hasAuthorization = this.__hmemHeaders && this.__hmemHeaders.authorization
+      if (token && !hasAuthorization) {
+        originalSetRequestHeader.call(this, 'Authorization', `Bearer ${token}`)
+      }
+
+      this.addEventListener('loadend', function () {
+        if (this.status === 401) notifyUnauthorized()
+      })
+    }
+
+    return originalSend.apply(this, arguments)
+  }
+}
+
+installAuthHeaderInterceptor()
+
 // Determine workspace ID from URL for loading stored filters at init
 function getWorkspaceFilters() {
   const match = window.location.pathname.match(/^\/workspace\/([^/]+)/)
@@ -22,16 +119,22 @@ function getWorkspaceFilters() {
   }
 }
 
-// Initialize Elm application
 const app = Elm.Main.init({
   node: document.getElementById('app'),
   flags: {
-    apiUrl: window.location.origin,
-    wsUrl: `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/ws`,
+    apiUrl,
+    wsUrl,
     sessionId: createSessionId(),
     storedFilters: getWorkspaceFilters()
   }
 })
+
+notifyUnauthorized = function () {
+  const now = Date.now()
+  if (now - lastUnauthorizedNotificationAt < 2000) return
+  lastUnauthorizedNotificationAt = now
+  if (app.ports.authUnauthorized) app.ports.authUnauthorized.send(null)
+}
 
 // ---------------------------------------------------------------------------
 // WebSocket port
@@ -42,7 +145,15 @@ let reconnectTimer = null
 let connectGeneration = 0
 
 function currentWorkspaceId() {
-  const match = window.location.pathname.match(/^\/workspace\/([^/]+)/)
+  const basePath = apiBasePath()
+  let pathname = window.location.pathname
+  if (basePath && pathname.startsWith(basePath + '/')) {
+    pathname = pathname.slice(basePath.length)
+  } else if (basePath && pathname === basePath) {
+    pathname = '/'
+  }
+
+  const match = pathname.match(/^\/workspace\/([^/]+)/)
   return match ? decodeURIComponent(match[1]) : null
 }
 
@@ -56,17 +167,21 @@ async function resolveWsUrl(url) {
   const workspaceId = currentWorkspaceId()
   if (!workspaceId) return url
 
-  const response = await fetch('/api/v1/ws-ticket', {
+  const response = await fetch(apiResourceUrl('/api/v1/ws-ticket'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', ...authHeaderObject() },
+    credentials: 'include',
     body: JSON.stringify({ workspace_id: workspaceId })
   })
 
-  if (!response.ok) return url
+  if (!response.ok) {
+    if (response.status === 401) notifyUnauthorized()
+    throw new Error(`ws-ticket-failed:${response.status}`)
+  }
 
   const body = await response.json()
-  return body && body.ticket ? wsUrlWithTicket(url, body.ticket) : url
+  if (!body || !body.ticket) throw new Error('ws-ticket-failed:missing-ticket')
+  return wsUrlWithTicket(url, body.ticket)
 }
 
 function connectWs(url) {
@@ -102,9 +217,10 @@ function connectWs(url) {
     socket.onerror = function () {
       // onclose will fire after onerror
     }
-  }).catch(function () {
+  }).catch(function (err) {
     if (generation !== connectGeneration) return
     app.ports.wsDisconnected.send(null)
+    if (err && String(err.message || '').startsWith('ws-ticket-failed:')) return
     reconnectTimer = setTimeout(function () {
       connectWs(url)
     }, 3000)
@@ -123,6 +239,7 @@ if (app.ports.sendWebSocket) {
 
 if (app.ports.disconnectWebSocket) {
   app.ports.disconnectWebSocket.subscribe(function () {
+    connectGeneration += 1
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
     if (ws) { ws.close(); ws = null }
   })

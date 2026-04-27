@@ -39,6 +39,9 @@ update msg model =
         WsMessageReceived _ ->
             Ok (Feature.WebSocket.update msg model)
 
+        AuthUnauthorized ->
+            Err (HandleInAppShell AppShell.AuthUnauthorizedMsg)
+
         -- Cytoscape
         CytoscapeNodeClicked _ ->
             Ok (Feature.Graph.update msg model)

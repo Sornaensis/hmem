@@ -25,6 +25,9 @@ port wsDisconnected : (() -> msg) -> Sub msg
 port wsMessage : (String -> msg) -> Sub msg
 
 
+port authUnauthorized : (() -> msg) -> Sub msg
+
+
 
 -- PORTS: Cytoscape
 

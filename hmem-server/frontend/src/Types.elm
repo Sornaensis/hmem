@@ -313,6 +313,7 @@ type Msg
     | WsConnectedMsg
     | WsDisconnectedMsg
     | WsMessageReceived String
+    | AuthUnauthorized
       -- Cytoscape
     | CytoscapeNodeClicked String
     | CytoscapeEdgeClicked String

@@ -27,7 +27,7 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Page.Home
 import Page.Workspace
-import Ports exposing (cytoscapeEdgeClicked, cytoscapeNodeClicked, localStorageReceived, onMainContentScroll)
+import Ports exposing (authUnauthorized, cytoscapeEdgeClicked, cytoscapeNodeClicked, disconnectWebSocket, localStorageReceived, onMainContentScroll)
 import Toast
 import Types exposing (..)
 import Url
@@ -37,6 +37,7 @@ type AppShellOwnedMsg
     = SelectWorkspaceMsg String
     | SwitchTabMsg WorkspaceTab
     | SessionContextLoadedMsg (Maybe String) (Result Http.Error Api.SessionContext)
+    | AuthUnauthorizedMsg
     | LocalStorageLoadedMsg Encode.Value
     | GlobalKeyDownMsg Int
     | MainContentScrolledMsg Float
@@ -130,6 +131,20 @@ handleOwned ownedMsg model =
             else
                 ( model, Cmd.none )
 
+        AuthUnauthorizedMsg ->
+            let
+                currentWebSocket =
+                    model.webSocket
+
+                ( toastedModel, toastCmd ) =
+                    Toast.addToast Warning "Authentication is required or has expired. Please sign in again, then retry."
+                        { model
+                            | sessionContext = Nothing
+                            , webSocket = { currentWebSocket | state = Disconnected }
+                        }
+            in
+            ( toastedModel, Cmd.batch [ toastCmd, disconnectWebSocket () ] )
+
         LocalStorageLoadedMsg json ->
             ( applyStoredFiltersIfCurrentWorkspace json model, Cmd.none )
 
@@ -189,6 +204,7 @@ subscriptions : Sub Msg
 subscriptions =
     Sub.batch
         [ Feature.WebSocket.subscriptions
+        , authUnauthorized (\_ -> AuthUnauthorized)
         , cytoscapeNodeClicked CytoscapeNodeClicked
         , cytoscapeEdgeClicked CytoscapeEdgeClicked
         , Browser.Events.onKeyDown (Decode.map GlobalKeyDown (Decode.field "keyCode" Decode.int))

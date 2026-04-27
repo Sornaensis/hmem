@@ -50,6 +50,9 @@ update msg model =
         GotWorkspaces _ ->
             Ok (Feature.DataLoading.update msg model)
 
+        GotSessionContext expectedWorkspace result ->
+            Err (HandleInAppShell (AppShell.SessionContextLoadedMsg expectedWorkspace result))
+
         GotProjects _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 

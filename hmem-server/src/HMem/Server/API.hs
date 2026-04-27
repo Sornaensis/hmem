@@ -49,6 +49,7 @@ import HMem.DB.Schema
 import HMem.DB.Search qualified as Search
 import HMem.DB.Task qualified as Task
 import HMem.DB.WorkspaceGroup qualified as WG
+import HMem.Config qualified as Config
 import HMem.Server.AccessTracker (AccessTracker, trackAccess, bufferSize)
 import HMem.Server.Event (Broadcast, ChangeEvent(..), ChangeType(..), EntityType(..))
 import HMem.Server.WebSocket qualified as WS
@@ -60,6 +61,7 @@ import HMem.Types
 
 type HMemAPI = "api" :> "v1" :>
   (    "health"      :> HealthAPI
+  :<|> "session"     :> SessionAPI
   :<|> "ws-ticket"   :> WebSocketTicketAPI
   :<|> "workspaces"  :> WorkspaceAPI
   :<|> "memories"    :> MemoryAPI
@@ -76,6 +78,8 @@ type HMemAPI = "api" :> "v1" :>
 
 -- Health check
 type HealthAPI = Get '[JSON] Value
+
+type SessionAPI = QueryParam "workspace_id" UUID :> Get '[JSON] SessionContext
 
 type WebSocketTicketAPI = ReqBody '[JSON] WebSocketTicketRequest :> Post '[JSON] WebSocketTicketResponse
 
@@ -547,9 +551,10 @@ purgeConflict = err409
 -- Server implementation
 ------------------------------------------------------------------------
 
-server :: Pool Hasql.Connection -> AccessTracker -> Broadcast -> WS.WSState -> Bool -> Server HMemAPI
-server pool tracker bc wsState pgvec =
+server :: Config.AuthConfig -> Pool Hasql.Connection -> AccessTracker -> Broadcast -> WS.WSState -> Bool -> Server HMemAPI
+server authCfg pool tracker bc wsState pgvec =
        healthHandler pool tracker
+  :<|> sessionHandler authCfg pool
   :<|> webSocketTicketHandler pool wsState
   :<|> workspaceHandlers pool bc
   :<|> memoryHandlers pool tracker bc pgvec
@@ -572,6 +577,76 @@ webSocketTicketHandler pool wsState req = do
     Just p -> pure p
     Nothing -> throwError (authErrorToServerError Auth.MissingPrincipal)
   liftIO $ WS.createTicket wsState principal req.workspaceId
+
+sessionHandler :: Config.AuthConfig -> Pool Hasql.Connection -> Maybe UUID -> Handler SessionContext
+sessionHandler authCfg pool mWorkspaceId = do
+  principal <- currentPrincipalH
+  createAllowed <- liftIO $ Auth.hasGlobalPermission pool (Just principal) Auth.GlobalCreateWorkspace
+  superAllowed <- liftIO $ Auth.hasGlobalPermission pool (Just principal) Auth.GlobalSuperadmin
+  workspaceCtx <- traverse (sessionWorkspaceContextH pool principal superAllowed) mWorkspaceId
+  pure SessionContext
+    { authMode = authModeToText authCfg.mode
+    , principal = sessionPrincipal principal
+    , globalPermissions = SessionGlobalPermissions
+        { createWorkspace = createAllowed
+        , superadmin = superAllowed
+        }
+    , workspace = workspaceCtx
+    }
+
+currentPrincipalH :: Handler Principal
+currentPrincipalH = do
+  mPrincipal <- liftIO currentPrincipal
+  case mPrincipal of
+    Just p -> pure p
+    Nothing -> throwError (authErrorToServerError Auth.MissingPrincipal)
+
+authModeToText :: Config.AuthMode -> Text
+authModeToText = \case
+  Config.AuthModeLocal -> "local"
+  Config.AuthModeDeployed -> "deployed"
+
+sessionPrincipal :: Principal -> SessionPrincipal
+sessionPrincipal principal = SessionPrincipal
+  { actorType = actorTypeToText principal.actorType
+  , actorId = principal.actorId
+  , actorLabel = principal.actorLabel
+  , authority = principalAuthorityToText principal.authority
+  , grantUserId = principalGrantUserId principal.authority
+  }
+
+principalAuthorityToText :: PrincipalAuthority -> Text
+principalAuthorityToText = \case
+  PrincipalNoAuthority -> "none"
+  PrincipalGrantUser{} -> "grant_user"
+  PrincipalSyntheticLocalSuperadmin -> "local_superadmin"
+
+principalGrantUserId :: PrincipalAuthority -> Maybe UUID
+principalGrantUserId = \case
+  PrincipalGrantUser userId -> Just userId
+  _ -> Nothing
+
+sessionWorkspaceContextH :: Pool Hasql.Connection -> Principal -> Bool -> UUID -> Handler SessionWorkspaceContext
+sessionWorkspaceContextH pool principal isSuperadmin workspaceId = do
+  requireActiveWorkspaceH pool workspaceId
+  liftIO $ sessionWorkspaceContext pool principal isSuperadmin workspaceId
+
+sessionWorkspaceContext :: Pool Hasql.Connection -> Principal -> Bool -> UUID -> IO SessionWorkspaceContext
+sessionWorkspaceContext pool principal isSuperadmin workspaceId = do
+  mStoredRole <- case principal.authority of
+    PrincipalGrantUser userId -> Auth.getWorkspaceRole pool workspaceId userId
+    _ -> pure Nothing
+  let mEffectiveRole
+        | isSuperadmin = Just Auth.WorkspaceRoleAdmin
+        | otherwise = mStoredRole
+      satisfies required = maybe False (`Auth.roleSatisfies` required) mEffectiveRole
+  pure SessionWorkspaceContext
+    { workspaceId = workspaceId
+    , role = Auth.roleToText <$> mEffectiveRole
+    , canRead = satisfies Auth.WorkspaceRoleRead
+    , canEdit = satisfies Auth.WorkspaceRoleEdit
+    , canAdmin = satisfies Auth.WorkspaceRoleAdmin
+    }
 
 -- | Emit a change event to all connected WebSocket clients.
 emit :: Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()

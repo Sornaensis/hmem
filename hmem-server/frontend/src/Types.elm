@@ -29,6 +29,7 @@ type alias Model =
     , url : Url.Url
     , page : Page
     , flags : Flags
+    , sessionContext : Maybe Api.SessionContext
     , selectedWorkspaceId : Maybe String
     , activeTab : WorkspaceTab
     , mainContentScrollY : Float
@@ -317,6 +318,7 @@ type Msg
     | CytoscapeEdgeClicked String
       -- HTTP responses
     | GotWorkspaces (Result Http.Error (Api.PaginatedResult Api.Workspace))
+    | GotSessionContext (Maybe String) (Result Http.Error Api.SessionContext)
     | GotProjects String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Project))
     | GotTasks String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Task))
     | GotMemories String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Memory))

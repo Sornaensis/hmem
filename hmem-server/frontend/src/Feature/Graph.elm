@@ -77,7 +77,10 @@ update msg model =
                 | selectedWorkspaceId = Just wsId
                 , graph = updatedGraph
               }
-            , Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
+            , Cmd.batch
+                [ Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
+                , Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (Just wsId))
+                ]
             )
 
         _ ->

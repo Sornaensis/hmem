@@ -195,6 +195,10 @@ instance ToSchema AuditLogEntry          where declareNamedSchema = genericDecla
 instance ToSchema RevertResult           where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WebSocketTicketRequest  where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WebSocketTicketResponse where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema SessionContext          where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema SessionPrincipal        where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema SessionGlobalPermissions where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema SessionWorkspaceContext where declareNamedSchema = genericDeclareNamedSchema opts
 
 ------------------------------------------------------------------------
 -- Helper

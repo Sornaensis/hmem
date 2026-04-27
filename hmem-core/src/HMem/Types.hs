@@ -107,6 +107,12 @@ module HMem.Types
   , WebSocketTicketRequest(..)
   , WebSocketTicketResponse(..)
 
+    -- * Session context
+  , SessionContext(..)
+  , SessionPrincipal(..)
+  , SessionGlobalPermissions(..)
+  , SessionWorkspaceContext(..)
+
     -- * Pagination
   , PaginatedResult(..)
 
@@ -1578,6 +1584,58 @@ data WebSocketTicketResponse = WebSocketTicketResponse
 instance ToJSON WebSocketTicketResponse where
   toJSON = genericToJSON jsonOptions
 instance FromJSON WebSocketTicketResponse where
+  parseJSON = genericParseJSON jsonOptions
+
+------------------------------------------------------------------------
+-- Session context
+------------------------------------------------------------------------
+
+data SessionPrincipal = SessionPrincipal
+  { actorType   :: Text
+  , actorId     :: Text
+  , actorLabel  :: Text
+  , authority   :: Text
+  , grantUserId :: Maybe UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON SessionPrincipal where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON SessionPrincipal where
+  parseJSON = genericParseJSON jsonOptions
+
+data SessionGlobalPermissions = SessionGlobalPermissions
+  { createWorkspace :: Bool
+  , superadmin      :: Bool
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON SessionGlobalPermissions where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON SessionGlobalPermissions where
+  parseJSON = genericParseJSON jsonOptions
+
+data SessionWorkspaceContext = SessionWorkspaceContext
+  { workspaceId :: UUID
+  , role        :: Maybe Text
+  , canRead     :: Bool
+  , canEdit     :: Bool
+  , canAdmin    :: Bool
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON SessionWorkspaceContext where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON SessionWorkspaceContext where
+  parseJSON = genericParseJSON jsonOptions
+
+data SessionContext = SessionContext
+  { authMode          :: Text
+  , principal         :: SessionPrincipal
+  , globalPermissions :: SessionGlobalPermissions
+  , workspace         :: Maybe SessionWorkspaceContext
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON SessionContext where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON SessionContext where
   parseJSON = genericParseJSON jsonOptions
 
 ------------------------------------------------------------------------

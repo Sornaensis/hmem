@@ -293,6 +293,7 @@ handleUrlChange url model =
                   }
                 , Cmd.batch
                     [ loadWorkspaceData model.flags.apiUrl wsId updatedDataLoading.activeWorkspaceLoadToken
+                    , Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (Just wsId))
                     , requestLocalStorage (localStorageKey wsId)
                     , connectWebSocket model.flags.wsUrl
                     , destroyCmd
@@ -312,12 +313,15 @@ handleUrlChange url model =
                 , page = page
                 , graph = updatedGraph
               }
-            , case model.selectedWorkspaceId of
-                Just wsId ->
-                    Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
+            , Cmd.batch
+                [ case model.selectedWorkspaceId of
+                    Just wsId ->
+                        Api.fetchVisualization model.flags.apiUrl wsId GotVisualization
 
-                Nothing ->
-                    Cmd.none
+                    Nothing ->
+                        Cmd.none
+                , Api.fetchSessionContext model.flags.apiUrl model.selectedWorkspaceId (GotSessionContext model.selectedWorkspaceId)
+                ]
             )
 
         AuditLogPage ->
@@ -352,6 +356,7 @@ handleUrlChange url model =
               }
             , Cmd.batch
                 [ Api.fetchAuditLog model.flags.apiUrl emptyFilters GotAuditLog
+                , Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)
                 , destroyCmd
                 ]
             )
@@ -365,4 +370,9 @@ handleUrlChange url model =
                     else
                         Cmd.none
             in
-            ( { model | url = url, page = page }, destroyCmd )
+            ( { model | url = url, page = page }
+            , Cmd.batch
+                [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)
+                , destroyCmd
+                ]
+            )

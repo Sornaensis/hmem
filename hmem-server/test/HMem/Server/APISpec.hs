@@ -300,7 +300,7 @@ withCapturedBroadcastApp env principal action = do
   let capture event = modifyIORef' eventsRef (<> [event])
       app = requestIdMiddleware
           $ principalMiddleware principal
-          $ serve (Proxy @HMemAPI) (server env.pool tracker capture wsState True)
+          $ serve (Proxy @HMemAPI) (server Config.defaultConfig.auth env.pool tracker capture wsState True)
   action app eventsRef
 
 grantWorkspaceRole :: TestEnv -> UUID -> UUID -> Auth.WorkspaceRole -> IO Auth.WorkspaceMembership
@@ -839,6 +839,89 @@ spec = around withApp $ do
           [("Authorization", "Bearer test-secret")]
           ""
         respStatus resp `shouldBe` 200
+
+  describe "session/principal context" $ do
+    it "returns local superadmin context for local bootstrap sessions" $ \app -> do
+      resp <- get_ app "/api/v1/session"
+      respStatus resp `shouldBe` 200
+      let Just session = decode (respBody resp) :: Maybe SessionContext
+      session.authMode `shouldBe` "local"
+      session.principal.actorType `shouldBe` "user"
+      session.principal.actorId `shouldBe` "local-user"
+      session.principal.authority `shouldBe` "local_superadmin"
+      session.globalPermissions.createWorkspace `shouldBe` True
+      session.globalPermissions.superadmin `shouldBe` True
+      session.workspace `shouldBe` Nothing
+
+    it "denies deployed session context without a principal" $ \_ ->
+      withAppEnvConfig deployedAuthCfg $ \_env app -> do
+        resp <- get_ app "/api/v1/session"
+        respStatus resp `shouldBe` 401
+
+    it "returns deployed grants and effective workspace role context" $ \_ ->
+      withTestEnv $ \env -> do
+        ws <- createTestWorkspace env "session-context-ws"
+        userId <- createTestUser env True False
+        _ <- grantWorkspaceRole env ws.id userId Auth.WorkspaceRoleEdit
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal userId) $ \app -> do
+          resp <- get_ app ("/api/v1/session?workspace_id=" <> encodeUtf8 (T.pack (show ws.id)))
+          respStatus resp `shouldBe` 200
+          let Just session = decode (respBody resp) :: Maybe SessionContext
+          session.authMode `shouldBe` "deployed"
+          session.principal.authority `shouldBe` "grant_user"
+          session.principal.grantUserId `shouldBe` Just userId
+          session.globalPermissions.createWorkspace `shouldBe` True
+          session.globalPermissions.superadmin `shouldBe` False
+          let Just workspaceContext = session.workspace
+          workspaceContext.workspaceId `shouldBe` ws.id
+          workspaceContext.role `shouldBe` Just "edit"
+          workspaceContext.canRead `shouldBe` True
+          workspaceContext.canEdit `shouldBe` True
+          workspaceContext.canAdmin `shouldBe` False
+
+    it "returns no workspace permissions for deployed users without membership" $ \_ ->
+      withTestEnv $ \env -> do
+        ws <- createTestWorkspace env "session-context-no-membership"
+        userId <- createTestUser env False False
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal userId) $ \app -> do
+          resp <- get_ app ("/api/v1/session?workspace_id=" <> encodeUtf8 (T.pack (show ws.id)))
+          respStatus resp `shouldBe` 200
+          let Just session = decode (respBody resp) :: Maybe SessionContext
+              Just workspaceContext = session.workspace
+          workspaceContext.role `shouldBe` Nothing
+          workspaceContext.canRead `shouldBe` False
+          workspaceContext.canEdit `shouldBe` False
+          workspaceContext.canAdmin `shouldBe` False
+
+    it "returns effective workspace admin for deployed superadmins" $ \_ ->
+      withTestEnv $ \env -> do
+        ws <- createTestWorkspace env "session-context-superadmin"
+        userId <- createTestUser env False True
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal userId) $ \app -> do
+          resp <- get_ app ("/api/v1/session?workspace_id=" <> encodeUtf8 (T.pack (show ws.id)))
+          respStatus resp `shouldBe` 200
+          let Just session = decode (respBody resp) :: Maybe SessionContext
+              Just workspaceContext = session.workspace
+          session.globalPermissions.superadmin `shouldBe` True
+          workspaceContext.role `shouldBe` Just "admin"
+          workspaceContext.canRead `shouldBe` True
+          workspaceContext.canEdit `shouldBe` True
+          workspaceContext.canAdmin `shouldBe` True
+
+    it "returns 404 for session workspace context on deleted workspaces" $ \_ ->
+      withTestEnv $ \env -> do
+        ws <- createTestWorkspace env "session-context-deleted"
+        userId <- createTestUser env False True
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal userId) $ \app -> do
+          deleteResp <- del app (uuidPath "/api/v1/workspaces" ws.id)
+          respStatus deleteResp `shouldBe` 200
+
+          resp <- get_ app ("/api/v1/session?workspace_id=" <> encodeUtf8 (T.pack (show ws.id)))
+          respStatus resp `shouldBe` 404
 
   describe "WebSocket auth and event scoping" $ do
     it "denies deployed WebSocket ticket issuance without a principal" $ \_ ->

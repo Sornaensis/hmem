@@ -72,6 +72,7 @@ init rawFlags url key =
 
         cmds =
             [ AppShell.connectCmd flags.wsUrl
+            , Api.fetchSessionContext flags.apiUrl (sessionWorkspace page) (GotSessionContext (sessionWorkspace page))
             , Api.fetchWorkspaces flags.apiUrl GotWorkspaces
             , Api.fetchWorkspaceGroups flags.apiUrl GotWorkspaceGroups
             ]
@@ -88,6 +89,16 @@ init rawFlags url key =
     ( AppShell.finalizeInit page model
     , Cmd.batch (cmds ++ [ pageCmd ])
     )
+
+
+sessionWorkspace : Page -> Maybe String
+sessionWorkspace page =
+    case page of
+        WorkspacePage wsId ->
+            Just wsId
+
+        _ ->
+            Nothing
 
 
 

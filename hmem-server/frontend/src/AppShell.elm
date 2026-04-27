@@ -1,5 +1,6 @@
 module AppShell exposing (AppShellOwnedMsg(..), connectCmd, finalizeInit, handleOwned, initModel, subscriptions, viewDocument)
 
+import Api
 import Browser
 import Browser.Events
 import Browser.Navigation as Nav
@@ -21,6 +22,7 @@ import Helpers exposing (applyStoredFiltersIfCurrentWorkspace, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (class, id)
 import Html.Keyed as Keyed
+import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Page.Home
@@ -34,6 +36,7 @@ import Url
 type AppShellOwnedMsg
     = SelectWorkspaceMsg String
     | SwitchTabMsg WorkspaceTab
+    | SessionContextLoadedMsg (Maybe String) (Result Http.Error Api.SessionContext)
     | LocalStorageLoadedMsg Encode.Value
     | GlobalKeyDownMsg Int
     | MainContentScrolledMsg Float
@@ -53,6 +56,7 @@ initModel key url page flags storedFilters frag =
             , url = url
             , page = page
             , flags = flags
+            , sessionContext = Nothing
             , selectedWorkspaceId = Nothing
             , activeTab = frag.tab
             , mainContentScrollY = 0
@@ -114,6 +118,18 @@ handleOwned ownedMsg model =
             in
             ( newModel, replaceFragment newModel )
 
+        SessionContextLoadedMsg expectedWorkspace result ->
+            if sessionContextResponseMatches expectedWorkspace model then
+                case result of
+                    Ok sessionContext ->
+                        ( { model | sessionContext = Just sessionContext }, Cmd.none )
+
+                    Err _ ->
+                        ( { model | sessionContext = Nothing }, Cmd.none )
+
+            else
+                ( model, Cmd.none )
+
         LocalStorageLoadedMsg json ->
             ( applyStoredFiltersIfCurrentWorkspace json model, Cmd.none )
 
@@ -141,6 +157,32 @@ handleOwned ownedMsg model =
 
         NoOpMsg ->
             ( model, Cmd.none )
+
+
+sessionContextResponseMatches : Maybe String -> Model -> Bool
+sessionContextResponseMatches expectedWorkspace model =
+    case expectedWorkspace of
+        Just wsId ->
+            case model.page of
+                WorkspacePage currentWsId ->
+                    currentWsId == wsId
+
+                MemoryGraphPage ->
+                    model.selectedWorkspaceId == Just wsId
+
+                _ ->
+                    False
+
+        Nothing ->
+            case model.page of
+                WorkspacePage _ ->
+                    False
+
+                MemoryGraphPage ->
+                    model.selectedWorkspaceId == Nothing
+
+                _ ->
+                    True
 
 
 subscriptions : Sub Msg

@@ -61,7 +61,7 @@ mkApp logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec 
        $ principalContextMiddleware jwksCache authCfg pool
        $ authMiddleware authCfg
        $ openApiMiddleware
-       $ serve (Proxy @HMemAPI) (server pool tracker bc wsState pgvec)
+       $ serve (Proxy @HMemAPI) (server authCfg pool tracker bc wsState pgvec)
 
 -- | Middleware that assigns a unique X-Request-Id to every request.
 -- If the incoming request already has an X-Request-Id header, it is

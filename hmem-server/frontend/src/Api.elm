@@ -6,9 +6,10 @@ module Api exposing
     , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
     , AuditAction(..), AuditLogEntry, RevertResult
     , PaginatedResult
+    , SessionContext, SessionPrincipal, SessionGlobalPermissions, SessionWorkspaceContext
     , MemoryType(..), ProjectStatus(..), TaskStatus(..), WorkspaceType(..)
     , ChangeEvent, ChangeType(..), EntityType(..)
-    , fetchWorkspaces, fetchWorkspace, updateWorkspace
+    , fetchSessionContext, fetchWorkspaces, fetchWorkspace, updateWorkspace
     , fetchProjects, fetchProject
     , fetchTasks, fetchTask
     , fetchMemories, fetchMemory
@@ -185,6 +186,38 @@ type alias AuditLogEntry =
     , actorId : Maybe String
     , actorLabel : Maybe String
     , changedAt : String
+    }
+
+
+type alias SessionContext =
+    { authMode : String
+    , principal : SessionPrincipal
+    , globalPermissions : SessionGlobalPermissions
+    , workspace : Maybe SessionWorkspaceContext
+    }
+
+
+type alias SessionPrincipal =
+    { actorType : String
+    , actorId : String
+    , actorLabel : String
+    , authority : String
+    , grantUserId : Maybe String
+    }
+
+
+type alias SessionGlobalPermissions =
+    { createWorkspace : Bool
+    , superadmin : Bool
+    }
+
+
+type alias SessionWorkspaceContext =
+    { workspaceId : String
+    , role : Maybe String
+    , canRead : Bool
+    , canEdit : Bool
+    , canAdmin : Bool
     }
 
 
@@ -498,6 +531,42 @@ paginatedDecoder itemDecoder =
         |> required "has_more" D.bool
 
 
+sessionContextDecoder : Decoder SessionContext
+sessionContextDecoder =
+    D.succeed SessionContext
+        |> required "auth_mode" D.string
+        |> required "principal" sessionPrincipalDecoder
+        |> required "global_permissions" sessionGlobalPermissionsDecoder
+        |> optional "workspace" (D.nullable sessionWorkspaceContextDecoder) Nothing
+
+
+sessionPrincipalDecoder : Decoder SessionPrincipal
+sessionPrincipalDecoder =
+    D.succeed SessionPrincipal
+        |> required "actor_type" D.string
+        |> required "actor_id" D.string
+        |> required "actor_label" D.string
+        |> required "authority" D.string
+        |> optional "grant_user_id" (D.nullable D.string) Nothing
+
+
+sessionGlobalPermissionsDecoder : Decoder SessionGlobalPermissions
+sessionGlobalPermissionsDecoder =
+    D.succeed SessionGlobalPermissions
+        |> required "create_workspace" D.bool
+        |> required "superadmin" D.bool
+
+
+sessionWorkspaceContextDecoder : Decoder SessionWorkspaceContext
+sessionWorkspaceContextDecoder =
+    D.succeed SessionWorkspaceContext
+        |> required "workspace_id" D.string
+        |> optional "role" (D.nullable D.string) Nothing
+        |> required "can_read" D.bool
+        |> required "can_edit" D.bool
+        |> required "can_admin" D.bool
+
+
 memoryTypeDecoder : Decoder MemoryType
 memoryTypeDecoder =
     D.string
@@ -756,6 +825,23 @@ entityTypeDecoder =
 
 
 -- HTTP REQUESTS
+
+
+fetchSessionContext : String -> Maybe String -> (Result Http.Error SessionContext -> msg) -> Cmd msg
+fetchSessionContext apiUrl maybeWorkspaceId toMsg =
+    let
+        suffix =
+            case maybeWorkspaceId of
+                Just wsId ->
+                    "?workspace_id=" ++ wsId
+
+                Nothing ->
+                    ""
+    in
+    Http.get
+        { url = apiUrl ++ "/api/v1/session" ++ suffix
+        , expect = Http.expectJson toMsg sessionContextDecoder
+        }
 
 
 fetchWorkspaces : String -> (Result Http.Error (PaginatedResult Workspace) -> msg) -> Cmd msg

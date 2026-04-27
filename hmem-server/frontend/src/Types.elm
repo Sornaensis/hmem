@@ -69,6 +69,7 @@ type alias ToastModel =
 
 type alias AuthModel =
     { status : AuthStatus
+    , mode : Maybe String
     }
 
 

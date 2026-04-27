@@ -276,7 +276,7 @@ handleUrlChange url model =
                 ( { model
                     | url = url
                     , page = page
-                    , auth = { status = AuthBooting }
+                    , auth = { status = AuthBooting, mode = model.auth.mode }
                     , sessionContext = Nothing
                     , webSocket = { state = Disconnected }
                     , selectedWorkspaceId = Just wsId
@@ -315,7 +315,7 @@ handleUrlChange url model =
             ( { model
                 | url = url
                 , page = page
-                , auth = { status = AuthBooting }
+                , auth = { status = AuthBooting, mode = model.auth.mode }
                 , sessionContext = Nothing
                 , webSocket = { state = Disconnected }
                 , graph = updatedGraph
@@ -355,7 +355,7 @@ handleUrlChange url model =
             ( { model
                 | url = url
                 , page = page
-                , auth = { status = AuthBooting }
+                , auth = { status = AuthBooting, mode = model.auth.mode }
                 , sessionContext = Nothing
                 , selectedWorkspaceId = Nothing
                 , webSocket = { state = Disconnected }
@@ -378,7 +378,7 @@ handleUrlChange url model =
                     else
                         Cmd.none
             in
-            ( { model | url = url, page = page, auth = { status = AuthBooting }, sessionContext = Nothing, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected } }
+            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected } }
                 |> clearRouteConfirmations
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)

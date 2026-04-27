@@ -28,6 +28,7 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Page.Home
 import Page.Workspace
+import Permissions
 import Ports exposing (authUnauthorized, cytoscapeEdgeClicked, cytoscapeNodeClicked, disconnectWebSocket, localStorageReceived, onMainContentScroll)
 import Route exposing (loadWorkspaceData)
 import Toast
@@ -54,7 +55,7 @@ initModel key url page flags storedFilters frag =
             , url = url
             , page = page
             , flags = flags
-            , auth = { status = AuthBooting }
+            , auth = { status = AuthBooting, mode = Nothing }
             , sessionContext = Nothing
             , selectedWorkspaceId = Nothing
             , activeTab = frag.tab
@@ -170,7 +171,7 @@ handleOwned ownedMsg model =
                                     _ ->
                                         Cmd.none
                         in
-                        ( { model | auth = { status = AuthReady }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin }
+                        ( { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin }
                             |> updateLoadingAfterSession expectedWorkspace sessionContext
                         , Cmd.batch [ sessionBootstrapCmd, fetchMembershipsCmd, fetchAuditCmd ]
                         )
@@ -178,7 +179,7 @@ handleOwned ownedMsg model =
                     Err _ ->
                         ( clearSessionScopedState
                             { model
-                                | auth = { status = authStatusFromSessionError result }
+                                | auth = { status = authStatusFromSessionError result, mode = model.auth.mode }
                                 , sessionContext = Nothing
                             }
                         , disconnectWebSocket ()
@@ -192,11 +193,18 @@ handleOwned ownedMsg model =
                 currentWebSocket =
                     model.webSocket
 
+                unauthorizedMessage =
+                    if Permissions.isLocalMode model then
+                        "Local session is unavailable or expired. Check local bootstrap/token settings, then retry."
+
+                    else
+                        "Authentication is required or has expired. Please sign in again, then retry."
+
                 ( toastedModel, toastCmd ) =
-                    Toast.addToast Warning "Authentication is required or has expired. Please sign in again, then retry."
+                    Toast.addToast Warning unauthorizedMessage
                         (clearSessionScopedState
                             { model
-                                | auth = { status = AuthRequired }
+                                | auth = { status = AuthRequired, mode = model.auth.mode }
                                 , sessionContext = Nothing
                                 , webSocket = { currentWebSocket | state = Disconnected }
                             }
@@ -549,25 +557,51 @@ viewPage model =
 
 viewAuthBootstrapPage : Model -> Html Msg
 viewAuthBootstrapPage model =
+    let
+        loadingText =
+            if Permissions.isLocalMode model then
+                "Starting configured local session..."
+
+            else
+                "Checking " ++ Permissions.authModeLabel model ++ " auth session..."
+    in
     div [ class "page" ]
         [ h2 [] [ text "Loading session" ]
-        , div [ class "loading-indicator" ] [ text ("Checking " ++ model.flags.runtimeMode ++ " auth session...") ]
+        , div [ class "loading-indicator" ] [ text loadingText ]
         ]
 
 
 viewAuthRequiredPage : Model -> Html Msg
 viewAuthRequiredPage model =
-    div [ class "page" ]
-        [ h2 [] [ text "Authentication required" ]
-        , p [] [ text "The server did not return an authenticated session. Sign in, then retry this page." ]
-        , p [] [ text ("Runtime mode: " ++ model.flags.runtimeMode) ]
-        , case model.flags.loginUrl of
-            Just loginUrl ->
-                p [] [ a [ href loginUrl ] [ text "Sign in" ] ]
+    if Permissions.isLocalMode model then
+        div [ class "page auth-page" ]
+            [ h2 [] [ text "Local session unavailable" ]
+            , p [] [ text "This frontend is configured for local mode, which normally starts with a server-provided local session and does not require sign-in." ]
+            , p [] [ text "The server did not return a local principal. Check local auth bootstrap settings or the configured local bot/static bearer token." ]
+            , p [ class "help-text" ] [ text ("Auth token storage key: " ++ model.flags.authTokenStorageKey) ]
+            , p [ class "help-text" ]
+                [ text
+                    (if model.flags.authTokenPresent then
+                        "A local auth token is present in the frontend runtime."
 
-            Nothing ->
-                p [] [ text ("No login URL is configured. Auth token storage key: " ++ model.flags.authTokenStorageKey) ]
-        ]
+                     else
+                        "No local auth token is present in the frontend runtime."
+                    )
+                ]
+            ]
+
+    else
+        div [ class "page auth-page" ]
+            [ h2 [] [ text "Authentication required" ]
+            , p [] [ text "The server did not return an authenticated session. Sign in, then retry this page." ]
+            , p [] [ text ("Runtime mode: " ++ Permissions.authModeLabel model) ]
+            , case model.flags.loginUrl of
+                Just loginUrl ->
+                    p [] [ a [ href loginUrl ] [ text "Sign in" ] ]
+
+                Nothing ->
+                    p [] [ text ("No login URL is configured. Auth token storage key: " ++ model.flags.authTokenStorageKey) ]
+            ]
 
 
 viewAuthFailedPage : Model -> String -> Html Msg
@@ -575,5 +609,10 @@ viewAuthFailedPage model message =
     div [ class "page" ]
         [ h2 [] [ text "Session unavailable" ]
         , p [] [ text message ]
-        , p [] [ text ("Runtime mode: " ++ model.flags.runtimeMode) ]
+        , p [] [ text ("Runtime mode: " ++ Permissions.authModeLabel model) ]
+        , if Permissions.isLocalMode model then
+            p [ class "help-text" ] [ text "This frontend is configured for local mode, which should resolve to a server-provided local principal. If this persists, verify local bootstrap and token settings on the server." ]
+
+          else
+            text ""
         ]

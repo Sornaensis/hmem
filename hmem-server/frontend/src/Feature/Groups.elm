@@ -295,7 +295,29 @@ viewSidebar model =
                     text ""
                 ]
             ]
+        , viewSessionFooter model
         ]
+
+
+viewSessionFooter : Model -> Html Msg
+viewSessionFooter model =
+    case Permissions.principalAttributionLabel model of
+        Just attribution ->
+            div [ class "sidebar-session" ]
+                [ div [ class "sidebar-session-mode" ]
+                    [ text
+                        (if Permissions.isLocalMode model then
+                            "Local session"
+
+                         else
+                            "Signed in"
+                        )
+                    ]
+                , div [ class "sidebar-session-principal" ] [ text attribution ]
+                ]
+
+        Nothing ->
+            text ""
 
 
 viewSidebarGroup : Model -> Api.WorkspaceGroup -> Html Msg
@@ -419,9 +441,10 @@ viewHomePage model =
                     ]
                     [ text "+ Group" ]
 
-              else
+               else
                 text ""
             ]
+        , viewLocalModeNotice model
         , if model.dataLoading.loadingWorkspaces then
             div [ class "loading-indicator" ] [ text "Loading workspaces..." ]
 
@@ -444,6 +467,31 @@ viewHomePage model =
                        ]
                 )
         ]
+
+
+viewLocalModeNotice : Model -> Html Msg
+viewLocalModeNotice model =
+    if Permissions.isLocalMode model then
+        let
+            attribution =
+                Permissions.principalAttributionLabel model
+                    |> Maybe.withDefault "Local session"
+
+            sessionDescription =
+                if Permissions.hasImplicitLocalSuperadmin model then
+                    " is using a server-provided implicit superadmin session. "
+
+                else
+                    " is using a server-provided local session. "
+        in
+        div [ class "local-session-notice" ]
+            [ strong [] [ text "Local mode" ]
+            , span [] [ text sessionDescription ]
+            , span [] [ text attribution ]
+            ]
+
+    else
+        text ""
 
 
 viewHomeGroup : Model -> Api.WorkspaceGroup -> Html Msg

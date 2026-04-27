@@ -80,7 +80,7 @@ update msg model =
             in
             ( { model
                 | selectedWorkspaceId = Just wsId
-                , auth = { status = AuthBooting }
+                , auth = { status = AuthBooting, mode = model.auth.mode }
                 , sessionContext = Nothing
                 , graph = updatedGraph
               }

@@ -51,6 +51,7 @@ type alias Model =
     , mutations : MutationsModel
     , groups : GroupsModel
     , auditLog : AuditLogModel
+    , workspaceAdmin : WorkspaceAdminModel
     }
 
 
@@ -164,6 +165,15 @@ type alias AuditLogModel =
     }
 
 
+type alias WorkspaceAdminModel =
+    { memberships : Dict String (List Api.WorkspaceMembership)
+    , loadingMemberships : Dict String Bool
+    , membershipUserId : String
+    , membershipRole : String
+    , purgeConfirmation : Maybe String
+    }
+
+
 type alias AuditLogFilters =
     { entityType : Maybe String
     , entityId : Maybe String
@@ -248,7 +258,8 @@ type EditState
 
 
 type CreateForm
-    = CreateProjectForm { name : String }
+    = CreateWorkspaceForm { name : String, workspaceType : Api.WorkspaceType, ghOwner : String, ghRepo : String }
+    | CreateProjectForm { name : String }
     | CreateMemoryForm { content : String, memoryType : Api.MemoryType }
     | CreateGroupForm { name : String, description : String }
 
@@ -334,6 +345,10 @@ type Msg
     | TaskUpdated (Result Http.Error Api.Task)
     | MemoryUpdated (Result Http.Error Api.Memory)
     | WorkspaceUpdated (Result Http.Error Api.Workspace)
+    | WorkspaceCreated (Result Http.Error Api.Workspace)
+    | WorkspaceDeleted String (Result Http.Error ())
+    | WorkspacePurged String (Result Http.Error ())
+    | WorkspaceDeletedForPurge String (Result Http.Error ())
       -- UI
     | SelectWorkspace String
     | SwitchTab WorkspaceTab
@@ -439,6 +454,7 @@ type Msg
       -- Workspace groups
     | GotWorkspaceGroups (Result Http.Error (Api.PaginatedResult Api.WorkspaceGroup))
     | GotGroupMembers String (Result Http.Error (List String))
+    | GotWorkspaceMemberships String (Result Http.Error (Api.PaginatedResult Api.WorkspaceMembership))
     | CreateWorkspaceGroup String
     | WorkspaceGroupCreated (Result Http.Error Api.WorkspaceGroup)
     | DeleteWorkspaceGroup String
@@ -447,6 +463,15 @@ type Msg
     | AddWorkspaceToGroup String String
     | RemoveWorkspaceFromGroup String String
     | GroupMembershipDone String (Result Http.Error ())
+    | UpdateMembershipUserId String
+    | UpdateMembershipRole String
+    | SubmitWorkspaceMembership String
+    | WorkspaceMembershipSaved String (Result Http.Error Api.WorkspaceMembership)
+    | RemoveWorkspaceMembership String String
+    | WorkspaceMembershipDeleted String String (Result Http.Error ())
+    | ConfirmWorkspacePurge String
+    | PerformWorkspacePurge
+    | CancelWorkspacePurge
     | MainContentScrolled Float
     | ClearPendingRequest String
       -- Audit log

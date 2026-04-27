@@ -8,6 +8,7 @@ import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Json.Decode as Decode
+import Permissions
 import Toast exposing (addToast)
 import Types exposing (..)
 
@@ -295,26 +296,34 @@ update msg model =
 
 viewAuditLogPage : Model -> Html Msg
 viewAuditLogPage model =
-    div [ class "page audit-log-view" ]
-        [ div [ class "page-header" ]
-            [ h2 [] [ span [ class "page-header-icon icon-audit" ] [], text "Audit Log" ] ]
-        , viewAuditLogFilters model
-        , if List.isEmpty model.auditLog.entries then
-            div [ class "empty-state" ] [ text "No audit log entries found." ]
+    if not (Permissions.canViewGlobalAudit model) then
+        div [ class "page audit-log-view" ]
+            [ div [ class "page-header" ]
+                [ h2 [] [ span [ class "page-header-icon icon-audit" ] [], text "Audit Log" ] ]
+            , div [ class "empty-state" ] [ text "Global audit log access requires superadmin permission." ]
+            ]
 
-          else
-            div [ class "audit-log-list" ]
-                (List.map (viewAuditLogEntry model) model.auditLog.entries
-                    ++ (if model.auditLog.hasMore then
-                            [ button [ class "audit-log-load-more", onClick LoadMoreAuditLog ]
-                                [ text "Load more..." ]
-                            ]
+    else
+        div [ class "page audit-log-view" ]
+            [ div [ class "page-header" ]
+                [ h2 [] [ span [ class "page-header-icon icon-audit" ] [], text "Audit Log" ] ]
+            , viewAuditLogFilters model
+            , if List.isEmpty model.auditLog.entries then
+                div [ class "empty-state" ] [ text "No audit log entries found." ]
 
-                        else
-                            []
-                       )
-                )
-        ]
+              else
+                div [ class "audit-log-list" ]
+                    (List.map (viewAuditLogEntry model) model.auditLog.entries
+                        ++ (if model.auditLog.hasMore then
+                                [ button [ class "audit-log-load-more", onClick LoadMoreAuditLog ]
+                                    [ text "Load more..." ]
+                                ]
+
+                            else
+                                []
+                           )
+                    )
+            ]
 
 
 viewAuditLogFilters : Model -> Html Msg
@@ -596,7 +605,7 @@ viewAuditLogEntry model entry =
                     [ span [ class "audit-entry-id" ] [ text ("Entry: " ++ String.left 8 entry.id) ]
                     , span [ class "audit-entity-id" ] [ text ("Entity: " ++ String.left 8 entry.entityId) ]
                     , span [ class "audit-actor" ] [ text ("Actor: " ++ auditActorSummary entry) ]
-                    , if isRevertableEntityType entry.entityType then
+                    , if isRevertableEntityType entry.entityType && Permissions.canViewGlobalAudit model then
                         button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩ Revert" ]
 
                       else
@@ -648,7 +657,7 @@ viewEntityHistory model entityType entityId =
             case Dict.get entityId model.auditLog.entityHistory of
                 Just entries ->
                     div [ class "entity-history-timeline" ]
-                        (List.map viewHistoryEntry entries
+                        (List.map (viewHistoryEntry model) entries
                             ++ (if Dict.get entityId model.auditLog.entityHistoryHasMore |> Maybe.withDefault False then
                                     [ button [ class "entity-history-load-more", onClick (LoadMoreHistory entityType entityId) ]
                                         [ text "Load more..." ]
@@ -674,8 +683,8 @@ viewEntityHistory model entityType entityId =
         ]
 
 
-viewHistoryEntry : Api.AuditLogEntry -> Html Msg
-viewHistoryEntry entry =
+viewHistoryEntry : Model -> Api.AuditLogEntry -> Html Msg
+viewHistoryEntry model entry =
     let
         actionLabel =
             case entry.action of
@@ -711,7 +720,11 @@ viewHistoryEntry entry =
         [ div [ class "history-entry-header" ]
             [ span [ class ("history-action-badge " ++ actionClass) ] [ text actionLabel ]
             , span [ class "history-timestamp" ] [ text (formatDate entry.changedAt) ]
-            , button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩" ]
+            , if Permissions.canViewGlobalAudit model then
+                button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩" ]
+
+              else
+                text ""
             ]
         , changedFields
         ]

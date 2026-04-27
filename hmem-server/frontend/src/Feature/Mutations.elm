@@ -4,6 +4,7 @@ import Dict
 import Helpers exposing (beginWorkspaceDataReload, trackLocalMutation)
 import Toast exposing (addToast)
 import Types exposing (..)
+import Browser.Navigation as Nav
 
 
 init : MutationsModel
@@ -105,6 +106,33 @@ update msg model =
 
                 Err _ ->
                     addToast Error "Failed to create memory" model
+
+        WorkspaceCreated result ->
+            case result of
+                Ok ws ->
+                    let
+                        currentEditing =
+                            model.editing
+
+                        updatedEditing =
+                            { currentEditing | createForm = Nothing }
+
+                        updatedModel =
+                            { model
+                                | workspaces = Dict.insert ws.id ws model.workspaces
+                                , editing = updatedEditing
+                            }
+
+                        ( trackedModel, trackCmd ) =
+                            trackLocalMutation ws.id updatedModel
+
+                        ( toastedModel, toastCmd ) =
+                            addToast Success ("Created workspace: " ++ ws.name) trackedModel
+                    in
+                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd, Nav.pushUrl model.key ("/workspace/" ++ ws.id) ] )
+
+                Err _ ->
+                    addToast Error "Failed to create workspace" model
 
         ProjectUpdated result ->
             case result of

@@ -154,6 +154,7 @@ handleUrlChange url model =
                     , editing = updatedEditing
                     , memory = updatedMemory
                   }
+                    |> clearRouteConfirmations
                 , Cmd.none
                 )
 
@@ -291,6 +292,7 @@ handleUrlChange url model =
                     , graph = updatedGraph
                     , auditLog = updatedAuditLog
                   }
+                    |> clearRouteConfirmations
                 , Cmd.batch
                     [ loadWorkspaceData model.flags.apiUrl wsId updatedDataLoading.activeWorkspaceLoadToken
                     , Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (Just wsId))
@@ -313,6 +315,7 @@ handleUrlChange url model =
                 , page = page
                 , graph = updatedGraph
               }
+                |> clearRouteConfirmations
             , Cmd.batch
                 [ case model.selectedWorkspaceId of
                     Just wsId ->
@@ -354,9 +357,9 @@ handleUrlChange url model =
                 , page = page
                 , auditLog = updatedAuditLog
               }
+                |> clearRouteConfirmations
             , Cmd.batch
-                [ Api.fetchAuditLog model.flags.apiUrl emptyFilters GotAuditLog
-                , Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)
+                [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)
                 , destroyCmd
                 ]
             )
@@ -371,8 +374,24 @@ handleUrlChange url model =
                         Cmd.none
             in
             ( { model | url = url, page = page }
+                |> clearRouteConfirmations
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)
                 , destroyCmd
                 ]
             )
+
+
+clearRouteConfirmations : Model -> Model
+clearRouteConfirmations model =
+    let
+        currentCards =
+            model.cards
+
+        currentWorkspaceAdmin =
+            model.workspaceAdmin
+    in
+    { model
+        | cards = { currentCards | deleteConfirmation = Nothing }
+        , workspaceAdmin = { currentWorkspaceAdmin | purgeConfirmation = Nothing }
+    }

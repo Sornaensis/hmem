@@ -14,6 +14,7 @@ import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
 import Feature.Memory
+import Permissions
 import Helpers exposing (..)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -141,34 +142,42 @@ update msg model =
         PerformDelete ->
             case model.cards.deleteConfirmation of
                 Just ( entityType, entityId ) ->
-                    let
-                        currentCards =
-                            model.cards
+                    if not (canDeleteEntity model entityType) then
+                        addToast Warning "You no longer have permission to delete this item"
+                            (updateCardsModel (\records -> { records | deleteConfirmation = Nothing }) model)
 
-                        updatedCards =
-                            { currentCards | deleteConfirmation = Nothing }
+                    else
+                        let
+                            currentCards =
+                                model.cards
 
-                        ( trackedModel, requestId, clearCmd ) =
-                            beginTrackedMutation [ entityId ] { model | cards = updatedCards }
+                            updatedCards =
+                                { currentCards | deleteConfirmation = Nothing }
 
-                        cmd =
-                            case entityType of
-                                "project" ->
-                                    Api.deleteProject model.flags.apiUrl entityId requestId (MutationDone "project")
+                            ( trackedModel, requestId, clearCmd ) =
+                                beginTrackedMutation [ entityId ] { model | cards = updatedCards }
 
-                                "task" ->
-                                    Api.deleteTask model.flags.apiUrl entityId requestId (MutationDone "task")
+                            cmd =
+                                case entityType of
+                                    "project" ->
+                                        Api.deleteProject model.flags.apiUrl entityId requestId (MutationDone "project")
 
-                                "memory" ->
-                                    Api.deleteMemory model.flags.apiUrl entityId requestId (MutationDone "memory")
+                                    "task" ->
+                                        Api.deleteTask model.flags.apiUrl entityId requestId (MutationDone "task")
 
-                                "group" ->
-                                    Api.deleteWorkspaceGroup model.flags.apiUrl entityId requestId (WorkspaceGroupDeleted entityId)
+                                    "memory" ->
+                                        Api.deleteMemory model.flags.apiUrl entityId requestId (MutationDone "memory")
 
-                                _ ->
-                                    Cmd.none
-                    in
-                    ( trackedModel, Cmd.batch [ clearCmd, cmd ] )
+                                    "workspace" ->
+                                        Api.deleteWorkspace model.flags.apiUrl entityId requestId (WorkspaceDeleted entityId)
+
+                                    "group" ->
+                                        Api.deleteWorkspaceGroup model.flags.apiUrl entityId requestId (WorkspaceGroupDeleted entityId)
+
+                                    _ ->
+                                        Cmd.none
+                        in
+                        ( trackedModel, Cmd.batch [ clearCmd, cmd ] )
 
                 Nothing ->
                     ( model, Cmd.none )
@@ -213,6 +222,19 @@ handleEscape model =
 updateCardsModel : (CardsModel -> CardsModel) -> Model -> Model
 updateCardsModel fn model =
     { model | cards = fn model.cards }
+
+
+canDeleteEntity : Model -> String -> Bool
+canDeleteEntity model entityType =
+    case entityType of
+        "workspace" ->
+            Permissions.canAdminCurrentWorkspace model
+
+        "group" ->
+            Permissions.isSuperadmin model
+
+        _ ->
+            Permissions.canEditCurrentWorkspace model
 
 
 
@@ -445,7 +467,7 @@ viewProjectNode allProjects model depth project hasSearch query =
     div [ class "tree-node", style "margin-left" (String.fromInt (depth * 20) ++ "px"), id ("entity-" ++ project.id) ]
         [ div
             [ class ("card tree-card card-project card-status-" ++ Api.projectStatusToString project.status ++ Feature.DragDrop.dragOverClass model project.id)
-            , draggable "true"
+            , draggable (if Permissions.canEditCurrentWorkspace model then "true" else "false")
             , on "dragstart" (Decode.succeed (DragStartCard "project" project.id))
             , preventDefaultOn "dragover" (Decode.succeed ( DragOverCard project.id, True ))
             , preventDefaultOn "drop" (Decode.succeed ( DropOnCard "project" project.id, True ))
@@ -471,9 +493,13 @@ viewProjectNode allProjects model depth project hasSearch query =
                     , Feature.Editing.viewEditableText model "project" project.id "name" project.name
                     ]
                 , div [ class "card-actions" ]
-                    [ Feature.Editing.viewStatusSelect "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString ChangeProjectStatus
-                    , Feature.Editing.viewPrioritySelect "project" project.id project.priority ChangeProjectPriority
-                    , button [ class "btn-icon btn-danger", onClick (ConfirmDelete "project" project.id), title "Delete" ] [ text "✕" ]
+                    [ Feature.Editing.viewStatusSelect model "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString ChangeProjectStatus
+                    , Feature.Editing.viewPrioritySelect model "project" project.id project.priority ChangeProjectPriority
+                    , if Permissions.canEditCurrentWorkspace model then
+                        button [ class "btn-icon btn-danger", onClick (ConfirmDelete "project" project.id), title "Delete" ] [ text "✕" ]
+
+                      else
+                        text ""
                     ]
                 ]
             , let
@@ -549,16 +575,24 @@ viewProjectNode allProjects model depth project hasSearch query =
                     text ""
                 ]
             , div [ class "card-inline-actions" ]
-                [ button
-                    [ class "btn-inline-create"
-                    , onClick (ShowInlineCreate (InlineCreateProject { parentId = Just project.id, name = "" }))
-                    ]
-                    [ text "+ Subproject" ]
-                , button
-                    [ class "btn-inline-create"
-                    , onClick (ShowInlineCreate (InlineCreateTask { projectId = Just project.id, parentId = Nothing, title = "" }))
-                    ]
-                    [ text "+ Task" ]
+                [ if Permissions.canEditCurrentWorkspace model then
+                    button
+                        [ class "btn-inline-create"
+                        , onClick (ShowInlineCreate (InlineCreateProject { parentId = Just project.id, name = "" }))
+                        ]
+                        [ text "+ Subproject" ]
+
+                  else
+                    text ""
+                , if Permissions.canEditCurrentWorkspace model then
+                    button
+                        [ class "btn-inline-create"
+                        , onClick (ShowInlineCreate (InlineCreateTask { projectId = Just project.id, parentId = Nothing, title = "" }))
+                        ]
+                        [ text "+ Task" ]
+
+                  else
+                    text ""
                 ]
             , Feature.Editing.viewInlineCreateInputForParent model (Just project.id) "project"
             , Feature.Editing.viewInlineCreateInputForParent model (Just project.id) "task"
@@ -642,7 +676,7 @@ viewTaskCard showProject model task =
     in
     div
         ([ class ("card tree-card " ++ cardClass ++ " card-status-" ++ Api.taskStatusToString task.status ++ Feature.DragDrop.dragOverClass model task.id)
-        , draggable "true"
+        , draggable (if Permissions.canEditCurrentWorkspace model then "true" else "false")
         , id ("entity-" ++ task.id)
         , on "dragstart" (Decode.succeed (DragStartCard "task" task.id))
         , preventDefaultOn "dragover" (Decode.succeed ( DragOverCard task.id, True ))
@@ -675,9 +709,13 @@ viewTaskCard showProject model task =
                 , Feature.Editing.viewEditableText model "task" task.id "title" task.title
                 ]
             , div [ class "card-actions" ]
-                [ Feature.Editing.viewStatusSelect "task" task.id (Api.taskStatusToString task.status) Api.allTaskStatuses Api.taskStatusToString ChangeTaskStatus
-                , Feature.Editing.viewPrioritySelect "task" task.id task.priority ChangeTaskPriority
-                , button [ class "btn-icon btn-danger", onClick (ConfirmDelete "task" task.id), title "Delete" ] [ text "✕" ]
+                [ Feature.Editing.viewStatusSelect model "task" task.id (Api.taskStatusToString task.status) Api.allTaskStatuses Api.taskStatusToString ChangeTaskStatus
+                , Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority
+                , if Permissions.canEditCurrentWorkspace model then
+                    button [ class "btn-icon btn-danger", onClick (ConfirmDelete "task" task.id), title "Delete" ] [ text "✕" ]
+
+                  else
+                    text ""
                 ]
             ]
         , let
@@ -774,11 +812,15 @@ viewTaskCard showProject model task =
                 text ""
             ]
         , div [ class "card-inline-actions" ]
-            [ button
-                [ class "btn-inline-create"
-                , onClick (ShowInlineCreate (InlineCreateTask { projectId = task.projectId, parentId = Just task.id, title = "" }))
-                ]
-                [ text "+ Subtask" ]
+            [ if Permissions.canEditCurrentWorkspace model then
+                button
+                    [ class "btn-inline-create"
+                    , onClick (ShowInlineCreate (InlineCreateTask { projectId = task.projectId, parentId = Just task.id, title = "" }))
+                    ]
+                    [ text "+ Subtask" ]
+
+              else
+                text ""
             ]
         , Feature.Editing.viewInlineCreateInputForParent model (Just task.id) "subtask"
         , div [ class "card-meta-group" ]

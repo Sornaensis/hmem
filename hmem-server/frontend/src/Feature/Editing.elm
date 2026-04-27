@@ -27,6 +27,8 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Markdown.Parser
 import Markdown.Renderer
+import Permissions
+import Toast exposing (addToast)
 import Types exposing (..)
 
 
@@ -297,8 +299,36 @@ update msg model =
 
         SubmitCreateForm ->
             case model.editing.createForm of
+                Just (CreateWorkspaceForm f) ->
+                    if not (Permissions.canCreateWorkspace model) then
+                        addToast Warning "You do not have permission to create workspaces" model
+
+                    else if String.isEmpty (String.trim f.name) then
+                        ( model, Cmd.none )
+
+                    else
+                        let
+                            ghOwner =
+                                nonEmptyMaybe f.ghOwner
+
+                            ghRepo =
+                                nonEmptyMaybe f.ghRepo
+
+                            ( trackedModel, requestId, clearCmd ) =
+                                beginTrackedMutation [] model
+                        in
+                        ( trackedModel
+                        , Cmd.batch
+                            [ clearCmd
+                            , Api.createWorkspace model.flags.apiUrl (String.trim f.name) f.workspaceType ghOwner ghRepo requestId WorkspaceCreated
+                            ]
+                        )
+
                 Just (CreateGroupForm f) ->
-                    if String.isEmpty (String.trim f.name) then
+                    if not (Permissions.isSuperadmin model) then
+                        addToast Warning "Superadmin permission is required to manage workspace groups" model
+
+                    else if String.isEmpty (String.trim f.name) then
                         ( model, Cmd.none )
 
                     else
@@ -323,7 +353,10 @@ update msg model =
                 _ ->
                     case ( model.editing.createForm, model.selectedWorkspaceId ) of
                         ( Just (CreateProjectForm f), Just wsId ) ->
-                            if String.isEmpty (String.trim f.name) then
+                            if not (Permissions.canEditCurrentWorkspace model) then
+                                addToast Warning "Workspace edit permission is required to create projects" model
+
+                            else if String.isEmpty (String.trim f.name) then
                                 ( model, Cmd.none )
 
                             else
@@ -334,7 +367,10 @@ update msg model =
                                 ( trackedModel, Cmd.batch [ clearCmd, Api.createProject model.flags.apiUrl wsId f.name requestId ProjectCreated ] )
 
                         ( Just (CreateMemoryForm f), Just wsId ) ->
-                            if String.isEmpty (String.trim f.content) then
+                            if not (Permissions.canEditCurrentWorkspace model) then
+                                addToast Warning "Workspace edit permission is required to create memories" model
+
+                            else if String.isEmpty (String.trim f.content) then
                                 ( model, Cmd.none )
 
                             else
@@ -358,60 +394,64 @@ update msg model =
             ( updateEditingModel (\ed -> { ed | inlineCreate = Just ic }) model, Cmd.none )
 
         SubmitInlineCreate ->
-            case ( model.editing.inlineCreate, model.selectedWorkspaceId ) of
-                ( Just (InlineCreateProject { parentId, name }), Just wsId ) ->
-                    if String.isEmpty (String.trim name) then
+            if not (Permissions.canEditCurrentWorkspace model) then
+                addToast Warning "Workspace edit permission is required to create items" model
+
+            else
+                case ( model.editing.inlineCreate, model.selectedWorkspaceId ) of
+                    ( Just (InlineCreateProject { parentId, name }), Just wsId ) ->
+                        if String.isEmpty (String.trim name) then
+                            ( model, Cmd.none )
+
+                        else
+                            case parentId of
+                                Just pid ->
+                                    let
+                                        ( trackedModel, requestId, clearCmd ) =
+                                            beginTrackedMutation [] model
+                                    in
+                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createProjectWithParent model.flags.apiUrl wsId pid name requestId ProjectCreated ] )
+
+                                Nothing ->
+                                    let
+                                        ( trackedModel, requestId, clearCmd ) =
+                                            beginTrackedMutation [] model
+                                    in
+                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createProject model.flags.apiUrl wsId name requestId ProjectCreated ] )
+
+                    ( Just (InlineCreateTask { projectId, parentId, title }), Just wsId ) ->
+                        if String.isEmpty (String.trim title) then
+                            ( model, Cmd.none )
+
+                        else
+                            case parentId of
+                                Just pid ->
+                                    let
+                                        ( trackedModel, requestId, clearCmd ) =
+                                            beginTrackedMutation [] model
+                                    in
+                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createTaskWithParent model.flags.apiUrl wsId projectId pid title requestId TaskCreated ] )
+
+                                Nothing ->
+                                    let
+                                        ( trackedModel, requestId, clearCmd ) =
+                                            beginTrackedMutation [] model
+                                    in
+                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createTask model.flags.apiUrl wsId projectId title requestId TaskCreated ] )
+
+                    ( Just (InlineCreateMemory { content }), Just wsId ) ->
+                        if String.isEmpty (String.trim content) then
+                            ( model, Cmd.none )
+
+                        else
+                            let
+                                ( trackedModel, requestId, clearCmd ) =
+                                    beginTrackedMutation [] model
+                            in
+                            ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId content Api.ShortTerm requestId MemoryCreated ] )
+
+                    _ ->
                         ( model, Cmd.none )
-
-                    else
-                        case parentId of
-                            Just pid ->
-                                let
-                                    ( trackedModel, requestId, clearCmd ) =
-                                        beginTrackedMutation [] model
-                                in
-                                ( trackedModel, Cmd.batch [ clearCmd, Api.createProjectWithParent model.flags.apiUrl wsId pid name requestId ProjectCreated ] )
-
-                            Nothing ->
-                                let
-                                    ( trackedModel, requestId, clearCmd ) =
-                                        beginTrackedMutation [] model
-                                in
-                                ( trackedModel, Cmd.batch [ clearCmd, Api.createProject model.flags.apiUrl wsId name requestId ProjectCreated ] )
-
-                ( Just (InlineCreateTask { projectId, parentId, title }), Just wsId ) ->
-                    if String.isEmpty (String.trim title) then
-                        ( model, Cmd.none )
-
-                    else
-                        case parentId of
-                            Just pid ->
-                                let
-                                    ( trackedModel, requestId, clearCmd ) =
-                                        beginTrackedMutation [] model
-                                in
-                                ( trackedModel, Cmd.batch [ clearCmd, Api.createTaskWithParent model.flags.apiUrl wsId projectId pid title requestId TaskCreated ] )
-
-                            Nothing ->
-                                let
-                                    ( trackedModel, requestId, clearCmd ) =
-                                        beginTrackedMutation [] model
-                                in
-                                ( trackedModel, Cmd.batch [ clearCmd, Api.createTask model.flags.apiUrl wsId projectId title requestId TaskCreated ] )
-
-                ( Just (InlineCreateMemory { content }), Just wsId ) ->
-                    if String.isEmpty (String.trim content) then
-                        ( model, Cmd.none )
-
-                    else
-                        let
-                            ( trackedModel, requestId, clearCmd ) =
-                                beginTrackedMutation [] model
-                        in
-                        ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId content Api.ShortTerm requestId MemoryCreated ] )
-
-                _ ->
-                    ( model, Cmd.none )
 
         CancelInlineCreate ->
             ( updateEditingModel (\ed -> { ed | inlineCreate = Nothing }) model, Cmd.none )
@@ -496,6 +536,35 @@ updateEditingModel fn model =
     { model | editing = fn model.editing }
 
 
+nonEmptyMaybe : String -> Maybe String
+nonEmptyMaybe raw =
+    let
+        trimmed =
+            String.trim raw
+    in
+    if String.isEmpty trimmed then
+        Nothing
+
+    else
+        Just trimmed
+
+
+workspaceTypeFromString : String -> Api.WorkspaceType
+workspaceTypeFromString raw =
+    case raw of
+        "planning" ->
+            Api.Planning
+
+        "personal" ->
+            Api.Personal
+
+        "organization" ->
+            Api.Organization
+
+        _ ->
+            Api.Repository
+
+
 saveEditCmd : String -> Maybe String -> { entityType : String, entityId : String, field : String, value : String, original : String } -> Cmd Msg
 saveEditCmd apiUrl maybeRequestId state =
     let
@@ -553,42 +622,54 @@ onKeyDown toMsg =
 
 viewEditableText : Model -> String -> String -> String -> String -> Html Msg
 viewEditableText model entityType entityId field currentValue =
-    case editingValue model entityId field of
-        Just val ->
-            input
-                [ class "inline-edit-input"
-                , value val
-                , onInput EditInput
-                , onBlur (SaveEdit entityId field)
-                , onKeyDown
-                    (\keyCode ->
-                        if keyCode == 13 then
-                            SaveEdit entityId field
+    if not (Permissions.canEditCurrentWorkspace model) then
+        span [ class "editable-text readonly", title "Read-only" ]
+            [ text
+                (if String.isEmpty currentValue then
+                    "(empty)"
 
-                        else if keyCode == 27 then
-                            CancelEdit
+                 else
+                    currentValue
+                )
+            ]
 
-                        else
-                            NoOp
-                    )
-                , Html.Attributes.id (editElementId entityId field)
-                ]
-                []
+    else
+        case editingValue model entityId field of
+            Just val ->
+                input
+                    [ class "inline-edit-input"
+                    , value val
+                    , onInput EditInput
+                    , onBlur (SaveEdit entityId field)
+                    , onKeyDown
+                        (\keyCode ->
+                            if keyCode == 13 then
+                                SaveEdit entityId field
 
-        Nothing ->
-            span
-                [ class "editable-text"
-                , onClick (StartEdit entityType entityId field currentValue)
-                , title "Click to edit"
-                ]
-                [ text
-                    (if String.isEmpty currentValue then
-                        "(empty)"
+                            else if keyCode == 27 then
+                                CancelEdit
 
-                     else
-                        currentValue
-                    )
-                ]
+                            else
+                                NoOp
+                        )
+                    , Html.Attributes.id (editElementId entityId field)
+                    ]
+                    []
+
+            Nothing ->
+                span
+                    [ class "editable-text"
+                    , onClick (StartEdit entityType entityId field currentValue)
+                    , title "Click to edit"
+                    ]
+                    [ text
+                        (if String.isEmpty currentValue then
+                            "(empty)"
+
+                         else
+                            currentValue
+                        )
+                    ]
 
 
 viewMarkdownContent : String -> Html Msg
@@ -608,7 +689,17 @@ viewMarkdownContent raw =
 
 viewEditableTextarea : Model -> String -> String -> String -> String -> Html Msg
 viewEditableTextarea model entityType entityId field currentValue =
-    case editingValue model entityId field of
+    if not (Permissions.canEditCurrentWorkspace model) then
+        div [ class "editable-textarea readonly", title "Read-only" ]
+            [ if String.isEmpty currentValue then
+                text ""
+
+              else
+                viewMarkdownContent currentValue
+            ]
+
+    else
+        case editingValue model entityId field of
         Just val ->
             let
                 lineCount =
@@ -647,10 +738,11 @@ viewEditableTextarea model entityType entityId field currentValue =
 -- STATUS / PRIORITY SELECTORS
 
 
-viewStatusSelect : String -> String -> String -> List a -> (a -> String) -> (String -> a -> Msg) -> Html Msg
-viewStatusSelect entityType entityId currentStr allValues toString toMsg =
+viewStatusSelect : Model -> String -> String -> String -> List a -> (a -> String) -> (String -> a -> Msg) -> Html Msg
+viewStatusSelect model entityType entityId currentStr allValues toString toMsg =
     select
         [ class ("status-select badge badge-" ++ currentStr)
+        , disabled (not (Permissions.canEditCurrentWorkspace model))
         , onInput
             (\s ->
                 let
@@ -678,11 +770,12 @@ viewStatusSelect entityType entityId currentStr allValues toString toMsg =
         )
 
 
-viewPrioritySelect : String -> String -> Int -> (String -> Int -> Msg) -> Html Msg
-viewPrioritySelect entityType entityId currentPri toMsg =
+viewPrioritySelect : Model -> String -> String -> Int -> (String -> Int -> Msg) -> Html Msg
+viewPrioritySelect model entityType entityId currentPri toMsg =
     select
         [ class "priority-select"
         , title "Priority"
+        , disabled (not (Permissions.canEditCurrentWorkspace model))
         , onInput
             (\s ->
                 case String.toInt s of
@@ -702,11 +795,12 @@ viewPrioritySelect entityType entityId currentPri toMsg =
         )
 
 
-viewImportanceSelect : String -> Int -> Html Msg
-viewImportanceSelect memId currentImp =
+viewImportanceSelect : Model -> String -> Int -> Html Msg
+viewImportanceSelect model memId currentImp =
     select
         [ class "priority-select"
         , title "Importance"
+        , disabled (not (Permissions.canEditCurrentWorkspace model))
         , onInput
             (\s ->
                 case String.toInt s of
@@ -726,10 +820,11 @@ viewImportanceSelect memId currentImp =
         )
 
 
-viewMemoryTypeSelect : String -> Api.MemoryType -> Html Msg
-viewMemoryTypeSelect memId currentType =
+viewMemoryTypeSelect : Model -> String -> Api.MemoryType -> Html Msg
+viewMemoryTypeSelect model memId currentType =
     select
         [ class ("status-select badge badge-" ++ Api.memoryTypeToString currentType)
+        , disabled (not (Permissions.canEditCurrentWorkspace model))
         , onInput
             (\s ->
                 ChangeMemoryType memId (Api.memoryTypeFromString s)
@@ -754,44 +849,51 @@ viewMemoryTypeSelect memId currentType =
 
 viewTagEditor : Model -> Api.Memory -> Html Msg
 viewTagEditor model memory =
-    div [ class "tag-editor" ]
-        [ div [ class "tag-list" ]
-            (List.map
-                (\t ->
-                    span [ class "tag tag-removable" ]
-                        [ text t
-                        , button [ class "tag-remove", onClick (RemoveTag memory.id t) ] [ text "x" ]
-                        ]
+    if Permissions.canEditCurrentWorkspace model then
+        div [ class "tag-editor" ]
+            [ div [ class "tag-list" ]
+                (List.map
+                    (\t ->
+                        span [ class "tag tag-removable" ]
+                            [ text t
+                            , button [ class "tag-remove", onClick (RemoveTag memory.id t) ] [ text "x" ]
+                            ]
+                    )
+                    memory.tags
                 )
-                memory.tags
-            )
-        , case editingValue model memory.id "tags" of
-            Just val ->
-                input
-                    [ class "tag-input"
-                    , placeholder "New tag..."
-                    , value val
-                    , onInput EditInput
-                    , onBlur (SaveEdit memory.id "tags")
-                    , onKeyDown
-                        (\keyCode ->
-                            if keyCode == 13 then
-                                AddTag memory.id val
+            , case editingValue model memory.id "tags" of
+                Just val ->
+                    input
+                        [ class "tag-input"
+                        , placeholder "New tag..."
+                        , value val
+                        , onInput EditInput
+                        , onBlur (SaveEdit memory.id "tags")
+                        , onKeyDown
+                            (\keyCode ->
+                                if keyCode == 13 then
+                                    AddTag memory.id val
 
-                            else if keyCode == 27 then
-                                CancelEdit
+                                else if keyCode == 27 then
+                                    CancelEdit
 
-                            else
-                                NoOp
-                        )
-                    , autofocus True
-                    ]
-                    []
+                                else
+                                    NoOp
+                            )
+                        , autofocus True
+                        ]
+                        []
 
-            Nothing ->
-                button [ class "btn-icon btn-add-tag", onClick (StartEdit "memory" memory.id "tags" "") ]
-                    [ text "+ tag" ]
-        ]
+                Nothing ->
+                    button [ class "btn-icon btn-add-tag", onClick (StartEdit "memory" memory.id "tags" "") ]
+                        [ text "+ tag" ]
+            ]
+
+    else
+        div [ class "tag-editor" ]
+            [ div [ class "tag-list" ]
+                (List.map (\t -> span [ class "tag" ] [ text t ]) memory.tags)
+            ]
 
 
 
@@ -807,13 +909,65 @@ viewCreateFormModal model =
         Just form ->
             div [ class "modal-overlay", onClick CancelCreateForm ]
                 [ div [ class "modal", stopPropagationOn "click" (Decode.succeed ( NoOp, True )) ]
-                    [ viewCreateFormContent form ]
+                    [ viewCreateFormContent model form ]
                 ]
 
 
-viewCreateFormContent : CreateForm -> Html Msg
-viewCreateFormContent form =
+viewCreateFormContent : Model -> CreateForm -> Html Msg
+viewCreateFormContent model form =
     case form of
+        CreateWorkspaceForm f ->
+            div []
+                [ h3 [ class "modal-title" ] [ text "New Workspace" ]
+                , if Permissions.canCreateWorkspace model then
+                    text ""
+
+                  else
+                    div [ class "empty-state" ] [ text "You do not have permission to create workspaces." ]
+                , div [ class "form-group" ]
+                    [ label [ class "form-label" ] [ text "Name" ]
+                    , input
+                        [ class "form-input"
+                        , value f.name
+                        , onInput (\s -> UpdateCreateForm (CreateWorkspaceForm { f | name = s }))
+                        , placeholder "Workspace name"
+                        , autofocus True
+                        , disabled (not (Permissions.canCreateWorkspace model))
+                        ]
+                        []
+                    ]
+                , div [ class "form-group" ]
+                    [ label [ class "form-label" ] [ text "Type" ]
+                    , select
+                        [ class "form-input"
+                        , disabled (not (Permissions.canCreateWorkspace model))
+                        , onInput (\s -> UpdateCreateForm (CreateWorkspaceForm { f | workspaceType = workspaceTypeFromString s }))
+                        ]
+                        (List.map
+                            (\wt ->
+                                let
+                                    str =
+                                        Api.workspaceTypeToString wt
+                                in
+                                option [ value str, selected (wt == f.workspaceType) ] [ text str ]
+                            )
+                            Api.allWorkspaceTypes
+                        )
+                    ]
+                , div [ class "form-group" ]
+                    [ label [ class "form-label" ] [ text "GitHub owner (optional)" ]
+                    , input [ class "form-input", value f.ghOwner, disabled (not (Permissions.canCreateWorkspace model)), onInput (\s -> UpdateCreateForm (CreateWorkspaceForm { f | ghOwner = s })) ] []
+                    ]
+                , div [ class "form-group" ]
+                    [ label [ class "form-label" ] [ text "GitHub repo (optional)" ]
+                    , input [ class "form-input", value f.ghRepo, disabled (not (Permissions.canCreateWorkspace model)), onInput (\s -> UpdateCreateForm (CreateWorkspaceForm { f | ghRepo = s })) ] []
+                    ]
+                , div [ class "modal-actions" ]
+                    [ button [ class "btn btn-secondary", onClick CancelCreateForm ] [ text "Cancel" ]
+                    , button [ class "btn btn-primary", disabled (not (Permissions.canCreateWorkspace model)), onClick SubmitCreateForm ] [ text "Create" ]
+                    ]
+                ]
+
         CreateProjectForm f ->
             div []
                 [ h3 [ class "modal-title" ] [ text "New Project" ]
@@ -943,39 +1097,43 @@ viewCreateFormContent form =
 
 viewInlineCreateMemory : Model -> Html Msg
 viewInlineCreateMemory model =
-    case model.editing.inlineCreate of
-        Just (InlineCreateMemory f) ->
-            div [ class "inline-create-row" ]
-                [ input
-                    [ class "inline-create-input"
-                    , Html.Attributes.id "inline-create-input"
-                    , placeholder "New memory content..."
-                    , value f.content
-                    , onInput (\s -> UpdateInlineCreate (InlineCreateMemory { f | content = s }))
-                    , onBlur CancelInlineCreate
-                    , onKeyDown
-                        (\keyCode ->
-                            if keyCode == 13 then
-                                SubmitInlineCreate
+    if not (Permissions.canEditCurrentWorkspace model) then
+        div [ class "inline-create-row empty-state" ] [ text "Read-only workspace" ]
 
-                            else if keyCode == 27 then
-                                CancelInlineCreate
+    else
+        case model.editing.inlineCreate of
+            Just (InlineCreateMemory f) ->
+                div [ class "inline-create-row" ]
+                    [ input
+                        [ class "inline-create-input"
+                        , Html.Attributes.id "inline-create-input"
+                        , placeholder "New memory content..."
+                        , value f.content
+                        , onInput (\s -> UpdateInlineCreate (InlineCreateMemory { f | content = s }))
+                        , onBlur CancelInlineCreate
+                        , onKeyDown
+                            (\keyCode ->
+                                if keyCode == 13 then
+                                    SubmitInlineCreate
 
-                            else
-                                NoOp
-                        )
+                                else if keyCode == 27 then
+                                    CancelInlineCreate
+
+                                else
+                                    NoOp
+                            )
+                        ]
+                        []
                     ]
-                    []
-                ]
 
-        _ ->
-            div [ class "inline-create-row" ]
-                [ button
-                    [ class "btn-inline-create-top"
-                    , onClick (ShowInlineCreate (InlineCreateMemory { content = "" }))
+            _ ->
+                div [ class "inline-create-row" ]
+                    [ button
+                        [ class "btn-inline-create-top"
+                        , onClick (ShowInlineCreate (InlineCreateMemory { content = "" }))
+                        ]
+                        [ text "+ New Memory" ]
                     ]
-                    [ text "+ New Memory" ]
-                ]
 
 
 viewInlineCreateInput : Model -> Maybe String -> String -> Html Msg
@@ -989,7 +1147,10 @@ viewInlineCreateInput model parentId inputType =
                 _ ->
                     False
     in
-    if isActive then
+    if not (Permissions.canEditCurrentWorkspace model) then
+        text ""
+
+    else if isActive then
         case model.editing.inlineCreate of
             Just (InlineCreateProject f) ->
                 div [ class "inline-create-row" ]
@@ -1033,73 +1194,77 @@ viewInlineCreateInput model parentId inputType =
 
 viewInlineCreateInputForParent : Model -> Maybe String -> String -> Html Msg
 viewInlineCreateInputForParent model parentId inputType =
-    case model.editing.inlineCreate of
-        Just (InlineCreateProject f) ->
-            if inputType == "project" && f.parentId == parentId then
-                div [ class "inline-create-row" ]
-                    [ input
-                        [ class "inline-create-input"
-                        , Html.Attributes.id "inline-create-input"
-                        , placeholder "Subproject name..."
-                        , value f.name
-                        , onInput (\s -> UpdateInlineCreate (InlineCreateProject { f | name = s }))
-                        , onBlur CancelInlineCreate
-                        , onKeyDown
-                            (\keyCode ->
-                                if keyCode == 13 then
-                                    SubmitInlineCreate
+    if not (Permissions.canEditCurrentWorkspace model) then
+        text ""
 
-                                else if keyCode == 27 then
-                                    CancelInlineCreate
+    else
+        case model.editing.inlineCreate of
+            Just (InlineCreateProject f) ->
+                if inputType == "project" && f.parentId == parentId then
+                    div [ class "inline-create-row" ]
+                        [ input
+                            [ class "inline-create-input"
+                            , Html.Attributes.id "inline-create-input"
+                            , placeholder "Subproject name..."
+                            , value f.name
+                            , onInput (\s -> UpdateInlineCreate (InlineCreateProject { f | name = s }))
+                            , onBlur CancelInlineCreate
+                            , onKeyDown
+                                (\keyCode ->
+                                    if keyCode == 13 then
+                                        SubmitInlineCreate
 
-                                else
-                                    NoOp
-                            )
+                                    else if keyCode == 27 then
+                                        CancelInlineCreate
+
+                                    else
+                                        NoOp
+                                )
+                            ]
+                            []
                         ]
-                        []
-                    ]
 
-            else
+                else
+                    text ""
+
+            Just (InlineCreateTask f) ->
+                if (inputType == "task" && f.projectId == parentId && f.parentId == Nothing)
+                    || (inputType == "subtask" && f.parentId == parentId)
+                then
+                    div [ class "inline-create-row" ]
+                        [ input
+                            [ class "inline-create-input"
+                            , Html.Attributes.id "inline-create-input"
+                            , placeholder
+                                (if inputType == "subtask" then
+                                    "Subtask title..."
+
+                                 else
+                                    "Task title..."
+                                )
+                            , value f.title
+                            , onInput (\s -> UpdateInlineCreate (InlineCreateTask { f | title = s }))
+                            , onBlur CancelInlineCreate
+                            , onKeyDown
+                                (\keyCode ->
+                                    if keyCode == 13 then
+                                        SubmitInlineCreate
+
+                                    else if keyCode == 27 then
+                                        CancelInlineCreate
+
+                                    else
+                                        NoOp
+                                )
+                            ]
+                            []
+                        ]
+
+                else
+                    text ""
+
+            Nothing ->
                 text ""
 
-        Just (InlineCreateTask f) ->
-            if (inputType == "task" && f.projectId == parentId && f.parentId == Nothing)
-                || (inputType == "subtask" && f.parentId == parentId)
-            then
-                div [ class "inline-create-row" ]
-                    [ input
-                        [ class "inline-create-input"
-                        , Html.Attributes.id "inline-create-input"
-                        , placeholder
-                            (if inputType == "subtask" then
-                                "Subtask title..."
-
-                             else
-                                "Task title..."
-                            )
-                        , value f.title
-                        , onInput (\s -> UpdateInlineCreate (InlineCreateTask { f | title = s }))
-                        , onBlur CancelInlineCreate
-                        , onKeyDown
-                            (\keyCode ->
-                                if keyCode == 13 then
-                                    SubmitInlineCreate
-
-                                else if keyCode == 27 then
-                                    CancelInlineCreate
-
-                                else
-                                    NoOp
-                            )
-                        ]
-                        []
-                    ]
-
-            else
+            _ ->
                 text ""
-
-        Nothing ->
-            text ""
-
-        _ ->
-            text ""

@@ -13,6 +13,7 @@ import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Json.Decode as Decode
+import Permissions
 import Toast exposing (addToast)
 import Types exposing (..)
 
@@ -147,28 +148,32 @@ viewTaskDependencies model taskId deps =
           else
             div [ class "task-dependencies-list" ]
                 (List.map (viewDependencyItem model taskId) deps)
-        , div [ class "card-inline-actions" ]
-            [ div [ class "popover-anchor" ]
-                [ button
-                    [ class
-                        (if selectorOpen then
-                            "btn-inline-create popover-trigger-active"
+        , if Permissions.canEditCurrentWorkspace model then
+            div [ class "card-inline-actions" ]
+                [ div [ class "popover-anchor" ]
+                    [ button
+                        [ class
+                            (if selectorOpen then
+                                "btn-inline-create popover-trigger-active"
 
-                         else
-                            "btn-inline-create"
-                        )
-                    , onClick
-                        (if selectorOpen then
-                            CancelAddDependency
+                             else
+                                "btn-inline-create"
+                            )
+                        , onClick
+                            (if selectorOpen then
+                                CancelAddDependency
 
-                         else
-                            StartAddDependency taskId
-                        )
+                             else
+                                StartAddDependency taskId
+                            )
+                        ]
+                        [ text "+ Dep" ]
+                    , viewAddDependencyPopover model taskId deps
                     ]
-                    [ text "+ Dep" ]
-                , viewAddDependencyPopover model taskId deps
                 ]
-            ]
+
+          else
+            text ""
         ]
 
 
@@ -311,12 +316,16 @@ viewDependencyItem model taskId dep =
                             , title "Jump to task"
                             ]
                             [ text "↗" ]
-                        , button
-                            [ class "btn-icon btn-danger"
-                            , onClick (PerformRemoveDependency taskId dep.id)
-                            , title "Remove dependency"
-                            ]
-                            [ text "✕" ]
+                        , if Permissions.canEditCurrentWorkspace model then
+                            button
+                                [ class "btn-icon btn-danger"
+                                , onClick (PerformRemoveDependency taskId dep.id)
+                                , title "Remove dependency"
+                                ]
+                                [ text "✕" ]
+
+                          else
+                            text ""
                         ]
                     ]
                 , if not (List.isEmpty crumbs) then
@@ -351,12 +360,16 @@ viewDependencyItem model taskId dep =
                             , title "Jump to task"
                             ]
                             [ text "↗" ]
-                        , button
-                            [ class "btn-icon btn-danger"
-                            , onClick (PerformRemoveDependency taskId dep.id)
-                            , title "Remove dependency"
-                            ]
-                            [ text "✕" ]
+                        , if Permissions.canEditCurrentWorkspace model then
+                            button
+                                [ class "btn-icon btn-danger"
+                                , onClick (PerformRemoveDependency taskId dep.id)
+                                , title "Remove dependency"
+                                ]
+                                [ text "✕" ]
+
+                          else
+                            text ""
                         ]
                     ]
                 ]

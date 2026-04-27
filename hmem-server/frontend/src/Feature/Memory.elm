@@ -20,6 +20,7 @@ import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Html.Keyed as Keyed
 import Json.Decode as Decode
+import Permissions
 import Toast exposing (addToast)
 import Types exposing (..)
 
@@ -350,57 +351,49 @@ viewMemoryCard model memory =
     in
     div
         [ class ("card" ++ Feature.DragDrop.dragOverClass model memory.id)
-        , draggable "true"
+        , draggable (if Permissions.canEditCurrentWorkspace model then "true" else "false")
         , on "dragstart" (Decode.succeed (DragStartCard "memory" memory.id))
         , preventDefaultOn "dragover" (Decode.succeed ( DragOverCard memory.id, True ))
         , preventDefaultOn "drop" (Decode.succeed ( DropOnCard "memory" memory.id, True ))
         , on "dragend" (Decode.succeed DragEndCard)
         ]
         [ div [ class "card-header" ]
-            [ case editingValue model memory.id "summary" of
-                Just val ->
-                    input
-                        [ class "inline-edit-input"
-                        , value val
-                        , onInput EditInput
-                        , onBlur (SaveEdit memory.id "summary")
-                        , Feature.Editing.onKeyDown
-                            (\keyCode ->
-                                if keyCode == 13 then
-                                    SaveEdit memory.id "summary"
+            [ if Permissions.canEditCurrentWorkspace model then
+                case editingValue model memory.id "summary" of
+                    Just val ->
+                        input
+                            [ class "inline-edit-input"
+                            , value val
+                            , onInput EditInput
+                            , onBlur (SaveEdit memory.id "summary")
+                            , Feature.Editing.onKeyDown
+                                (\keyCode ->
+                                    if keyCode == 13 then
+                                        SaveEdit memory.id "summary"
 
-                                else if keyCode == 27 then
-                                    CancelEdit
-
-                                else
-                                    NoOp
-                            )
-                        , Html.Attributes.id (editElementId memory.id "summary")
-                        ]
-                        []
-
-                Nothing ->
-                    span
-                        [ class "editable-text"
-                        , onClick (StartEdit "memory" memory.id "summary" (Maybe.withDefault "" memory.summary))
-                        , title "Click to edit summary"
-                        ]
-                        [ text
-                            (case memory.summary of
-                                Just s ->
-                                    if String.isEmpty s then
-                                        "<untitled>"
+                                    else if keyCode == 27 then
+                                        CancelEdit
 
                                     else
-                                        s
+                                        NoOp
+                                )
+                            , Html.Attributes.id (editElementId memory.id "summary")
+                            ]
+                            []
 
-                                Nothing ->
-                                    "<untitled>"
-                            )
-                        ]
+                    Nothing ->
+                        span
+                            [ class "editable-text"
+                            , onClick (StartEdit "memory" memory.id "summary" (Maybe.withDefault "" memory.summary))
+                            , title "Click to edit summary"
+                            ]
+                            [ text (memorySummaryTitle memory) ]
+
+              else
+                span [ class "editable-text readonly", title "Read-only" ] [ text (memorySummaryTitle memory) ]
             , div [ class "card-actions" ]
-                [ Feature.Editing.viewMemoryTypeSelect memory.id memory.memoryType
-                , Feature.Editing.viewImportanceSelect memory.id memory.importance
+                [ Feature.Editing.viewMemoryTypeSelect model memory.id memory.memoryType
+                , Feature.Editing.viewImportanceSelect model memory.id memory.importance
                 , button
                     [ class
                         (if memory.pinned then
@@ -411,9 +404,14 @@ viewMemoryCard model memory =
                         )
                     , onClick (ToggleMemoryPin memory.id (not memory.pinned))
                     , title "Pin"
+                    , disabled (not (Permissions.canEditCurrentWorkspace model))
                     ]
                     [ text "\u{1F4CC}" ]
-                , button [ class "btn-icon btn-danger", onClick (ConfirmDelete "memory" memory.id), title "Delete" ] [ text "✕" ]
+                , if Permissions.canEditCurrentWorkspace model then
+                    button [ class "btn-icon btn-danger", onClick (ConfirmDelete "memory" memory.id), title "Delete" ] [ text "✕" ]
+
+                  else
+                    text ""
                 ]
             ]
         , div [ class "card-body card-expanded" ]
@@ -468,12 +466,16 @@ viewMemoryLinkedEntities model memoryId projects tasks =
                     div [ class "linked-entity-item" ]
                         [ span [ class "entity-type-label entity-type-project" ] [ text "PRJ" ]
                         , span [ class "linked-entity-name", onClick (FocusEntity "project" p.id) ] [ text p.name ]
-                        , button
-                            [ class "btn-icon btn-danger"
-                            , onClick (PerformUnlinkEntity "project" p.id memoryId)
-                            , title "Unlink"
-                            ]
-                            [ text "✕" ]
+                        , if Permissions.canEditCurrentWorkspace model then
+                            button
+                                [ class "btn-icon btn-danger"
+                                , onClick (PerformUnlinkEntity "project" p.id memoryId)
+                                , title "Unlink"
+                                ]
+                                [ text "✕" ]
+
+                          else
+                            text ""
                         ]
                 )
                 projects
@@ -482,12 +484,16 @@ viewMemoryLinkedEntities model memoryId projects tasks =
                         div [ class "linked-entity-item" ]
                             [ span [ class "entity-type-label entity-type-task" ] [ text "TSK" ]
                             , span [ class "linked-entity-name", onClick (FocusEntity "task" t.id) ] [ text t.title ]
-                            , button
-                                [ class "btn-icon btn-danger"
-                                , onClick (PerformUnlinkEntity "task" t.id memoryId)
-                                , title "Unlink"
-                                ]
-                                [ text "✕" ]
+                            , if Permissions.canEditCurrentWorkspace model then
+                                button
+                                    [ class "btn-icon btn-danger"
+                                    , onClick (PerformUnlinkEntity "task" t.id memoryId)
+                                    , title "Unlink"
+                                    ]
+                                    [ text "✕" ]
+
+                              else
+                                text ""
                             ]
                     )
                     tasks
@@ -508,28 +514,32 @@ viewMemoryLinkedEntities model memoryId projects tasks =
 
           else
             div [ class "linked-entities-list" ] items
-        , div [ class "card-inline-actions" ]
-            [ div [ class "popover-anchor" ]
-                [ button
-                    [ class
-                        (if selectorOpen then
-                            "btn-inline-create popover-trigger-active"
+        , if Permissions.canEditCurrentWorkspace model then
+            div [ class "card-inline-actions" ]
+                [ div [ class "popover-anchor" ]
+                    [ button
+                        [ class
+                            (if selectorOpen then
+                                "btn-inline-create popover-trigger-active"
 
-                         else
-                            "btn-inline-create"
-                        )
-                    , onClick
-                        (if selectorOpen then
-                            CancelLinkEntity
+                             else
+                                "btn-inline-create"
+                            )
+                        , onClick
+                            (if selectorOpen then
+                                CancelLinkEntity
 
-                         else
-                            StartLinkEntity memoryId
-                        )
+                             else
+                                StartLinkEntity memoryId
+                            )
+                        ]
+                        [ text "+ Link" ]
+                    , viewLinkEntityPopover model memoryId projects tasks
                     ]
-                    [ text "+ Link" ]
-                , viewLinkEntityPopover model memoryId projects tasks
                 ]
-            ]
+
+          else
+            text ""
         ]
 
 
@@ -740,28 +750,32 @@ viewLinkedMemories model entityType entityId linkedMems =
           else
             div [ class "linked-memories-list" ]
                 (List.map (viewLinkedMemoryItem model entityType entityId) linkedMems)
-        , div [ class "card-inline-actions" ]
-            [ div [ class "popover-anchor" ]
-                [ button
-                    [ class
-                        (if selectorOpen then
-                            "btn-inline-create popover-trigger-active"
+        , if Permissions.canEditCurrentWorkspace model then
+            div [ class "card-inline-actions" ]
+                [ div [ class "popover-anchor" ]
+                    [ button
+                        [ class
+                            (if selectorOpen then
+                                "btn-inline-create popover-trigger-active"
 
-                         else
-                            "btn-inline-create"
-                        )
-                    , onClick
-                        (if selectorOpen then
-                            CancelLinkMemory
+                             else
+                                "btn-inline-create"
+                            )
+                        , onClick
+                            (if selectorOpen then
+                                CancelLinkMemory
 
-                         else
-                            StartLinkMemory entityType entityId
-                        )
+                             else
+                                StartLinkMemory entityType entityId
+                            )
+                        ]
+                        [ text "+ Link" ]
+                    , viewLinkMemoryPopover model entityType entityId linkedMems
                     ]
-                    [ text "+ Link" ]
-                , viewLinkMemoryPopover model entityType entityId linkedMems
                 ]
-            ]
+
+          else
+            text ""
         ]
 
 
@@ -891,14 +905,18 @@ viewLinkedMemoryItem model entityType entityId memory =
                             memory.content
                     )
                 ]
-            , div [ class "dep-item-actions" ]
-                [ button
-                    [ class "btn-icon btn-danger"
-                    , onClick (PerformUnlinkMemory entityType entityId memory.id)
-                    , title "Unlink"
+            , if Permissions.canEditCurrentWorkspace model then
+                div [ class "dep-item-actions" ]
+                    [ button
+                        [ class "btn-icon btn-danger"
+                        , onClick (PerformUnlinkMemory entityType entityId memory.id)
+                        , title "Unlink"
+                        ]
+                        [ text "✕" ]
                     ]
-                    [ text "✕" ]
-                ]
+
+              else
+                text ""
             ]
         , div [ class "popover-card-meta" ]
             [ span [ class "popover-card-status" ]
@@ -936,3 +954,17 @@ uniqueStrings list =
         )
         []
         list
+
+
+memorySummaryTitle : Api.Memory -> String
+memorySummaryTitle memory =
+    case memory.summary of
+        Just s ->
+            if String.isEmpty s then
+                "<untitled>"
+
+            else
+                s
+
+        Nothing ->
+            "<untitled>"

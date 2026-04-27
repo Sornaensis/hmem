@@ -6,6 +6,7 @@ import Helpers exposing (..)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
+import Permissions
 import Toast exposing (addToast)
 import Types exposing (..)
 
@@ -274,12 +275,16 @@ viewSidebar model =
                         , text "Knowledge Graph"
                         ]
                     ]
-                , li []
-                    [ a [ href "/audit", class "sidebar-link" ]
-                        [ span [ class "sidebar-icon icon-audit" ] []
-                        , text "Audit Log"
+                , if Permissions.canViewGlobalAudit model then
+                    li []
+                        [ a [ href "/audit", class "sidebar-link" ]
+                            [ span [ class "sidebar-icon icon-audit" ] []
+                            , text "Audit Log"
+                            ]
                         ]
-                    ]
+
+                  else
+                    text ""
                 ]
             ]
         ]
@@ -390,11 +395,24 @@ viewHomePage model =
     div [ class "page" ]
         [ h2 [ style "display" "flex", style "align-items" "center", style "gap" "0.75rem" ]
             [ text "Workspaces"
-            , button
-                [ class "btn-small"
-                , onClick (ShowCreateForm (CreateGroupForm { name = "", description = "" }))
-                ]
-                [ text "+ Group" ]
+            , if Permissions.canCreateWorkspace model then
+                button
+                    [ class "btn-small"
+                    , onClick (ShowCreateForm (CreateWorkspaceForm { name = "", workspaceType = Api.Repository, ghOwner = "", ghRepo = "" }))
+                    ]
+                    [ text "+ Workspace" ]
+
+              else
+                text ""
+            , if Permissions.isSuperadmin model then
+                button
+                    [ class "btn-small"
+                    , onClick (ShowCreateForm (CreateGroupForm { name = "", description = "" }))
+                    ]
+                    [ text "+ Group" ]
+
+              else
+                text ""
             ]
         , if model.dataLoading.loadingWorkspaces then
             div [ class "loading-indicator" ] [ text "Loading workspaces..." ]
@@ -462,39 +480,43 @@ viewHomeGroup model group =
                     Nothing ->
                         text ""
                 ]
-            , div [ class "group-actions" ]
-                [ button
-                    [ class
-                        (if isManaging then
-                            "btn-small group-manage-active"
+            , if Permissions.isSuperadmin model then
+                div [ class "group-actions" ]
+                    [ button
+                        [ class
+                            (if isManaging then
+                                "btn-small group-manage-active"
 
-                         else
-                            "btn-small"
-                        )
-                    , onClick (ToggleManageGroup group.id)
-                    , title
-                        (if isManaging then
-                            "Done managing"
+                             else
+                                "btn-small"
+                            )
+                        , onClick (ToggleManageGroup group.id)
+                        , title
+                            (if isManaging then
+                                "Done managing"
 
-                         else
-                            "Manage members"
-                        )
-                    ]
-                    [ text
-                        (if isManaging then
-                            "Done"
+                             else
+                                "Manage members"
+                            )
+                        ]
+                        [ text
+                            (if isManaging then
+                                "Done"
 
-                         else
-                            "Manage"
-                        )
+                             else
+                                "Manage"
+                            )
+                        ]
+                    , button
+                        [ class "btn-small btn-danger-subtle"
+                        , onClick (ConfirmDelete "group" group.id)
+                        , title "Delete group"
+                        ]
+                        [ text "Delete" ]
                     ]
-                , button
-                    [ class "btn-small btn-danger-subtle"
-                    , onClick (ConfirmDelete "group" group.id)
-                    , title "Delete group"
-                    ]
-                    [ text "Delete" ]
-                ]
+
+              else
+                text ""
             ]
         , if isManaging then
             div [ class "group-manage-panel" ]

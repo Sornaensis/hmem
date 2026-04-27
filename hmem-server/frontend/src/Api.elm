@@ -1,6 +1,6 @@
 module Api exposing
     ( Workspace, Project, Task, Memory, MemoryLink
-    , WorkspaceGroup
+    , WorkspaceGroup, WorkspaceMembership
     , TaskDependencySummary, TaskOverview
     , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, UnifiedSearchResults
     , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
@@ -9,7 +9,8 @@ module Api exposing
     , SessionContext, SessionPrincipal, SessionGlobalPermissions, SessionWorkspaceContext
     , MemoryType(..), ProjectStatus(..), TaskStatus(..), WorkspaceType(..)
     , ChangeEvent, ChangeType(..), EntityType(..)
-    , fetchSessionContext, fetchWorkspaces, fetchWorkspace, updateWorkspace
+    , fetchSessionContext, fetchWorkspaces, fetchWorkspace, createWorkspace, updateWorkspace, deleteWorkspace, purgeWorkspace
+    , fetchWorkspaceMemberships, upsertWorkspaceMembership, deleteWorkspaceMembership
     , fetchProjects, fetchProject
     , fetchTasks, fetchTask
     , fetchMemories, fetchMemory
@@ -36,7 +37,7 @@ module Api exposing
     , auditActionToString, auditActionFromString
     , projectStatusFromString, taskStatusFromString
     , projectStatusOrder, taskStatusOrder
-    , allProjectStatuses, allTaskStatuses, allMemoryTypes
+    , allProjectStatuses, allTaskStatuses, allMemoryTypes, allWorkspaceTypes
     )
 
 import Http
@@ -110,6 +111,16 @@ type alias WorkspaceGroup =
     { id : String
     , name : String
     , description : Maybe String
+    , createdAt : String
+    , updatedAt : String
+    }
+
+
+type alias WorkspaceMembership =
+    { workspaceId : String
+    , userId : String
+    , role : String
+    , grantedBy : Maybe String
     , createdAt : String
     , updatedAt : String
     }
@@ -389,6 +400,11 @@ allMemoryTypes =
     [ ShortTerm, LongTerm ]
 
 
+allWorkspaceTypes : List WorkspaceType
+allWorkspaceTypes =
+    [ Repository, Planning, Personal, Organization ]
+
+
 {-| Sort order for project statuses: active first, archived last.
 -}
 projectStatusOrder : ProjectStatus -> Int
@@ -511,6 +527,17 @@ workspaceGroupDecoder =
         |> required "id" D.string
         |> required "name" D.string
         |> optional "description" (D.nullable D.string) Nothing
+        |> required "created_at" D.string
+        |> required "updated_at" D.string
+
+
+workspaceMembershipDecoder : Decoder WorkspaceMembership
+workspaceMembershipDecoder =
+    D.succeed WorkspaceMembership
+        |> required "workspace_id" D.string
+        |> required "user_id" D.string
+        |> required "role" D.string
+        |> optional "granted_by" (D.nullable D.string) Nothing
         |> required "created_at" D.string
         |> required "updated_at" D.string
 
@@ -860,6 +887,33 @@ fetchWorkspace apiUrl wsId toMsg =
         }
 
 
+createWorkspace : String -> String -> WorkspaceType -> Maybe String -> Maybe String -> String -> (Result Http.Error Workspace -> msg) -> Cmd msg
+createWorkspace apiUrl name workspaceType mGhOwner mGhRepo requestId toMsg =
+    let
+        optionalFields =
+            [ ( "gh_owner", Maybe.map E.string mGhOwner )
+            , ( "gh_repo", Maybe.map E.string mGhRepo )
+            ]
+                |> List.filterMap (\( key, mValue ) -> Maybe.map (\value -> ( key, value )) mValue)
+
+        fields =
+            [ ( "name", E.string name )
+            , ( "workspace_type", E.string (workspaceTypeToString workspaceType) )
+            , ( "request_id", E.string requestId )
+            ]
+                ++ optionalFields
+    in
+    Http.request
+        { method = "POST"
+        , headers = requestIdHeaders fields
+        , url = apiUrl ++ "/api/v1/workspaces"
+        , body = Http.jsonBody (E.object fields)
+        , expect = Http.expectJson toMsg workspaceDecoder
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
 updateWorkspace : String -> String -> List ( String, E.Value ) -> (Result Http.Error Workspace -> msg) -> Cmd msg
 updateWorkspace apiUrl wsId fields toMsg =
     let
@@ -872,6 +926,73 @@ updateWorkspace apiUrl wsId fields toMsg =
         , url = apiUrl ++ "/api/v1/workspaces/" ++ wsId
         , body = Http.jsonBody (E.object fields)
         , expect = Http.expectJson toMsg workspaceDecoder
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+deleteWorkspace : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+deleteWorkspace apiUrl wsId requestId toMsg =
+    Http.request
+        { method = "DELETE"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/workspaces/" ++ wsId
+        , body = Http.emptyBody
+        , expect = Http.expectWhatever toMsg
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+purgeWorkspace : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+purgeWorkspace apiUrl wsId requestId toMsg =
+    Http.request
+        { method = "DELETE"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/purge"
+        , body = Http.emptyBody
+        , expect = Http.expectWhatever toMsg
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+fetchWorkspaceMemberships : String -> String -> (Result Http.Error (PaginatedResult WorkspaceMembership) -> msg) -> Cmd msg
+fetchWorkspaceMemberships apiUrl wsId toMsg =
+    Http.get
+        { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/memberships?limit=200"
+        , expect = Http.expectJson toMsg (paginatedDecoder workspaceMembershipDecoder)
+        }
+
+
+upsertWorkspaceMembership : String -> String -> String -> String -> String -> (Result Http.Error WorkspaceMembership -> msg) -> Cmd msg
+upsertWorkspaceMembership apiUrl wsId userId role requestId toMsg =
+    let
+        fields =
+            [ ( "user_id", E.string userId )
+            , ( "role", E.string role )
+            , ( "request_id", E.string requestId )
+            ]
+    in
+    Http.request
+        { method = "POST"
+        , headers = requestIdHeaders fields
+        , url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/memberships"
+        , body = Http.jsonBody (E.object fields)
+        , expect = Http.expectJson toMsg workspaceMembershipDecoder
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+deleteWorkspaceMembership : String -> String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+deleteWorkspaceMembership apiUrl wsId userId requestId toMsg =
+    Http.request
+        { method = "DELETE"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/memberships/" ++ userId
+        , body = Http.emptyBody
+        , expect = Http.expectWhatever toMsg
         , timeout = Nothing
         , tracker = Nothing
         }

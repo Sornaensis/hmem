@@ -18,6 +18,7 @@ import Feature.Memory
 import Feature.Mutations
 import Feature.Search
 import Feature.WebSocket
+import Feature.WorkspaceAdmin
 import Helpers exposing (applyStoredFiltersIfCurrentWorkspace, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (class, id)
@@ -79,6 +80,7 @@ initModel key url page flags storedFilters frag =
             , mutations = Feature.Mutations.init
             , groups = Feature.Groups.init
             , auditLog = Feature.AuditLog.init
+            , workspaceAdmin = Feature.WorkspaceAdmin.init
             }
     in
     case storedFilters of
@@ -123,7 +125,54 @@ handleOwned ownedMsg model =
             if sessionContextResponseMatches expectedWorkspace model then
                 case result of
                     Ok sessionContext ->
-                        ( { model | sessionContext = Just sessionContext }, Cmd.none )
+                        let
+                            mMembershipWorkspaceId =
+                                case sessionContext.workspace of
+                                    Just workspaceContext ->
+                                        if sessionContext.globalPermissions.superadmin || workspaceContext.canAdmin then
+                                            Just workspaceContext.workspaceId
+
+                                        else
+                                            Nothing
+
+                                    Nothing ->
+                                        Nothing
+
+                            fetchMembershipsCmd =
+                                case mMembershipWorkspaceId of
+                                    Just wsId ->
+                                        Api.fetchWorkspaceMemberships model.flags.apiUrl wsId (GotWorkspaceMemberships wsId)
+
+                                    Nothing ->
+                                        Cmd.none
+
+                            nextWorkspaceAdmin =
+                                case mMembershipWorkspaceId of
+                                    Just wsId ->
+                                        let
+                                            admin =
+                                                model.workspaceAdmin
+                                        in
+                                        { admin | loadingMemberships = Dict.insert wsId True admin.loadingMemberships }
+
+                                    Nothing ->
+                                        model.workspaceAdmin
+
+                            fetchAuditCmd =
+                                case ( expectedWorkspace, model.page ) of
+                                    ( Nothing, AuditLogPage ) ->
+                                        if sessionContext.globalPermissions.superadmin then
+                                            Api.fetchAuditLog model.flags.apiUrl model.auditLog.filters GotAuditLog
+
+                                        else
+                                            Cmd.none
+
+                                    _ ->
+                                        Cmd.none
+                        in
+                        ( { model | sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin }
+                        , Cmd.batch [ fetchMembershipsCmd, fetchAuditCmd ]
+                        )
 
                     Err _ ->
                         ( { model | sessionContext = Nothing }, Cmd.none )
@@ -152,6 +201,7 @@ handleOwned ownedMsg model =
             if keyCode == 27 then
                 case List.filterMap identity
                     [ Feature.Cards.handleEscape model
+                    , Feature.WorkspaceAdmin.handleEscape model
                     , Feature.DragDrop.handleEscape model
                     , Feature.Dependencies.handleEscape model
                     , Feature.Memory.handleEscape model
@@ -227,6 +277,7 @@ viewDocument model =
             , Feature.DragDrop.viewDropActionModal model
             , Feature.Cards.viewDeleteConfirmModal model
             , Feature.AuditLog.viewRevertConfirmModal model
+            , Feature.WorkspaceAdmin.viewPurgeConfirmModal model
             ]
         ]
     }

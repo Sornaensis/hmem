@@ -8,10 +8,12 @@ import Feature.Cards
 import Feature.Editing
 import Feature.Memory
 import Feature.Search
+import Feature.WorkspaceAdmin
 import Helpers exposing (formatDate)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (onClick)
+import Permissions
 import Types exposing (..)
 
 
@@ -112,19 +114,39 @@ viewWorkspacePage wsId model =
                             ]
                         ]
                     ]
-                , Feature.Search.viewSearchBar model
-                , viewTabs model.activeTab
-                , if model.dataLoading.loadingWorkspaceData then
-                    div [ class "loading-indicator" ] [ text "Loading..." ]
+                , Feature.WorkspaceAdmin.viewPermissionSummary model
+                , if not (Permissions.canReadCurrentWorkspace model) then
+                    viewUnauthorizedWorkspace model
 
                   else
-                    case model.search.unifiedResults of
-                        Just results ->
-                            Feature.Search.viewUnifiedSearchResults (Feature.Memory.viewMemoryCard model) model results
+                    div []
+                        [ Feature.WorkspaceAdmin.viewWorkspaceAdminPanel ws model
+                        , Feature.Search.viewSearchBar model
+                        , viewTabs model.activeTab
+                        , if model.dataLoading.loadingWorkspaceData then
+                            div [ class "loading-indicator" ] [ text "Loading..." ]
 
-                        Nothing ->
-                            viewTabContent wsId model
+                          else
+                            case model.search.unifiedResults of
+                                Just results ->
+                                    Feature.Search.viewUnifiedSearchResults (Feature.Memory.viewMemoryCard model) model results
+
+                                Nothing ->
+                                    viewTabContent wsId model
+                        ]
                 ]
+
+
+viewUnauthorizedWorkspace : Model -> Html Msg
+viewUnauthorizedWorkspace model =
+    if model.sessionContext == Nothing then
+        div [ class "empty-state" ] [ text "Loading workspace permissions..." ]
+
+    else
+        div [ class "empty-state" ]
+            [ h3 [] [ text "No workspace access" ]
+            , p [] [ text "You can see this route, but the current session does not have read permission for this workspace." ]
+            ]
 
 
 viewStickyWorkspaceBar : Model -> Api.Workspace -> List String -> Html Msg

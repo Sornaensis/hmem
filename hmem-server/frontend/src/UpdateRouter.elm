@@ -15,6 +15,7 @@ import Feature.Memory
 import Feature.Mutations
 import Feature.Search
 import Feature.WebSocket
+import Feature.WorkspaceAdmin
 import Toast
 import Types exposing (..)
 import Url
@@ -95,6 +96,18 @@ update msg model =
 
         WorkspaceUpdated _ ->
             Ok (Feature.Mutations.update msg model)
+
+        WorkspaceCreated _ ->
+            Ok (Feature.Mutations.update msg model)
+
+        WorkspaceDeleted _ _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        WorkspacePurged _ _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        WorkspaceDeletedForPurge _ _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
 
         -- UI
         DismissToast _ ->
@@ -391,6 +404,9 @@ update msg model =
         GotGroupMembers _ _ ->
             Ok (Feature.Groups.update msg model)
 
+        GotWorkspaceMemberships _ _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
         CreateWorkspaceGroup _ ->
             Ok (Feature.Groups.update msg model)
 
@@ -414,6 +430,33 @@ update msg model =
 
         GroupMembershipDone _ _ ->
             Ok (Feature.Groups.update msg model)
+
+        UpdateMembershipUserId _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        UpdateMembershipRole _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        SubmitWorkspaceMembership _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        WorkspaceMembershipSaved _ _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        RemoveWorkspaceMembership _ _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        WorkspaceMembershipDeleted _ _ _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        ConfirmWorkspacePurge _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        PerformWorkspacePurge ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        CancelWorkspacePurge ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
 
         UrlRequested _ ->
             case msg of

@@ -87,6 +87,8 @@ type alias WebSocketModel =
 
 type alias DataLoadingModel =
     { loadingWorkspaces : Bool
+    , activeWorkspaceListLoadToken : Maybe Int
+    , nextWorkspaceListLoadToken : Int
     , loadingWorkspaceData : Bool
     , pendingWorkspaceLoads : Int
     , activeWorkspaceLoadToken : Maybe Int
@@ -356,7 +358,7 @@ type Msg
     | CytoscapeNodeClicked String
     | CytoscapeEdgeClicked String
       -- HTTP responses
-    | GotWorkspaces (Result Http.Error (Api.PaginatedResult Api.Workspace))
+    | GotWorkspaces Int (Result Http.Error (Api.PaginatedResult Api.Workspace))
     | GotWorkspace String (Result Http.Error Api.Workspace)
     | GotSessionContext (Maybe String) (Result Http.Error Api.SessionContext)
     | GotProjects String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Project))

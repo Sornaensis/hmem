@@ -379,11 +379,33 @@ applyChangeEvent event model =
             )
 
         Api.EWorkspaceGroup ->
-            ( model
-            , Cmd.batch
-                [ Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
-                , Api.fetchWorkspaceGroups model.flags.apiUrl GotWorkspaceGroups
-                ]
+            let
+                workspaceListLoadToken =
+                    model.dataLoading.nextWorkspaceListLoadToken
+
+                currentLoading =
+                    model.dataLoading
+
+                loadingModel =
+                    { model
+                        | workspaces = Dict.empty
+                        , dataLoading =
+                            { currentLoading
+                                | loadingWorkspaces = True
+                                , activeWorkspaceListLoadToken = Just workspaceListLoadToken
+                                , nextWorkspaceListLoadToken = workspaceListLoadToken + 1
+                            }
+                    }
+
+                groupCmds =
+                    if Permissions.isSuperadmin model then
+                        [ Api.fetchWorkspaceGroups model.flags.apiUrl GotWorkspaceGroups ]
+
+                    else
+                        []
+            in
+            ( loadingModel
+            , Cmd.batch (Api.fetchWorkspaces model.flags.apiUrl (GotWorkspaces workspaceListLoadToken) :: groupCmds)
             )
 
         Api.ESavedView ->

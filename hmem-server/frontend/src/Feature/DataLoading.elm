@@ -10,6 +10,8 @@ import Types exposing (..)
 init : DataLoadingModel
 init =
     { loadingWorkspaces = True
+    , activeWorkspaceListLoadToken = Nothing
+    , nextWorkspaceListLoadToken = 1
     , loadingWorkspaceData = False
     , pendingWorkspaceLoads = 0
     , activeWorkspaceLoadToken = Nothing
@@ -91,8 +93,8 @@ acceptWorkspaceLoad maybeToken dataLoading =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        GotWorkspaces result ->
-            if model.auth.status /= AuthReady || not (Permissions.isSuperadmin model) then
+        GotWorkspaces token result ->
+            if model.auth.status /= AuthReady || model.dataLoading.activeWorkspaceListLoadToken /= Just token then
                 ( model, Cmd.none )
 
             else
@@ -103,7 +105,7 @@ update msg model =
                                 model.dataLoading
 
                             updatedDataLoading =
-                                { currentDataLoading | loadingWorkspaces = False }
+                                { currentDataLoading | loadingWorkspaces = False, activeWorkspaceListLoadToken = Nothing }
                         in
                         ( { model
                             | workspaces = indexBy .id paginated.items
@@ -118,7 +120,7 @@ update msg model =
                                 model.dataLoading
 
                             updatedDataLoading =
-                                { currentDataLoading | loadingWorkspaces = False }
+                                { currentDataLoading | loadingWorkspaces = False, activeWorkspaceListLoadToken = Nothing }
                         in
                         addToast Error "Failed to load workspaces"
                             { model | dataLoading = updatedDataLoading }

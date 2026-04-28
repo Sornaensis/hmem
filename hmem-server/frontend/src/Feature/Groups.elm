@@ -246,31 +246,40 @@ viewSidebar model =
     nav [ class "sidebar" ]
         [ div [ class "sidebar-header" ]
             [ a [ href "/", class "sidebar-logo" ] [ text "hmem" ] ]
-        , if not (List.isEmpty groups) then
+        , if model.dataLoading.loadingWorkspaces then
+            div [ class "sidebar-section" ]
+                [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
+                , div [ class "sidebar-loading" ] [ text "Loading..." ]
+                ]
+
+          else if not (List.isEmpty groups) then
             div []
                 (List.map (viewSidebarGroup model) groups)
 
           else
             text ""
-        , if not (List.isEmpty ungroupedWs) then
+        , if model.dataLoading.loadingWorkspaces then
+            text ""
+
+          else if not (List.isEmpty ungroupedWs) then
             div [ class "sidebar-section" ]
                 [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
-                , if model.dataLoading.loadingWorkspaces then
-                    div [ class "sidebar-loading" ] [ text "Loading..." ]
-
-                  else
-                    ul [ class "sidebar-nav" ]
-                        (ungroupedWs |> List.map (viewSidebarWorkspace model.selectedWorkspaceId))
+                , ul [ class "sidebar-nav" ]
+                    (ungroupedWs |> List.map (viewSidebarWorkspace model.selectedWorkspaceId))
                 ]
 
           else if List.isEmpty groups then
             div [ class "sidebar-section" ]
                 [ div [ class "sidebar-section-title" ] [ text "Workspaces" ]
-                , if model.dataLoading.loadingWorkspaces then
-                    div [ class "sidebar-loading" ] [ text "Loading..." ]
+                , div [ class "sidebar-empty" ]
+                    [ text
+                        (if Permissions.isSuperadmin model then
+                            "No workspaces"
 
-                  else
-                    div [ class "sidebar-empty" ] [ text "No workspaces" ]
+                         else
+                            "No visible workspaces"
+                        )
+                    ]
                 ]
 
           else
@@ -454,24 +463,37 @@ viewHomePage model =
             div [ class "loading-indicator" ] [ text "Loading workspaces..." ]
 
           else
-            div []
-                (List.map (viewHomeGroup model) groups
-                    ++ [ if not (List.isEmpty ungroupedWs) then
-                            div []
-                                [ if not (List.isEmpty groups) then
-                                    h3 [ style "margin-top" "1.5rem", style "margin-bottom" "0.75rem" ] [ text "Ungrouped" ]
+            if List.isEmpty groups && List.isEmpty ungroupedWs then
+                viewNoVisibleWorkspaces model
 
-                                  else
-                                    text ""
-                                , div [ class "card-grid" ]
-                                    (ungroupedWs |> List.map viewWorkspaceCard)
-                                ]
+            else
+                div []
+                    (List.map (viewHomeGroup model) groups
+                        ++ [ if not (List.isEmpty ungroupedWs) then
+                                div []
+                                    [ if not (List.isEmpty groups) then
+                                        h3 [ style "margin-top" "1.5rem", style "margin-bottom" "0.75rem" ] [ text "Ungrouped" ]
 
-                         else
-                            text ""
-                       ]
-                )
+                                      else
+                                        text ""
+                                    , div [ class "card-grid" ]
+                                        (ungroupedWs |> List.map viewWorkspaceCard)
+                                    ]
+
+                             else
+                                text ""
+                           ]
+                    )
         ]
+
+
+viewNoVisibleWorkspaces : Model -> Html Msg
+viewNoVisibleWorkspaces model =
+    if Permissions.isSuperadmin model then
+        div [ class "empty-state" ] [ text "No workspaces. Create one to get started." ]
+
+    else
+        div [ class "empty-state" ] [ text "No visible workspaces." ]
 
 
 viewLocalModeNotice : Model -> Html Msg

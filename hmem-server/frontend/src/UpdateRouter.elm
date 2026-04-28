@@ -69,7 +69,7 @@ update msg model =
             Ok (Feature.Graph.update msg model)
 
         -- HTTP responses
-        GotWorkspaces _ ->
+        GotWorkspaces _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
         GotWorkspace _ _ ->

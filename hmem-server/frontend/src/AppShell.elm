@@ -349,17 +349,17 @@ currentSessionWorkspace model =
 bootstrapAfterSession : Maybe String -> Api.SessionContext -> Model -> Cmd Msg
 bootstrapAfterSession expectedWorkspace sessionContext model =
     let
-        canListGlobal =
-            sessionContext.globalPermissions.superadmin
+        workspaceListLoadToken =
+            model.dataLoading.nextWorkspaceListLoadToken
 
         globalCmds =
-            if canListGlobal then
-                [ Api.fetchWorkspaces model.flags.apiUrl GotWorkspaces
-                , Api.fetchWorkspaceGroups model.flags.apiUrl GotWorkspaceGroups
-                ]
+            Api.fetchWorkspaces model.flags.apiUrl (GotWorkspaces workspaceListLoadToken)
+                :: (if sessionContext.globalPermissions.superadmin then
+                        [ Api.fetchWorkspaceGroups model.flags.apiUrl GotWorkspaceGroups ]
 
-            else
-                []
+                    else
+                        []
+                   )
 
         ( workspaceCmds, shouldKeepWebSocket ) =
             case model.page of
@@ -430,18 +430,6 @@ updateLoadingAfterSession expectedWorkspace sessionContext model =
             else
                 { state = Disconnected }
 
-        nextWorkspaces =
-            if sessionContext.globalPermissions.superadmin then
-                model.workspaces
-
-            else
-                case expectedWorkspace of
-                    Just wsId ->
-                        Dict.filter (\id _ -> id == wsId) model.workspaces
-
-                    Nothing ->
-                        Dict.empty
-
         nextGroups =
             if sessionContext.globalPermissions.superadmin then
                 model.groups
@@ -451,7 +439,9 @@ updateLoadingAfterSession expectedWorkspace sessionContext model =
 
         updatedLoading =
             { currentLoading
-                | loadingWorkspaces = sessionContext.globalPermissions.superadmin && currentLoading.loadingWorkspaces
+                | loadingWorkspaces = True
+                , activeWorkspaceListLoadToken = Just currentLoading.nextWorkspaceListLoadToken
+                , nextWorkspaceListLoadToken = currentLoading.nextWorkspaceListLoadToken + 1
                 , loadingWorkspaceData = shouldLoadWorkspaceData && currentLoading.loadingWorkspaceData
                 , pendingWorkspaceLoads =
                     if shouldLoadWorkspaceData then
@@ -467,13 +457,14 @@ updateLoadingAfterSession expectedWorkspace sessionContext model =
                         Nothing
             }
     in
-    { model | dataLoading = updatedLoading, webSocket = nextWebSocket, workspaces = nextWorkspaces, groups = nextGroups }
+    { model | dataLoading = updatedLoading, webSocket = nextWebSocket, workspaces = Dict.empty, groups = nextGroups }
 
 
 stopAllLoading : DataLoadingModel -> DataLoadingModel
 stopAllLoading dataLoading =
     { dataLoading
         | loadingWorkspaces = False
+        , activeWorkspaceListLoadToken = Nothing
         , loadingWorkspaceData = False
         , pendingWorkspaceLoads = 0
         , activeWorkspaceLoadToken = Nothing

@@ -343,6 +343,76 @@ spec = around withApp $ do
       decode (respBody resp) `shouldBe` Just
         (object ["items" .= ([] :: [Value]), "has_more" .= False])
 
+    it "lists all active workspaces in local mode" $ \app -> do
+      wsAResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("local-visible-a" :: T.Text)])
+      wsBResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("local-visible-b" :: T.Text)])
+      let Just wsA = decode (respBody wsAResp) :: Maybe Workspace
+          Just wsB = decode (respBody wsBResp) :: Maybe Workspace
+
+      resp <- get_ app "/api/v1/workspaces"
+      respStatus resp `shouldBe` 200
+      let Just result = decode (respBody resp) :: Maybe (PaginatedResult Workspace)
+      map (.id) result.items `shouldContain` [wsA.id, wsB.id]
+
+    it "lists only principal-visible workspaces for deployed non-superadmins" $ \_ ->
+      withTestEnv $ \env -> do
+        wsA <- createTestWorkspace env "visible-workspace-a"
+        wsB <- createTestWorkspace env "visible-workspace-b"
+        wsHidden <- createTestWorkspace env "visible-workspace-hidden"
+        memberUserId <- createTestUser env False False
+        outsiderUserId <- createTestUser env False False
+        _ <- grantWorkspaceRole env wsB.id memberUserId Auth.WorkspaceRoleRead
+        _ <- grantWorkspaceRole env wsA.id memberUserId Auth.WorkspaceRoleAdmin
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal memberUserId) $ \memberApp -> do
+          resp <- get_ memberApp "/api/v1/workspaces"
+          respStatus resp `shouldBe` 200
+          let Just result = decode (respBody resp) :: Maybe (PaginatedResult Workspace)
+          map (.id) result.items `shouldBe` [wsA.id, wsB.id]
+          map (.id) result.items `shouldNotContain` [wsHidden.id]
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal outsiderUserId) $ \outsiderApp -> do
+          resp <- get_ outsiderApp "/api/v1/workspaces"
+          respStatus resp `shouldBe` 200
+          let Just result = decode (respBody resp) :: Maybe (PaginatedResult Workspace)
+          result.items `shouldBe` []
+
+    it "lets deployed superadmins list all active workspaces" $ \_ ->
+      withTestEnv $ \env -> do
+        wsA <- createTestWorkspace env "super-visible-a"
+        wsB <- createTestWorkspace env "super-visible-b"
+        superadminUserId <- createTestUser env False True
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal superadminUserId) $ \superApp -> do
+          resp <- get_ superApp "/api/v1/workspaces"
+          respStatus resp `shouldBe` 200
+          let Just result = decode (respBody resp) :: Maybe (PaginatedResult Workspace)
+          map (.id) result.items `shouldContain` [wsA.id, wsB.id]
+
+    it "uses stable id ordering for duplicate workspace names" $ \_ ->
+      withTestEnv $ \env -> do
+        wsA <- createTestWorkspace env "duplicate-visible-name"
+        wsB <- createTestWorkspace env "duplicate-visible-name"
+        memberUserId <- createTestUser env False False
+        _ <- grantWorkspaceRole env wsA.id memberUserId Auth.WorkspaceRoleRead
+        _ <- grantWorkspaceRole env wsB.id memberUserId Auth.WorkspaceRoleRead
+        let expectedFirst = if wsA.id < wsB.id then wsA.id else wsB.id
+            expectedSecond = if wsA.id < wsB.id then wsB.id else wsA.id
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal memberUserId) $ \memberApp -> do
+          firstResp <- get_ memberApp "/api/v1/workspaces?limit=1&offset=0"
+          respStatus firstResp `shouldBe` 200
+          let Just firstPage = decode (respBody firstResp) :: Maybe (PaginatedResult Workspace)
+          map (.id) firstPage.items `shouldBe` [expectedFirst]
+          firstPage.hasMore `shouldBe` True
+
+          secondResp <- get_ memberApp "/api/v1/workspaces?limit=1&offset=1"
+          respStatus secondResp `shouldBe` 200
+          let Just secondPage = decode (respBody secondResp) :: Maybe (PaginatedResult Workspace)
+          map (.id) secondPage.items `shouldBe` [expectedSecond]
+
   describe "POST /api/v1/workspaces" $ do
     it "creates a workspace" $ \app -> do
       resp <- postJSON app "/api/v1/workspaces"
@@ -1096,16 +1166,20 @@ spec = around withApp $ do
             (object ["name" .= ("plain-create-denied" :: T.Text)])
           respStatus deniedCreateResp `shouldBe` 403
 
-          deniedGlobalListResp <- get_ plainApp "/api/v1/workspaces"
-          respStatus deniedGlobalListResp `shouldBe` 403
+          visibleListResp <- get_ plainApp "/api/v1/workspaces"
+          respStatus visibleListResp `shouldBe` 200
+          let Just visibleList = decode (respBody visibleListResp) :: Maybe (PaginatedResult Workspace)
+          visibleList.items `shouldBe` []
 
         withPrincipalApp env deployedAuthCfg (grantPrincipal creatorUserId) $ \creatorApp -> do
           allowedCreateResp <- postJSON creatorApp "/api/v1/workspaces"
             (object ["name" .= ("creator-create-allowed" :: T.Text)])
           respStatus allowedCreateResp `shouldBe` 200
 
-          deniedGlobalListResp <- get_ creatorApp "/api/v1/workspaces"
-          respStatus deniedGlobalListResp `shouldBe` 403
+          visibleListResp <- get_ creatorApp "/api/v1/workspaces"
+          respStatus visibleListResp `shouldBe` 200
+          let Just visibleList = decode (respBody visibleListResp) :: Maybe (PaginatedResult Workspace)
+          map (.name) visibleList.items `shouldContain` ["creator-create-allowed"]
 
         ws <- createTestWorkspace env "superadmin-bypass-ws"
         withPrincipalApp env deployedAuthCfg (grantPrincipal superadminUserId) $ \superApp -> do

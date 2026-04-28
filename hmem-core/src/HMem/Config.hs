@@ -30,6 +30,12 @@ module HMem.Config
     -- * Derived helpers
   , connectionString
   , serverUrl
+  , serverHostIsLoopback
+  , corsAllowsRemoteOrigins
+  , localImplicitBootstrapActive
+  , localImplicitBootstrapAllowed
+  , localImplicitBootstrapExposesRemote
+  , localImplicitBootstrapStartupError
   , authStaticBearerEnabled
   , authStaticBearerToken
   ) where
@@ -37,6 +43,7 @@ module HMem.Config
 import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), ToJSON(..), (.:), (.:?), (.!=), (.=))
 import Data.Aeson qualified as Aeson
+import Data.Char (isDigit)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -45,6 +52,7 @@ import System.Environment (lookupEnv)
 import System.Directory (getHomeDirectory, doesFileExist, createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
+import Text.Read (readMaybe)
 
 ------------------------------------------------------------------------
 -- Config types
@@ -95,8 +103,9 @@ data LocalBotTokenConfig = LocalBotTokenConfig
   } deriving stock (Show, Eq)
 
 data LocalAuthConfig = LocalAuthConfig
-  { bootstrapEnabled :: !Bool
-  , botTokens        :: ![LocalBotTokenConfig]
+  { bootstrapEnabled      :: !Bool
+  , allowRemoteBootstrap :: !Bool
+  , botTokens            :: ![LocalBotTokenConfig]
   } deriving stock (Show, Eq)
 
 data DeployedAuthConfig = DeployedAuthConfig
@@ -244,11 +253,13 @@ instance ToJSON LocalBotTokenConfig where
 instance FromJSON LocalAuthConfig where
   parseJSON = Aeson.withObject "LocalAuthConfig" $ \o -> LocalAuthConfig
     <$> o .:? "bootstrap_enabled" .!= True
+    <*> o .:? "allow_remote_bootstrap" .!= False
     <*> o .:? "bot_tokens" .!= []
 
 instance ToJSON LocalAuthConfig where
   toJSON localCfg = Aeson.object
     [ "bootstrap_enabled" .= localCfg.bootstrapEnabled
+    , "allow_remote_bootstrap" .= localCfg.allowRemoteBootstrap
     , "bot_tokens" .= localCfg.botTokens
     ]
 
@@ -372,6 +383,7 @@ defCors = CorsConfig { allowedOrigins = defCorsOrigins }
 defLocalAuth :: LocalAuthConfig
 defLocalAuth = LocalAuthConfig
   { bootstrapEnabled = True
+  , allowRemoteBootstrap = False
   , botTokens = []
   }
 
@@ -501,7 +513,7 @@ validateConfig cfg = (warnings, corrected)
     (dbWarns,  db)  = validateDatabase cfg.database
     (plWarns,  pl)  = validatePool cfg.pool
     (lgWarns,  lg)  = validateLog cfg.logging
-    (auWarns,  au)  = validateAuth cfg.auth
+    (auWarns,  au)  = validateAuth srv cfg.auth
     (rlWarns,  rl)  = validateRateLimit cfg.rateLimit
     warnings  = srvWarns <> dbWarns <> plWarns <> lgWarns <> auWarns <> rlWarns
     corrected = cfg { server = srv, database = db, pool = pl, logging = lg, auth = au, rateLimit = rl }
@@ -535,7 +547,7 @@ validateConfig cfg = (warnings, corrected)
           (ws2, bc) = clampField "logging.backup_count" 0 100 l.backupCount
       in  (ws1 <> ws2, LogConfig { level = l.level, maxSizeMB = ms, backupCount = bc })
 
-    validateAuth a = (missingLegacyWarn <> deployedWarns, a)
+    validateAuth s a = (missingLegacyWarn <> localExposureWarns <> deployedWarns, a)
       where
         missingLegacyWarn
           | a.mode == AuthModeLocal
@@ -543,6 +555,20 @@ validateConfig cfg = (warnings, corrected)
           , Nothing <- a.apiKey =
               ["auth.enabled is true but no auth.api_key or HMEM_API_KEY is configured; current runtime will not enable legacy static bearer auth until richer mode-specific auth is implemented"]
           | otherwise = []
+
+        localExposureWarns
+          | a.mode /= AuthModeLocal = []
+          | not a.local.bootstrapEnabled = []
+          | null exposureReasons = []
+          | a.local.allowRemoteBootstrap = map escapeHatchWarning exposureReasons
+          | otherwise =
+              [ "auth.local.bootstrap_enabled is true in local mode with " <> joinedReasons <> "; implicit local superadmin is loopback/CORS-local only by default and startup validation will refuse this unless auth.local.allow_remote_bootstrap is true" ]
+          where
+            exposureReasons = localExposureReasons s cfg.cors
+            joinedReasons = joinReasons exposureReasons
+
+            escapeHatchWarning reason =
+              "auth.local.allow_remote_bootstrap is true with " <> reason <> "; implicit local superadmin may be reachable by remote clients; only use this on trusted private networks"
 
         deployedWarns
           | a.mode /= AuthModeDeployed = []
@@ -577,6 +603,18 @@ validateConfig cfg = (warnings, corrected)
       | val > hi  = ([name <> ": " <> show val <> " exceeds maximum " <> show hi <> "; using " <> show hi], hi)
       | otherwise = ([], val)
 
+    showText txt = "'" <> T.unpack txt <> "'"
+
+    joinReasons = \case
+      []       -> ""
+      [x]      -> x
+      x : rest -> x <> concatMap (", " <>) rest
+
+    localExposureReasons s corsCfg = concat
+      [ ["server.host is " <> showText s.host | not (serverHostIsLoopback s.host)]
+      , ["cors.allowed_origins permits remote origins" | corsAllowsRemoteOrigins corsCfg]
+      ]
+
 ------------------------------------------------------------------------
 -- Derived helpers
 ------------------------------------------------------------------------
@@ -600,6 +638,84 @@ connectionString dc = T.intercalate " " $ concat
 -- | Build the server base URL, e.g. @http:\/\/127.0.0.1:8420@.
 serverUrl :: ServerConfig -> Text
 serverUrl sc = "http://" <> sc.host <> ":" <> T.pack (show sc.port)
+
+-- | Whether a configured host is loopback-only for the local-mode implicit
+-- superadmin safety policy.
+serverHostIsLoopback :: Text -> Bool
+serverHostIsLoopback host =
+  let h = T.toLower (T.strip host)
+  in h == "localhost"
+    || h == "::1"
+    || h == "[::1]"
+    || maybe False isIPv4Loopback (parseIPv4 h)
+  where
+    isIPv4Loopback octets = case octets of
+      127 : _ -> True
+      _       -> False
+
+    parseIPv4 txt = case traverse parseOctet (T.splitOn "." txt) of
+      Just [a, b, c, d] -> Just [a, b, c, d]
+      _                 -> Nothing
+
+    parseOctet part
+      | T.null part = Nothing
+      | not (T.all isDigit part) = Nothing
+      | otherwise = do
+          value <- readMaybe (T.unpack part)
+          if value >= (0 :: Int) && value <= 255
+            then Just value
+            else Nothing
+
+-- | Whether CORS config permits browser requests from non-loopback origins.
+corsAllowsRemoteOrigins :: CorsConfig -> Bool
+corsAllowsRemoteOrigins corsCfg = any allowsRemote corsCfg.allowedOrigins
+  where
+    allowsRemote origin
+      | T.strip origin == "*" = True
+      | otherwise = not (maybe False serverHostIsLoopback (originHost origin))
+
+    originHost origin =
+      let trimmed = T.strip origin
+          withoutScheme = case T.splitOn "://" trimmed of
+            [_scheme, rest] -> rest
+            _               -> trimmed
+          authority = T.takeWhile (/= '/') withoutScheme
+      in if T.null authority
+          then Nothing
+          else if "[" `T.isPrefixOf` authority
+            then case T.breakOn "]" (T.drop 1 authority) of
+              (ipv6Host, suffix)
+                | "]" `T.isPrefixOf` suffix -> Just ipv6Host
+              _ -> Nothing
+            else Just (T.takeWhile (/= ':') authority)
+
+-- | Whether local mode would synthesize the implicit local superadmin.
+localImplicitBootstrapActive :: HMemConfig -> Bool
+localImplicitBootstrapActive cfg =
+  cfg.auth.mode == AuthModeLocal && cfg.auth.local.bootstrapEnabled
+
+-- | Config gate for the implicit local superadmin policy.
+localImplicitBootstrapAllowed :: HMemConfig -> Bool
+localImplicitBootstrapAllowed cfg =
+  not (localImplicitBootstrapActive cfg)
+    || cfg.auth.local.allowRemoteBootstrap
+    || (serverHostIsLoopback cfg.server.host && not (corsAllowsRemoteOrigins cfg.cors))
+
+-- | Whether the implicit local superadmin would be reachable from non-loopback
+-- clients under the current config.
+localImplicitBootstrapExposesRemote :: HMemConfig -> Bool
+localImplicitBootstrapExposesRemote cfg =
+  localImplicitBootstrapActive cfg
+    && (not (serverHostIsLoopback cfg.server.host) || corsAllowsRemoteOrigins cfg.cors)
+
+-- | Startup refusal message for unsafe implicit local superadmin exposure.
+localImplicitBootstrapStartupError :: HMemConfig -> Maybe Text
+localImplicitBootstrapStartupError cfg
+  | localImplicitBootstrapAllowed cfg = Nothing
+  | otherwise = Just $
+      "Unsafe local auth configuration: auth.mode=local and auth.local.bootstrap_enabled=true would expose the implicit local superadmin. "
+      <> "Remediation: bind server.host to localhost/127.0.0.1 with local-only CORS, set auth.local.bootstrap_enabled=false, switch auth.mode=deployed, "
+      <> "or set auth.local.allow_remote_bootstrap=true only on trusted private networks."
 
 -- | Whether the currently implemented legacy static bearer auth path can
 -- actually be enforced with the loaded config.

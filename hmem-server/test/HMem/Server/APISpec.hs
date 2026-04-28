@@ -87,7 +87,7 @@ testAuthCfg = Config.defaultConfig
       { Config.mode = Config.AuthModeLocal
       , Config.enabled = True
       , Config.apiKey = Just "test-secret"
-      , Config.local = Config.LocalAuthConfig { Config.bootstrapEnabled = True, Config.botTokens = [] }
+      , Config.local = Config.LocalAuthConfig { Config.bootstrapEnabled = True, Config.allowRemoteBootstrap = False, Config.botTokens = [] }
       , Config.deployed = Config.DeployedAuthConfig
           { Config.issuer = Nothing
           , Config.audience = Nothing
@@ -114,7 +114,7 @@ deployedAuthCfg = Config.defaultConfig
       { Config.mode = Config.AuthModeDeployed
       , Config.enabled = False
       , Config.apiKey = Nothing
-      , Config.local = Config.LocalAuthConfig { Config.bootstrapEnabled = False, Config.botTokens = [] }
+      , Config.local = Config.LocalAuthConfig { Config.bootstrapEnabled = False, Config.allowRemoteBootstrap = False, Config.botTokens = [] }
       }
   }
 
@@ -1309,6 +1309,7 @@ spec = around withApp $ do
                 { Config.mode = Config.AuthModeLocal
                 , Config.local = Config.LocalAuthConfig
                     { Config.bootstrapEnabled = True
+                    , Config.allowRemoteBootstrap = False
                     , Config.botTokens = [Config.LocalBotTokenConfig { Config.label = "Agent", Config.token = "bot-secret" }]
                     }
                 }
@@ -1533,6 +1534,7 @@ spec = around withApp $ do
                 { Config.mode = Config.AuthModeLocal
                 , Config.local = Config.LocalAuthConfig
                     { Config.bootstrapEnabled = True
+                    , Config.allowRemoteBootstrap = False
                     , Config.botTokens = [Config.LocalBotTokenConfig { Config.label = "Codex Bot", Config.token = "codex-secret" }]
                     }
                 }

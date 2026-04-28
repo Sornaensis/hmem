@@ -1,6 +1,7 @@
 module HMem.ConfigSpec (spec) where
 
 import Data.ByteString.Char8 qualified as BS8
+import Data.List (isInfixOf)
 import Data.Yaml qualified as Yaml
 import Test.Hspec
 
@@ -79,10 +80,69 @@ spec = do
           (_, validated) = validateConfig cfg
       authStaticBearerEnabled validated.auth `shouldBe` False
 
+    it "warns when implicit local superadmin is configured on a non-loopback host without the escape hatch" $ do
+      let remoteServer = ServerConfig { port = defaultConfig.server.port, host = "0.0.0.0" }
+          cfg = defaultConfig
+            { server = remoteServer
+            , auth = defaultConfig.auth
+                { mode = AuthModeLocal
+                , local = defaultConfig.auth.local { bootstrapEnabled = True, allowRemoteBootstrap = False }
+                }
+            }
+          (warnings, _) = validateConfig cfg
+      warnings `shouldSatisfy` any ("loopback/CORS-local only by default" `isInfixOf`)
+      localImplicitBootstrapActive cfg `shouldBe` True
+      localImplicitBootstrapAllowed cfg `shouldBe` False
+      localImplicitBootstrapExposesRemote cfg `shouldBe` True
+
+    it "warns and disallows implicit local superadmin with permissive CORS" $ do
+      let cfg = defaultConfig { cors = CorsConfig { allowedOrigins = ["*"] } }
+          (warnings, _) = validateConfig cfg
+      warnings `shouldSatisfy` any ("cors.allowed_origins permits remote origins" `isInfixOf`)
+      corsAllowsRemoteOrigins cfg.cors `shouldBe` True
+      localImplicitBootstrapAllowed cfg `shouldBe` False
+      localImplicitBootstrapStartupError cfg `shouldSatisfy` (/= Nothing)
+
+    it "allows but strongly warns for explicit remote local bootstrap" $ do
+      let remoteServer = ServerConfig { port = defaultConfig.server.port, host = "0.0.0.0" }
+          cfg = defaultConfig
+            { server = remoteServer
+            , auth = defaultConfig.auth
+                { mode = AuthModeLocal
+                , local = defaultConfig.auth.local { bootstrapEnabled = True, allowRemoteBootstrap = True }
+                }
+            }
+          (warnings, _) = validateConfig cfg
+      warnings `shouldSatisfy` any ("allow_remote_bootstrap is true" `isInfixOf`)
+      localImplicitBootstrapAllowed cfg `shouldBe` True
+      localImplicitBootstrapExposesRemote cfg `shouldBe` True
+
+    it "allows implicit local superadmin on loopback by default" $ do
+      let cfg = defaultConfig
+      localImplicitBootstrapActive cfg `shouldBe` True
+      localImplicitBootstrapAllowed cfg `shouldBe` True
+      localImplicitBootstrapExposesRemote cfg `shouldBe` False
+
+    it "classifies only concrete loopback hosts as loopback" $ do
+      serverHostIsLoopback "localhost" `shouldBe` True
+      serverHostIsLoopback "127.0.0.1" `shouldBe` True
+      serverHostIsLoopback "127.12.34.56" `shouldBe` True
+      serverHostIsLoopback "::1" `shouldBe` True
+      serverHostIsLoopback "0.0.0.0" `shouldBe` False
+      serverHostIsLoopback "127.example.com" `shouldBe` False
+      serverHostIsLoopback "127.0.0.999" `shouldBe` False
+
+    it "classifies concrete remote CORS origins as remote" $ do
+      corsAllowsRemoteOrigins (CorsConfig { allowedOrigins = ["http://localhost:3000", "http://127.0.0.1"] }) `shouldBe` False
+      corsAllowsRemoteOrigins (CorsConfig { allowedOrigins = ["*"] }) `shouldBe` True
+      corsAllowsRemoteOrigins (CorsConfig { allowedOrigins = ["https://example.com"] }) `shouldBe` True
+      corsAllowsRemoteOrigins (CorsConfig { allowedOrigins = ["https://localhost.evil.example"] }) `shouldBe` True
+
   describe "default auth schema" $ do
     it "defaults to local auth mode with local bootstrap enabled" $ do
       defaultConfig.auth.mode `shouldBe` AuthModeLocal
       defaultConfig.auth.local.bootstrapEnabled `shouldBe` True
+      defaultConfig.auth.local.allowRemoteBootstrap `shouldBe` False
 
     it "defaults deployed token lookup to database" $ do
       defaultConfig.auth.deployed.tokenLookup `shouldBe` TokenLookupDatabase
@@ -129,6 +189,7 @@ spec = do
                 , enabled = True
                 , local = LocalAuthConfig
                     { bootstrapEnabled = False
+                    , allowRemoteBootstrap = True
                     , botTokens = [ LocalBotTokenConfig { label = "codex", token = "secret-token" } ]
                     }
                 , deployed = DeployedAuthConfig

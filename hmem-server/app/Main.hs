@@ -10,6 +10,7 @@ import Network.Wai.Handler.Warp (defaultSettings, runSettings, setHost, setPort,
 import Network.Wai.Handler.WarpTLS (runTLS, tlsSettings)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing)
+import System.Exit (exitFailure)
 import System.FilePath ((</>))
 import System.IO (BufferMode(..), hPutStrLn, hSetBuffering, stderr)
 import System.Log.FastLogger (LogType'(LogFile, LogStderr), FileLogSpec(..), defaultBufSize, newFastLogger)
@@ -119,11 +120,25 @@ runDevMode opts = do
       Just dir -> "serving from " <> T.pack dir
       Nothing  -> "no static/ found — run 'stack run build-frontend' first"
     logInfo logger "[dev] WebSocket: enabled at /api/v1/ws"
-    logInfo logger "[dev] Auth: disabled"
+    logInfo logger "[dev] Auth: local implicit superadmin (loopback/local-CORS only)"
     logInfo logger "[dev] Press Ctrl-C to stop (ephemeral DB will be destroyed)"
 
     let devAuth = Config.defaultConfig.auth { Config.enabled = False, Config.apiKey = Nothing }
-        devCors = Config.CorsConfig { allowedOrigins = ["*"] }
+        devCors = Config.CorsConfig
+          { allowedOrigins =
+              [ "http://localhost"
+              , "http://localhost:" <> T.pack (show port)
+              , "http://localhost:5173"
+              , "http://127.0.0.1"
+              , "http://127.0.0.1:" <> T.pack (show port)
+              , "http://127.0.0.1:5173"
+              ]
+          }
+        devConfigForPolicy = Config.defaultConfig
+          { Config.server = Config.ServerConfig { Config.port = port, Config.host = "127.0.0.1" }
+          , Config.auth = devAuth
+          , Config.cors = devCors
+          }
         devRateLimit = Config.RateLimitConfig { rlEnabled = False, rlRequestsPerSecond = 100, rlBurst = 200 }
         settings = setHost (fromString "127.0.0.1") $ setPort port $ setTimeout 60 $ setGracefulShutdownTimeout (Just 5) $ defaultSettings
         shutdown = do
@@ -131,6 +146,13 @@ runDevMode opts = do
           flushNow pool tracker `catch` \(_ :: SomeException) -> pure ()
           destroyAllResources pool
           cleanupLog
+
+    case Config.localImplicitBootstrapStartupError devConfigForPolicy of
+      Just err -> do
+        logWarn logger $ "[dev] Refusing unsafe local auth config: " <> err
+        cleanupLog
+        exitFailure
+      Nothing -> pure ()
 
     app <- mkApp requestLogger devAuth devCors devRateLimit pool tracker wsState mStaticDir pgvec
     runSettings settings app `finally` shutdown
@@ -252,6 +274,12 @@ runNormalMode :: Opts -> IO ()
 runNormalMode opts = do
   cfg <- Config.loadConfig
 
+  case Config.localImplicitBootstrapStartupError cfg of
+    Just err -> do
+      hPutStrLn stderr $ "Config error: " <> T.unpack err
+      exitFailure
+    Nothing -> pure ()
+
   let port    = fromMaybe cfg.server.port opts.optPort
       connStr = maybe (Config.connectionString cfg.database) T.pack opts.optDbConn
       poolSz  = fromMaybe cfg.pool.size opts.optPool
@@ -295,11 +323,9 @@ runNormalMode opts = do
   logInfo logger $ "WebSocket: enabled at /api/v1/ws"
 
   -- Warn when CORS origins are localhost-only but server is network-accessible
-  let isLoopback h = h `elem` ["127.0.0.1", "localhost", "::1"]
-      originsAreLocal = not (null cfg.cors.allowedOrigins)
-                     && "*" `notElem` cfg.cors.allowedOrigins
-                     && all (\o -> any (`T.isInfixOf` o) ["localhost", "127.0.0.1", "::1"]) cfg.cors.allowedOrigins
-  when (not (isLoopback cfg.server.host) && originsAreLocal) $
+  let originsAreLocal = not (null cfg.cors.allowedOrigins)
+                     && not (Config.corsAllowsRemoteOrigins cfg.cors)
+  when (not (Config.serverHostIsLoopback cfg.server.host) && originsAreLocal) $
     logWarn logger $ "CORS allowedOrigins are localhost-only but server is bound to "
                   <> cfg.server.host <> " — remote clients will be rejected by CORS"
 

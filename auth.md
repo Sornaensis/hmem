@@ -13,6 +13,7 @@ Use local mode for personal development and single-user automation.
 - Default mode: `auth.mode: local`
 - Local bootstrap is enabled by default.
 - With local bootstrap enabled, the local user has superadmin privileges.
+- The implicit local superadmin is loopback/local-CORS only by default; binding local mode to a non-loopback host or permissive CORS requires the explicit `auth.local.allow_remote_bootstrap: true` escape hatch and should only be used on trusted private networks.
 - Optional local bot tokens label automated actions in audit/events.
 - Legacy `auth.enabled: true` plus `auth.api_key` / `HMEM_API_KEY` is local-only static bearer compatibility. Do not use it for deployed auth.
 
@@ -23,6 +24,7 @@ auth:
   mode: local
   local:
     bootstrap_enabled: true
+    allow_remote_bootstrap: false
     bot_tokens:
       - label: local-service
         token: replace-with-local-service-token

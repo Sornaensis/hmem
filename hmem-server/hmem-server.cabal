@@ -29,6 +29,7 @@ library
       HMem.Server.App
       HMem.Server.AuthBootstrap
       HMem.Server.AuthTokens
+      HMem.Server.AuthUsers
       HMem.Server.Event
       HMem.Server.Logging
       HMem.Server.OpenAPI
@@ -301,6 +302,7 @@ test-suite hmem-server-test
       HMem.Server.APISpec
       HMem.Server.AuthBootstrapSpec
       HMem.Server.AuthTokensSpec
+      HMem.Server.AuthUsersSpec
       SpecHook
       Paths_hmem_server
   hs-source-dirs:

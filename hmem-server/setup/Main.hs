@@ -12,6 +12,7 @@
 --   @hmem-ctl projects@      – list projects (with optional name/workspace filter)
 --   @hmem-ctl workspace@    – interactively select/create workspace, write .hmem.workspace
 --   @hmem-ctl auth bootstrap-superadmin@ – create/update the first deployed superadmin
+--   @hmem-ctl auth users upsert@ – create/update deployed users and global grants
 --   @hmem-ctl auth tokens issue@ – create a display-once service/PAT token
 --
 --   Requires: initdb, pg_ctl, createdb, psql on PATH (ships with PostgreSQL).
@@ -61,6 +62,7 @@ import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool qualified as Pool
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
+import HMem.Server.AuthUsers qualified as AuthUsers
 import HMem.Types
 import Paths_hmem_server qualified as Paths
 
@@ -84,7 +86,11 @@ data Command
 
 data AuthCommand
   = CmdBootstrapSuperadmin BootstrapSuperadminOpts
+  | CmdUsers UserCommand
   | CmdTokens TokenCommand
+
+data UserCommand
+  = CmdUpsertUser UpsertUserOpts
 
 data TokenCommand
   = CmdIssueToken IssueTokenOpts
@@ -113,6 +119,16 @@ data RotateTokenOpts = RotateTokenOpts
 
 data RevokeTokenOpts = RevokeTokenOpts
   { revokeTokenId :: String
+  }
+
+data UpsertUserOpts = UpsertUserOpts
+  { upsertAuthSubject        :: String
+  , upsertEmail              :: Maybe String
+  , upsertDisplayName        :: Maybe String
+  , upsertCanCreateWorkspace :: Bool
+  , upsertNoCreateWorkspace  :: Bool
+  , upsertSuperadmin         :: Bool
+  , upsertNoSuperadmin       :: Bool
   }
 
 data WorkspacesOpts = WorkspacesOpts
@@ -156,9 +172,51 @@ authCommandParser :: Parser AuthCommand
 authCommandParser = subparser
   ( command "bootstrap-superadmin" (info ((CmdBootstrapSuperadmin <$> bootstrapSuperadminParser) <**> helper)
       (progDesc "Create or update the deployed first superadmin user"))
+  <> command "users" (info (CmdUsers <$> userCommandParser)
+      (progDesc "Create or update deployed users and global grants"))
   <> command "tokens" (info (CmdTokens <$> tokenCommandParser)
       (progDesc "Issue, rotate, and revoke service/PAT tokens"))
   )
+
+userCommandParser :: Parser UserCommand
+userCommandParser = subparser
+  ( command "upsert" (info ((CmdUpsertUser <$> upsertUserParser) <**> helper)
+      (progDesc "Create or update a deployed user and global grants"))
+  )
+
+upsertUserParser :: Parser UpsertUserOpts
+upsertUserParser = UpsertUserOpts
+  <$> strOption
+      ( long "auth-subject"
+     <> metavar "SUBJECT"
+     <> help "Stable provider subject claim for the user"
+      )
+  <*> optional (strOption
+      ( long "email"
+     <> metavar "EMAIL"
+     <> help "Optional email for the user"
+      ))
+  <*> optional (strOption
+      ( long "display-name"
+     <> metavar "NAME"
+     <> help "Optional display name for the user"
+      ))
+  <*> switch
+      ( long "can-create-workspace"
+     <> help "Grant global create_workspace"
+      )
+  <*> switch
+      ( long "no-create-workspace"
+     <> help "Revoke global create_workspace"
+      )
+  <*> switch
+      ( long "superadmin"
+     <> help "Grant global superadmin"
+      )
+  <*> switch
+      ( long "no-superadmin"
+     <> help "Revoke global superadmin"
+      )
 
 tokenCommandParser :: Parser TokenCommand
 tokenCommandParser = subparser
@@ -1247,7 +1305,12 @@ removeIfExists path = do
 doAuth :: AuthCommand -> IO ()
 doAuth = \case
   CmdBootstrapSuperadmin opts -> doBootstrapSuperadmin opts
+  CmdUsers userCmd -> doUserCommand userCmd
   CmdTokens tokenCmd -> doTokenCommand tokenCmd
+
+doUserCommand :: UserCommand -> IO ()
+doUserCommand = \case
+  CmdUpsertUser opts -> doUpsertUser opts
 
 doTokenCommand :: TokenCommand -> IO ()
 doTokenCommand = \case
@@ -1303,9 +1366,49 @@ bootstrapDecisionText = \case
   AuthBootstrap.BootstrapUpdated -> "updated"
   AuthBootstrap.BootstrapAlreadySatisfied -> "already-satisfied"
 
+doUpsertUser :: UpsertUserOpts -> IO ()
+doUpsertUser opts = do
+  cfg <- loadAuthOperatorConfig "auth users upsert" "user/global-grant administration is intended for deployed auth"
+  canCreate <- parseGrantFlag "create_workspace" opts.upsertCanCreateWorkspace opts.upsertNoCreateWorkspace
+  superadmin <- parseGrantFlag "superadmin" opts.upsertSuperadmin opts.upsertNoSuperadmin
+  let input = AuthUsers.UpsertUserInput
+        { AuthUsers.authSubject = T.pack (strip opts.upsertAuthSubject)
+        , AuthUsers.email = normalizeOptionalText opts.upsertEmail
+        , AuthUsers.displayName = normalizeOptionalText opts.upsertDisplayName
+        , AuthUsers.canCreateWorkspace = canCreate
+        , AuthUsers.isSuperadmin = superadmin
+        }
+  pool <- Pool.createPool (connectionString cfg.database) 2 60 30000
+  result <- AuthUsers.upsertUser pool input
+  case result of
+    Left AuthUsers.EmptyAuthSubject -> do
+      hPutStrLn stderr "Error: --auth-subject must not be empty."
+      exitFailure
+    Right user -> do
+      putStrLn "User upsert complete."
+      putStrLn $ "  User ID:              " <> show user.userId
+      putStrLn $ "  Decision:             " <> userDecisionText user.decision
+      putStrLn $ "  create_workspace:     " <> show user.canCreateWorkspace
+      putStrLn $ "  superadmin:           " <> show user.isSuperadmin
+      putStrLn "Workspace memberships remain managed through workspace-admin APIs."
+
+parseGrantFlag :: String -> Bool -> Bool -> IO (Maybe Bool)
+parseGrantFlag name grant revoke
+  | grant && revoke = do
+      hPutStrLn stderr $ "Error: conflicting grant flags for " <> name <> "."
+      exitFailure
+  | grant = pure (Just True)
+  | revoke = pure (Just False)
+  | otherwise = pure Nothing
+
+userDecisionText :: AuthUsers.UpsertUserDecision -> String
+userDecisionText = \case
+  AuthUsers.UserCreated -> "created"
+  AuthUsers.UserUpdated -> "updated"
+
 doIssueToken :: IssueTokenOpts -> IO ()
 doIssueToken opts = do
-  cfg <- loadAuthOperatorConfig "auth tokens issue"
+  cfg <- loadAuthOperatorConfig "auth tokens issue" "token operations are intended for deployed auth"
   grantUserId <- parseUuidOption "--grant-user-id" opts.issueGrantUserId
   actorType <- parseActorTypeOption opts.issueActorType
   expiry <- parseMaybeTimeOption "--expires-at" opts.issueExpiresAt
@@ -1323,7 +1426,7 @@ doIssueToken opts = do
 
 doRotateToken :: RotateTokenOpts -> IO ()
 doRotateToken opts = do
-  cfg <- loadAuthOperatorConfig "auth tokens rotate"
+  cfg <- loadAuthOperatorConfig "auth tokens rotate" "token operations are intended for deployed auth"
   tokenId <- parseUuidOption "--token-id" opts.rotateTokenId
   expiry <- parseMaybeTimeOption "--expires-at" opts.rotateExpiresAt
   let input = AuthTokens.RotateAccessTokenInput
@@ -1343,7 +1446,7 @@ doRotateToken opts = do
 
 doRevokeToken :: RevokeTokenOpts -> IO ()
 doRevokeToken opts = do
-  cfg <- loadAuthOperatorConfig "auth tokens revoke"
+  cfg <- loadAuthOperatorConfig "auth tokens revoke" "token operations are intended for deployed auth"
   tokenId <- parseUuidOption "--token-id" opts.revokeTokenId
   pool <- Pool.createPool (connectionString cfg.database) 2 60 30000
   revoked <- AuthTokens.revokeAccessToken pool tokenId
@@ -1353,12 +1456,12 @@ doRevokeToken opts = do
       hPutStrLn stderr $ "Error: token not found or already revoked: " <> show tokenId
       exitFailure
 
-loadAuthOperatorConfig :: String -> IO HMemConfig
-loadAuthOperatorConfig commandName = do
+loadAuthOperatorConfig :: String -> String -> IO HMemConfig
+loadAuthOperatorConfig commandName operationLabel = do
   _ <- ensureInitialized commandName
   cfg <- loadConfig
   when (cfg.auth.mode /= AuthModeDeployed) $
-    hPutStrLn stderr "Warning: auth.mode is not 'deployed'; token operations are intended for deployed auth."
+    hPutStrLn stderr $ "Warning: auth.mode is not 'deployed'; " <> operationLabel <> "."
   pure cfg
 
 parseUuidOption :: String -> String -> IO UUID

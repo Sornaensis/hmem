@@ -101,6 +101,20 @@ Required behavior for the implemented workflow:
 - Logs and output identify the affected user and bootstrap decision, but never print bearer tokens or provider credentials.
 - Operators must verify the result by authenticating as that provider subject and checking that `/api/v1/session` reports `superadmin`.
 
+### User and global-grant administration
+
+Operators can create or update deployed users and global grants with `hmem-ctl auth users upsert`:
+
+```bash
+hmem-ctl auth users upsert \
+  --auth-subject oidc-subject-from-provider \
+  --display-name "Workspace Creator" \
+  --email creator@example.com \
+  --can-create-workspace
+```
+
+Use `--superadmin` / `--no-superadmin` and `--can-create-workspace` / `--no-create-workspace` to update global grants. Workspace memberships remain managed by workspace-admin APIs.
+
 ### Service/PAT token lifecycle
 
 Operators can issue, rotate, and revoke deployed service/PAT tokens with `hmem-ctl auth tokens`. Issuance generates a high-entropy raw token, stores only `token_hash`, and prints the raw token exactly once:

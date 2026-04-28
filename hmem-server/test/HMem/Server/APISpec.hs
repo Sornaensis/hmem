@@ -50,7 +50,7 @@ import HMem.Server.App (mkApp, requestIdMiddleware, resolveRequestPrincipal)
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..))
-import HMem.Server.WebSocket (WorkspaceSubscription(..), consumeTicket, createTicket, eventVisibleToSubscription, newWSState)
+import HMem.Server.WebSocket (WorkspaceSubscription(..), consumeTicket, createTicket, eventVisibleToSubscription, newWSState, resolveLocalWebSocketAccess)
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -985,6 +985,43 @@ spec = around withApp $ do
       eventVisibleToSubscription SubscribeAllWorkspaces event `shouldBe` True
       eventVisibleToSubscription (SubscribeWorkspace wsA) event `shouldBe` True
       eventVisibleToSubscription (SubscribeWorkspace wsB) event `shouldBe` False
+
+    it "allows default local WebSocket all-workspace access only without remote-bootstrap override" $ \_ -> do
+      let defaultLocal = Config.defaultConfig.auth
+          exposedLocal = defaultLocal
+            { Config.local = defaultLocal.local { Config.allowRemoteBootstrap = True }
+            }
+
+      case resolveLocalWebSocketAccess defaultLocal Nothing of
+        Just (Just principal, SubscribeAllWorkspaces) -> do
+          principalActorType principal `shouldBe` ActorUser
+          principalAuthority principal `shouldBe` PrincipalSyntheticLocalSuperadmin
+        other -> expectationFailure $ "expected implicit local WebSocket access, got " <> show other
+
+      resolveLocalWebSocketAccess exposedLocal Nothing `shouldBe` Nothing
+
+    it "requires an explicit local WebSocket token when remote bootstrap override is enabled" $ \_ -> do
+      let exposedLocal = Config.defaultConfig.auth
+            { Config.local = Config.defaultConfig.auth.local
+                { Config.allowRemoteBootstrap = True
+                , Config.botTokens = [Config.LocalBotTokenConfig { Config.label = "Agent", Config.token = "bot-secret" }]
+                }
+            }
+          exposedStatic = exposedLocal { Config.enabled = True, Config.apiKey = Just "static-secret" }
+
+      case resolveLocalWebSocketAccess exposedLocal (Just "bot-secret") of
+        Just (Just principal, SubscribeAllWorkspaces) -> do
+          principalActorType principal `shouldBe` ActorBot
+          principalAuthority principal `shouldBe` PrincipalSyntheticLocalSuperadmin
+        other -> expectationFailure $ "expected local bot WebSocket access, got " <> show other
+
+      case resolveLocalWebSocketAccess exposedStatic (Just "static-secret") of
+        Just (Just principal, SubscribeAllWorkspaces) -> do
+          principalActorType principal `shouldBe` ActorBot
+          principalAuthority principal `shouldBe` PrincipalSyntheticLocalSuperadmin
+        other -> expectationFailure $ "expected legacy static WebSocket access, got " <> show other
+
+      resolveLocalWebSocketAccess exposedLocal (Just "wrong-secret") `shouldBe` Nothing
 
     it "uses WebSocket tickets only once" $ \_ -> do
       wsState <- newWSState

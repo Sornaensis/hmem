@@ -7,6 +7,7 @@ module HMem.Server.WebSocket
   , createTicket
   , consumeTicket
   , eventVisibleToSubscription
+  , resolveLocalWebSocketAccess
     -- * Broadcast
   , broadcast
     -- * WAI integration
@@ -175,12 +176,9 @@ wsApp authCfg st pending
           Just ticket -> accept (Just ticket.ticketPrincipal) (SubscribeWorkspace ticket.ticketWorkspaceId)
           Nothing -> WS.rejectRequest pending "Unauthorized"
       Nothing -> WS.rejectRequest pending "Unauthorized"
-  | authStaticBearerEnabled authCfg = case tokenFromRequest (WS.pendingRequest pending) of
-      Just token
-        | Just principal <- authorizedTokenPrincipal authCfg (TE.decodeUtf8Lenient token) ->
-            accept (Just principal) SubscribeAllWorkspaces
-      _ -> WS.rejectRequest pending "Unauthorized"
-  | otherwise = accept (defaultLocalPrincipal authCfg) SubscribeAllWorkspaces
+  | otherwise = case resolveLocalWebSocketAccess authCfg (TE.decodeUtf8Lenient <$> tokenFromRequest (WS.pendingRequest pending)) of
+      Just (principal, subscription) -> accept principal subscription
+      Nothing -> WS.rejectRequest pending "Unauthorized"
   where
     accept principal subscription = do
       conn <- WS.acceptRequest pending
@@ -216,6 +214,16 @@ ticketFromRequest rh =
 authorizedTokenPrincipal :: AuthConfig -> Text -> Maybe Principal
 authorizedTokenPrincipal authCfg token =
   localBotPrincipal authCfg token <|> legacyPrincipal authCfg token
+
+resolveLocalWebSocketAccess :: AuthConfig -> Maybe Text -> Maybe (Maybe Principal, WorkspaceSubscription)
+resolveLocalWebSocketAccess authCfg mToken
+  | authCfg.mode /= AuthModeLocal = Nothing
+  | Just token <- mToken
+  , Just principal <- authorizedTokenPrincipal authCfg token =
+      Just (Just principal, SubscribeAllWorkspaces)
+  | authStaticBearerEnabled authCfg = Nothing
+  | AuthConfig { local = LocalAuthConfig { allowRemoteBootstrap = True } } <- authCfg = Nothing
+  | otherwise = Just (defaultLocalPrincipal authCfg, SubscribeAllWorkspaces)
 
 localBotPrincipal :: AuthConfig -> Text -> Maybe Principal
 localBotPrincipal authCfg token

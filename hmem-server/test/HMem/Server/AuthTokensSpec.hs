@@ -30,9 +30,11 @@ spec = describe "service/PAT token lifecycle" $ do
         , expiresAt = expiry
         }
 
-      issued.rawToken `shouldSatisfy` T.isPrefixOf "hmem_pat_"
-      T.length issued.rawToken `shouldSatisfy` (>= 80)
-      issued.rawToken `shouldSatisfy` T.all tokenChar
+      issued.rawToken `shouldSatisfy` isGeneratedAccessTokenFormat
+      issued.rawToken `shouldSatisfy` T.isPrefixOf generatedAccessTokenPrefix
+      T.length (T.drop (T.length generatedAccessTokenPrefix) issued.rawToken)
+        `shouldBe` generatedAccessTokenRandomHexChars
+      generatedAccessTokenMinEntropyBits `shouldBe` 256
 
       mResolved <- Auth.resolveAccessTokenPrincipal env.pool issued.rawToken
       case mResolved of
@@ -45,6 +47,18 @@ spec = describe "service/PAT token lifecycle" $ do
 
       rawHashLookup <- Auth.resolveAccessTokenPrincipal env.pool (Auth.accessTokenHash issued.rawToken)
       rawHashLookup `shouldBe` Nothing
+
+  it "defines and validates the official hmem access-token format" $ do
+    first <- generateAccessToken
+    second <- generateAccessToken
+
+    first `shouldSatisfy` isGeneratedAccessTokenFormat
+    second `shouldSatisfy` isGeneratedAccessTokenFormat
+    first `shouldNotBe` second
+
+    isGeneratedAccessTokenFormat "short-token" `shouldBe` False
+    isGeneratedAccessTokenFormat (generatedAccessTokenPrefix <> T.replicate (generatedAccessTokenRandomHexChars - 1) "a") `shouldBe` False
+    isGeneratedAccessTokenFormat (generatedAccessTokenPrefix <> T.replicate generatedAccessTokenRandomHexChars "g") `shouldBe` False
 
   it "uses the explicit least-privilege grant-bearing user as token authority" $
     withTestEnv $ \env -> do
@@ -200,9 +214,6 @@ defaultIssueInput userId = IssueAccessTokenInput
   , actorLabel = "Deploy Bot"
   , expiresAt = Nothing
   }
-
-tokenChar :: Char -> Bool
-tokenChar c = c == '_' || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
 
 expectRight :: (Show e) => Either e a -> IO a
 expectRight = \case

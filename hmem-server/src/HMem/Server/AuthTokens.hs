@@ -10,6 +10,10 @@ module HMem.Server.AuthTokens
   , rotateAccessToken
   , revokeAccessToken
   , generateAccessToken
+  , generatedAccessTokenPrefix
+  , generatedAccessTokenRandomHexChars
+  , generatedAccessTokenMinEntropyBits
+  , isGeneratedAccessTokenFormat
   ) where
 
 import Control.Applicative ((<|>))
@@ -68,6 +72,7 @@ data AccessTokenError
   = EmptyActorLabel
   | GrantUserNotFound !UUID
   | SourceTokenNotFound !UUID
+  | GeneratedTokenFormatInvalid
   deriving stock (Show, Eq)
 
 data TokenTemplate = TokenTemplate
@@ -98,12 +103,34 @@ revokeAccessToken pool tokenId = do
   affected <- runSession pool $ Session.statement tokenId revokeAccessTokenStatement
   pure (affected > 0)
 
+generatedAccessTokenPrefix :: Text
+generatedAccessTokenPrefix = "hmem_pat_v1_"
+
+-- | Officially issued access tokens carry three UUIDv4 random identifiers.
+-- UUIDv4 reserves version/variant bits, so this provides roughly 366 bits of
+-- randomness while keeping a copy/paste-friendly lowercase hexadecimal format.
+generatedAccessTokenRandomHexChars :: Int
+generatedAccessTokenRandomHexChars = 96
+
+generatedAccessTokenMinEntropyBits :: Int
+generatedAccessTokenMinEntropyBits = 256
+
 generateAccessToken :: IO Text
 generateAccessToken = do
   parts <- traverse (const UUIDv4.nextRandom) [1 :: Int, 2, 3]
-  pure $ "hmem_pat_" <> T.concat (map uuidTokenPart parts)
+  pure $ generatedAccessTokenPrefix <> T.concat (map uuidTokenPart parts)
   where
     uuidTokenPart = T.filter (/= '-') . UUID.toText
+
+isGeneratedAccessTokenFormat :: Text -> Bool
+isGeneratedAccessTokenFormat token =
+  T.isPrefixOf generatedAccessTokenPrefix token
+    && T.length randomPart == generatedAccessTokenRandomHexChars
+    && T.all isLowerHex randomPart
+  where
+    randomPart = T.drop (T.length generatedAccessTokenPrefix) token
+
+    isLowerHex c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 
 issueAccessTokenSession
   :: IssueAccessTokenInput
@@ -111,6 +138,7 @@ issueAccessTokenSession
   -> Session.Session (Either AccessTokenError IssuedAccessToken)
 issueAccessTokenSession input raw
   | T.null (T.strip input.actorLabel) = pure (Left EmptyActorLabel)
+  | not (isGeneratedAccessTokenFormat raw) = pure (Left GeneratedTokenFormatInvalid)
   | otherwise = do
       userExists <- Session.statement input.grantUserId userExistsStatement
       if not userExists
@@ -131,24 +159,27 @@ rotateAccessTokenSession
   -> Text
   -> Session.Session (Either AccessTokenError IssuedAccessToken)
 rotateAccessTokenSession input raw = do
-  mTemplate <- Session.statement input.sourceTokenId tokenTemplateStatement
-  case mTemplate of
-    Nothing -> pure (Left (SourceTokenNotFound input.sourceTokenId))
-    Just template -> do
-      tokenId <- Session.statement
-        ( template.templateGrantUserId
-        , accessTokenActorToText template.templateActorType
-        , template.templateActorLabel
-        , Auth.accessTokenHash raw
-        , input.expiresAt <|> template.templateExpiresAt
-        )
-        insertAccessTokenStatement
-      if input.revokeOld
-        then do
-          _ <- Session.statement input.sourceTokenId revokeAccessTokenStatement
-          pure ()
-        else pure ()
-      pure (Right IssuedAccessToken { tokenId = tokenId, rawToken = raw })
+  if not (isGeneratedAccessTokenFormat raw)
+    then pure (Left GeneratedTokenFormatInvalid)
+    else do
+      mTemplate <- Session.statement input.sourceTokenId tokenTemplateStatement
+      case mTemplate of
+        Nothing -> pure (Left (SourceTokenNotFound input.sourceTokenId))
+        Just template -> do
+          tokenId <- Session.statement
+            ( template.templateGrantUserId
+            , accessTokenActorToText template.templateActorType
+            , template.templateActorLabel
+            , Auth.accessTokenHash raw
+            , input.expiresAt <|> template.templateExpiresAt
+            )
+            insertAccessTokenStatement
+          if input.revokeOld
+            then do
+              _ <- Session.statement input.sourceTokenId revokeAccessTokenStatement
+              pure ()
+            else pure ()
+          pure (Right IssuedAccessToken { tokenId = tokenId, rawToken = raw })
 
 userExistsStatement :: Statement.Statement UUID Bool
 userExistsStatement = Statement.Statement sql encoder decoder True

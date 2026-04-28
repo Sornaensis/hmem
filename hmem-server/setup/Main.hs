@@ -1501,6 +1501,8 @@ printTokenError = \case
     hPutStrLn stderr $ "Error: grant-bearing user not found: " <> show userId
   AuthTokens.SourceTokenNotFound tokenId ->
     hPutStrLn stderr $ "Error: source token not found or already revoked: " <> show tokenId
+  AuthTokens.GeneratedTokenFormatInvalid ->
+    hPutStrLn stderr "Error: generated token failed hmem access-token format validation."
 
 ------------------------------------------------------------------------
 -- Query commands (workspaces, projects)

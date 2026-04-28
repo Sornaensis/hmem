@@ -135,7 +135,9 @@ hmem-ctl auth tokens rotate --token-id old-token-row-uuid
 hmem-ctl auth tokens revoke --token-id old-token-row-uuid
 ```
 
-Tokens are operator-managed in v1, not self-service UI objects. Use `--actor-type bot|user`, stable `--actor-label` values, and least-privilege grant-bearing users so automated clients inherit only the permissions they need.
+Officially issued tokens use the `hmem_pat_v1_` prefix plus 96 lowercase hexadecimal characters from UUIDv4 random material, exceeding the 256-bit entropy floor for hmem bearer tokens. Tokens are operator-managed in v1, not self-service UI objects. Use `--actor-type bot|user`, stable `--actor-label` values, and least-privilege grant-bearing users so automated clients inherit only the permissions they need.
+
+If an operator pre-provisions an `access_tokens` row outside `hmem-ctl`, the raw bearer secret must still be generated from at least 256 bits of cryptographically secure randomness. Do not use short, human-chosen, or reusable secrets; store only the canonical `token_hash`, and record the raw token only in a secret manager.
 
 ## Frontend and MCP
 

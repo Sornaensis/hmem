@@ -50,6 +50,7 @@ tests:
       - "-with-rtsopts=-N"
     dependencies:
       - hmem-mcp
+      - hmem-server
       - hspec
       - scientific
 

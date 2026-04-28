@@ -12,12 +12,14 @@ import Data.Maybe (listToMaybe)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.UUID qualified as UUID
 import Test.Hspec
 
 import HMem.Config qualified as Config
 import HMem.MCP.Config
 import HMem.MCP.Tools
+import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -952,6 +954,12 @@ spec = do
     it "builds the outbound bearer Authorization header" $ do
       bearerAuthHeaders (Just "cli-token") `shouldBe` [("Authorization", "Bearer cli-token")]
       bearerAuthHeaders Nothing `shouldBe` []
+
+    it "forwards generated service tokens as bearer credentials" $ do
+      rawToken <- AuthTokens.generateAccessToken
+      case bearerAuthHeaders (Just rawToken) of
+        [("Authorization", value)] | value == "Bearer " <> TE.encodeUtf8 rawToken -> pure ()
+        _ -> expectationFailure "generated service token was not forwarded as a Bearer credential"
 
     it "redacts token-like values from server response snippets" $ do
       let samples =

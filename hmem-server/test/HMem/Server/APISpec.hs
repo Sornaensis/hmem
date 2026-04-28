@@ -48,6 +48,7 @@ import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.API (HMemAPI, server)
 import HMem.Server.App (mkApp, requestIdMiddleware, resolveRequestPrincipal)
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
+import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..))
 import HMem.Server.WebSocket (WorkspaceSubscription(..), consumeTicket, createTicket, eventVisibleToSubscription, newWSState)
 import HMem.Types
@@ -1362,6 +1363,32 @@ spec = around withApp $ do
         created.actorType `shouldBe` Just "bot"
         created.actorId `shouldBe` Just (T.pack $ show tokenId)
         created.actorLabel `shouldBe` Just "Deploy Bot"
+
+    it "accepts and revokes operator-issued deployed PATs" $ \_ ->
+      withTestEnv $ \env -> do
+        grantUserId <- createTestUser env True False
+        Right issued <- AuthTokens.issueAccessToken env.pool AuthTokens.IssueAccessTokenInput
+          { AuthTokens.grantUserId = grantUserId
+          , AuthTokens.actorType = AuthTokens.AccessTokenActorBot
+          , AuthTokens.actorLabel = "Issued MCP Bot"
+          , AuthTokens.expiresAt = Nothing
+          }
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        let cfg = deployedAuthCfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
+        app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        createResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer " <> encodeUtf8 issued.rawToken)]
+          (encode (object ["name" .= ("operator-issued-pat-ws" :: T.Text)]))
+        respStatus createResp `shouldBe` 200
+
+        revoked <- AuthTokens.revokeAccessToken env.pool issued.tokenId
+        revoked `shouldBe` True
+        deniedResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer " <> encodeUtf8 issued.rawToken)]
+          (encode (object ["name" .= ("operator-issued-pat-denied" :: T.Text)]))
+        respStatus deniedResp `shouldBe` 401
 
     it "rejects revoked deployed PATs" $ \_ ->
       withTestEnv $ \env -> do

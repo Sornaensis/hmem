@@ -32,6 +32,7 @@ library
       HMem.DB.Search
       HMem.DB.Task
       HMem.DB.TestHarness
+      HMem.DB.Workspace
       HMem.DB.WorkspaceGroup
       HMem.Types
   other-modules:

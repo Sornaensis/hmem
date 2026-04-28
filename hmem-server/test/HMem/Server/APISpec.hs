@@ -379,6 +379,55 @@ spec = around withApp $ do
           let Just result = decode (respBody resp) :: Maybe (PaginatedResult Workspace)
           result.items `shouldBe` []
 
+    it "does not grant deployed create-workspace users visibility into unrelated workspaces" $ \_ ->
+      withTestEnv $ \env -> do
+        existingWs <- createTestWorkspace env "creator-hidden-existing-workspace"
+        creatorUserId <- createTestUser env True False
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal creatorUserId) $ \creatorApp -> do
+          initialListResp <- get_ creatorApp "/api/v1/workspaces"
+          respStatus initialListResp `shouldBe` 200
+          let Just initialList = decode (respBody initialListResp) :: Maybe (PaginatedResult Workspace)
+          initialList.items `shouldBe` []
+
+          hiddenGetResp <- get_ creatorApp (uuidPath "/api/v1/workspaces" existingWs.id)
+          respStatus hiddenGetResp `shouldBe` 403
+
+          createResp <- postJSON creatorApp "/api/v1/workspaces"
+            (object ["name" .= ("creator-owned-visible-workspace" :: T.Text)])
+          respStatus createResp `shouldBe` 200
+          let Just createdWs = decode (respBody createResp) :: Maybe Workspace
+
+          afterCreateListResp <- get_ creatorApp "/api/v1/workspaces"
+          respStatus afterCreateListResp `shouldBe` 200
+          let Just afterCreateList = decode (respBody afterCreateListResp) :: Maybe (PaginatedResult Workspace)
+          map (.id) afterCreateList.items `shouldBe` [createdWs.id]
+          map (.id) afterCreateList.items `shouldNotContain` [existingWs.id]
+
+          createdGetResp <- get_ creatorApp (uuidPath "/api/v1/workspaces" createdWs.id)
+          respStatus createdGetResp `shouldBe` 200
+
+    it "allows deployed non-superadmin members to load listed workspaces but not hidden ones" $ \_ ->
+      withTestEnv $ \env -> do
+        visibleWs <- createTestWorkspace env "member-navigable-visible-workspace"
+        hiddenWs <- createTestWorkspace env "member-navigable-hidden-workspace"
+        memberUserId <- createTestUser env False False
+        _ <- grantWorkspaceRole env visibleWs.id memberUserId Auth.WorkspaceRoleRead
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal memberUserId) $ \memberApp -> do
+          listResp <- get_ memberApp "/api/v1/workspaces"
+          respStatus listResp `shouldBe` 200
+          let Just visibleList = decode (respBody listResp) :: Maybe (PaginatedResult Workspace)
+          map (.id) visibleList.items `shouldBe` [visibleWs.id]
+
+          visibleGetResp <- get_ memberApp (uuidPath "/api/v1/workspaces" visibleWs.id)
+          respStatus visibleGetResp `shouldBe` 200
+          let Just loadedWs = decode (respBody visibleGetResp) :: Maybe Workspace
+          loadedWs.id `shouldBe` visibleWs.id
+
+          hiddenGetResp <- get_ memberApp (uuidPath "/api/v1/workspaces" hiddenWs.id)
+          respStatus hiddenGetResp `shouldBe` 403
+
     it "lets deployed superadmins list all active workspaces" $ \_ ->
       withTestEnv $ \env -> do
         wsA <- createTestWorkspace env "super-visible-a"

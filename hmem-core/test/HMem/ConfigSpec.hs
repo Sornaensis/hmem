@@ -116,6 +116,56 @@ spec = do
       warnings `shouldSatisfy` any ("allow_remote_bootstrap is true" `isInfixOf`)
       localImplicitBootstrapAllowed cfg `shouldBe` True
       localImplicitBootstrapExposesRemote cfg `shouldBe` True
+      localImplicitBootstrapStartupError cfg `shouldBe` Nothing
+
+    it "allows explicit remote local bootstrap even with permissive CORS" $ do
+      let remoteServer = ServerConfig { port = defaultConfig.server.port, host = "0.0.0.0" }
+          cfg = defaultConfig
+            { server = remoteServer
+            , cors = CorsConfig { allowedOrigins = ["*"] }
+            , auth = defaultConfig.auth
+                { mode = AuthModeLocal
+                , local = defaultConfig.auth.local { bootstrapEnabled = True, allowRemoteBootstrap = True }
+                }
+            }
+          (warnings, _) = validateConfig cfg
+      warnings `shouldSatisfy` any ("server.host is '0.0.0.0'" `isInfixOf`)
+      warnings `shouldSatisfy` any ("cors.allowed_origins permits remote origins" `isInfixOf`)
+      localImplicitBootstrapAllowed cfg `shouldBe` True
+      localImplicitBootstrapStartupError cfg `shouldBe` Nothing
+
+    it "does not apply local exposure guard when local bootstrap is disabled" $ do
+      let remoteServer = ServerConfig { port = defaultConfig.server.port, host = "0.0.0.0" }
+          cfg = defaultConfig
+            { server = remoteServer
+            , cors = CorsConfig { allowedOrigins = ["*"] }
+            , auth = defaultConfig.auth
+                { mode = AuthModeLocal
+                , local = defaultConfig.auth.local { bootstrapEnabled = False, allowRemoteBootstrap = False }
+                }
+            }
+          (warnings, _) = validateConfig cfg
+      warnings `shouldSatisfy` all (not . ("implicit local superadmin" `isInfixOf`))
+      localImplicitBootstrapActive cfg `shouldBe` False
+      localImplicitBootstrapAllowed cfg `shouldBe` True
+      localImplicitBootstrapStartupError cfg `shouldBe` Nothing
+
+    it "does not apply local exposure guard in deployed mode" $ do
+      let remoteServer = ServerConfig { port = defaultConfig.server.port, host = "0.0.0.0" }
+          cfg = defaultConfig
+            { server = remoteServer
+            , cors = CorsConfig { allowedOrigins = ["*"] }
+            , auth = defaultConfig.auth
+                { mode = AuthModeDeployed
+                , local = defaultConfig.auth.local { bootstrapEnabled = True, allowRemoteBootstrap = False }
+                }
+            }
+          (warnings, _) = validateConfig cfg
+      warnings `shouldSatisfy` all (not . ("implicit local superadmin" `isInfixOf`))
+      localImplicitBootstrapActive cfg `shouldBe` False
+      localImplicitBootstrapAllowed cfg `shouldBe` True
+      localImplicitBootstrapExposesRemote cfg `shouldBe` False
+      localImplicitBootstrapStartupError cfg `shouldBe` Nothing
 
     it "allows implicit local superadmin on loopback by default" $ do
       let cfg = defaultConfig
@@ -128,7 +178,10 @@ spec = do
       serverHostIsLoopback "127.0.0.1" `shouldBe` True
       serverHostIsLoopback "127.12.34.56" `shouldBe` True
       serverHostIsLoopback "::1" `shouldBe` True
+      serverHostIsLoopback "[::1]" `shouldBe` True
+      serverHostIsLoopback "LOCALHOST" `shouldBe` True
       serverHostIsLoopback "0.0.0.0" `shouldBe` False
+      serverHostIsLoopback "::" `shouldBe` False
       serverHostIsLoopback "127.example.com" `shouldBe` False
       serverHostIsLoopback "127.0.0.999" `shouldBe` False
 
@@ -137,6 +190,7 @@ spec = do
       corsAllowsRemoteOrigins (CorsConfig { allowedOrigins = ["*"] }) `shouldBe` True
       corsAllowsRemoteOrigins (CorsConfig { allowedOrigins = ["https://example.com"] }) `shouldBe` True
       corsAllowsRemoteOrigins (CorsConfig { allowedOrigins = ["https://localhost.evil.example"] }) `shouldBe` True
+      corsAllowsRemoteOrigins (CorsConfig { allowedOrigins = ["http://[::1]:8420"] }) `shouldBe` False
 
   describe "default auth schema" $ do
     it "defaults to local auth mode with local bootstrap enabled" $ do

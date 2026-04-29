@@ -2104,7 +2104,7 @@ auditHandlers pool bc =
     listAuditH :: Maybe UUID -> Maybe Text -> Maybe Text -> Maybe AuditAction -> Maybe UTCTime -> Maybe UTCTime
                -> Maybe Int -> Maybe Int -> Handler (PaginatedResult AuditLogEntry)
     listAuditH mWorkspaceId mEntityType mEntityId mAction mSince mUntil mlimit moffset = do
-      requireGlobalPermissionH pool Auth.GlobalSuperadmin
+      requireAuditReadH mWorkspaceId
       let lim = capLimit mlimit
           off = capOffset moffset
           q = AuditLogQuery
@@ -2122,11 +2122,26 @@ auditHandlers pool bc =
 
     getAuditH :: UUID -> Handler AuditLogEntry
     getAuditH auditId = do
-      requireGlobalPermissionH pool Auth.GlobalSuperadmin
+      requireAuthenticatedH
       mEntry <- handleDBErrors $ Audit.getAuditEntry pool auditId
       case mEntry of
-        Just entry -> pure entry
+        Just entry -> do
+          allowed <- auditReadAllowedH entry.workspaceId
+          if allowed then pure entry else throwError err404
         Nothing    -> throwError err404
+
+    requireAuditReadH :: Maybe UUID -> Handler ()
+    requireAuditReadH = \case
+      Just wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
+      Nothing   -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
+
+    auditReadAllowedH :: Maybe UUID -> Handler Bool
+    auditReadAllowedH mWorkspaceId = do
+      mPrincipal <- liftIO currentPrincipal
+      result <- liftIO $ case mWorkspaceId of
+        Just wsId -> Auth.authorizeWorkspace pool mPrincipal wsId Auth.WorkspaceRoleAdmin
+        Nothing   -> Auth.authorizeGlobal pool mPrincipal Auth.GlobalSuperadmin
+      pure $ either (const False) (const True) result
 
     revertAuditH :: UUID -> Handler RevertResult
     revertAuditH auditId = do

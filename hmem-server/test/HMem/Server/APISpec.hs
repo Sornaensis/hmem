@@ -3069,6 +3069,104 @@ spec = around withApp $ do
         entry.entityId `shouldBe` T.pack (show wsA.id)
         entry.entityId `shouldNotBe` T.pack (show wsB.id)
 
+    it "allows workspace admins to read only workspace-scoped audit entries" $ \_ -> do
+      withAppEnv $ \env app -> do
+        wsAResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("audit-admin-a" :: T.Text)])
+        respStatus wsAResp `shouldBe` 200
+        let Just wsA = decode (respBody wsAResp) :: Maybe Workspace
+
+        wsBResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("audit-admin-b" :: T.Text)])
+        respStatus wsBResp `shouldBe` 200
+        let Just wsB = decode (respBody wsBResp) :: Maybe Workspace
+
+        wsAAuditResp <- get_ app
+          ( "/api/v1/audit?workspace_id=" <> encodeUtf8 (T.pack (show wsA.id))
+         <> "&entity_type=workspace"
+          )
+        respStatus wsAAuditResp `shouldBe` 200
+        let Just wsAAuditPage = decode (respBody wsAAuditResp) :: Maybe (PaginatedResult AuditLogEntry)
+        length wsAAuditPage.items `shouldBe` 1
+        let [wsAEntry] = wsAAuditPage.items
+
+        wsBAuditResp <- get_ app
+          ( "/api/v1/audit?workspace_id=" <> encodeUtf8 (T.pack (show wsB.id))
+         <> "&entity_type=workspace"
+          )
+        respStatus wsBAuditResp `shouldBe` 200
+        let Just wsBAuditPage = decode (respBody wsBAuditResp) :: Maybe (PaginatedResult AuditLogEntry)
+        length wsBAuditPage.items `shouldBe` 1
+        let [wsBEntry] = wsBAuditPage.items
+
+        adminUserId <- createTestUser env False False
+        readerUserId <- createTestUser env False False
+        editorUserId <- createTestUser env False False
+        outsiderUserId <- createTestUser env False False
+        superadminUserId <- createTestUser env False True
+
+        _ <- grantWorkspaceRole env wsA.id adminUserId Auth.WorkspaceRoleAdmin
+        _ <- grantWorkspaceRole env wsA.id readerUserId Auth.WorkspaceRoleRead
+        _ <- grantWorkspaceRole env wsA.id editorUserId Auth.WorkspaceRoleEdit
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal adminUserId) $ \adminApp -> do
+          allowedList <- get_ adminApp
+            ( "/api/v1/audit?workspace_id=" <> encodeUtf8 (T.pack (show wsA.id))
+           <> "&entity_type=workspace"
+            )
+          respStatus allowedList `shouldBe` 200
+          let Just allowedPage = decode (respBody allowedList) :: Maybe (PaginatedResult AuditLogEntry)
+          fmap (.id) allowedPage.items `shouldBe` [wsAEntry.id]
+
+          allowedGet <- get_ adminApp (uuidPath "/api/v1/audit" wsAEntry.id)
+          respStatus allowedGet `shouldBe` 200
+
+          deniedGlobalList <- get_ adminApp "/api/v1/audit?entity_type=workspace"
+          respStatus deniedGlobalList `shouldBe` 403
+
+          deniedOtherList <- get_ adminApp
+            ( "/api/v1/audit?workspace_id=" <> encodeUtf8 (T.pack (show wsB.id))
+           <> "&entity_type=workspace"
+            )
+          respStatus deniedOtherList `shouldBe` 403
+
+          deniedOtherGet <- get_ adminApp (uuidPath "/api/v1/audit" wsBEntry.id)
+          respStatus deniedOtherGet `shouldBe` 404
+
+          deniedRevert <- postJSON adminApp (uuidPath "/api/v1/audit" wsAEntry.id <> "/revert") Null
+          respStatus deniedRevert `shouldBe` 403
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal readerUserId) $ \readerApp -> do
+          deniedList <- get_ readerApp
+            ( "/api/v1/audit?workspace_id=" <> encodeUtf8 (T.pack (show wsA.id))
+           <> "&entity_type=workspace"
+            )
+          respStatus deniedList `shouldBe` 403
+
+          deniedGet <- get_ readerApp (uuidPath "/api/v1/audit" wsAEntry.id)
+          respStatus deniedGet `shouldBe` 404
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal editorUserId) $ \editorApp -> do
+          deniedList <- get_ editorApp
+            ( "/api/v1/audit?workspace_id=" <> encodeUtf8 (T.pack (show wsA.id))
+           <> "&entity_type=workspace"
+            )
+          respStatus deniedList `shouldBe` 403
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal outsiderUserId) $ \outsiderApp -> do
+          deniedList <- get_ outsiderApp
+            ( "/api/v1/audit?workspace_id=" <> encodeUtf8 (T.pack (show wsA.id))
+           <> "&entity_type=workspace"
+            )
+          respStatus deniedList `shouldBe` 403
+
+        withPrincipalApp env deployedAuthCfg (grantPrincipal superadminUserId) $ \superApp -> do
+          allowedGlobalList <- get_ superApp "/api/v1/audit?entity_type=workspace"
+          respStatus allowedGlobalList `shouldBe` 200
+
+          allowedOtherGet <- get_ superApp (uuidPath "/api/v1/audit" wsBEntry.id)
+          respStatus allowedOtherGet `shouldBe` 200
+
     it "includes canonical actor hints in emitted change events" $ \_ -> do
       withTestEnv $ \env -> do
         let principal = Principal

@@ -115,6 +115,7 @@ data DeployedAuthConfig = DeployedAuthConfig
   , jwksUrl     :: !(Maybe Text)
   , jwks        :: !(Maybe Aeson.Value)
   , tokenLookup :: !TokenLookupMode
+  , tokenHashSecret :: !(Maybe Text)
   } deriving stock (Show, Eq)
 
 data AuthConfig = AuthConfig
@@ -271,6 +272,7 @@ instance FromJSON DeployedAuthConfig where
     <*> o .:? "jwks_url"
     <*> o .:? "jwks"
     <*> o .:? "token_lookup" .!= TokenLookupDatabase
+    <*> o .:? "token_hash_secret"
 
 instance ToJSON DeployedAuthConfig where
   toJSON deployedCfg = Aeson.object $ concat
@@ -280,6 +282,7 @@ instance ToJSON DeployedAuthConfig where
     , maybe [] (\v -> ["jwks_url" .= v]) deployedCfg.jwksUrl
     , maybe [] (\v -> ["jwks" .= v]) deployedCfg.jwks
     , ["token_lookup" .= deployedCfg.tokenLookup]
+    , maybe [] (\v -> ["token_hash_secret" .= v]) deployedCfg.tokenHashSecret
     ]
 
 instance FromJSON AuthConfig where
@@ -395,6 +398,7 @@ defDeployedAuth = DeployedAuthConfig
   , jwksUrl = Nothing
   , jwks = Nothing
   , tokenLookup = TokenLookupDatabase
+  , tokenHashSecret = Nothing
   }
 
 defAuth :: AuthConfig

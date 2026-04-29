@@ -50,6 +50,8 @@ auth:
     audience: hmem-web
     jwks_url: https://issuer.example/.well-known/jwks.json
     token_lookup: database
+    # Optional but recommended before issuing service/PAT tokens.
+    token_hash_secret: replace-with-secret-manager-value
 ```
 
 ## Permission model
@@ -136,6 +138,8 @@ hmem-ctl auth tokens revoke --token-id old-token-row-uuid
 ```
 
 Officially issued tokens use the `hmem_pat_v1_` prefix plus 96 lowercase hexadecimal characters from UUIDv4 random material, exceeding the 256-bit entropy floor for hmem bearer tokens. Tokens are operator-managed in v1, not self-service UI objects. Use `--actor-type bot|user`, stable `--actor-label` values, and least-privilege grant-bearing users so automated clients inherit only the permissions they need.
+
+When `auth.deployed.token_hash_secret` is configured, newly issued and rotated tokens store versioned HMAC-SHA256 hashes (`hmac-sha256-v1:`). Servers with that secret still accept existing legacy `sha256:` token rows so operators can rotate clients gradually. If the secret is changed or removed, HMAC-hashed tokens issued with the old secret will stop resolving; rotate tokens after changing the secret.
 
 If an operator pre-provisions an `access_tokens` row outside `hmem-ctl`, the raw bearer secret must still be generated from at least 256 bits of cryptographically secure randomness. Do not use short, human-chosen, or reusable secrets; store only the canonical `token_hash`, and record the raw token only in a secret manager.
 

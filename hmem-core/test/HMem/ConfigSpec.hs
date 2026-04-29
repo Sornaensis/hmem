@@ -225,6 +225,7 @@ spec = do
             , "    issuer: https://issuer.example"
             , "    audience: hmem-web"
             , "    token_lookup: database"
+            , "    token_hash_secret: hmac-secret"
             ]
       case Yaml.decodeEither' yaml of
         Left err -> expectationFailure (show err)
@@ -234,6 +235,7 @@ spec = do
           cfg.auth.deployed.issuer `shouldBe` Just "https://issuer.example"
           cfg.auth.deployed.audience `shouldBe` Just "hmem-web"
           cfg.auth.deployed.tokenLookup `shouldBe` TokenLookupDatabase
+          cfg.auth.deployed.tokenHashSecret `shouldBe` Just "hmac-secret"
           authStaticBearerEnabled cfg.auth `shouldBe` False
 
     it "round-trips the richer auth schema through yaml encoding" $ do
@@ -253,6 +255,7 @@ spec = do
                     , jwksUrl = Just "https://issuer.example/.well-known/jwks.json"
                     , jwks = Nothing
                     , tokenLookup = TokenLookupDatabase
+                    , tokenHashSecret = Just "hash-secret"
                     }
                 }
             }

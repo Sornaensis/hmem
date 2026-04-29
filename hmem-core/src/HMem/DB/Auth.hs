@@ -22,7 +22,10 @@ module HMem.DB.Auth
   , getUserGrants
   , getWorkspaceRole
   , accessTokenHash
+  , accessTokenHmacHash
+  , accessTokenHashCandidates
   , resolveAccessTokenPrincipal
+  , resolveAccessTokenPrincipalWithSecret
   , touchAccessTokenLastUsed
   , resolveUserPrincipalByAuthSubject
   , listWorkspaceMemberships
@@ -51,6 +54,7 @@ import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Control.Monad (void)
 import Crypto.Hash (Digest, SHA256, hash)
+import Crypto.MAC.HMAC (HMAC, hmac, hmacGetDigest)
 import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
@@ -244,9 +248,36 @@ accessTokenHash token = "sha256:" <> T.pack (show digest)
   where
     digest = hash (TE.encodeUtf8 token) :: Digest SHA256
 
+-- | Versioned HMAC-SHA256 token digest for installations with a server-side
+-- token hash secret/pepper.  The raw token is already high-entropy; the HMAC
+-- protects against offline lookup if the database is exposed without the
+-- server configuration secret.
+accessTokenHmacHash :: Text -> Text -> Text
+accessTokenHmacHash secret token = "hmac-sha256-v1:" <> T.pack (show digest)
+  where
+    digest = hmacGetDigest (hmac (TE.encodeUtf8 secret) (TE.encodeUtf8 token) :: HMAC SHA256)
+
+accessTokenHashCandidates :: Maybe Text -> Text -> [Text]
+accessTokenHashCandidates mSecret token = case T.strip <$> mSecret of
+  Just secret | not (T.null secret) -> [accessTokenHmacHash secret token, accessTokenHash token]
+  _ -> [accessTokenHash token]
+
 resolveAccessTokenPrincipal :: Pool Hasql.Connection -> Text -> IO (Maybe ResolvedAccessToken)
 resolveAccessTokenPrincipal pool token =
-  runSession pool $ Session.statement (accessTokenHash token) accessTokenPrincipalStatement
+  resolveAccessTokenPrincipalWithSecret pool Nothing token
+
+resolveAccessTokenPrincipalWithSecret :: Pool Hasql.Connection -> Maybe Text -> Text -> IO (Maybe ResolvedAccessToken)
+resolveAccessTokenPrincipalWithSecret pool mSecret token =
+  firstJustM (runSession pool . (`Session.statement` accessTokenPrincipalStatement))
+    (accessTokenHashCandidates mSecret token)
+
+firstJustM :: (a -> IO (Maybe b)) -> [a] -> IO (Maybe b)
+firstJustM _ [] = pure Nothing
+firstJustM f (x:xs) = do
+  result <- f x
+  case result of
+    Just _ -> pure result
+    Nothing -> firstJustM f xs
 
 touchAccessTokenLastUsed :: Pool Hasql.Connection -> UUID -> IO ()
 touchAccessTokenLastUsed pool tokenId =

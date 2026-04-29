@@ -81,6 +81,24 @@ spec = describe "service/PAT token lifecycle" $ do
       grants <- Auth.getUserGrants env.pool grantUserId
       grants `shouldBe` Just (Auth.UserGrants False False)
 
+  it "stores HMAC token hashes when a token hash secret is configured and keeps legacy fallback" $
+    withTestEnv $ \env -> do
+      grantUserId <- createGrantUser env "token-grant-hmac"
+      let hashSecret = Just "server-token-hash-secret"
+
+      hmacIssued <- expectRight =<< issueAccessTokenWithSecret env.pool hashSecret (defaultIssueInput grantUserId)
+      legacyIssued <- expectRight =<< issueAccessToken env.pool (defaultIssueInput grantUserId)
+
+      lookupTokenHash env hmacIssued.tokenId `shouldReturn` Auth.accessTokenHmacHash "server-token-hash-secret" hmacIssued.rawToken
+      lookupTokenHash env legacyIssued.tokenId `shouldReturn` Auth.accessTokenHash legacyIssued.rawToken
+
+      Auth.resolveAccessTokenPrincipalWithSecret env.pool hashSecret hmacIssued.rawToken
+        `shouldSatisfyM` maybe False ((== hmacIssued.tokenId) . (.tokenId))
+      Auth.resolveAccessTokenPrincipal env.pool hmacIssued.rawToken `shouldReturn` Nothing
+
+      Auth.resolveAccessTokenPrincipalWithSecret env.pool hashSecret legacyIssued.rawToken
+        `shouldSatisfyM` maybe False ((== legacyIssued.tokenId) . (.tokenId))
+
   it "revokes tokens so the raw token no longer resolves" $
     withTestEnv $ \env -> do
       grantUserId <- createGrantUser env "token-grant-revoke"
@@ -207,6 +225,17 @@ tokenExpiryStatement = Statement.Statement sql encoder decoder True
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.singleRow (Dec.column (Dec.nullable Dec.timestamptz))
 
+lookupTokenHash :: TestEnv -> UUID.UUID -> IO T.Text
+lookupTokenHash env tokenId =
+  DBPool.runSession env.pool $ Session.statement tokenId tokenHashStatement
+
+tokenHashStatement :: Statement.Statement UUID.UUID T.Text
+tokenHashStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT token_hash FROM access_tokens WHERE id = $1"
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.singleRow (Dec.column (Dec.nonNullable Dec.text))
+
 defaultIssueInput :: UUID.UUID -> IssueAccessTokenInput
 defaultIssueInput userId = IssueAccessTokenInput
   { grantUserId = userId
@@ -224,3 +253,8 @@ shouldBeLeft :: (Eq e, Show e) => Either e a -> e -> Expectation
 shouldBeLeft actual expected = case actual of
   Left err -> err `shouldBe` expected
   Right _ -> expectationFailure $ "expected Left " <> show expected <> ", got Right"
+
+shouldSatisfyM :: (Show a) => IO a -> (a -> Bool) -> Expectation
+shouldSatisfyM action predicate = do
+  value <- action
+  value `shouldSatisfy` predicate

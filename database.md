@@ -248,8 +248,11 @@ The `access_tokens` table is the minimal v1 storage surface for PAT, bot, and
 service-token access. It stores token identity and lifecycle metadata, not raw
 bearer secrets.
 
-- `token_hash` stores the canonical digest of the bearer token. Raw deployed
-  token material is only available to the operator at issuance time.
+- `token_hash` stores the canonical digest of the bearer token. Legacy rows use
+  `sha256:`. When `auth.deployed.token_hash_secret` is configured, new
+  operator-issued/rotated rows use `hmac-sha256-v1:` and the server still checks
+  legacy `sha256:` as a compatibility fallback. Raw deployed token material is
+  only available to the operator at issuance time.
 - `actor_type = bot` means requests authenticate as a bot actor for audit and
   event attribution. The token row `id` is the stable token identity used as
   that token's bot `actor_id`; token rotation creates a replacement actor id.

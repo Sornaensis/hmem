@@ -1432,7 +1432,7 @@ doIssueToken opts = do
         , AuthTokens.expiresAt = expiry
         }
   pool <- Pool.createPool (connectionString cfg.database) 2 60 30000
-  result <- AuthTokens.issueAccessToken pool input
+  result <- AuthTokens.issueAccessTokenWithSecret pool cfg.auth.deployed.tokenHashSecret input
   case result of
     Left err -> printTokenError err >> exitFailure
     Right issued -> printIssuedToken "Access token issued." issued
@@ -1448,7 +1448,7 @@ doRotateToken opts = do
         , AuthTokens.revokeOld = opts.rotateRevokeOld
         }
   pool <- Pool.createPool (connectionString cfg.database) 2 60 30000
-  result <- AuthTokens.rotateAccessToken pool input
+  result <- AuthTokens.rotateAccessTokenWithSecret pool cfg.auth.deployed.tokenHashSecret input
   case result of
     Left err -> printTokenError err >> exitFailure
     Right issued -> do

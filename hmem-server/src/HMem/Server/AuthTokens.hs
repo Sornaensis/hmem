@@ -7,7 +7,9 @@ module HMem.Server.AuthTokens
   , IssuedAccessToken(..)
   , AccessTokenError(..)
   , issueAccessToken
+  , issueAccessTokenWithSecret
   , rotateAccessToken
+  , rotateAccessTokenWithSecret
   , revokeAccessToken
   , generateAccessToken
   , generatedAccessTokenPrefix
@@ -88,7 +90,16 @@ issueAccessToken
   -> IO (Either AccessTokenError IssuedAccessToken)
 issueAccessToken pool input = do
   raw <- generateAccessToken
-  runTransaction pool $ issueAccessTokenSession input raw
+  runTransaction pool $ issueAccessTokenSession Nothing input raw
+
+issueAccessTokenWithSecret
+  :: Pool Hasql.Connection
+  -> Maybe Text
+  -> IssueAccessTokenInput
+  -> IO (Either AccessTokenError IssuedAccessToken)
+issueAccessTokenWithSecret pool mSecret input = do
+  raw <- generateAccessToken
+  runTransaction pool $ issueAccessTokenSession mSecret input raw
 
 rotateAccessToken
   :: Pool Hasql.Connection
@@ -96,7 +107,16 @@ rotateAccessToken
   -> IO (Either AccessTokenError IssuedAccessToken)
 rotateAccessToken pool input = do
   raw <- generateAccessToken
-  runTransaction pool $ rotateAccessTokenSession input raw
+  runTransaction pool $ rotateAccessTokenSession Nothing input raw
+
+rotateAccessTokenWithSecret
+  :: Pool Hasql.Connection
+  -> Maybe Text
+  -> RotateAccessTokenInput
+  -> IO (Either AccessTokenError IssuedAccessToken)
+rotateAccessTokenWithSecret pool mSecret input = do
+  raw <- generateAccessToken
+  runTransaction pool $ rotateAccessTokenSession mSecret input raw
 
 revokeAccessToken :: Pool Hasql.Connection -> UUID -> IO Bool
 revokeAccessToken pool tokenId = do
@@ -133,10 +153,11 @@ isGeneratedAccessTokenFormat token =
     isLowerHex c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 
 issueAccessTokenSession
-  :: IssueAccessTokenInput
+  :: Maybe Text
+  -> IssueAccessTokenInput
   -> Text
   -> Session.Session (Either AccessTokenError IssuedAccessToken)
-issueAccessTokenSession input raw
+issueAccessTokenSession mSecret input raw
   | T.null (T.strip input.actorLabel) = pure (Left EmptyActorLabel)
   | not (isGeneratedAccessTokenFormat raw) = pure (Left GeneratedTokenFormatInvalid)
   | otherwise = do
@@ -148,17 +169,18 @@ issueAccessTokenSession input raw
             ( input.grantUserId
             , accessTokenActorToText input.actorType
             , T.strip input.actorLabel
-            , Auth.accessTokenHash raw
+            , accessTokenHashForStorage mSecret raw
             , input.expiresAt
             )
             insertAccessTokenStatement
           pure (Right IssuedAccessToken { tokenId = tokenId, rawToken = raw })
 
 rotateAccessTokenSession
-  :: RotateAccessTokenInput
+  :: Maybe Text
+  -> RotateAccessTokenInput
   -> Text
   -> Session.Session (Either AccessTokenError IssuedAccessToken)
-rotateAccessTokenSession input raw = do
+rotateAccessTokenSession mSecret input raw = do
   if not (isGeneratedAccessTokenFormat raw)
     then pure (Left GeneratedTokenFormatInvalid)
     else do
@@ -170,7 +192,7 @@ rotateAccessTokenSession input raw = do
             ( template.templateGrantUserId
             , accessTokenActorToText template.templateActorType
             , template.templateActorLabel
-            , Auth.accessTokenHash raw
+            , accessTokenHashForStorage mSecret raw
             , input.expiresAt <|> template.templateExpiresAt
             )
             insertAccessTokenStatement
@@ -180,6 +202,11 @@ rotateAccessTokenSession input raw = do
               pure ()
             else pure ()
           pure (Right IssuedAccessToken { tokenId = tokenId, rawToken = raw })
+
+accessTokenHashForStorage :: Maybe Text -> Text -> Text
+accessTokenHashForStorage mSecret raw = case T.strip <$> mSecret of
+  Just secret | not (T.null secret) -> Auth.accessTokenHmacHash secret raw
+  _ -> Auth.accessTokenHash raw
 
 userExistsStatement :: Statement.Statement UUID Bool
 userExistsStatement = Statement.Statement sql encoder decoder True

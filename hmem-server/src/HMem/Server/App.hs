@@ -115,7 +115,7 @@ resolveRequestPrincipalWithCache jwksCache pool authCfg req = case authCfg.mode 
 resolveDeployedBearerPrincipal :: JWKSetCache -> Pool Hasql.Connection -> DeployedAuthConfig -> Text -> IO (Maybe Principal)
 resolveDeployedBearerPrincipal jwksCache pool deployedCfg token = do
   mPatPrincipal <- case deployedCfg.tokenLookup of
-    TokenLookupDatabase -> Auth.resolveAccessTokenPrincipal pool token
+    TokenLookupDatabase -> Auth.resolveAccessTokenPrincipalWithSecret pool deployedCfg.tokenHashSecret token
   case mPatPrincipal of
     Just resolved -> do
       withPrincipalContext (Just resolved.principal) $

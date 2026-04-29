@@ -95,6 +95,7 @@ testAuthCfg = Config.defaultConfig
           , Config.jwksUrl = Nothing
           , Config.jwks = Nothing
           , Config.tokenLookup = Config.TokenLookupDatabase
+          , Config.tokenHashSecret = Nothing
           }
       }
   }
@@ -1563,6 +1564,42 @@ spec = around withApp $ do
           [("Authorization", "Bearer " <> encodeUtf8 issued.rawToken)]
           (encode (object ["name" .= ("operator-issued-pat-denied" :: T.Text)]))
         respStatus deniedResp `shouldBe` 401
+
+    it "resolves HMAC-hashed deployed PATs while preserving legacy hash fallback" $ \_ ->
+      withTestEnv $ \env -> do
+        grantUserId <- createTestUser env True False
+        Right hmacIssued <- AuthTokens.issueAccessTokenWithSecret env.pool (Just "configured-hash-secret") AuthTokens.IssueAccessTokenInput
+          { AuthTokens.grantUserId = grantUserId
+          , AuthTokens.actorType = AuthTokens.AccessTokenActorBot
+          , AuthTokens.actorLabel = "HMAC Bot"
+          , AuthTokens.expiresAt = Nothing
+          }
+        Right legacyIssued <- AuthTokens.issueAccessToken env.pool AuthTokens.IssueAccessTokenInput
+          { AuthTokens.grantUserId = grantUserId
+          , AuthTokens.actorType = AuthTokens.AccessTokenActorBot
+          , AuthTokens.actorLabel = "Legacy Bot"
+          , AuthTokens.expiresAt = Nothing
+          }
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        let cfg = deployedAuthCfg
+              { Config.auth = deployedAuthCfg.auth
+                  { Config.deployed = deployedAuthCfg.auth.deployed
+                      { Config.tokenHashSecret = Just "configured-hash-secret" }
+                  }
+              , Config.cors = CorsConfig { allowedOrigins = ["*"] }
+              }
+        app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        hmacResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer " <> encodeUtf8 hmacIssued.rawToken)]
+          (encode (object ["name" .= ("hmac-pat-ws" :: T.Text)]))
+        respStatus hmacResp `shouldBe` 200
+
+        legacyResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer " <> encodeUtf8 legacyIssued.rawToken)]
+          (encode (object ["name" .= ("legacy-fallback-pat-ws" :: T.Text)]))
+        respStatus legacyResp `shouldBe` 200
 
     it "rejects revoked deployed PATs" $ \_ ->
       withTestEnv $ \env -> do

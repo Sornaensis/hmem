@@ -129,6 +129,8 @@ data UpsertUserOpts = UpsertUserOpts
   , upsertNoCreateWorkspace  :: Bool
   , upsertSuperadmin         :: Bool
   , upsertNoSuperadmin       :: Bool
+  , upsertActive             :: Bool
+  , upsertDisabled           :: Bool
   }
 
 data WorkspacesOpts = WorkspacesOpts
@@ -216,6 +218,14 @@ upsertUserParser = UpsertUserOpts
   <*> switch
       ( long "no-superadmin"
      <> help "Revoke global superadmin"
+      )
+  <*> switch
+      ( long "active"
+     <> help "Enable/reactivate the user"
+      )
+  <*> switch
+      ( long "disabled"
+     <> help "Disable the user so JWT and PAT resolution fail closed"
       )
 
 tokenCommandParser :: Parser TokenCommand
@@ -1371,12 +1381,14 @@ doUpsertUser opts = do
   cfg <- loadAuthOperatorConfig "auth users upsert" "user/global-grant administration is intended for deployed auth"
   canCreate <- parseGrantFlag "create_workspace" opts.upsertCanCreateWorkspace opts.upsertNoCreateWorkspace
   superadmin <- parseGrantFlag "superadmin" opts.upsertSuperadmin opts.upsertNoSuperadmin
+  active <- parseGrantFlag "active" opts.upsertActive opts.upsertDisabled
   let input = AuthUsers.UpsertUserInput
         { AuthUsers.authSubject = T.pack (strip opts.upsertAuthSubject)
         , AuthUsers.email = normalizeOptionalText opts.upsertEmail
         , AuthUsers.displayName = normalizeOptionalText opts.upsertDisplayName
         , AuthUsers.canCreateWorkspace = canCreate
         , AuthUsers.isSuperadmin = superadmin
+        , AuthUsers.active = active
         }
   pool <- Pool.createPool (connectionString cfg.database) 2 60 30000
   result <- AuthUsers.upsertUser pool input
@@ -1390,6 +1402,7 @@ doUpsertUser opts = do
       putStrLn $ "  Decision:             " <> userDecisionText user.decision
       putStrLn $ "  create_workspace:     " <> show user.canCreateWorkspace
       putStrLn $ "  superadmin:           " <> show user.isSuperadmin
+      putStrLn $ "  active:               " <> show user.active
       putStrLn "Workspace memberships remain managed through workspace-admin APIs."
 
 parseGrantFlag :: String -> Bool -> Bool -> IO (Maybe Bool)

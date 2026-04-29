@@ -17,11 +17,13 @@ spec = describe "deployed user/global grant administration" $ do
         , displayName = Just "Create User"
         , canCreateWorkspace = Just True
         , isSuperadmin = Just False
+        , active = Nothing
         }
 
       created.decision `shouldBe` UserCreated
       created.canCreateWorkspace `shouldBe` True
       created.isSuperadmin `shouldBe` False
+      created.active `shouldBe` True
       Auth.getUserGrants env.pool created.userId `shouldReturn` Just (Auth.UserGrants True False)
 
       mPrincipal <- Auth.resolveUserPrincipalByAuthSubject env.pool "provider-user-create"
@@ -39,6 +41,7 @@ spec = describe "deployed user/global grant administration" $ do
         , displayName = Just "Update User"
         , canCreateWorkspace = Just True
         , isSuperadmin = Just True
+        , active = Nothing
         }
 
       updated <- expectRight =<< upsertUser env.pool UpsertUserInput
@@ -47,12 +50,14 @@ spec = describe "deployed user/global grant administration" $ do
         , displayName = Nothing
         , canCreateWorkspace = Nothing
         , isSuperadmin = Just False
+        , active = Nothing
         }
 
       updated.decision `shouldBe` UserUpdated
       updated.userId `shouldBe` created.userId
       updated.canCreateWorkspace `shouldBe` True
       updated.isSuperadmin `shouldBe` False
+      updated.active `shouldBe` True
       Auth.getUserGrants env.pool updated.userId `shouldReturn` Just (Auth.UserGrants True False)
 
   it "defaults new users to no global grants when grant flags are omitted" $
@@ -63,11 +68,42 @@ spec = describe "deployed user/global grant administration" $ do
         , displayName = Nothing
         , canCreateWorkspace = Nothing
         , isSuperadmin = Nothing
+        , active = Nothing
         }
 
       created.canCreateWorkspace `shouldBe` False
       created.isSuperadmin `shouldBe` False
+      created.active `shouldBe` True
       Auth.getUserGrants env.pool created.userId `shouldReturn` Just (Auth.UserGrants False False)
+
+  it "disables and reactivates users for auth resolution" $
+    withTestEnv $ \env -> do
+      created <- expectRight =<< upsertUser env.pool UpsertUserInput
+        { authSubject = "provider-user-disable"
+        , email = Nothing
+        , displayName = Just "Disable User"
+        , canCreateWorkspace = Just True
+        , isSuperadmin = Just False
+        , active = Just False
+        }
+
+      created.active `shouldBe` False
+      Auth.getUserGrants env.pool created.userId `shouldReturn` Nothing
+      Auth.resolveUserPrincipalByAuthSubject env.pool "provider-user-disable" `shouldReturn` Nothing
+
+      reactivated <- expectRight =<< upsertUser env.pool UpsertUserInput
+        { authSubject = "provider-user-disable"
+        , email = Nothing
+        , displayName = Nothing
+        , canCreateWorkspace = Nothing
+        , isSuperadmin = Nothing
+        , active = Just True
+        }
+
+      reactivated.decision `shouldBe` UserUpdated
+      reactivated.userId `shouldBe` created.userId
+      reactivated.active `shouldBe` True
+      Auth.getUserGrants env.pool created.userId `shouldReturn` Just (Auth.UserGrants True False)
 
   it "rejects empty auth subjects" $
     withTestEnv $ \env -> do
@@ -77,6 +113,7 @@ spec = describe "deployed user/global grant administration" $ do
         , displayName = Nothing
         , canCreateWorkspace = Just True
         , isSuperadmin = Just True
+        , active = Nothing
         }
       result `shouldBe` Left EmptyAuthSubject
 

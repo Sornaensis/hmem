@@ -51,9 +51,10 @@ data BootstrapSuperadminError
 data BootstrapUserRow = BootstrapUserRow
   { rowUserId             :: !UUID
   , rowEmail              :: !(Maybe Text)
-  , rowDisplayName        :: !(Maybe Text)
-  , rowCanCreateWorkspace :: !Bool
-  , rowIsSuperadmin       :: !Bool
+    , rowDisplayName        :: !(Maybe Text)
+    , rowCanCreateWorkspace :: !Bool
+    , rowIsSuperadmin       :: !Bool
+    , rowActive             :: !Bool
   } deriving stock (Show, Eq)
 
 bootstrapSuperadmin
@@ -113,6 +114,7 @@ bootstrapSatisfied :: BootstrapSuperadminInput -> BootstrapUserRow -> Bool
 bootstrapSatisfied input row =
   row.rowCanCreateWorkspace &&
   row.rowIsSuperadmin &&
+  row.rowActive &&
   maybe True (\expected -> row.rowEmail == Just expected) input.email &&
   maybe True (\expected -> row.rowDisplayName == Just expected) input.displayName
 
@@ -122,6 +124,7 @@ findOtherSuperadminStatement = Statement.Statement sql encoder decoder True
     sql = "SELECT id, COALESCE(display_name, email, id::text) \
           \FROM users \
           \WHERE is_superadmin \
+          \  AND disabled_at IS NULL \
           \  AND auth_subject IS DISTINCT FROM $1 \
           \ORDER BY created_at ASC, id ASC \
           \LIMIT 1"
@@ -133,7 +136,7 @@ findOtherSuperadminStatement = Statement.Statement sql encoder decoder True
 userByAuthSubjectStatement :: Statement.Statement Text (Maybe BootstrapUserRow)
 userByAuthSubjectStatement = Statement.Statement sql encoder decoder True
   where
-    sql = "SELECT id, email, display_name, can_create_workspace, is_superadmin \
+    sql = "SELECT id, email, display_name, can_create_workspace, is_superadmin, disabled_at IS NULL \
           \FROM users WHERE auth_subject = $1"
     encoder = Enc.param (Enc.nonNullable Enc.text)
     decoder = Dec.rowMaybe bootstrapUserRowDecoder
@@ -143,6 +146,7 @@ bootstrapUserRowDecoder = BootstrapUserRow
   <$> Dec.column (Dec.nonNullable Dec.uuid)
   <*> Dec.column (Dec.nullable Dec.text)
   <*> Dec.column (Dec.nullable Dec.text)
+  <*> Dec.column (Dec.nonNullable Dec.bool)
   <*> Dec.column (Dec.nonNullable Dec.bool)
   <*> Dec.column (Dec.nonNullable Dec.bool)
 
@@ -165,7 +169,8 @@ updateBootstrapSuperadminStatement = Statement.Statement sql encoder decoder Tru
           \SET email = COALESCE($2, email), \
           \    display_name = COALESCE($3, display_name), \
           \    can_create_workspace = true, \
-          \    is_superadmin = true \
+          \    is_superadmin = true, \
+          \    disabled_at = NULL \
           \WHERE id = $1 \
           \RETURNING id"
     encoder =

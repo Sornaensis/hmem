@@ -288,6 +288,7 @@ grantWorkspaceAdminToCreatorSession workspaceId principal = case principal.autho
     mGrants <- Session.statement userId userGrantsStatement
     case mGrants of
       Just UserGrants { userIsSuperadmin = True } -> pure ()
+      Nothing -> pure ()
       _ -> void $ Session.statement
         ( workspaceId
         , userId
@@ -300,7 +301,7 @@ grantWorkspaceAdminToCreatorSession workspaceId principal = case principal.autho
 userGrantsStatement :: Statement.Statement UUID (Maybe UserGrants)
 userGrantsStatement = Statement.Statement sql encoder decoder True
   where
-    sql = "SELECT can_create_workspace, is_superadmin FROM users WHERE id = $1"
+    sql = "SELECT can_create_workspace, is_superadmin FROM users WHERE id = $1 AND disabled_at IS NULL"
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowMaybe $ UserGrants
       <$> Dec.column (Dec.nonNullable Dec.bool)
@@ -309,7 +310,10 @@ userGrantsStatement = Statement.Statement sql encoder decoder True
 workspaceRoleStatement :: Statement.Statement (UUID, UUID) (Maybe Text)
 workspaceRoleStatement = Statement.Statement sql encoder decoder True
   where
-    sql = "SELECT role::text FROM workspace_memberships WHERE workspace_id = $1 AND user_id = $2"
+    sql = "SELECT wm.role::text \
+          \FROM workspace_memberships wm \
+          \JOIN users u ON u.id = wm.user_id \
+          \WHERE wm.workspace_id = $1 AND wm.user_id = $2 AND u.disabled_at IS NULL"
     encoder =
       contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
       contramap snd (Enc.param (Enc.nonNullable Enc.uuid))
@@ -318,11 +322,13 @@ workspaceRoleStatement = Statement.Statement sql encoder decoder True
 accessTokenPrincipalStatement :: Statement.Statement Text (Maybe ResolvedAccessToken)
 accessTokenPrincipalStatement = Statement.Statement sql encoder decoder True
   where
-    sql = "SELECT id, grant_user_id, actor_type::text, actor_label \
-          \FROM access_tokens \
-          \WHERE token_hash = $1 \
-          \  AND revoked_at IS NULL \
-          \  AND (expires_at IS NULL OR expires_at > now())"
+    sql = "SELECT at.id, at.grant_user_id, at.actor_type::text, at.actor_label \
+          \FROM access_tokens at \
+          \JOIN users u ON u.id = at.grant_user_id \
+          \WHERE at.token_hash = $1 \
+          \  AND at.revoked_at IS NULL \
+          \  AND (at.expires_at IS NULL OR at.expires_at > now()) \
+          \  AND u.disabled_at IS NULL"
     encoder = Enc.param (Enc.nonNullable Enc.text)
     decoder = Dec.rowMaybe $ do
       tokenId <- Dec.column (Dec.nonNullable Dec.uuid)
@@ -356,7 +362,7 @@ userPrincipalByAuthSubjectStatement :: Statement.Statement Text (Maybe Principal
 userPrincipalByAuthSubjectStatement = Statement.Statement sql encoder decoder True
   where
     sql = "SELECT id, COALESCE(display_name, email, auth_subject, id::text) \
-          \FROM users WHERE auth_subject = $1"
+          \FROM users WHERE auth_subject = $1 AND disabled_at IS NULL"
     encoder = Enc.param (Enc.nonNullable Enc.text)
     decoder = Dec.rowMaybe $ do
       userId <- Dec.column (Dec.nonNullable Dec.uuid)

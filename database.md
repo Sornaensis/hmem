@@ -9,6 +9,7 @@
   ║       display_name         TEXT                                            ║
   ║       can_create_workspace BOOLEAN                                         ║
   ║       is_superadmin        BOOLEAN                                         ║
+  ║       disabled_at          TIMESTAMPTZ                                     ║
   ║       created_at           TIMESTAMPTZ                                     ║
   ║       updated_at           TIMESTAMPTZ                                     ║
   ║                                                                            ║
@@ -236,6 +237,12 @@
 ```
 
 ## Auth/access table semantics
+
+`users.disabled_at` disables provider JWT and persisted PAT/service-token
+resolution for that grant-bearing user. Authorization helpers treat disabled
+users as missing grants/roles, so disabled accounts fail closed even when their
+workspace memberships or token rows remain in the database for later re-enable
+or audit review.
 
 The `access_tokens` table is the minimal v1 storage surface for PAT, bot, and
 service-token access. It stores token identity and lifecycle metadata, not raw

@@ -244,6 +244,19 @@ expireAccessTokenStatement = Statement.Statement sql encoder decoder True
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.noResult
 
+setUserDisabled :: TestEnv -> UUID -> Bool -> IO ()
+setUserDisabled env userId disabled =
+  DBPool.runSession env.pool $ Session.statement (userId, disabled) setUserDisabledStatement
+
+setUserDisabledStatement :: Statement.Statement (UUID, Bool) ()
+setUserDisabledStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "UPDATE users SET disabled_at = CASE WHEN $2 THEN now() ELSE NULL END WHERE id = $1"
+    encoder =
+      contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap snd (Enc.param (Enc.nonNullable Enc.bool))
+    decoder = Dec.noResult
+
 accessTokenLastUsedIsSet :: TestEnv -> UUID -> IO Bool
 accessTokenLastUsedIsSet env tokenId =
   DBPool.runSession env.pool $ Session.statement tokenId accessTokenLastUsedIsSetStatement
@@ -1581,6 +1594,23 @@ spec = around withApp $ do
           (encode (object ["name" .= ("expired-pat-ws" :: T.Text)]))
         respStatus wsResp `shouldBe` 401
 
+    it "rejects deployed PATs whose grant-bearing user is disabled" $ \_ ->
+      withTestEnv $ \env -> do
+        grantUserId <- createTestUser env True False
+        tokenId <- createAccessToken env grantUserId ActorBot "Disabled Bot" "disabled-pat-secret"
+        setUserDisabled env grantUserId True
+        Auth.resolveAccessTokenPrincipal env.pool "disabled-pat-secret" `shouldReturn` Nothing
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        let cfg = deployedAuthCfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
+        app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        wsResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer disabled-pat-secret")]
+          (encode (object ["name" .= ("disabled-pat-ws" :: T.Text)]))
+        respStatus wsResp `shouldBe` 401
+        accessTokenLastUsedIsSet env tokenId >>= (`shouldBe` False)
+
     it "validates deployed JWTs and maps subject claims to users" $ \_ ->
       withTestEnv $ \env -> do
         Right bootstrapResult <- AuthBootstrap.bootstrapSuperadmin env.pool AuthBootstrap.BootstrapSuperadminInput
@@ -1615,6 +1645,27 @@ spec = around withApp $ do
         respStatus sessionResp `shouldBe` 200
         let Just session = decode (respBody sessionResp) :: Maybe SessionContext
         session.globalPermissions.superadmin `shouldBe` True
+
+    it "rejects deployed JWTs for disabled users" $ \_ ->
+      withTestEnv $ \env -> do
+        userId <- createTestUserWithSubject env "provider-disabled-user" True False
+        setUserDisabled env userId True
+        let jwk = JWK.fromOctets (encodeUtf8 testJwtSecret)
+            cfg = (deployedJwtCfg (JWK.JWKSet [jwk])) { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
+        token <- signTestJwt testJwtSecret "provider-disabled-user"
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+
+        sessionResp <- runReqWithHeaders app methodGet "/api/v1/session"
+          [("Authorization", "Bearer " <> encodeUtf8 token)]
+          ""
+        respStatus sessionResp `shouldBe` 401
+
+        wsResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [("Authorization", "Bearer " <> encodeUtf8 token)]
+          (encode (object ["name" .= ("disabled-jwt-ws" :: T.Text)]))
+        respStatus wsResp `shouldBe` 401
 
     it "rejects deployed JWTs that fail validation" $ \_ ->
       withTestEnv $ \env -> do

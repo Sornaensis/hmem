@@ -21,6 +21,7 @@ data-files:
     migrations/V005__drop_workspace_path.sql
     migrations/V006__auth_schema.sql
     migrations/V007__redact_access_token_hash_from_audit.sql
+    migrations/V008__user_disabled_at.sql
 
 library
   exposed-modules:

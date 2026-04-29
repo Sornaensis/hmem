@@ -115,7 +115,7 @@ hmem-ctl auth users upsert \
   --can-create-workspace
 ```
 
-Use `--superadmin` / `--no-superadmin` and `--can-create-workspace` / `--no-create-workspace` to update global grants. Workspace memberships remain managed by workspace-admin APIs.
+Use `--superadmin` / `--no-superadmin` and `--can-create-workspace` / `--no-create-workspace` to update global grants. Use `--disabled` to make JWT and PAT authentication for that grant-bearing user fail closed, and `--active` to re-enable the user. Workspace memberships remain managed by workspace-admin APIs.
 
 ### Service/PAT token lifecycle
 

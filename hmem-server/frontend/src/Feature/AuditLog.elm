@@ -20,7 +20,7 @@ init =
     , historyExpanded = Dict.empty
     , entries = []
     , hasMore = False
-    , filters = { entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
+    , filters = { workspaceId = Nothing, entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
     , expandedEntries = Dict.empty
     , revertConfirmation = Nothing
     , revertInFlight = False
@@ -45,9 +45,14 @@ update msg model =
                             fallback
 
                 mWorkspaceId =
-                    orElseMaybe
-                        (Maybe.andThen extractWsId auditEntry.oldValues)
-                        (Maybe.andThen extractWsId auditEntry.newValues)
+                    case auditEntry.workspaceId of
+                        Just _ ->
+                            auditEntry.workspaceId
+
+                        Nothing ->
+                            orElseMaybe
+                                (Maybe.andThen extractWsId auditEntry.oldValues)
+                                (Maybe.andThen extractWsId auditEntry.newValues)
 
                 resolvedTarget =
                     resolveAuditNavigationTarget auditEntry

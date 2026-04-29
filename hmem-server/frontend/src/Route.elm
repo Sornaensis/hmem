@@ -337,7 +337,7 @@ handleUrlChange url model =
                         Cmd.none
 
                 emptyFilters =
-                    { entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
+                    { workspaceId = Nothing, entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
 
                 currentAuditLog =
                     model.auditLog

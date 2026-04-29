@@ -187,6 +187,7 @@ type AuditAction
 
 type alias AuditLogEntry =
     { id : String
+    , workspaceId : Maybe String
     , entityType : String
     , entityId : String
     , action : AuditAction
@@ -707,6 +708,7 @@ auditLogEntryDecoder : Decoder AuditLogEntry
 auditLogEntryDecoder =
     D.succeed AuditLogEntry
         |> required "id" D.string
+        |> optional "workspace_id" (D.nullable D.string) Nothing
         |> required "entity_type" D.string
         |> required "entity_id" D.string
         |> required "action" auditActionDecoder
@@ -1642,12 +1644,13 @@ removeGroupMember apiUrl groupId workspaceId requestId toMsg =
 -- AUDIT LOG
 
 
-fetchAuditLog : String -> { entityType : Maybe String, entityId : Maybe String, action : Maybe String, since : Maybe String, until : Maybe String, limit : Maybe Int, offset : Maybe Int } -> (Result Http.Error (PaginatedResult AuditLogEntry) -> msg) -> Cmd msg
+fetchAuditLog : String -> { workspaceId : Maybe String, entityType : Maybe String, entityId : Maybe String, action : Maybe String, since : Maybe String, until : Maybe String, limit : Maybe Int, offset : Maybe Int } -> (Result Http.Error (PaginatedResult AuditLogEntry) -> msg) -> Cmd msg
 fetchAuditLog apiUrl filters toMsg =
     let
         params =
             List.filterMap identity
-                [ Maybe.map (\v -> "entity_type=" ++ v) filters.entityType
+                [ Maybe.map (\v -> "workspace_id=" ++ v) filters.workspaceId
+                , Maybe.map (\v -> "entity_type=" ++ v) filters.entityType
                 , Maybe.map (\v -> "entity_id=" ++ v) filters.entityId
                 , Maybe.map (\v -> "action=" ++ v) filters.action
                 , Maybe.map (\v -> "since=" ++ v ++ "T00:00:00Z") filters.since

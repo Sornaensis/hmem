@@ -30,6 +30,7 @@ import HMem.Types (AuditLogEntry(..), AuditLogQuery(..), auditActionFromText, au
 auditLogRowDecoder :: Dec.Row AuditLogEntry
 auditLogRowDecoder = do
   alId         <- Dec.column (Dec.nonNullable Dec.uuid)
+  alWorkspaceId <- Dec.column (Dec.nullable Dec.uuid)
   alEntityType <- Dec.column (Dec.nonNullable Dec.text)
   alEntityId   <- Dec.column (Dec.nonNullable Dec.text)
   alActionText <- Dec.column (Dec.nonNullable Dec.text)
@@ -45,6 +46,7 @@ auditLogRowDecoder = do
         Nothing -> error $ "HMem.DB.Audit: unexpected audit_action_enum value: " <> show alActionText
   pure AuditLogEntry
     { id         = alId
+    , workspaceId = alWorkspaceId
     , entityType = alEntityType
     , entityId   = alEntityId
     , action     = alAction
@@ -68,9 +70,9 @@ getAuditEntry pool auditId =
 getAuditEntryStatement :: Statement.Statement UUID (Maybe AuditLogEntry)
 getAuditEntryStatement = Statement.Statement sql encoder decoder True
   where
-    sql = "SELECT id, entity_type, entity_id, action::text, old_values, new_values, \
-          \request_id, actor_type::text, actor_id, actor_label, changed_at \
-          \FROM audit_log WHERE id = $1"
+    sql = "SELECT id, workspace_id, entity_type, entity_id, action::text, old_values, new_values, \
+           \request_id, actor_type::text, actor_id, actor_label, changed_at \
+           \FROM audit_log WHERE id = $1"
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowMaybe auditLogRowDecoder
 
@@ -91,8 +93,8 @@ getAuditByEntity pool entityType entityId mlimit = do
 getAuditByEntityStatement :: Statement.Statement (Text, Text, Int32) [AuditLogEntry]
 getAuditByEntityStatement = Statement.Statement sql encoder decoder True
   where
-    sql = "SELECT id, entity_type, entity_id, action::text, old_values, new_values, \
-          \request_id, actor_type::text, actor_id, actor_label, changed_at \
+    sql = "SELECT id, workspace_id, entity_type, entity_id, action::text, old_values, new_values, \
+           \request_id, actor_type::text, actor_id, actor_label, changed_at \
           \FROM audit_log \
           \WHERE entity_type = $1 AND entity_id = $2 \
           \ORDER BY changed_at DESC, id DESC \
@@ -110,7 +112,8 @@ getAuditByEntityStatement = Statement.Statement sql encoder decoder True
 getAuditLog :: Pool Hasql.Connection -> AuditLogQuery -> IO [AuditLogEntry]
 getAuditLog pool q = do
   let (lim, off) = capPagination q.limit q.offset
-      params = ( q.entityType
+      params = ( q.workspaceId
+               , q.entityType
                , q.entityId
                , auditActionToText <$> q.action
                , q.since
@@ -120,29 +123,31 @@ getAuditLog pool q = do
                )
   runSession pool $ Session.statement params getAuditLogStatement
 
-type AuditLogParams = (Maybe Text, Maybe Text, Maybe Text, Maybe UTCTime, Maybe UTCTime, Int32, Int32)
+type AuditLogParams = (Maybe UUID, Maybe Text, Maybe Text, Maybe Text, Maybe UTCTime, Maybe UTCTime, Int32, Int32)
 
 getAuditLogStatement :: Statement.Statement AuditLogParams [AuditLogEntry]
 getAuditLogStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
-      [ "SELECT id, entity_type, entity_id, action::text, old_values, new_values,"
+      [ "SELECT id, workspace_id, entity_type, entity_id, action::text, old_values, new_values,"
       , "       request_id, actor_type::text, actor_id, actor_label, changed_at"
       , "FROM audit_log"
-      , "WHERE ($1::text IS NULL OR entity_type = $1)"
-      , "  AND ($2::text IS NULL OR entity_id = $2)"
-      , "  AND ($3::text IS NULL OR action::text = $3)"
-      , "  AND ($4::timestamptz IS NULL OR changed_at >= $4)"
-      , "  AND ($5::timestamptz IS NULL OR changed_at <= $5)"
+      , "WHERE ($1::uuid IS NULL OR workspace_id = $1)"
+      , "  AND ($2::text IS NULL OR entity_type = $2)"
+      , "  AND ($3::text IS NULL OR entity_id = $3)"
+      , "  AND ($4::text IS NULL OR action::text = $4)"
+      , "  AND ($5::timestamptz IS NULL OR changed_at >= $5)"
+      , "  AND ($6::timestamptz IS NULL OR changed_at <= $6)"
       , "ORDER BY changed_at DESC, id DESC"
-      , "LIMIT $6 OFFSET $7"
+      , "LIMIT $7 OFFSET $8"
       ]
     encoder =
-      contramap (\(a,_,_,_,_,_,_) -> a) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,b,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,c,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,_,d,_,_,_) -> d) (Enc.param (Enc.nullable Enc.timestamptz)) <>
-      contramap (\(_,_,_,_,e,_,_) -> e) (Enc.param (Enc.nullable Enc.timestamptz)) <>
-      contramap (\(_,_,_,_,_,f,_) -> f) (Enc.param (Enc.nonNullable Enc.int4)) <>
-      contramap (\(_,_,_,_,_,_,g) -> g) (Enc.param (Enc.nonNullable Enc.int4))
+      contramap (\(a,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nullable Enc.uuid)) <>
+      contramap (\(_,b,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,c,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,d,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,e,_,_,_) -> e) (Enc.param (Enc.nullable Enc.timestamptz)) <>
+      contramap (\(_,_,_,_,_,f,_,_) -> f) (Enc.param (Enc.nullable Enc.timestamptz)) <>
+      contramap (\(_,_,_,_,_,_,g,_) -> g) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,_,h) -> h) (Enc.param (Enc.nonNullable Enc.int4))
     decoder = Dec.rowList auditLogRowDecoder

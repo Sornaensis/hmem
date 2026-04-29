@@ -23,6 +23,7 @@ data-files:
     migrations/V007__redact_access_token_hash_from_audit.sql
     migrations/V008__user_disabled_at.sql
     migrations/V009__ignore_access_token_last_used_audit.sql
+    migrations/V010__audit_log_workspace_query_index.sql
 
 library
   exposed-modules:

@@ -196,7 +196,8 @@ type alias WorkspaceAdminModel =
 
 
 type alias AuditLogFilters =
-    { entityType : Maybe String
+    { workspaceId : Maybe String
+    , entityType : Maybe String
     , entityId : Maybe String
     , action : Maybe String
     , since : Maybe String

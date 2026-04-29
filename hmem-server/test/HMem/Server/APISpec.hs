@@ -3032,6 +3032,7 @@ spec = around withApp $ do
         let Just auditPage = decode (respBody listResp) :: Maybe (PaginatedResult AuditLogEntry)
         length auditPage.items `shouldBe` 1
         let [entry] = auditPage.items
+        entry.workspaceId `shouldBe` Just ws.id
         entry.requestId `shouldBe` Just "audit-actor-req"
         entry.actorType `shouldBe` Just "user"
         entry.actorId `shouldBe` Just "local-user"
@@ -3040,9 +3041,33 @@ spec = around withApp $ do
         getResp <- get_ app (uuidPath "/api/v1/audit" entry.id)
         respStatus getResp `shouldBe` 200
         let Just fetchedEntry = decode (respBody getResp) :: Maybe AuditLogEntry
+        fetchedEntry.workspaceId `shouldBe` Just ws.id
         fetchedEntry.actorType `shouldBe` Just "user"
         fetchedEntry.actorId `shouldBe` Just "local-user"
         fetchedEntry.actorLabel `shouldBe` Just "Local User"
+
+    it "filters audit API responses by workspace_id" $ \_ -> do
+      withAppEnv $ \_env app -> do
+        wsAResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("audit-filter-a" :: T.Text)])
+        respStatus wsAResp `shouldBe` 200
+        let Just wsA = decode (respBody wsAResp) :: Maybe Workspace
+
+        wsBResp <- postJSON app "/api/v1/workspaces"
+          (object ["name" .= ("audit-filter-b" :: T.Text)])
+        respStatus wsBResp `shouldBe` 200
+        let Just wsB = decode (respBody wsBResp) :: Maybe Workspace
+
+        filteredResp <- get_ app
+          ("/api/v1/audit?workspace_id=" <> encodeUtf8 (T.pack (show wsA.id)))
+        respStatus filteredResp `shouldBe` 200
+        let Just filteredPage = decode (respBody filteredResp) :: Maybe (PaginatedResult AuditLogEntry)
+        length filteredPage.items `shouldBe` 1
+        let [entry] = filteredPage.items
+        entry.workspaceId `shouldBe` Just wsA.id
+        entry.entityType `shouldBe` "workspace"
+        entry.entityId `shouldBe` T.pack (show wsA.id)
+        entry.entityId `shouldNotBe` T.pack (show wsB.id)
 
     it "includes canonical actor hints in emitted change events" $ \_ -> do
       withTestEnv $ \env -> do

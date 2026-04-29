@@ -1521,6 +1521,7 @@ instance FromJSON AuditAction where
 
 data AuditLogEntry = AuditLogEntry
   { id         :: UUID
+  , workspaceId :: Maybe UUID
   , entityType :: Text
   , entityId   :: Text
   , action     :: AuditAction
@@ -1539,7 +1540,8 @@ instance FromJSON AuditLogEntry where
   parseJSON  = genericParseJSON jsonOptions
 
 data AuditLogQuery = AuditLogQuery
-  { entityType :: Maybe Text
+  { workspaceId :: Maybe UUID
+  , entityType :: Maybe Text
   , entityId   :: Maybe Text
   , action     :: Maybe AuditAction
   , since      :: Maybe UTCTime

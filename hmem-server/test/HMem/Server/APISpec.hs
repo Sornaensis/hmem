@@ -996,6 +996,18 @@ spec = around withApp $ do
           ""
         respStatus resp `shouldBe` 200
 
+    it "treats malformed bearer headers as unauthenticated" $ \_ ->
+      withAppConfig testAuthCfg $ \app -> do
+        emptyBearer <- runReqWithHeaders app methodGet "/api/v1/health"
+          [("Authorization", "Bearer ")]
+          ""
+        respStatus emptyBearer `shouldBe` 401
+
+        invalidUtf8 <- runReqWithHeaders app methodGet "/api/v1/health"
+          [("Authorization", BS.pack [66, 101, 97, 114, 101, 114, 32, 255])]
+          ""
+        respStatus invalidUtf8 `shouldBe` 401
+
   describe "session/principal context" $ do
     it "returns local superadmin context for local bootstrap sessions" $ \app -> do
       resp <- get_ app "/api/v1/session"

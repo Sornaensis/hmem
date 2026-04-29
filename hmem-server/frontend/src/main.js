@@ -11,6 +11,7 @@ function createSessionId() {
 
 const runtimeConfig = window.HMEM_CONFIG || {}
 const authTokenStorageKey = runtimeConfig.authTokenStorageKey || 'hmem-auth-token'
+const authTokenStorageMode = normalizeAuthTokenStorageMode(runtimeConfig.authTokenStorage || runtimeConfig.authTokenStorageMode || 'local')
 const runtimeMode = runtimeConfig.authMode || runtimeConfig.runtimeMode || import.meta.env.VITE_HMEM_AUTH_MODE || 'unknown'
 const defaultAuthTokenUrlParams = ['hmem_token', 'auth_token', 'access_token']
 function normalizeStringArray(value, fallback) {
@@ -25,6 +26,11 @@ const authLoginStateStorageKey = runtimeConfig.authLoginStateStorageKey || 'hmem
 const requireAuthState = runtimeConfig.requireAuthState !== false
 let pendingAuthSessionError = null
 let ignoreStoredAuthToken = false
+
+function normalizeAuthTokenStorageMode(value) {
+  if (value === 'memory' || value === 'session' || value === 'local') return value
+  return 'local'
+}
 
 function configuredApiUrl() {
   return runtimeConfig.apiUrl || import.meta.env.VITE_HMEM_API_URL || window.location.origin
@@ -102,6 +108,31 @@ function safeSessionStorageRemove(key) {
   try {
     sessionStorage.removeItem(key)
   } catch (e) {}
+}
+
+function storedAuthTokenGet() {
+  if (authTokenStorageMode === 'memory') return null
+  if (authTokenStorageMode === 'session') return safeSessionStorageGet(authTokenStorageKey)
+  return safeLocalStorageGet(authTokenStorageKey)
+}
+
+function storedAuthTokenSet(value) {
+  if (authTokenStorageMode === 'memory') {
+    runtimeConfig.authToken = value
+    return true
+  }
+  if (authTokenStorageMode === 'session') return safeSessionStorageSet(authTokenStorageKey, value)
+  return safeLocalStorageSet(authTokenStorageKey, value)
+}
+
+function storedAuthTokenRemove() {
+  safeSessionStorageRemove(authTokenStorageKey)
+  safeLocalStorageRemove(authTokenStorageKey)
+}
+
+function clearInactiveStoredAuthTokens() {
+  if (authTokenStorageMode !== 'session') safeSessionStorageRemove(authTokenStorageKey)
+  if (authTokenStorageMode !== 'local') safeLocalStorageRemove(authTokenStorageKey)
 }
 
 function extractTokenFromParams(params) {
@@ -186,7 +217,7 @@ function captureAuthTokenFromUrl() {
 
   if (stateAccepted) {
     ignoreStoredAuthToken = false
-    if (!safeLocalStorageSet(authTokenStorageKey, found.value)) {
+    if (!storedAuthTokenSet(found.value)) {
       runtimeConfig.authToken = found.value
       pendingAuthSessionError = 'Browser storage is unavailable; using the returned auth token for this tab only.'
     }
@@ -203,10 +234,11 @@ function captureAuthTokenFromUrl() {
   return found.value
 }
 
+clearInactiveStoredAuthTokens()
 captureAuthTokenFromUrl()
 
 function currentAuthToken() {
-  const storedToken = ignoreStoredAuthToken ? null : safeLocalStorageGet(authTokenStorageKey)
+  const storedToken = ignoreStoredAuthToken ? null : storedAuthTokenGet()
   if (runtimeMode === 'deployed') return storedToken || runtimeConfig.authToken || null
   return runtimeConfig.authToken || storedToken || null
 }
@@ -303,7 +335,7 @@ const app = Elm.Main.init({
     wsUrl,
     sessionId: createSessionId(),
     runtimeMode,
-    authTokenStorageKey,
+    authTokenStorageKey: authTokenStorageMode === 'memory' ? 'in-memory' : authTokenStorageKey,
     authTokenPresent: authTokenPresent(),
     loginUrl: runtimeConfig.loginUrl || import.meta.env.VITE_HMEM_LOGIN_URL || null,
     logoutUrl: runtimeConfig.logoutUrl || import.meta.env.VITE_HMEM_LOGOUT_URL || null,
@@ -348,7 +380,7 @@ function createAuthState() {
 }
 
 window.addEventListener('storage', function (event) {
-  if (event.key === authTokenStorageKey) {
+  if (authTokenStorageMode === 'local' && event.key === authTokenStorageKey) {
     if (event.newValue !== null) ignoreStoredAuthToken = false
     if (runtimeMode === 'deployed' && event.newValue === null) runtimeConfig.authToken = null
     notifyAuthTokenChanged(false)
@@ -366,7 +398,7 @@ setInterval(function () {
 if (app.ports.logoutAuth) {
   app.ports.logoutAuth.subscribe(function () {
     ignoreStoredAuthToken = true
-    safeLocalStorageRemove(authTokenStorageKey)
+    storedAuthTokenRemove()
     runtimeConfig.authToken = null
     notifyAuthTokenChanged(true)
 

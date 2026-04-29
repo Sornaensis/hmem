@@ -149,6 +149,8 @@ The server authorizes requests. Clients forward credentials and display server-p
 
 Configure the frontend with the HTTP and WebSocket server URLs. Load session state before fetching protected data.
 
+For explicit bearer-token frontend flows, provider callbacks must return tokens in URL fragments, not query strings. The frontend strips auth callback parameters from the URL after processing. By default it stores bearer tokens in `localStorage` for cross-tab persistence; this is convenient but exposes tokens to any successful XSS in the hmem origin. Operators can set `window.HMEM_CONFIG.authTokenStorage` to `session` for per-tab browser session storage or `memory` for in-memory-only storage; the frontend clears inactive storage locations on startup and logout. Server-side provider sessions remain the preferred future hardening path in the provider-auth workstream.
+
 MCP can point at a separate server:
 
 ```bash

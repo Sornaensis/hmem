@@ -270,7 +270,12 @@ legacyPrincipal authCfg token = do
 bearerToken :: Wai.Request -> Maybe Text
 bearerToken request = do
   raw <- lookup "Authorization" (Wai.requestHeaders request)
-  BS8.stripPrefix "Bearer " raw >>= Just . TE.decodeUtf8
+  tokenBytes <- BS8.stripPrefix "Bearer " raw
+  case TE.decodeUtf8' tokenBytes of
+    Left _ -> Nothing
+    Right token
+      | T.null token -> Nothing
+      | otherwise -> Just token
 
 -- | Current legacy static bearer auth path. When inactive, requests pass
 -- through. When active, all non-OPTIONS requests must supply a matching

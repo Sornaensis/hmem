@@ -167,10 +167,19 @@ containsObjectField fieldName = \case
   Just (Object obj) -> KM.member (Key.fromText fieldName) obj
   _ -> False
 
-assertNoTokenHashAuditSnapshot :: AuditLogRow -> Expectation
-assertNoTokenHashAuditSnapshot row = do
+assertNoAccessTokenSensitiveAuditSnapshot :: T.Text -> AuditLogRow -> Expectation
+assertNoAccessTokenSensitiveAuditSnapshot rawToken row = do
   row.oldValues `shouldSatisfy` (not . containsObjectField "token_hash")
   row.newValues `shouldSatisfy` (not . containsObjectField "token_hash")
+  row.oldValues `shouldSatisfy` (not . containsObjectField "last_used_at")
+  row.newValues `shouldSatisfy` (not . containsObjectField "last_used_at")
+  auditSnapshotText row.oldValues `shouldSatisfy` (not . T.isInfixOf rawToken)
+  auditSnapshotText row.newValues `shouldSatisfy` (not . T.isInfixOf rawToken)
+
+auditSnapshotText :: Maybe Value -> T.Text
+auditSnapshotText = \case
+  Nothing -> ""
+  Just value -> T.pack (LBS8.unpack (encode value))
 
 uuidPath :: BS.ByteString -> UUID -> BS.ByteString
 uuidPath prefix uid = prefix <> "/" <> encodeUtf8 (T.pack (show uid))
@@ -1527,11 +1536,8 @@ spec = around withApp $ do
         let Just ws = decode (respBody wsResp) :: Maybe Workspace
 
         tokenAuditRows <- getAuditLogRows env.pool "access_token" (T.pack $ show tokenId)
-        mapM_ assertNoTokenHashAuditSnapshot tokenAuditRows
-        let lastTokenAudit = last tokenAuditRows
-        lastTokenAudit.actorType `shouldBe` Just "bot"
-        lastTokenAudit.actorId `shouldBe` Just (T.pack $ show tokenId)
-        lastTokenAudit.actorLabel `shouldBe` Just "Deploy Bot"
+        length tokenAuditRows `shouldBe` 1
+        mapM_ (assertNoAccessTokenSensitiveAuditSnapshot "pat-secret") tokenAuditRows
 
         rows <- getAuditLogRows env.pool "workspace" (T.pack (show ws.id))
         let [created] = rows

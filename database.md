@@ -263,11 +263,14 @@ bearer secrets.
 - `grant_user_id` points to the canonical `users` row whose global permissions
   and `workspace_memberships` are evaluated. Bot/service tokens do not have a
   separate permissions table in v1.
-- `expires_at`, `revoked_at`, and `last_used_at` are the v1 lifecycle and
-  observability fields used for operator-managed issuance, rotation, and
-  revocation.
-- `token_hash` is omitted from `access_tokens` audit snapshots; audit rows
-  should carry actor attribution and lifecycle changes, not secret digests.
+- `expires_at` and `revoked_at` provide lifecycle controls for operator-managed
+  issuance, rotation, and emergency revocation.
+- `last_used_at` is operational usage metadata updated when persisted PATs are
+  used. The access-token audit trigger ignores it so routine authentication does
+  not create per-request audit noise.
+- `token_hash` and `last_used_at` are omitted from `access_tokens` audit
+  snapshots; audit rows should carry actor attribution and lifecycle changes,
+  not secret digests or high-volume usage timestamps.
 
 Local configured bot tokens may be represented in local config/bootstrap
 material instead of `access_tokens` during the local compatibility period, but

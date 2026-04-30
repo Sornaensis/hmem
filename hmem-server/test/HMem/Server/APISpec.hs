@@ -3104,6 +3104,17 @@ spec = around withApp $ do
         editorUserId <- createTestUser env False False
         outsiderUserId <- createTestUser env False False
         superadminUserId <- createTestUser env False True
+        globalAuditUserId <- createTestUser env False False
+
+        globalAuditResp <- get_ app
+          ( "/api/v1/audit?entity_type=user&entity_id="
+         <> encodeUtf8 (T.pack (show globalAuditUserId))
+          )
+        respStatus globalAuditResp `shouldBe` 200
+        let Just globalAuditPage = decode (respBody globalAuditResp) :: Maybe (PaginatedResult AuditLogEntry)
+        length globalAuditPage.items `shouldBe` 1
+        let [globalEntry] = globalAuditPage.items
+        globalEntry.workspaceId `shouldBe` Nothing
 
         _ <- grantWorkspaceRole env wsA.id adminUserId Auth.WorkspaceRoleAdmin
         _ <- grantWorkspaceRole env wsA.id readerUserId Auth.WorkspaceRoleRead
@@ -3132,6 +3143,9 @@ spec = around withApp $ do
 
           deniedOtherGet <- get_ adminApp (uuidPath "/api/v1/audit" wsBEntry.id)
           respStatus deniedOtherGet `shouldBe` 404
+
+          deniedGlobalGet <- get_ adminApp (uuidPath "/api/v1/audit" globalEntry.id)
+          respStatus deniedGlobalGet `shouldBe` 404
 
           deniedRevert <- postJSON adminApp (uuidPath "/api/v1/audit" wsAEntry.id <> "/revert") Null
           respStatus deniedRevert `shouldBe` 403
@@ -3166,6 +3180,9 @@ spec = around withApp $ do
 
           allowedOtherGet <- get_ superApp (uuidPath "/api/v1/audit" wsBEntry.id)
           respStatus allowedOtherGet `shouldBe` 200
+
+          allowedGlobalGet <- get_ superApp (uuidPath "/api/v1/audit" globalEntry.id)
+          respStatus allowedGlobalGet `shouldBe` 200
 
     it "includes canonical actor hints in emitted change events" $ \_ -> do
       withTestEnv $ \env -> do

@@ -50,11 +50,15 @@ parseFragment fragment =
                         pairs
 
                 tab =
-                    if tabVal == "memories" then
-                        MemoriesTab
+                    case tabVal of
+                        "memories" ->
+                            MemoriesTab
 
-                    else
-                        ProjectsTab
+                        "audit" ->
+                            AuditTab
+
+                        _ ->
+                            ProjectsTab
 
                 focusVal =
                     List.foldl
@@ -93,6 +97,9 @@ buildFragment tab focus =
 
                 MemoriesTab ->
                     "tab=memories"
+
+                AuditTab ->
+                    "tab=audit"
 
         focusPart =
             case focus of

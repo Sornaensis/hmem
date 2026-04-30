@@ -4,6 +4,7 @@ module Page.Workspace exposing
 
 import Api
 import Dict
+import Feature.AuditLog
 import Feature.Cards
 import Feature.Editing
 import Feature.Memory
@@ -130,10 +131,17 @@ viewReadableWorkspacePage wsId model ws =
           else
             div []
                 [ Feature.WorkspaceAdmin.viewWorkspaceAdminPanel ws model
-                , Feature.Search.viewSearchBar model
-                , viewTabs model.activeTab
+                , if model.activeTab == AuditTab then
+                    text ""
+
+                  else
+                    Feature.Search.viewSearchBar model
+                , viewTabs model
                 , if model.dataLoading.loadingWorkspaceData then
                     div [ class "loading-indicator" ] [ text "Loading..." ]
+
+                  else if model.activeTab == AuditTab then
+                    viewTabContent wsId model
 
                   else
                     case model.search.unifiedResults of
@@ -196,12 +204,19 @@ viewCreateButton _ =
     text ""
 
 
-viewTabs : WorkspaceTab -> Html Msg
-viewTabs activeTab =
+viewTabs : Model -> Html Msg
+viewTabs model =
     div [ class "tabs" ]
-        [ viewTab ProjectsTab activeTab "Projects"
-        , viewTab MemoriesTab activeTab "Memories"
-        ]
+        (List.filterMap identity
+            [ Just (viewTab ProjectsTab model.activeTab "Projects")
+            , Just (viewTab MemoriesTab model.activeTab "Memories")
+            , if Permissions.canViewCurrentWorkspaceAudit model then
+                Just (viewTab AuditTab model.activeTab "Audit")
+
+              else
+                Nothing
+            ]
+        )
 
 
 viewTab : WorkspaceTab -> WorkspaceTab -> String -> Html Msg
@@ -227,3 +242,6 @@ viewTabContent wsId model =
 
         MemoriesTab ->
             Feature.Memory.viewMemoriesList wsId model
+
+        AuditTab ->
+            Feature.AuditLog.viewWorkspaceAuditPanel wsId model

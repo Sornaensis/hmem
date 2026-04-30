@@ -121,8 +121,29 @@ handleOwned ownedMsg model =
                         |> Feature.Editing.clearForTabSwitch
                         |> Feature.Memory.clearForTabSwitch
                         |> (\currentModel -> { currentModel | activeTab = tab })
+
+                ( auditLog, auditCmd ) =
+                    case ( tab, newModel.selectedWorkspaceId ) of
+                        ( AuditTab, Just wsId ) ->
+                            if Permissions.canViewCurrentWorkspaceAudit newModel then
+                                let
+                                    filters =
+                                        workspaceAuditFilters wsId
+                                in
+                                ( resetAuditLogWithFilters filters newModel.auditLog
+                                , Api.fetchAuditLog newModel.flags.apiUrl filters (GotAuditLog filters)
+                                )
+
+                            else
+                                ( newModel.auditLog, Cmd.none )
+
+                        _ ->
+                            ( newModel.auditLog, Cmd.none )
+
+                finalModel =
+                    { newModel | auditLog = auditLog }
             in
-            ( newModel, replaceFragment newModel )
+            ( finalModel, Cmd.batch [ replaceFragment finalModel, auditCmd ] )
 
         SessionContextLoadedMsg expectedWorkspace result ->
             if sessionContextResponseMatches expectedWorkspace model then
@@ -164,19 +185,36 @@ handleOwned ownedMsg model =
                                     Nothing ->
                                         model.workspaceAdmin
 
-                            fetchAuditCmd =
+                            ( nextAuditLog, fetchAuditCmd ) =
                                 case ( expectedWorkspace, model.page ) of
                                     ( Nothing, AuditLogPage ) ->
                                         if sessionContext.globalPermissions.superadmin then
-                                            Api.fetchAuditLog model.flags.apiUrl model.auditLog.filters GotAuditLog
+                                            let
+                                                auditLog =
+                                                    model.auditLog
+                                            in
+                                            ( { auditLog | loading = True, loadingFilters = Just model.auditLog.filters }, Api.fetchAuditLog model.flags.apiUrl model.auditLog.filters (GotAuditLog model.auditLog.filters) )
 
                                         else
-                                            Cmd.none
+                                            ( model.auditLog, Cmd.none )
+
+                                    ( Just wsId, WorkspacePage currentWsId ) ->
+                                        if wsId == currentWsId && model.activeTab == AuditTab && sessionCanAdminWorkspace wsId sessionContext then
+                                            let
+                                                filters =
+                                                    workspaceAuditFilters wsId
+                                            in
+                                            ( resetAuditLogWithFilters filters model.auditLog
+                                            , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
+                                            )
+
+                                        else
+                                            ( model.auditLog, Cmd.none )
 
                                     _ ->
-                                        Cmd.none
+                                        ( model.auditLog, Cmd.none )
                         in
-                        ( { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin }
+                        ( { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin, auditLog = nextAuditLog }
                             |> updateLoadingAfterSession expectedWorkspace sessionContext
                         , Cmd.batch [ sessionBootstrapCmd, fetchMembershipsCmd, fetchAuditCmd ]
                         )
@@ -407,6 +445,42 @@ sessionCanReadWorkspace wsId sessionContext =
                 |> Maybe.map (\workspaceContext -> workspaceContext.workspaceId == wsId && workspaceContext.canRead)
                 |> Maybe.withDefault False
            )
+
+
+sessionCanAdminWorkspace : String -> Api.SessionContext -> Bool
+sessionCanAdminWorkspace wsId sessionContext =
+    sessionContext.globalPermissions.superadmin
+        || (sessionContext.workspace
+                |> Maybe.map (\workspaceContext -> workspaceContext.workspaceId == wsId && workspaceContext.canAdmin)
+                |> Maybe.withDefault False
+           )
+
+
+workspaceAuditFilters : String -> AuditLogFilters
+workspaceAuditFilters wsId =
+    { workspaceId = Just wsId
+    , entityType = Nothing
+    , entityId = Nothing
+    , action = Nothing
+    , since = Nothing
+    , until = Nothing
+    , limit = Just 50
+    , offset = Nothing
+    }
+
+
+resetAuditLogWithFilters : AuditLogFilters -> AuditLogModel -> AuditLogModel
+resetAuditLogWithFilters filters auditLog =
+    { auditLog
+        | entries = []
+        , hasMore = False
+        , loading = True
+        , loadingFilters = Just filters
+        , filters = filters
+        , expandedEntries = Dict.empty
+        , revertConfirmation = Nothing
+        , revertInFlight = False
+    }
 
 
 updateLoadingAfterSession : Maybe String -> Api.SessionContext -> Model -> Model

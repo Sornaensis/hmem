@@ -376,7 +376,7 @@ update msg model =
         ClearFocus ->
             Ok (Feature.Focus.update msg model)
 
-        GotAuditLog _ ->
+        GotAuditLog _ _ ->
             Ok (Feature.AuditLog.update msg model)
 
         GotEntityHistory _ _ ->

@@ -179,6 +179,8 @@ type alias AuditLogModel =
     , historyExpanded : Dict String Bool
     , entries : List Api.AuditLogEntry
     , hasMore : Bool
+    , loading : Bool
+    , loadingFilters : Maybe AuditLogFilters
     , filters : AuditLogFilters
     , expandedEntries : Dict String Bool
     , revertConfirmation : Maybe Api.AuditLogEntry
@@ -265,6 +267,7 @@ type ToastLevel
 type WorkspaceTab
     = ProjectsTab
     | MemoriesTab
+    | AuditTab
 
 
 
@@ -506,7 +509,7 @@ type Msg
     | MainContentScrolled Float
     | ClearPendingRequest String
       -- Audit log
-    | GotAuditLog (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
+    | GotAuditLog AuditLogFilters (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
     | GotEntityHistory String (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
     | ToggleEntityHistory String String
     | LoadMoreHistory String String

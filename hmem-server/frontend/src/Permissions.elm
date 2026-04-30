@@ -5,6 +5,7 @@ module Permissions exposing
     , canEditCurrentWorkspace
     , canReadCurrentWorkspace
     , canViewGlobalAudit
+    , canViewCurrentWorkspaceAudit
     , currentWorkspaceRoleLabel
     , hasImplicitLocalSuperadmin
     , hasSession
@@ -91,6 +92,11 @@ canAdminCurrentWorkspace model =
 canViewGlobalAudit : Model -> Bool
 canViewGlobalAudit =
     isSuperadmin
+
+
+canViewCurrentWorkspaceAudit : Model -> Bool
+canViewCurrentWorkspaceAudit =
+    canAdminCurrentWorkspace
 
 
 currentWorkspaceRoleLabel : Model -> String

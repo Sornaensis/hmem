@@ -5,6 +5,7 @@ import Browser
 import Browser.Navigation as Nav
 import Dict
 import Helpers exposing (localStorageKey, parseFragment)
+import Permissions
 import Ports exposing (destroyCytoscape, disconnectWebSocket, requestLocalStorage)
 import Types exposing (..)
 import Url
@@ -146,17 +147,20 @@ handleUrlChange url model =
                             | linkingMemoryFor = Nothing
                             , linkingEntityFor = Nothing
                         }
+                    updatedModel =
+                        { model
+                            | url = url
+                            , activeTab = frag.tab
+                            , focus = updatedFocus
+                            , editing = updatedEditing
+                            , memory = updatedMemory
+                        }
+                            |> clearRouteConfirmations
+
+                    ( finalModel, auditCmd ) =
+                        prepareWorkspaceAuditFromRoute wsId frag.tab updatedModel
                 in
-                ( { model
-                    | url = url
-                    , activeTab = frag.tab
-                    , focus = updatedFocus
-                    , editing = updatedEditing
-                    , memory = updatedMemory
-                  }
-                    |> clearRouteConfirmations
-                , Cmd.none
-                )
+                ( finalModel, auditCmd )
 
             else
                 let
@@ -346,6 +350,8 @@ handleUrlChange url model =
                     { currentAuditLog
                         | entries = []
                         , hasMore = False
+                        , loading = False
+                        , loadingFilters = Nothing
                         , filters = emptyFilters
                         , expandedEntries = Dict.empty
                         , revertConfirmation = Nothing
@@ -386,6 +392,51 @@ handleUrlChange url model =
                 , destroyCmd
                 ]
             )
+
+
+prepareWorkspaceAuditFromRoute : String -> WorkspaceTab -> Model -> ( Model, Cmd Msg )
+prepareWorkspaceAuditFromRoute wsId tab model =
+    if tab == AuditTab && Permissions.canViewCurrentWorkspaceAudit model && model.auditLog.filters.workspaceId /= Just wsId then
+        let
+            filters =
+                workspaceAuditFilters wsId
+
+            auditLog =
+                resetAuditLogWithFilters filters model.auditLog
+        in
+        ( { model | auditLog = auditLog }
+        , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
+        )
+
+    else
+        ( model, Cmd.none )
+
+
+workspaceAuditFilters : String -> AuditLogFilters
+workspaceAuditFilters wsId =
+    { workspaceId = Just wsId
+    , entityType = Nothing
+    , entityId = Nothing
+    , action = Nothing
+    , since = Nothing
+    , until = Nothing
+    , limit = Just 50
+    , offset = Nothing
+    }
+
+
+resetAuditLogWithFilters : AuditLogFilters -> AuditLogModel -> AuditLogModel
+resetAuditLogWithFilters filters auditLog =
+    { auditLog
+        | entries = []
+        , hasMore = False
+        , loading = True
+        , loadingFilters = Just filters
+        , filters = filters
+        , expandedEntries = Dict.empty
+        , revertConfirmation = Nothing
+        , revertInFlight = False
+    }
 
 
 clearRouteConfirmations : Model -> Model

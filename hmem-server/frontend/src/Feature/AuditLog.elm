@@ -1,4 +1,4 @@
-module Feature.AuditLog exposing (init, update, viewAuditLogPage, viewEntityHistory, viewRevertConfirmModal)
+module Feature.AuditLog exposing (init, update, viewAuditLogPage, viewWorkspaceAuditPanel, viewEntityHistory, viewRevertConfirmModal)
 
 import Api
 import Browser.Navigation as Nav
@@ -20,6 +20,8 @@ init =
     , historyExpanded = Dict.empty
     , entries = []
     , hasMore = False
+    , loading = False
+    , loadingFilters = Nothing
     , filters = { workspaceId = Nothing, entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
     , expandedEntries = Dict.empty
     , revertConfirmation = Nothing
@@ -65,6 +67,14 @@ update msg model =
                     case mWorkspaceId of
                         Just wsId ->
                             let
+                                targetTab =
+                                    case targetType of
+                                        "memory" ->
+                                            MemoriesTab
+
+                                        _ ->
+                                            ProjectsTab
+
                                 focusEntry =
                                     ( targetType, targetId )
 
@@ -86,22 +96,26 @@ update msg model =
                                         , historyIndex = newIndex
                                     }
                                 )
-                                { model | selectedWorkspaceId = Just wsId }
-                            , Nav.pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment model.activeTab (Just focusEntry))
+                                { model | selectedWorkspaceId = Just wsId, activeTab = targetTab }
+                            , Nav.pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment targetTab (Just focusEntry))
                             )
 
                         Nothing ->
                             addToast Warning "Cannot navigate: entity workspace unknown" model
 
-        GotAuditLog result ->
-            case result of
-                Ok paginated ->
-                    ( updateAuditLogModel (\al -> { al | entries = al.entries ++ paginated.items, hasMore = paginated.hasMore }) model
-                    , Cmd.none
-                    )
+        GotAuditLog requestedFilters result ->
+            if requestedFilters /= model.auditLog.filters || model.auditLog.loadingFilters /= Just requestedFilters then
+                ( model, Cmd.none )
 
-                Err _ ->
-                    addToast Error "Failed to load audit log" model
+            else
+                case result of
+                    Ok paginated ->
+                        ( updateAuditLogModel (\al -> { al | entries = al.entries ++ paginated.items, hasMore = paginated.hasMore, loading = False, loadingFilters = Nothing }) model
+                        , Cmd.none
+                        )
+
+                    Err _ ->
+                        addToast Error "Failed to load audit log" (updateAuditLogModel (\al -> { al | loading = False, loadingFilters = Nothing }) model)
 
         GotEntityHistory entityId result ->
             case result of
@@ -174,7 +188,7 @@ update msg model =
                         _ ->
                             filters
             in
-            ( updateAuditLogModel (\al -> { al | filters = updated }) model, Cmd.none )
+            ( updateAuditLogModel (\al -> { al | filters = updated, loading = False, loadingFilters = Nothing }) model, Cmd.none )
 
         ApplyAuditFilters ->
             let
@@ -184,21 +198,25 @@ update msg model =
                 filters =
                     { oldFilters | offset = Nothing }
             in
-            ( updateAuditLogModel (\al -> { al | entries = [], hasMore = False, filters = filters }) model
-            , Api.fetchAuditLog model.flags.apiUrl filters GotAuditLog
+            ( updateAuditLogModel (\al -> { al | entries = [], hasMore = False, loading = True, loadingFilters = Just filters, filters = filters }) model
+            , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
             )
 
         LoadMoreAuditLog ->
-            let
-                oldFilters =
-                    model.auditLog.filters
+            if model.auditLog.loading then
+                ( model, Cmd.none )
 
-                filters =
-                    { oldFilters | offset = Just (List.length model.auditLog.entries) }
-            in
-            ( updateAuditLogModel (\al -> { al | filters = filters }) model
-            , Api.fetchAuditLog model.flags.apiUrl filters GotAuditLog
-            )
+            else
+                let
+                    oldFilters =
+                        model.auditLog.filters
+
+                    filters =
+                        { oldFilters | offset = Just (List.length model.auditLog.entries) }
+                in
+                ( updateAuditLogModel (\al -> { al | filters = filters, loading = True, loadingFilters = Just filters }) model
+                , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
+                )
 
         ToggleAuditExpand entryId ->
             let
@@ -239,7 +257,7 @@ update msg model =
                         refreshHistoryCmd =
                             Api.fetchEntityHistory model.flags.apiUrl entityType entityId Nothing (GotEntityHistory entityId)
 
-                        refreshAuditCmd =
+                        refreshAuditFilters =
                             case model.page of
                                 AuditLogPage ->
                                     let
@@ -249,9 +267,17 @@ update msg model =
                                         filters =
                                             { oldFilters | offset = Nothing }
                                     in
-                                    Api.fetchAuditLog model.flags.apiUrl filters GotAuditLog
+                                    Just filters
 
                                 _ ->
+                                    Nothing
+
+                        refreshAuditCmd =
+                            case refreshAuditFilters of
+                                Just filters ->
+                                    Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
+
+                                Nothing ->
                                     Cmd.none
 
                         clearAuditLog =
@@ -275,6 +301,16 @@ update msg model =
 
                                                 else
                                                     al.entries
+                                            , loading =
+                                                case refreshAuditFilters of
+                                                    Just _ ->
+                                                        True
+
+                                                    Nothing ->
+                                                        False
+                                            , loadingFilters = refreshAuditFilters
+                                            , filters =
+                                                Maybe.withDefault al.filters refreshAuditFilters
                                         }
                                     )
                                     model
@@ -301,7 +337,14 @@ update msg model =
 
 viewAuditLogPage : Model -> Html Msg
 viewAuditLogPage model =
-    if not (Permissions.canViewGlobalAudit model) then
+    if model.sessionContext == Nothing then
+        div [ class "page audit-log-view" ]
+            [ div [ class "page-header" ]
+                [ h2 [] [ span [ class "page-header-icon icon-audit" ] [], text "Audit Log" ] ]
+            , div [ class "loading-indicator" ] [ text "Loading audit permissions..." ]
+            ]
+
+    else if not (Permissions.canViewGlobalAudit model) then
         div [ class "page audit-log-view" ]
             [ div [ class "page-header" ]
                 [ h2 [] [ span [ class "page-header-icon icon-audit" ] [], text "Audit Log" ] ]
@@ -313,22 +356,66 @@ viewAuditLogPage model =
             [ div [ class "page-header" ]
                 [ h2 [] [ span [ class "page-header-icon icon-audit" ] [], text "Audit Log" ] ]
             , viewAuditLogFilters model
-            , if List.isEmpty model.auditLog.entries then
-                div [ class "empty-state" ] [ text "No audit log entries found." ]
+            , viewAuditEntries model "No audit log entries found."
+            ]
+
+
+viewWorkspaceAuditPanel : String -> Model -> Html Msg
+viewWorkspaceAuditPanel wsId model =
+    if model.sessionContext == Nothing then
+        div [ class "audit-log-view" ]
+            [ div [ class "loading-indicator" ] [ text "Loading audit permissions..." ] ]
+
+    else if not (Permissions.canViewCurrentWorkspaceAudit model) then
+        div [ class "audit-log-view" ]
+            [ div [ class "empty-state" ]
+                [ h3 [] [ text "Workspace audit unavailable" ]
+                , p [] [ text "Workspace audit access requires workspace admin permission." ]
+                ]
+            ]
+
+    else
+        let
+            filtersMatch =
+                model.auditLog.filters.workspaceId == Just wsId
+        in
+        div [ class "audit-log-view workspace-audit-log" ]
+            [ div [ class "section-header" ]
+                [ h3 [] [ span [ class "section-header-icon icon-audit" ] [], text "Workspace audit" ]
+                , p [ class "help-text" ] [ text "Recent changes recorded for this workspace." ]
+                ]
+            , viewAuditLogFilters model
+            , if filtersMatch then
+                viewAuditEntries model "No workspace audit entries found."
 
               else
-                div [ class "audit-log-list" ]
-                    (List.map (viewAuditLogEntry model) model.auditLog.entries
-                        ++ (if model.auditLog.hasMore then
-                                [ button [ class "audit-log-load-more", onClick LoadMoreAuditLog ]
-                                    [ text "Load more..." ]
-                                ]
-
-                            else
-                                []
-                           )
-                    )
+                div [ class "loading-indicator" ] [ text "Loading workspace audit..." ]
             ]
+
+
+viewAuditEntries : Model -> String -> Html Msg
+viewAuditEntries model emptyMessage =
+    if model.auditLog.loading && List.isEmpty model.auditLog.entries then
+        div [ class "loading-indicator" ] [ text "Loading audit entries..." ]
+
+    else if List.isEmpty model.auditLog.entries then
+        div [ class "empty-state" ] [ text emptyMessage ]
+
+    else
+        div [ class "audit-log-list" ]
+            (List.map (viewAuditLogEntry model) model.auditLog.entries
+                ++ (if model.auditLog.hasMore && model.auditLog.loading then
+                        [ div [ class "loading-indicator" ] [ text "Loading more audit entries..." ] ]
+
+                    else if model.auditLog.hasMore then
+                        [ button [ class "audit-log-load-more", onClick LoadMoreAuditLog ]
+                            [ text "Load more..." ]
+                        ]
+
+                    else
+                        []
+                   )
+            )
 
 
 viewAuditLogFilters : Model -> Html Msg
@@ -610,7 +697,7 @@ viewAuditLogEntry model entry =
                     [ span [ class "audit-entry-id" ] [ text ("Entry: " ++ String.left 8 entry.id) ]
                     , span [ class "audit-entity-id" ] [ text ("Entity: " ++ String.left 8 entry.entityId) ]
                     , span [ class "audit-actor" ] [ text ("Actor: " ++ auditActorSummary entry) ]
-                    , if isRevertableEntityType entry.entityType && Permissions.canViewGlobalAudit model then
+                    , if isRevertableEntityType entry.entityType && Permissions.canViewGlobalAudit model && model.page == AuditLogPage then
                         button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩ Revert" ]
 
                       else
@@ -725,7 +812,7 @@ viewHistoryEntry model entry =
         [ div [ class "history-entry-header" ]
             [ span [ class ("history-action-badge " ++ actionClass) ] [ text actionLabel ]
             , span [ class "history-timestamp" ] [ text (formatDate entry.changedAt) ]
-            , if Permissions.canViewGlobalAudit model then
+            , if isRevertableEntityType entry.entityType && Permissions.canViewGlobalAudit model && model.page == AuditLogPage then
                 button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩" ]
 
               else

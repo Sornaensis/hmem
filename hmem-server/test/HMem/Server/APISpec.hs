@@ -15,6 +15,7 @@ import Data.Maybe (isJust)
 import Data.String (fromString)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import Data.Text.Encoding qualified as TE
 import Data.Time (addUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Data.UUID (UUID)
@@ -46,11 +47,11 @@ import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(
 import HMem.DB.TestHarness
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.API (HMemAPI, server)
-import HMem.Server.App (mkApp, requestIdMiddleware, resolveRequestPrincipal)
+import HMem.Server.App (OidcCodeExchange, mkApp, mkAppWithOidcCodeExchange, requestIdMiddleware, resolveRequestPrincipal)
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..))
-import HMem.Server.WebSocket (WorkspaceSubscription(..), consumeTicket, createTicket, eventVisibleToSubscription, newWSState, resolveLocalWebSocketAccess)
+import HMem.Server.WebSocket (WSState, WorkspaceSubscription(..), consumeTicket, createTicket, eventVisibleToSubscription, newWSState, resolveLocalWebSocketAccess)
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -76,6 +77,13 @@ withAppEnvConfigAndMiddleware cfg middleware action = withTestEnv $ \env -> do
   let cfg' = cfg { Config.cors = CorsConfig { allowedOrigins = ["*"] } }
   app <- mkApp middleware cfg'.auth cfg'.cors cfg'.rateLimit env.pool tracker wsState Nothing True
   action env app
+
+withAppEnvConfigExactAndOidcExchange :: Config.HMemConfig -> OidcCodeExchange -> (TestEnv -> Application -> WSState -> IO a) -> IO a
+withAppEnvConfigExactAndOidcExchange cfg oidcCodeExchange action = withTestEnv $ \env -> do
+  tracker <- newAccessTracker env.pool 3600
+  wsState <- newWSState
+  app <- mkAppWithOidcCodeExchange oidcCodeExchange id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+  action env app wsState
 
 principalMiddleware :: Principal -> Middleware
 principalMiddleware principal app req respond =
@@ -171,9 +179,30 @@ respBody = simpleBody
 setCookieHeaders :: SResponse -> [BS.ByteString]
 setCookieHeaders resp = [value | (name, value) <- simpleHeaders resp, name == "Set-Cookie"]
 
+setCookieValue :: T.Text -> SResponse -> Maybe T.Text
+setCookieValue cookieName resp = do
+  rawValue <- firstJust [extractValue header | header <- setCookieHeaders resp]
+  either (const Nothing) Just (decodeUtf8Strict rawValue)
+  where
+    prefix = encodeUtf8 cookieName <> "="
+
+    extractValue header = do
+      withoutName <- BS.stripPrefix prefix header
+      let value = fst (BS.break (== 59) withoutName)
+      if BS.null value then Nothing else Just value
+
+    firstJust [] = Nothing
+    firstJust (Nothing:rest) = firstJust rest
+    firstJust (Just value:_) = Just value
+
+    decodeUtf8Strict = TE.decodeUtf8'
+
 cookieHeader :: [(T.Text, T.Text)] -> (HeaderName, BS.ByteString)
 cookieHeader cookies =
   ("Cookie", BS.intercalate "; " [encodeUtf8 name <> "=" <> encodeUtf8 value | (name, value) <- cookies])
+
+responseHeader :: HeaderName -> SResponse -> Maybe BS.ByteString
+responseHeader name resp = lookup name (simpleHeaders resp)
 
 principalActorType :: Principal -> ActorType
 principalActorType Principal { actorType = value } = value
@@ -1300,6 +1329,157 @@ spec = around withApp $ do
         respStatus resp `shouldBe` 200
         let Just allowedHeaders = lookup "Access-Control-Allow-Headers" (simpleHeaders resp)
         allowedHeaders `shouldSatisfy` BS.isInfixOf "X-HMEM-CSRF"
+
+  describe "frontend-provider topology acceptance" $ do
+    it "supports same-origin cookie bootstrap, WebSocket ticket issuance, and logout without CORS" $ \_ ->
+      withAppEnvConfig deployedAuthCfg $ \env app -> do
+        ws <- createTestWorkspace env "same-origin-provider-ws"
+        userId <- createTestUser env False False
+        _ <- grantWorkspaceRole env ws.id userId Auth.WorkspaceRoleRead
+        _ <- createAuthSession env userId "same-origin-session" "same-origin-csrf"
+        let cookies = cookieHeader [("hmem_session", "same-origin-session"), ("hmem_csrf", "same-origin-csrf")]
+
+        sessionResp <- runReqWithHeaders app methodGet
+          ("/api/v1/session?workspace_id=" <> encodeUtf8 (T.pack (show ws.id)))
+          [cookies]
+          ""
+        respStatus sessionResp `shouldBe` 200
+        responseHeader "Access-Control-Allow-Origin" sessionResp `shouldBe` Nothing
+        let Just session = decode (respBody sessionResp) :: Maybe SessionContext
+            Just workspaceCtx = session.workspace
+        workspaceCtx.canRead `shouldBe` True
+
+        ticketResp <- runReqWithHeaders app methodPost "/api/v1/ws-ticket"
+          [cookies, ("X-CSRF-Token", "same-origin-csrf")]
+          (encode (object ["workspace_id" .= ws.id]))
+        respStatus ticketResp `shouldBe` 200
+        let Just wsTicket = decode (respBody ticketResp) :: Maybe WebSocketTicketResponse
+        wsTicket.ticket `shouldSatisfy` (not . T.null)
+
+        logoutResp <- runReqWithHeaders app methodPost "/api/v1/auth/logout"
+          [cookies, ("X-CSRF-Token", "same-origin-csrf")]
+          ""
+        respStatus logoutResp `shouldBe` 302
+
+        expiredSessionResp <- runReqWithHeaders app methodGet "/api/v1/session" [cookies] ""
+        respStatus expiredSessionResp `shouldBe` 401
+
+    it "supports a separate trusted frontend origin with credentialed CORS but not untrusted origins" $ \_ -> do
+      let frontendOrigin = "https://frontend.example"
+          jwk = JWK.fromOctets (encodeUtf8 testJwtSecret)
+          cfg = (deployedJwtCfg (JWK.JWKSet [jwk]))
+            { Config.cors = CorsConfig { allowedOrigins = [frontendOrigin] }
+            , Config.auth = (deployedJwtCfg (JWK.JWKSet [jwk])).auth
+                { Config.deployed = (deployedJwtCfg (JWK.JWKSet [jwk])).auth.deployed
+                    { Config.clientId = Just testJwtAudience
+                    , Config.clientSecret = Just "client-secret"
+                    , Config.redirectUri = Just "https://hmem.example/api/v1/auth/callback"
+                    , Config.authorizationEndpoint = Just "https://issuer.example/auth"
+                    , Config.tokenEndpoint = Just "https://issuer.example/token"
+                    , Config.cookieSameSite = "None"
+                    , Config.cookieSecure = True
+                    }
+                }
+            }
+      idToken <- signTestJwt testJwtSecret "separate-origin-provider-user"
+      let oidcExchange _deployedCfg code = pure $ if code == "provider-code" then Just idToken else Nothing
+      withAppEnvConfigExactAndOidcExchange cfg oidcExchange $ \env app wsState -> do
+        ws <- createTestWorkspace env "separate-frontend-provider-ws"
+        userId <- createTestUserWithSubject env "separate-origin-provider-user" False False
+        _ <- grantWorkspaceRole env ws.id userId Auth.WorkspaceRoleRead
+
+        loginResp <- get_ app "/api/v1/auth/login?return_to=%2Fworkspace%2Fseparate"
+        respStatus loginResp `shouldBe` 302
+        setCookieHeaders loginResp `shouldSatisfy` any (\cookie -> BS.isPrefixOf "hmem_session_oidc_state=" cookie && BS.isInfixOf "SameSite=None" cookie && BS.isInfixOf "Secure" cookie)
+        let Just stateToken = setCookieValue "hmem_session_oidc_state" loginResp
+            Just returnToken = setCookieValue "hmem_session_return_to" loginResp
+
+        callbackResp <- runReqWithHeaders app methodGet
+          ("/api/v1/auth/callback?code=provider-code&state=" <> encodeUtf8 stateToken)
+          [cookieHeader [("hmem_session_oidc_state", stateToken), ("hmem_session_return_to", returnToken)]]
+          ""
+        respStatus callbackResp `shouldBe` 302
+        responseHeader hLocation callbackResp `shouldBe` Just "/workspace/separate"
+        setCookieHeaders callbackResp `shouldSatisfy` any (\cookie -> BS.isPrefixOf "hmem_session=" cookie && BS.isInfixOf "HttpOnly" cookie && BS.isInfixOf "SameSite=None" cookie && BS.isInfixOf "Secure" cookie)
+        setCookieHeaders callbackResp `shouldSatisfy` any (\cookie -> BS.isPrefixOf "hmem_csrf=" cookie && not (BS.isInfixOf "HttpOnly" cookie) && BS.isInfixOf "SameSite=None" cookie && BS.isInfixOf "Secure" cookie)
+
+        let Just sessionToken = setCookieValue "hmem_session" callbackResp
+            Just csrfToken = setCookieValue "hmem_csrf" callbackResp
+            cookies = cookieHeader [("hmem_session", sessionToken), ("hmem_csrf", csrfToken)]
+            originHeader = ("Origin", encodeUtf8 frontendOrigin)
+
+        preflight <- runReqWithHeaders app methodOptions "/api/v1/ws-ticket"
+          [ originHeader
+          , ("Access-Control-Request-Method", "POST")
+          , ("Access-Control-Request-Headers", "Content-Type, X-CSRF-Token")
+          ]
+          ""
+        respStatus preflight `shouldBe` 200
+        responseHeader "Access-Control-Allow-Origin" preflight `shouldBe` Just (encodeUtf8 frontendOrigin)
+        responseHeader "Access-Control-Allow-Credentials" preflight `shouldBe` Just "true"
+
+        sessionResp <- runReqWithHeaders app methodGet "/api/v1/session"
+          [originHeader, cookies]
+          ""
+        respStatus sessionResp `shouldBe` 200
+        responseHeader "Access-Control-Allow-Origin" sessionResp `shouldBe` Just (encodeUtf8 frontendOrigin)
+        responseHeader "Access-Control-Allow-Credentials" sessionResp `shouldBe` Just "true"
+
+        ticketResp <- runReqWithHeaders app methodPost "/api/v1/ws-ticket"
+          [originHeader, cookies, ("X-CSRF-Token", encodeUtf8 csrfToken)]
+          (encode (object ["workspace_id" .= ws.id]))
+        respStatus ticketResp `shouldBe` 200
+        responseHeader "Access-Control-Allow-Origin" ticketResp `shouldBe` Just (encodeUtf8 frontendOrigin)
+        let Just wsTicket = decode (respBody ticketResp) :: Maybe WebSocketTicketResponse
+        wsTicket.ticket `shouldSatisfy` (not . T.null)
+        consumed <- consumeTicket wsState wsTicket.ticket
+        case consumed of
+          Nothing -> expectationFailure "expected issued WebSocket ticket to be consumable"
+          Just _ -> pure ()
+        consumedAgain <- consumeTicket wsState wsTicket.ticket
+        case consumedAgain of
+          Nothing -> pure ()
+          Just _ -> expectationFailure "expected WebSocket ticket to be single-use"
+
+        noAccessWs <- createTestWorkspace env "separate-frontend-no-access-ws"
+        deniedTicketResp <- runReqWithHeaders app methodPost "/api/v1/ws-ticket"
+          [originHeader, cookies, ("X-CSRF-Token", encodeUtf8 csrfToken)]
+          (encode (object ["workspace_id" .= noAccessWs.id]))
+        respStatus deniedTicketResp `shouldBe` 403
+        responseHeader "Access-Control-Allow-Origin" deniedTicketResp `shouldBe` Just (encodeUtf8 frontendOrigin)
+
+        untrustedResp <- runReqWithHeaders app methodGet "/api/v1/session"
+          [("Origin", "https://evil.example"), cookies]
+          ""
+        respStatus untrustedResp `shouldBe` 200
+        responseHeader "Access-Control-Allow-Origin" untrustedResp `shouldBe` Nothing
+        responseHeader "Access-Control-Allow-Credentials" untrustedResp `shouldBe` Nothing
+
+    it "keeps OIDC login provider redirects free of local return paths and credential material" $ \_ -> do
+      let cfg = deployedAuthCfg
+            { Config.auth = deployedAuthCfg.auth
+                { Config.deployed = deployedAuthCfg.auth.deployed
+                    { Config.issuer = Just testJwtIssuer
+                    , Config.clientId = Just "hmem-web"
+                    , Config.clientSecret = Just "super-secret-client-secret"
+                    , Config.redirectUri = Just "https://hmem.example/api/v1/auth/callback"
+                    , Config.authorizationEndpoint = Just "https://issuer.example/auth"
+                    , Config.tokenEndpoint = Just "https://issuer.example/token"
+                    }
+                }
+            }
+      withAppEnvConfig cfg $ \_env app -> do
+        resp <- get_ app "/api/v1/auth/login?return_to=%2Fworkspace%2Fabc%3Ftab%3Daudit"
+        respStatus resp `shouldBe` 302
+        let Just location = responseHeader hLocation resp
+        location `shouldSatisfy` BS.isInfixOf "https://issuer.example/auth?"
+        location `shouldSatisfy` not . BS.isInfixOf "super-secret-client-secret"
+        location `shouldSatisfy` not . BS.isInfixOf "return_to"
+        location `shouldSatisfy` not . BS.isInfixOf "workspace%2Fabc"
+        location `shouldSatisfy` not . BS.isInfixOf "access_token"
+        location `shouldSatisfy` not . BS.isInfixOf "id_token"
+        location `shouldSatisfy` not . BS.isInfixOf "refresh_token"
+        setCookieHeaders resp `shouldSatisfy` any (\cookie -> BS.isInfixOf "hmem_session_return_to=" cookie && BS.isInfixOf "HttpOnly" cookie)
 
   describe "WebSocket auth and event scoping" $ do
     it "denies deployed WebSocket ticket issuance without a principal" $ \_ ->

@@ -1,5 +1,7 @@
 module HMem.Server.App
   ( mkApp
+  , mkAppWithOidcCodeExchange -- ^ Test-only seam; production callers should use 'mkApp'.
+  , OidcCodeExchange -- ^ Test-only injected OIDC code exchange type.
   , requestIdMiddleware
   , resolveRequestPrincipal
   , resolveRequestPrincipalIO
@@ -51,7 +53,17 @@ import HMem.Server.WebSocket (WSState, broadcast, wsMiddleware)
 
 -- | Build the WAI Application.
 mkApp :: Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
-mkApp logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
+mkApp = mkAppWithOidcCodeExchange defaultOidcCodeExchange
+
+type OidcCodeExchange = DeployedAuthConfig -> Text -> IO (Maybe Text)
+
+-- | Build the WAI Application with an injected OIDC code exchange.
+--
+-- This constructor exists for deterministic tests of the browser OIDC callback
+-- flow. Production entry points should call 'mkApp', which always uses
+-- 'defaultOidcCodeExchange' and the configured HTTPS provider token endpoint.
+mkAppWithOidcCodeExchange :: OidcCodeExchange -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
+mkAppWithOidcCodeExchange oidcCodeExchange logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
   rateLimit <- rateLimitMiddleware rateLimitCfg
   jwksCache <- newIORef Nothing
   let bc = broadcast wsState
@@ -61,7 +73,7 @@ mkApp logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec 
         $ corsMiddleware authCfg corsCfg
         $ rateLimit
         $ wsMiddleware authCfg wsState
-        $ oidcAuthRoutesMiddleware jwksCache authCfg pool
+        $ oidcAuthRoutesMiddleware oidcCodeExchange jwksCache authCfg pool
         $ csrfMiddleware authCfg pool
         $ principalContextMiddleware jwksCache authCfg pool
         $ authMiddleware authCfg
@@ -265,12 +277,12 @@ instance FromJSON OidcTokenResponse where
   parseJSON = Aeson.withObject "OidcTokenResponse" $ \o -> OidcTokenResponse
     <$> o .: "id_token"
 
-oidcAuthRoutesMiddleware :: JWKSetCache -> AuthConfig -> Pool Hasql.Connection -> Middleware
-oidcAuthRoutesMiddleware jwksCache authCfg pool app req respond = case Wai.pathInfo req of
+oidcAuthRoutesMiddleware :: OidcCodeExchange -> JWKSetCache -> AuthConfig -> Pool Hasql.Connection -> Middleware
+oidcAuthRoutesMiddleware oidcCodeExchange jwksCache authCfg pool app req respond = case Wai.pathInfo req of
   ["api", "v1", "auth", "login"]
     | Wai.requestMethod req == methodGet -> handleOidcLogin authCfg req respond
   ["api", "v1", "auth", "callback"]
-    | Wai.requestMethod req == methodGet -> handleOidcCallback jwksCache authCfg pool req respond
+    | Wai.requestMethod req == methodGet -> handleOidcCallback oidcCodeExchange jwksCache authCfg pool req respond
   ["api", "v1", "auth", "logout"]
     | Wai.requestMethod req == methodPost -> handleOidcLogout authCfg pool req respond
   _ -> app req respond
@@ -301,8 +313,8 @@ handleOidcLogin authCfg req respond = case authCfg.mode of
           respond $ Wai.responseLBS status302 headers ""
     _ -> respond $ jsonResponse status503 "oidc_unavailable" "OIDC client_id and redirect_uri must be configured"
 
-handleOidcCallback :: JWKSetCache -> AuthConfig -> Pool Hasql.Connection -> Wai.Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Wai.ResponseReceived
-handleOidcCallback jwksCache authCfg pool req respond = case authCfg.mode of
+handleOidcCallback :: OidcCodeExchange -> JWKSetCache -> AuthConfig -> Pool Hasql.Connection -> Wai.Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Wai.ResponseReceived
+handleOidcCallback oidcCodeExchange jwksCache authCfg pool req respond = case authCfg.mode of
   AuthModeLocal -> respond $ jsonResponse status404 "not_found" "OIDC callback is only available in deployed auth mode"
   AuthModeDeployed -> do
     let deployedCfg = authCfg.deployed
@@ -313,7 +325,7 @@ handleOidcCallback jwksCache authCfg pool req respond = case authCfg.mode of
     case (mCode, mReturnedState, mStoredState) of
       (Just code, Just returnedState, Just storedState)
         | returnedState == storedState -> do
-            result <- completeOidcCallback jwksCache pool deployedCfg code
+            result <- completeOidcCallback oidcCodeExchange jwksCache pool deployedCfg code
             case result of
               Left msg -> respond $ jsonResponseWithHeaders status401 (callbackClearHeaders deployedCfg) "oidc_login_failed" msg
               Right (sessionToken, csrfToken) -> do
@@ -327,32 +339,37 @@ handleOidcCallback jwksCache authCfg pool req respond = case authCfg.mode of
                 respond $ Wai.responseLBS status302 headers ""
       _ -> respond $ jsonResponseWithHeaders status401 (callbackClearHeaders deployedCfg) "oidc_state_mismatch" "OIDC callback state did not match the login state cookie"
 
-completeOidcCallback :: JWKSetCache -> Pool Hasql.Connection -> DeployedAuthConfig -> Text -> IO (Either Text (Text, Text))
-completeOidcCallback jwksCache pool deployedCfg code
+completeOidcCallback :: OidcCodeExchange -> JWKSetCache -> Pool Hasql.Connection -> DeployedAuthConfig -> Text -> IO (Either Text (Text, Text))
+completeOidcCallback oidcCodeExchange jwksCache pool deployedCfg code
   | deployedCfg.sessionTtlSeconds <= 0 = pure $ Left "OIDC session_ttl_seconds must be positive"
   | otherwise = case (deployedCfg.clientId, deployedCfg.clientSecret, deployedCfg.redirectUri) of
-    (Just clientId, Just clientSecret, Just redirectUri) -> do
-      mEndpoints <- resolveOidcEndpoints deployedCfg
-      case mEndpoints of
-        Nothing -> pure $ Left "OIDC token endpoint is not configured"
-        Just endpoints -> do
-          mTokenResponse <- exchangeAuthorizationCode endpoints.oidcTokenEndpoint clientId clientSecret redirectUri code
-          case mTokenResponse of
-            Nothing -> pure $ Left "OIDC provider token exchange failed"
-            Just tokenResponse -> do
-              mPrincipal <- case deployedCfg.issuer of
-                Nothing -> pure Nothing
-                Just expectedIssuer -> resolveJwtPrincipalForAudience jwksCache pool deployedCfg expectedIssuer clientId tokenResponse.oidcIdToken
-              case mPrincipal >>= principalGrantUser of
-                Nothing -> pure $ Left "OIDC subject is not linked to an active hmem user"
-                Just userId -> do
-                  now <- getCurrentTime
-                  let expiresAt = addUTCTime (fromIntegral deployedCfg.sessionTtlSeconds) now
-                  sessionToken <- randomSecret "hmem_sess_v1_"
-                  csrfToken <- randomSecret "hmem_csrf_v1_"
-                  _ <- Auth.createAuthSession pool userId sessionToken csrfToken expiresAt
-                  pure $ Right (sessionToken, csrfToken)
+    (Just clientId, Just _clientSecret, Just _redirectUri) -> do
+      mIdToken <- oidcCodeExchange deployedCfg code
+      case mIdToken of
+        Nothing -> pure $ Left "OIDC provider token exchange failed"
+        Just idToken -> do
+          mPrincipal <- case deployedCfg.issuer of
+            Nothing -> pure Nothing
+            Just expectedIssuer -> resolveJwtPrincipalForAudience jwksCache pool deployedCfg expectedIssuer clientId idToken
+          case mPrincipal >>= principalGrantUser of
+            Nothing -> pure $ Left "OIDC subject is not linked to an active hmem user"
+            Just userId -> do
+              now <- getCurrentTime
+              let expiresAt = addUTCTime (fromIntegral deployedCfg.sessionTtlSeconds) now
+              sessionToken <- randomSecret "hmem_sess_v1_"
+              csrfToken <- randomSecret "hmem_csrf_v1_"
+              _ <- Auth.createAuthSession pool userId sessionToken csrfToken expiresAt
+              pure $ Right (sessionToken, csrfToken)
     _ -> pure $ Left "OIDC client_id, client_secret, and redirect_uri must be configured"
+
+defaultOidcCodeExchange :: OidcCodeExchange
+defaultOidcCodeExchange deployedCfg code = case (deployedCfg.clientId, deployedCfg.clientSecret, deployedCfg.redirectUri) of
+  (Just clientId, Just clientSecret, Just redirectUri) -> do
+    mEndpoints <- resolveOidcEndpoints deployedCfg
+    case mEndpoints of
+      Nothing -> pure Nothing
+      Just endpoints -> fmap (.oidcIdToken) <$> exchangeAuthorizationCode endpoints.oidcTokenEndpoint clientId clientSecret redirectUri code
+  _ -> pure Nothing
 
 callbackClearHeaders :: DeployedAuthConfig -> [(HeaderName, ByteString)]
 callbackClearHeaders deployedCfg =

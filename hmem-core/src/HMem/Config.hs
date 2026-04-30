@@ -116,6 +116,18 @@ data DeployedAuthConfig = DeployedAuthConfig
   , jwks        :: !(Maybe Aeson.Value)
   , tokenLookup :: !TokenLookupMode
   , tokenHashSecret :: !(Maybe Text)
+  , clientId    :: !(Maybe Text)
+  , clientSecret :: !(Maybe Text)
+  , redirectUri :: !(Maybe Text)
+  , scopes      :: ![Text]
+  , authorizationEndpoint :: !(Maybe Text)
+  , tokenEndpoint :: !(Maybe Text)
+  , sessionCookieName :: !Text
+  , csrfCookieName :: !Text
+  , csrfHeaderName :: !Text
+  , sessionTtlSeconds :: !Int
+  , cookieSecure :: !Bool
+  , cookieSameSite :: !Text
   } deriving stock (Show, Eq)
 
 data AuthConfig = AuthConfig
@@ -273,6 +285,18 @@ instance FromJSON DeployedAuthConfig where
     <*> o .:? "jwks"
     <*> o .:? "token_lookup" .!= TokenLookupDatabase
     <*> o .:? "token_hash_secret"
+    <*> o .:? "client_id"
+    <*> o .:? "client_secret"
+    <*> o .:? "redirect_uri"
+    <*> o .:? "scopes" .!= ["openid", "profile", "email"]
+    <*> o .:? "authorization_endpoint"
+    <*> o .:? "token_endpoint"
+    <*> o .:? "session_cookie_name" .!= "hmem_session"
+    <*> o .:? "csrf_cookie_name" .!= "hmem_csrf"
+    <*> o .:? "csrf_header_name" .!= "X-CSRF-Token"
+    <*> o .:? "session_ttl_seconds" .!= 28800
+    <*> o .:? "cookie_secure" .!= True
+    <*> o .:? "cookie_same_site" .!= "Lax"
 
 instance ToJSON DeployedAuthConfig where
   toJSON deployedCfg = Aeson.object $ concat
@@ -283,6 +307,19 @@ instance ToJSON DeployedAuthConfig where
     , maybe [] (\v -> ["jwks" .= v]) deployedCfg.jwks
     , ["token_lookup" .= deployedCfg.tokenLookup]
     , maybe [] (\v -> ["token_hash_secret" .= v]) deployedCfg.tokenHashSecret
+    , maybe [] (\v -> ["client_id" .= v]) deployedCfg.clientId
+    , maybe [] (\v -> ["client_secret" .= v]) deployedCfg.clientSecret
+    , maybe [] (\v -> ["redirect_uri" .= v]) deployedCfg.redirectUri
+    , ["scopes" .= deployedCfg.scopes]
+    , maybe [] (\v -> ["authorization_endpoint" .= v]) deployedCfg.authorizationEndpoint
+    , maybe [] (\v -> ["token_endpoint" .= v]) deployedCfg.tokenEndpoint
+    , [ "session_cookie_name" .= deployedCfg.sessionCookieName
+      , "csrf_cookie_name" .= deployedCfg.csrfCookieName
+      , "csrf_header_name" .= deployedCfg.csrfHeaderName
+      , "session_ttl_seconds" .= deployedCfg.sessionTtlSeconds
+      , "cookie_secure" .= deployedCfg.cookieSecure
+      , "cookie_same_site" .= deployedCfg.cookieSameSite
+      ]
     ]
 
 instance FromJSON AuthConfig where
@@ -399,6 +436,18 @@ defDeployedAuth = DeployedAuthConfig
   , jwks = Nothing
   , tokenLookup = TokenLookupDatabase
   , tokenHashSecret = Nothing
+  , clientId = Nothing
+  , clientSecret = Nothing
+  , redirectUri = Nothing
+  , scopes = ["openid", "profile", "email"]
+  , authorizationEndpoint = Nothing
+  , tokenEndpoint = Nothing
+  , sessionCookieName = "hmem_session"
+  , csrfCookieName = "hmem_csrf"
+  , csrfHeaderName = "X-CSRF-Token"
+  , sessionTtlSeconds = 28800
+  , cookieSecure = True
+  , cookieSameSite = "Lax"
   }
 
 defAuth :: AuthConfig
@@ -582,9 +631,19 @@ validateConfig cfg = (warnings, corrected)
               , ["auth.mode is deployed but no discovery_url, jwks_url, or inline jwks is configured; provider JWTs will not resolve" | noJwksSource]
               , ["auth.deployed.discovery_url should use https" | maybe False (not . T.isPrefixOf "https://") a.deployed.discoveryUrl]
               , ["auth.deployed.jwks_url should use https" | maybe False (not . T.isPrefixOf "https://") a.deployed.jwksUrl]
+              , ["auth.deployed.client_id is not configured; OIDC browser login will not start" | a.deployed.clientId == Nothing]
+              , ["auth.deployed.client_secret is not configured; OIDC code exchange will fail" | a.deployed.clientSecret == Nothing]
+              , ["auth.deployed.redirect_uri is not configured; OIDC browser login will not start" | a.deployed.redirectUri == Nothing]
+              , ["auth.deployed.authorization_endpoint should use https" | maybe False (not . T.isPrefixOf "https://") a.deployed.authorizationEndpoint]
+              , ["auth.deployed.token_endpoint should use https" | maybe False (not . T.isPrefixOf "https://") a.deployed.tokenEndpoint]
+              , ["auth.deployed.cookie_same_site should be one of Lax, Strict, or None; runtime cookie emission will fall back to Lax" | not validSameSite]
+              , ["auth.deployed.cookie_same_site=None requires auth.deployed.cookie_secure=true" | T.toLower a.deployed.cookieSameSite == "none" && not a.deployed.cookieSecure]
+              , ["auth.deployed.session_ttl_seconds is below 60; browser sessions will expire quickly" | a.deployed.sessionTtlSeconds < 60]
+              , ["auth.mode is deployed with credentialed CORS remote/wildcard origins; restrict cors.allowed_origins to trusted frontend origins before enabling browser cookie sessions" | corsAllowsRemoteOrigins cfg.cors]
               ]
           where
             noJwksSource = a.deployed.discoveryUrl == Nothing && a.deployed.jwksUrl == Nothing && a.deployed.jwks == Nothing
+            validSameSite = T.toLower (T.strip a.deployed.cookieSameSite) `elem` ["lax", "strict", "none"]
 
     validateRateLimit rateLimitCfg =
       let (ws1, rps) = clampFieldD "rate_limit.requests_per_second" 0.1 10000.0 rateLimitCfg.rlRequestsPerSecond

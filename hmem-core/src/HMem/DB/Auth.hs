@@ -28,6 +28,10 @@ module HMem.DB.Auth
   , resolveAccessTokenPrincipalWithSecret
   , touchAccessTokenLastUsed
   , resolveUserPrincipalByAuthSubject
+  , createAuthSession
+  , resolveAuthSessionPrincipal
+  , authSessionCsrfMatches
+  , revokeAuthSession
   , listWorkspaceMemberships
   , upsertWorkspaceMembership
   , deleteWorkspaceMembership
@@ -287,6 +291,27 @@ resolveUserPrincipalByAuthSubject :: Pool Hasql.Connection -> Text -> IO (Maybe 
 resolveUserPrincipalByAuthSubject pool authSubject =
   runSession pool $ Session.statement authSubject userPrincipalByAuthSubjectStatement
 
+createAuthSession :: Pool Hasql.Connection -> UUID -> Text -> Text -> UTCTime -> IO UUID
+createAuthSession pool userId sessionToken csrfToken expiresAt =
+  runSession pool $ Session.statement
+    (userId, accessTokenHash sessionToken, accessTokenHash csrfToken, expiresAt)
+    createAuthSessionStatement
+
+resolveAuthSessionPrincipal :: Pool Hasql.Connection -> Text -> IO (Maybe Principal)
+resolveAuthSessionPrincipal pool sessionToken =
+  runSession pool $ Session.statement (accessTokenHash sessionToken) authSessionPrincipalStatement
+
+authSessionCsrfMatches :: Pool Hasql.Connection -> Text -> Text -> IO Bool
+authSessionCsrfMatches pool sessionToken csrfToken =
+  runSession pool $ Session.statement
+    (accessTokenHash sessionToken, accessTokenHash csrfToken)
+    authSessionCsrfMatchesStatement
+
+revokeAuthSession :: Pool Hasql.Connection -> Text -> IO Bool
+revokeAuthSession pool sessionToken = do
+  n <- runSession pool $ Session.statement (accessTokenHash sessionToken) revokeAuthSessionStatement
+  pure (n > 0)
+
 listWorkspaceMemberships :: Pool Hasql.Connection -> UUID -> Maybe Int -> Maybe Int -> IO [WorkspaceMembership]
 listWorkspaceMemberships pool workspaceId mlimit moffset = do
   let lim = fromIntegral (maybe 50 (max 1 . min 201) mlimit) :: Int32
@@ -402,8 +427,69 @@ userPrincipalByAuthSubjectStatement = Statement.Statement sql encoder decoder Tr
         { actorType = ActorUser
         , actorId = UUID.toText userId
         , actorLabel = label
+            , authority = PrincipalGrantUser userId
+            }
+
+createAuthSessionStatement :: Statement.Statement (UUID, Text, Text, UTCTime) UUID
+createAuthSessionStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "INSERT INTO auth_sessions (user_id, session_hash, csrf_token_hash, expires_at) \
+          \VALUES ($1, $2, $3, $4) RETURNING id"
+    encoder =
+      contramap (\(a,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text)) <>
+      contramap (\(_,_,c,_) -> c) (Enc.param (Enc.nonNullable Enc.text)) <>
+      contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nonNullable Enc.timestamptz))
+    decoder = Dec.singleRow (Dec.column (Dec.nonNullable Dec.uuid))
+
+authSessionPrincipalStatement :: Statement.Statement Text (Maybe Principal)
+authSessionPrincipalStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "UPDATE auth_sessions s \
+          \SET last_used_at = now() \
+          \FROM users u \
+          \WHERE s.user_id = u.id \
+          \  AND s.session_hash = $1 \
+          \  AND s.revoked_at IS NULL \
+          \  AND s.expires_at > now() \
+          \  AND u.disabled_at IS NULL \
+          \RETURNING u.id, COALESCE(u.display_name, u.email, u.auth_subject, u.id::text)"
+    encoder = Enc.param (Enc.nonNullable Enc.text)
+    decoder = Dec.rowMaybe $ do
+      userId <- Dec.column (Dec.nonNullable Dec.uuid)
+      label <- Dec.column (Dec.nonNullable Dec.text)
+      pure Principal
+        { actorType = ActorUser
+        , actorId = UUID.toText userId
+        , actorLabel = label
         , authority = PrincipalGrantUser userId
         }
+
+authSessionCsrfMatchesStatement :: Statement.Statement (Text, Text) Bool
+authSessionCsrfMatchesStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT EXISTS ( \
+          \  SELECT 1 \
+          \  FROM auth_sessions s \
+          \  JOIN users u ON u.id = s.user_id \
+          \  WHERE s.session_hash = $1 \
+          \    AND s.csrf_token_hash = $2 \
+          \    AND s.revoked_at IS NULL \
+          \    AND s.expires_at > now() \
+          \    AND u.disabled_at IS NULL \
+          \)"
+    encoder =
+      contramap fst (Enc.param (Enc.nonNullable Enc.text)) <>
+      contramap snd (Enc.param (Enc.nonNullable Enc.text))
+    decoder = Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))
+
+revokeAuthSessionStatement :: Statement.Statement Text Int64
+revokeAuthSessionStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "UPDATE auth_sessions SET revoked_at = now() \
+          \WHERE session_hash = $1 AND revoked_at IS NULL"
+    encoder = Enc.param (Enc.nonNullable Enc.text)
+    decoder = Dec.rowsAffected
 
 actorTypeFromText :: Text -> Maybe ActorType
 actorTypeFromText "user" = Just ActorUser

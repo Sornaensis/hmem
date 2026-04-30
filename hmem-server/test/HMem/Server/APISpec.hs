@@ -15,7 +15,7 @@ import Data.Maybe (isJust)
 import Data.String (fromString)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
-import Data.Time (getCurrentTime)
+import Data.Time (addUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUIDv4
@@ -96,6 +96,18 @@ testAuthCfg = Config.defaultConfig
           , Config.jwks = Nothing
           , Config.tokenLookup = Config.TokenLookupDatabase
           , Config.tokenHashSecret = Nothing
+          , Config.clientId = Nothing
+          , Config.clientSecret = Nothing
+          , Config.redirectUri = Nothing
+          , Config.scopes = ["openid", "profile", "email"]
+          , Config.authorizationEndpoint = Nothing
+          , Config.tokenEndpoint = Nothing
+          , Config.sessionCookieName = "hmem_session"
+          , Config.csrfCookieName = "hmem_csrf"
+          , Config.csrfHeaderName = "X-CSRF-Token"
+          , Config.sessionTtlSeconds = 28800
+          , Config.cookieSecure = True
+          , Config.cookieSameSite = "Lax"
           }
       }
   }
@@ -155,6 +167,13 @@ respStatus = statusCode . simpleStatus
 
 respBody :: SResponse -> LBS.ByteString
 respBody = simpleBody
+
+setCookieHeaders :: SResponse -> [BS.ByteString]
+setCookieHeaders resp = [value | (name, value) <- simpleHeaders resp, name == "Set-Cookie"]
+
+cookieHeader :: [(T.Text, T.Text)] -> (HeaderName, BS.ByteString)
+cookieHeader cookies =
+  ("Cookie", BS.intercalate "; " [encodeUtf8 name <> "=" <> encodeUtf8 value | (name, value) <- cookies])
 
 principalActorType :: Principal -> ActorType
 principalActorType Principal { actorType = value } = value
@@ -229,6 +248,26 @@ createAccessTokenStatement = Statement.Statement sql encoder decoder True
       contramap (\(_,_,c,_) -> c) (Enc.param (Enc.nonNullable Enc.text)) <>
       contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nonNullable Enc.text))
     decoder = Dec.singleRow (Dec.column (Dec.nonNullable Dec.uuid))
+
+createAuthSession :: TestEnv -> UUID -> T.Text -> T.Text -> IO UUID
+createAuthSession env userId sessionToken csrfToken = do
+  now <- getCurrentTime
+  Auth.createAuthSession env.pool userId sessionToken csrfToken (addUTCTime 3600 now)
+
+createExpiredAuthSession :: TestEnv -> UUID -> T.Text -> T.Text -> IO UUID
+createExpiredAuthSession env userId sessionToken csrfToken = do
+  sessionId <- createAuthSession env userId sessionToken csrfToken
+  DBPool.runSession env.pool $ Session.statement sessionId expireAuthSessionStatement
+  pure sessionId
+
+expireAuthSessionStatement :: Statement.Statement UUID ()
+expireAuthSessionStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "UPDATE auth_sessions \
+          \SET created_at = now() - interval '2 seconds', expires_at = now() - interval '1 second' \
+          \WHERE id = $1"
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.noResult
 
 revokeAccessToken :: TestEnv -> UUID -> IO ()
 revokeAccessToken env tokenId =
@@ -1090,6 +1129,177 @@ spec = around withApp $ do
 
           resp <- get_ app ("/api/v1/session?workspace_id=" <> encodeUtf8 (T.pack (show ws.id)))
           respStatus resp `shouldBe` 404
+
+    it "resolves deployed HttpOnly cookie sessions" $ \_ ->
+      withAppEnvConfig deployedAuthCfg $ \env app -> do
+        userId <- createTestUser env True False
+        _ <- createAuthSession env userId "cookie-session-token" "cookie-csrf-token"
+
+        resp <- runReqWithHeaders app methodGet "/api/v1/session"
+          [cookieHeader [("hmem_session", "cookie-session-token")]]
+          ""
+        respStatus resp `shouldBe` 200
+        let Just session = decode (respBody resp) :: Maybe SessionContext
+        session.principal.authority `shouldBe` "grant_user"
+        session.principal.grantUserId `shouldBe` Just userId
+        session.globalPermissions.createWorkspace `shouldBe` True
+
+    it "rejects expired deployed cookie sessions" $ \_ ->
+      withAppEnvConfig deployedAuthCfg $ \env app -> do
+        userId <- createTestUser env True False
+        _ <- createExpiredAuthSession env userId "expired-session-token" "expired-csrf-token"
+
+        resp <- runReqWithHeaders app methodGet "/api/v1/session"
+          [cookieHeader [("hmem_session", "expired-session-token")]]
+          ""
+        respStatus resp `shouldBe` 401
+
+    it "lets explicit bearer auth take precedence over cookie sessions" $ \_ ->
+      withAppEnvConfig deployedAuthCfg $ \env app -> do
+        cookieUserId <- createTestUser env False False
+        bearerUserId <- createTestUser env True False
+        _ <- createAuthSession env cookieUserId "precedence-cookie-session" "precedence-cookie-csrf"
+        _ <- createAccessToken env bearerUserId ActorBot "Bearer Bot" "precedence-bearer-token"
+
+        resp <- runReqWithHeaders app methodGet "/api/v1/session"
+          [ cookieHeader [("hmem_session", "precedence-cookie-session")]
+          , ("Authorization", "Bearer precedence-bearer-token")
+          ]
+          ""
+        respStatus resp `shouldBe` 200
+        let Just session = decode (respBody resp) :: Maybe SessionContext
+        session.principal.actorType `shouldBe` "bot"
+        session.principal.grantUserId `shouldBe` Just bearerUserId
+
+    it "does not fall back to cookie sessions when an explicit bearer token is invalid" $ \_ ->
+      withAppEnvConfig deployedAuthCfg $ \env app -> do
+        userId <- createTestUser env True False
+        _ <- createAuthSession env userId "invalid-bearer-cookie-session" "invalid-bearer-csrf"
+        let cookies = cookieHeader [("hmem_session", "invalid-bearer-cookie-session"), ("hmem_csrf", "invalid-bearer-csrf")]
+
+        sessionResp <- runReqWithHeaders app methodGet "/api/v1/session"
+          [cookies, ("Authorization", "Bearer invalid-bearer-token")]
+          ""
+        respStatus sessionResp `shouldBe` 401
+
+        unsafeResp <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [cookies, ("Authorization", "Bearer invalid-bearer-token")]
+          (encode (object ["name" .= ("invalid-bearer-no-csrf-ws" :: T.Text)]))
+        respStatus unsafeResp `shouldBe` 401
+
+    it "requires CSRF tokens for cookie-authenticated unsafe requests" $ \_ ->
+      withAppEnvConfig deployedAuthCfg $ \env app -> do
+        userId <- createTestUser env True False
+        _ <- createAuthSession env userId "csrf-session-token" "csrf-token"
+        let cookies = cookieHeader [("hmem_session", "csrf-session-token"), ("hmem_csrf", "csrf-token")]
+            body = encode (object ["name" .= ("csrf-cookie-ws" :: T.Text)])
+
+        missing <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [cookieHeader [("hmem_session", "csrf-session-token")]]
+          body
+        respStatus missing `shouldBe` 403
+
+        noHeader <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [cookies]
+          body
+        respStatus noHeader `shouldBe` 403
+
+        mismatched <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [cookies, ("X-CSRF-Token", "wrong-csrf-token")]
+          body
+        respStatus mismatched `shouldBe` 403
+
+        ok <- runReqWithHeaders app methodPost "/api/v1/workspaces"
+          [cookies, ("X-CSRF-Token", "csrf-token")]
+          body
+        respStatus ok `shouldBe` 200
+
+    it "revokes deployed cookie sessions on logout" $ \_ ->
+      withAppEnvConfig deployedAuthCfg $ \env app -> do
+        userId <- createTestUser env True False
+        _ <- createAuthSession env userId "logout-session-token" "logout-csrf-token"
+        let cookies = cookieHeader [("hmem_session", "logout-session-token"), ("hmem_csrf", "logout-csrf-token")]
+
+        getLogoutResp <- runReqWithHeaders app methodGet "/api/v1/auth/logout" [cookies] ""
+        respStatus getLogoutResp `shouldBe` 404
+
+        missingCsrf <- runReqWithHeaders app methodPost "/api/v1/auth/logout" [cookies] ""
+        respStatus missingCsrf `shouldBe` 403
+
+        logoutResp <- runReqWithHeaders app methodPost "/api/v1/auth/logout"
+          [cookies, ("X-CSRF-Token", "logout-csrf-token")]
+          ""
+        respStatus logoutResp `shouldBe` 302
+        setCookieHeaders logoutResp `shouldSatisfy` any (BS.isInfixOf "hmem_session=; Path=/; Max-Age=0")
+
+        sessionResp <- runReqWithHeaders app methodGet "/api/v1/session" [cookies] ""
+        respStatus sessionResp `shouldBe` 401
+
+    it "starts OIDC login with a server-generated state cookie and secure cookie flags" $ \_ -> do
+      let cfg = deployedAuthCfg
+            { Config.auth = deployedAuthCfg.auth
+                { Config.deployed = deployedAuthCfg.auth.deployed
+                    { Config.issuer = Just testJwtIssuer
+                    , Config.clientId = Just "hmem-web"
+                    , Config.clientSecret = Just "client-secret"
+                    , Config.redirectUri = Just "https://hmem.example/api/v1/auth/callback"
+                    , Config.authorizationEndpoint = Just "https://issuer.example/auth"
+                    , Config.tokenEndpoint = Just "https://issuer.example/token"
+                    }
+                }
+            }
+      withAppEnvConfig cfg $ \_env app -> do
+        resp <- get_ app "/api/v1/auth/login?return_to=%2Fworkspace%2Fabc"
+        respStatus resp `shouldBe` 302
+        let Just location = lookup hLocation (simpleHeaders resp)
+        location `shouldSatisfy` BS.isInfixOf "https://issuer.example/auth?"
+        location `shouldSatisfy` BS.isInfixOf "client_id=hmem-web"
+        location `shouldSatisfy` BS.isInfixOf "response_type=code"
+        location `shouldSatisfy` BS.isInfixOf "state=hmem_oidc_state_v1_"
+        setCookieHeaders resp `shouldSatisfy` any (BS.isInfixOf "hmem_session_oidc_state=hmem_oidc_state_v1_")
+        setCookieHeaders resp `shouldSatisfy` any (BS.isInfixOf "HttpOnly")
+        setCookieHeaders resp `shouldSatisfy` any (BS.isInfixOf "Secure")
+        setCookieHeaders resp `shouldSatisfy` any (BS.isInfixOf "SameSite=Lax")
+
+    it "rejects OIDC callbacks with missing or mismatched state cookies" $ \_ ->
+      withAppEnvConfig deployedAuthCfg $ \_env app -> do
+        resp <- get_ app "/api/v1/auth/callback?code=provider-code&state=wrong-state"
+        respStatus resp `shouldBe` 401
+
+    it "fails closed for non-HTTPS OIDC authorization endpoints" $ \_ -> do
+      let cfg = deployedAuthCfg
+            { Config.auth = deployedAuthCfg.auth
+                { Config.deployed = deployedAuthCfg.auth.deployed
+                    { Config.issuer = Just testJwtIssuer
+                    , Config.clientId = Just "hmem-web"
+                    , Config.clientSecret = Just "client-secret"
+                    , Config.redirectUri = Just "https://hmem.example/api/v1/auth/callback"
+                    , Config.authorizationEndpoint = Just "http://issuer.example/auth"
+                    , Config.tokenEndpoint = Just "https://issuer.example/token"
+                    }
+                }
+            }
+      withAppEnvConfig cfg $ \_env app -> do
+        resp <- get_ app "/api/v1/auth/login"
+        respStatus resp `shouldBe` 503
+
+    it "allows configured CSRF headers in CORS preflight responses" $ \_ -> do
+      let cfg = deployedAuthCfg
+            { Config.auth = deployedAuthCfg.auth
+                { Config.deployed = deployedAuthCfg.auth.deployed
+                    { Config.csrfHeaderName = "X-HMEM-CSRF" }
+                }
+            }
+      withAppEnvConfig cfg $ \_env app -> do
+        resp <- runReqWithHeaders app methodOptions "/api/v1/workspaces"
+          [ ("Origin", "https://frontend.example")
+          , ("Access-Control-Request-Method", "POST")
+          , ("Access-Control-Request-Headers", "X-HMEM-CSRF")
+          ]
+          ""
+        respStatus resp `shouldBe` 200
+        let Just allowedHeaders = lookup "Access-Control-Allow-Headers" (simpleHeaders resp)
+        allowedHeaders `shouldSatisfy` BS.isInfixOf "X-HMEM-CSRF"
 
   describe "WebSocket auth and event scoping" $ do
     it "denies deployed WebSocket ticket issuance without a principal" $ \_ ->

@@ -35,7 +35,8 @@ auth:
 Use deployed mode for shared installations.
 
 - Set `auth.mode: deployed` explicitly.
-- Users authenticate with provider-backed bearer tokens such as JWT/OIDC tokens.
+- Browser users should authenticate through server-side OIDC authorization-code login and `HttpOnly` cookie sessions.
+- Explicit bearer JWT/PAT authentication remains supported for MCP, services, and fallback. If both bearer and cookie are present, bearer wins.
 - Service access uses bearer tokens resolved through database-backed `access_tokens` rows.
 - Legacy local static bearer auth does not work in deployed mode.
 - Protected requests without a valid deployed principal fail closed.
@@ -48,8 +49,19 @@ auth:
   deployed:
     issuer: https://issuer.example
     audience: hmem-web
+    discovery_url: https://issuer.example/.well-known/openid-configuration
     jwks_url: https://issuer.example/.well-known/jwks.json
+    client_id: hmem-web
+    client_secret: replace-with-oidc-client-secret
+    redirect_uri: https://hmem.example.com/api/v1/auth/callback
+    scopes: [openid, profile, email]
     token_lookup: database
+    session_cookie_name: hmem_session
+    csrf_cookie_name: hmem_csrf
+    csrf_header_name: X-CSRF-Token
+    session_ttl_seconds: 28800
+    cookie_secure: true
+    cookie_same_site: Lax
     # Optional but recommended before issuing service/PAT tokens.
     token_hash_secret: replace-with-secret-manager-value
 ```
@@ -78,7 +90,7 @@ Bot and service tokens identify automated clients in audit/events. In deployed m
 ## Deployed setup checklist
 
 1. Apply database migrations before enabling deployed auth.
-2. Configure `auth.mode: deployed` and provider verification settings.
+2. Configure `auth.mode: deployed`, provider verification settings, and OIDC client settings. Keycloak is the recommended self-hosted example provider, but hmem only relies on standard OIDC discovery, code exchange, and ID-token validation.
 3. Bootstrap at least one `superadmin` user using the supported operator workflow.
 4. Grant `create_workspace` or workspace roles to non-superadmin users as needed.
 5. For automated clients, create service/PAT tokens linked to a grant-bearing user using the token workflow below.
@@ -149,7 +161,13 @@ The server authorizes requests. Clients forward credentials and display server-p
 
 Configure the frontend with the HTTP and WebSocket server URLs. Load session state before fetching protected data.
 
-For explicit bearer-token frontend flows, provider callbacks must return tokens in URL fragments, not query strings. The frontend strips auth callback parameters from the URL after processing. By default it stores bearer tokens in `localStorage` for cross-tab persistence; this is convenient but exposes tokens to any successful XSS in the hmem origin. Operators can set `window.HMEM_CONFIG.authTokenStorage` to `session` for per-tab browser session storage or `memory` for in-memory-only storage; the frontend clears inactive storage locations on startup and logout. Server-side provider sessions remain the preferred future hardening path in the provider-auth workstream.
+For deployed browser auth, set `window.HMEM_CONFIG.loginUrl` to `/api/v1/auth/login` and `logoutUrl` to `/api/v1/auth/logout` (or the same paths behind your reverse proxy). The frontend starts login with a browser redirect and performs logout with a CSRF-protected `POST`. The server validates OIDC state, exchanges the provider code, links the ID-token `sub` to `users.auth_subject`, creates a revocable `HttpOnly` session cookie, and emits a non-HttpOnly CSRF cookie that the frontend sends as `X-CSRF-Token` on unsafe API requests.
+
+For cookie-session deployments, keep `cors.allowed_origins` restricted to trusted frontend origins. Do not deploy browser cookie sessions with wildcard or over-broad credentialed CORS.
+
+If you customize `auth.deployed.csrf_cookie_name` or `auth.deployed.csrf_header_name`, set matching frontend runtime values (`window.HMEM_CONFIG.csrfCookieName` / `csrfHeaderName`). The defaults are `hmem_csrf` and `X-CSRF-Token`.
+
+For explicit bearer-token frontend fallback flows, provider callbacks must return tokens in URL fragments, not query strings. The frontend strips auth callback parameters from the URL after processing. By default it stores bearer tokens in `localStorage` for cross-tab persistence; this is convenient but exposes tokens to any successful XSS in the hmem origin. Operators can set `window.HMEM_CONFIG.authTokenStorage` to `session` for per-tab browser session storage or `memory` for in-memory-only storage; the frontend clears inactive storage locations on startup and logout.
 
 MCP can point at a separate server:
 

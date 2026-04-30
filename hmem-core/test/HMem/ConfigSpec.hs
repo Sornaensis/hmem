@@ -256,6 +256,18 @@ spec = do
                     , jwks = Nothing
                     , tokenLookup = TokenLookupDatabase
                     , tokenHashSecret = Just "hash-secret"
+                    , clientId = Just "hmem-web"
+                    , clientSecret = Just "client-secret"
+                    , redirectUri = Just "https://hmem.example/api/v1/auth/callback"
+                    , scopes = ["openid", "profile", "email"]
+                    , authorizationEndpoint = Just "https://issuer.example/protocol/openid-connect/auth"
+                    , tokenEndpoint = Just "https://issuer.example/protocol/openid-connect/token"
+                    , sessionCookieName = "hmem_session"
+                    , csrfCookieName = "hmem_csrf"
+                    , csrfHeaderName = "X-CSRF-Token"
+                    , sessionTtlSeconds = 28800
+                    , cookieSecure = True
+                    , cookieSameSite = "Lax"
                     }
                 }
             }

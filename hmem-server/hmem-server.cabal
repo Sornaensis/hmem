@@ -24,6 +24,7 @@ data-files:
     migrations/V008__user_disabled_at.sql
     migrations/V009__ignore_access_token_last_used_audit.sql
     migrations/V010__audit_log_workspace_query_index.sql
+    migrations/V011__auth_sessions.sql
 
 library
   exposed-modules:

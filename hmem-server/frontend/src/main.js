@@ -23,6 +23,8 @@ const authTokenUrlParams = normalizeStringArray(runtimeConfig.authTokenUrlParams
 const sensitiveAuthUrlParams = Array.from(new Set([...defaultAuthTokenUrlParams, ...authTokenUrlParams, 'access_token', 'id_token', 'refresh_token']))
 const authCallbackUrlParams = Array.from(new Set([...sensitiveAuthUrlParams, ...normalizeStringArray(runtimeConfig.authCallbackUrlParams, []), 'code', 'state', 'token_type', 'expires_in', 'scope', 'error', 'error_description']))
 const authLoginStateStorageKey = runtimeConfig.authLoginStateStorageKey || 'hmem-auth-login-state'
+const csrfCookieName = runtimeConfig.csrfCookieName || 'hmem_csrf'
+const csrfHeaderName = runtimeConfig.csrfHeaderName || 'X-CSRF-Token'
 const requireAuthState = runtimeConfig.requireAuthState !== false
 let pendingAuthSessionError = null
 let ignoreStoredAuthToken = false
@@ -256,6 +258,30 @@ function authHeaderObject() {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
+function readCookie(name) {
+  const prefix = `${name}=`
+  return document.cookie
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix))
+    ?.slice(prefix.length) || null
+}
+
+function csrfHeaderObject() {
+  const token = readCookie(csrfCookieName)
+  return token ? { [csrfHeaderName]: token } : {}
+}
+
+function isUnsafeMethod(method) {
+  const normalized = String(method || 'GET').toUpperCase()
+  return normalized !== 'GET' && normalized !== 'HEAD' && normalized !== 'OPTIONS'
+}
+
+function currentRelativeReturnPath(returnPath) {
+  const parsed = new URL(returnPath || '/', window.location.href)
+  return `${parsed.pathname}${parsed.search}${parsed.hash}`
+}
+
 const apiUrl = normalizeBaseUrl(configuredApiUrl())
 const wsUrl = configuredWsUrl(apiUrl)
 let lastUnauthorizedNotificationAt = 0
@@ -283,6 +309,7 @@ function installAuthHeaderInterceptor() {
   const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader
 
   XMLHttpRequest.prototype.open = function (method, url) {
+    this.__hmemMethod = method
     this.__hmemRequestUrl = url
     this.__hmemHeaders = {}
     return originalOpen.apply(this, arguments)
@@ -298,10 +325,17 @@ function installAuthHeaderInterceptor() {
     const requestAuthSignature = authTokenSignature()
     const requestAuthGeneration = authTokenGeneration
     if (isApiRequestUrl(this.__hmemRequestUrl)) {
+      this.withCredentials = true
       const token = currentAuthToken()
       const hasAuthorization = this.__hmemHeaders && this.__hmemHeaders.authorization
       if (token && !hasAuthorization) {
         originalSetRequestHeader.call(this, 'Authorization', `Bearer ${token}`)
+      }
+
+      const hasCsrf = this.__hmemHeaders && this.__hmemHeaders[String(csrfHeaderName).toLowerCase()]
+      if (isUnsafeMethod(this.__hmemMethod) && !hasCsrf) {
+        const csrfToken = readCookie(csrfCookieName)
+        if (csrfToken) originalSetRequestHeader.call(this, csrfHeaderName, csrfToken)
       }
 
       this.addEventListener('loadend', function () {
@@ -403,7 +437,15 @@ if (app.ports.logoutAuth) {
     notifyAuthTokenChanged(true)
 
     const logoutUrl = runtimeConfig.logoutUrl || import.meta.env.VITE_HMEM_LOGOUT_URL || null
-    if (logoutUrl) window.location.assign(logoutUrl)
+    if (logoutUrl) {
+      fetch(new URL(logoutUrl, window.location.href).toString(), {
+        method: 'POST',
+        headers: { ...authHeaderObject(), ...csrfHeaderObject() },
+        credentials: 'include'
+      }).finally(function () {
+        window.location.assign(runtimeConfig.logoutRedirectUrl || '/')
+      })
+    }
   })
 }
 
@@ -411,14 +453,17 @@ if (app.ports.loginAuth) {
   app.ports.loginAuth.subscribe(function (returnPath) {
     const loginUrl = runtimeConfig.loginUrl || import.meta.env.VITE_HMEM_LOGIN_URL || null
     if (!loginUrl) return
-    const state = createAuthState()
-    if (requireAuthState && !safeSessionStorageSet(authLoginStateStorageKey, state)) {
-      notifyAuthSessionError('Browser session storage is unavailable, so a secure provider login cannot be started.')
-      return
-    }
     const parsed = new URL(loginUrl, window.location.href)
-    parsed.searchParams.set('state', state)
-    if (!parsed.searchParams.has('return_to')) parsed.searchParams.set('return_to', new URL(returnPath || '/', window.location.href).toString())
+    const serverSideOidcLogin = runtimeConfig.serverSideOidcLogin === true || parsed.pathname.endsWith('/api/v1/auth/login')
+    if (!serverSideOidcLogin) {
+      const state = createAuthState()
+      if (requireAuthState && !safeSessionStorageSet(authLoginStateStorageKey, state)) {
+        notifyAuthSessionError('Browser session storage is unavailable, so a secure provider login cannot be started.')
+        return
+      }
+      parsed.searchParams.set('state', state)
+    }
+    if (!parsed.searchParams.has('return_to')) parsed.searchParams.set('return_to', currentRelativeReturnPath(returnPath))
     window.location.assign(parsed.toString())
   })
 }
@@ -499,7 +544,7 @@ async function resolveWsUrl(config) {
   const requestAuthGeneration = authTokenGeneration
   const response = await fetch(apiResourceUrl('/api/v1/ws-ticket'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaderObject() },
+    headers: { 'Content-Type': 'application/json', ...authHeaderObject(), ...csrfHeaderObject() },
     credentials: 'include',
     body: JSON.stringify({ workspace_id: config.workspaceId })
   })

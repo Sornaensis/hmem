@@ -138,6 +138,7 @@ test-suite hmem-core-test
       HMem.DB.MemorySpec
       HMem.DB.ProjectSpec
       HMem.DB.TaskSpec
+      HMem.DB.TestHarnessSpec
       HMem.TypesSpec
       SpecHook
       Paths_hmem_core

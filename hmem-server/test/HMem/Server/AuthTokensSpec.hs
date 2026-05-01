@@ -131,8 +131,8 @@ spec = describe "service/PAT token lifecycle" $ do
   it "inherits or overrides expiry during rotation" $
     withTestEnv $ \env -> do
       grantUserId <- createGrantUser env "token-grant-rotate-expiry"
-      let originalExpiry = UTCTime (fromGregorian 2026 5 1) (secondsToDiffTime 0)
-          overrideExpiry = UTCTime (fromGregorian 2026 6 1) (secondsToDiffTime 0)
+      let originalExpiry = UTCTime (fromGregorian 2099 5 1) (secondsToDiffTime 0)
+          overrideExpiry = UTCTime (fromGregorian 2099 6 1) (secondsToDiffTime 0)
       old <- expectRight =<< issueAccessToken env.pool IssueAccessTokenInput
         { grantUserId = grantUserId
         , actorType = AccessTokenActorBot

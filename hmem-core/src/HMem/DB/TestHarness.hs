@@ -1,8 +1,15 @@
 module HMem.DB.TestHarness
   ( -- * Test environment
     TestEnv(..)
+  , TestSandbox(..)
+  , TestDb(..)
   , AuditLogRow(..)
   , withTestEnv
+  , withTestSandbox
+  , withSandboxedEnv
+  , withSandboxedPostgres
+  , withSandboxedTestEnv
+  , assertInSandbox
     -- * Transaction-based test isolation
   , setupTestPool
   , withTestTransaction
@@ -12,6 +19,8 @@ module HMem.DB.TestHarness
   , startEphemeralPg
   , stopEphemeralPg
   , checkPgTools
+  , resolveRepoRoot
+  , resolveMigrationsDir
     -- * DB utilities
   , cleanDB
   , ensureSchema
@@ -21,18 +30,21 @@ module HMem.DB.TestHarness
   ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (SomeException, bracket, finally, try)
-import Control.Monad (void)
+import Control.Exception (SomeException, bracket, bracketOnError, finally, throwIO, try)
+import Control.Monad (forM_, unless, void, when)
 import Data.Aeson (Value)
 import Data.Functor.Contravariant (contramap)
+import Data.Foldable qualified as Foldable
+import Data.Maybe (catMaybes, isJust)
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID (UUID)
-import System.Directory (doesDirectoryExist, findExecutable, getCurrentDirectory,
-                         removeDirectoryRecursive)
-import System.Environment (lookupEnv, setEnv)
-import System.FilePath ((</>))
+import Data.UUID.V4 qualified as UUID
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist,
+                         findExecutable, getCurrentDirectory, removeDirectoryRecursive)
+import System.Environment (getExecutablePath, lookupEnv, setEnv, unsetEnv)
+import System.FilePath ((</>), isPathSeparator, normalise, takeDirectory, takeFileName)
 import System.IO (hFlush, hPutStrLn, stderr)
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
 import System.Process (callProcess)
@@ -48,11 +60,36 @@ import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool (createPool, runSession, setTestTransactionMode, withConn)
 import HMem.DB.Schema
 import HMem.Types
+import Paths_hmem_core (getDataDir)
 
 -- | Test environment wrapping the connection pool.
 data TestEnv = TestEnv
   { pool :: Pool Hasql.Connection
+  , testSandbox :: TestSandbox
+  , testDb :: TestDb
   }
+
+data TestSandbox = TestSandbox
+  { sandboxRoot :: FilePath
+  , sandboxTmpDir :: FilePath
+  , sandboxLogDir :: FilePath
+  , sandboxConfigDir :: FilePath
+  , sandboxStaticDir :: FilePath
+  , sandboxCacheDir :: FilePath
+  , sandboxHomeDir :: FilePath
+  , sandboxRepoRoot :: FilePath
+  , sandboxMigrationsDir :: FilePath
+  , sandboxPreserveOnFailure :: Bool
+  } deriving stock (Show, Eq)
+
+data TestDb = TestDb
+  { testDbDataDir :: FilePath
+  , testDbLogFile :: FilePath
+  , testDbPort :: Int
+  , testDbName :: Text
+  , testDbConnStr :: Text
+  , testDbUnsafeExternal :: Bool
+  } deriving stock (Show, Eq)
 
 data AuditLogRow = AuditLogRow
   { entityType :: Text
@@ -66,17 +103,6 @@ data AuditLogRow = AuditLogRow
   , oldValues :: Maybe Value
   , newValues :: Maybe Value
   } deriving stock (Show, Eq)
-
--- | Default connection string when HMEM_TEST_DB is not set.
-defaultTestConnStr :: Text
-defaultTestConnStr = "host=localhost dbname=hmem_test"
-
--- | Read the test connection string from the HMEM_TEST_DB environment
--- variable, falling back to @host=localhost dbname=hmem_test@.
-getTestConnStr :: IO Text
-getTestConnStr = do
-  env <- lookupEnv "HMEM_TEST_DB"
-  pure $ maybe defaultTestConnStr T.pack env
 
 -- | Set up a test environment: read config from env, create a pool,
 -- ensure the schema is applied, and truncate all tables.
@@ -92,12 +118,10 @@ getTestConnStr = do
 -- @
 withTestEnv :: (TestEnv -> IO a) -> IO a
 withTestEnv action = do
-  connStr <- getTestConnStr
-  p <- createPool connStr 10 5.0 30000
-  let env = TestEnv { pool = p }
-  ensureSchema env
-  cleanDB env
-  action env
+  active <- currentSandboxFromEnv
+  case active of
+    Just (sandbox, db) -> withPooledTestEnv sandbox db 10 action
+    Nothing -> withConfiguredExternalOrSandboxedTestEnv action
 
 ------------------------------------------------------------------------
 -- Transaction-based test isolation
@@ -115,12 +139,8 @@ withTestEnv action = do
 -- @
 setupTestPool :: IO TestEnv
 setupTestPool = do
-  connStr <- getTestConnStr
-  p <- createPool connStr 1 5.0 30000
-  let env = TestEnv { pool = p }
-  ensureSchema env
-  cleanDB env
-  pure env
+  (sandbox, db) <- requireCurrentSandbox
+  withPooledTestEnv sandbox db 1 pure
 
 -- | Wrap a single test case in a database transaction that is always
 -- rolled back, regardless of success or failure.  Requires a pool of
@@ -142,29 +162,55 @@ withTestTransaction action env = do
       void $ Session.run (Session.sql "ROLLBACK") conn
 
 -- | Check whether the schema has been applied and apply it if not.
--- Looks for @hmem-server/migrations/@ relative to the working directory.
 ensureSchema :: TestEnv -> IO ()
 ensureSchema env = do
-  dir <- findMigrationsDir
-  result <- Migration.runMigrations env.pool dir
+  result <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
   case result.failed of
     Just (file, err) -> fail $ "Failed to apply migration " <> file <> ": " <> err
     Nothing          -> pure ()
 
--- | Search a few candidate paths for @hmem-server/migrations/@.
-findMigrationsDir :: IO FilePath
-findMigrationsDir = do
-  let candidates =
-        [ "hmem-server/migrations"
-        , "../hmem-server/migrations"
-        , "../../hmem-server/migrations"
-        ]
-  found <- mapM (\p -> (,) <$> doesDirectoryExist p <*> pure p) candidates
-  case [p | (True, p) <- found] of
-    (p:_) -> pure p
-    []    -> do
-      cwd <- getCurrentDirectory
-      fail $ "Could not find hmem-server/migrations/ (cwd: " <> cwd <> ")"
+resolveRepoRoot :: IO FilePath
+resolveRepoRoot = do
+  explicit <- lookupEnv repoRootOverrideVar
+  cwd <- Just <$> (canonicalizePath =<< getCurrentDirectory)
+  exeDir <- either (const Nothing) (Just . takeDirectory) <$> (try getExecutablePath :: IO (Either SomeException FilePath))
+  dataDir <- either (const Nothing) Just <$> (try getDataDir :: IO (Either SomeException FilePath))
+  let candidates = catMaybes [explicit, cwd, exeDir, dataDir]
+  resolved <- firstExistingRepoRoot candidates
+  case resolved of
+    Just repoRoot -> pure repoRoot
+    Nothing -> fail $ "Could not resolve hmem repository root from candidates: " <> show candidates
+  where
+    firstExistingRepoRoot [] = pure Nothing
+    firstExistingRepoRoot (candidate:rest) = do
+      found <- findRepoRootFrom candidate
+      case found of
+        Just repoRoot -> pure (Just repoRoot)
+        Nothing -> firstExistingRepoRoot rest
+
+    findRepoRootFrom anchor = do
+      start <- canonicalizePath anchor
+      go start
+
+    go dir = do
+      hasStack <- doesFileExist (dir </> "stack.yaml")
+      hasMigrations <- doesDirectoryExist (dir </> "hmem-server" </> "migrations")
+      if hasStack && hasMigrations
+        then pure (Just dir)
+        else do
+          let parent = takeDirectory dir
+          if parent == dir
+            then pure Nothing
+            else go parent
+
+resolveMigrationsDir :: FilePath -> IO FilePath
+resolveMigrationsDir repoRoot = do
+  dir <- canonicalizePath (repoRoot </> "hmem-server" </> "migrations")
+  migrationsExists <- doesDirectoryExist dir
+  firstMigration <- doesFileExist (dir </> "V001__initial_schema.sql")
+  if migrationsExists && firstMigration
+    then pure dir
+    else fail $ "Could not resolve hmem-server/migrations under repo root: " <> repoRoot
 
 -- | Truncate all tables in dependency order, resetting the database
 -- to a clean state between tests.
@@ -269,12 +315,14 @@ data EphemeralPg = EphemeralPg
   , epDataDir :: FilePath
   , epPort    :: Int
   , epConnStr :: Text
+  , epLogFile :: FilePath
+  , epDbName  :: Text
   }
 
--- | Bracket that starts an ephemeral PostgreSQL instance when
--- @HMEM_TEST_DB@ is not set, runs the inner action, then guarantees
--- teardown.  If @HMEM_TEST_DB@ is already set, the action runs
--- directly against that database.
+-- | Bracket that starts an isolated sandboxed PostgreSQL instance, runs the
+-- inner action, then guarantees teardown.  Legacy @HMEM_TEST_DB@ is scrubbed
+-- from the test environment rather than accepted as a silent external DB
+-- escape hatch.
 --
 -- Designed for use with hspec's @aroundAll_@ in a @SpecHook@ module:
 --
@@ -283,15 +331,95 @@ data EphemeralPg = EphemeralPg
 -- hook = aroundAll_ withEphemeralPg
 -- @
 withEphemeralPg :: IO () -> IO ()
-withEphemeralPg action = do
-  env <- lookupEnv "HMEM_TEST_DB"
-  case env of
-    Just _  -> action
-    Nothing -> do
-      checkPgTools
-      bracket startEphemeralPg stopEphemeralPg $ \pg -> do
-        setEnv "HMEM_TEST_DB" (T.unpack pg.epConnStr)
-        action
+withEphemeralPg action =
+  withTestSandbox $ \sandbox ->
+    withSandboxedEnv sandbox $ 
+      withSandboxedPostgres sandbox $ \db ->
+        withActiveSandboxEnv sandbox db action
+
+withSandboxedTestEnv :: (TestEnv -> IO a) -> IO a
+withSandboxedTestEnv action =
+  withTestSandbox $ \sandbox ->
+    withSandboxedEnv sandbox $
+      withSandboxedPostgres sandbox $ \db ->
+        withActiveSandboxEnv sandbox db $
+          withPooledTestEnv sandbox db 10 action
+
+withTestSandbox :: (TestSandbox -> IO a) -> IO a
+withTestSandbox action = do
+  preserve <- envFlag preserveSandboxVar
+  tmpBase <- getCanonicalTemporaryDirectory
+  root <- createTempDirectory tmpBase "hmem-sandbox"
+  let tmpDir = root </> "tmp"
+      logDir = root </> "logs"
+      configDir = root </> "config"
+      staticDir = root </> "static"
+      cacheDir = root </> "cache"
+      homeDir = root </> "home"
+  result <- try $ do
+    forM_ [tmpDir, logDir, configDir, staticDir, cacheDir, homeDir] $
+      createDirectoryIfMissing True
+    repoRoot <- resolveRepoRoot
+    migrationsDir <- resolveMigrationsDir repoRoot
+    let sandbox = TestSandbox
+          { sandboxRoot = root
+          , sandboxTmpDir = tmpDir
+          , sandboxLogDir = logDir
+          , sandboxConfigDir = configDir
+          , sandboxStaticDir = staticDir
+          , sandboxCacheDir = cacheDir
+          , sandboxHomeDir = homeDir
+          , sandboxRepoRoot = repoRoot
+          , sandboxMigrationsDir = migrationsDir
+          , sandboxPreserveOnFailure = preserve
+          }
+    value <- action sandbox
+    pure (sandbox, value)
+  case result of
+    Right (sandbox, value) -> do
+      cleanupSandbox sandbox True
+      pure value
+    Left (err :: SomeException) -> do
+      cleanupSandboxRoot root preserve
+      throwIO err
+
+withSandboxedEnv :: TestSandbox -> IO a -> IO a
+withSandboxedEnv sandbox action =
+  bracket snapshotEnv restoreEnv $ \_ -> do
+    legacy <- lookupEnv legacyTestDbVar
+    when (isJust legacy) $
+      hPutStrLn stderr $ "[test-sandbox] ignoring legacy " <> legacyTestDbVar <> " in favor of sandboxed PostgreSQL"
+    forM_ scrubbedEnvVars unsetEnv
+    setEnv sandboxRootVar sandbox.sandboxRoot
+    setEnv sandboxTmpVar sandbox.sandboxTmpDir
+    setEnv sandboxLogVar sandbox.sandboxLogDir
+    setEnv sandboxConfigVar sandbox.sandboxConfigDir
+    setEnv sandboxStaticVar sandbox.sandboxStaticDir
+    setEnv sandboxCacheVar sandbox.sandboxCacheDir
+    setEnv sandboxHomeVar sandbox.sandboxHomeDir
+    setEnv sandboxRepoVar sandbox.sandboxRepoRoot
+    setEnv sandboxMigrationsVar sandbox.sandboxMigrationsDir
+    setEnv sandboxActiveVar "1"
+    setEnv "HOME" sandbox.sandboxHomeDir
+    setEnv "USERPROFILE" sandbox.sandboxHomeDir
+    setEnv "APPDATA" (sandbox.sandboxHomeDir </> "AppData" </> "Roaming")
+    setEnv "LOCALAPPDATA" (sandbox.sandboxHomeDir </> "AppData" </> "Local")
+    setEnv "XDG_CONFIG_HOME" (sandbox.sandboxHomeDir </> ".config")
+    action
+
+withSandboxedPostgres :: TestSandbox -> (TestDb -> IO a) -> IO a
+withSandboxedPostgres sandbox action = do
+  checkPgTools
+  bracket (startEphemeralPgInSandbox sandbox) stopEphemeralPgServer $ \pg -> do
+    let db = TestDb
+          { testDbDataDir = pg.epDataDir
+          , testDbLogFile = pg.epLogFile
+          , testDbPort = pg.epPort
+          , testDbName = pg.epDbName
+          , testDbConnStr = pg.epConnStr
+          , testDbUnsafeExternal = False
+          }
+    action db
 
 -- | Fail immediately when required PostgreSQL CLI tools are missing.
 checkPgTools :: IO ()
@@ -302,24 +430,29 @@ checkPgTools = do
   case missing of
     [] -> pure ()
     _  -> fail $ unlines
-            [ "HMEM_TEST_DB is not set and required PostgreSQL tools not on PATH: "
+            [ "Required PostgreSQL tools not on PATH for sandboxed tests: "
                 ++ unwords missing
-            , "Install PostgreSQL (ensure its bin/ is on PATH) or set HMEM_TEST_DB"
-            , "to point at an existing test database."
+            , "Install PostgreSQL and ensure its bin/ is on PATH."
             ]
 
 -- | Start an ephemeral PostgreSQL cluster on a random port.
 startEphemeralPg :: IO EphemeralPg
 startEphemeralPg = do
-  port <- randomRIO (49152, 65535) :: IO Int
-  tmpBase <- getCanonicalTemporaryDirectory
-  tmpDir  <- createTempDirectory tmpBase "hmem-test-pg"
-  let dataDir = tmpDir </> "data"
-      logFile = tmpDir </> "pg.log"
-      connStr = "host=localhost port=" <> T.pack (show port) <> " dbname=hmem_test"
+  sandbox <- createStandaloneSandbox
+  startEphemeralPgInSandbox sandbox
 
-  hPutStrLn stderr $ "[test-pg] tmp dir : " ++ tmpDir
+startEphemeralPgInSandbox :: TestSandbox -> IO EphemeralPg
+startEphemeralPgInSandbox sandbox = do
+  port <- randomRIO (49152, 65535) :: IO Int
+  suffix <- T.take 8 . T.filter (/= '-') . T.pack . show <$> UUID.nextRandom
+  let dbName = "hmem_test_" <> suffix
+      dataDir = sandbox.sandboxRoot </> "postgres" </> "data"
+      logFile = sandbox.sandboxLogDir </> "postgresql.log"
+      connStr = "host=localhost port=" <> T.pack (show port) <> " dbname=" <> dbName
+
+  hPutStrLn stderr $ "[test-pg] sandbox : " ++ sandbox.sandboxRoot
   hPutStrLn stderr $ "[test-pg] port    : " ++ show port
+  hPutStrLn stderr $ "[test-pg] db      : " ++ T.unpack dbName
   hFlush stderr
 
   -- Initialise a fresh data directory
@@ -335,29 +468,44 @@ startEphemeralPg = do
     , "listen_addresses = 'localhost'"
     ]
 
-  -- Start
-  callProcess "pg_ctl"
-    [ "start", "-D", dataDir, "-l", logFile, "-w", "-t", "30" ]
-  threadDelay 500000
+  let pg = EphemeralPg
+        { epTmpDir  = sandbox.sandboxRoot
+        , epDataDir = dataDir
+        , epPort    = port
+        , epConnStr = connStr
+        , epLogFile = logFile
+        , epDbName  = dbName
+        }
 
-  -- Create the test database
-  callProcess "createdb"
-    [ "-h", "localhost", "-p", show port, "hmem_test" ]
+  bracketOnError
+    (do
+      callProcess "pg_ctl"
+        [ "start", "-D", dataDir, "-l", logFile, "-w", "-t", "30" ]
+      pure pg)
+    stopEphemeralPgServer
+    (\started -> do
+      threadDelay 500000
 
-  hPutStrLn stderr "[test-pg] PostgreSQL ready."
-  hFlush stderr
+      -- Create the test database
+      callProcess "createdb"
+        [ "-h", "localhost", "-p", show port, T.unpack dbName ]
 
-  pure EphemeralPg
-    { epTmpDir  = tmpDir
-    , epDataDir = dataDir
-    , epPort    = port
-    , epConnStr = connStr
-    }
+      hPutStrLn stderr "[test-pg] PostgreSQL ready."
+      hFlush stderr
+
+      pure started)
 
 -- | Stop the ephemeral PostgreSQL cluster and remove its temp
 -- directory.  Ignores errors so teardown always completes.
 stopEphemeralPg :: EphemeralPg -> IO ()
 stopEphemeralPg pg = do
+  stopEphemeralPgServer pg
+  _ <- try (removeDirectoryRecursive pg.epTmpDir
+        ) :: IO (Either SomeException ())
+  pure ()
+
+stopEphemeralPgServer :: EphemeralPg -> IO ()
+stopEphemeralPgServer pg = do
   hPutStrLn stderr "[test-pg] Tearing down..."
   hFlush stderr
   _ <- try (callProcess "pg_ctl"
@@ -365,6 +513,278 @@ stopEphemeralPg pg = do
         ) :: IO (Either SomeException ())
   -- Small delay so Windows releases file locks
   threadDelay 500000
-  _ <- try (removeDirectoryRecursive pg.epTmpDir
-        ) :: IO (Either SomeException ())
   pure ()
+
+assertInSandbox :: TestSandbox -> FilePath -> IO ()
+assertInSandbox sandbox path = do
+  root <- canonicalizePath sandbox.sandboxRoot
+  target <- canonicalizePath path
+  unless (isPathWithin root target) $
+    fail $ "Path is outside sandbox. root=" <> root <> " path=" <> target
+
+------------------------------------------------------------------------
+-- Internal sandbox helpers
+------------------------------------------------------------------------
+
+withPooledTestEnv :: TestSandbox -> TestDb -> Int -> (TestEnv -> IO a) -> IO a
+withPooledTestEnv sandbox db poolSize action = do
+  p <- createPool db.testDbConnStr poolSize 5.0 30000
+  let env = TestEnv { pool = p, testSandbox = sandbox, testDb = db }
+  ensureSchema env
+  cleanDB env
+  action env
+
+currentSandboxFromEnv :: IO (Maybe (TestSandbox, TestDb))
+currentSandboxFromEnv = do
+  active <- lookupEnv sandboxActiveVar
+  mRoot <- lookupEnv sandboxRootVar
+  mConn <- lookupEnv sandboxDbVar
+  case (active, mRoot, mConn) of
+    (Just "1", Just root, Just connStr) -> do
+      sandbox <- TestSandbox root
+        <$> envOrFail sandboxTmpVar
+        <*> envOrFail sandboxLogVar
+        <*> envOrFail sandboxConfigVar
+        <*> envOrFail sandboxStaticVar
+        <*> envOrFail sandboxCacheVar
+        <*> envOrFail sandboxHomeVar
+        <*> envOrFail sandboxRepoVar
+        <*> envOrFail sandboxMigrationsVar
+        <*> envFlag preserveSandboxVar
+      db <- TestDb
+        <$> envOrFail sandboxDbDataVar
+        <*> envOrFail sandboxDbLogVar
+        <*> (read <$> envOrFail sandboxDbPortVar)
+        <*> (T.pack <$> envOrFail sandboxDbNameVar)
+        <*> pure (T.pack connStr)
+        <*> pure False
+      validateActiveSandbox sandbox db
+      pure $ Just (sandbox, db)
+    (Nothing, _, _) -> pure Nothing
+    _ -> fail "Incomplete or untrusted active sandbox metadata in environment"
+
+requireCurrentSandbox :: IO (TestSandbox, TestDb)
+requireCurrentSandbox = do
+  active <- currentSandboxFromEnv
+  case active of
+    Just value -> pure value
+    Nothing -> fail "No active sandbox metadata found in environment"
+
+withActiveSandboxEnv :: TestSandbox -> TestDb -> IO a -> IO a
+withActiveSandboxEnv _sandbox db action = do
+  setEnv sandboxActiveVar "1"
+  setEnv sandboxDbVar (T.unpack db.testDbConnStr)
+  setEnv sandboxDbDataVar db.testDbDataDir
+  setEnv sandboxDbLogVar db.testDbLogFile
+  setEnv sandboxDbPortVar (show db.testDbPort)
+  setEnv sandboxDbNameVar (T.unpack db.testDbName)
+  action
+
+withConfiguredExternalOrSandboxedTestEnv :: (TestEnv -> IO a) -> IO a
+withConfiguredExternalOrSandboxedTestEnv action = do
+  external <- lookupEnv externalTestDbVar
+  allowExternal <- envFlag allowExternalTestDbVar
+  ci <- envFlag "CI"
+  case external of
+    Nothing
+      | allowExternal -> fail $ allowExternalTestDbVar <> " requires " <> externalTestDbVar
+      | otherwise -> withSandboxedTestEnv action
+    Just connStr
+      | not allowExternal -> fail $ "Refusing " <> externalTestDbVar <> " without " <> allowExternalTestDbVar <> "=1"
+      | ci -> fail "Refusing unsafe external test database mode in CI"
+      | otherwise -> withUnsafeExternalTestEnv (T.pack connStr) action
+
+withUnsafeExternalTestEnv :: Text -> (TestEnv -> IO a) -> IO a
+withUnsafeExternalTestEnv connStr action =
+  withTestSandbox $ \sandbox ->
+    withSandboxedEnv sandbox $ do
+      let externalDir = sandbox.sandboxRoot </> "external-db-not-managed"
+          externalLog = sandbox.sandboxLogDir </> "external-db-not-managed.log"
+          db = TestDb
+            { testDbDataDir = externalDir
+            , testDbLogFile = externalLog
+            , testDbPort = 0
+            , testDbName = "external"
+            , testDbConnStr = connStr
+            , testDbUnsafeExternal = True
+            }
+      createDirectoryIfMissing True externalDir
+      writeFile externalLog "[test-sandbox] unsafe external database mode; PostgreSQL is not managed by harness\n"
+      hPutStrLn stderr $ "[test-sandbox] UNSAFE external test database enabled by " <> allowExternalTestDbVar
+      withActiveSandboxEnv sandbox db $
+        withPooledTestEnv sandbox db 10 action
+
+createStandaloneSandbox :: IO TestSandbox
+createStandaloneSandbox = do
+  preserve <- envFlag preserveSandboxVar
+  tmpBase <- getCanonicalTemporaryDirectory
+  root <- createTempDirectory tmpBase "hmem-sandbox"
+  let tmpDir = root </> "tmp"
+      logDir = root </> "logs"
+      configDir = root </> "config"
+      staticDir = root </> "static"
+      cacheDir = root </> "cache"
+      homeDir = root </> "home"
+  forM_ [tmpDir, logDir, configDir, staticDir, cacheDir, homeDir] $
+    createDirectoryIfMissing True
+  repoRoot <- resolveRepoRoot
+  migrationsDir <- resolveMigrationsDir repoRoot
+  pure TestSandbox
+    { sandboxRoot = root
+    , sandboxTmpDir = tmpDir
+    , sandboxLogDir = logDir
+    , sandboxConfigDir = configDir
+    , sandboxStaticDir = staticDir
+    , sandboxCacheDir = cacheDir
+    , sandboxHomeDir = homeDir
+    , sandboxRepoRoot = repoRoot
+    , sandboxMigrationsDir = migrationsDir
+    , sandboxPreserveOnFailure = preserve
+    }
+
+cleanupSandbox :: TestSandbox -> Bool -> IO ()
+cleanupSandbox sandbox success
+  | sandbox.sandboxPreserveOnFailure && not success =
+      hPutStrLn stderr $ "[test-sandbox] preserved after failure: " <> sandbox.sandboxRoot
+  | otherwise = cleanupSandboxRoot sandbox.sandboxRoot False
+
+cleanupSandboxRoot :: FilePath -> Bool -> IO ()
+cleanupSandboxRoot root preserve
+  | preserve = hPutStrLn stderr $ "[test-sandbox] preserved after failure: " <> root
+  | otherwise = do
+      _ <- try (removeDirectoryRecursive root) :: IO (Either SomeException ())
+      pure ()
+
+snapshotEnv :: IO [(String, Maybe String)]
+snapshotEnv = mapM (\name -> do value <- lookupEnv name; pure (name, value)) sandboxManagedEnvVars
+
+restoreEnv :: [(String, Maybe String)] -> IO ()
+restoreEnv snapshot =
+  forM_ snapshot $ \(name, value) -> case value of
+    Nothing -> unsetEnv name
+    Just raw -> setEnv name raw
+
+envOrFail :: String -> IO String
+envOrFail name = do
+  value <- lookupEnv name
+  case value of
+    Just raw -> pure raw
+    Nothing -> fail $ "Missing sandbox environment variable: " <> name
+
+envFlag :: String -> IO Bool
+envFlag name = do
+  value <- lookupEnv name
+  pure $ value `elem` [Just "1", Just "true", Just "TRUE", Just "yes", Just "YES"]
+
+validateActiveSandbox :: TestSandbox -> TestDb -> IO ()
+validateActiveSandbox sandbox db = do
+  tempRoot <- getCanonicalTemporaryDirectory >>= canonicalizePath
+  root <- canonicalizePath sandbox.sandboxRoot
+  unless (isPathWithin tempRoot root && "hmem-sandbox" `prefixOfString` takeFileName root) $
+    fail $ "Active sandbox root is not an hmem temp sandbox: " <> root
+  forM_
+    [ sandbox.sandboxTmpDir
+    , sandbox.sandboxLogDir
+    , sandbox.sandboxConfigDir
+    , sandbox.sandboxStaticDir
+    , sandbox.sandboxCacheDir
+    , sandbox.sandboxHomeDir
+    , db.testDbDataDir
+    , db.testDbLogFile
+    ] $
+    assertInSandbox sandbox
+  unless ("hmem_test_" `T.isPrefixOf` db.testDbName) $
+    fail $ "Active sandbox DB name is not harness-generated: " <> T.unpack db.testDbName
+  let expectedConnStr = "host=localhost port=" <> T.pack (show db.testDbPort) <> " dbname=" <> db.testDbName
+  unless (db.testDbConnStr == expectedConnStr) $
+    fail "Active sandbox DB connection string does not match sandbox metadata"
+
+isPathWithin :: FilePath -> FilePath -> Bool
+isPathWithin rawRoot rawTarget =
+  let root = addTrailingSeparator (normalise rawRoot)
+      target = normalise rawTarget
+  in target == normalise rawRoot || root `prefixOfPath` target
+
+addTrailingSeparator :: FilePath -> FilePath
+addTrailingSeparator path
+  | Foldable.null path = path
+  | isPathSeparator (last path) = path
+  | otherwise = path <> [pathSeparator]
+  where
+    pathSeparator = if any (== '\\') path then '\\' else '/'
+
+prefixOfPath :: FilePath -> FilePath -> Bool
+prefixOfPath [] _ = True
+prefixOfPath _ [] = False
+prefixOfPath (x:xs) (y:ys) = x == y && prefixOfPath xs ys
+
+prefixOfString :: String -> String -> Bool
+prefixOfString [] _ = True
+prefixOfString _ [] = False
+prefixOfString (x:xs) (y:ys) = x == y && prefixOfString xs ys
+
+sandboxActiveVar, sandboxDbVar, legacyTestDbVar, preserveSandboxVar, externalTestDbVar, allowExternalTestDbVar, repoRootOverrideVar :: String
+sandboxActiveVar = "HMEM_TEST_SANDBOX_ACTIVE"
+sandboxDbVar = "HMEM_TEST_SANDBOX_DB"
+legacyTestDbVar = "HMEM_TEST_DB"
+preserveSandboxVar = "HMEM_TEST_PRESERVE_SANDBOX"
+externalTestDbVar = "HMEM_TEST_EXTERNAL_DB"
+allowExternalTestDbVar = "HMEM_TEST_ALLOW_EXTERNAL_DB"
+repoRootOverrideVar = "HMEM_TEST_REPO_ROOT"
+
+sandboxRootVar, sandboxTmpVar, sandboxLogVar, sandboxConfigVar, sandboxStaticVar, sandboxCacheVar, sandboxHomeVar, sandboxRepoVar, sandboxMigrationsVar :: String
+sandboxRootVar = "HMEM_TEST_SANDBOX_ROOT"
+sandboxTmpVar = "HMEM_TEST_SANDBOX_TMP"
+sandboxLogVar = "HMEM_TEST_SANDBOX_LOGS"
+sandboxConfigVar = "HMEM_TEST_SANDBOX_CONFIG"
+sandboxStaticVar = "HMEM_TEST_SANDBOX_STATIC"
+sandboxCacheVar = "HMEM_TEST_SANDBOX_CACHE"
+sandboxHomeVar = "HMEM_TEST_SANDBOX_HOME"
+sandboxRepoVar = "HMEM_TEST_SANDBOX_REPO_ROOT"
+sandboxMigrationsVar = "HMEM_TEST_SANDBOX_MIGRATIONS"
+
+sandboxDbDataVar, sandboxDbLogVar, sandboxDbPortVar, sandboxDbNameVar :: String
+sandboxDbDataVar = "HMEM_TEST_SANDBOX_DB_DATA"
+sandboxDbLogVar = "HMEM_TEST_SANDBOX_DB_LOG"
+sandboxDbPortVar = "HMEM_TEST_SANDBOX_DB_PORT"
+sandboxDbNameVar = "HMEM_TEST_SANDBOX_DB_NAME"
+
+scrubbedEnvVars :: [String]
+scrubbedEnvVars =
+  [ legacyTestDbVar
+  , externalTestDbVar
+  , allowExternalTestDbVar
+  , "HMEM_DB_PASSWORD"
+  , "HMEM_API_KEY"
+  , "HMEM_DB_SSLMODE"
+  , "HMEM_AUTH_TOKEN"
+  , "HMEM_MCP_AUTH_TOKEN"
+  , "HMEM_SERVER_URL"
+  , "KEYCLOAK_URL"
+  , "KEYCLOAK_REALM"
+  , "KEYCLOAK_CLIENT_SECRET"
+  ]
+
+sandboxManagedEnvVars :: [String]
+sandboxManagedEnvVars = scrubbedEnvVars <>
+  [ sandboxActiveVar
+  , sandboxDbVar
+  , sandboxRootVar
+  , sandboxTmpVar
+  , sandboxLogVar
+  , sandboxConfigVar
+  , sandboxStaticVar
+  , sandboxCacheVar
+  , sandboxHomeVar
+  , sandboxRepoVar
+  , sandboxMigrationsVar
+  , sandboxDbDataVar
+  , sandboxDbLogVar
+  , sandboxDbPortVar
+  , sandboxDbNameVar
+  , "HOME"
+  , "USERPROFILE"
+  , "APPDATA"
+  , "LOCALAPPDATA"
+  , "XDG_CONFIG_HOME"
+  ]

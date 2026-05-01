@@ -307,6 +307,7 @@ test-suite hmem-server-test
       HMem.Server.AuthBootstrapSpec
       HMem.Server.AuthTokensSpec
       HMem.Server.AuthUsersSpec
+      HMem.Server.DeployedSandboxSpec
       HMem.Server.LocalSandboxSpec
       HMem.Server.TestHarness
       SpecHook

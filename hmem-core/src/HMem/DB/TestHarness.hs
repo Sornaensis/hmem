@@ -189,8 +189,10 @@ resolveRepoRoot = do
         Nothing -> firstExistingRepoRoot rest
 
     findRepoRootFrom anchor = do
-      start <- canonicalizePath anchor
-      go start
+      start <- try (canonicalizePath anchor) :: IO (Either SomeException FilePath)
+      case start of
+        Left _ -> pure Nothing
+        Right dir -> go dir
 
     go dir = do
       hasStack <- doesFileExist (dir </> "stack.yaml")
@@ -399,6 +401,7 @@ withSandboxedEnv sandbox action =
     setEnv sandboxHomeVar sandbox.sandboxHomeDir
     setEnv sandboxRepoVar sandbox.sandboxRepoRoot
     setEnv sandboxMigrationsVar sandbox.sandboxMigrationsDir
+    setEnv repoRootOverrideVar sandbox.sandboxRepoRoot
     setEnv sandboxActiveVar "1"
     setEnv "HOME" sandbox.sandboxHomeDir
     setEnv "USERPROFILE" sandbox.sandboxHomeDir
@@ -437,9 +440,8 @@ checkPgTools = do
 
 -- | Start an ephemeral PostgreSQL cluster on a random port.
 startEphemeralPg :: IO EphemeralPg
-startEphemeralPg = do
-  sandbox <- createStandaloneSandbox
-  startEphemeralPgInSandbox sandbox
+startEphemeralPg =
+  bracketOnError createStandaloneSandbox (`cleanupSandbox` False) startEphemeralPgInSandbox
 
 startEphemeralPgInSandbox :: TestSandbox -> IO EphemeralPg
 startEphemeralPgInSandbox sandbox = do
@@ -500,17 +502,18 @@ startEphemeralPgInSandbox sandbox = do
 stopEphemeralPg :: EphemeralPg -> IO ()
 stopEphemeralPg pg = do
   stopEphemeralPgServer pg
-  _ <- try (removeDirectoryRecursive pg.epTmpDir
-        ) :: IO (Either SomeException ())
-  pure ()
+  removeSandboxDirectory pg.epTmpDir
 
 stopEphemeralPgServer :: EphemeralPg -> IO ()
 stopEphemeralPgServer pg = do
   hPutStrLn stderr "[test-pg] Tearing down..."
   hFlush stderr
-  _ <- try (callProcess "pg_ctl"
+  stopResult <- try (callProcess "pg_ctl"
         [ "stop", "-D", pg.epDataDir, "-m", "fast" ]
         ) :: IO (Either SomeException ())
+  case stopResult of
+    Right () -> pure ()
+    Left err -> hPutStrLn stderr $ "[test-pg] PostgreSQL teardown failed: " <> show err
   -- Small delay so Windows releases file locks
   threadDelay 500000
   pure ()
@@ -625,22 +628,28 @@ createStandaloneSandbox = do
       staticDir = root </> "static"
       cacheDir = root </> "cache"
       homeDir = root </> "home"
-  forM_ [tmpDir, logDir, configDir, staticDir, cacheDir, homeDir] $
-    createDirectoryIfMissing True
-  repoRoot <- resolveRepoRoot
-  migrationsDir <- resolveMigrationsDir repoRoot
-  pure TestSandbox
-    { sandboxRoot = root
-    , sandboxTmpDir = tmpDir
-    , sandboxLogDir = logDir
-    , sandboxConfigDir = configDir
-    , sandboxStaticDir = staticDir
-    , sandboxCacheDir = cacheDir
-    , sandboxHomeDir = homeDir
-    , sandboxRepoRoot = repoRoot
-    , sandboxMigrationsDir = migrationsDir
-    , sandboxPreserveOnFailure = preserve
-    }
+  result <- try $ do
+    forM_ [tmpDir, logDir, configDir, staticDir, cacheDir, homeDir] $
+      createDirectoryIfMissing True
+    repoRoot <- resolveRepoRoot
+    migrationsDir <- resolveMigrationsDir repoRoot
+    pure TestSandbox
+      { sandboxRoot = root
+      , sandboxTmpDir = tmpDir
+      , sandboxLogDir = logDir
+      , sandboxConfigDir = configDir
+      , sandboxStaticDir = staticDir
+      , sandboxCacheDir = cacheDir
+      , sandboxHomeDir = homeDir
+      , sandboxRepoRoot = repoRoot
+      , sandboxMigrationsDir = migrationsDir
+      , sandboxPreserveOnFailure = preserve
+      }
+  case result of
+    Right sandbox -> pure sandbox
+    Left (err :: SomeException) -> do
+      cleanupSandboxRoot root preserve
+      throwIO err
 
 cleanupSandbox :: TestSandbox -> Bool -> IO ()
 cleanupSandbox sandbox success
@@ -651,9 +660,14 @@ cleanupSandbox sandbox success
 cleanupSandboxRoot :: FilePath -> Bool -> IO ()
 cleanupSandboxRoot root preserve
   | preserve = hPutStrLn stderr $ "[test-sandbox] preserved after failure: " <> root
-  | otherwise = do
-      _ <- try (removeDirectoryRecursive root) :: IO (Either SomeException ())
-      pure ()
+  | otherwise = removeSandboxDirectory root
+
+removeSandboxDirectory :: FilePath -> IO ()
+removeSandboxDirectory root = do
+  result <- try (removeDirectoryRecursive root) :: IO (Either SomeException ())
+  case result of
+    Right () -> pure ()
+    Left err -> hPutStrLn stderr $ "[test-sandbox] failed to remove sandbox root " <> root <> ": " <> show err
 
 snapshotEnv :: IO [(String, Maybe String)]
 snapshotEnv = mapM (\name -> do value <- lookupEnv name; pure (name, value)) sandboxManagedEnvVars
@@ -782,6 +796,7 @@ sandboxManagedEnvVars = scrubbedEnvVars <>
   , sandboxDbLogVar
   , sandboxDbPortVar
   , sandboxDbNameVar
+  , repoRootOverrideVar
   , "HOME"
   , "USERPROFILE"
   , "APPDATA"

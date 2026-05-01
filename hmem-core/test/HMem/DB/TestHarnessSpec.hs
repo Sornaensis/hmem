@@ -6,6 +6,7 @@ import Data.Text qualified as T
 import System.Directory (doesDirectoryExist, removeDirectoryRecursive, withCurrentDirectory)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath (takeDirectory)
+import System.IO.Temp (getCanonicalTemporaryDirectory)
 import Test.Hspec
 
 import HMem.DB.TestHarness
@@ -54,6 +55,13 @@ spec = do
             lookupEnv "HMEM_API_KEY" >>= (`shouldBe` Nothing)
             lookupEnv "HOME" >>= (`shouldBe` Just sandbox.sandboxHomeDir)
         lookupEnv "HMEM_API_KEY" >>= (`shouldBe` Just "real-user-token")
+
+    it "overrides and restores the explicit repo-root override inside the sandbox" $
+      getCanonicalTemporaryDirectory >>= \staleRoot -> withEnvVar "HMEM_TEST_REPO_ROOT" (Just staleRoot) $ do
+        withTestSandbox $ \sandbox ->
+          withSandboxedEnv sandbox $
+            lookupEnv "HMEM_TEST_REPO_ROOT" >>= (`shouldBe` Just sandbox.sandboxRepoRoot)
+        lookupEnv "HMEM_TEST_REPO_ROOT" >>= (`shouldBe` Just staleRoot)
 
     it "ignores the legacy HMEM_TEST_DB variable inside sandboxed tests" $
       withEnvVar "HMEM_TEST_DB" (Just "host=real.example dbname=real_hmem") $ do

@@ -51,6 +51,7 @@ import HMem.Server.App (OidcCodeExchange, mkApp, mkAppWithOidcCodeExchange, requ
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..))
+import HMem.Server.TestHarness (withLocalSandboxApp, withLocalSandboxAppEnv)
 import HMem.Server.WebSocket (WSState, WorkspaceSubscription(..), consumeTicket, createTicket, eventVisibleToSubscription, newWSState, resolveLocalWebSocketAccess)
 import HMem.Types
 
@@ -59,13 +60,13 @@ import HMem.Types
 ------------------------------------------------------------------------
 
 withApp :: (Application -> IO a) -> IO a
-withApp action = withAppConfig Config.defaultConfig action
+withApp = withLocalSandboxApp
 
 withAppConfig :: Config.HMemConfig -> (Application -> IO a) -> IO a
 withAppConfig cfg action = withAppEnvConfig cfg (\_ app -> action app)
 
 withAppEnv :: (TestEnv -> Application -> IO a) -> IO a
-withAppEnv = withAppEnvConfig Config.defaultConfig
+withAppEnv = withLocalSandboxAppEnv
 
 withAppEnvConfig :: Config.HMemConfig -> (TestEnv -> Application -> IO a) -> IO a
 withAppEnvConfig cfg = withAppEnvConfigAndMiddleware cfg id

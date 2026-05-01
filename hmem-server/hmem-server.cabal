@@ -307,6 +307,8 @@ test-suite hmem-server-test
       HMem.Server.AuthBootstrapSpec
       HMem.Server.AuthTokensSpec
       HMem.Server.AuthUsersSpec
+      HMem.Server.LocalSandboxSpec
+      HMem.Server.TestHarness
       SpecHook
       Paths_hmem_server
   hs-source-dirs:

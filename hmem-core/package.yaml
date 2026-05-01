@@ -41,9 +41,6 @@ executables:
     source-dirs: app
     dependencies:
       - process
-      - temporary
-      - random
-      - filepath
     ghc-options:
       - -threaded
 

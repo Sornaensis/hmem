@@ -68,6 +68,11 @@ withAppConfig cfg action = withAppEnvConfig cfg (\_ app -> action app)
 withAppEnv :: (TestEnv -> Application -> IO a) -> IO a
 withAppEnv = withLocalSandboxAppEnv
 
+-- The remaining config-taking helpers are deliberate in-process test variants:
+-- they run on the sandboxed TestEnv pool supplied by HMem.DB.TestHarness and
+-- never load ~/.hmem, HMEM_TEST_DB, or a running user server.  Config.defaultConfig
+-- below is only a record template for auth/rate-limit permutations that the
+-- named local/deployed profile helpers do not cover directly.
 withAppEnvConfig :: Config.HMemConfig -> (TestEnv -> Application -> IO a) -> IO a
 withAppEnvConfig cfg = withAppEnvConfigAndMiddleware cfg id
 

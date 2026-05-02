@@ -3,7 +3,7 @@ module Main where
 import Data.Maybe (fromMaybe)
 import Data.String (fromString)
 import Data.Text qualified as T
-import Control.Exception (SomeException, bracket, catch, finally)
+import Control.Exception (SomeException, catch, finally)
 import Control.Monad (when)
 import Data.Pool (Pool, destroyAllResources)
 import Network.Wai.Handler.Warp (defaultSettings, runSettings, setHost, setPort, setTimeout, setGracefulShutdownTimeout)
@@ -19,7 +19,7 @@ import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
 import HMem.Config qualified as Config
 import HMem.DB.Pool qualified as Pool
-import HMem.DB.TestHarness (EphemeralPg(..), checkPgTools, startEphemeralPg, stopEphemeralPg, ensureSchema, TestEnv(..))
+import HMem.DB.TestHarness (TestDb(..), TestEnv(..), withSandboxedTestEnv)
 import HMem.Server.AccessTracker (newAccessTracker, flushNow)
 import HMem.Server.App (mkApp)
 import HMem.Server.Logging (newLogger, parseLogLevel, logInfo, logWarn, jsonRequestLogger)
@@ -93,15 +93,12 @@ main = do
 -- | Dev mode: ephemeral PostgreSQL, logs to stderr, seed data.
 runDevMode :: Opts -> IO ()
 runDevMode opts = do
-  hPutStrLn stderr "[dev] Checking for PostgreSQL tools..."
-  checkPgTools
-  bracket startEphemeralPg stopEphemeralPg $ \pg -> do
-    let port   = fromMaybe 8420 opts.optPort
-        connStr = pg.epConnStr
-
-    pool <- Pool.createPool connStr 5 5.0 30000
-    -- Apply schema
-    ensureSchema (TestEnv { pool = pool })
+  hPutStrLn stderr "[dev] Starting sandboxed PostgreSQL..."
+  withSandboxedTestEnv $ \env -> do
+    let port = fromMaybe 8420 opts.optPort
+        pool = env.pool
+        TestEnv { testDb = db } = env
+        TestDb { testDbPort = dbPort } = db
     -- Seed demo data
     seedDevData pool
 
@@ -114,7 +111,7 @@ runDevMode opts = do
     let logger = newLogger logAction (parseLogLevel "info")
     requestLogger <- jsonRequestLogger logAction
 
-    logInfo logger $ "[dev] Ephemeral PostgreSQL on port " <> T.pack (show pg.epPort)
+    logInfo logger $ "[dev] Sandboxed PostgreSQL on port " <> T.pack (show dbPort)
     logInfo logger $ "[dev] hmem-server listening on http://localhost:" <> T.pack (show port)
     logInfo logger $ "[dev] Web UI: " <> case mStaticDir of
       Just dir -> "serving from " <> T.pack dir

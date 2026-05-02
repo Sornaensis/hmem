@@ -62,6 +62,18 @@ executables:
     dependencies:
       - hmem-server
 
+  hmem-test-harness:
+    main:        Main.hs
+    source-dirs: app-harness
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - "-with-rtsopts=-N"
+    dependencies:
+      - hmem-core
+      - hmem-server
+      - random
+
   hmem-ctl:
     main:        Main.hs
     source-dirs: setup

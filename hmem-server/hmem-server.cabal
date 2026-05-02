@@ -373,6 +373,8 @@ test-suite hmem-server-test
       HMem.Server.AuthTokensSpec
       HMem.Server.AuthUsersSpec
       HMem.Server.DeployedSandboxSpec
+      HMem.Server.KeycloakHarness
+      HMem.Server.KeycloakHarnessSpec
       HMem.Server.LocalSandboxSpec
       HMem.Server.TestHarness
       SpecHook
@@ -424,6 +426,7 @@ test-suite hmem-server-test
     , lens
     , openapi3
     , optparse-applicative
+    , process
     , rel8
     , resource-pool >=0.4
     , servant-openapi3

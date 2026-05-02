@@ -135,6 +135,7 @@ tests:
       - time
       - http-types
       - async
+      - process
 
 default-extensions:
   - OverloadedStrings

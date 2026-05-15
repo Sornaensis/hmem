@@ -45,11 +45,12 @@ import System.Directory   (createDirectoryIfMissing, copyFile,
                            removeDirectoryRecursive, removeFile)
 import System.Exit        (ExitCode(..), exitFailure, exitSuccess)
 import System.FilePath    ((</>))
-import System.IO          (IOMode(..), hFlush, hPutStrLn,
+import System.IO          (IOMode(..), hClose, hFlush, hPutStrLn,
                            openFile, stderr, stdout)
 import System.Info        (os)
 import System.Process     (CreateProcess(..), StdStream(..), callProcess,
-                           createProcess, proc, readProcess, waitForProcess)
+                           createProcess, getProcessExitCode, proc, ProcessHandle,
+                           readProcess, waitForProcess)
 
 import qualified Brick
 import qualified Brick.Widgets.List as BL
@@ -63,6 +64,7 @@ import HMem.DB.Pool qualified as Pool
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.AuthUsers qualified as AuthUsers
+import HMem.Server.CtlPaths
 import HMem.Types
 import Paths_hmem_server qualified as Paths
 
@@ -524,6 +526,7 @@ installLinux = do
 
   -- Write hmem-server service
   step "Writing hmem-server.service"
+  let serverStdioLog = serverStdioLogPath logDir
   writeFile (systemdDir </> "hmem-server.service") $ unlines
     [ "[Unit]"
     , "Description=hmem Memory Server"
@@ -533,8 +536,8 @@ installLinux = do
     , "[Service]"
     , "Type=simple"
     , "ExecStart=" <> serverBin
-    , "StandardOutput=append:" <> logDir </> "hmem-server.log"
-    , "StandardError=append:" <> logDir </> "hmem-server.log"
+    , "StandardOutput=append:" <> serverStdioLog
+    , "StandardError=append:" <> serverStdioLog
     , "Restart=on-failure"
     , "RestartSec=5"
     , ""
@@ -1153,18 +1156,67 @@ doStart = do
 
   putStrLn "Starting hmem-server..."
   serverBin <- findBinary "hmem-server" "hmem-server"
-  let serverLog = logDir </> "hmem-server.log"
-  logH <- openFile serverLog AppendMode
-  _ <- createProcess (proc serverBin [])
+  let serverLog = serverRotatingLogPath logDir
+      serverStdioLog = serverStdioLogPath logDir
+  logH <- openFile serverStdioLog AppendMode
+  (_, _, _, ph) <- createProcess (proc serverBin [])
     { std_in           = NoStream
     , std_out          = UseHandle logH
     , std_err          = UseHandle logH
     , detach_console   = True
     , use_process_jobs = False
     }
-  threadDelay 500000
-  putStrLn $ "hmem-server running on port " <> show cfg.server.port
-  putStrLn $ "  Log: " <> serverLog
+  hClose logH
+  mgr <- HTTP.newManager HTTP.defaultManagerSettings
+  startup <- waitForHmemServerStartup mgr cfg ph
+  case startup of
+    ServerStarted -> do
+      putStrLn $ "hmem-server running on port " <> show cfg.server.port
+      putStrLn $ "  Log: " <> serverLog
+      putStrLn $ "  Stdout/stderr: " <> serverStdioLog
+    ServerStillStarting -> do
+      putStrLn $ "hmem-server process is still running on port " <> show cfg.server.port
+      putStrLn $ "  " <> serverHealthPath <> " did not respond before the startup check timed out."
+      putStrLn $ "  Log: " <> serverLog
+      putStrLn $ "  Stdout/stderr: " <> serverStdioLog
+    ServerExited ec -> do
+      hPutStrLn stderr $ "hmem-server exited during startup: " <> show ec
+      hPutStrLn stderr "  Check the server log and stdout/stderr capture:"
+      hPutStrLn stderr $ "    Log: " <> serverLog
+      hPutStrLn stderr $ "    Stdout/stderr: " <> serverStdioLog
+      exitFailure
+
+data ServerStartupStatus
+  = ServerStarted
+  | ServerStillStarting
+  | ServerExited ExitCode
+
+waitForHmemServerStartup :: HTTP.Manager -> HMemConfig -> ProcessHandle -> IO ServerStartupStatus
+waitForHmemServerStartup mgr cfg ph = go (25 :: Int)
+  where
+    go 0 = do
+      getProcessExitCode ph >>= \case
+        Just ec -> pure (ServerExited ec)
+        Nothing -> pure ServerStillStarting
+    go attempts = do
+      getProcessExitCode ph >>= \case
+        Just ec -> pure (ServerExited ec)
+        Nothing -> do
+          healthy <- checkHealth
+          if healthy
+            then pure ServerStarted
+            else do
+              threadDelay 200000
+              go (attempts - 1)
+
+    checkHealth = do
+      result <- try $ do
+        req <- HTTP.parseRequest (serverStartupHealthUrl cfg.server.host cfg.server.port)
+        resp <- HTTP.httpNoBody req mgr
+        pure $ statusCode (HTTP.responseStatus resp) == 200
+      case result :: Either SomeException Bool of
+        Right ok -> pure ok
+        Left _   -> pure False
 
 doStop :: IO ()
 doStop = do

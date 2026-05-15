@@ -22,6 +22,7 @@ import HMem.DB.Pool qualified as Pool
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), withSandboxedTestEnv)
 import HMem.Server.AccessTracker (newAccessTracker, flushNow)
 import HMem.Server.App (mkApp)
+import HMem.Server.LogRotation (preRotateLogFileIfNeeded)
 import HMem.Server.Logging (newLogger, parseLogLevel, logInfo, logWarn, jsonRequestLogger)
 import HMem.Server.Static (resolveStaticDir)
 import HMem.Server.WebSocket (newWSState)
@@ -297,11 +298,13 @@ runNormalMode opts = do
   logDir <- (</> "logs") <$> Config.configDir
   createDirectoryIfMissing True logDir
   let logPath = logDir </> "hmem-server.log"
+      maxLogBytes = fromIntegral cfg.logging.maxSizeMB * 1024 * 1024
       fileSpec = FileLogSpec
         { log_file          = logPath
-        , log_file_size     = fromIntegral cfg.logging.maxSizeMB * 1024 * 1024
+        , log_file_size     = maxLogBytes
         , log_backup_number = cfg.logging.backupCount
         }
+  _ <- preRotateLogFileIfNeeded logPath maxLogBytes cfg.logging.backupCount
   (logAction, cleanupLog) <- newFastLogger (LogFile fileSpec defaultBufSize)
   let logger = newLogger logAction (parseLogLevel cfg.logging.level)
   requestLogger <- jsonRequestLogger logAction

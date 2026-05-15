@@ -34,8 +34,10 @@ library
       HMem.Server.AuthBootstrap
       HMem.Server.AuthTokens
       HMem.Server.AuthUsers
+      HMem.Server.CtlPaths
       HMem.Server.Event
       HMem.Server.Logging
+      HMem.Server.LogRotation
       HMem.Server.OpenAPI
       HMem.Server.Static
       HMem.Server.WebSocket
@@ -372,10 +374,12 @@ test-suite hmem-server-test
       HMem.Server.AuthBootstrapSpec
       HMem.Server.AuthTokensSpec
       HMem.Server.AuthUsersSpec
+      HMem.Server.CtlPathsSpec
       HMem.Server.DeployedSandboxSpec
       HMem.Server.KeycloakHarness
       HMem.Server.KeycloakHarnessSpec
       HMem.Server.LocalSandboxSpec
+      HMem.Server.LogRotationSpec
       HMem.Server.TestHarness
       SpecHook
       Paths_hmem_server

@@ -84,6 +84,7 @@ data DBException
   | DBForeignKeyViolation Text
   | DBCheckViolation Text
   | DBCycleDetected Text
+  | DBLifecycleViolation Text Text (Maybe Text) (Maybe Text)
   | DBStatementTimeout
   | DBOtherError Text
   deriving (Show, Eq)
@@ -99,14 +100,25 @@ classifyError sessErr = classifyCmd cmdErr
     cmdErr = case sessErr of
       Session.QueryError _ _ ce -> ce
       Session.PipelineError ce  -> ce
-    classifyCmd (Session.ResultError (Session.ServerError sqlstate msg _ _ _))
-      | sqlstate == "23505" = DBUniqueViolation (TE.decodeUtf8Lenient msg)
-      | sqlstate == "23503" = DBForeignKeyViolation (TE.decodeUtf8Lenient msg)
-      | sqlstate == "23514" = DBCheckViolation (TE.decodeUtf8Lenient msg)
-      | sqlstate == "P0001" = DBCycleDetected (TE.decodeUtf8Lenient msg)
+    classifyCmd (Session.ResultError (Session.ServerError sqlstate msg detail hint _))
+      | Just lifecycleCode <- lifecycleCodeFor sqlstate =
+          DBLifecycleViolation lifecycleCode (decode msg) (decode <$> detail) (decode <$> hint)
+      | sqlstate == "23505" = DBUniqueViolation (decode msg)
+      | sqlstate == "23503" = DBForeignKeyViolation (decode msg)
+      | sqlstate == "23514" = DBCheckViolation (decode msg)
+      | sqlstate == "P0001" = DBCycleDetected (decode msg)
       | sqlstate == "57014" = DBStatementTimeout
-      | otherwise           = DBOtherError (TE.decodeUtf8Lenient msg)
+      | otherwise           = DBOtherError (decode msg)
     classifyCmd other = DBOtherError (T.pack (show other))
+
+    decode = TE.decodeUtf8Lenient
+
+    lifecycleCodeFor "HM101" = Just "TASK_COMPLETION_BLOCKED"
+    lifecycleCodeFor "HM102" = Just "TASK_OPEN_UNDER_DONE_TASK"
+    lifecycleCodeFor "HM201" = Just "PROJECT_COMPLETION_BLOCKED"
+    lifecycleCodeFor "HM202" = Just "PROJECT_OPEN_UNDER_CLOSED_PROJECT"
+    lifecycleCodeFor "HM203" = Just "TASK_OPEN_UNDER_CLOSED_PROJECT"
+    lifecycleCodeFor _       = Nothing
 
 ------------------------------------------------------------------------
 -- Pool creation

@@ -3,17 +3,23 @@
 module HMem.DB.TaskSpec (spec) where
 
 import Control.Exception (try)
+import Control.Monad (forM_, void)
+import Data.ByteString.Char8 qualified as BS8
 import Data.Maybe (isJust, isNothing)
+import Data.Text (Text)
+import Data.Text qualified as T
 import Test.Hspec
+import Hasql.Session qualified as Session
 
 import HMem.DB.Memory (createMemory, getTaskMemories, touchMemory, updateMemory)
-import HMem.DB.Pool (DBException(..))
-import HMem.DB.Project (createProject)
+import HMem.DB.Pool (DBException(..), runSession)
+import HMem.DB.Project (createProject, updateProject)
 import HMem.DB.Task
 import HMem.DB.TestHarness
 import HMem.Types
 
 import Data.UUID (UUID)
+import Data.UUID qualified as UUID
 
 spec :: Spec
 spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
@@ -132,6 +138,10 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Just parent.id, title = "Child"
         , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
 
+      _ <- updateTask env.pool child.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+
       _ <- updateTask env.pool parent.id UpdateTask
         { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
         , status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
@@ -232,6 +242,213 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       case result of
         Left (DBCycleDetected _) -> pure ()
         other -> expectationFailure $ "Expected DBCycleDetected, got: " <> show other
+
+    forM_ [(Todo, "todo" :: Text), (InProgress, "inprogress"), (Blocked, "blocked")] $ \(childStatus, suffix) ->
+      it ("rejects marking a task done while a " <> T.unpack suffix <> " descendant is open") $ \env -> do
+        ws <- createTestWorkspace env ("task-open-desc-" <> suffix)
+        proj <- createProject env.pool CreateProject
+          { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+          , description = Nothing, priority = Nothing, metadata = Nothing }
+        parent <- createTask env.pool CreateTask
+          { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+          , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        child <- createTask env.pool CreateTask
+          { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+          , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        whenStatus childStatus $ \statusValue ->
+          void $ updateTask env.pool child.id (taskStatusUpdate statusValue)
+
+        result <- try @DBException $ updateTask env.pool parent.id (taskStatusUpdate Done)
+        expectLifecycle "TASK_COMPLETION_BLOCKED" result
+
+    it "allows marking a task done when descendants are done or cancelled" $ \env -> do
+      ws <- createTestWorkspace env "task-closed-desc-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      doneChild <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Done child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      cancelledChild <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Cancelled child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      void $ updateTask env.pool doneChild.id (taskStatusUpdate Done)
+      void $ updateTask env.pool cancelledChild.id (taskStatusUpdate Cancelled)
+      updated <- updateTask env.pool parent.id (taskStatusUpdate Done)
+
+      let Just parentDone = updated
+      parentDone.status `shouldBe` Done
+      parentDone.completedAt `shouldSatisfy` isJust
+
+    it "rejects creating an open child under a done task" $ \env -> do
+      ws <- createTestWorkspace env "task-open-child-done-parent-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      void $ updateTask env.pool parent.id (taskStatusUpdate Done)
+
+      result <- try @DBException $ createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Open child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      expectLifecycle "TASK_OPEN_UNDER_DONE_TASK" result
+
+    it "rejects reopening a descendant under a done task" $ \env -> do
+      ws <- createTestWorkspace env "task-reopen-under-done-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      void $ updateTask env.pool child.id (taskStatusUpdate Done)
+      void $ updateTask env.pool parent.id (taskStatusUpdate Done)
+
+      result <- try @DBException $ updateTask env.pool child.id (taskStatusUpdate InProgress)
+      expectLifecycle "TASK_OPEN_UNDER_DONE_TASK" result
+
+    it "rejects reparenting an open task under a done task" $ \env -> do
+      ws <- createTestWorkspace env "task-reparent-under-done-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      doneParent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Done parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      openTask <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Open task"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      void $ updateTask env.pool doneParent.id (taskStatusUpdate Done)
+
+      result <- try @DBException $ updateTask env.pool openTask.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = SetTo doneParent.id
+        , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      expectLifecycle "TASK_OPEN_UNDER_DONE_TASK" result
+
+    it "rejects reparenting a cancelled task subtree with open descendants under a done task" $ \env -> do
+      ws <- createTestWorkspace env "task-reparent-cancelled-subtree-under-done-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      doneParent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Done parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      cancelledParent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Cancelled parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      _ <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just cancelledParent.id, title = "Open child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      void $ updateTask env.pool doneParent.id (taskStatusUpdate Done)
+      void $ updateTask env.pool cancelledParent.id (taskStatusUpdate Cancelled)
+
+      result <- try @DBException $ updateTask env.pool cancelledParent.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = SetTo doneParent.id
+        , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      expectLifecycle "TASK_OPEN_UNDER_DONE_TASK" result
+
+    it "rejects moving a cancelled task subtree with open descendants into a closed project" $ \env -> do
+      ws <- createTestWorkspace env "task-move-cancelled-subtree-closed-project-ws"
+      sourceProj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Source"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      closedProj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Closed"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      cancelledParent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Nothing, title = "Cancelled parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      _ <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Just cancelledParent.id, title = "Open child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      void $ updateTask env.pool cancelledParent.id (taskStatusUpdate Cancelled)
+      void $ updateProject env.pool closedProj.id (projectStatusUpdate ProjCompleted)
+
+      result <- try @DBException $ updateTask env.pool cancelledParent.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = SetTo closedProj.id, parentId = SetNull
+        , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      expectLifecycle "TASK_OPEN_UNDER_CLOSED_PROJECT" result
+
+    it "rejects restoring an open child under a done task" $ \env -> do
+      ws <- createTestWorkspace env "task-restore-under-done-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      deleteTask env.pool child.id `shouldReturn` True
+      void $ updateTask env.pool parent.id (taskStatusUpdate Done)
+
+      result <- try @DBException $ restoreTask env.pool child.id
+      expectLifecycle "TASK_OPEN_UNDER_DONE_TASK" result
+
+    it "rejects direct SQL completion with open descendants" $ \env -> do
+      ws <- createTestWorkspace env "task-direct-sql-gate-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      _ <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      result <- try @DBException $ execSql env $ "UPDATE tasks SET status = 'done' WHERE id = '" <> UUID.toString parent.id <> "'"
+      expectLifecycle "TASK_COMPLETION_BLOCKED" result
+
+    -- The transaction-isolated DB spec uses a single pooled connection, so
+    -- these parent-first/child-first cases cover the same lifecycle endpoints
+    -- that concurrent close/open races exercise without a brittle two-session
+    -- timing test.
+    it "rejects parent-first batch task completion while a child is open" $ \env -> do
+      ws <- createTestWorkspace env "task-batch-gate-fail-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      parentFirst <- try @DBException $ updateTaskBatch env.pool
+        [ (parent.id, taskStatusUpdate Done)
+        , (child.id, taskStatusUpdate Done)
+        ]
+      expectLifecycle "TASK_COMPLETION_BLOCKED" parentFirst
+
+    it "allows child-first batch task completion" $ \env -> do
+      ws <- createTestWorkspace env "task-batch-gate-success-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      childFirst <- updateTaskBatch env.pool
+        [ (child.id, taskStatusUpdate Done)
+        , (parent.id, taskStatusUpdate Done)
+        ]
+      childFirst `shouldBe` 2
 
     it "returns Nothing for nonexistent ID" $ \env -> do
       result <- updateTask env.pool (read "00000000-0000-0000-0000-000000000099") UpdateTask
@@ -475,3 +692,38 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
             , metadata = Nothing, dueAt = Unchanged }
       count <- updateTaskBatch env.pool [(task.id, upd), (bogusId, upd)]
       count `shouldBe` 1
+
+taskStatusUpdate :: TaskStatus -> UpdateTask
+taskStatusUpdate statusValue = UpdateTask
+  { title = Nothing
+  , description = Unchanged
+  , projectId = Unchanged
+  , parentId = Unchanged
+  , status = Just statusValue
+  , priority = Nothing
+  , metadata = Nothing
+  , dueAt = Unchanged
+  }
+
+projectStatusUpdate :: ProjectStatus -> UpdateProject
+projectStatusUpdate statusValue = UpdateProject
+  { name = Nothing
+  , description = Unchanged
+  , parentId = Unchanged
+  , status = Just statusValue
+  , priority = Nothing
+  , metadata = Nothing
+  }
+
+whenStatus :: TaskStatus -> (TaskStatus -> IO ()) -> IO ()
+whenStatus Todo _ = pure ()
+whenStatus statusValue action = action statusValue
+
+expectLifecycle :: Text -> Either DBException a -> Expectation
+expectLifecycle expected result = case result of
+  Left (DBLifecycleViolation actual _ _ _) -> actual `shouldBe` expected
+  Left other -> expectationFailure $ "Expected DBLifecycleViolation " <> show expected <> ", got: " <> show other
+  Right _ -> expectationFailure $ "Expected DBLifecycleViolation " <> show expected <> ", got success"
+
+execSql :: TestEnv -> String -> IO ()
+execSql env sql = runSession env.pool (Session.sql (BS8.pack sql))

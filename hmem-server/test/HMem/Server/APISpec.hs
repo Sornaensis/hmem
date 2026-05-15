@@ -221,6 +221,25 @@ containsObjectField fieldName = \case
   Just (Object obj) -> KM.member (Key.fromText fieldName) obj
   _ -> False
 
+assertLifecycleError :: T.Text -> SResponse -> Expectation
+assertLifecycleError expectedCode resp =
+  case decode (respBody resp) :: Maybe Value of
+    Just (Object body) -> do
+      KM.lookup (Key.fromText "error") body `shouldBe` Just (String "lifecycle_conflict")
+      KM.lookup (Key.fromText "code") body `shouldBe` Just (String expectedCode)
+      KM.lookup (Key.fromText "message") body `shouldSatisfy` \case
+        Just (String msg) -> not (T.null msg)
+        _ -> False
+      KM.lookup (Key.fromText "hint") body `shouldSatisfy` \case
+        Just (String hint) -> not (T.null hint)
+        _ -> False
+      KM.lookup (Key.fromText "detail") body `shouldSatisfy` \case
+        Just (Object detail) -> KM.member (Key.fromText "blocker_count") detail
+          || KM.member (Key.fromText "open_project_count") detail
+          || KM.member (Key.fromText "open_task_count") detail
+        _ -> False
+    other -> expectationFailure $ "Expected lifecycle error object, got: " <> show other
+
 assertNoAccessTokenSensitiveAuditSnapshot :: T.Text -> AuditLogRow -> Expectation
 assertNoAccessTokenSensitiveAuditSnapshot rawToken row = do
   row.oldValues `shouldSatisfy` (not . containsObjectField "token_hash")
@@ -801,6 +820,23 @@ spec = around withApp $ do
         (object ["parent_id" .= grandchild.id])
       respStatus cycleResp `shouldBe` 409
 
+    it "returns a lifecycle conflict body when project completion is blocked" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("proj-lifecycle-conflict-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      rootResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Root" :: T.Text)])
+      let Just root = decode (respBody rootResp) :: Maybe Project
+
+      _ <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Child" :: T.Text), "parent_id" .= root.id])
+
+      blockedResp <- putJSON app (uuidPath "/api/v1/projects" root.id)
+        (object ["status" .= ("completed" :: T.Text)])
+      respStatus blockedResp `shouldBe` 409
+      assertLifecycleError "PROJECT_COMPLETION_BLOCKED" blockedResp
+
     it "rejects cross-workspace project parents" $ \app -> do
       wsAResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("project-parent-ws-a" :: T.Text)])
@@ -932,6 +968,25 @@ spec = around withApp $ do
       cycleResp <- putJSON app (uuidPath "/api/v1/tasks" root.id)
         (object ["parent_id" .= grandchild.id])
       respStatus cycleResp `shouldBe` 409
+
+    it "returns a lifecycle conflict body when task completion is blocked" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-lifecycle-conflict-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Task Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Parent" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Task
+      _ <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= parent.id, "title" .= ("Child" :: T.Text)])
+
+      blockedResp <- putJSON app (uuidPath "/api/v1/tasks" parent.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus blockedResp `shouldBe` 409
+      assertLifecycleError "TASK_COMPLETION_BLOCKED" blockedResp
 
     it "rejects cross-workspace task project and parent moves" $ \app -> do
       wsAResp <- postJSON app "/api/v1/workspaces"

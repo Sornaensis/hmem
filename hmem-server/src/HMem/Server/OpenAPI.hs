@@ -5,10 +5,12 @@ module HMem.Server.OpenAPI
   ( openApiSpec
   ) where
 
-import Control.Lens ((&), (.~), (?~))
+import Control.Lens ((&), (.~), (?~), at)
 import Data.Aeson (Value)
 import Data.OpenApi
 import Data.Proxy (Proxy (..))
+import Data.Text (Text)
+import GHC.Generics (Generic)
 import Servant.OpenApi (toOpenApi)
 
 import HMem.DB.Auth qualified as Auth
@@ -23,7 +25,19 @@ openApiSpec :: OpenApi
 openApiSpec = toOpenApi (Proxy @HMemAPI)
   & info . title   .~ "hmem API"
   & info . version .~ "0.1.0.0"
-  & info . description ?~ "LLM memory and task management server"
+  & info . description ?~ "LLM memory and task management server. Mutating project/task endpoints may return HTTP 409 with a LifecycleConflictError body when recursive lifecycle invariants reject the requested state change."
+  & components . schemas . at "LifecycleConflictError" ?~ toSchema (Proxy @LifecycleConflictError)
+
+data LifecycleConflictError = LifecycleConflictError
+  { error   :: Text
+  , code    :: Text
+  , message :: Text
+  , detail  :: Maybe Value
+  , hint    :: Maybe Text
+  } deriving stock Generic
+
+instance ToSchema LifecycleConflictError where
+  declareNamedSchema = genericDeclareNamedSchema opts
 
 ------------------------------------------------------------------------
 -- ToSchema instances (orphans, scoped to hmem-server)

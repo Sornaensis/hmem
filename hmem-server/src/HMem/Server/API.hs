@@ -430,10 +430,25 @@ handleDBErrors io = do
         { errBody = Aeson.encode $ errorBody "invalid_request" "Request violates a data constraint" }
       DBCycleDetected _ -> err409
         { errBody = Aeson.encode $ errorBody "cycle" "Operation would create a cycle" }
+      DBLifecycleViolation code msg detail hint -> err409
+        { errBody = Aeson.encode $ lifecycleErrorBody code msg detail hint }
       DBStatementTimeout -> err504
         { errBody = Aeson.encode $ errorBody "timeout" "Database request timed out" }
       DBOtherError _ -> err500
         { errBody = Aeson.encode $ errorBody "internal" "Internal database error" }
+
+    lifecycleErrorBody :: Text -> Text -> Maybe Text -> Maybe Text -> Value
+    lifecycleErrorBody code msg detail hint = object $
+      [ "error" .= ("lifecycle_conflict" :: Text)
+      , "code" .= code
+      , "message" .= msg
+      ]
+      ++ [ "detail" .= decodeDetail d | Just d <- [detail] ]
+      ++ [ "hint" .= h | Just h <- [hint] ]
+
+    decodeDetail :: Text -> Value
+    decodeDetail detailText = fromMaybe (String detailText) $
+      Aeson.decode @Value (LBS8.pack (T.unpack detailText))
 
 logDatabaseError :: DBException -> IO ()
 logDatabaseError dbErr = do
@@ -452,6 +467,7 @@ dbErrorLabel = \case
   DBForeignKeyViolation _ -> "foreign_key_violation"
   DBCheckViolation _ -> "check_violation"
   DBCycleDetected _ -> "cycle_detected"
+  DBLifecycleViolation code _ _ _ -> "lifecycle_violation:" <> code
   DBStatementTimeout -> "statement_timeout"
   DBOtherError _ -> "other_error"
 
@@ -461,6 +477,10 @@ dbErrorDetail = \case
   DBForeignKeyViolation detail -> Just detail
   DBCheckViolation detail -> Just detail
   DBCycleDetected detail -> Just detail
+  DBLifecycleViolation code msg detail hint -> Just $ T.intercalate " | " $
+    [ "code=" <> code, "message=" <> msg ]
+    ++ [ "detail=" <> d | Just d <- [detail] ]
+    ++ [ "hint=" <> h | Just h <- [hint] ]
   DBStatementTimeout -> Nothing
   DBOtherError detail -> Just detail
 

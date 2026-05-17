@@ -165,6 +165,17 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
           _ <- insertMemoryDirect ws.id "unlinked direct"
           forceDeferredConstraints
 
+    it "memoryTypeRequiredSQL rejects direct SQL memory inserts without explicit memory_type" $ \env -> do
+      ws <- createTestWorkspace env "direct-missing-type-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Missing type project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      expectWorkflowViolation "MEMORY_TYPE_REQUIRED" $
+        runTransaction env.pool $ do
+          mid <- insertMemoryWithoutTypeDirect ws.id "missing type direct"
+          linkProjectMemoryDirect proj.id mid
+          forceDeferredConstraints
+
     it "accepts direct SQL memory inserts with a project link in the same transaction" $ \env -> do
       ws <- createTestWorkspace env "direct-project-link-ws"
       proj <- createProject env.pool CreateProject
@@ -873,6 +884,19 @@ insertMemoryDirectStatement :: Statement.Statement (UUID, Text) UUID
 insertMemoryDirectStatement = Statement.Statement sql encoder decoder True
   where
     sql = "INSERT INTO memories (workspace_id, content, memory_type) VALUES ($1, $2, 'short_term') RETURNING id"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.text))
+    decoder = D.singleRow (D.column (D.nonNullable D.uuid))
+
+insertMemoryWithoutTypeDirect :: UUID -> Text -> Session.Session UUID
+insertMemoryWithoutTypeDirect wsId label =
+  Session.statement (wsId, label) insertMemoryWithoutTypeDirectStatement
+
+insertMemoryWithoutTypeDirectStatement :: Statement.Statement (UUID, Text) UUID
+insertMemoryWithoutTypeDirectStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "INSERT INTO memories (workspace_id, content) VALUES ($1, $2) RETURNING id"
     encoder =
       contramap fst (E.param (E.nonNullable E.uuid)) <>
       contramap snd (E.param (E.nonNullable E.text))

@@ -127,6 +127,7 @@ classifyError sessErr = classifyCmd cmdErr
     workflowCodeFor "HM302" = Just "MEMORY_LINK_AMBIGUOUS"
     workflowCodeFor "HM303" = Just "MEMORY_LINK_TARGET_INVALID"
     workflowCodeFor "HM304" = Just "MEMORY_LINK_CROSS_WORKSPACE"
+    workflowCodeFor "HM305" = Just "MEMORY_TYPE_REQUIRED"
     workflowCodeFor _       = Nothing
 
 ------------------------------------------------------------------------

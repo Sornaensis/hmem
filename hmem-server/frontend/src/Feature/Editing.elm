@@ -463,16 +463,19 @@ update msg model =
                                 ( model, Cmd.none )
 
                             else
-                                case memoryCreateTargetIds model f.target of
-                                    Just ( projectId, taskId ) ->
+                                case ( memoryCreateTargetIds model f.target, f.memoryType ) of
+                                    ( Just ( projectId, taskId ), Just memoryType ) ->
                                         let
                                             ( trackedModel, requestId, clearCmd ) =
                                                 beginTrackedMutation [] model
                                         in
-                                        ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId projectId taskId f.content f.memoryType requestId MemoryCreated ] )
+                                        ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId projectId taskId f.content memoryType requestId MemoryCreated ] )
 
-                                    Nothing ->
+                                    ( Nothing, _ ) ->
                                         addToast Warning "Select a project or task for this memory" model
+
+                                    ( _, Nothing ) ->
+                                        addToast Warning "Select short-term or long-term for this memory" model
 
                         _ ->
                             ( model, Cmd.none )
@@ -533,21 +536,24 @@ update msg model =
                                     in
                                     ( trackedModel, Cmd.batch [ clearCmd, Api.createTask model.flags.apiUrl wsId projectId title requestId TaskCreated ] )
 
-                    ( Just (InlineCreateMemory { content, target }), Just wsId ) ->
+                    ( Just (InlineCreateMemory { content, target, memoryType }), Just wsId ) ->
                         if String.isEmpty (String.trim content) then
                             ( model, Cmd.none )
 
                         else
-                            case memoryCreateTargetIds model target of
-                                Just ( projectId, taskId ) ->
+                            case ( memoryCreateTargetIds model target, memoryType ) of
+                                ( Just ( projectId, taskId ), Just selectedType ) ->
                                     let
                                         ( trackedModel, requestId, clearCmd ) =
                                             beginTrackedMutation [] model
                                     in
-                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId projectId taskId content Api.ShortTerm requestId MemoryCreated ] )
+                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId projectId taskId content selectedType requestId MemoryCreated ] )
 
-                                Nothing ->
+                                ( Nothing, _ ) ->
                                     addToast Warning "Select a project or task for this memory" model
+
+                                ( _, Nothing ) ->
+                                    addToast Warning "Select short-term or long-term for this memory" model
 
                     _ ->
                         ( model, Cmd.none )
@@ -943,7 +949,12 @@ viewMemoryTypeSelect model memId currentType =
         , disabled (not (Permissions.canEditCurrentWorkspace model))
         , onInput
             (\s ->
-                ChangeMemoryType memId (Api.memoryTypeFromString s)
+                case Api.memoryTypeFromString s of
+                    Just mt ->
+                        ChangeMemoryType memId mt
+
+                    Nothing ->
+                        NoOp
             )
         ]
         (List.map
@@ -1122,6 +1133,9 @@ viewCreateFormContent model form =
 
                 selectedTarget =
                     selectedMemoryTargetValue model f.target |> Maybe.withDefault ""
+
+                selectedType =
+                    f.memoryType |> Maybe.map Api.memoryTypeToString |> Maybe.withDefault ""
             in
             div []
                 [ h3 [ class "modal-title" ] [ text "New Memory" ]
@@ -1160,23 +1174,25 @@ viewCreateFormContent model form =
                     [ label [ class "form-label" ] [ text "Type" ]
                     , select
                         [ class "form-input"
+                        , value selectedType
                         , onInput (\s -> UpdateCreateForm (CreateMemoryForm { f | memoryType = Api.memoryTypeFromString s }))
                         ]
-                        (List.map
-                            (\mt ->
-                                let
-                                    str =
-                                        Api.memoryTypeToString mt
-                                in
-                                option [ value str, selected (mt == f.memoryType) ]
-                                    [ text (str |> String.replace "_" " ") ]
-                            )
-                            Api.allMemoryTypes
+                        (option [ value "", selected (selectedType == "") ] [ text "Select type..." ]
+                            :: List.map
+                                (\mt ->
+                                    let
+                                        str =
+                                            Api.memoryTypeToString mt
+                                    in
+                                    option [ value str, selected (Just mt == f.memoryType) ]
+                                        [ text (str |> String.replace "_" " ") ]
+                                )
+                                Api.allMemoryTypes
                         )
                     ]
                 , div [ class "modal-actions" ]
                     [ button [ class "btn btn-secondary", onClick CancelCreateForm ] [ text "Cancel" ]
-                    , button [ class "btn btn-primary", disabled (List.isEmpty targetOptions), onClick SubmitCreateForm ] [ text "Create" ]
+                    , button [ class "btn btn-primary", disabled (List.isEmpty targetOptions || f.memoryType == Nothing), onClick SubmitCreateForm ] [ text "Create" ]
                     ]
                 ]
 
@@ -1259,6 +1275,9 @@ viewInlineCreateMemory model =
                     let
                         selectedTarget =
                             selectedMemoryTargetValue model f.target |> Maybe.withDefault defaultTarget
+
+                        selectedType =
+                            f.memoryType |> Maybe.map Api.memoryTypeToString |> Maybe.withDefault ""
                     in
                     div [ class "inline-create-row" ]
                         [ select
@@ -1272,6 +1291,23 @@ viewInlineCreateMemory model =
                                         [ text optionItem.label ]
                                 )
                                 targetOptions
+                            )
+                        , select
+                            [ class "inline-create-input"
+                            , value selectedType
+                            , onInput (\s -> UpdateInlineCreate (InlineCreateMemory { f | memoryType = Api.memoryTypeFromString s }))
+                            ]
+                            (option [ value "", selected (selectedType == "") ] [ text "Select type..." ]
+                                :: List.map
+                                    (\mt ->
+                                        let
+                                            str =
+                                                Api.memoryTypeToString mt
+                                        in
+                                        option [ value str, selected (Just mt == f.memoryType) ]
+                                            [ text (str |> String.replace "_" " ") ]
+                                    )
+                                    Api.allMemoryTypes
                             )
                         , input
                             [ class "inline-create-input"
@@ -1298,7 +1334,7 @@ viewInlineCreateMemory model =
                     div [ class "inline-create-row" ]
                         [ button
                             [ class "btn-inline-create-top"
-                            , onClick (ShowInlineCreate (InlineCreateMemory { content = "", target = defaultTarget }))
+                            , onClick (ShowInlineCreate (InlineCreateMemory { content = "", memoryType = Nothing, target = defaultTarget }))
                             ]
                             [ text "+ New Memory" ]
                         ]

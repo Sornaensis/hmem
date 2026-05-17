@@ -19,7 +19,7 @@ import System.IO.Temp (getCanonicalTemporaryDirectory)
 import Test.Hspec
 
 import HMem.DB.Migration qualified as Migration
-import HMem.DB.Pool (DBException(..), createPool, runSession)
+import HMem.DB.Pool (DBException(..), createPool, runSession, runTransaction)
 import HMem.DB.TestHarness
 
 spec :: Spec
@@ -199,6 +199,47 @@ spec = do
                 Session.statement manualBlockedId taskAutoBlockedStatement
               manualAutoBlocked `shouldBe` False
 
+    it "explicitMemoryTypeMigration backfills null rows and rejects new missing types" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              preV15Dir <- copyMigrationSubset sandbox migrations "pre-v015" (\name -> name < "V015")
+              v15OnlyDir <- copyMigrationSubset sandbox migrations "v015-only" (== "V015__require_explicit_memory_type.sql")
+
+              preResult <- Migration.runMigrations pool preV15Dir
+              preResult.failed `shouldBe` Nothing
+
+              wsId <- runSession pool $
+                Session.statement ("explicit-type-migration-ws" :: Text) insertWorkspaceDirectStatement
+              projectId <- runSession pool $
+                Session.statement (wsId, "Explicit Type Migration Project" :: Text) insertProjectDirectStatement
+              runSession pool $ Session.sql "ALTER TABLE memories ALTER COLUMN memory_type DROP NOT NULL"
+              legacyMemoryId <- runTransaction pool $ do
+                mid <- Session.statement (wsId, "legacy null type memory" :: Text) insertMemoryWithoutTypeDirectStatement
+                Session.statement (projectId, mid) linkProjectMemoryDirectStatement
+                forceDeferredConstraints
+                pure mid
+
+              v15Result <- Migration.runMigrations pool v15OnlyDir
+              v15Result.failed `shouldBe` Nothing
+
+              legacyType <- runSession pool $
+                Session.statement legacyMemoryId memoryTypeTextStatement
+              legacyType `shouldBe` "short_term"
+
+              newMissingType <- try (runTransaction pool $ do
+                mid <- Session.statement (wsId, "new missing type" :: Text) insertMemoryWithoutTypeDirectStatement
+                Session.statement (projectId, mid) linkProjectMemoryDirectStatement
+                forceDeferredConstraints
+                pure mid)
+                :: IO (Either DBException UUID)
+              case newMissingType of
+                Left (DBWorkflowViolation code _ _ _) -> code `shouldBe` "MEMORY_TYPE_REQUIRED"
+                Left other -> expectationFailure $ "Expected MEMORY_TYPE_REQUIRED, got: " <> show other
+                Right _ -> expectationFailure "Expected new missing-type memory insert to fail after V015"
+
     it "resolves the repository root from a non-repo cwd" $
       withTestSandbox $ \sandbox ->
         withCurrentDirectory sandbox.sandboxTmpDir $ do
@@ -245,6 +286,35 @@ insertUnlinkedMemoryDirectStatement = Statement.Statement sql encoder decoder Tr
       contramap fst (E.param (E.nonNullable E.uuid)) <>
       contramap snd (E.param (E.nonNullable E.text))
     decoder = D.singleRow (D.column (D.nonNullable D.uuid))
+
+insertMemoryWithoutTypeDirectStatement :: Statement.Statement (UUID, Text) UUID
+insertMemoryWithoutTypeDirectStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "INSERT INTO memories (workspace_id, content) VALUES ($1, $2) RETURNING id"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.text))
+    decoder = D.singleRow (D.column (D.nonNullable D.uuid))
+
+linkProjectMemoryDirectStatement :: Statement.Statement (UUID, UUID) ()
+linkProjectMemoryDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "INSERT INTO project_memory_links (project_id, memory_id) VALUES ($1, $2)"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
+
+memoryTypeTextStatement :: Statement.Statement UUID Text
+memoryTypeTextStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT memory_type::text FROM memories WHERE id = $1"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nonNullable D.text))
+
+forceDeferredConstraints :: Session.Session ()
+forceDeferredConstraints = do
+  Session.sql "SET CONSTRAINTS ALL IMMEDIATE"
+  Session.sql "SET CONSTRAINTS ALL DEFERRED"
 
 activeMemoryExistsStatement :: Statement.Statement UUID Bool
 activeMemoryExistsStatement = Statement.Statement sql encoder decoder True

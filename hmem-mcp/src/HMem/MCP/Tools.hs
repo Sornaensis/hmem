@@ -75,9 +75,33 @@ toolDefinitions =
                                        "description" .= t "Tags for categorization"]
           , "fts_language" .= prop "string" "Full-text search language (default 'english'). Use a PostgreSQL regconfig name, e.g. 'spanish', 'german', 'simple'."
           , "items"        .= object ["type" .= t "array",
-                                       "description" .= t "Batch: array of memory objects (same fields as top-level, max 100). Every item must include memory_type and at least one project_id or task_id. When present, top-level fields are ignored.",
-                                       "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
-                                       "items" .= object ["type" .= t "object"]]
+                                        "description" .= t "Batch: array of memory objects (same fields as top-level, max 100). Every item must include memory_type and at least one project_id or task_id. When present, top-level fields are ignored.",
+                                        "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
+                                        "items" .= object
+                                          [ "type" .= t "object"
+                                          , "properties" .= object
+                                              [ "workspace_id" .= prop "string" "UUID of the workspace"
+                                              , "project_id"   .= prop "string" "UUID of a project to link at creation time. Provide at least one of project_id or task_id."
+                                              , "task_id"      .= prop "string" "UUID of a task to link at creation time. Provide at least one of project_id or task_id."
+                                              , "content"      .= propMaxLength "string" "The memory content" maxMemoryContentBytes
+                                              , "summary"      .= propMaxLength "string" "Optional short summary" maxMemorySummaryBytes
+                                              , "memory_type"  .= propEnum "string" "short_term or long_term" ["short_term", "long_term"]
+                                              , "importance"   .= prop "integer" "1 (lowest) to 10 (highest), default 5"
+                                              , "metadata"     .= prop "object" "Optional metadata JSON object for structured annotations"
+                                              , "expires_at"   .= prop "string" "ISO 8601 expiration time"
+                                              , "source"       .= prop "string" "Provenance: user_stated, inferred, tool_output, web_search"
+                                              , "confidence"   .= prop "number" "Confidence level 0.0-1.0, default 1.0"
+                                              , "pinned"       .= prop "boolean" "Pin this memory (default false)"
+                                              , "tags"         .= object ["type" .= t "array", "items" .= object ["type" .= t "string"],
+                                                                           "description" .= t "Tags for categorization"]
+                                              , "fts_language" .= prop "string" "Full-text search language (default 'english'). Use a PostgreSQL regconfig name, e.g. 'spanish', 'german', 'simple'."
+                                              ]
+                                          , "required" .= (["workspace_id", "content", "memory_type"] :: [Text])
+                                          ]]
+          ]
+      , "anyOf" .=
+          [ object ["required" .= (["workspace_id", "content", "memory_type"] :: [Text])]
+          , object ["required" .= (["items"] :: [Text])]
           ]
       , "required" .= ([] :: [Text])
       ]

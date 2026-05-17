@@ -95,6 +95,27 @@ spec = do
       let args = object [ "workspace_id" .= testUUID ]  -- missing content, memory_type
       parseToolCall "memory_create" args `shouldSatisfy` isLeft
 
+    it "rejects memory_create when memory_type is missing" $ do
+      let args = object
+            [ "workspace_id" .= testUUID
+            , "project_id" .= testUUID2
+            , "content" .= ("hello" :: Text)
+            ]
+      case parseToolCall "memory_create" args of
+        Left err -> T.pack err `shouldSatisfy` T.isInfixOf "memory_type"
+        Right other -> expectationFailure $ "Expected missing memory_type to fail, got: " <> show other
+
+    it "rejects memory_create with an invalid memory_type" $ do
+      let args = object
+            [ "workspace_id" .= testUUID
+            , "project_id" .= testUUID2
+            , "content" .= ("hello" :: Text)
+            , "memory_type" .= ("episodic" :: Text)
+            ]
+      case parseToolCall "memory_create" args of
+        Left err -> T.pack err `shouldSatisfy` T.isInfixOf "short_term or long_term"
+        Right other -> expectationFailure $ "Expected invalid memory_type to fail, got: " <> show other
+
     it "parses memory_get" $ do
       let args = object [ "memory_id" .= testUUID ]
       case parseToolCall "memory_get" args of
@@ -189,6 +210,29 @@ spec = do
       case parseToolCall "memory_create" args of
         Right (MemoryCreateBatch cms) -> length cms `shouldBe` 2
         other -> expectationFailure $ "Expected MemoryCreateBatch, got: " <> show other
+
+    it "rejects batch memory_create items missing memory_type" $ do
+      let item = object
+            [ "workspace_id" .= testUUID
+            , "project_id"   .= testUUID2
+            , "content"      .= ("batch item" :: Text)
+            ]
+          args = object [ "items" .= [item] ]
+      case parseToolCall "memory_create" args of
+        Left err -> T.pack err `shouldSatisfy` T.isInfixOf "memory_type"
+        Right other -> expectationFailure $ "Expected missing batch memory_type to fail, got: " <> show other
+
+    it "rejects batch memory_create items with invalid memory_type" $ do
+      let item = object
+            [ "workspace_id" .= testUUID
+            , "project_id"   .= testUUID2
+            , "content"      .= ("batch item" :: Text)
+            , "memory_type"  .= ("episodic" :: Text)
+            ]
+          args = object [ "items" .= [item] ]
+      case parseToolCall "memory_create" args of
+        Left err -> T.pack err `shouldSatisfy` T.isInfixOf "short_term or long_term"
+        Right other -> expectationFailure $ "Expected invalid batch memory_type to fail, got: " <> show other
 
     it "parses memory_link with action=create" $ do
       let args = object [ "action" .= ("create" :: Text), "source_id" .= testUUID, "target_id" .= testUUID2, "relation_type" .= ("related" :: Text) ]
@@ -1081,15 +1125,22 @@ spec = do
       schema <- requireJust "memory_create schema" (inputSchemaFor "memory_create")
       properties <- requireJust "memory_create properties" (objectField "properties" schema)
       contentSchema <- requireJust "memory_create content schema" (objectField "content" properties)
+      memoryTypeSchema <- requireJust "memory_create memory_type schema" (objectField "memory_type" properties)
       numberField "maxLength" contentSchema `shouldBe` Just (fromIntegral maxMemoryContentBytes)
+      objectField "enum" memoryTypeSchema `shouldBe` Just (toJSON (["short_term", "long_term"] :: [Text]))
       objectField "project_id" properties `shouldSatisfy` (/= Nothing)
       objectField "task_id" properties `shouldSatisfy` (/= Nothing)
+      objectField "anyOf" schema `shouldSatisfy` (/= Nothing)
 
     it "advertises batch items support on memory_create" $ do
       schema <- requireJust "memory_create schema" (inputSchemaFor "memory_create")
       properties <- requireJust "memory_create properties" (objectField "properties" schema)
       itemsSchema <- requireJust "memory_create items schema" (objectField "items" properties)
-      objectField "items" itemsSchema `shouldSatisfy` (/= Nothing)
+      itemSchema <- requireJust "memory_create batch item schema" (objectField "items" itemsSchema)
+      itemProperties <- requireJust "memory_create batch item properties" (objectField "properties" itemSchema)
+      itemMemoryTypeSchema <- requireJust "memory_create batch item memory_type schema" (objectField "memory_type" itemProperties)
+      objectField "enum" itemMemoryTypeSchema `shouldBe` Just (toJSON (["short_term", "long_term"] :: [Text]))
+      objectField "required" itemSchema `shouldBe` Just (toJSON (["workspace_id", "content", "memory_type"] :: [Text]))
 
     it "advertises list filter timestamps and task priority" $ do
       memorySchema <- requireJust "memory_list schema" (inputSchemaFor "memory_list")

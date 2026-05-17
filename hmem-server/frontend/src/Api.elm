@@ -565,14 +565,17 @@ workspaceTypeToString wt =
             "organization"
 
 
-memoryTypeFromString : String -> MemoryType
+memoryTypeFromString : String -> Maybe MemoryType
 memoryTypeFromString s =
     case s of
+        "short_term" ->
+            Just ShortTerm
+
         "long_term" ->
-            LongTerm
+            Just LongTerm
 
         _ ->
-            ShortTerm
+            Nothing
 
 
 allProjectStatuses : List ProjectStatus

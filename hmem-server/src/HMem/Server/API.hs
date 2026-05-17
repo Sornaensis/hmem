@@ -4,6 +4,7 @@
 module HMem.Server.API
   ( HMemAPI
   , server
+  , CreateMemoryRequest(..)
   , CleanupRunReq(..)
   , GroupMemberReq(..)
   , CategoryLink(..)
@@ -113,11 +114,11 @@ type MemoryAPI =
          :> QueryParam "updated_after" UTCTime
          :> QueryParam "updated_before" UTCTime
          :> QueryParam "limit" Int
-         :> QueryParam "offset" Int
-         :> QueryParam "compact" Bool
-         :> Get '[JSON] (PaginatedResult Memory)
-  :<|> ReqBody '[JSON] CreateMemory :> Post '[JSON] Memory
-  :<|> "batch" :> ReqBody '[JSON] [CreateMemory] :> Post '[JSON] [Memory]
+          :> QueryParam "offset" Int
+          :> QueryParam "compact" Bool
+          :> Get '[JSON] (PaginatedResult Memory)
+  :<|> ReqBody '[JSON] CreateMemoryRequest :> Post '[JSON] Memory
+  :<|> "batch" :> ReqBody '[JSON] [CreateMemoryRequest] :> Post '[JSON] [Memory]
   :<|> "search" :> QueryParam "compact" Bool :> ReqBody '[JSON] SearchQuery :> Post '[JSON] [Memory]
   :<|> "contradictions" :> QueryParam "workspace_id" UUID :> Get '[JSON] [MemoryLink]
   :<|> "by-relation" :> QueryParam "workspace_id" UUID
@@ -338,6 +339,18 @@ instance ToJSON CategoryLink where
   toJSON = genericToJSON jsonOptions
 instance FromJSON CategoryLink where
   parseJSON = genericParseJSON jsonOptions
+
+-- Request body wrapper for memory creation.  The handler parses the raw JSON so
+-- missing/invalid memory_type can be returned as the same structured validation
+-- error body as semantic request validation, rather than Servant's plain-text
+-- JSON parse failure.
+newtype CreateMemoryRequest = CreateMemoryRequest { createMemoryRequestValue :: Value }
+  deriving (Show, Eq, Generic)
+
+instance ToJSON CreateMemoryRequest where
+  toJSON (CreateMemoryRequest value) = value
+instance FromJSON CreateMemoryRequest where
+  parseJSON = pure . CreateMemoryRequest
 
 ------------------------------------------------------------------------
 -- Servant FromHttpApiData instances for query params
@@ -1197,7 +1210,8 @@ memoryHandlers pool tracker bc pgvec =
       let items = (if compact then map compactMemory else Prelude.id) $ take lim results
       pure PaginatedResult { items = items, hasMore = length results > lim }
 
-    createMemoryH cm = do
+    createMemoryH req = do
+      cm <- parseCreateMemoryRequest Nothing req
       requireWorkspaceRoleH pool cm.workspaceId Auth.WorkspaceRoleEdit
       authorizeCreateMemoryTarget cm
       rejectValidationErrors (validateCreateMemoryInput cm)
@@ -1205,8 +1219,12 @@ memoryHandlers pool tracker bc pgvec =
       emit bc Created ETMemory mem.id (Just $ toJSON mem)
       pure mem
 
-    createMemoryBatchH cms
+    createMemoryBatchH reqs
       | otherwise = do
+          cms <- sequence
+            [ parseCreateMemoryRequest (Just idx) req
+            | (idx, req) <- zip [(0 :: Int) ..] reqs
+            ]
           requireAuthenticatedH
           mapM_ (\wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleEdit) (dedupe $ map (.workspaceId) cms)
           mapM_ authorizeCreateMemoryTarget cms
@@ -2500,6 +2518,29 @@ rejectValidationErrors errs = throwError err400
       , "details" .= errs
       ]
   }
+
+parseCreateMemoryRequest :: Maybe Int -> CreateMemoryRequest -> Handler CreateMemory
+parseCreateMemoryRequest mIndex (CreateMemoryRequest raw) =
+  case Aeson.fromJSON raw of
+    Aeson.Success cm -> pure cm
+    Aeson.Error err  -> rejectValidationErrors (createMemoryParseErrors mIndex raw err) >> throwError err400
+
+createMemoryParseErrors :: Maybe Int -> Value -> String -> [Text]
+createMemoryParseErrors mIndex raw parseErr =
+  case raw of
+    Object obj ->
+      case KeyMap.lookup (Aeson.fromText "memory_type") obj of
+        Nothing -> [prefix <> "memory_type is required and must be short_term or long_term"]
+        Just (String rawType)
+          | memoryTypeFromText rawType == Nothing ->
+              [prefix <> "memory_type must be short_term or long_term"]
+        Just (String _) -> [prefix <> T.pack parseErr]
+        Just _ -> [prefix <> "memory_type must be a string: short_term or long_term"]
+    _ -> [prefix <> "memory create request must be a JSON object"]
+  where
+    prefix = case mIndex of
+      Nothing  -> ""
+      Just idx -> "memories[" <> T.pack (show idx) <> "]."
 
 dedupe :: Ord a => [a] -> [a]
 dedupe = Map.keys . Map.fromList . map (\x -> (x, ()))

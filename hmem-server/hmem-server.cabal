@@ -28,6 +28,7 @@ data-files:
     migrations/V012__recursive_lifecycle_invariants.sql
     migrations/V013__explicit_memory_creation_links.sql
     migrations/V014__recursive_task_auto_blocking.sql
+    migrations/V015__require_explicit_memory_type.sql
 
 library
   exposed-modules:

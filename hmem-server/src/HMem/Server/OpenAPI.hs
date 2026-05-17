@@ -14,7 +14,7 @@ import GHC.Generics (Generic)
 import Servant.OpenApi (toOpenApi)
 
 import HMem.DB.Auth qualified as Auth
-import HMem.Server.API (HMemAPI, CleanupRunReq, GroupMemberReq, CategoryLink)
+import HMem.Server.API (HMemAPI, CreateMemoryRequest, CleanupRunReq, GroupMemberReq, CategoryLink)
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -160,6 +160,7 @@ instance ToSchema a => ToSchema (FieldUpdate a) where
 -- Domain types using Generic derivation
 instance ToSchema Memory              where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CreateMemory         where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema CreateMemoryRequest  where declareNamedSchema _ = declareNamedSchema (Proxy @CreateMemory)
 instance ToSchema UpdateMemory         where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SearchQuery          where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema MemoryLink           where declareNamedSchema = genericDeclareNamedSchema opts

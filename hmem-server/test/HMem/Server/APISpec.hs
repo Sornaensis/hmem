@@ -243,6 +243,15 @@ assertLifecycleError expectedCode resp =
         _ -> False
     other -> expectationFailure $ "Expected lifecycle error object, got: " <> show other
 
+assertValidationErrorContains :: T.Text -> SResponse -> Expectation
+assertValidationErrorContains expectedText resp =
+  case decode (respBody resp) :: Maybe Value of
+    Just (Object body) -> do
+      KM.lookup (Key.fromText "error") body `shouldBe` Just (String "validation")
+      KM.lookup (Key.fromText "message") body `shouldBe` Just (String "Request validation failed")
+      T.pack (show (KM.lookup (Key.fromText "details") body)) `shouldSatisfy` T.isInfixOf expectedText
+    other -> expectationFailure $ "Expected validation error object, got: " <> show other
+
 assertNoAccessTokenSensitiveAuditSnapshot :: T.Text -> AuditLogRow -> Expectation
 assertNoAccessTokenSensitiveAuditSnapshot rawToken row = do
   row.oldValues `shouldSatisfy` (not . containsObjectField "token_hash")
@@ -745,6 +754,55 @@ spec = around withApp $ do
       respStatus purgeResp `shouldBe` 200
 
   describe "explicit memory creation links" $ do
+    it "memoryTypeRequiredAPI requires explicit memory_type and accepts both supported types" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("memory-type-required-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Memory Type Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      missingTypeResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
+          , "content" .= ("missing explicit type" :: T.Text)
+          ])
+      respStatus missingTypeResp `shouldBe` 400
+      assertValidationErrorContains "memory_type" missingTypeResp
+
+      invalidTypeResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
+          , "content" .= ("invalid explicit type" :: T.Text)
+          , "memory_type" .= ("episodic" :: T.Text)
+          ])
+      respStatus invalidTypeResp `shouldBe` 400
+      assertValidationErrorContains "short_term or long_term" invalidTypeResp
+
+      shortResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
+          , "content" .= ("short explicit type" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          ])
+      respStatus shortResp `shouldBe` 200
+      let Just shortMem = decode (respBody shortResp) :: Maybe Memory
+      shortMem.memoryType `shouldBe` ShortTerm
+
+      longResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
+          , "content" .= ("long explicit type" :: T.Text)
+          , "memory_type" .= ("long_term" :: T.Text)
+          ])
+      respStatus longResp `shouldBe` 200
+      let Just longMem = decode (respBody longResp) :: Maybe Memory
+      longMem.memoryType `shouldBe` LongTerm
+
     it "requires at least one project or task target and allows multiple targets" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("memory-link-required-ws" :: T.Text)])

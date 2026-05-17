@@ -14,6 +14,7 @@ import Test.Hspec
 import HMem.DB.Cleanup
 import HMem.DB.Memory (createMemory, getMemory, linkMemories)
 import HMem.DB.Pool (runSession)
+import HMem.DB.Project (createProject)
 import HMem.DB.TestHarness
 import HMem.Types
 
@@ -23,20 +24,26 @@ import HMem.Types
 
 -- | Create a short-term memory with a given importance.
 mkMemory :: TestEnv -> UUID -> Int -> String -> IO Memory
-mkMemory env wsId imp label = createMemory env.pool CreateMemory
-  { workspaceId = wsId
-  , content     = "cleanup-test: " <> fromString label
-  , summary     = Nothing
-  , memoryType  = ShortTerm
-  , importance  = Just imp
-  , metadata    = Nothing
-  , expiresAt   = Nothing
-  , source      = Nothing
-  , confidence  = Nothing
-  , pinned      = Nothing
-  , tags        = Nothing
-  , ftsLanguage = Nothing
-  }
+mkMemory env wsId imp label = do
+  proj <- createProject env.pool CreateProject
+    { workspaceId = wsId, parentId = Nothing, name = "CleanupSpec link target"
+    , description = Nothing, priority = Nothing, metadata = Nothing }
+  createMemory env.pool CreateMemory
+    { workspaceId = wsId
+    , projectId   = Just proj.id
+    , taskId      = Nothing
+    , content     = "cleanup-test: " <> fromString label
+    , summary     = Nothing
+    , memoryType  = ShortTerm
+    , importance  = Just imp
+    , metadata    = Nothing
+    , expiresAt   = Nothing
+    , source      = Nothing
+    , confidence  = Nothing
+    , pinned      = Nothing
+    , tags        = Nothing
+    , ftsLanguage = Nothing
+    }
 
 -- | Backdate a memory's created_at to N hours ago via raw SQL.
 backdateMemory :: TestEnv -> UUID -> Int -> IO ()

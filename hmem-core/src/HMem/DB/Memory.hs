@@ -146,6 +146,7 @@ createMemory pool cm = do
     case rs of
       (r:_) -> do
         let mid = (r :: MemoryT Result).memId
+        insertCreationLink mid cm
         case memTags of
           [] -> pure ()
           _  -> Session.statement () $ run_ $
@@ -200,6 +201,7 @@ createMemoryBatch pool cms = do
         }
     -- Zip returned rows (in insertion order) with original cms
     let pairs = zip rs cms
+    mapM_ (\(r, cm) -> insertCreationLink ((r :: MemoryT Result).memId) cm) pairs
     -- Build all tag rows in one batch
     let allTags = [ MemoryTagT { mtMemoryId = lit (r :: MemoryT Result).memId, mtTag = lit tg }
                   | (r, cm) <- pairs
@@ -216,6 +218,23 @@ createMemoryBatch pool cms = do
           }
     pure pairs
   pure [rowToMemory r (fromMaybe [] cm.tags) | (r, cm) <- results]
+
+insertCreationLink :: UUID -> CreateMemory -> Session.Session ()
+insertCreationLink mid cm = do
+  mapM_ (\pid -> Session.statement () $ run_ $
+    insert Insert
+      { into = projectMemoryLinkSchema
+      , rows = values [ProjectMemoryLinkT { pmlProjectId = lit pid, pmlMemoryId = lit mid }]
+      , onConflict = DoNothing
+      , returning = NoReturning
+      }) cm.projectId
+  mapM_ (\tid -> Session.statement () $ run_ $
+    insert Insert
+      { into = taskMemoryLinkSchema
+      , rows = values [TaskMemoryLinkT { tmlTaskId = lit tid, tmlMemoryId = lit mid }]
+      , onConflict = DoNothing
+      , returning = NoReturning
+      }) cm.taskId
 
 ------------------------------------------------------------------------
 -- Read
@@ -325,20 +344,6 @@ deleteMemory pool mid = do
             , deleteWhere = \_ row -> row.mclMemoryId ==. lit mid
             , returning = NoReturning
             }
-        Session.statement () $ run_ $
-          delete Delete
-            { from = projectMemoryLinkSchema
-            , using = pure ()
-            , deleteWhere = \_ row -> row.pmlMemoryId ==. lit mid
-            , returning = NoReturning
-            }
-        Session.statement () $ run_ $
-          delete Delete
-            { from = taskMemoryLinkSchema
-            , using = pure ()
-            , deleteWhere = \_ row -> row.tmlMemoryId ==. lit mid
-            , returning = NoReturning
-            }
         pure True
 
 -- | Soft-delete multiple memories by ID in a single statement.
@@ -376,20 +381,6 @@ deleteMemoryBatch pool mids = do
         { from = memoryCategoryLinkSchema
         , using = pure ()
         , deleteWhere = \_ row -> in_ row.mclMemoryId (map lit mids)
-        , returning = NoReturning
-        }
-    Session.statement () $ run_ $
-      delete Delete
-        { from = projectMemoryLinkSchema
-        , using = pure ()
-        , deleteWhere = \_ row -> in_ row.pmlMemoryId (map lit mids)
-        , returning = NoReturning
-        }
-    Session.statement () $ run_ $
-      delete Delete
-        { from = taskMemoryLinkSchema
-        , using = pure ()
-        , deleteWhere = \_ row -> in_ row.tmlMemoryId (map lit mids)
         , returning = NoReturning
         }
     pure (fromIntegral n)

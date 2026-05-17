@@ -1,27 +1,34 @@
-{-# OPTIONS_GHC -Wno-x-partial -Wno-incomplete-uni-patterns #-}
+{-# OPTIONS_GHC -Wno-x-partial -Wno-incomplete-uni-patterns -Wno-missing-fields #-}
 
 module HMem.DB.MemorySpec (spec) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (try, SomeException)
-import Data.Functor.Contravariant ((>$<))
+import Data.Functor.Contravariant ((>$<), contramap)
 import Data.Maybe (isJust, isNothing)
+import Data.Pool (Pool)
+import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID (UUID)
+import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Test.Hspec
 
-import HMem.DB.Memory
-import HMem.DB.Pool (runSession)
+import HMem.DB.Memory hiding (createMemory, createMemoryBatch)
+import HMem.DB.Memory qualified as Mem
+import HMem.DB.Pool (DBException(..), runSession, runTransaction)
+import HMem.DB.Project (createProject)
+import HMem.DB.Task qualified as Task
 import HMem.DB.TestHarness
 import HMem.Types
 
 
 backdateMemoryUpdatedAt :: TestEnv -> UUID -> Int -> IO ()
 backdateMemoryUpdatedAt env mid hours = do
+  runSession env.pool forceDeferredConstraints
   runSession env.pool $ Session.sql "ALTER TABLE memories DISABLE TRIGGER trg_memories_updated_at"
   let stmt = Statement.Statement
         "UPDATE memories SET updated_at = now() - ($1 * interval '1 hour') WHERE id = $2"
@@ -98,6 +105,278 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
             }
       mem <- createMemory env.pool cm
       mem.importance `shouldBe` 5
+
+    it "creates a memory atomically with an explicit project link" $ \env -> do
+      ws <- createTestWorkspace env "project-linked-create-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Project target"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      mem <- Mem.createMemory env.pool CreateMemory
+        { workspaceId = ws.id
+        , projectId = Just proj.id
+        , taskId = Nothing
+        , content = "project linked"
+        , summary = Nothing
+        , memoryType = ShortTerm
+        , importance = Nothing
+        , metadata = Nothing
+        , expiresAt = Nothing
+        , source = Nothing
+        , confidence = Nothing
+        , pinned = Nothing
+        , tags = Nothing
+        , ftsLanguage = Nothing
+        }
+      got <- getMemory env.pool mem.id
+      got `shouldSatisfy` isJust
+
+    it "creates a memory atomically with an explicit task link" $ \env -> do
+      ws <- createTestWorkspace env "task-linked-create-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Task project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- Task.createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing
+        , title = "Task target", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      mem <- Mem.createMemory env.pool CreateMemory
+        { workspaceId = ws.id
+        , projectId = Nothing
+        , taskId = Just task.id
+        , content = "task linked"
+        , summary = Nothing
+        , memoryType = ShortTerm
+        , importance = Nothing
+        , metadata = Nothing
+        , expiresAt = Nothing
+        , source = Nothing
+        , confidence = Nothing
+        , pinned = Nothing
+        , tags = Nothing
+        , ftsLanguage = Nothing
+        }
+      got <- getMemory env.pool mem.id
+      got `shouldSatisfy` isJust
+
+    it "rejects direct SQL memory inserts without a project or task link" $ \env -> do
+      ws <- createTestWorkspace env "direct-unlinked-ws"
+      expectWorkflowViolation "MEMORY_LINK_REQUIRED" $
+        runTransaction env.pool $ do
+          _ <- insertMemoryDirect ws.id "unlinked direct"
+          forceDeferredConstraints
+
+    it "accepts direct SQL memory inserts with a project link in the same transaction" $ \env -> do
+      ws <- createTestWorkspace env "direct-project-link-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Direct project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      mid <- runTransaction env.pool $ do
+        mid <- insertMemoryDirect ws.id "direct project linked"
+        linkProjectMemoryDirect proj.id mid
+        forceDeferredConstraints
+        pure mid
+      got <- getMemory env.pool mid
+      got `shouldSatisfy` isJust
+
+    it "accepts direct SQL memory inserts with a task link in the same transaction" $ \env -> do
+      ws <- createTestWorkspace env "direct-task-link-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Direct task project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- Task.createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing
+        , title = "Direct task", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      mid <- runTransaction env.pool $ do
+        mid <- insertMemoryDirect ws.id "direct task linked"
+        linkTaskMemoryDirect task.id mid
+        forceDeferredConstraints
+        pure mid
+      got <- getMemory env.pool mid
+      got `shouldSatisfy` isJust
+
+    it "accepts direct SQL memory links to subtasks" $ \env -> do
+      ws <- createTestWorkspace env "direct-subtask-link-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Subtask project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- Task.createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing
+        , title = "Parent", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      child <- Task.createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id
+        , title = "Child", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      mid <- runTransaction env.pool $ do
+        mid <- insertMemoryDirect ws.id "subtask linked"
+        linkTaskMemoryDirect child.id mid
+        forceDeferredConstraints
+        pure mid
+      getMemory env.pool mid >>= (`shouldSatisfy` isJust)
+
+    it "rejects direct SQL memory links across workspaces" $ \env -> do
+      wsA <- createTestWorkspace env "direct-cross-a"
+      wsB <- createTestWorkspace env "direct-cross-b"
+      projB <- createProject env.pool CreateProject
+        { workspaceId = wsB.id, parentId = Nothing, name = "Other project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      expectWorkflowViolation "MEMORY_LINK_CROSS_WORKSPACE" $
+        runTransaction env.pool $ do
+          mid <- insertMemoryDirect wsA.id "cross workspace"
+          linkProjectMemoryDirect projB.id mid
+          forceDeferredConstraints
+
+    it "rejects direct SQL memory links to deleted cross-workspace targets" $ \env -> do
+      wsA <- createTestWorkspace env "direct-cross-deleted-a"
+      wsB <- createTestWorkspace env "direct-cross-deleted-b"
+      projA <- createProject env.pool CreateProject
+        { workspaceId = wsA.id, parentId = Nothing, name = "Project A"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      projB <- createProject env.pool CreateProject
+        { workspaceId = wsB.id, parentId = Nothing, name = "Deleted other project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      mem <- Mem.createMemory env.pool CreateMemory
+        { workspaceId = wsA.id, projectId = Just projA.id, taskId = Nothing
+        , content = "valid local link", summary = Nothing, memoryType = ShortTerm
+        , importance = Nothing, metadata = Nothing, expiresAt = Nothing, source = Nothing
+        , confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      runTransaction env.pool $ do
+        softDeleteProjectDirect projB.id
+        forceDeferredConstraints
+      expectWorkflowViolation "MEMORY_LINK_CROSS_WORKSPACE" $
+        runTransaction env.pool $ do
+          linkProjectMemoryDirect projB.id mem.id
+          forceDeferredConstraints
+
+    it "accepts direct SQL memory creation with both project and task links" $ \env -> do
+      ws <- createTestWorkspace env "direct-ambiguous-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Ambiguous project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- Task.createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing
+        , title = "Ambiguous task", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      mid <- runTransaction env.pool $ do
+        mid <- insertMemoryDirect ws.id "multiple links"
+        linkProjectMemoryDirect proj.id mid
+        linkTaskMemoryDirect task.id mid
+        forceDeferredConstraints
+        pure mid
+      getMemory env.pool mid >>= (`shouldSatisfy` isJust)
+
+    it "rejects updating a project link away from a memory's only active target" $ \env -> do
+      ws <- createTestWorkspace env "direct-project-link-update-ws"
+      proj1 <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Project one"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      proj2 <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Project two"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      mem1 <- Mem.createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Just proj1.id, taskId = Nothing
+        , content = "source memory", summary = Nothing, memoryType = ShortTerm
+        , importance = Nothing, metadata = Nothing, expiresAt = Nothing, source = Nothing
+        , confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      mem2 <- Mem.createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Just proj2.id, taskId = Nothing
+        , content = "target memory", summary = Nothing, memoryType = ShortTerm
+        , importance = Nothing, metadata = Nothing, expiresAt = Nothing, source = Nothing
+        , confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+
+      expectWorkflowViolation "MEMORY_LINK_REQUIRED" $
+        runTransaction env.pool $ do
+          updateProjectMemoryLinkMemoryDirect proj1.id mem1.id mem2.id
+          forceDeferredConstraints
+
+    it "rejects updating a task link away from a memory's only active target" $ \env -> do
+      ws <- createTestWorkspace env "direct-task-link-update-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Task project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task1 <- Task.createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing
+        , title = "Task one", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      task2 <- Task.createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing
+        , title = "Task two", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      mem1 <- Mem.createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Nothing, taskId = Just task1.id
+        , content = "source memory", summary = Nothing, memoryType = ShortTerm
+        , importance = Nothing, metadata = Nothing, expiresAt = Nothing, source = Nothing
+        , confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      mem2 <- Mem.createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Nothing, taskId = Just task2.id
+        , content = "target memory", summary = Nothing, memoryType = ShortTerm
+        , importance = Nothing, metadata = Nothing, expiresAt = Nothing, source = Nothing
+        , confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+
+      expectWorkflowViolation "MEMORY_LINK_REQUIRED" $
+        runTransaction env.pool $ do
+          updateTaskMemoryLinkMemoryDirect task1.id mem1.id mem2.id
+          forceDeferredConstraints
+
+    it "allows reparenting a linked task into a subtask" $ \env -> do
+      ws <- createTestWorkspace env "linked-task-reparent-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Reparent project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- Task.createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing
+        , title = "Parent", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      linkedTask <- Task.createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing
+        , title = "Linked task", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      mem <- Mem.createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Nothing, taskId = Just linkedTask.id
+        , content = "linked task memory", summary = Nothing, memoryType = ShortTerm
+        , importance = Nothing, metadata = Nothing, expiresAt = Nothing, source = Nothing
+        , confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      runTransaction env.pool $ do
+        reparentTaskDirect linkedTask.id parent.id
+        forceDeferredConstraints
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isJust)
+
+    it "rejects soft-deleting a linked project when it is the memory's only active target" $ \env -> do
+      ws <- createTestWorkspace env "linked-project-delete-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Linked project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      _ <- Mem.createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Just proj.id, taskId = Nothing
+        , content = "linked project memory", summary = Nothing, memoryType = ShortTerm
+        , importance = Nothing, metadata = Nothing, expiresAt = Nothing, source = Nothing
+        , confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      expectWorkflowViolation "MEMORY_LINK_REQUIRED" $
+        runTransaction env.pool $ do
+          softDeleteProjectDirect proj.id
+          forceDeferredConstraints
+
+    it "allows soft-deleting one linked project while another active target remains" $ \env -> do
+      ws <- createTestWorkspace env "linked-project-delete-with-other-ws"
+      proj1 <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Linked project one"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      proj2 <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Linked project two"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      mem <- Mem.createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Just proj1.id, taskId = Nothing
+        , content = "linked project memory", summary = Nothing, memoryType = ShortTerm
+        , importance = Nothing, metadata = Nothing, expiresAt = Nothing, source = Nothing
+        , confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      runTransaction env.pool $ do
+        linkProjectMemoryDirect proj2.id mem.id
+        forceDeferredConstraints
+      runTransaction env.pool $ do
+        softDeleteProjectDirect proj1.id
+        forceDeferredConstraints
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isJust)
 
   describe "updateMemory" $ do
     it "updates content and importance" $ \env -> do
@@ -549,3 +828,129 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 nub :: Eq a => [a] -> [a]
 nub [] = []
 nub (x:xs) = x : nub (filter (/= x) xs)
+
+createMemory :: Pool Hasql.Connection -> CreateMemory -> IO Memory
+createMemory pool cm = do
+  proj <- createProject pool CreateProject
+    { workspaceId = cm.workspaceId
+    , parentId = Nothing
+    , name = "MemorySpec link target"
+    , description = Nothing
+    , priority = Nothing
+    , metadata = Nothing
+    }
+  Mem.createMemory pool cm { projectId = Just proj.id, taskId = Nothing }
+
+createMemoryBatch :: Pool Hasql.Connection -> [CreateMemory] -> IO [Memory]
+createMemoryBatch pool cms = do
+  linked <- mapM addProjectLink cms
+  Mem.createMemoryBatch pool linked
+  where
+    addProjectLink cm = do
+      proj <- createProject pool CreateProject
+        { workspaceId = cm.workspaceId
+        , parentId = Nothing
+        , name = "MemorySpec batch link target"
+        , description = Nothing
+        , priority = Nothing
+        , metadata = Nothing
+        }
+      pure cm { projectId = Just proj.id, taskId = Nothing }
+
+expectWorkflowViolation :: Text -> IO a -> Expectation
+expectWorkflowViolation expectedCode action = do
+  result <- try @DBException action
+  case result of
+    Left (DBWorkflowViolation code _ _ _) -> code `shouldBe` expectedCode
+    Left other -> expectationFailure $ "Expected workflow violation " <> show expectedCode <> ", got: " <> show other
+    Right _ -> expectationFailure $ "Expected workflow violation " <> show expectedCode <> ", but action succeeded"
+
+insertMemoryDirect :: UUID -> Text -> Session.Session UUID
+insertMemoryDirect wsId label =
+  Session.statement (wsId, label) insertMemoryDirectStatement
+
+insertMemoryDirectStatement :: Statement.Statement (UUID, Text) UUID
+insertMemoryDirectStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "INSERT INTO memories (workspace_id, content, memory_type) VALUES ($1, $2, 'short_term') RETURNING id"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.text))
+    decoder = D.singleRow (D.column (D.nonNullable D.uuid))
+
+linkProjectMemoryDirect :: UUID -> UUID -> Session.Session ()
+linkProjectMemoryDirect projectId memoryId =
+  Session.statement (projectId, memoryId) linkProjectMemoryDirectStatement
+
+linkProjectMemoryDirectStatement :: Statement.Statement (UUID, UUID) ()
+linkProjectMemoryDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "INSERT INTO project_memory_links (project_id, memory_id) VALUES ($1, $2)"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
+
+linkTaskMemoryDirect :: UUID -> UUID -> Session.Session ()
+linkTaskMemoryDirect taskId memoryId =
+  Session.statement (taskId, memoryId) linkTaskMemoryDirectStatement
+
+linkTaskMemoryDirectStatement :: Statement.Statement (UUID, UUID) ()
+linkTaskMemoryDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "INSERT INTO task_memory_links (task_id, memory_id) VALUES ($1, $2)"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
+
+updateProjectMemoryLinkMemoryDirect :: UUID -> UUID -> UUID -> Session.Session ()
+updateProjectMemoryLinkMemoryDirect projectId oldMemoryId newMemoryId =
+  Session.statement (projectId, oldMemoryId, newMemoryId) updateProjectMemoryLinkMemoryDirectStatement
+
+updateProjectMemoryLinkMemoryDirectStatement :: Statement.Statement (UUID, UUID, UUID) ()
+updateProjectMemoryLinkMemoryDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "UPDATE project_memory_links SET memory_id = $3 WHERE project_id = $1 AND memory_id = $2"
+    encoder =
+      contramap (\(projectId, _, _) -> projectId) (E.param (E.nonNullable E.uuid)) <>
+      contramap (\(_, oldMemoryId, _) -> oldMemoryId) (E.param (E.nonNullable E.uuid)) <>
+      contramap (\(_, _, newMemoryId) -> newMemoryId) (E.param (E.nonNullable E.uuid))
+
+updateTaskMemoryLinkMemoryDirect :: UUID -> UUID -> UUID -> Session.Session ()
+updateTaskMemoryLinkMemoryDirect taskId oldMemoryId newMemoryId =
+  Session.statement (taskId, oldMemoryId, newMemoryId) updateTaskMemoryLinkMemoryDirectStatement
+
+updateTaskMemoryLinkMemoryDirectStatement :: Statement.Statement (UUID, UUID, UUID) ()
+updateTaskMemoryLinkMemoryDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "UPDATE task_memory_links SET memory_id = $3 WHERE task_id = $1 AND memory_id = $2"
+    encoder =
+      contramap (\(taskId, _, _) -> taskId) (E.param (E.nonNullable E.uuid)) <>
+      contramap (\(_, oldMemoryId, _) -> oldMemoryId) (E.param (E.nonNullable E.uuid)) <>
+      contramap (\(_, _, newMemoryId) -> newMemoryId) (E.param (E.nonNullable E.uuid))
+
+reparentTaskDirect :: UUID -> UUID -> Session.Session ()
+reparentTaskDirect taskId parentId =
+  Session.statement (taskId, parentId) reparentTaskDirectStatement
+
+reparentTaskDirectStatement :: Statement.Statement (UUID, UUID) ()
+reparentTaskDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "UPDATE tasks SET parent_id = $2 WHERE id = $1"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
+
+softDeleteProjectDirect :: UUID -> Session.Session ()
+softDeleteProjectDirect projectId =
+  Session.statement projectId softDeleteProjectDirectStatement
+
+softDeleteProjectDirectStatement :: Statement.Statement UUID ()
+softDeleteProjectDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "UPDATE projects SET deleted_at = now() WHERE id = $1"
+    encoder = E.param (E.nonNullable E.uuid)
+
+forceDeferredConstraints :: Session.Session ()
+forceDeferredConstraints = do
+  Session.sql "SET CONSTRAINTS ALL IMMEDIATE"
+  Session.sql "SET CONSTRAINTS ALL DEFERRED"

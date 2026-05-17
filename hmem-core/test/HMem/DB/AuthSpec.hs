@@ -121,8 +121,18 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
   describe "entity scope resolution" $ do
     it "resolves representative entity IDs to workspace or global scopes" $ \env -> do
       ws <- createTestWorkspace env "authz-resolution"
+      project <- Proj.createProject env.pool CreateProject
+        { workspaceId = ws.id
+        , name = "scoped project"
+        , description = Nothing
+        , parentId = Nothing
+        , priority = Nothing
+        , metadata = Nothing
+        }
       mem <- Mem.createMemory env.pool CreateMemory
         { workspaceId = ws.id
+        , projectId = Just project.id
+        , taskId = Nothing
         , content = "scoped memory"
         , summary = Nothing
         , memoryType = ShortTerm
@@ -134,14 +144,6 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         , pinned = Nothing
         , tags = Nothing
         , ftsLanguage = Nothing
-        }
-      project <- Proj.createProject env.pool CreateProject
-        { workspaceId = ws.id
-        , name = "scoped project"
-        , description = Nothing
-        , parentId = Nothing
-        , priority = Nothing
-        , metadata = Nothing
         }
       task <- Task.createTask env.pool CreateTask
         { workspaceId = ws.id
@@ -185,8 +187,18 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
     it "resolves soft-deleted entities and reports missing entity scopes" $ \env -> do
       ws <- createTestWorkspace env "authz-deleted-resolution"
+      project <- Proj.createProject env.pool CreateProject
+        { workspaceId = ws.id
+        , name = "memory scope project"
+        , description = Nothing
+        , parentId = Nothing
+        , priority = Nothing
+        , metadata = Nothing
+        }
       mem <- Mem.createMemory env.pool CreateMemory
         { workspaceId = ws.id
+        , projectId = Just project.id
+        , taskId = Nothing
         , content = "deleted but still scoped"
         , summary = Nothing
         , memoryType = ShortTerm

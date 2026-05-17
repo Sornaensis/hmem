@@ -40,6 +40,94 @@ init =
     }
 
 
+type alias MemoryTargetOption =
+    { value : String
+    , label : String
+    }
+
+
+memoryTargetOptions : Model -> List MemoryTargetOption
+memoryTargetOptions model =
+    case model.selectedWorkspaceId of
+        Nothing ->
+            []
+
+        Just wsId ->
+            let
+                projectOptions =
+                    model.projects
+                        |> Dict.values
+                        |> List.filter (\p -> p.workspaceId == wsId)
+                        |> List.sortBy .name
+                        |> List.map
+                            (\p ->
+                                { value = "project:" ++ p.id
+                                , label = "Project: " ++ p.name
+                                }
+                            )
+
+                taskOptions =
+                    model.tasks
+                        |> Dict.values
+                        |> List.filter (\t -> t.workspaceId == wsId)
+                        |> List.sortBy .title
+                        |> List.map
+                            (\t ->
+                                { value = "task:" ++ t.id
+                                , label = "Task: " ++ t.title
+                                }
+                            )
+            in
+            projectOptions ++ taskOptions
+
+
+selectedMemoryTargetValue : Model -> String -> Maybe String
+selectedMemoryTargetValue model target =
+    let
+        options =
+            memoryTargetOptions model
+    in
+    if List.any (\option -> option.value == target) options then
+        Just target
+
+    else
+        List.head options |> Maybe.map .value
+
+
+memoryCreateTargetIds : Model -> String -> Maybe ( Maybe String, Maybe String )
+memoryCreateTargetIds model target =
+    selectedMemoryTargetValue model target
+        |> Maybe.andThen decodeMemoryTargetValue
+
+
+decodeMemoryTargetValue : String -> Maybe ( Maybe String, Maybe String )
+decodeMemoryTargetValue target =
+    if String.startsWith "project:" target then
+        let
+            projectId =
+                String.dropLeft (String.length "project:") target
+        in
+        if String.isEmpty projectId then
+            Nothing
+
+        else
+            Just ( Just projectId, Nothing )
+
+    else if String.startsWith "task:" target then
+        let
+            taskId =
+                String.dropLeft (String.length "task:") target
+        in
+        if String.isEmpty taskId then
+            Nothing
+
+        else
+            Just ( Nothing, Just taskId )
+
+    else
+        Nothing
+
+
 clearForTabSwitch : Model -> Model
 clearForTabSwitch =
     updateEditingModel
@@ -374,11 +462,16 @@ update msg model =
                                 ( model, Cmd.none )
 
                             else
-                                let
-                                    ( trackedModel, requestId, clearCmd ) =
-                                        beginTrackedMutation [] model
-                                in
-                                ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId f.content f.memoryType requestId MemoryCreated ] )
+                                case memoryCreateTargetIds model f.target of
+                                    Just ( projectId, taskId ) ->
+                                        let
+                                            ( trackedModel, requestId, clearCmd ) =
+                                                beginTrackedMutation [] model
+                                        in
+                                        ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId projectId taskId f.content f.memoryType requestId MemoryCreated ] )
+
+                                    Nothing ->
+                                        addToast Warning "Select a project or task for this memory" model
 
                         _ ->
                             ( model, Cmd.none )
@@ -439,16 +532,21 @@ update msg model =
                                     in
                                     ( trackedModel, Cmd.batch [ clearCmd, Api.createTask model.flags.apiUrl wsId projectId title requestId TaskCreated ] )
 
-                    ( Just (InlineCreateMemory { content }), Just wsId ) ->
+                    ( Just (InlineCreateMemory { content, target }), Just wsId ) ->
                         if String.isEmpty (String.trim content) then
                             ( model, Cmd.none )
 
                         else
-                            let
-                                ( trackedModel, requestId, clearCmd ) =
-                                    beginTrackedMutation [] model
-                            in
-                            ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId content Api.ShortTerm requestId MemoryCreated ] )
+                            case memoryCreateTargetIds model target of
+                                Just ( projectId, taskId ) ->
+                                    let
+                                        ( trackedModel, requestId, clearCmd ) =
+                                            beginTrackedMutation [] model
+                                    in
+                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId projectId taskId content Api.ShortTerm requestId MemoryCreated ] )
+
+                                Nothing ->
+                                    addToast Warning "Select a project or task for this memory" model
 
                     _ ->
                         ( model, Cmd.none )
@@ -1000,6 +1098,13 @@ viewCreateFormContent model form =
                 ]
 
         CreateMemoryForm f ->
+            let
+                targetOptions =
+                    memoryTargetOptions model
+
+                selectedTarget =
+                    selectedMemoryTargetValue model f.target |> Maybe.withDefault ""
+            in
             div []
                 [ h3 [ class "modal-title" ] [ text "New Memory" ]
                 , div [ class "form-group" ]
@@ -1013,6 +1118,25 @@ viewCreateFormContent model form =
                         , autofocus True
                         ]
                         []
+                    ]
+                , div [ class "form-group" ]
+                    [ label [ class "form-label" ] [ text "Link target" ]
+                    , if List.isEmpty targetOptions then
+                        div [ class "form-hint" ] [ text "Create a project or task before adding memories." ]
+
+                      else
+                        select
+                            [ class "form-input"
+                            , value selectedTarget
+                            , onInput (\s -> UpdateCreateForm (CreateMemoryForm { f | target = s }))
+                            ]
+                            (List.map
+                                (\optionItem ->
+                                    option [ value optionItem.value, selected (optionItem.value == selectedTarget) ]
+                                        [ text optionItem.label ]
+                                )
+                                targetOptions
+                            )
                     ]
                 , div [ class "form-group" ]
                     [ label [ class "form-label" ] [ text "Type" ]
@@ -1034,7 +1158,7 @@ viewCreateFormContent model form =
                     ]
                 , div [ class "modal-actions" ]
                     [ button [ class "btn btn-secondary", onClick CancelCreateForm ] [ text "Cancel" ]
-                    , button [ class "btn btn-primary", onClick SubmitCreateForm ] [ text "Create" ]
+                    , button [ class "btn btn-primary", disabled (List.isEmpty targetOptions), onClick SubmitCreateForm ] [ text "Create" ]
                     ]
                 ]
 
@@ -1101,39 +1225,65 @@ viewInlineCreateMemory model =
         div [ class "inline-create-row empty-state" ] [ text "Read-only workspace" ]
 
     else
-        case model.editing.inlineCreate of
-            Just (InlineCreateMemory f) ->
-                div [ class "inline-create-row" ]
-                    [ input
-                        [ class "inline-create-input"
-                        , Html.Attributes.id "inline-create-input"
-                        , placeholder "New memory content..."
-                        , value f.content
-                        , onInput (\s -> UpdateInlineCreate (InlineCreateMemory { f | content = s }))
-                        , onBlur CancelInlineCreate
-                        , onKeyDown
-                            (\keyCode ->
-                                if keyCode == 13 then
-                                    SubmitInlineCreate
+        let
+            targetOptions =
+                memoryTargetOptions model
 
-                                else if keyCode == 27 then
-                                    CancelInlineCreate
+            defaultTarget =
+                selectedMemoryTargetValue model "" |> Maybe.withDefault ""
+        in
+        if List.isEmpty targetOptions then
+            div [ class "inline-create-row empty-state" ] [ text "Create a project or task before adding memories." ]
 
-                                else
-                                    NoOp
+        else
+            case model.editing.inlineCreate of
+                Just (InlineCreateMemory f) ->
+                    let
+                        selectedTarget =
+                            selectedMemoryTargetValue model f.target |> Maybe.withDefault defaultTarget
+                    in
+                    div [ class "inline-create-row" ]
+                        [ select
+                            [ class "inline-create-input"
+                            , value selectedTarget
+                            , onInput (\s -> UpdateInlineCreate (InlineCreateMemory { f | target = s }))
+                            ]
+                            (List.map
+                                (\optionItem ->
+                                    option [ value optionItem.value, selected (optionItem.value == selectedTarget) ]
+                                        [ text optionItem.label ]
+                                )
+                                targetOptions
                             )
-                        ]
-                        []
-                    ]
+                        , input
+                            [ class "inline-create-input"
+                            , Html.Attributes.id "inline-create-input"
+                            , placeholder "New memory content..."
+                            , value f.content
+                            , onInput (\s -> UpdateInlineCreate (InlineCreateMemory { f | content = s }))
+                            , onKeyDown
+                                (\keyCode ->
+                                    if keyCode == 13 then
+                                        SubmitInlineCreate
 
-            _ ->
-                div [ class "inline-create-row" ]
-                    [ button
-                        [ class "btn-inline-create-top"
-                        , onClick (ShowInlineCreate (InlineCreateMemory { content = "" }))
+                                    else if keyCode == 27 then
+                                        CancelInlineCreate
+
+                                    else
+                                        NoOp
+                                )
+                            ]
+                            []
                         ]
-                        [ text "+ New Memory" ]
-                    ]
+
+                _ ->
+                    div [ class "inline-create-row" ]
+                        [ button
+                            [ class "btn-inline-create-top"
+                            , onClick (ShowInlineCreate (InlineCreateMemory { content = "", target = defaultTarget }))
+                            ]
+                            [ text "+ New Memory" ]
+                        ]
 
 
 viewInlineCreateInput : Model -> Maybe String -> String -> Html Msg

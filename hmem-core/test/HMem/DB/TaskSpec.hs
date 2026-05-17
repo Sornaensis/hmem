@@ -11,7 +11,7 @@ import Data.Text qualified as T
 import Test.Hspec
 import Hasql.Session qualified as Session
 
-import HMem.DB.Memory (createMemory, getTaskMemories, touchMemory, updateMemory)
+import HMem.DB.Memory (createMemory, getMemory, getTaskMemories, touchMemory, updateMemory)
 import HMem.DB.Pool (DBException(..), runSession)
 import HMem.DB.Project (createProject, updateProject)
 import HMem.DB.Task
@@ -625,7 +625,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       -- All should succeed -- no cycle in a diamond
 
   describe "memory links" $ do
-    it "links and unlinks task to memory" $ \env -> do
+    it "keeps task memory link creation idempotent" $ \env -> do
       ws <- createTestWorkspace env "taskmem-ws"
       proj <- createProject env.pool CreateProject
         { workspaceId = ws.id, parentId = Nothing, name = "Mem"
@@ -635,13 +635,61 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         , description = Nothing, priority = Nothing, metadata = Nothing
         , dueAt = Nothing }
       mem <- createMemory env.pool CreateMemory
-        { workspaceId = ws.id, content = "linked mem", summary = Nothing
+        { workspaceId = ws.id, projectId = Nothing, taskId = Just task.id, content = "linked mem", summary = Nothing
         , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
         , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
-      linkTaskMemory env.pool task.id mem.id
       -- Idempotent
       linkTaskMemory env.pool task.id mem.id
-      unlinkTaskMemory env.pool task.id mem.id
+
+    it "soft-deletes and restores task-linked memories with the task" $ \env -> do
+      ws <- createTestWorkspace env "taskmem-delete-restore-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Task Memory Project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing
+        , title = "Task with memory", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Nothing, taskId = Just task.id, content = "task scoped memory", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+
+      deleteTask env.pool task.id `shouldReturn` True
+      getTask env.pool task.id >>= (`shouldSatisfy` isNothing)
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isNothing)
+
+      restoreTask env.pool task.id `shouldReturn` True
+      getTask env.pool task.id >>= (`shouldSatisfy` isJust)
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isJust)
+
+    it "preserves task-linked memories while another active target remains" $ \env -> do
+      ws <- createTestWorkspace env "taskmem-multiple-delete-restore-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Task Memory Project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task1 <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing
+        , title = "Task one", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      task2 <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing
+        , title = "Task two", description = Nothing, priority = Nothing
+        , metadata = Nothing, dueAt = Nothing }
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Nothing, taskId = Just task1.id, content = "shared task memory", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      linkTaskMemory env.pool task2.id mem.id
+
+      deleteTask env.pool task1.id `shouldReturn` True
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isJust)
+
+      deleteTask env.pool task2.id `shouldReturn` True
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isNothing)
+
+      restoreTask env.pool task1.id `shouldReturn` True
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isJust)
 
     it "filters linked task memories by query, tags, importance, type, and access count" $ \env -> do
       ws <- createTestWorkspace env "taskmem-filter-ws"
@@ -653,15 +701,13 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         , description = Nothing, priority = Nothing, metadata = Nothing
         , dueAt = Nothing }
       matching <- createMemory env.pool CreateMemory
-        { workspaceId = ws.id, content = "beta haskell note", summary = Nothing
+        { workspaceId = ws.id, projectId = Nothing, taskId = Just task.id, content = "beta haskell note", summary = Nothing
         , memoryType = LongTerm, importance = Just 7, metadata = Nothing
         , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Just ["keep"], ftsLanguage = Nothing }
-      nonMatching <- createMemory env.pool CreateMemory
-        { workspaceId = ws.id, content = "beta haskell note", summary = Nothing
+      _nonMatching <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Nothing, taskId = Just task.id, content = "beta haskell note", summary = Nothing
         , memoryType = ShortTerm, importance = Just 2, metadata = Nothing
         , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Just ["drop"], ftsLanguage = Nothing }
-      linkTaskMemory env.pool task.id matching.id
-      linkTaskMemory env.pool task.id nonMatching.id
       touchMemory env.pool matching.id
       _ <- updateMemory env.pool matching.id UpdateMemory
         { content = Nothing, summary = Unchanged, memoryType = Nothing, importance = Nothing

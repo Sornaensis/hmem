@@ -85,6 +85,7 @@ data DBException
   | DBCheckViolation Text
   | DBCycleDetected Text
   | DBLifecycleViolation Text Text (Maybe Text) (Maybe Text)
+  | DBWorkflowViolation Text Text (Maybe Text) (Maybe Text)
   | DBStatementTimeout
   | DBOtherError Text
   deriving (Show, Eq)
@@ -103,6 +104,8 @@ classifyError sessErr = classifyCmd cmdErr
     classifyCmd (Session.ResultError (Session.ServerError sqlstate msg detail hint _))
       | Just lifecycleCode <- lifecycleCodeFor sqlstate =
           DBLifecycleViolation lifecycleCode (decode msg) (decode <$> detail) (decode <$> hint)
+      | Just workflowCode <- workflowCodeFor sqlstate =
+          DBWorkflowViolation workflowCode (decode msg) (decode <$> detail) (decode <$> hint)
       | sqlstate == "23505" = DBUniqueViolation (decode msg)
       | sqlstate == "23503" = DBForeignKeyViolation (decode msg)
       | sqlstate == "23514" = DBCheckViolation (decode msg)
@@ -119,6 +122,12 @@ classifyError sessErr = classifyCmd cmdErr
     lifecycleCodeFor "HM202" = Just "PROJECT_OPEN_UNDER_CLOSED_PROJECT"
     lifecycleCodeFor "HM203" = Just "TASK_OPEN_UNDER_CLOSED_PROJECT"
     lifecycleCodeFor _       = Nothing
+
+    workflowCodeFor "HM301" = Just "MEMORY_LINK_REQUIRED"
+    workflowCodeFor "HM302" = Just "MEMORY_LINK_AMBIGUOUS"
+    workflowCodeFor "HM303" = Just "MEMORY_LINK_TARGET_INVALID"
+    workflowCodeFor "HM304" = Just "MEMORY_LINK_CROSS_WORKSPACE"
+    workflowCodeFor _       = Nothing
 
 ------------------------------------------------------------------------
 -- Pool creation

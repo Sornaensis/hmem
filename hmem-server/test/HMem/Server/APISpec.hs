@@ -699,10 +699,16 @@ spec = around withApp $ do
       respStatus wsResp `shouldBe` 200
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
 
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Memory Flow Project" :: T.Text)])
+      respStatus projResp `shouldBe` 200
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
       -- Create memory
       memResp <- postJSON app "/api/v1/memories"
         (object
           [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
           , "content" .= ("Test memory content" :: T.Text)
           , "memory_type" .= ("short_term" :: T.Text)
           , "importance" .= (7 :: Int)
@@ -734,6 +740,103 @@ spec = around withApp $ do
 
       purgeResp <- del app (uuidPath "/api/v1/memories" mem.id <> "/purge")
       respStatus purgeResp `shouldBe` 200
+
+  describe "explicit memory creation links" $ do
+    it "requires at least one project or task target and allows multiple targets" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("memory-link-required-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Memory Target Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+      taskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Top task" :: T.Text)])
+      let Just task = decode (respBody taskResp) :: Maybe Task
+
+      missingResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "content" .= ("missing link" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          ])
+      respStatus missingResp `shouldBe` 400
+
+      multiTargetResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
+          , "task_id" .= task.id
+          , "content" .= ("multi-target link" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          ])
+      respStatus multiTargetResp `shouldBe` 200
+
+    it "creates project-linked and task-linked memories atomically" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("memory-linked-valid-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Valid Target Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+      taskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Valid top task" :: T.Text)])
+      let Just task = decode (respBody taskResp) :: Maybe Task
+
+      projectMemResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
+          , "content" .= ("project-linked" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          ])
+      respStatus projectMemResp `shouldBe` 200
+
+      taskMemResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= ws.id
+          , "task_id" .= task.id
+          , "content" .= ("task-linked" :: T.Text)
+          , "memory_type" .= ("long_term" :: T.Text)
+          ])
+      respStatus taskMemResp `shouldBe` 200
+
+    it "accepts subtask creation targets and rejects cross-workspace targets" $ \app -> do
+      wsAResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("memory-link-invalid-a" :: T.Text)])
+      let Just wsA = decode (respBody wsAResp) :: Maybe Workspace
+      wsBResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("memory-link-invalid-b" :: T.Text)])
+      let Just wsB = decode (respBody wsBResp) :: Maybe Workspace
+      projAResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= wsA.id, "name" .= ("Project A" :: T.Text)])
+      let Just projA = decode (respBody projAResp) :: Maybe Project
+      projBResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= wsB.id, "name" .= ("Project B" :: T.Text)])
+      let Just projB = decode (respBody projBResp) :: Maybe Project
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= wsA.id, "project_id" .= projA.id, "title" .= ("Parent" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Task
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= wsA.id, "project_id" .= projA.id, "parent_id" .= parent.id, "title" .= ("Child" :: T.Text)])
+      let Just child = decode (respBody childResp) :: Maybe Task
+
+      subtaskResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= wsA.id
+          , "task_id" .= child.id
+          , "content" .= ("subtask-linked" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          ])
+      respStatus subtaskResp `shouldBe` 200
+
+      crossWorkspaceResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= wsA.id
+          , "project_id" .= projB.id
+          , "content" .= ("cross workspace" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          ])
+      respStatus crossWorkspaceResp `shouldBe` 400
 
   describe "project flow" $ do
     it "creates workspace, project, lists, updates status" $ \app -> do
@@ -1042,15 +1145,20 @@ spec = around withApp $ do
       wsResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("search-ws" :: T.Text)])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Search Memory Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
       _ <- postJSON app "/api/v1/memories"
         (object
           [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
           , "content" .= ("Haskell is a purely functional programming language" :: T.Text)
           , "memory_type" .= ("short_term" :: T.Text)
           ])
       _ <- postJSON app "/api/v1/memories"
         (object
           [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
           , "content" .= ("Python is a dynamically typed scripting language" :: T.Text)
           , "memory_type" .= ("short_term" :: T.Text)
           ])
@@ -1753,15 +1861,15 @@ spec = around withApp $ do
           respStatus deniedCreateProjectResp `shouldBe` 403
 
         mem <- withPrincipalApp env deployedAuthCfg (grantPrincipal editUserId) $ \editApp -> do
-          createMemoryResp <- postJSON editApp "/api/v1/memories"
-            (object ["workspace_id" .= ws.id, "content" .= ("edit allowed" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
-          respStatus createMemoryResp `shouldBe` 200
-          let Just createdMem = decode (respBody createMemoryResp) :: Maybe Memory
-
           createProjectResp <- postJSON editApp "/api/v1/projects"
             (object ["workspace_id" .= ws.id, "name" .= ("edit-project-allowed" :: T.Text)])
           respStatus createProjectResp `shouldBe` 200
           let Just createdProject = decode (respBody createProjectResp) :: Maybe Project
+
+          createMemoryResp <- postJSON editApp "/api/v1/memories"
+            (object ["workspace_id" .= ws.id, "project_id" .= createdProject.id, "content" .= ("edit allowed" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
+          respStatus createMemoryResp `shouldBe` 200
+          let Just createdMem = decode (respBody createMemoryResp) :: Maybe Memory
 
           createTaskResp <- postJSON editApp "/api/v1/tasks"
             (object ["workspace_id" .= ws.id, "project_id" .= createdProject.id, "title" .= ("edit-task-allowed" :: T.Text)])
@@ -1790,8 +1898,18 @@ spec = around withApp $ do
         wsB <- createTestWorkspace env "entity-denial-b"
         userId <- createTestUser env False False
         _ <- grantWorkspaceRole env wsA.id userId Auth.WorkspaceRoleRead
+        projectB <- Proj.createProject env.pool CreateProject
+          { workspaceId = wsB.id
+          , name = "workspace b project"
+          , description = Nothing
+          , parentId = Nothing
+          , priority = Nothing
+          , metadata = Nothing
+          }
         memB <- Mem.createMemory env.pool CreateMemory
           { workspaceId = wsB.id
+          , projectId = Just projectB.id
+          , taskId = Nothing
           , content = "workspace b secret"
           , summary = Nothing
           , memoryType = ShortTerm
@@ -1803,14 +1921,6 @@ spec = around withApp $ do
           , pinned = Nothing
           , tags = Nothing
           , ftsLanguage = Nothing
-          }
-        projectB <- Proj.createProject env.pool CreateProject
-          { workspaceId = wsB.id
-          , name = "workspace b project"
-          , description = Nothing
-          , parentId = Nothing
-          , priority = Nothing
-          , metadata = Nothing
           }
         taskB <- Task.createTask env.pool CreateTask
           { workspaceId = wsB.id
@@ -1903,9 +2013,14 @@ spec = around withApp $ do
         (object ["workspace_id" .= wsA.id, "name" .= ("Project A" :: T.Text)])
       let Just proj = decode (respBody projResp) :: Maybe Project
 
+      projBResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= wsB.id, "name" .= ("Project B" :: T.Text)])
+      let Just projB = decode (respBody projBResp) :: Maybe Project
+
       memResp <- postJSON app "/api/v1/memories"
         (object
           [ "workspace_id" .= wsB.id
+          , "project_id" .= projB.id
           , "content" .= ("Memory B" :: T.Text)
           , "memory_type" .= ("short_term" :: T.Text)
           ])
@@ -1924,12 +2039,20 @@ spec = around withApp $ do
         (object ["name" .= ("relation-ws-b" :: T.Text)])
       let Just wsB = decode (respBody wsBResp) :: Maybe Workspace
 
+      projAResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= wsA.id, "name" .= ("Relation Project A" :: T.Text)])
+      let Just projA = decode (respBody projAResp) :: Maybe Project
+
+      projBResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= wsB.id, "name" .= ("Relation Project B" :: T.Text)])
+      let Just projB = decode (respBody projBResp) :: Maybe Project
+
       memAResp <- postJSON app "/api/v1/memories"
-        (object ["workspace_id" .= wsA.id, "content" .= ("A" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
+        (object ["workspace_id" .= wsA.id, "project_id" .= projA.id, "content" .= ("A" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
       let Just memA = decode (respBody memAResp) :: Maybe Memory
 
       memBResp <- postJSON app "/api/v1/memories"
-        (object ["workspace_id" .= wsB.id, "content" .= ("B" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
+        (object ["workspace_id" .= wsB.id, "project_id" .= projB.id, "content" .= ("B" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
       let Just memB = decode (respBody memBResp) :: Maybe Memory
 
       memoryLinkResp <- postJSON app (uuidPath "/api/v1/memories" memA.id <> "/links")
@@ -2285,16 +2408,21 @@ spec = around withApp $ do
       wsResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("memory-filter-ws" :: T.Text)])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Memory Filter Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
 
       firstMemResp <- postJSON app "/api/v1/memories"
         (object
           [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
           , "content" .= ("older memory" :: T.Text)
           , "memory_type" .= ("short_term" :: T.Text)
           ])
       secondMemResp <- postJSON app "/api/v1/memories"
         (object
           [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
           , "content" .= ("newer memory" :: T.Text)
           , "memory_type" .= ("short_term" :: T.Text)
           ])
@@ -2373,22 +2501,28 @@ spec = around withApp $ do
         wsResp <- postJSON app "/api/v1/workspaces"
           (object ["name" .= ("memory-access-filter-ws" :: T.Text)])
         let Just ws = decode (respBody wsResp) :: Maybe Workspace
+        projResp <- postJSON app "/api/v1/projects"
+          (object ["workspace_id" .= ws.id, "name" .= ("Memory Access Project" :: T.Text)])
+        let Just proj = decode (respBody projResp) :: Maybe Project
 
         lowMemResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "project_id" .= proj.id
             , "content" .= ("low access" :: T.Text)
             , "memory_type" .= ("short_term" :: T.Text)
             ])
         highMemResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "project_id" .= proj.id
             , "content" .= ("high access" :: T.Text)
             , "memory_type" .= ("short_term" :: T.Text)
             ])
         untouchedMemResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "project_id" .= proj.id
             , "content" .= ("untouched access" :: T.Text)
             , "memory_type" .= ("short_term" :: T.Text)
             ])
@@ -2422,6 +2556,7 @@ spec = around withApp $ do
         matchingResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "project_id" .= proj.id
             , "content" .= ("alpha haskell note" :: T.Text)
             , "memory_type" .= ("long_term" :: T.Text)
             , "importance" .= (8 :: Int)
@@ -2430,6 +2565,7 @@ spec = around withApp $ do
         wrongTagResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "project_id" .= proj.id
             , "content" .= ("alpha haskell note" :: T.Text)
             , "memory_type" .= ("long_term" :: T.Text)
             , "importance" .= (8 :: Int)
@@ -2438,6 +2574,7 @@ spec = around withApp $ do
         lowImportanceResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "project_id" .= proj.id
             , "content" .= ("alpha haskell note" :: T.Text)
             , "memory_type" .= ("long_term" :: T.Text)
             , "importance" .= (2 :: Int)
@@ -2446,6 +2583,7 @@ spec = around withApp $ do
         wrongTypeResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "project_id" .= proj.id
             , "content" .= ("alpha haskell note" :: T.Text)
             , "memory_type" .= ("short_term" :: T.Text)
             , "importance" .= (8 :: Int)
@@ -2454,6 +2592,7 @@ spec = around withApp $ do
         lowAccessResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "project_id" .= proj.id
             , "content" .= ("alpha haskell note" :: T.Text)
             , "memory_type" .= ("long_term" :: T.Text)
             , "importance" .= (8 :: Int)
@@ -2462,6 +2601,7 @@ spec = around withApp $ do
         wrongQueryResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "project_id" .= proj.id
             , "content" .= ("gamma note" :: T.Text)
             , "memory_type" .= ("long_term" :: T.Text)
             , "importance" .= (8 :: Int)
@@ -2509,6 +2649,7 @@ spec = around withApp $ do
         matchingResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "task_id" .= task.id
             , "content" .= ("beta haskell note" :: T.Text)
             , "memory_type" .= ("long_term" :: T.Text)
             , "importance" .= (7 :: Int)
@@ -2517,6 +2658,7 @@ spec = around withApp $ do
         wrongTagResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "task_id" .= task.id
             , "content" .= ("beta haskell note" :: T.Text)
             , "memory_type" .= ("long_term" :: T.Text)
             , "importance" .= (7 :: Int)
@@ -2525,6 +2667,7 @@ spec = around withApp $ do
         lowImportanceResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "task_id" .= task.id
             , "content" .= ("beta haskell note" :: T.Text)
             , "memory_type" .= ("long_term" :: T.Text)
             , "importance" .= (2 :: Int)
@@ -2533,6 +2676,7 @@ spec = around withApp $ do
         wrongTypeResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "task_id" .= task.id
             , "content" .= ("beta haskell note" :: T.Text)
             , "memory_type" .= ("short_term" :: T.Text)
             , "importance" .= (7 :: Int)
@@ -2541,6 +2685,7 @@ spec = around withApp $ do
         lowAccessResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "task_id" .= task.id
             , "content" .= ("beta haskell note" :: T.Text)
             , "memory_type" .= ("long_term" :: T.Text)
             , "importance" .= (7 :: Int)
@@ -2549,6 +2694,7 @@ spec = around withApp $ do
         wrongQueryResp <- postJSON app "/api/v1/memories"
           (object
             [ "workspace_id" .= ws.id
+            , "task_id" .= task.id
             , "content" .= ("gamma note" :: T.Text)
             , "memory_type" .= ("long_term" :: T.Text)
             , "importance" .= (7 :: Int)
@@ -2585,12 +2731,15 @@ spec = around withApp $ do
       wsResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("link-ws" :: T.Text)])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Memory Link Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
       m1Resp <- postJSON app "/api/v1/memories"
-        (object ["workspace_id" .= ws.id, "content" .= ("mem A" :: T.Text)
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "content" .= ("mem A" :: T.Text)
                 , "memory_type" .= ("short_term" :: T.Text)])
       let Just m1 = decode (respBody m1Resp) :: Maybe Memory
       m2Resp <- postJSON app "/api/v1/memories"
-        (object ["workspace_id" .= ws.id, "content" .= ("mem B" :: T.Text)
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "content" .= ("mem B" :: T.Text)
                 , "memory_type" .= ("short_term" :: T.Text)])
       let Just m2 = decode (respBody m2Resp) :: Maybe Memory
 
@@ -2608,8 +2757,11 @@ spec = around withApp $ do
       wsResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("tag-ws" :: T.Text)])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Tag Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
       memResp <- postJSON app "/api/v1/memories"
-        (object ["workspace_id" .= ws.id, "content" .= ("tagged" :: T.Text)
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "content" .= ("tagged" :: T.Text)
                 , "memory_type" .= ("short_term" :: T.Text)
                 , "tags" .= (["alpha", "beta"] :: [T.Text])])
       let Just mem = decode (respBody memResp) :: Maybe Memory
@@ -2624,10 +2776,13 @@ spec = around withApp $ do
       wsResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("batch-ws" :: T.Text)])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Batch Memory Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
       let items =
-            [ object ["workspace_id" .= ws.id, "content" .= ("batch 1" :: T.Text)
+            [ object ["workspace_id" .= ws.id, "project_id" .= proj.id, "content" .= ("batch 1" :: T.Text)
                      , "memory_type" .= ("short_term" :: T.Text)]
-            , object ["workspace_id" .= ws.id, "content" .= ("batch 2" :: T.Text)
+            , object ["workspace_id" .= ws.id, "project_id" .= proj.id, "content" .= ("batch 2" :: T.Text)
                      , "memory_type" .= ("long_term" :: T.Text)]
             ]
       batchResp <- postJSON app "/api/v1/memories/batch" (toJSON items)
@@ -2639,8 +2794,11 @@ spec = around withApp $ do
       wsResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("batch-invalid-ws" :: T.Text)])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Batch Invalid Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
       let items =
-            [ object ["workspace_id" .= ws.id, "content" .= ("   " :: T.Text)
+            [ object ["workspace_id" .= ws.id, "project_id" .= proj.id, "content" .= ("   " :: T.Text)
                      , "memory_type" .= ("short_term" :: T.Text)]
             ]
       batchResp <- postJSON app "/api/v1/memories/batch" (toJSON items)
@@ -2701,6 +2859,7 @@ spec = around withApp $ do
       taskMemResp <- postJSON app "/api/v1/memories"
         (object
           [ "workspace_id" .= ws.id
+          , "task_id" .= task.id
           , "content" .= ("Task memory content" :: T.Text)
           , "summary" .= ("Task memory" :: T.Text)
           , "memory_type" .= ("short_term" :: T.Text)
@@ -2711,6 +2870,7 @@ spec = around withApp $ do
       projectMemResp <- postJSON app "/api/v1/memories"
         (object
           [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
           , "content" .= ("Project memory content" :: T.Text)
           , "summary" .= ("Project memory" :: T.Text)
           , "memory_type" .= ("long_term" :: T.Text)
@@ -2718,9 +2878,14 @@ spec = around withApp $ do
           ])
       let Just projectMem = decode (respBody projectMemResp) :: Maybe Memory
 
+      workspaceMemProjectResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Workspace Memory Project" :: T.Text)])
+      let Just workspaceMemProject = decode (respBody workspaceMemProjectResp) :: Maybe Project
+
       workspaceMemResp <- postJSON app "/api/v1/memories"
         (object
           [ "workspace_id" .= ws.id
+          , "project_id" .= workspaceMemProject.id
           , "content" .= ("Workspace memory content" :: T.Text)
           , "summary" .= ("Workspace memory" :: T.Text)
           , "memory_type" .= ("short_term" :: T.Text)
@@ -2765,6 +2930,7 @@ spec = around withApp $ do
       projectMemResp <- postJSON app "/api/v1/memories"
         (object
           [ "workspace_id" .= ws.id
+          , "project_id" .= proj.id
           , "content" .= ("Project overview memory" :: T.Text)
           , "summary" .= ("Project overview mem" :: T.Text)
           , "memory_type" .= ("long_term" :: T.Text)
@@ -2772,9 +2938,14 @@ spec = around withApp $ do
           ])
       let Just projectMem = decode (respBody projectMemResp) :: Maybe Memory
 
+      workspaceMemProjectResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Project Overview Workspace Memory Project" :: T.Text)])
+      let Just workspaceMemProject = decode (respBody workspaceMemProjectResp) :: Maybe Project
+
       workspaceMemResp <- postJSON app "/api/v1/memories"
         (object
           [ "workspace_id" .= ws.id
+          , "project_id" .= workspaceMemProject.id
           , "content" .= ("Workspace context memory" :: T.Text)
           , "summary" .= ("Workspace context mem" :: T.Text)
           , "memory_type" .= ("short_term" :: T.Text)
@@ -2827,8 +2998,13 @@ spec = around withApp $ do
           ])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
 
+      memProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Hidden Memory Project" :: T.Text)])
+      let Just memProj = decode (respBody memProjResp) :: Maybe Project
+
       memResp <- postJSON app "/api/v1/memories"
         (object ["workspace_id" .= ws.id, "content" .= ("hidden memory" :: T.Text)
+                , "project_id" .= memProj.id
                 , "memory_type" .= ("short_term" :: T.Text)])
       let Just mem = decode (respBody memResp) :: Maybe Memory
 
@@ -2904,8 +3080,13 @@ spec = around withApp $ do
         (object ["name" .= ("restore-memory-ws" :: T.Text)])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
 
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Restore Memory Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
       memResp <- postJSON app "/api/v1/memories"
         (object ["workspace_id" .= ws.id, "content" .= ("restore me" :: T.Text)
+                , "project_id" .= proj.id
                 , "memory_type" .= ("short_term" :: T.Text)])
       let Just mem = decode (respBody memResp) :: Maybe Memory
 
@@ -2994,8 +3175,13 @@ spec = around withApp $ do
           ])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
 
+      memProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Workspace Child Memory Project" :: T.Text)])
+      let Just memProj = decode (respBody memProjResp) :: Maybe Project
+
       memResp <- postJSON app "/api/v1/memories"
         (object ["workspace_id" .= ws.id, "content" .= ("workspace child memory" :: T.Text)
+                , "project_id" .= memProj.id
                 , "memory_type" .= ("short_term" :: T.Text)])
       let Just mem = decode (respBody memResp) :: Maybe Memory
 
@@ -3176,8 +3362,13 @@ spec = around withApp $ do
         (object ["workspace_id" .= ws.id, "name" .= ("linkable" :: T.Text)])
       let Just cat = decode (respBody catResp) :: Maybe MemoryCategory
 
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Category Link Memory Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
       memResp <- postJSON app "/api/v1/memories"
         (object ["workspace_id" .= ws.id, "content" .= ("to categorize" :: T.Text)
+                , "project_id" .= proj.id
                 , "memory_type" .= ("short_term" :: T.Text)])
       let Just mem = decode (respBody memResp) :: Maybe Memory
 
@@ -3273,13 +3464,19 @@ spec = around withApp $ do
         (object ["workspace_id" .= ws.id, "name" .= ("batch-category-two" :: T.Text)])
       let Just cat2 = decode (respBody cat2Resp) :: Maybe MemoryCategory
 
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Category Batch Memory Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
       mem1Resp <- postJSON app "/api/v1/memories"
         (object ["workspace_id" .= ws.id, "content" .= ("batch category memory one" :: T.Text)
+                , "project_id" .= proj.id
                 , "memory_type" .= ("short_term" :: T.Text)])
       let Just mem1 = decode (respBody mem1Resp) :: Maybe Memory
 
       mem2Resp <- postJSON app "/api/v1/memories"
         (object ["workspace_id" .= ws.id, "content" .= ("batch category memory two" :: T.Text)
+                , "project_id" .= proj.id
                 , "memory_type" .= ("short_term" :: T.Text)])
       let Just mem2 = decode (respBody mem2Resp) :: Maybe Memory
 
@@ -3414,9 +3611,14 @@ spec = around withApp $ do
         (object ["name" .= ("activity-ws" :: T.Text)])
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
 
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Activity Memory Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
       -- Create a memory to generate activity
       _ <- postJSON app "/api/v1/memories"
         (object ["workspace_id" .= ws.id, "content" .= ("activity test" :: T.Text)
+                , "project_id" .= proj.id
                 , "memory_type" .= ("short_term" :: T.Text)])
 
       actResp <- get_ app ("/api/v1/activity?workspace_id="

@@ -431,15 +431,17 @@ handleDBErrors io = do
       DBCycleDetected _ -> err409
         { errBody = Aeson.encode $ errorBody "cycle" "Operation would create a cycle" }
       DBLifecycleViolation code msg detail hint -> err409
-        { errBody = Aeson.encode $ lifecycleErrorBody code msg detail hint }
+        { errBody = Aeson.encode $ structuredErrorBody "lifecycle_conflict" code msg detail hint }
+      DBWorkflowViolation code msg detail hint -> err409
+        { errBody = Aeson.encode $ structuredErrorBody "workflow_conflict" code msg detail hint }
       DBStatementTimeout -> err504
         { errBody = Aeson.encode $ errorBody "timeout" "Database request timed out" }
       DBOtherError _ -> err500
         { errBody = Aeson.encode $ errorBody "internal" "Internal database error" }
 
-    lifecycleErrorBody :: Text -> Text -> Maybe Text -> Maybe Text -> Value
-    lifecycleErrorBody code msg detail hint = object $
-      [ "error" .= ("lifecycle_conflict" :: Text)
+    structuredErrorBody :: Text -> Text -> Text -> Maybe Text -> Maybe Text -> Value
+    structuredErrorBody errType code msg detail hint = object $
+      [ "error" .= errType
       , "code" .= code
       , "message" .= msg
       ]
@@ -468,6 +470,7 @@ dbErrorLabel = \case
   DBCheckViolation _ -> "check_violation"
   DBCycleDetected _ -> "cycle_detected"
   DBLifecycleViolation code _ _ _ -> "lifecycle_violation:" <> code
+  DBWorkflowViolation code _ _ _ -> "workflow_violation:" <> code
   DBStatementTimeout -> "statement_timeout"
   DBOtherError _ -> "other_error"
 
@@ -478,6 +481,10 @@ dbErrorDetail = \case
   DBCheckViolation detail -> Just detail
   DBCycleDetected detail -> Just detail
   DBLifecycleViolation code msg detail hint -> Just $ T.intercalate " | " $
+    [ "code=" <> code, "message=" <> msg ]
+    ++ [ "detail=" <> d | Just d <- [detail] ]
+    ++ [ "hint=" <> h | Just h <- [hint] ]
+  DBWorkflowViolation code msg detail hint -> Just $ T.intercalate " | " $
     [ "code=" <> code, "message=" <> msg ]
     ++ [ "detail=" <> d | Just d <- [detail] ]
     ++ [ "hint=" <> h | Just h <- [hint] ]
@@ -886,11 +893,6 @@ workspaceHandlers pool bc =
               where_ $ row.memWorkspaceId ==. lit wsId
               where_ $ activeMemory row
               pure row.memId
-            projIds <- Session.statement () $ run $ select $ do
-              row <- each projectSchema
-              where_ $ row.projWorkspaceId ==. lit wsId
-              where_ $ activeProject row
-              pure row.projId
             taskIds <- Session.statement () $ run $ select $ do
               row <- each taskSchema
               where_ $ row.taskWorkspaceId ==. lit wsId
@@ -940,51 +942,13 @@ workspaceHandlers pool bc =
                   , returning = NoReturning
                   }
 
-            case projIds of
-              [] -> pure ()
-              _ -> Session.statement () $ run_ $
-                delete Rel8.Delete
-                  { from = projectMemoryLinkSchema
-                  , using = pure ()
-                  , deleteWhere = \_ row -> in_ row.pmlProjectId (map lit projIds)
-                  , returning = NoReturning
-                  }
-
-            case memIds of
-              [] -> pure ()
-              _ -> Session.statement () $ run_ $
-                delete Rel8.Delete
-                  { from = projectMemoryLinkSchema
-                  , using = pure ()
-                  , deleteWhere = \_ row -> in_ row.pmlMemoryId (map lit memIds)
-                  , returning = NoReturning
-                  }
-
             case taskIds of
               [] -> pure ()
-              _ -> do
-                Session.statement () $ run_ $
-                  delete Rel8.Delete
-                    { from = taskMemoryLinkSchema
-                    , using = pure ()
-                    , deleteWhere = \_ row -> in_ row.tmlTaskId (map lit taskIds)
-                    , returning = NoReturning
-                    }
-                Session.statement () $ run_ $
-                  delete Rel8.Delete
-                    { from = taskDependencySchema
-                    , using = pure ()
-                    , deleteWhere = \_ row -> in_ row.tdTaskId (map lit taskIds) ||. in_ row.tdDependsOnId (map lit taskIds)
-                    , returning = NoReturning
-                    }
-
-            case memIds of
-              [] -> pure ()
               _ -> Session.statement () $ run_ $
                 delete Rel8.Delete
-                  { from = taskMemoryLinkSchema
+                  { from = taskDependencySchema
                   , using = pure ()
-                  , deleteWhere = \_ row -> in_ row.tmlMemoryId (map lit memIds)
+                  , deleteWhere = \_ row -> in_ row.tdTaskId (map lit taskIds) ||. in_ row.tdDependsOnId (map lit taskIds)
                   , returning = NoReturning
                   }
 
@@ -1234,6 +1198,7 @@ memoryHandlers pool tracker bc pgvec =
 
     createMemoryH cm = do
       requireWorkspaceRoleH pool cm.workspaceId Auth.WorkspaceRoleEdit
+      authorizeCreateMemoryTarget cm
       rejectValidationErrors (validateCreateMemoryInput cm)
       mem <- handleDBErrors $ Mem.createMemory pool cm
       emit bc Created ETMemory mem.id (Just $ toJSON mem)
@@ -1243,8 +1208,23 @@ memoryHandlers pool tracker bc pgvec =
       | otherwise = do
           requireAuthenticatedH
           mapM_ (\wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleEdit) (dedupe $ map (.workspaceId) cms)
+          mapM_ authorizeCreateMemoryTarget cms
           rejectValidationErrors (validateCreateMemoryBatchInput cms)
           handleDBErrors $ Mem.createMemoryBatch pool cms
+
+    authorizeCreateMemoryTarget cm = do
+      case cm.projectId of
+        Just pid -> do
+          projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
+          _ <- requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope cm.workspaceId) projectScope
+          pure ()
+        Nothing -> pure ()
+      case cm.taskId of
+        Just tid -> do
+          taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
+          _ <- requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope cm.workspaceId) taskScope
+          pure ()
+        Nothing -> pure ()
 
     searchMemoriesH mcompact sq = do
       let sq' = SearchQuery

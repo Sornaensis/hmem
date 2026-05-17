@@ -287,14 +287,14 @@ type EditState
 type CreateForm
     = CreateWorkspaceForm { name : String, workspaceType : Api.WorkspaceType, ghOwner : String, ghRepo : String }
     | CreateProjectForm { name : String }
-    | CreateMemoryForm { content : String, memoryType : Api.MemoryType }
+    | CreateMemoryForm { content : String, memoryType : Api.MemoryType, target : String }
     | CreateGroupForm { name : String, description : String }
 
 
 type InlineCreate
     = InlineCreateProject { parentId : Maybe String, name : String }
     | InlineCreateTask { projectId : Maybe String, parentId : Maybe String, title : String }
-    | InlineCreateMemory { content : String }
+    | InlineCreateMemory { content : String, target : String }
 
 
 type FilterShowOnly

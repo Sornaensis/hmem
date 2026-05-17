@@ -312,6 +312,7 @@ deleteTask pool tid = do
     case ids of
       [] -> pure False
       _ -> do
+        softDeleteTaskMemoriesS ids
         Session.statement () $ run_ $
           update Update
             { target = taskSchema
@@ -327,13 +328,6 @@ deleteTask pool tid = do
             , deleteWhere = \_ row -> in_ row.tdTaskId (map lit ids) ||. in_ row.tdDependsOnId (map lit ids)
             , returning = NoReturning
             }
-        Session.statement () $ run_ $
-          delete Delete
-            { from = taskMemoryLinkSchema
-            , using = pure ()
-            , deleteWhere = \_ row -> in_ row.tmlTaskId (map lit ids)
-            , returning = NoReturning
-            }
         pure True
 
 -- | Soft-delete multiple tasks by ID in a single transaction.
@@ -343,6 +337,7 @@ deleteTaskBatch :: Pool Hasql.Connection -> [UUID] -> IO Int
 deleteTaskBatch _pool [] = pure 0
 deleteTaskBatch pool ids = do
   runTransaction pool $ do
+    softDeleteTaskMemoriesS ids
     n <- Session.statement () $ runN $
       update Update
         { target = taskSchema
@@ -351,19 +346,12 @@ deleteTaskBatch pool ids = do
         , updateWhere = \_ row -> in_ row.taskId (map lit ids) &&. activeTask row
         , returning = NoReturning
         }
-    -- Cascade dependency and link cleanup
+    -- Cascade dependency cleanup
     Session.statement () $ run_ $
       delete Delete
         { from = taskDependencySchema
         , using = pure ()
         , deleteWhere = \_ row -> in_ row.tdTaskId (map lit ids) ||. in_ row.tdDependsOnId (map lit ids)
-        , returning = NoReturning
-        }
-    Session.statement () $ run_ $
-      delete Delete
-        { from = taskMemoryLinkSchema
-        , using = pure ()
-        , deleteWhere = \_ row -> in_ row.tmlTaskId (map lit ids)
         , returning = NoReturning
         }
     pure (fromIntegral n)
@@ -390,8 +378,104 @@ restoreTask pool tid = do
                 , updateWhere = \_ task -> in_ task.taskId (map lit ids) &&. not_ (isNull task.taskDeletedAt)
                 , returning = NoReturning
                 }
+            restoreTaskMemoriesS ids deletedAt
             pure (n > 0)
         | otherwise -> pure False
+
+softDeleteTaskMemoriesS :: [UUID] -> Session.Session ()
+softDeleteTaskMemoriesS [] = pure ()
+softDeleteTaskMemoriesS ids =
+  Session.statement ids softDeleteTaskMemoriesStatement
+
+softDeleteTaskMemoriesStatement :: Statement.Statement [UUID] ()
+softDeleteTaskMemoriesStatement = Statement.Statement sql encoder Dec.noResult True
+  where
+    sql = BS8.pack $ unlines
+      [ "UPDATE memories m"
+      , "SET deleted_at = now()"
+      , "WHERE m.deleted_at IS NULL"
+      , "  AND EXISTS ("
+      , "    SELECT 1 FROM task_memory_links tml"
+      , "    WHERE tml.memory_id = m.id"
+      , "      AND tml.task_id = ANY($1)"
+      , "  )"
+      , "  AND NOT EXISTS ("
+      , "    SELECT 1"
+      , "    FROM task_memory_links tml"
+      , "    JOIN tasks t ON t.id = tml.task_id"
+      , "    WHERE tml.memory_id = m.id"
+      , "      AND t.deleted_at IS NULL"
+      , "      AND t.workspace_id = m.workspace_id"
+      , "      AND t.id <> ALL($1)"
+      , "  )"
+      , "  AND NOT EXISTS ("
+      , "    SELECT 1"
+      , "    FROM project_memory_links pml"
+      , "    JOIN projects p ON p.id = pml.project_id"
+      , "    WHERE pml.memory_id = m.id"
+      , "      AND p.deleted_at IS NULL"
+      , "      AND p.workspace_id = m.workspace_id"
+      , "  )"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+
+restoreTaskMemoriesS :: [UUID] -> UTCTime -> Session.Session ()
+restoreTaskMemoriesS [] _ = pure ()
+restoreTaskMemoriesS ids deletedAt =
+  Session.statement (ids, deletedAt) restoreTaskMemoriesStatement
+
+restoreTaskMemoriesStatement :: Statement.Statement ([UUID], UTCTime) ()
+restoreTaskMemoriesStatement = Statement.Statement sql encoder Dec.noResult True
+  where
+    sql = BS8.pack $ unlines
+      [ "UPDATE memories m"
+      , "SET deleted_at = NULL"
+      , "WHERE m.deleted_at IS NOT NULL"
+      , "  AND EXISTS ("
+      , "    SELECT 1 FROM task_memory_links tml"
+      , "    WHERE tml.memory_id = m.id"
+      , "      AND tml.task_id = ANY($1)"
+      , "  )"
+      , "  AND ("
+      , "    m.deleted_at = $2"
+      , "    OR EXISTS ("
+      , "      SELECT 1"
+      , "      FROM task_memory_links tml_deleted"
+      , "      JOIN tasks t_deleted ON t_deleted.id = tml_deleted.task_id"
+      , "      WHERE tml_deleted.memory_id = m.id"
+      , "        AND t_deleted.deleted_at = m.deleted_at"
+      , "    )"
+      , "    OR EXISTS ("
+      , "      SELECT 1"
+      , "      FROM project_memory_links pml_deleted"
+      , "      JOIN projects p_deleted ON p_deleted.id = pml_deleted.project_id"
+      , "      WHERE pml_deleted.memory_id = m.id"
+      , "        AND p_deleted.deleted_at = m.deleted_at"
+      , "    )"
+      , "  )"
+      , "  AND ("
+      , "    EXISTS ("
+      , "      SELECT 1"
+      , "      FROM task_memory_links tml_active"
+      , "      JOIN tasks t_active ON t_active.id = tml_active.task_id"
+      , "      WHERE tml_active.memory_id = m.id"
+      , "        AND t_active.deleted_at IS NULL"
+      , "        AND t_active.workspace_id = m.workspace_id"
+      , "    )"
+      , "    OR EXISTS ("
+      , "      SELECT 1"
+      , "      FROM project_memory_links pml_active"
+      , "      JOIN projects p_active ON p_active.id = pml_active.project_id"
+      , "      WHERE pml_active.memory_id = m.id"
+      , "        AND p_active.deleted_at IS NULL"
+      , "        AND p_active.workspace_id = m.workspace_id"
+      , "    )"
+      , "  )"
+      ]
+    uuidArrayEncoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    encoder =
+      contramap fst uuidArrayEncoder <>
+      contramap snd (Enc.param (Enc.nonNullable Enc.timestamptz))
 
 -- | Move multiple tasks to a new project (or detach from all projects
 -- when projectId is Nothing). Returns the number of tasks actually moved.

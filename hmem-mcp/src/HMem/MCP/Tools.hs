@@ -52,10 +52,12 @@ toolDefinitions =
       , "properties" .= object []
       ]
 
-    , mkTool "memory_create" "Create one or more memories in a workspace. For batch creation, pass items[] array (max 100) instead of top-level fields. Use this for initial capture, then refine later with updates, tags, links, or categories." $ object
+    , mkTool "memory_create" "Create one or more memories in a workspace. Each memory must include memory_type and at least one explicit creation target: project_id and/or task_id. For batch creation, pass items[] array (max 100) instead of top-level fields." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
+          , "project_id"   .= prop "string" "UUID of a project to link at creation time. Provide at least one of project_id or task_id."
+          , "task_id"      .= prop "string" "UUID of a task to link at creation time. Provide at least one of project_id or task_id."
           , "content"      .= propMaxLength "string" "The memory content" maxMemoryContentBytes
           , "summary"      .= propMaxLength "string" "Optional short summary" maxMemorySummaryBytes
           , "memory_type"  .= propEnum "string" "short_term or long_term" ["short_term", "long_term"]
@@ -69,7 +71,7 @@ toolDefinitions =
                                        "description" .= t "Tags for categorization"]
           , "fts_language" .= prop "string" "Full-text search language (default 'english'). Use a PostgreSQL regconfig name, e.g. 'spanish', 'german', 'simple'."
           , "items"        .= object ["type" .= t "array",
-                                       "description" .= t "Batch: array of memory objects (same fields as top-level, max 100). When present, top-level fields are ignored.",
+                                       "description" .= t "Batch: array of memory objects (same fields as top-level, max 100). Every item must include memory_type and at least one project_id or task_id. When present, top-level fields are ignored.",
                                        "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
                                        "items" .= object ["type" .= t "object"]]
           ]
@@ -1019,6 +1021,8 @@ firstValidationError errs = Left (T.unpack (T.intercalate "; " errs))
 clampCreateMemory :: CreateMemory -> CreateMemory
 clampCreateMemory cm = CreateMemory
   { workspaceId = cm.workspaceId
+  , projectId   = cm.projectId
+  , taskId      = cm.taskId
   , content     = cm.content
   , summary     = cm.summary
   , memoryType  = cm.memoryType
@@ -1292,16 +1296,13 @@ executeToolCall mgr base mApiKey = \case
             Just authErr -> pure (Just authErr)
             Nothing -> case taskResult of
               Right taskVal -> do
-                let mWsId = case taskVal of
-                      Object o -> case KM.lookup "workspace_id" o of
-                        Just (String ws) -> Just ws
-                        _                -> Nothing
-                      _ -> Nothing
+                let mWsId = objectTextField "workspace_id" taskVal
                 case mWsId of
                   Just wsId -> do
-                    -- Create the notes memory
-                    let memBody = object
+                    -- Create the notes memory with its required target link atomically.
+                    let memBody = object $
                           [ "workspace_id" .= wsId
+                          , "task_id"      .= tid
                           , "content"      .= notes
                           , "memory_type"  .= ("long_term" :: Text)
                           , "importance"   .= (6 :: Int)
@@ -1312,21 +1313,9 @@ executeToolCall mgr base mApiKey = \case
                     case rawAuthErrorToMcp memResult of
                       Just authErr -> pure (Just authErr)
                       Nothing -> case memResult of
-                        Right memVal -> do
-                          let mMemId = case memVal of
-                                Object o -> case KM.lookup "id" o of
-                                  Just (String mid) -> Just mid
-                                  _                 -> Nothing
-                                _ -> Nothing
-                          case mMemId of
-                            Just memId -> do
-                              linkResult <- rawPostJSON mgr base mApiKey
-                                ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
-                                (object ["memory_id" .= memId])
-                              pure (rawAuthErrorToMcp linkResult)
-                            Nothing -> pure Nothing
-                        Left _ -> pure Nothing  -- memory creation failed; still update status
-                  Nothing -> pure Nothing  -- couldn't find workspace_id; still update status
+                        Right _ -> pure Nothing
+                        Left err -> pure . Just $ mcpErrorCodeFromRaw "MEMORY_CREATE_FAILED" err
+                  Nothing -> pure . Just $ mcpErrorCode "MEMORY_TARGET_REQUIRED" "Could not determine the task workspace for the notes memory."
               Left _ -> pure Nothing  -- task fetch failed; still update status
         _ -> pure Nothing
       -- 2. Update task status
@@ -1396,6 +1385,7 @@ executeToolCall mgr base mApiKey = \case
                 Just wsId -> do
                   let memBody = object
                         [ "workspace_id" .= wsId
+                        , "project_id"   .= pid
                         , "content"      .= summary
                         , "memory_type"  .= ("long_term" :: Text)
                         , "importance"   .= (7 :: Int)
@@ -1406,20 +1396,8 @@ executeToolCall mgr base mApiKey = \case
                   case rawAuthErrorToMcp memResult of
                     Just authErr -> pure (Just authErr)
                     Nothing -> case memResult of
-                      Right memVal -> do
-                        let mMemId = case memVal of
-                              Object o -> case KM.lookup "id" o of
-                                Just (String mid) -> Just mid
-                                _                 -> Nothing
-                              _ -> Nothing
-                        case mMemId of
-                          Just memId -> do
-                            linkResult <- rawPostJSON mgr base mApiKey
-                              ("/api/v1/projects/" <> uuidPath pid <> "/memories")
-                              (object ["memory_id" .= memId])
-                            pure (rawAuthErrorToMcp linkResult)
-                          Nothing -> pure Nothing
-                      Left _ -> pure Nothing
+                      Right _ -> pure Nothing
+                      Left err -> pure . Just $ mcpErrorCodeFromRaw "MEMORY_CREATE_FAILED" err
                 Nothing -> pure Nothing
             _ -> pure Nothing
           -- 3. Archive the project
@@ -1575,6 +1553,14 @@ stripRawErrorCode raw = case rawErrorCode raw of
   Just code -> T.strip $ T.drop (T.length code + 2) raw
 
 
+objectTextField :: Key -> Value -> Maybe Text
+objectTextField key = \case
+  Object o -> case KM.lookup key o of
+    Just (String value) -> Just value
+    _                   -> Nothing
+  _ -> Nothing
+
+
 firstRawAuthError :: [Either Text a] -> Maybe Text
 firstRawAuthError [] = Nothing
 firstRawAuthError (Left err : rest)
@@ -1597,7 +1583,7 @@ t = Prelude.id
 -- (new required fields, renamed tools, changed semantics).
 -- Adding new optional fields or new tools does not require a bump.
 toolApiVersion :: Text
-toolApiVersion = "0.5.0"
+toolApiVersion = "0.6.0"
 
 mkTool :: Text -> Text -> Value -> Value
 mkTool name desc inputSchema = object

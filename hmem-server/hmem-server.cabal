@@ -26,6 +26,7 @@ data-files:
     migrations/V010__audit_log_workspace_query_index.sql
     migrations/V011__auth_sessions.sql
     migrations/V012__recursive_lifecycle_invariants.sql
+    migrations/V013__explicit_memory_creation_links.sql
 
 library
   exposed-modules:

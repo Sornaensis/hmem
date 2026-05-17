@@ -7,9 +7,11 @@ import Data.Aeson.Key (fromText)
 import Data.Aeson.KeyMap qualified as KM
 import Data.List (sort)
 import Data.Text qualified as T
+import Data.UUID (UUID)
 import Test.Hspec
 
 import HMem.DB.Memory
+import HMem.DB.Project (createProject)
 import HMem.DB.RequestContext
 import HMem.DB.TestHarness
 import HMem.Types
@@ -20,8 +22,11 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
   describe "audit log" $ do
     it "records create and soft-delete snapshots for memories" $ \env -> do
       ws <- createTestWorkspace env "audit-ws"
+      proj <- auditProject env ws.id
       mem <- createMemory env.pool CreateMemory
         { workspaceId = ws.id
+        , projectId = Just proj.id
+        , taskId = Nothing
         , content = "audit me"
         , summary = Just "snapshot"
         , memoryType = ShortTerm
@@ -54,8 +59,11 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
     it "ignores access-tracking updates for memories" $ \env -> do
       ws <- createTestWorkspace env "touch-ws"
+      proj <- auditProject env ws.id
       mem <- createMemory env.pool CreateMemory
         { workspaceId = ws.id
+        , projectId = Just proj.id
+        , taskId = Nothing
         , content = "read often"
         , summary = Nothing
         , memoryType = ShortTerm
@@ -76,6 +84,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
     it "persists actor and workspace request context into audit rows" $ \env -> do
       ws <- createTestWorkspace env "ctx-ws"
+      proj <- auditProject env ws.id
       mem <- withRequestIdContext (Just "req-ctx-1") $
         withPrincipalContext (Just Principal
           { actorType = ActorBot
@@ -86,6 +95,8 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         withWorkspaceIdContext (Just ws.id) $
           createMemory env.pool CreateMemory
             { workspaceId = ws.id
+            , projectId = Just proj.id
+            , taskId = Nothing
             , content = "contextful"
             , summary = Nothing
             , memoryType = ShortTerm
@@ -110,3 +121,13 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 lookupField :: T.Text -> Value -> Maybe Value
 lookupField key (Object obj) = KM.lookup (fromText key) obj
 lookupField _ _ = Nothing
+
+auditProject :: TestEnv -> UUID -> IO Project
+auditProject env wsId = createProject env.pool CreateProject
+  { workspaceId = wsId
+  , parentId = Nothing
+  , name = "AuditSpec link target"
+  , description = Nothing
+  , priority = Nothing
+  , metadata = Nothing
+  }

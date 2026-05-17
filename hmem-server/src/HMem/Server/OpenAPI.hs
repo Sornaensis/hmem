@@ -25,8 +25,9 @@ openApiSpec :: OpenApi
 openApiSpec = toOpenApi (Proxy @HMemAPI)
   & info . title   .~ "hmem API"
   & info . version .~ "0.1.0.0"
-  & info . description ?~ "LLM memory and task management server. Mutating project/task endpoints may return HTTP 409 with a LifecycleConflictError body when recursive lifecycle invariants reject the requested state change."
+  & info . description ?~ "LLM memory and task management server. Mutating project/task endpoints may return HTTP 409 with a LifecycleConflictError body when recursive lifecycle invariants reject the requested state change. Memory creation and memory-link mutations may return HTTP 409 with a WorkflowConflictError body when at-least-one creation-link invariants are violated."
   & components . schemas . at "LifecycleConflictError" ?~ toSchema (Proxy @LifecycleConflictError)
+  & components . schemas . at "WorkflowConflictError" ?~ toSchema (Proxy @WorkflowConflictError)
 
 data LifecycleConflictError = LifecycleConflictError
   { error   :: Text
@@ -39,12 +40,34 @@ data LifecycleConflictError = LifecycleConflictError
 instance ToSchema LifecycleConflictError where
   declareNamedSchema = genericDeclareNamedSchema opts
 
+data WorkflowConflictError = WorkflowConflictError
+  { workflowError   :: Text
+  , workflowCode    :: Text
+  , workflowMessage :: Text
+  , workflowDetail  :: Maybe Value
+  , workflowHint    :: Maybe Text
+  } deriving stock Generic
+
+instance ToSchema WorkflowConflictError where
+  declareNamedSchema = genericDeclareNamedSchema workflowConflictOpts
+
 ------------------------------------------------------------------------
 -- ToSchema instances (orphans, scoped to hmem-server)
 ------------------------------------------------------------------------
 
 opts :: SchemaOptions
 opts = defaultSchemaOptions { fieldLabelModifier = camelToSnakeField }
+
+workflowConflictOpts :: SchemaOptions
+workflowConflictOpts = opts
+  { fieldLabelModifier = \case
+      "workflowError"   -> "error"
+      "workflowCode"    -> "code"
+      "workflowMessage" -> "message"
+      "workflowDetail"  -> "detail"
+      "workflowHint"    -> "hint"
+      other             -> camelToSnakeField other
+  }
 
 -- Primitives / pre-existing
 instance ToSchema Value where

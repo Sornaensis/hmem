@@ -50,12 +50,15 @@ spec = do
     it "parses memory_create with required fields" $ do
       let args = object
             [ "workspace_id" .= testUUID
+            , "project_id"   .= testUUID2
             , "content"      .= ("hello" :: Text)
             , "memory_type"  .= ("short_term" :: Text)
             ]
       case parseToolCall "memory_create" args of
         Right (MemoryCreate cm) -> do
           cm.workspaceId `shouldBe` parsedUUID
+          cm.projectId `shouldBe` Just parsedUUID2
+          cm.taskId `shouldBe` Nothing
           cm.content `shouldBe` "hello"
           cm.memoryType `shouldBe` ShortTerm
         other -> expectationFailure $ "Expected MemoryCreate, got: " <> show other
@@ -63,6 +66,7 @@ spec = do
     it "parses memory_create with optional fields" $ do
       let args = object
             [ "workspace_id" .= testUUID
+            , "task_id"      .= testUUID2
             , "content"      .= ("hello" :: Text)
             , "memory_type"  .= ("long_term" :: Text)
             , "importance"   .= (8 :: Int)
@@ -75,6 +79,8 @@ spec = do
             ]
       case parseToolCall "memory_create" args of
         Right (MemoryCreate cm) -> do
+          cm.projectId `shouldBe` Nothing
+          cm.taskId `shouldBe` Just parsedUUID2
           cm.memoryType `shouldBe` LongTerm
           cm.importance `shouldBe` Just 8
           cm.summary `shouldBe` Just "sum"
@@ -175,6 +181,7 @@ spec = do
     it "parses memory_create with items (batch)" $ do
       let item = object
             [ "workspace_id" .= testUUID
+            , "project_id"   .= testUUID2
             , "content"      .= ("batch item" :: Text)
             , "memory_type"  .= ("short_term" :: Text)
             ]
@@ -204,7 +211,7 @@ spec = do
 
     it "clamps importance to 1-10" $ do
       let cm = CreateMemory
-            { workspaceId = parsedUUID, content = "x", summary = Nothing
+            { workspaceId = parsedUUID, projectId = Just parsedUUID, taskId = Nothing, content = "x", summary = Nothing
             , memoryType = ShortTerm, importance = Just 99
             , metadata = Nothing, expiresAt = Nothing, source = Nothing
             , confidence = Nothing, pinned = Nothing, tags = Nothing
@@ -216,7 +223,7 @@ spec = do
 
     it "clamps importance minimum to 1" $ do
       let cm = CreateMemory
-            { workspaceId = parsedUUID, content = "x", summary = Nothing
+            { workspaceId = parsedUUID, projectId = Just parsedUUID, taskId = Nothing, content = "x", summary = Nothing
             , memoryType = ShortTerm, importance = Just (-5)
             , metadata = Nothing, expiresAt = Nothing, source = Nothing
             , confidence = Nothing, pinned = Nothing, tags = Nothing
@@ -228,7 +235,7 @@ spec = do
 
     it "clamps confidence to 0.0-1.0" $ do
       let cm = CreateMemory
-            { workspaceId = parsedUUID, content = "x", summary = Nothing
+            { workspaceId = parsedUUID, projectId = Just parsedUUID, taskId = Nothing, content = "x", summary = Nothing
             , memoryType = ShortTerm, importance = Nothing
             , metadata = Nothing, expiresAt = Nothing, source = Nothing
             , confidence = Just 5.0, pinned = Nothing, tags = Nothing
@@ -240,7 +247,7 @@ spec = do
 
     it "rejects invalid fts_language on memory_create" $ do
       let cm = CreateMemory
-            { workspaceId = parsedUUID, content = "x", summary = Nothing
+            { workspaceId = parsedUUID, projectId = Just parsedUUID, taskId = Nothing, content = "x", summary = Nothing
             , memoryType = ShortTerm, importance = Nothing
             , metadata = Nothing, expiresAt = Nothing, source = Nothing
             , confidence = Nothing, pinned = Nothing, tags = Nothing
@@ -250,7 +257,7 @@ spec = do
 
     it "accepts valid fts_language" $ do
       let cm = CreateMemory
-            { workspaceId = parsedUUID, content = "x", summary = Nothing
+            { workspaceId = parsedUUID, projectId = Just parsedUUID, taskId = Nothing, content = "x", summary = Nothing
             , memoryType = ShortTerm, importance = Nothing
             , metadata = Nothing, expiresAt = Nothing, source = Nothing
             , confidence = Nothing, pinned = Nothing, tags = Nothing
@@ -258,9 +265,21 @@ spec = do
             }
       validateToolCall (MemoryCreate cm) `shouldSatisfy` isRight
 
+    it "requires at least one memory_create target and allows both target types" $ do
+      let cm = CreateMemory
+            { workspaceId = parsedUUID, projectId = Nothing, taskId = Nothing, content = "x", summary = Nothing
+            , memoryType = ShortTerm, importance = Nothing
+            , metadata = Nothing, expiresAt = Nothing, source = Nothing
+            , confidence = Nothing, pinned = Nothing, tags = Nothing
+            , ftsLanguage = Nothing
+            }
+          both = cm { projectId = Just parsedUUID, taskId = Just parsedUUID2 }
+      validateToolCall (MemoryCreate cm) `shouldSatisfy` isLeft
+      validateToolCall (MemoryCreate both) `shouldSatisfy` isRight
+
     it "rejects batch with >100 items" $ do
       let cm = CreateMemory
-            { workspaceId = parsedUUID, content = "x", summary = Nothing
+            { workspaceId = parsedUUID, projectId = Just parsedUUID, taskId = Nothing, content = "x", summary = Nothing
             , memoryType = ShortTerm, importance = Nothing
             , metadata = Nothing, expiresAt = Nothing, source = Nothing
             , confidence = Nothing, pinned = Nothing, tags = Nothing
@@ -270,7 +289,7 @@ spec = do
 
     it "accepts batch with <=100 items" $ do
       let cm = CreateMemory
-            { workspaceId = parsedUUID, content = "x", summary = Nothing
+            { workspaceId = parsedUUID, projectId = Just parsedUUID, taskId = Nothing, content = "x", summary = Nothing
             , memoryType = ShortTerm, importance = Nothing
             , metadata = Nothing, expiresAt = Nothing, source = Nothing
             , confidence = Nothing, pinned = Nothing, tags = Nothing
@@ -280,7 +299,7 @@ spec = do
 
     it "rejects batch items with empty content" $ do
       let cm = CreateMemory
-            { workspaceId = parsedUUID, content = "   ", summary = Nothing
+            { workspaceId = parsedUUID, projectId = Just parsedUUID, taskId = Nothing, content = "   ", summary = Nothing
             , memoryType = ShortTerm, importance = Nothing
             , metadata = Nothing, expiresAt = Nothing, source = Nothing
             , confidence = Nothing, pinned = Nothing, tags = Nothing
@@ -1022,6 +1041,8 @@ spec = do
       properties <- requireJust "memory_create properties" (objectField "properties" schema)
       contentSchema <- requireJust "memory_create content schema" (objectField "content" properties)
       numberField "maxLength" contentSchema `shouldBe` Just (fromIntegral maxMemoryContentBytes)
+      objectField "project_id" properties `shouldSatisfy` (/= Nothing)
+      objectField "task_id" properties `shouldSatisfy` (/= Nothing)
 
     it "advertises batch items support on memory_create" $ do
       schema <- requireJust "memory_create schema" (inputSchemaFor "memory_create")

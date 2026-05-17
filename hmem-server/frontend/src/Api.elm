@@ -1220,8 +1220,15 @@ deleteTask apiUrl taskId requestId toMsg =
         }
 
 
-createMemory : String -> String -> String -> MemoryType -> String -> (Result Http.Error Memory -> msg) -> Cmd msg
-createMemory apiUrl wsId content mtype requestId toMsg =
+createMemory : String -> String -> Maybe String -> Maybe String -> String -> MemoryType -> String -> (Result Http.Error Memory -> msg) -> Cmd msg
+createMemory apiUrl wsId projectId taskId content mtype requestId toMsg =
+    let
+        targetFields =
+            List.filterMap identity
+                [ Maybe.map (\pid -> ( "project_id", E.string pid )) projectId
+                , Maybe.map (\tid -> ( "task_id", E.string tid )) taskId
+                ]
+    in
     Http.request
         { method = "POST"
         , headers = [ Http.header "X-Request-Id" requestId ]
@@ -1229,11 +1236,13 @@ createMemory apiUrl wsId content mtype requestId toMsg =
         , body =
             Http.jsonBody
                 (E.object
-                    [ ( "workspace_id", E.string wsId )
-                    , ( "content", E.string content )
-                    , ( "memory_type", E.string (memoryTypeToString mtype) )
-                    , ( "request_id", E.string requestId )
-                    ]
+                    ([ ( "workspace_id", E.string wsId )
+                     , ( "content", E.string content )
+                     , ( "memory_type", E.string (memoryTypeToString mtype) )
+                     , ( "request_id", E.string requestId )
+                     ]
+                        ++ targetFields
+                    )
                 )
         , expect = Http.expectJson toMsg memoryDecoder
         , timeout = Nothing

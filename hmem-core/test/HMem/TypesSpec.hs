@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-orphans -Wno-ambiguous-fields #-}
 
 module HMem.TypesSpec (spec) where
 
@@ -212,6 +212,8 @@ spec = do
     it "rejects oversized memory content" $ do
       let cm = CreateMemory
             { workspaceId = read "00000000-0000-0000-0000-000000000001"
+            , projectId = Just (read "00000000-0000-0000-0000-000000000002")
+            , taskId = Nothing
             , content = T.replicate (maxMemoryContentBytes + 1) "a"
             , summary = Nothing
             , memoryType = ShortTerm
@@ -243,6 +245,8 @@ spec = do
       validateCreateMemoryBatchInput [] `shouldBe` ["memories must contain at least one item"]
       let cm = CreateMemory
             { workspaceId = read "00000000-0000-0000-0000-000000000001"
+            , projectId = Just (read "00000000-0000-0000-0000-000000000002")
+            , taskId = Nothing
             , content = ""
             , summary = Nothing
             , memoryType = ShortTerm
@@ -256,6 +260,33 @@ spec = do
             , ftsLanguage = Nothing
             }
       validateCreateMemoryBatchInput [cm] `shouldBe` ["memories[0].content must not be empty"]
+
+    it "requires at least one memory creation target" $ do
+      let cm = CreateMemory
+            { workspaceId = read "00000000-0000-0000-0000-000000000001"
+            , projectId = Nothing
+            , taskId = Nothing
+            , content = "valid content"
+            , summary = Nothing
+            , memoryType = ShortTerm
+            , importance = Nothing
+            , metadata = Nothing
+            , expiresAt = Nothing
+            , source = Nothing
+            , confidence = Nothing
+            , pinned = Nothing
+            , tags = Nothing
+            , ftsLanguage = Nothing
+            }
+          pid = read "00000000-0000-0000-0000-000000000002"
+          tid = read "00000000-0000-0000-0000-000000000003"
+          bothTargets = cm { projectId = Just pid, taskId = Just tid } :: CreateMemory
+          projectTarget = cm { projectId = Just pid } :: CreateMemory
+          taskTarget = cm { taskId = Just tid } :: CreateMemory
+      validateCreateMemoryInput cm `shouldBe` ["at least one of project_id or task_id is required"]
+      validateCreateMemoryInput bothTargets `shouldBe` []
+      validateCreateMemoryInput projectTarget `shouldBe` []
+      validateCreateMemoryInput taskTarget `shouldBe` []
 
     it "rejects reversed memory list time ranges" $ do
       let mq = MemoryListQuery

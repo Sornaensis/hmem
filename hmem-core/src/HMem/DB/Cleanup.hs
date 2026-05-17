@@ -67,20 +67,6 @@ softDeleteMemoriesS ids = do
       , deleteWhere = \_ row -> in_ row.mclMemoryId (map lit ids)
       , returning = NoReturning
       }
-  Session.statement () $ run_ $
-    delete Delete
-      { from = projectMemoryLinkSchema
-      , using = pure ()
-      , deleteWhere = \_ row -> in_ row.pmlMemoryId (map lit ids)
-      , returning = NoReturning
-      }
-  Session.statement () $ run_ $
-    delete Delete
-      { from = taskMemoryLinkSchema
-      , using = pure ()
-      , deleteWhere = \_ row -> in_ row.tmlMemoryId (map lit ids)
-      , returning = NoReturning
-      }
   pure n
 
 ------------------------------------------------------------------------
@@ -247,5 +233,4 @@ decayStaleImportance pool wsId policy = case policy.maxAgeHours of
             &&. row.memImportance >. lit (1 :: Int16)
         , returning = NoReturning
         }
-
 

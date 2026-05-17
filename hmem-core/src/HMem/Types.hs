@@ -314,6 +314,7 @@ validateCreateMemoryInput :: CreateMemory -> [Text]
 validateCreateMemoryInput cm =
   validateRequiredText "content" maxMemoryContentBytes cm.content
   <> validateOptionalText "summary" maxMemorySummaryBytes cm.summary
+  <> ["at least one of project_id or task_id is required" | cm.projectId == Nothing && cm.taskId == Nothing]
 
 validateUpdateMemoryInput :: UpdateMemory -> [Text]
 validateUpdateMemoryInput um =
@@ -773,6 +774,8 @@ compactMemory m = Memory
 
 data CreateMemory = CreateMemory
   { workspaceId  :: UUID
+  , projectId    :: Maybe UUID
+  , taskId       :: Maybe UUID
   , content      :: Text
   , summary      :: Maybe Text
   , memoryType   :: MemoryType

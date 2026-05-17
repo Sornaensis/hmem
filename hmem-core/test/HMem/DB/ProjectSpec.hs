@@ -12,7 +12,7 @@ import Test.Hspec
 import Hasql.Session qualified as Session
 
 import HMem.DB.Pool (DBException(..), runSession)
-import HMem.DB.Memory (createMemory, getProjectMemories, touchMemory, updateMemory)
+import HMem.DB.Memory (createMemory, getMemory, getProjectMemories, touchMemory, updateMemory)
 import HMem.DB.Project
 import HMem.DB.Task (createTask, deleteTask, getTask, listTasksByWorkspace, restoreTask, updateTask)
 import HMem.DB.TestHarness
@@ -397,21 +397,58 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       (head active).name `shouldBe` "StillActive"
 
   describe "memory links" $ do
-    it "links and unlinks project to memory" $ \env -> do
+    it "keeps project memory link creation idempotent" $ \env -> do
       ws <- createTestWorkspace env "projmem-ws"
       proj <- createProject env.pool CreateProject
         { workspaceId = ws.id, parentId = Nothing, name = "Linked Proj"
         , description = Nothing, priority = Nothing, metadata = Nothing }
       mem <- createMemory env.pool CreateMemory
-        { workspaceId = ws.id, content = "linked memory", summary = Nothing
+        { workspaceId = ws.id, projectId = Just proj.id, taskId = Nothing, content = "linked memory", summary = Nothing
         , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
         , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
-      -- Link should not throw
-      linkProjectMemory env.pool proj.id mem.id
       -- Linking again should be idempotent (DoNothing)
       linkProjectMemory env.pool proj.id mem.id
-      -- Unlink
-      unlinkProjectMemory env.pool proj.id mem.id
+
+    it "soft-deletes and restores project-linked memories with the project" $ \env -> do
+      ws <- createTestWorkspace env "projmem-delete-restore-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Project with memory"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Just proj.id, taskId = Nothing, content = "project scoped memory", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+
+      deleteProject env.pool proj.id `shouldReturn` True
+      getProject env.pool proj.id >>= (`shouldSatisfy` isNothing)
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isNothing)
+
+      restoreProject env.pool proj.id `shouldReturn` True
+      getProject env.pool proj.id >>= (`shouldSatisfy` isJust)
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isJust)
+
+    it "preserves project-linked memories while another active target remains" $ \env -> do
+      ws <- createTestWorkspace env "projmem-multiple-delete-restore-ws"
+      proj1 <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Project one"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      proj2 <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Project two"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      mem <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Just proj1.id, taskId = Nothing, content = "shared project memory", summary = Nothing
+        , memoryType = ShortTerm, importance = Nothing, metadata = Nothing
+        , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
+      linkProjectMemory env.pool proj2.id mem.id
+
+      deleteProject env.pool proj1.id `shouldReturn` True
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isJust)
+
+      deleteProject env.pool proj2.id `shouldReturn` True
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isNothing)
+
+      restoreProject env.pool proj1.id `shouldReturn` True
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isJust)
 
     it "filters linked project memories by query, tags, importance, type, and access count" $ \env -> do
       ws <- createTestWorkspace env "projmem-filter-ws"
@@ -419,15 +456,13 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         { workspaceId = ws.id, parentId = Nothing, name = "Filter Proj"
         , description = Nothing, priority = Nothing, metadata = Nothing }
       matching <- createMemory env.pool CreateMemory
-        { workspaceId = ws.id, content = "alpha haskell note", summary = Nothing
+        { workspaceId = ws.id, projectId = Just proj.id, taskId = Nothing, content = "alpha haskell note", summary = Nothing
         , memoryType = LongTerm, importance = Just 8, metadata = Nothing
         , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Just ["keep"], ftsLanguage = Nothing }
-      nonMatching <- createMemory env.pool CreateMemory
-        { workspaceId = ws.id, content = "alpha haskell note", summary = Nothing
+      _nonMatching <- createMemory env.pool CreateMemory
+        { workspaceId = ws.id, projectId = Just proj.id, taskId = Nothing, content = "alpha haskell note", summary = Nothing
         , memoryType = ShortTerm, importance = Just 3, metadata = Nothing
         , expiresAt = Nothing, source = Nothing, confidence = Nothing, pinned = Nothing, tags = Just ["drop"], ftsLanguage = Nothing }
-      linkProjectMemory env.pool proj.id matching.id
-      linkProjectMemory env.pool proj.id nonMatching.id
       touchMemory env.pool matching.id
       _ <- updateMemory env.pool matching.id UpdateMemory
         { content = Nothing, summary = Unchanged, memoryType = Nothing, importance = Nothing

@@ -233,6 +233,9 @@ assertLifecycleError expectedCode resp =
       KM.lookup (Key.fromText "hint") body `shouldSatisfy` \case
         Just (String hint) -> not (T.null hint)
         _ -> False
+      KM.lookup (Key.fromText "required_action") body `shouldSatisfy` \case
+        Just (String action) -> not (T.null action)
+        _ -> False
       KM.lookup (Key.fromText "detail") body `shouldSatisfy` \case
         Just (Object detail) -> KM.member (Key.fromText "blocker_count") detail
           || KM.member (Key.fromText "open_project_count") detail
@@ -940,6 +943,22 @@ spec = around withApp $ do
       respStatus blockedResp `shouldBe` 409
       assertLifecycleError "PROJECT_COMPLETION_BLOCKED" blockedResp
 
+    it "returns a lifecycle conflict body from project batch updates" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("proj-lifecycle-batch-conflict-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      rootResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Root" :: T.Text)])
+      let Just root = decode (respBody rootResp) :: Maybe Project
+      _ <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Child" :: T.Text), "parent_id" .= root.id])
+
+      blockedResp <- postJSON app "/api/v1/projects/batch-update"
+        (object ["items" .= [object ["id" .= root.id, "status" .= ("completed" :: T.Text)]]])
+      respStatus blockedResp `shouldBe` 409
+      assertLifecycleError "PROJECT_COMPLETION_BLOCKED" blockedResp
+
     it "rejects cross-workspace project parents" $ \app -> do
       wsAResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("project-parent-ws-a" :: T.Text)])
@@ -1088,6 +1107,25 @@ spec = around withApp $ do
 
       blockedResp <- putJSON app (uuidPath "/api/v1/tasks" parent.id)
         (object ["status" .= ("done" :: T.Text)])
+      respStatus blockedResp `shouldBe` 409
+      assertLifecycleError "TASK_COMPLETION_BLOCKED" blockedResp
+
+    it "returns a lifecycle conflict body from task batch updates" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-lifecycle-batch-conflict-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Task Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Parent" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Task
+      _ <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= parent.id, "title" .= ("Child" :: T.Text)])
+
+      blockedResp <- postJSON app "/api/v1/tasks/batch-update"
+        (object ["items" .= [object ["id" .= parent.id, "status" .= ("done" :: T.Text)]]])
       respStatus blockedResp `shouldBe` 409
       assertLifecycleError "TASK_COMPLETION_BLOCKED" blockedResp
 

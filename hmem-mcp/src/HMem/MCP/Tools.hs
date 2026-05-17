@@ -7,7 +7,10 @@ module HMem.MCP.Tools
   , buildProjectListPath
   , buildTaskListPath
   , sanitizeServerResponse
+  , mcpHttpError
+  , rawHttpErrorText
   , mcpErrorCodeFromRaw
+  , taskStartUpdateError
   , firstRawAuthError
   , bearerAuthHeaders
   , ToolCall(..)
@@ -21,6 +24,7 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32)
 import Data.List (intercalate)
+import Data.Maybe (fromMaybe)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -1275,8 +1279,8 @@ executeToolCall mgr base mApiKey = \case
       -- 1. Update task status to in_progress (best-effort; may already be in_progress)
       updateResult <- rawPutJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
               (object ["status" .= ("in_progress" :: Text)])
-      case rawAuthErrorToMcp updateResult of
-        Just authErr -> pure authErr
+      case taskStartUpdateError updateResult of
+        Just startErr -> pure startErr
         Nothing -> do
           -- 2. Load context for the task
           let levelStr = case level of
@@ -1437,9 +1441,7 @@ httpJSON mgr mApiKey httpMethod url mbody = do
         body = responseBody resp
     if code >= 200 && code < 300
       then pure $ mcpResult body
-      else pure $ mcpErrorCode
-        (httpErrorCode code)
-        (httpErrorMessage code body)
+      else pure $ mcpHttpError code body
   case result of
     Right v  -> pure v
     Left (_ :: SomeException) -> pure $ mcpErrorCode "CONNECTION_ERROR" connectionErrorMessage
@@ -1463,7 +1465,7 @@ rawHttpJSON' mgr mApiKey httpMethod url mbody = do
       then case eitherDecode body of
         Right v  -> pure (Right v)
         Left _   -> pure (Right (String (decodeUtf8 body)))
-      else pure (Left ("[" <> httpErrorCode code <> "] " <> httpErrorMessage code body))
+      else pure (Left (rawHttpErrorPayload code body))
   case result of
     Right v  -> pure v
     Left (_ :: SomeException) -> pure (Left ("[CONNECTION_ERROR] " <> connectionErrorMessage))
@@ -1533,10 +1535,147 @@ mcpErrorCode code msg = object
 
 mcpErrorCodeFromRaw :: Text -> Text -> Value
 mcpErrorCodeFromRaw fallbackCode rawMessage =
-  case rawErrorCode rawMessage of
-    Just authCode | authCode `elem` ["AUTH_REQUIRED", "AUTH_FORBIDDEN"] ->
-      mcpErrorCode authCode (stripRawErrorCode rawMessage)
-    _ -> mcpErrorCode fallbackCode rawMessage
+  case mcpErrorFromRawPayload rawMessage of
+    Just structuredError -> structuredError
+    Nothing -> case rawErrorCode rawMessage of
+      Just rawCode | shouldPromoteRawCode rawCode ->
+        mcpErrorCode rawCode (stripRawErrorCode rawMessage)
+      _ -> mcpErrorCode fallbackCode rawMessage
+
+
+shouldPromoteRawCode :: Text -> Bool
+shouldPromoteRawCode code =
+  code `elem` ["AUTH_REQUIRED", "AUTH_FORBIDDEN"]
+    || (not ("HTTP_" `T.isPrefixOf` code) && code `notElem` transportCodes)
+  where
+    transportCodes = ["NOT_FOUND", "RATE_LIMITED", "CONNECTION_ERROR"]
+
+
+data ApiError = ApiError
+  { apiErrorType           :: Text
+  , apiErrorCode           :: Maybe Text
+  , apiErrorMessage        :: Maybe Text
+  , apiErrorDetail         :: Maybe Value
+  , apiErrorHint           :: Maybe Text
+  , apiErrorRequiredAction :: Maybe Text
+  }
+
+
+instance FromJSON ApiError where
+  parseJSON = withObject "ApiError" $ \o -> do
+    apiErrorType <- o .: "error"
+    apiErrorCode <- o .:? "code"
+    apiErrorMessage <- o .:? "message"
+    apiErrorDetail <- o .:? "detail"
+    apiErrorHint <- o .:? "hint"
+    apiErrorRequiredAction <- o .:? "required_action"
+    pure ApiError {..}
+
+
+mcpHttpError :: Int -> BL.ByteString -> Value
+mcpHttpError code body
+  | code == 401 || code == 403 = fallback
+  | otherwise = case decodeApiError body of
+      Just apiErr | shouldUseStructuredApiError apiErr -> mcpApiError code apiErr
+      _ -> fallback
+  where
+    fallback = mcpErrorCode (httpErrorCode code) (httpErrorMessage code body)
+
+
+rawHttpErrorText :: Int -> BL.ByteString -> Text
+rawHttpErrorText code body
+  | code == 401 || code == 403 = fallback
+  | otherwise = case decodeApiError body of
+      Just apiErr | shouldUseStructuredApiError apiErr ->
+        "[" <> apiErrorCodeText code apiErr <> "] " <> apiErrorDisplayText apiErr
+      _ -> fallback
+  where
+    fallback = "[" <> httpErrorCode code <> "] " <> httpErrorMessage code body
+
+
+rawHttpErrorPayload :: Int -> BL.ByteString -> Text
+rawHttpErrorPayload code body
+  | code == 401 || code == 403 = rawHttpErrorText code body
+  | otherwise = case decodeApiError body of
+      Just apiErr | shouldUseStructuredApiError apiErr -> decodeUtf8 (encode (mcpApiError code apiErr))
+      _ -> rawHttpErrorText code body
+
+
+decodeApiError :: BL.ByteString -> Maybe ApiError
+decodeApiError = decode @ApiError
+
+
+mcpErrorFromRawPayload :: Text -> Maybe Value
+mcpErrorFromRawPayload raw = case decode @Value (BL.fromStrict (TE.encodeUtf8 raw)) of
+  Just value@(Object obj)
+    | KM.lookup "isError" obj == Just (Bool True)
+    , KM.member "content" obj -> Just value
+  _ -> Nothing
+
+
+shouldUseStructuredApiError :: ApiError -> Bool
+shouldUseStructuredApiError apiErr = case apiErr.apiErrorCode of
+  Just code -> not (T.null (T.strip code))
+  Nothing   -> False
+
+
+mcpApiError :: Int -> ApiError -> Value
+mcpApiError httpStatus apiErr = object
+  [ "isError" .= True
+  , "content" .= [object
+      [ "type" .= ("text" :: Text)
+      , "text" .= ("[" <> apiErrorCodeText httpStatus apiErr <> "] " <> apiErrorDisplayText apiErr)
+      ]]
+  , "error" .= object
+      ([ "type" .= apiErr.apiErrorType
+       , "http_status" .= httpStatus
+       , "code" .= apiErrorCodeText httpStatus apiErr
+       ]
+       ++ [ "message" .= msg | Just msg <- [apiErrorMessageNonEmpty apiErr] ]
+       ++ [ "hint" .= hint | Just hint <- [apiErrorHintNonEmpty apiErr] ]
+       ++ [ "required_action" .= action | Just action <- [apiErrorRequiredActionNonEmpty apiErr] ]
+       ++ [ "detail" .= detail | Just detail <- [apiErr.apiErrorDetail] ]
+      )
+  ]
+
+
+apiErrorCodeText :: Int -> ApiError -> Text
+apiErrorCodeText httpStatus apiErr = fromMaybe (httpErrorCode httpStatus) apiErr.apiErrorCode
+
+
+apiErrorDisplayText :: ApiError -> Text
+apiErrorDisplayText apiErr = firstNonEmpty
+  [ apiErrorRequiredActionNonEmpty apiErr
+  , apiErrorHintNonEmpty apiErr
+  , apiErrorMessageNonEmpty apiErr
+  , Just apiErr.apiErrorType
+  ]
+
+
+apiErrorMessageNonEmpty :: ApiError -> Maybe Text
+apiErrorMessageNonEmpty apiErr = nonEmptyText apiErr.apiErrorMessage
+
+
+apiErrorHintNonEmpty :: ApiError -> Maybe Text
+apiErrorHintNonEmpty apiErr = nonEmptyText apiErr.apiErrorHint
+
+
+apiErrorRequiredActionNonEmpty :: ApiError -> Maybe Text
+apiErrorRequiredActionNonEmpty apiErr = case nonEmptyText apiErr.apiErrorRequiredAction of
+  Just action -> Just action
+  Nothing     -> apiErrorHintNonEmpty apiErr
+
+
+nonEmptyText :: Maybe Text -> Maybe Text
+nonEmptyText value = do
+  text <- T.strip <$> value
+  if T.null text then Nothing else Just text
+
+
+firstNonEmpty :: [Maybe Text] -> Text
+firstNonEmpty [] = "hmem-server rejected the request."
+firstNonEmpty (Just value : _) = value
+firstNonEmpty (Nothing : rest) = firstNonEmpty rest
 
 
 rawErrorCode :: Text -> Maybe Text
@@ -1571,6 +1710,12 @@ firstRawAuthError (Right _ : rest) = firstRawAuthError rest
 
 rawAuthErrorToMcp :: Either Text a -> Maybe Value
 rawAuthErrorToMcp result = mcpErrorCodeFromRaw "AUTH_FAILED" <$> firstRawAuthError [result]
+
+
+taskStartUpdateError :: Either Text Value -> Maybe Value
+taskStartUpdateError = \case
+  Left err -> Just $ mcpErrorCodeFromRaw "TASK_START_FAILED" err
+  Right _  -> Nothing
 
 ------------------------------------------------------------------------
 -- Utility

@@ -1001,6 +1001,47 @@ spec = do
       firstRawAuthError [Right (object []), Left "[AUTH_FORBIDDEN] denied", Left "other"]
         `shouldBe` Just "[AUTH_FORBIDDEN] denied"
 
+    it "preserves structured lifecycle API errors for MCP tools" $ do
+      let body = encode $ object
+            [ "error" .= ("lifecycle_conflict" :: Text)
+            , "code" .= ("TASK_COMPLETION_BLOCKED" :: Text)
+            , "message" .= ("Cannot mark task done while descendant tasks are still open." :: Text)
+            , "hint" .= ("Complete or cancel open descendant tasks first." :: Text)
+            , "required_action" .= ("Complete or cancel open descendant tasks first." :: Text)
+            , "detail" .= object
+                [ "blocker_count" .= (1 :: Int)
+                , "blocker_ids" .= ([testUUID] :: [Text])
+                ]
+            ]
+          err = mcpHttpError 409 body
+      (textField "text" =<< firstContent err)
+        `shouldBe` Just "[TASK_COMPLETION_BLOCKED] Complete or cancel open descendant tasks first."
+      apiErr <- requireJust "structured mcp error" (objectField "error" err)
+      textField "type" apiErr `shouldBe` Just "lifecycle_conflict"
+      textField "code" apiErr `shouldBe` Just "TASK_COMPLETION_BLOCKED"
+      textField "message" apiErr `shouldBe` Just "Cannot mark task done while descendant tasks are still open."
+      textField "hint" apiErr `shouldBe` Just "Complete or cancel open descendant tasks first."
+      textField "required_action" apiErr `shouldBe` Just "Complete or cancel open descendant tasks first."
+      numberField "http_status" apiErr `shouldBe` Just (409 :: Scientific)
+      objectField "detail" apiErr `shouldSatisfy` (/= Nothing)
+
+      rawHttpErrorText 409 body
+        `shouldBe` "[TASK_COMPLETION_BLOCKED] Complete or cancel open descendant tasks first."
+      let promoted = mcpErrorCodeFromRaw "TASK_FINISH_FAILED" (rawHttpErrorText 409 body)
+      (textField "text" =<< firstContent promoted)
+        `shouldBe` Just "[TASK_COMPLETION_BLOCKED] Complete or cancel open descendant tasks first."
+
+      let structuredPayload = T.pack (BL8.unpack (encode err))
+          promotedStructured = mcpErrorCodeFromRaw "TASK_START_FAILED" structuredPayload
+      promotedApiErr <- requireJust "promoted structured raw mcp error" (objectField "error" promotedStructured)
+      textField "code" promotedApiErr `shouldBe` Just "TASK_COMPLETION_BLOCKED"
+      objectField "detail" promotedApiErr `shouldSatisfy` (/= Nothing)
+
+      startErr <- requireJust "task_start update error" (taskStartUpdateError (Left structuredPayload))
+      startApiErr <- requireJust "task_start structured error" (objectField "error" startErr)
+      textField "code" startApiErr `shouldBe` Just "TASK_COMPLETION_BLOCKED"
+      taskStartUpdateError (Right (object [])) `shouldBe` Nothing
+
     it "UTF-8 encodes non-ASCII project_list query text" $ do
       let path = buildProjectListPath ProjectListQuery
             { workspaceId = Just parsedUUID

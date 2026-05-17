@@ -30,22 +30,24 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & components . schemas . at "WorkflowConflictError" ?~ toSchema (Proxy @WorkflowConflictError)
 
 data LifecycleConflictError = LifecycleConflictError
-  { error   :: Text
-  , code    :: Text
-  , message :: Text
-  , detail  :: Maybe Value
-  , hint    :: Maybe Text
+  { error          :: Text
+  , code           :: Text
+  , message        :: Text
+  , detail         :: Maybe Value
+  , hint           :: Maybe Text
+  , requiredAction :: Maybe Text
   } deriving stock Generic
 
 instance ToSchema LifecycleConflictError where
   declareNamedSchema = genericDeclareNamedSchema opts
 
 data WorkflowConflictError = WorkflowConflictError
-  { workflowError   :: Text
-  , workflowCode    :: Text
-  , workflowMessage :: Text
-  , workflowDetail  :: Maybe Value
-  , workflowHint    :: Maybe Text
+  { workflowError          :: Text
+  , workflowCode           :: Text
+  , workflowMessage        :: Text
+  , workflowDetail         :: Maybe Value
+  , workflowHint           :: Maybe Text
+  , workflowRequiredAction :: Maybe Text
   } deriving stock Generic
 
 instance ToSchema WorkflowConflictError where
@@ -66,6 +68,7 @@ workflowConflictOpts = opts
       "workflowMessage" -> "message"
       "workflowDetail"  -> "detail"
       "workflowHint"    -> "hint"
+      "workflowRequiredAction" -> "required_action"
       other             -> camelToSnakeField other
   }
 

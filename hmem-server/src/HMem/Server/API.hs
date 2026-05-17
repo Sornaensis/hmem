@@ -447,6 +447,7 @@ handleDBErrors io = do
       ]
       ++ [ "detail" .= decodeDetail d | Just d <- [detail] ]
       ++ [ "hint" .= h | Just h <- [hint] ]
+      ++ [ "required_action" .= h | Just h <- [hint] ]
 
     decodeDetail :: Text -> Value
     decodeDetail detailText = fromMaybe (String detailText) $

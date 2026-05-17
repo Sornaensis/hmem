@@ -8,8 +8,11 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Hasql.Decoders qualified as D
+import Hasql.Encoders qualified as E
 import Test.Hspec
 import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 
 import HMem.DB.Memory (createMemory, getMemory, getTaskMemories, touchMemory, updateMemory)
 import HMem.DB.Pool (DBException(..), runSession)
@@ -624,6 +627,298 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       addDependency env.pool t4.id t3.id
       -- All should succeed -- no cycle in a diamond
 
+    it "auto-blocks a task with an open dependency and unblocks when the dependency is done" $ \env -> do
+      ws <- createTestWorkspace env "taskdep-autoblock-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "AutoBlock"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      dependency <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependency"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      dependent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      addDependency env.pool dependent.id dependency.id
+      getTask env.pool dependent.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "dependent task not found")
+
+      _ <- updateTask env.pool dependency.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      getTask env.pool dependent.id >>= (\case
+        Just task -> task.status `shouldBe` Todo
+        Nothing -> expectationFailure "dependent task not found")
+
+    it "auto-blocks a done task when a new open dependency is added" $ \env -> do
+      ws <- createTestWorkspace env "taskdep-done-autoblock-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Done AutoBlock"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      dependency <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependency"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      dependent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      _ <- updateTask env.pool dependent.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+
+      addDependency env.pool dependent.id dependency.id
+      getTask env.pool dependent.id >>= (\case
+        Just task -> do
+          task.status `shouldBe` Blocked
+          task.completedAt `shouldSatisfy` isNothing
+        Nothing -> expectationFailure "dependent task not found")
+
+    it "preserves manually blocked tasks when dependencies are removed" $ \env -> do
+      ws <- createTestWorkspace env "taskdep-manual-blocked-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Manual Blocked"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      dependency <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependency"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      dependent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      _ <- updateTask env.pool dependent.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Blocked, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      addDependency env.pool dependent.id dependency.id
+      removeDependency env.pool dependent.id dependency.id
+      getTask env.pool dependent.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "dependent task not found")
+
+    it "does not reopen an auto-blocked task after it is cancelled" $ \env -> do
+      ws <- createTestWorkspace env "taskdep-cancelled-autoblock-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Cancelled AutoBlock"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      dependency <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependency"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      dependent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      addDependency env.pool dependent.id dependency.id
+      _ <- updateTask env.pool dependent.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Cancelled, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      taskAutoBlocked env dependent.id `shouldReturn` False
+
+      _ <- updateTask env.pool dependency.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      getTask env.pool dependent.id >>= (\case
+        Just task -> task.status `shouldBe` Cancelled
+        Nothing -> expectationFailure "dependent task not found")
+
+    it "auto-blocks recursively through task ancestors" $ \env -> do
+      ws <- createTestWorkspace env "taskdep-recursive-autoblock-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Recursive AutoBlock"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      root <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Root"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just root.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      leaf <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just child.id, title = "Leaf"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      getTask env.pool child.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "child task not found")
+      getTask env.pool root.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "root task not found")
+
+      _ <- updateTask env.pool leaf.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      getTask env.pool child.id >>= (\case
+        Just task -> task.status `shouldBe` Todo
+        Nothing -> expectationFailure "child task not found")
+      getTask env.pool root.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "root task not found")
+
+      _ <- updateTask env.pool child.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      getTask env.pool root.id >>= (\case
+        Just task -> task.status `shouldBe` Todo
+        Nothing -> expectationFailure "root task not found")
+
+    it "auto-blocks across transitive dependency chains" $ \env -> do
+      ws <- createTestWorkspace env "taskdep-transitive-autoblock-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Transitive AutoBlock"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      c <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "C"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      b <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "B"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      a <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "A"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      _ <- updateTask env.pool c.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      addDependency env.pool b.id c.id
+      _ <- updateTask env.pool b.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      addDependency env.pool a.id b.id
+      getTask env.pool a.id >>= (\case
+        Just task -> task.status `shouldBe` Todo
+        Nothing -> expectationFailure "A task not found")
+
+      _ <- updateTask env.pool c.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+        , status = Just Todo, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+
+      getTask env.pool b.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "B task not found")
+      getTask env.pool a.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "A task not found")
+
+    it "moves blocking status when a subtask is reparented" $ \env -> do
+      ws <- createTestWorkspace env "task-reparent-autoblock-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Reparent AutoBlock"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      oldParent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Old parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      newParent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "New parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just oldParent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      getTask env.pool oldParent.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "old parent not found")
+
+      _ <- updateTask env.pool child.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = SetTo newParent.id
+        , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+
+      getTask env.pool oldParent.id >>= (\case
+        Just task -> task.status `shouldBe` Todo
+        Nothing -> expectationFailure "old parent not found")
+      getTask env.pool newParent.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "new parent not found")
+
+    it "unblocks and re-blocks ancestors when an open subtask is deleted and restored" $ \env -> do
+      ws <- createTestWorkspace env "task-restore-autoblock-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Restore AutoBlock"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      getTask env.pool parent.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "parent not found")
+
+      deleteTask env.pool child.id `shouldReturn` True
+      getTask env.pool parent.id >>= (\case
+        Just task -> task.status `shouldBe` Todo
+        Nothing -> expectationFailure "parent not found")
+
+      restoreTask env.pool child.id `shouldReturn` True
+      getTask env.pool parent.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "parent not found")
+
+    it "unblocks dependent tasks when a blocking dependency is deleted" $ \env -> do
+      ws <- createTestWorkspace env "task-delete-dependency-autoblock-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Delete Dependency AutoBlock"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      dependency <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependency"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      dependent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      addDependency env.pool dependent.id dependency.id
+      getTask env.pool dependent.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "dependent not found")
+
+      deleteTask env.pool dependency.id `shouldReturn` True
+      getTask env.pool dependent.id >>= (\case
+        Just task -> task.status `shouldBe` Todo
+        Nothing -> expectationFailure "dependent not found")
+
+    it "preserves auto-blocked status across project batch moves" $ \env -> do
+      ws <- createTestWorkspace env "task-batch-move-autoblock-ws"
+      sourceProj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Source"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      targetProj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Target"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      getTask env.pool parent.id >>= (\case
+        Just task -> task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "parent not found")
+
+      moveTasksBatch env.pool [parent.id, child.id] (Just targetProj.id) `shouldReturn` 2
+      getTask env.pool parent.id >>= (\case
+        Just task -> do
+          task.projectId `shouldBe` Just targetProj.id
+          task.status `shouldBe` Blocked
+        Nothing -> expectationFailure "parent not found")
+      getTask env.pool child.id >>= (\case
+        Just task -> task.projectId `shouldBe` Just targetProj.id
+        Nothing -> expectationFailure "child not found")
+
+    it "rejects cross-workspace task dependencies at the database layer" $ \env -> do
+      wsA <- createTestWorkspace env "taskdep-cross-a"
+      wsB <- createTestWorkspace env "taskdep-cross-b"
+      projA <- createProject env.pool CreateProject
+        { workspaceId = wsA.id, parentId = Nothing, name = "A"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      projB <- createProject env.pool CreateProject
+        { workspaceId = wsB.id, parentId = Nothing, name = "B"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      taskA <- createTask env.pool CreateTask
+        { workspaceId = wsA.id, projectId = Just projA.id, parentId = Nothing, title = "A"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      taskB <- createTask env.pool CreateTask
+        { workspaceId = wsB.id, projectId = Just projB.id, parentId = Nothing, title = "B"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      result <- try @DBException $ addDependency env.pool taskA.id taskB.id
+      case result of
+        Left (DBCheckViolation _) -> pure ()
+        other -> expectationFailure $ "Expected DBCheckViolation, got: " <> show other
+
   describe "memory links" $ do
     it "keeps task memory link creation idempotent" $ \env -> do
       ws <- createTestWorkspace env "taskmem-ws"
@@ -773,3 +1068,13 @@ expectLifecycle expected result = case result of
 
 execSql :: TestEnv -> String -> IO ()
 execSql env sql = runSession env.pool (Session.sql (BS8.pack sql))
+
+taskAutoBlocked :: TestEnv -> UUID -> IO Bool
+taskAutoBlocked env taskId = runSession env.pool $ Session.statement taskId taskAutoBlockedStatement
+
+taskAutoBlockedStatement :: Statement.Statement UUID Bool
+taskAutoBlockedStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT auto_blocked FROM tasks WHERE id = $1"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nonNullable D.bool))

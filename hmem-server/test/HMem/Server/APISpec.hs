@@ -2823,6 +2823,9 @@ spec = around withApp $ do
       depResp <- postJSON app (uuidPath "/api/v1/tasks" t2.id <> "/dependencies")
         (object ["depends_on_id" .= t1.id])
       respStatus depResp `shouldBe` 200
+      blockedResp <- get_ app (uuidPath "/api/v1/tasks" t2.id)
+      let Just blockedTask = decode (respBody blockedResp) :: Maybe Task
+      blockedTask.status `shouldBe` Blocked
 
       -- Add A depends on B (cycle -- should be 409)
       cycleResp <- postJSON app (uuidPath "/api/v1/tasks" t1.id <> "/dependencies")
@@ -2833,6 +2836,9 @@ spec = around withApp $ do
       delResp <- del app (uuidPath "/api/v1/tasks" t2.id <> "/dependencies/"
                           <> encodeUtf8 (T.pack (show t1.id)))
       respStatus delResp `shouldBe` 200
+      unblockedResp <- get_ app (uuidPath "/api/v1/tasks" t2.id)
+      let Just unblockedTask = decode (respBody unblockedResp) :: Maybe Task
+      unblockedTask.status `shouldBe` Todo
 
   describe "task overview endpoint" $ do
     it "returns dependency summaries and optional extra-context memories" $ \app -> do

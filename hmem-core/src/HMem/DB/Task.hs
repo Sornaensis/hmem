@@ -289,9 +289,7 @@ updateTask pool tid ut = do
           (r:_) -> pure . Just $ rowToTask r
       case mTask of
         Nothing -> pure Nothing
-        Just t -> do
-          enriched <- enrichTaskCounts pool [t]
-          pure $ listToMaybe enriched
+        Just t -> getTask pool t.id
 
 ------------------------------------------------------------------------
 -- Delete

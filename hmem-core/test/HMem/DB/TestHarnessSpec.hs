@@ -159,6 +159,46 @@ spec = do
                 Left other -> expectationFailure $ "Expected MEMORY_LINK_REQUIRED, got: " <> show other
                 Right _ -> expectationFailure "Expected new unlinked memory insert to fail after V013"
 
+    it "autoBlockMigration backfills existing task blockers and preserves manual blocked tasks" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              preV14Dir <- copyMigrationSubset sandbox migrations "pre-v014" (\name -> name < "V014")
+              v14OnlyDir <- copyMigrationSubset sandbox migrations "v014-only" (== "V014__recursive_task_auto_blocking.sql")
+
+              preResult <- Migration.runMigrations pool preV14Dir
+              preResult.failed `shouldBe` Nothing
+
+              wsId <- runSession pool $
+                Session.statement ("auto-block-migration-ws" :: Text) insertWorkspaceDirectStatement
+              projectId <- runSession pool $
+                Session.statement (wsId, "Auto Block Migration Project" :: Text) insertProjectDirectStatement
+              parentId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "parent" :: Text, "todo" :: Text) insertTaskDirectStatement
+              _childId <- runSession pool $
+                Session.statement (wsId, projectId, Just parentId, "child" :: Text, "todo" :: Text) insertTaskDirectStatement
+              manualBlockedId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "manual blocked" :: Text, "blocked" :: Text) insertTaskDirectStatement
+
+              v14Result <- Migration.runMigrations pool v14OnlyDir
+              v14Result.failed `shouldBe` Nothing
+
+              parentStatus <- runSession pool $
+                Session.statement parentId taskStatusTextStatement
+              parentStatus `shouldBe` "blocked"
+              parentAutoBlocked <- runSession pool $
+                Session.statement parentId taskAutoBlockedStatement
+              parentAutoBlocked `shouldBe` True
+
+              manualStatus <- runSession pool $
+                Session.statement manualBlockedId taskStatusTextStatement
+              manualStatus `shouldBe` "blocked"
+              manualAutoBlocked <- runSession pool $
+                Session.statement manualBlockedId taskAutoBlockedStatement
+              manualAutoBlocked `shouldBe` False
+
     it "resolves the repository root from a non-repo cwd" $
       withTestSandbox $ \sandbox ->
         withCurrentDirectory sandbox.sandboxTmpDir $ do
@@ -210,5 +250,40 @@ activeMemoryExistsStatement :: Statement.Statement UUID Bool
 activeMemoryExistsStatement = Statement.Statement sql encoder decoder True
   where
     sql = "SELECT EXISTS (SELECT 1 FROM memories WHERE id = $1 AND deleted_at IS NULL)"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nonNullable D.bool))
+
+insertProjectDirectStatement :: Statement.Statement (UUID, Text) UUID
+insertProjectDirectStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "INSERT INTO projects (workspace_id, name) VALUES ($1, $2) RETURNING id"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.text))
+    decoder = D.singleRow (D.column (D.nonNullable D.uuid))
+
+insertTaskDirectStatement :: Statement.Statement (UUID, UUID, Maybe UUID, Text, Text) UUID
+insertTaskDirectStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "INSERT INTO tasks (workspace_id, project_id, parent_id, title, status) VALUES ($1, $2, $3, $4, $5::task_status_enum) RETURNING id"
+    encoder =
+      contramap (\(wsId, _, _, _, _) -> wsId) (E.param (E.nonNullable E.uuid)) <>
+      contramap (\(_, projectId, _, _, _) -> projectId) (E.param (E.nonNullable E.uuid)) <>
+      contramap (\(_, _, parentId, _, _) -> parentId) (E.param (E.nullable E.uuid)) <>
+      contramap (\(_, _, _, title, _) -> title) (E.param (E.nonNullable E.text)) <>
+      contramap (\(_, _, _, _, status) -> status) (E.param (E.nonNullable E.text))
+    decoder = D.singleRow (D.column (D.nonNullable D.uuid))
+
+taskStatusTextStatement :: Statement.Statement UUID Text
+taskStatusTextStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT status::text FROM tasks WHERE id = $1"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nonNullable D.text))
+
+taskAutoBlockedStatement :: Statement.Statement UUID Bool
+taskAutoBlockedStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT auto_blocked FROM tasks WHERE id = $1"
     encoder = E.param (E.nonNullable E.uuid)
     decoder = D.singleRow (D.column (D.nonNullable D.bool))

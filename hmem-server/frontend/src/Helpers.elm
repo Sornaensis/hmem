@@ -454,6 +454,15 @@ collectDescendantProjectIds allProjects parentId =
     parentId :: List.concatMap (\c -> collectDescendantProjectIds allProjects c.id) directChildren
 
 
+collectDescendantTaskIds : List Api.Task -> String -> List String
+collectDescendantTaskIds allTasks parentId =
+    let
+        directChildren =
+            List.filter (\t -> t.parentId == Just parentId) allTasks
+    in
+    parentId :: List.concatMap (\child -> collectDescendantTaskIds allTasks child.id) directChildren
+
+
 computeDropPriority : Maybe Int -> Maybe Int -> Int
 computeDropPriority abovePri belowPri =
     case ( abovePri, belowPri ) of

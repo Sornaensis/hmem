@@ -1,6 +1,7 @@
 module Feature.Mutations exposing (init, update)
 
 import Dict
+import Api
 import Helpers exposing (beginWorkspaceDataReload, trackLocalMutation)
 import Toast exposing (addToast)
 import Types exposing (..)
@@ -50,8 +51,8 @@ update msg model =
                     in
                     ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
 
-                Err _ ->
-                    addToast Error "Failed to create project" model
+                Err err ->
+                    handleApiMutationError "Failed to create project" err model
 
         TaskCreated result ->
             case result of
@@ -77,8 +78,8 @@ update msg model =
                     in
                     ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
 
-                Err _ ->
-                    addToast Error "Failed to create task" model
+                Err err ->
+                    handleApiMutationError "Failed to create task" err model
 
         MemoryCreated result ->
             case result of
@@ -144,8 +145,8 @@ update msg model =
                     in
                     ( trackedModel, trackCmd )
 
-                Err _ ->
-                    addToast Error "Failed to update project" model
+                Err err ->
+                    handleApiMutationError "Failed to update project" err model
 
         TaskUpdated result ->
             case result of
@@ -157,8 +158,8 @@ update msg model =
                     in
                     ( trackedModel, trackCmd )
 
-                Err _ ->
-                    addToast Error "Failed to update task" model
+                Err err ->
+                    handleApiMutationError "Failed to update task" err model
 
         MemoryUpdated result ->
             case result of
@@ -212,3 +213,19 @@ refreshAfterMutation model =
 updateMutationsModel : (MutationsModel -> MutationsModel) -> Model -> Model
 updateMutationsModel fn model =
     { model | mutations = fn model.mutations }
+
+
+handleApiMutationError : String -> Api.ApiError -> Model -> ( Model, Cmd Msg )
+handleApiMutationError fallback err model =
+    let
+        ( toastedModel, toastCmd ) =
+            addToast Error (Api.apiErrorToUserMessage fallback err) model
+
+        ( reloadedModel, reloadCmd ) =
+            if Api.isLifecycleConflict err then
+                beginWorkspaceDataReload False toastedModel
+
+            else
+                ( toastedModel, Cmd.none )
+    in
+    ( reloadedModel, Cmd.batch [ toastCmd, reloadCmd ] )

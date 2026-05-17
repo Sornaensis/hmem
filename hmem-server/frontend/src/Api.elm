@@ -5,6 +5,7 @@ module Api exposing
     , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, UnifiedSearchResults
     , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
     , AuditAction(..), AuditLogEntry, RevertResult
+    , ApiError, apiErrorToUserMessage, decodeApiErrorBody, isLifecycleConflict
     , PaginatedResult
     , SessionContext, SessionPrincipal, SessionGlobalPermissions, SessionWorkspaceContext
     , MemoryType(..), ProjectStatus(..), TaskStatus(..), WorkspaceType(..)
@@ -199,6 +200,194 @@ type alias AuditLogEntry =
     , actorLabel : Maybe String
     , changedAt : String
     }
+
+
+type ApiError
+    = StructuredApiError StructuredErrorBody
+    | TransportError Http.Error
+    | DecodeError String
+
+
+type alias StructuredErrorBody =
+    { error : String
+    , code : Maybe String
+    , message : String
+    , detail : Maybe ErrorDetail
+    , hint : Maybe String
+    , requiredAction : Maybe String
+    }
+
+
+type alias ErrorDetail =
+    { blockerCount : Maybe Int
+    , blockerIds : List String
+    , openProjectCount : Maybe Int
+    , openProjectIds : List String
+    , openTaskCount : Maybe Int
+    , openTaskIds : List String
+    }
+
+
+expectJsonWithApiError : Decoder a -> (Result ApiError a -> msg) -> Http.Expect msg
+expectJsonWithApiError decoder toMsg =
+    Http.expectStringResponse toMsg (decodeApiResponse decoder)
+
+
+decodeApiResponse : Decoder a -> Http.Response String -> Result ApiError a
+decodeApiResponse decoder response =
+    case response of
+        Http.BadUrl_ url ->
+            Err (TransportError (Http.BadUrl url))
+
+        Http.Timeout_ ->
+            Err (TransportError Http.Timeout)
+
+        Http.NetworkError_ ->
+            Err (TransportError Http.NetworkError)
+
+        Http.BadStatus_ metadata body ->
+            Err (decodeApiErrorBody metadata.statusCode body)
+
+        Http.GoodStatus_ _ body ->
+            case D.decodeString decoder body of
+                Ok value ->
+                    Ok value
+
+                Err err ->
+                    Err (DecodeError (D.errorToString err))
+
+
+decodeApiErrorBody : Int -> String -> ApiError
+decodeApiErrorBody statusCode body =
+    case D.decodeString structuredApiErrorDecoder body of
+        Ok apiError ->
+            StructuredApiError apiError
+
+        Err _ ->
+            TransportError (Http.BadStatus statusCode)
+
+
+structuredApiErrorDecoder : Decoder StructuredErrorBody
+structuredApiErrorDecoder =
+    D.succeed StructuredErrorBody
+        |> required "error" D.string
+        |> optional "code" (D.nullable D.string) Nothing
+        |> optional "message" D.string "Server rejected the request."
+        |> optional "detail" (D.nullable errorDetailDecoder) Nothing
+        |> optional "hint" (D.nullable D.string) Nothing
+        |> optional "required_action" (D.nullable D.string) Nothing
+
+
+errorDetailDecoder : Decoder ErrorDetail
+errorDetailDecoder =
+    D.succeed ErrorDetail
+        |> optional "blocker_count" (D.nullable D.int) Nothing
+        |> optional "blocker_ids" (D.list D.string) []
+        |> optional "open_project_count" (D.nullable D.int) Nothing
+        |> optional "open_project_ids" (D.list D.string) []
+        |> optional "open_task_count" (D.nullable D.int) Nothing
+        |> optional "open_task_ids" (D.list D.string) []
+
+
+apiErrorToUserMessage : String -> ApiError -> String
+apiErrorToUserMessage fallback err =
+    case err of
+        StructuredApiError apiError ->
+            structuredErrorToUserMessage fallback apiError
+
+        TransportError _ ->
+            fallback
+
+        DecodeError _ ->
+            fallback
+
+
+isLifecycleConflict : ApiError -> Bool
+isLifecycleConflict err =
+    case err of
+        StructuredApiError apiError ->
+            apiError.error == "lifecycle_conflict"
+
+        _ ->
+            False
+
+
+structuredErrorToUserMessage : String -> StructuredErrorBody -> String
+structuredErrorToUserMessage fallback apiError =
+    let
+        baseMessage =
+            case apiError.code of
+                Just "TASK_COMPLETION_BLOCKED" ->
+                    "Finish or cancel all subtasks before marking this task done."
+
+                Just "TASK_OPEN_UNDER_DONE_TASK" ->
+                    "Reopen the parent task before adding or reopening open subtasks."
+
+                Just "PROJECT_COMPLETION_BLOCKED" ->
+                    "Complete/archive child projects and finish or cancel all tasks before closing this project."
+
+                Just "PROJECT_OPEN_UNDER_CLOSED_PROJECT" ->
+                    "Reopen the parent project before adding or reopening active child projects."
+
+                Just "TASK_OPEN_UNDER_CLOSED_PROJECT" ->
+                    "Reopen the project before adding or reopening open tasks."
+
+                _ ->
+                    apiError.requiredAction
+                        |> Maybe.withDefault (Maybe.withDefault apiError.message apiError.hint)
+
+        detailText =
+            apiError.detail
+                |> Maybe.map errorDetailSummary
+                |> Maybe.withDefault ""
+    in
+    if String.isEmpty baseMessage then
+        fallback ++ detailText
+
+    else
+        baseMessage ++ detailText
+
+
+errorDetailSummary : ErrorDetail -> String
+errorDetailSummary detail =
+    let
+        parts =
+            List.filterMap identity
+                [ Maybe.map (\n -> String.fromInt n ++ " blocker" ++ plural n) detail.blockerCount
+                , Maybe.map (\n -> String.fromInt n ++ " open project" ++ plural n) detail.openProjectCount
+                , Maybe.map (\n -> String.fromInt n ++ " open task" ++ plural n) detail.openTaskCount
+                ]
+
+        ids =
+            detail.blockerIds ++ detail.openProjectIds ++ detail.openTaskIds
+
+        idText =
+            case List.take 2 ids of
+                [] ->
+                    ""
+
+                examples ->
+                    "; examples: " ++ String.join ", " (List.map shortId examples)
+    in
+    if List.isEmpty parts && String.isEmpty idText then
+        ""
+
+    else
+        " (" ++ String.join ", " parts ++ idText ++ ")"
+
+
+plural : Int -> String
+plural count =
+    if count == 1 then
+        ""
+
+    else
+        "s"
+
+
+shortId : String -> String
+shortId idValue =
+    String.left 8 idValue
 
 
 type alias SessionContext =
@@ -1112,7 +1301,7 @@ unifiedSearch apiUrl query mWorkspaceId toMsg =
 -- MUTATION REQUESTS
 
 
-createProject : String -> String -> String -> String -> (Result Http.Error Project -> msg) -> Cmd msg
+createProject : String -> String -> String -> String -> (Result ApiError Project -> msg) -> Cmd msg
 createProject apiUrl wsId name requestId toMsg =
     Http.request
         { method = "POST"
@@ -1126,13 +1315,13 @@ createProject apiUrl wsId name requestId toMsg =
                     , ( "request_id", E.string requestId )
                     ]
                 )
-        , expect = Http.expectJson toMsg projectDecoder
+        , expect = expectJsonWithApiError projectDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }
 
 
-updateProject : String -> String -> List ( String, E.Value ) -> (Result Http.Error Project -> msg) -> Cmd msg
+updateProject : String -> String -> List ( String, E.Value ) -> (Result ApiError Project -> msg) -> Cmd msg
 updateProject apiUrl projectId fields toMsg =
     let
         headers =
@@ -1143,7 +1332,7 @@ updateProject apiUrl projectId fields toMsg =
         , headers = headers
         , url = apiUrl ++ "/api/v1/projects/" ++ projectId
         , body = Http.jsonBody (E.object fields)
-        , expect = Http.expectJson toMsg projectDecoder
+        , expect = expectJsonWithApiError projectDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }
@@ -1162,7 +1351,7 @@ deleteProject apiUrl projectId requestId toMsg =
         }
 
 
-createTask : String -> String -> Maybe String -> String -> String -> (Result Http.Error Task -> msg) -> Cmd msg
+createTask : String -> String -> Maybe String -> String -> String -> (Result ApiError Task -> msg) -> Cmd msg
 createTask apiUrl wsId mProjectId title requestId toMsg =
     Http.request
         { method = "POST"
@@ -1184,13 +1373,13 @@ createTask apiUrl wsId mProjectId title requestId toMsg =
                            )
                     )
                 )
-        , expect = Http.expectJson toMsg taskDecoder
+        , expect = expectJsonWithApiError taskDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }
 
 
-updateTask : String -> String -> List ( String, E.Value ) -> (Result Http.Error Task -> msg) -> Cmd msg
+updateTask : String -> String -> List ( String, E.Value ) -> (Result ApiError Task -> msg) -> Cmd msg
 updateTask apiUrl taskId fields toMsg =
     let
         headers =
@@ -1201,7 +1390,7 @@ updateTask apiUrl taskId fields toMsg =
         , headers = headers
         , url = apiUrl ++ "/api/v1/tasks/" ++ taskId
         , body = Http.jsonBody (E.object fields)
-        , expect = Http.expectJson toMsg taskDecoder
+        , expect = expectJsonWithApiError taskDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }
@@ -1365,7 +1554,7 @@ unlinkTaskMemory apiUrl taskId memoryId requestId toMsg =
         }
 
 
-createProjectWithParent : String -> String -> String -> String -> String -> (Result Http.Error Project -> msg) -> Cmd msg
+createProjectWithParent : String -> String -> String -> String -> String -> (Result ApiError Project -> msg) -> Cmd msg
 createProjectWithParent apiUrl wsId parentId name requestId toMsg =
     Http.request
         { method = "POST"
@@ -1380,13 +1569,13 @@ createProjectWithParent apiUrl wsId parentId name requestId toMsg =
                     , ( "request_id", E.string requestId )
                     ]
                 )
-        , expect = Http.expectJson toMsg projectDecoder
+        , expect = expectJsonWithApiError projectDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }
 
 
-createTaskWithParent : String -> String -> Maybe String -> String -> String -> String -> (Result Http.Error Task -> msg) -> Cmd msg
+createTaskWithParent : String -> String -> Maybe String -> String -> String -> String -> (Result ApiError Task -> msg) -> Cmd msg
 createTaskWithParent apiUrl wsId mProjectId parentId title requestId toMsg =
     Http.request
         { method = "POST"
@@ -1409,7 +1598,7 @@ createTaskWithParent apiUrl wsId mProjectId parentId title requestId toMsg =
                            )
                     )
                 )
-        , expect = Http.expectJson toMsg taskDecoder
+        , expect = expectJsonWithApiError taskDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }

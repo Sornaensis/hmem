@@ -14,6 +14,7 @@ module Feature.Editing exposing
     , viewMemoryTypeSelect
     , viewPrioritySelect
     , viewStatusSelect
+    , viewStatusSelectWithDisabled
     , viewTagEditor
     )
 
@@ -838,6 +839,11 @@ viewEditableTextarea model entityType entityId field currentValue =
 
 viewStatusSelect : Model -> String -> String -> String -> List a -> (a -> String) -> (String -> a -> Msg) -> Html Msg
 viewStatusSelect model entityType entityId currentStr allValues toString toMsg =
+    viewStatusSelectWithDisabled model entityType entityId currentStr allValues toString (\_ -> Nothing) toMsg
+
+
+viewStatusSelectWithDisabled : Model -> String -> String -> String -> List a -> (a -> String) -> (a -> Maybe String) -> (String -> a -> Msg) -> Html Msg
+viewStatusSelectWithDisabled model entityType entityId currentStr allValues toString disabledReason toMsg =
     select
         [ class ("status-select badge badge-" ++ currentStr)
         , disabled (not (Permissions.canEditCurrentWorkspace model))
@@ -860,8 +866,20 @@ viewStatusSelect model entityType entityId currentStr allValues toString toMsg =
                 let
                     str =
                         toString v
+
+                    reason =
+                        disabledReason v
                 in
-                option [ value str, selected (str == currentStr) ]
+                option
+                    ([ value str, selected (str == currentStr) ]
+                        ++ (case reason of
+                                Just message ->
+                                    [ disabled True, title message ]
+
+                                Nothing ->
+                                    []
+                           )
+                    )
                     [ text (str |> String.replace "_" " ") ]
             )
             allValues

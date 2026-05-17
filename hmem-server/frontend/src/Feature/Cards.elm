@@ -1,12 +1,15 @@
 module Feature.Cards exposing
     ( handleEscape
     , init
+    , projectCompletionBlockerReason
+    , taskCompletionBlockerReason
     , update
     , viewDeleteConfirmModal
     , viewProjectsTree
     )
 
 import Api
+import Char
 import Dict
 import Feature.AuditLog
 import Feature.Dependencies
@@ -237,6 +240,101 @@ canDeleteEntity model entityType =
             Permissions.canEditCurrentWorkspace model
 
 
+isOpenProjectStatus : Api.ProjectStatus -> Bool
+isOpenProjectStatus status =
+    status == Api.ProjActive || status == Api.ProjPaused
+
+
+isOpenTaskStatus : Api.TaskStatus -> Bool
+isOpenTaskStatus status =
+    status == Api.Todo || status == Api.InProgress || status == Api.Blocked
+
+
+projectAndAncestorsAreOpen : List Api.Project -> String -> Bool
+projectAndAncestorsAreOpen allProjects projectId =
+    case List.filter (\project -> project.id == projectId) allProjects |> List.head of
+        Just project ->
+            isOpenProjectStatus project.status
+                && (case project.parentId of
+                        Just parentId ->
+                            projectAndAncestorsAreOpen allProjects parentId
+
+                        Nothing ->
+                            True
+                   )
+
+        Nothing ->
+            True
+
+
+hasDoneTaskAncestor : List Api.Task -> Api.Task -> Bool
+hasDoneTaskAncestor allTasks task =
+    case task.parentId |> Maybe.andThen (\parentId -> List.filter (\candidate -> candidate.id == parentId) allTasks |> List.head) of
+        Just parent ->
+            parent.status == Api.Done || hasDoneTaskAncestor allTasks parent
+
+        Nothing ->
+            False
+
+
+projectCompletionBlockerReason : Int -> Int -> Maybe String
+projectCompletionBlockerReason openProjectCount openTaskCount =
+    if openProjectCount == 0 && openTaskCount == 0 then
+        Nothing
+
+    else
+        let
+            actions =
+                List.filterMap identity
+                    [ if openProjectCount > 0 then
+                        Just ("complete/archive " ++ countPhrase openProjectCount "child project" "child projects")
+
+                      else
+                        Nothing
+                    , if openTaskCount > 0 then
+                        Just ("finish/cancel " ++ countPhrase openTaskCount "task" "tasks")
+
+                      else
+                        Nothing
+                    ]
+        in
+        Just (sentenceCase (String.join " and " actions) ++ " before closing this project.")
+
+
+taskCompletionBlockerReason : Int -> Maybe String
+taskCompletionBlockerReason openTaskCount =
+    if openTaskCount == 0 then
+        Nothing
+
+    else
+        Just ("Finish or cancel " ++ countPhrase openTaskCount "subtask" "subtasks" ++ " before marking this task done.")
+
+
+countPhrase : Int -> String -> String -> String
+countPhrase count singular pluralLabel =
+    String.fromInt count ++ " " ++ (if count == 1 then singular else pluralLabel)
+
+
+sentenceCase : String -> String
+sentenceCase value =
+    case String.uncons value of
+        Just ( first, rest ) ->
+            String.fromChar (Char.toUpper first) ++ rest
+
+        Nothing ->
+            value
+
+
+viewCompletionNote : Maybe String -> Html Msg
+viewCompletionNote reason =
+    case reason of
+        Just message ->
+            span [ class "completion-blocker-note", title message ] [ text "blocked" ]
+
+        Nothing ->
+            text ""
+
+
 
 -- VIEW
 
@@ -463,6 +561,47 @@ viewProjectNode allProjects model depth project hasSearch query =
 
         linkedMems =
             Dict.get project.id model.memory.entityMemories |> Maybe.withDefault []
+
+        projectSubtreeIds =
+            collectDescendantProjectIds allProjects project.id
+
+        openSubprojectCount =
+            allProjects
+                |> List.filter (\p -> p.id /= project.id && List.member p.id projectSubtreeIds && isOpenProjectStatus p.status)
+                |> List.length
+
+        projectTaskTreeIds =
+            model.tasks
+                |> Dict.values
+                |> List.filter
+                    (\t ->
+                        t.projectId
+                            |> Maybe.map (\pid -> List.member pid projectSubtreeIds)
+                            |> Maybe.withDefault False
+                    )
+                |> List.concatMap (\t -> collectDescendantTaskIds (Dict.values model.tasks) t.id)
+
+        openProjectTaskCount =
+            model.tasks
+                |> Dict.values
+                |> List.filter (\t -> isOpenTaskStatus t.status && List.member t.id projectTaskTreeIds)
+                |> List.length
+
+        completionBlockerReason =
+            projectCompletionBlockerReason openSubprojectCount openProjectTaskCount
+
+        projectStatusDisabled status =
+            if status == Api.ProjCompleted || status == Api.ProjArchived then
+                completionBlockerReason
+
+            else
+                Nothing
+
+        projectAllowsOpenChildren =
+            projectAndAncestorsAreOpen allProjects project.id
+
+        projectCreateChildReason =
+            "Reopen this project before adding active child projects or open tasks."
     in
     div [ class "tree-node", style "margin-left" (String.fromInt (depth * 20) ++ "px"), id ("entity-" ++ project.id) ]
         [ div
@@ -493,7 +632,8 @@ viewProjectNode allProjects model depth project hasSearch query =
                     , Feature.Editing.viewEditableText model "project" project.id "name" project.name
                     ]
                 , div [ class "card-actions" ]
-                    [ Feature.Editing.viewStatusSelect model "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString ChangeProjectStatus
+                    [ Feature.Editing.viewStatusSelectWithDisabled model "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString projectStatusDisabled ChangeProjectStatus
+                    , viewCompletionNote completionBlockerReason
                     , Feature.Editing.viewPrioritySelect model "project" project.id project.priority ChangeProjectPriority
                     , if Permissions.canEditCurrentWorkspace model then
                         button [ class "btn-icon btn-danger", onClick (ConfirmDelete "project" project.id), title "Delete" ] [ text "✕" ]
@@ -578,6 +718,8 @@ viewProjectNode allProjects model depth project hasSearch query =
                 [ if Permissions.canEditCurrentWorkspace model then
                     button
                         [ class "btn-inline-create"
+                        , disabled (not projectAllowsOpenChildren)
+                        , title (if projectAllowsOpenChildren then "Add subproject" else projectCreateChildReason)
                         , onClick (ShowInlineCreate (InlineCreateProject { parentId = Just project.id, name = "" }))
                         ]
                         [ text "+ Subproject" ]
@@ -587,6 +729,8 @@ viewProjectNode allProjects model depth project hasSearch query =
                 , if Permissions.canEditCurrentWorkspace model then
                     button
                         [ class "btn-inline-create"
+                        , disabled (not projectAllowsOpenChildren)
+                        , title (if projectAllowsOpenChildren then "Add task" else projectCreateChildReason)
                         , onClick (ShowInlineCreate (InlineCreateTask { projectId = Just project.id, parentId = Nothing, title = "" }))
                         ]
                         [ text "+ Task" ]
@@ -673,6 +817,45 @@ viewTaskCard showProject model task =
 
         linkedMems =
             Dict.get task.id model.memory.entityMemories |> Maybe.withDefault []
+
+        allTasks =
+            Dict.values model.tasks
+
+        descendantTaskIds =
+            collectDescendantTaskIds allTasks task.id
+
+        openDescendantTaskCount =
+            allTasks
+                |> List.filter (\t -> t.id /= task.id && List.member t.id descendantTaskIds && isOpenTaskStatus t.status)
+                |> List.length
+
+        completionBlockerReason =
+            taskCompletionBlockerReason openDescendantTaskCount
+
+        taskStatusDisabled status =
+            if status == Api.Done then
+                completionBlockerReason
+
+            else
+                Nothing
+
+        taskProjectAllowsOpenTasks =
+            task.projectId
+                |> Maybe.map (projectAndAncestorsAreOpen (Dict.values model.projects))
+                |> Maybe.withDefault True
+
+        taskAllowsOpenChildren =
+            task.status /= Api.Done && not (hasDoneTaskAncestor allTasks task) && taskProjectAllowsOpenTasks
+
+        taskCreateChildReason =
+            if task.status == Api.Done then
+                "Reopen this task before adding open subtasks."
+
+            else if hasDoneTaskAncestor allTasks task then
+                "Reopen the parent task before adding open subtasks."
+
+            else
+                "Reopen the project before adding open subtasks."
     in
     div
         ([ class ("card tree-card " ++ cardClass ++ " card-status-" ++ Api.taskStatusToString task.status ++ Feature.DragDrop.dragOverClass model task.id)
@@ -709,7 +892,8 @@ viewTaskCard showProject model task =
                 , Feature.Editing.viewEditableText model "task" task.id "title" task.title
                 ]
             , div [ class "card-actions" ]
-                [ Feature.Editing.viewStatusSelect model "task" task.id (Api.taskStatusToString task.status) Api.allTaskStatuses Api.taskStatusToString ChangeTaskStatus
+                [ Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) Api.allTaskStatuses Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
+                , viewCompletionNote completionBlockerReason
                 , Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority
                 , if Permissions.canEditCurrentWorkspace model then
                     button [ class "btn-icon btn-danger", onClick (ConfirmDelete "task" task.id), title "Delete" ] [ text "✕" ]
@@ -815,6 +999,8 @@ viewTaskCard showProject model task =
             [ if Permissions.canEditCurrentWorkspace model then
                 button
                     [ class "btn-inline-create"
+                    , disabled (not taskAllowsOpenChildren)
+                    , title (if taskAllowsOpenChildren then "Add subtask" else taskCreateChildReason)
                     , onClick (ShowInlineCreate (InlineCreateTask { projectId = task.projectId, parentId = Just task.id, title = "" }))
                     ]
                     [ text "+ Subtask" ]

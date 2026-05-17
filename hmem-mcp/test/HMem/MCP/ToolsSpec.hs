@@ -33,11 +33,17 @@ testUUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 testUUID2 :: Text
 testUUID2 = "11111111-2222-3333-4444-555555555555"
 
+testUUID3 :: Text
+testUUID3 = "22222222-3333-4444-5555-666666666666"
+
 parsedUUID :: UUID.UUID
 parsedUUID = read "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 parsedUUID2 :: UUID.UUID
 parsedUUID2 = read "11111111-2222-3333-4444-555555555555"
+
+parsedUUID3 :: UUID.UUID
+parsedUUID3 = read "22222222-3333-4444-5555-666666666666"
 
 ------------------------------------------------------------------------
 -- parseToolCall
@@ -350,6 +356,27 @@ spec = do
             , ftsLanguage = Nothing
             }
       validateToolCall (MemoryCreateBatch [cm]) `shouldSatisfy` isLeft
+
+  describe "memory target helpers" $ do
+
+    it "identifies top-level tasks as eligible memory targets and subtasks as ineligible" $ do
+      isTopLevelTaskTarget (taskValue testUUID Nothing Nothing) `shouldBe` True
+      isTopLevelTaskTarget (taskValue testUUID (Just testUUID2) Nothing) `shouldBe` False
+
+    it "links task_finish notes for top-level tasks to the task itself" $ do
+      taskFinishNotesTarget parsedUUID (taskValue testUUID Nothing (Just testUUID3)) []
+        `shouldBe` Right (MemoryTargetTask parsedUUID)
+
+    it "links task_finish notes for subtasks to the nearest top-level ancestor task" $ do
+      let current = taskValue testUUID (Just testUUID2) (Just testUUID3)
+          parent = taskValue testUUID2 Nothing (Just testUUID3)
+      taskFinishNotesTarget parsedUUID current [parent]
+        `shouldBe` Right (MemoryTargetTask parsedUUID2)
+
+    it "falls back to the project when subtask notes cannot resolve a top-level task" $ do
+      let current = taskValue testUUID (Just testUUID2) (Just testUUID3)
+      taskFinishNotesTarget parsedUUID current []
+        `shouldBe` Right (MemoryTargetProject parsedUUID3)
 
     it "rejects oversized project descriptions" $ do
       let cp = CreateProject
@@ -1126,8 +1153,10 @@ spec = do
       properties <- requireJust "memory_create properties" (objectField "properties" schema)
       contentSchema <- requireJust "memory_create content schema" (objectField "content" properties)
       memoryTypeSchema <- requireJust "memory_create memory_type schema" (objectField "memory_type" properties)
+      taskIdSchema <- requireJust "memory_create task_id schema" (objectField "task_id" properties)
       numberField "maxLength" contentSchema `shouldBe` Just (fromIntegral maxMemoryContentBytes)
       objectField "enum" memoryTypeSchema `shouldBe` Just (toJSON (["short_term", "long_term"] :: [Text]))
+      textField "description" taskIdSchema `shouldSatisfy` maybe False (T.isInfixOf "top-level")
       objectField "project_id" properties `shouldSatisfy` (/= Nothing)
       objectField "task_id" properties `shouldSatisfy` (/= Nothing)
       objectField "anyOf" schema `shouldSatisfy` (/= Nothing)
@@ -1141,6 +1170,7 @@ spec = do
       itemMemoryTypeSchema <- requireJust "memory_create batch item memory_type schema" (objectField "memory_type" itemProperties)
       objectField "enum" itemMemoryTypeSchema `shouldBe` Just (toJSON (["short_term", "long_term"] :: [Text]))
       objectField "required" itemSchema `shouldBe` Just (toJSON (["workspace_id", "content", "memory_type"] :: [Text]))
+      objectField "anyOf" itemSchema `shouldSatisfy` (/= Nothing)
 
     it "advertises list filter timestamps and task priority" $ do
       memorySchema <- requireJust "memory_list schema" (inputSchemaFor "memory_list")
@@ -1308,6 +1338,14 @@ textField key (Object obj) = case KM.lookup (Key.fromText key) obj of
   Just (String value) -> Just value
   _                   -> Nothing
 textField _ _ = Nothing
+
+taskValue :: Text -> Maybe Text -> Maybe Text -> Value
+taskValue tid mParentId mProjectId = object $
+  [ "id" .= tid
+  , "workspace_id" .= testUUID
+  ]
+  ++ [ "parent_id" .= parentId | Just parentId <- [mParentId] ]
+  ++ [ "project_id" .= projectId | Just projectId <- [mProjectId] ]
 
 firstContent :: Value -> Maybe Value
 firstContent value = case objectField "content" value of

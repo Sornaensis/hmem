@@ -11,6 +11,9 @@ module HMem.MCP.Tools
   , rawHttpErrorText
   , mcpErrorCodeFromRaw
   , taskStartUpdateError
+  , MemoryTarget(..)
+  , isTopLevelTaskTarget
+  , taskFinishNotesTarget
   , firstRawAuthError
   , bearerAuthHeaders
   , ToolCall(..)
@@ -19,7 +22,7 @@ module HMem.MCP.Tools
 import Control.Exception (SomeException, try)
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
-import Data.Aeson.Types (Parser, parseEither)
+import Data.Aeson.Types (Parser, Pair, parseEither)
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32)
@@ -56,12 +59,12 @@ toolDefinitions =
       , "properties" .= object []
       ]
 
-    , mkTool "memory_create" "Create one or more memories in a workspace. Each memory must include memory_type and at least one explicit creation target: project_id and/or task_id. For batch creation, pass items[] array (max 100) instead of top-level fields." $ object
+    , mkTool "memory_create" "Create one or more memories in a workspace. Each memory must include memory_type and at least one explicit creation target: project_id and/or task_id. Multiple project/task links are allowed. task_id targets must be top-level tasks only; subtasks are not valid memory targets. For batch creation, pass items[] array (max 100) instead of top-level fields." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
           , "project_id"   .= prop "string" "UUID of a project to link at creation time. Provide at least one of project_id or task_id."
-          , "task_id"      .= prop "string" "UUID of a task to link at creation time. Provide at least one of project_id or task_id."
+          , "task_id"      .= prop "string" "UUID of a top-level task to link at creation time. Subtask IDs are rejected. Provide at least one of project_id or task_id."
           , "content"      .= propMaxLength "string" "The memory content" maxMemoryContentBytes
           , "summary"      .= propMaxLength "string" "Optional short summary" maxMemorySummaryBytes
           , "memory_type"  .= propEnum "string" "short_term or long_term" ["short_term", "long_term"]
@@ -75,14 +78,14 @@ toolDefinitions =
                                        "description" .= t "Tags for categorization"]
           , "fts_language" .= prop "string" "Full-text search language (default 'english'). Use a PostgreSQL regconfig name, e.g. 'spanish', 'german', 'simple'."
           , "items"        .= object ["type" .= t "array",
-                                        "description" .= t "Batch: array of memory objects (same fields as top-level, max 100). Every item must include memory_type and at least one project_id or task_id. When present, top-level fields are ignored.",
+                                        "description" .= t "Batch: array of memory objects (same fields as top-level, max 100). Every item must include memory_type and at least one project_id or top-level task_id. Subtask task_id values are rejected. When present, top-level fields are ignored.",
                                         "minItems" .= (1 :: Int), "maxItems" .= (100 :: Int),
                                         "items" .= object
                                           [ "type" .= t "object"
                                           , "properties" .= object
                                               [ "workspace_id" .= prop "string" "UUID of the workspace"
                                               , "project_id"   .= prop "string" "UUID of a project to link at creation time. Provide at least one of project_id or task_id."
-                                              , "task_id"      .= prop "string" "UUID of a task to link at creation time. Provide at least one of project_id or task_id."
+                                              , "task_id"      .= prop "string" "UUID of a top-level task to link at creation time. Subtask IDs are rejected. Provide at least one of project_id or task_id."
                                               , "content"      .= propMaxLength "string" "The memory content" maxMemoryContentBytes
                                               , "summary"      .= propMaxLength "string" "Optional short summary" maxMemorySummaryBytes
                                               , "memory_type"  .= propEnum "string" "short_term or long_term" ["short_term", "long_term"]
@@ -97,11 +100,16 @@ toolDefinitions =
                                               , "fts_language" .= prop "string" "Full-text search language (default 'english'). Use a PostgreSQL regconfig name, e.g. 'spanish', 'german', 'simple'."
                                               ]
                                           , "required" .= (["workspace_id", "content", "memory_type"] :: [Text])
+                                          , "anyOf" .=
+                                              [ object ["required" .= (["project_id"] :: [Text])]
+                                              , object ["required" .= (["task_id"] :: [Text])]
+                                              ]
                                           ]]
           ]
       , "anyOf" .=
-          [ object ["required" .= (["workspace_id", "content", "memory_type"] :: [Text])]
-          , object ["required" .= (["items"] :: [Text])]
+          [ object ["required" .= (["items"] :: [Text])]
+          , object ["required" .= (["workspace_id", "content", "memory_type", "project_id"] :: [Text])]
+          , object ["required" .= (["workspace_id", "content", "memory_type", "task_id"] :: [Text])]
           ]
       , "required" .= ([] :: [Text])
       ]
@@ -430,7 +438,7 @@ toolDefinitions =
       , "required" .= [t "action", t "task_id", t "depends_on_id"]
       ]
 
-  , mkTool "link_memory" "Link or unlink memories to/from a project, task, or category. Use action 'link' to attach memories, 'unlink' to detach. Supports single or batch operations via memory_ids array (max 100). For categories, link/unlink always operates on a single memory_id." $ object
+  , mkTool "link_memory" "Link or unlink memories to/from a project, top-level task, or category. Use action 'link' to attach memories, 'unlink' to detach. Subtask task IDs are not valid link targets. Supports single or batch operations via memory_ids array (max 100). For categories, link/unlink always operates on a single memory_id." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "entity_type" .= propEnum "string" "Type of entity to link memories to" ["project", "task", "category"]
@@ -504,7 +512,7 @@ toolDefinitions =
       , "required" .= [t "task_id"]
       ]
 
-  , mkTool "task_finish" "Finish working on a task: optionally records notes as a linked memory, then updates task status. Use status 'done' for completion, 'blocked' when stuck, 'cancelled' to abandon. Notes are stored as a long_term memory linked to the task." $ object
+  , mkTool "task_finish" "Finish working on a task: optionally records notes as a linked long_term memory, then updates task status. Use status 'done' for completion, 'blocked' when stuck, 'cancelled' to abandon. Notes for top-level tasks link to that task. Notes for subtasks link to the nearest top-level ancestor task, or to the project if an eligible top-level task cannot be resolved; notes are never linked directly to subtasks." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the task"
@@ -668,6 +676,11 @@ data ToolCall
   | ProjectSpecCall UUID Text (Maybe Text) (Maybe Int32) [SpecTask] -- ws_id, name, desc, priority, tasks
   | ProjectArchiveCall UUID (Maybe Text)                         -- project_id, summary
   | UnifiedSearch UnifiedSearchQuery
+  deriving (Show, Eq)
+
+data MemoryTarget
+  = MemoryTargetProject UUID
+  | MemoryTargetTask UUID
   deriving (Show, Eq)
 
 -- | A task stub for project_spec — just the fields needed to create a task.
@@ -1134,8 +1147,12 @@ clampLinkedMemoryListQuery lq = LinkedMemoryListQuery
 -- | Execute a typed tool call against the hmem-server HTTP API.
 executeToolCall :: Manager -> String -> Maybe Text -> ToolCall -> IO Value
 executeToolCall mgr base mApiKey = \case
-    MemoryCreate cm     -> postJSON mgr base mApiKey "/api/v1/memories" cm
-    MemoryCreateBatch cms -> postJSON mgr base mApiKey "/api/v1/memories/batch" cms
+    MemoryCreate cm -> do
+      mTargetErr <- ensureTopLevelMemoryTaskTargets mgr base mApiKey [cm]
+      maybe (postJSON mgr base mApiKey "/api/v1/memories" cm) pure mTargetErr
+    MemoryCreateBatch cms -> do
+      mTargetErr <- ensureTopLevelMemoryTaskTargets mgr base mApiKey cms
+      maybe (postJSON mgr base mApiKey "/api/v1/memories/batch" cms) pure mTargetErr
     MemorySearch sq detail -> postJSON mgr base mApiKey ("/api/v1/memories/search?compact=" <> if detail then "false" else "true") sq
     MemoryGet mid       -> getJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
     MemoryUpdate mid um -> putJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid) um
@@ -1172,10 +1189,20 @@ executeToolCall mgr base mApiKey = \case
     TaskPurge tid       -> delJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/purge")
     TaskList tq -> getJSON mgr base mApiKey (buildTaskListPath tq)
     TaskUpdate tid ut   -> putJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid) ut
-    TaskLinkMem tid mid -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
-                            (object ["memory_id" .= mid])
-    TaskUnlinkMem tid mid -> delJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories/"
-                              <> uuidPath mid)
+    TaskLinkMem tid mid -> do
+      mTargetErr <- ensureTopLevelTaskTarget mgr base mApiKey tid
+      maybe
+        (postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
+          (object ["memory_id" .= mid]))
+        pure
+        mTargetErr
+    TaskUnlinkMem tid mid -> do
+      mTargetErr <- ensureTopLevelTaskTarget mgr base mApiKey tid
+      maybe
+        (delJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories/"
+          <> uuidPath mid))
+        pure
+        mTargetErr
     TaskDepAdd tid did  -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies")
                             (object ["depends_on_id" .= did])
     TaskDepRemove tid did -> delJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/"
@@ -1247,8 +1274,13 @@ executeToolCall mgr base mApiKey = \case
                                     (object ["memory_ids" .= mids])
     CategoryLinkMemBatch cid mids -> postJSON mgr base mApiKey ("/api/v1/categories/" <> uuidPath cid <> "/memories/batch")
                                       (object ["memory_ids" .= mids])
-    TaskLinkMemBatch tid mids -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories/batch")
-                                  (object ["memory_ids" .= mids])
+    TaskLinkMemBatch tid mids -> do
+      mTargetErr <- ensureTopLevelTaskTarget mgr base mApiKey tid
+      maybe
+        (postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories/batch")
+          (object ["memory_ids" .= mids]))
+        pure
+        mTargetErr
     MemorySetTagsBatch items -> postJSON mgr base mApiKey "/api/v1/memories/batch-set-tags"
                                 (object ["items" .= [object ["memory_id" .= mid, "tags" .= tags] | (mid, tags) <- items]])
     MemoryUpdateBatch items -> postJSON mgr base mApiKey "/api/v1/memories/batch-update"
@@ -1318,7 +1350,7 @@ executeToolCall mgr base mApiKey = \case
       -- 1. If notes provided, create a linked memory
       mAuthErr <- case mNotes of
         Just notes | not (T.null (T.strip notes)) -> do
-          -- First get the task to find workspace_id
+          -- First get the task to find workspace_id and an eligible memory target.
           taskResult <- rawGetJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
           case rawAuthErrorToMcp taskResult of
             Just authErr -> pure (Just authErr)
@@ -1327,24 +1359,20 @@ executeToolCall mgr base mApiKey = \case
                 let mWsId = objectTextField "workspace_id" taskVal
                 case mWsId of
                   Just wsId -> do
-                    -- Create the notes memory with its required target link atomically.
-                    let memBody = object $
-                          [ "workspace_id" .= wsId
-                          , "task_id"      .= tid
-                          , "content"      .= notes
-                          , "memory_type"  .= ("long_term" :: Text)
-                          , "importance"   .= (6 :: Int)
-                          , "source"       .= ("inferred" :: Text)
-                          , "tags"         .= maybe ["task-notes" :: Text] id mTags
-                          ]
-                    memResult <- rawPostJSON mgr base mApiKey "/api/v1/memories" memBody
-                    case rawAuthErrorToMcp memResult of
-                      Just authErr -> pure (Just authErr)
-                      Nothing -> case memResult of
-                        Right _ -> pure Nothing
-                        Left err -> pure . Just $ mcpErrorCodeFromRaw "MEMORY_CREATE_FAILED" err
+                    targetResult <- resolveTaskFinishNotesTarget mgr base mApiKey tid taskVal
+                    case targetResult of
+                      Left targetErr -> pure (Just targetErr)
+                      Right target -> do
+                        -- Create the notes memory with its required eligible target link atomically.
+                        let memBody = taskFinishNotesMemoryBody wsId target notes mTags
+                        memResult <- rawPostJSON mgr base mApiKey "/api/v1/memories" memBody
+                        case rawAuthErrorToMcp memResult of
+                          Just authErr -> pure (Just authErr)
+                          Nothing -> case memResult of
+                            Right _ -> pure Nothing
+                            Left err -> pure . Just $ mcpErrorCodeFromRaw "MEMORY_CREATE_FAILED" err
                   Nothing -> pure . Just $ mcpErrorCode "MEMORY_TARGET_REQUIRED" "Could not determine the task workspace for the notes memory."
-              Left _ -> pure Nothing  -- task fetch failed; still update status
+              Left err -> pure . Just $ mcpErrorCodeFromRaw "TASK_LOOKUP_FAILED" err
         _ -> pure Nothing
       -- 2. Update task status
       case mAuthErr of
@@ -1716,6 +1744,114 @@ stripRawErrorCode raw = case rawErrorCode raw of
   Just code -> T.strip $ T.drop (T.length code + 2) raw
 
 
+ensureTopLevelMemoryTaskTargets :: Manager -> String -> Maybe Text -> [CreateMemory] -> IO (Maybe Value)
+ensureTopLevelMemoryTaskTargets mgr base mApiKey cms =
+  firstTargetError (uniqueUUIDs [tid | cm <- cms, Just tid <- [cm.taskId]])
+  where
+    firstTargetError [] = pure Nothing
+    firstTargetError (tid : rest) = do
+      mErr <- ensureTopLevelTaskTarget mgr base mApiKey tid
+      case mErr of
+        Just err -> pure (Just err)
+        Nothing  -> firstTargetError rest
+
+
+ensureTopLevelTaskTarget :: Manager -> String -> Maybe Text -> UUID -> IO (Maybe Value)
+ensureTopLevelTaskTarget mgr base mApiKey tid = do
+  taskResult <- rawGetJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+  case rawAuthErrorToMcp taskResult of
+    Just authErr -> pure (Just authErr)
+    Nothing -> case taskResult of
+      Left err -> pure . Just $ mcpErrorCodeFromRaw "TASK_TARGET_LOOKUP_FAILED" err
+      Right taskVal
+        | isTopLevelTaskTarget taskVal -> pure Nothing
+        | otherwise -> pure . Just $ mcpErrorCode "SUBTASK_MEMORY_TARGET_NOT_ALLOWED" $
+            "Memories can only be linked to projects or top-level tasks. Provide a project_id or the nearest top-level task_id instead of subtask " <> T.pack (show tid) <> "."
+
+
+isTopLevelTaskTarget :: Value -> Bool
+isTopLevelTaskTarget taskVal = case taskParentId taskVal of
+  Nothing -> True
+  Just _  -> False
+
+
+resolveTaskFinishNotesTarget :: Manager -> String -> Maybe Text -> UUID -> Value -> IO (Either Value MemoryTarget)
+resolveTaskFinishNotesTarget mgr base mApiKey tid taskVal =
+  case taskParentId taskVal of
+    Nothing -> pure (Right $ MemoryTargetTask tid)
+    Just parentId -> do
+      ancestorsResult <- fetchTaskAncestors mgr base mApiKey parentId []
+      case ancestorsResult of
+        Left err -> case taskProjectId taskVal of
+          Just projectId -> pure (Right $ MemoryTargetProject projectId)
+          Nothing        -> pure (Left err)
+        Right ancestors -> case taskFinishNotesTarget tid taskVal ancestors of
+          Right target -> pure (Right target)
+          Left msg -> pure . Left $ mcpErrorCode "MEMORY_TARGET_REQUIRED" msg
+
+
+fetchTaskAncestors :: Manager -> String -> Maybe Text -> UUID -> [Value] -> IO (Either Value [Value])
+fetchTaskAncestors mgr base mApiKey parentId acc
+  | length acc > 100 = pure . Left $ mcpErrorCode "TASK_ANCESTOR_LOOKUP_FAILED" "Task ancestor chain is unexpectedly deep; cannot choose a safe notes memory target."
+  | otherwise = do
+      parentResult <- rawGetJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath parentId)
+      case rawAuthErrorToMcp parentResult of
+        Just authErr -> pure (Left authErr)
+        Nothing -> case parentResult of
+          Left err -> pure . Left $ mcpErrorCodeFromRaw "TASK_ANCESTOR_LOOKUP_FAILED" err
+          Right parentVal -> case taskParentId parentVal of
+            Nothing -> pure (Right (acc <> [parentVal]))
+            Just grandParentId -> fetchTaskAncestors mgr base mApiKey grandParentId (acc <> [parentVal])
+
+
+taskFinishNotesTarget :: UUID -> Value -> [Value] -> Either Text MemoryTarget
+taskFinishNotesTarget tid taskVal ancestors =
+  case taskParentId taskVal of
+    Nothing -> Right $ MemoryTargetTask tid
+    Just _ -> case [ancestorId | ancestor <- ancestors, taskParentId ancestor == Nothing, Just ancestorId <- [taskIdValue ancestor]] of
+      (rootId : _) -> Right $ MemoryTargetTask rootId
+      [] -> case taskProjectId taskVal of
+        Just projectId -> Right $ MemoryTargetProject projectId
+        Nothing -> Left "Could not determine a top-level task or project for the notes memory; notes are never linked directly to subtasks."
+
+
+taskFinishNotesMemoryBody :: Text -> MemoryTarget -> Text -> Maybe [Text] -> Value
+taskFinishNotesMemoryBody wsId target notes mTags = object $
+  [ "workspace_id" .= wsId
+  , "content"      .= notes
+  , "memory_type"  .= ("long_term" :: Text)
+  , "importance"   .= (6 :: Int)
+  , "source"       .= ("inferred" :: Text)
+  , "tags"         .= maybe ["task-notes" :: Text] id mTags
+  ] <> memoryTargetPairs target
+
+
+memoryTargetPairs :: MemoryTarget -> [Pair]
+memoryTargetPairs = \case
+  MemoryTargetProject pid -> ["project_id" .= pid]
+  MemoryTargetTask tid    -> ["task_id" .= tid]
+
+
+taskIdValue :: Value -> Maybe UUID
+taskIdValue = objectUUIDField "id"
+
+
+taskParentId :: Value -> Maybe UUID
+taskParentId = objectUUIDField "parent_id"
+
+
+taskProjectId :: Value -> Maybe UUID
+taskProjectId = objectUUIDField "project_id"
+
+
+objectUUIDField :: Key -> Value -> Maybe UUID
+objectUUIDField key value = objectTextField key value >>= UUID.fromText
+
+
+uniqueUUIDs :: [UUID] -> [UUID]
+uniqueUUIDs = foldr (\uid acc -> if uid `elem` acc then acc else uid : acc) []
+
+
 objectTextField :: Key -> Value -> Maybe Text
 objectTextField key = \case
   Object o -> case KM.lookup key o of
@@ -1752,7 +1888,7 @@ t = Prelude.id
 -- (new required fields, renamed tools, changed semantics).
 -- Adding new optional fields or new tools does not require a bump.
 toolApiVersion :: Text
-toolApiVersion = "0.6.0"
+toolApiVersion = "0.7.0"
 
 mkTool :: Text -> Text -> Value -> Value
 mkTool name desc inputSchema = object

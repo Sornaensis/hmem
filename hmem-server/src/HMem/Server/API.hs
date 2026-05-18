@@ -166,9 +166,9 @@ type ProjectAPI =
   :<|> ReqBody '[JSON] CreateProject :> Post '[JSON] Project
   :<|> Capture "projectId" UUID :> Get '[JSON] Project
   :<|> Capture "projectId" UUID :> ReqBody '[JSON] UpdateProject :> Put '[JSON] Project
-  :<|> Capture "projectId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "projectId" UUID :> Delete '[JSON] CascadeResult
     :<|> Capture "projectId" UUID :> "restore" :> Post '[JSON] NoContent
-  :<|> Capture "projectId" UUID :> "purge" :> Delete '[JSON] NoContent
+  :<|> Capture "projectId" UUID :> "purge" :> Delete '[JSON] CascadeResult
   :<|> Capture "projectId" UUID :> "memories" :> ReqBody '[JSON] LinkMemory
          :> Post '[JSON] NoContent
   :<|> Capture "projectId" UUID :> "memories" :> Capture "memoryId" UUID
@@ -206,9 +206,9 @@ type TaskAPI =
   :<|> ReqBody '[JSON] CreateTask :> Post '[JSON] Task
   :<|> Capture "taskId" UUID :> Get '[JSON] Task
   :<|> Capture "taskId" UUID :> ReqBody '[JSON] UpdateTask :> Put '[JSON] Task
-  :<|> Capture "taskId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "taskId" UUID :> Delete '[JSON] CascadeResult
   :<|> Capture "taskId" UUID :> "restore" :> Post '[JSON] NoContent
-  :<|> Capture "taskId" UUID :> "purge" :> Delete '[JSON] NoContent
+  :<|> Capture "taskId" UUID :> "purge" :> Delete '[JSON] CascadeResult
   :<|> Capture "taskId" UUID :> "memories" :> ReqBody '[JSON] LinkMemory
          :> Post '[JSON] NoContent
   :<|> Capture "taskId" UUID :> "memories" :> Capture "memoryId" UUID
@@ -1520,8 +1520,12 @@ projectHandlers pool bc =
 
     deleteProjectH pid = do
       scope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
-      ok <- handleDBErrors $ Proj.deleteProject pool pid
-      if ok then do emitInScope scope bc Deleted ETProject pid Nothing; pure NoContent else throwError err404
+      result <- handleDBErrors $ Proj.deleteProjectCascade pool pid
+      case result of
+        Nothing -> throwError err404
+        Just cascade -> do
+          emitInScope scope bc Deleted ETProject pid (Just $ toJSON cascade)
+          pure cascade
 
     restoreProjectH pid = do
       scope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
@@ -1539,14 +1543,10 @@ projectHandlers pool bc =
         (r:_)
           | r.projDeletedAt == Nothing -> throwError purgeConflict
           | otherwise -> do
-              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
-                delete Rel8.Delete
-                  { from = projectSchema
-                  , using = pure ()
-                  , deleteWhere = \_ row -> row.projId ==. lit pid
-                  , returning = NoReturning
-                  }
-              pure NoContent
+              result <- handleDBErrors $ Proj.purgeProjectCascade pool pid
+              case result of
+                Nothing -> throwError err404
+                Just cascade -> pure cascade
 
     linkMemoryH pid lm = do
       projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
@@ -1730,8 +1730,12 @@ taskHandlers pool bc =
 
     deleteTaskH tid = do
       scope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
-      ok <- handleDBErrors $ Task.deleteTask pool tid
-      if ok then do emitInScope scope bc Deleted ETTask tid Nothing; pure NoContent else throwError err404
+      result <- handleDBErrors $ Task.deleteTaskCascade pool tid
+      case result of
+        Nothing -> throwError err404
+        Just cascade -> do
+          emitInScope scope bc Deleted ETTask tid (Just $ toJSON cascade)
+          pure cascade
 
     restoreTaskH tid = do
       scope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
@@ -1749,14 +1753,10 @@ taskHandlers pool bc =
         (r:_)
           | r.taskDeletedAt == Nothing -> throwError purgeConflict
           | otherwise -> do
-              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
-                delete Rel8.Delete
-                  { from = taskSchema
-                  , using = pure ()
-                  , deleteWhere = \_ row -> row.taskId ==. lit tid
-                  , returning = NoReturning
-                  }
-              pure NoContent
+              result <- handleDBErrors $ Task.purgeTaskCascade pool tid
+              case result of
+                Nothing -> throwError err404
+                Just cascade -> pure cascade
 
     linkMemoryH tid lm = do
       taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit

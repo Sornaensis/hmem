@@ -434,6 +434,54 @@ spec = do
               runSession pool (Session.statement (batchCycleGreatGrandchildId, batchCycleGrandchildId) dependencyCycleSkippedReportDetailStatement) `shouldReturn` True
               runSession pool (Session.statement hierarchyCycleRootId hierarchyCycleReportCountStatement) `shouldReturn` 1
 
+    it "deleteCascadeMigration backfills active descendants of deleted tasks and projects" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              preV19Dir <- copyMigrationSubset sandbox migrations "pre-v019" (\name -> name < "V019")
+              v19OnlyDir <- copyMigrationSubset sandbox migrations "v019-only" (== "V019__cascade_delete_task_project_subtrees.sql")
+
+              preResult <- Migration.runMigrations pool preV19Dir
+              preResult.failed `shouldBe` Nothing
+
+              wsId <- runSession pool $
+                Session.statement ("delete-cascade-migration-ws" :: Text) insertWorkspaceDirectStatement
+              projectId <- runSession pool $
+                Session.statement (wsId, "Delete Cascade Migration Project" :: Text) insertProjectDirectStatement
+
+              deletedParentTaskId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "deleted parent task" :: Text, "todo" :: Text) insertTaskDirectStatement
+              activeChildTaskId <- runSession pool $
+                Session.statement (wsId, projectId, Just deletedParentTaskId, "active child task" :: Text, "todo" :: Text) insertTaskDirectStatement
+              dependentTaskId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "dependent task" :: Text, "todo" :: Text) insertTaskDirectStatement
+              runSession pool $
+                Session.statement (dependentTaskId, activeChildTaskId) insertTaskDependencyDirectStatement
+              runSession pool $
+                Session.statement deletedParentTaskId softDeleteTaskDirectStatement
+
+              deletedProjectId <- runSession pool $
+                Session.statement (wsId, "deleted project" :: Text) insertProjectDirectStatement
+              activeChildProjectId <- runSession pool $
+                Session.statement (wsId, Just deletedProjectId, "active child project" :: Text) insertProjectWithParentDirectStatement
+              activeProjectTaskId <- runSession pool $
+                Session.statement (wsId, activeChildProjectId, Nothing, "active project task" :: Text, "todo" :: Text) insertTaskDirectStatement
+              runSession pool $
+                Session.statement deletedProjectId softDeleteProjectDirectStatement
+
+              v19Result <- Migration.runMigrations pool v19OnlyDir
+              v19Result.failed `shouldBe` Nothing
+
+              runSession pool (Session.statement activeChildTaskId activeTaskExistsStatement) `shouldReturn` False
+              runSession pool (Session.statement activeChildProjectId activeProjectExistsStatement) `shouldReturn` False
+              runSession pool (Session.statement activeProjectTaskId activeTaskExistsStatement) `shouldReturn` False
+              runSession pool (Session.statement (dependentTaskId, activeChildTaskId) taskDependencyCountStatement) `shouldReturn` 0
+              runSession pool (Session.statement activeChildTaskId activeChildTaskCascadeReportCountStatement) `shouldReturn` 1
+              runSession pool (Session.statement activeChildProjectId activeChildProjectCascadeReportCountStatement) `shouldReturn` 1
+              runSession pool (Session.statement activeProjectTaskId projectTaskCascadeReportCountStatement) `shouldReturn` 1
+
     it "resolves the repository root from a non-repo cwd" $
       withTestSandbox $ \sandbox ->
         withCurrentDirectory sandbox.sandboxTmpDir $ do
@@ -526,6 +574,16 @@ insertProjectDirectStatement = Statement.Statement sql encoder decoder True
       contramap snd (E.param (E.nonNullable E.text))
     decoder = D.singleRow (D.column (D.nonNullable D.uuid))
 
+insertProjectWithParentDirectStatement :: Statement.Statement (UUID, Maybe UUID, Text) UUID
+insertProjectWithParentDirectStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "INSERT INTO projects (workspace_id, parent_id, name) VALUES ($1, $2, $3) RETURNING id"
+    encoder =
+      contramap (\(wsId, _, _) -> wsId) (E.param (E.nonNullable E.uuid)) <>
+      contramap (\(_, parentId, _) -> parentId) (E.param (E.nullable E.uuid)) <>
+      contramap (\(_, _, name) -> name) (E.param (E.nonNullable E.text))
+    decoder = D.singleRow (D.column (D.nonNullable D.uuid))
+
 insertTaskDirectStatement :: Statement.Statement (UUID, UUID, Maybe UUID, Text, Text) UUID
 insertTaskDirectStatement = Statement.Statement sql encoder decoder True
   where
@@ -581,6 +639,12 @@ softDeleteTaskDirectStatement = Statement.Statement sql encoder D.noResult True
     sql = "UPDATE tasks SET deleted_at = now() WHERE id = $1"
     encoder = E.param (E.nonNullable E.uuid)
 
+softDeleteProjectDirectStatement :: Statement.Statement UUID ()
+softDeleteProjectDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "UPDATE projects SET deleted_at = now() WHERE id = $1"
+    encoder = E.param (E.nonNullable E.uuid)
+
 hardDeleteTaskDirectStatement :: Statement.Statement UUID ()
 hardDeleteTaskDirectStatement = Statement.Statement sql encoder D.noResult True
   where
@@ -607,6 +671,20 @@ activeNestedSubtaskCountStatement = Statement.Statement sql E.noParams decoder T
   where
     sql = "SELECT count(*)::int FROM tasks child JOIN tasks parent ON parent.id = child.parent_id WHERE child.deleted_at IS NULL AND parent.deleted_at IS NULL AND parent.parent_id IS NOT NULL"
     decoder = D.singleRow (fromIntegral <$> D.column (D.nonNullable D.int4))
+
+activeTaskExistsStatement :: Statement.Statement UUID Bool
+activeTaskExistsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1 AND deleted_at IS NULL)"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nonNullable D.bool))
+
+activeProjectExistsStatement :: Statement.Statement UUID Bool
+activeProjectExistsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT EXISTS (SELECT 1 FROM projects WHERE id = $1 AND deleted_at IS NULL)"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nonNullable D.bool))
 
 taskDependencyCountStatement :: Statement.Statement (UUID, UUID) Int
 taskDependencyCountStatement = Statement.Statement sql encoder decoder True
@@ -648,3 +726,24 @@ dependencyCycleSkippedReportDetailStatement = Statement.Statement sql encoder de
       contramap fst (E.param (E.nonNullable E.uuid)) <>
       contramap snd (E.param (E.nonNullable E.uuid))
     decoder = D.singleRow (D.column (D.nonNullable D.bool))
+
+activeChildTaskCascadeReportCountStatement :: Statement.Statement UUID Int
+activeChildTaskCascadeReportCountStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT count(*)::int FROM delete_cascade_migration_report WHERE entity_type = 'task' AND entity_id = $1 AND issue = 'active_child_task_deleted_with_parent'"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (fromIntegral <$> D.column (D.nonNullable D.int4))
+
+activeChildProjectCascadeReportCountStatement :: Statement.Statement UUID Int
+activeChildProjectCascadeReportCountStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT count(*)::int FROM delete_cascade_migration_report WHERE entity_type = 'project' AND entity_id = $1 AND issue = 'active_child_project_deleted_with_parent'"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (fromIntegral <$> D.column (D.nonNullable D.int4))
+
+projectTaskCascadeReportCountStatement :: Statement.Statement UUID Int
+projectTaskCascadeReportCountStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT count(*)::int FROM delete_cascade_migration_report WHERE entity_type = 'task' AND entity_id = $1 AND issue = 'active_task_deleted_with_project'"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (fromIntegral <$> D.column (D.nonNullable D.int4))

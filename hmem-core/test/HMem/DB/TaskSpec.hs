@@ -4,6 +4,7 @@ module HMem.DB.TaskSpec (spec) where
 
 import Control.Exception (try)
 import Control.Monad (forM_, void, when)
+import Data.Functor.Contravariant (contramap)
 import Data.ByteString.Char8 qualified as BS8
 import Data.List (sort)
 import Data.Maybe (isJust, isNothing)
@@ -547,6 +548,63 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       ok <- deleteTask env.pool parent.id
       ok `shouldBe` True
 
+      getTask env.pool parent.id `shouldReturn` Nothing
+      getTask env.pool child.id `shouldReturn` Nothing
+
+    it "returns cascade counts and purges deleted task subtrees" $ \env -> do
+      ws <- createTestWorkspace env "task-cascade-result-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Cascade"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      preDeletedChild <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Already deleted child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      dependent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      addDependency env.pool dependent.id child.id
+      deleteTask env.pool preDeletedChild.id `shouldReturn` True
+
+      result <- deleteTaskCascade env.pool parent.id
+      result `shouldSatisfy` isJust
+      let Just cascade = result
+      cascade.affected `shouldBe` 2
+      cascade.taskCount `shouldBe` 2
+      cascade.projectCount `shouldBe` 0
+      cascade.dependencyCount `shouldBe` 1
+      getTask env.pool parent.id `shouldReturn` Nothing
+      getTask env.pool child.id `shouldReturn` Nothing
+      taskDependencyCount env dependent.id child.id `shouldReturn` 0
+      deleteTaskCascade env.pool parent.id `shouldReturn` Nothing
+
+      purge <- purgeTaskCascade env.pool parent.id
+      purge `shouldSatisfy` isJust
+      let Just purged = purge
+      purged.taskCount `shouldBe` 3
+      taskRowExists env parent.id `shouldReturn` False
+      taskRowExists env child.id `shouldReturn` False
+      taskRowExists env preDeletedChild.id `shouldReturn` False
+      purgeTaskCascade env.pool parent.id `shouldReturn` Nothing
+
+    it "batch-deletes task descendants" $ \env -> do
+      ws <- createTestWorkspace env "task-batch-cascade-delete-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Batch Cascade"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      deleteTaskBatch env.pool [parent.id] `shouldReturn` 2
       getTask env.pool parent.id `shouldReturn` Nothing
       getTask env.pool child.id `shouldReturn` Nothing
 
@@ -1266,3 +1324,25 @@ taskAutoBlockedStatement = Statement.Statement sql encoder decoder True
     sql = "SELECT auto_blocked FROM tasks WHERE id = $1"
     encoder = E.param (E.nonNullable E.uuid)
     decoder = D.singleRow (D.column (D.nonNullable D.bool))
+
+taskRowExists :: TestEnv -> UUID -> IO Bool
+taskRowExists env taskId = runSession env.pool $ Session.statement taskId taskRowExistsStatement
+
+taskRowExistsStatement :: Statement.Statement UUID Bool
+taskRowExistsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1)"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nonNullable D.bool))
+
+taskDependencyCount :: TestEnv -> UUID -> UUID -> IO Int
+taskDependencyCount env taskId dependsOnId = runSession env.pool $ Session.statement (taskId, dependsOnId) taskDependencyCountStatement
+
+taskDependencyCountStatement :: Statement.Statement (UUID, UUID) Int
+taskDependencyCountStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT count(*)::int FROM task_dependencies WHERE task_id = $1 AND depends_on_id = $2"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
+    decoder = D.singleRow (fromIntegral <$> D.column (D.nonNullable D.int4))

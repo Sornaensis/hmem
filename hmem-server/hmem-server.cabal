@@ -32,6 +32,7 @@ data-files:
     migrations/V016__subtasks_completion_gated_not_auto_blocking.sql
     migrations/V017__flat_subtask_lifecycle_rules.sql
     migrations/V018__flatten_nested_subtasks.sql
+    migrations/V019__cascade_delete_task_project_subtrees.sql
 
 library
   exposed-modules:

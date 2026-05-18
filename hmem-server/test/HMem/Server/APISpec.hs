@@ -3450,6 +3450,9 @@ spec = around withApp $ do
 
       delResp <- del app (uuidPath "/api/v1/projects" parent.id)
       respStatus delResp `shouldBe` 200
+      let Just projectDelete = decode (respBody delResp) :: Maybe CascadeResult
+      projectDelete.projectCount `shouldBe` 2
+      projectDelete.taskCount `shouldBe` 0
       getParentResp <- get_ app (uuidPath "/api/v1/projects" parent.id)
       respStatus getParentResp `shouldBe` 404
       getChildResp <- get_ app (uuidPath "/api/v1/projects" child.id)
@@ -3487,6 +3490,9 @@ spec = around withApp $ do
 
       delResp <- del app (uuidPath "/api/v1/tasks" parent.id)
       respStatus delResp `shouldBe` 200
+      let Just taskDelete = decode (respBody delResp) :: Maybe CascadeResult
+      taskDelete.taskCount `shouldBe` 2
+      taskDelete.projectCount `shouldBe` 0
       getParentResp <- get_ app (uuidPath "/api/v1/tasks" parent.id)
       respStatus getParentResp `shouldBe` 404
       getChildResp <- get_ app (uuidPath "/api/v1/tasks" child.id)

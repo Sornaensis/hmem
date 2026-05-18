@@ -203,6 +203,7 @@ instance ToSchema BatchMemoryLinkRequest where declareNamedSchema = genericDecla
 instance ToSchema BatchSetTagsItem       where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema BatchSetTagsRequest    where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema BatchResult            where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema CascadeResult          where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema BatchUpdateMemoryItem  where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema BatchUpdateMemoryRequest where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema BatchUpdateProjectItem where declareNamedSchema = genericDeclareNamedSchema opts

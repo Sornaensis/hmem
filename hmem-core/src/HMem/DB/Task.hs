@@ -4,8 +4,10 @@ module HMem.DB.Task
   , updateTask
   , updateTaskBatch
   , deleteTask
+  , deleteTaskCascade
   , deleteTaskBatch
   , restoreTask
+  , purgeTaskCascade
   , moveTasksBatch
   , listTasks
   , listTasksWithQuery
@@ -171,6 +173,25 @@ taskSubtreeIdsStatement = Statement.Statement sql encoder decoder True
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
+taskSubtreeIdsForRootsStatement :: Statement.Statement [UUID] [UUID]
+taskSubtreeIdsForRootsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE task_tree AS ("
+      , "  SELECT id"
+      , "  FROM tasks"
+      , "  WHERE id = ANY($1) AND deleted_at IS NULL"
+      , "  UNION"
+      , "  SELECT t.id"
+      , "  FROM tasks t"
+      , "  JOIN task_tree tt ON t.parent_id = tt.id"
+      , "  WHERE t.deleted_at IS NULL"
+      , ")"
+      , "SELECT id FROM task_tree"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
 deletedTaskSubtreeIdsStatement :: Statement.Statement (UUID, UTCTime) [UUID]
 deletedTaskSubtreeIdsStatement = Statement.Statement sql encoder decoder True
   where
@@ -191,6 +212,69 @@ deletedTaskSubtreeIdsStatement = Statement.Statement sql encoder decoder True
       contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
       contramap snd (Enc.param (Enc.nonNullable Enc.timestamptz))
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+allTaskSubtreeIdsStatement :: Statement.Statement UUID [UUID]
+allTaskSubtreeIdsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE task_tree AS ("
+      , "  SELECT id"
+      , "  FROM tasks"
+      , "  WHERE id = $1"
+      , "  UNION"
+      , "  SELECT t.id"
+      , "  FROM tasks t"
+      , "  JOIN task_tree tt ON t.parent_id = tt.id"
+      , ")"
+      , "SELECT id FROM task_tree"
+      ]
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+softDeleteTasksStatement :: Statement.Statement [UUID] Int
+softDeleteTasksStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH updated AS ("
+      , "  UPDATE tasks"
+      , "     SET deleted_at = now()"
+      , "   WHERE id = ANY($1)"
+      , "     AND deleted_at IS NULL"
+      , "  RETURNING id"
+      , ")"
+      , "SELECT count(*)::int FROM updated"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
+
+deleteTaskDependenciesStatement :: Statement.Statement [UUID] Int
+deleteTaskDependenciesStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH deleted AS ("
+      , "  DELETE FROM task_dependencies"
+      , "   WHERE task_id = ANY($1)"
+      , "      OR depends_on_id = ANY($1)"
+      , "  RETURNING task_id"
+      , ")"
+      , "SELECT count(*)::int FROM deleted"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
+
+purgeTasksStatement :: Statement.Statement [UUID] Int
+purgeTasksStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH deleted AS ("
+      , "  DELETE FROM tasks"
+      , "   WHERE id = ANY($1)"
+      , "  RETURNING id"
+      , ")"
+      , "SELECT count(*)::int FROM deleted"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
 
 applyFieldUpdateMaybe :: Maybe a -> FieldUpdate a -> Maybe a
 applyFieldUpdateMaybe oldValue = \case
@@ -405,55 +489,39 @@ updateTaskBatch pool items = do
   pure $ length [() | Just _ <- results]
 
 deleteTask :: Pool Hasql.Connection -> UUID -> IO Bool
-deleteTask pool tid = do
+deleteTask pool tid = isJustCascade <$> deleteTaskCascade pool tid
+  where
+    isJustCascade = maybe False (const True)
+
+deleteTaskCascade :: Pool Hasql.Connection -> UUID -> IO (Maybe CascadeResult)
+deleteTaskCascade pool tid = do
   runTransaction pool $ do
     ids <- Session.statement tid taskSubtreeIdsStatement
-    case ids of
-      [] -> pure False
-      _ -> do
-        softDeleteTaskMemoriesS ids
-        Session.statement () $ run_ $
-          update Update
-            { target = taskSchema
-            , from = pure ()
-            , set = \_ row -> row { taskDeletedAt = deletedNow }
-            , updateWhere = \_ row -> in_ row.taskId (map lit ids) &&. activeTask row
-            , returning = NoReturning
-            }
-        Session.statement () $ run_ $
-          delete Delete
-            { from = taskDependencySchema
-            , using = pure ()
-            , deleteWhere = \_ row -> in_ row.tdTaskId (map lit ids) ||. in_ row.tdDependsOnId (map lit ids)
-            , returning = NoReturning
-            }
-        pure True
+    deleteTaskIdsCascadeS ids
 
--- | Soft-delete multiple tasks by ID in a single transaction.
--- Does NOT cascade to subtasks (unlike deleteTask).
--- Returns the number of tasks actually deleted.
+-- | Soft-delete multiple tasks by ID in a single transaction, cascading to
+-- active descendants. Returns the number of task rows actually deleted.
 deleteTaskBatch :: Pool Hasql.Connection -> [UUID] -> IO Int
 deleteTaskBatch _pool [] = pure 0
 deleteTaskBatch pool ids = do
   runTransaction pool $ do
-    softDeleteTaskMemoriesS ids
-    n <- Session.statement () $ runN $
-      update Update
-        { target = taskSchema
-        , from = pure ()
-        , set = \_ row -> row { taskDeletedAt = deletedNow }
-        , updateWhere = \_ row -> in_ row.taskId (map lit ids) &&. activeTask row
-        , returning = NoReturning
-        }
-    -- Cascade dependency cleanup
-    Session.statement () $ run_ $
-      delete Delete
-        { from = taskDependencySchema
-        , using = pure ()
-        , deleteWhere = \_ row -> in_ row.tdTaskId (map lit ids) ||. in_ row.tdDependsOnId (map lit ids)
-        , returning = NoReturning
-        }
-    pure (fromIntegral n)
+    cascadeIds <- Session.statement ids taskSubtreeIdsForRootsStatement
+    mResult <- deleteTaskIdsCascadeS cascadeIds
+    pure $ maybe 0 (.taskCount) mResult
+
+deleteTaskIdsCascadeS :: [UUID] -> Session.Session (Maybe CascadeResult)
+deleteTaskIdsCascadeS [] = pure Nothing
+deleteTaskIdsCascadeS ids = do
+  memoryCount <- softDeleteTaskMemoriesS ids
+  dependencyCount <- deleteTaskDependenciesS ids
+  taskCount <- Session.statement ids softDeleteTasksStatement
+  pure . Just $ CascadeResult
+    { affected = taskCount
+    , projectCount = 0
+    , taskCount = taskCount
+    , memoryCount = memoryCount
+    , dependencyCount = dependencyCount
+    }
 
 -- | Restore a soft-deleted task by clearing its deleted_at timestamp.
 -- Returns True if the task was restored, False if not found or not deleted.
@@ -481,24 +549,52 @@ restoreTask pool tid = do
             pure (n > 0)
         | otherwise -> pure False
 
-softDeleteTaskMemoriesS :: [UUID] -> Session.Session ()
-softDeleteTaskMemoriesS [] = pure ()
+purgeTaskCascade :: Pool Hasql.Connection -> UUID -> IO (Maybe CascadeResult)
+purgeTaskCascade pool tid =
+  runTransaction pool $ do
+    rows <- Session.statement () $ run $ select $ do
+      row <- each taskSchema
+      where_ $ row.taskId ==. lit tid
+      pure row
+    case rows of
+      [] -> pure Nothing
+      (row:_) -> case row.taskDeletedAt of
+        Nothing -> pure Nothing
+        Just _deletedAt -> do
+          -- Purge hard-deletes every descendant row, including tasks that were
+          -- soft-deleted before the root task.  Timestamp-scoped restore remains
+          -- separate; purge must not rely on implicit FK cascades for counts or
+          -- dependency cleanup.
+          ids <- Session.statement tid allTaskSubtreeIdsStatement
+          dependencyCount <- deleteTaskDependenciesS ids
+          taskCount <- Session.statement ids purgeTasksStatement
+          pure . Just $ CascadeResult
+            { affected = taskCount
+            , projectCount = 0
+            , taskCount = taskCount
+            , memoryCount = 0
+            , dependencyCount = dependencyCount
+            }
+
+softDeleteTaskMemoriesS :: [UUID] -> Session.Session Int
+softDeleteTaskMemoriesS [] = pure 0
 softDeleteTaskMemoriesS ids =
   Session.statement ids softDeleteTaskMemoriesStatement
 
-softDeleteTaskMemoriesStatement :: Statement.Statement [UUID] ()
-softDeleteTaskMemoriesStatement = Statement.Statement sql encoder Dec.noResult True
+softDeleteTaskMemoriesStatement :: Statement.Statement [UUID] Int
+softDeleteTaskMemoriesStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
-      [ "UPDATE memories m"
-      , "SET deleted_at = now()"
-      , "WHERE m.deleted_at IS NULL"
-      , "  AND EXISTS ("
+      [ "WITH updated AS ("
+      , "  UPDATE memories m"
+      , "  SET deleted_at = now()"
+      , "  WHERE m.deleted_at IS NULL"
+      , "    AND EXISTS ("
       , "    SELECT 1 FROM task_memory_links tml"
       , "    WHERE tml.memory_id = m.id"
       , "      AND tml.task_id = ANY($1)"
-      , "  )"
-      , "  AND NOT EXISTS ("
+      , "    )"
+      , "    AND NOT EXISTS ("
       , "    SELECT 1"
       , "    FROM task_memory_links tml"
       , "    JOIN tasks t ON t.id = tml.task_id"
@@ -506,17 +602,25 @@ softDeleteTaskMemoriesStatement = Statement.Statement sql encoder Dec.noResult T
       , "      AND t.deleted_at IS NULL"
       , "      AND t.workspace_id = m.workspace_id"
       , "      AND t.id <> ALL($1)"
-      , "  )"
-      , "  AND NOT EXISTS ("
+      , "    )"
+      , "    AND NOT EXISTS ("
       , "    SELECT 1"
       , "    FROM project_memory_links pml"
       , "    JOIN projects p ON p.id = pml.project_id"
       , "    WHERE pml.memory_id = m.id"
       , "      AND p.deleted_at IS NULL"
       , "      AND p.workspace_id = m.workspace_id"
-      , "  )"
+      , "    )"
+      , "  RETURNING m.id"
+      , ")"
+      , "SELECT count(*)::int FROM updated"
       ]
     encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
+
+deleteTaskDependenciesS :: [UUID] -> Session.Session Int
+deleteTaskDependenciesS [] = pure 0
+deleteTaskDependenciesS ids = Session.statement ids deleteTaskDependenciesStatement
 
 restoreTaskMemoriesS :: [UUID] -> UTCTime -> Session.Session ()
 restoreTaskMemoriesS [] _ = pure ()

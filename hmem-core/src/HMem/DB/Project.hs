@@ -3,9 +3,11 @@ module HMem.DB.Project
   , getProject
   , updateProject
   , deleteProject
+  , deleteProjectCascade
   , deleteProjectBatch
   , updateProjectBatch
   , restoreProject
+  , purgeProjectCascade
   , listProjects
   , listProjectsWithQuery
   , linkProjectMemory
@@ -71,6 +73,25 @@ projectSubtreeIdsStatement = Statement.Statement sql encoder decoder True
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
+projectSubtreeIdsForRootsStatement :: Statement.Statement [UUID] [UUID]
+projectSubtreeIdsForRootsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE project_tree AS ("
+      , "  SELECT id"
+      , "  FROM projects"
+      , "  WHERE id = ANY($1) AND deleted_at IS NULL"
+      , "  UNION"
+      , "  SELECT p.id"
+      , "  FROM projects p"
+      , "  JOIN project_tree pt ON p.parent_id = pt.id"
+      , "  WHERE p.deleted_at IS NULL"
+      , ")"
+      , "SELECT id FROM project_tree"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
 deletedProjectSubtreeIdsStatement :: Statement.Statement (UUID, UTCTime) [UUID]
 deletedProjectSubtreeIdsStatement = Statement.Statement sql encoder decoder True
   where
@@ -91,6 +112,160 @@ deletedProjectSubtreeIdsStatement = Statement.Statement sql encoder decoder True
       contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
       contramap snd (Enc.param (Enc.nonNullable Enc.timestamptz))
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+allProjectSubtreeIdsStatement :: Statement.Statement UUID [UUID]
+allProjectSubtreeIdsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE project_tree AS ("
+      , "  SELECT id"
+      , "  FROM projects"
+      , "  WHERE id = $1"
+      , "  UNION"
+      , "  SELECT p.id"
+      , "  FROM projects p"
+      , "  JOIN project_tree pt ON p.parent_id = pt.id"
+      , ")"
+      , "SELECT id FROM project_tree"
+      ]
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+activeProjectTaskIdsStatement :: Statement.Statement [UUID] [UUID]
+activeProjectTaskIdsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE task_tree AS ("
+      , "  SELECT id"
+      , "    FROM tasks"
+      , "   WHERE project_id = ANY($1)"
+      , "     AND deleted_at IS NULL"
+      , "  UNION"
+      , "  SELECT child.id"
+      , "    FROM tasks child"
+      , "    JOIN task_tree parent ON child.parent_id = parent.id"
+      , "   WHERE child.deleted_at IS NULL"
+      , ")"
+      , "SELECT id FROM task_tree"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+deletedProjectTaskIdsStatement :: Statement.Statement ([UUID], UTCTime) [UUID]
+deletedProjectTaskIdsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE task_tree AS ("
+      , "  SELECT id"
+      , "    FROM tasks"
+      , "   WHERE project_id = ANY($1)"
+      , "     AND deleted_at = $2"
+      , "  UNION"
+      , "  SELECT child.id"
+      , "    FROM tasks child"
+      , "    JOIN task_tree parent ON child.parent_id = parent.id"
+      , "   WHERE child.deleted_at = $2"
+      , ")"
+      , "SELECT id FROM task_tree"
+      ]
+    uuidArrayEncoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    encoder =
+      contramap fst uuidArrayEncoder <>
+      contramap snd (Enc.param (Enc.nonNullable Enc.timestamptz))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+allProjectTaskIdsStatement :: Statement.Statement [UUID] [UUID]
+allProjectTaskIdsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE task_tree AS ("
+      , "  SELECT id"
+      , "    FROM tasks"
+      , "   WHERE project_id = ANY($1)"
+      , "  UNION"
+      , "  SELECT child.id"
+      , "    FROM tasks child"
+      , "    JOIN task_tree parent ON child.parent_id = parent.id"
+      , ")"
+      , "SELECT id FROM task_tree"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+softDeleteProjectsStatement :: Statement.Statement [UUID] Int
+softDeleteProjectsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH updated AS ("
+      , "  UPDATE projects"
+      , "     SET deleted_at = now()"
+      , "   WHERE id = ANY($1)"
+      , "     AND deleted_at IS NULL"
+      , "  RETURNING id"
+      , ")"
+      , "SELECT count(*)::int FROM updated"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
+
+softDeleteProjectTasksStatement :: Statement.Statement [UUID] Int
+softDeleteProjectTasksStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH updated AS ("
+      , "  UPDATE tasks"
+      , "     SET deleted_at = now()"
+      , "   WHERE id = ANY($1)"
+      , "     AND deleted_at IS NULL"
+      , "  RETURNING id"
+      , ")"
+      , "SELECT count(*)::int FROM updated"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
+
+deleteProjectTaskDependenciesStatement :: Statement.Statement [UUID] Int
+deleteProjectTaskDependenciesStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH deleted AS ("
+      , "  DELETE FROM task_dependencies"
+      , "   WHERE task_id = ANY($1)"
+      , "      OR depends_on_id = ANY($1)"
+      , "  RETURNING task_id"
+      , ")"
+      , "SELECT count(*)::int FROM deleted"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
+
+purgeProjectTasksStatement :: Statement.Statement [UUID] Int
+purgeProjectTasksStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH deleted AS ("
+      , "  DELETE FROM tasks"
+      , "   WHERE id = ANY($1)"
+      , "  RETURNING id"
+      , ")"
+      , "SELECT count(*)::int FROM deleted"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
+
+purgeProjectsStatement :: Statement.Statement [UUID] Int
+purgeProjectsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH deleted AS ("
+      , "  DELETE FROM projects"
+      , "   WHERE id = ANY($1)"
+      , "  RETURNING id"
+      , ")"
+      , "SELECT count(*)::int FROM deleted"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
 
 ensureParentProject :: Pool Hasql.Connection -> UUID -> Maybe UUID -> IO ()
 ensureParentProject _ _ Nothing = pure ()
@@ -189,57 +364,40 @@ updateProject pool pid up = do
 ------------------------------------------------------------------------
 
 deleteProject :: Pool Hasql.Connection -> UUID -> IO Bool
-deleteProject pool pid = do
-  runTransaction pool $ do
-    ids <- Session.statement pid projectSubtreeIdsStatement
-    case ids of
-      [] -> pure False
-      _ -> do
-        softDeleteProjectMemoriesS ids
-        Session.statement () $ run_ $
-          update Update
-            { target = projectSchema
-            , from = pure ()
-            , set = \_ row -> row { projDeletedAt = deletedNow }
-            , updateWhere = \_ row -> in_ row.projId (map lit ids) &&. activeProject row
-            , returning = NoReturning
-            }
-        Session.statement () $ run_ $
-          update Update
-            { target = taskSchema
-            , from = pure ()
-            , set = \_ row -> row { taskProjectId = lit (Nothing :: Maybe UUID) }
-            , updateWhere = \_ row -> in_ row.taskProjectId (map lit (Just <$> ids)) &&. activeTask row
-            , returning = NoReturning
-            }
-        pure True
+deleteProject pool pid = maybe False (const True) <$> deleteProjectCascade pool pid
 
--- | Soft-delete multiple projects by ID in a single transaction.
--- Does NOT cascade to subtrees (unlike deleteProject).
--- Returns the number of projects actually deleted.
+deleteProjectCascade :: Pool Hasql.Connection -> UUID -> IO (Maybe CascadeResult)
+deleteProjectCascade pool pid = do
+  runTransaction pool $ do
+    projectIds <- Session.statement pid projectSubtreeIdsStatement
+    deleteProjectIdsCascadeS projectIds
+
+-- | Soft-delete multiple projects by ID in a single transaction, cascading to
+-- project subtrees and active tasks within those project subtrees. Returns the
+-- total number of project and task rows actually deleted.
 deleteProjectBatch :: Pool Hasql.Connection -> [UUID] -> IO Int
 deleteProjectBatch _pool [] = pure 0
 deleteProjectBatch pool ids = do
   runTransaction pool $ do
-    softDeleteProjectMemoriesS ids
-    n <- Session.statement () $ runN $
-      update Update
-        { target = projectSchema
-        , from = pure ()
-        , set = \_ row -> row { projDeletedAt = deletedNow }
-        , updateWhere = \_ row -> in_ row.projId (map lit ids) &&. activeProject row
-        , returning = NoReturning
-        }
-    -- Detach tasks from deleted projects
-    Session.statement () $ run_ $
-      update Update
-        { target = taskSchema
-        , from = pure ()
-        , set = \_ row -> row { taskProjectId = lit (Nothing :: Maybe UUID) }
-        , updateWhere = \_ row -> in_ row.taskProjectId (map lit (Just <$> ids)) &&. activeTask row
-        , returning = NoReturning
-        }
-    pure (fromIntegral n)
+    projectIds <- Session.statement ids projectSubtreeIdsForRootsStatement
+    mResult <- deleteProjectIdsCascadeS projectIds
+    pure $ maybe 0 (.affected) mResult
+
+deleteProjectIdsCascadeS :: [UUID] -> Session.Session (Maybe CascadeResult)
+deleteProjectIdsCascadeS [] = pure Nothing
+deleteProjectIdsCascadeS projectIds = do
+  taskIds <- Session.statement projectIds activeProjectTaskIdsStatement
+  memoryCount <- softDeleteProjectAndTaskMemoriesS projectIds taskIds
+  dependencyCount <- deleteProjectTaskDependenciesS taskIds
+  taskCount <- softDeleteProjectTasksS taskIds
+  projectCount <- Session.statement projectIds softDeleteProjectsStatement
+  pure . Just $ CascadeResult
+    { affected = projectCount + taskCount
+    , projectCount = projectCount
+    , taskCount = taskCount
+    , memoryCount = memoryCount
+    , dependencyCount = dependencyCount
+    }
 
 -- | Batch-update multiple projects. Each item is updated individually.
 -- Returns the count of successfully updated projects.
@@ -263,6 +421,7 @@ restoreProject pool pid = do
       (row:_)
         | Just deletedAt <- row.projDeletedAt -> do
             ids <- Session.statement (pid, deletedAt) deletedProjectSubtreeIdsStatement
+            taskIds <- Session.statement (ids, deletedAt) deletedProjectTaskIdsStatement
             n <- Session.statement () $ runN $
               update Update
                 { target = projectSchema
@@ -271,28 +430,77 @@ restoreProject pool pid = do
                 , updateWhere = \_ projectRow -> in_ projectRow.projId (map lit ids) &&. not_ (isNull projectRow.projDeletedAt)
                 , returning = NoReturning
                 }
-            restoreProjectMemoriesS ids deletedAt
+            _taskN <- Session.statement () $ runN $
+              update Update
+                { target = taskSchema
+                , from = pure ()
+                , set = \_ task -> task { taskDeletedAt = lit (Nothing :: Maybe UTCTime) }
+                , updateWhere = \_ task -> in_ task.taskId (map lit taskIds) &&. task.taskDeletedAt ==. lit (Just deletedAt)
+                , returning = NoReturning
+                }
+            _ <- restoreProjectAndTaskMemoriesS ids taskIds deletedAt
             pure (n > 0)
         | otherwise -> pure False
 
-softDeleteProjectMemoriesS :: [UUID] -> Session.Session ()
-softDeleteProjectMemoriesS [] = pure ()
-softDeleteProjectMemoriesS ids =
-  Session.statement ids softDeleteProjectMemoriesStatement
+purgeProjectCascade :: Pool Hasql.Connection -> UUID -> IO (Maybe CascadeResult)
+purgeProjectCascade pool pid =
+  runTransaction pool $ do
+    rows <- Session.statement () $ run $ select $ do
+      row <- each projectSchema
+      where_ $ row.projId ==. lit pid
+      pure row
+    case rows of
+      [] -> pure Nothing
+      (row:_) -> case row.projDeletedAt of
+        Nothing -> pure Nothing
+        Just _deletedAt -> do
+          -- Purge hard-deletes the full project subtree regardless of individual
+          -- descendant deleted_at timestamps.  Restore remains timestamp-scoped,
+          -- but purge must delete older pre-deleted child projects and their
+          -- tasks before project_id ON DELETE SET NULL can detach task rows.
+          projectIds <- Session.statement pid allProjectSubtreeIdsStatement
+          -- Purge hard-deletes every task row still associated with the project
+          -- subtree, including tasks that were soft-deleted before the project
+          -- delete timestamp.  Otherwise project_id ON DELETE SET NULL would
+          -- detach those older deleted tasks when the project rows are purged.
+          taskIds <- Session.statement projectIds allProjectTaskIdsStatement
+          dependencyCount <- deleteProjectTaskDependenciesS taskIds
+          taskCount <- purgeProjectTasksS taskIds
+          projectCount <- Session.statement projectIds purgeProjectsStatement
+          pure . Just $ CascadeResult
+            { affected = projectCount + taskCount
+            , projectCount = projectCount
+            , taskCount = taskCount
+            , memoryCount = 0
+            , dependencyCount = dependencyCount
+            }
 
-softDeleteProjectMemoriesStatement :: Statement.Statement [UUID] ()
-softDeleteProjectMemoriesStatement = Statement.Statement sql encoder Dec.noResult True
+softDeleteProjectAndTaskMemoriesS :: [UUID] -> [UUID] -> Session.Session Int
+softDeleteProjectAndTaskMemoriesS [] [] = pure 0
+softDeleteProjectAndTaskMemoriesS projectIds taskIds =
+  Session.statement (projectIds, taskIds) softDeleteProjectAndTaskMemoriesStatement
+
+softDeleteProjectAndTaskMemoriesStatement :: Statement.Statement ([UUID], [UUID]) Int
+softDeleteProjectAndTaskMemoriesStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
-      [ "UPDATE memories m"
-      , "SET deleted_at = now()"
-      , "WHERE m.deleted_at IS NULL"
-      , "  AND EXISTS ("
-      , "    SELECT 1 FROM project_memory_links pml"
-      , "    WHERE pml.memory_id = m.id"
-      , "      AND pml.project_id = ANY($1)"
-      , "  )"
-      , "  AND NOT EXISTS ("
+      [ "WITH updated AS ("
+      , "  UPDATE memories m"
+      , "  SET deleted_at = now()"
+      , "  WHERE m.deleted_at IS NULL"
+      , "    AND ("
+      , "      EXISTS ("
+      , "        SELECT 1 FROM project_memory_links pml"
+      , "        WHERE pml.memory_id = m.id"
+      , "          AND pml.project_id = ANY($1)"
+      , "      )"
+      , "      OR EXISTS ("
+      , "        SELECT 1 FROM task_memory_links tml"
+      , "        WHERE tml.memory_id = m.id"
+      , "          AND tml.task_id = ANY($2)"
+      , "      )"
+      , "    )"
+      , "    AND NOT EXISTS ("
       , "    SELECT 1"
       , "    FROM project_memory_links pml"
       , "    JOIN projects p ON p.id = pml.project_id"
@@ -300,37 +508,51 @@ softDeleteProjectMemoriesStatement = Statement.Statement sql encoder Dec.noResul
       , "      AND p.deleted_at IS NULL"
       , "      AND p.workspace_id = m.workspace_id"
       , "      AND p.id <> ALL($1)"
-      , "  )"
-      , "  AND NOT EXISTS ("
+      , "    )"
+      , "    AND NOT EXISTS ("
       , "    SELECT 1"
       , "    FROM task_memory_links tml"
       , "    JOIN tasks t ON t.id = tml.task_id"
       , "    WHERE tml.memory_id = m.id"
       , "      AND t.deleted_at IS NULL"
       , "      AND t.workspace_id = m.workspace_id"
-      , "  )"
+      , "      AND t.id <> ALL($2)"
+      , "    )"
+      , "  RETURNING m.id"
+      , ")"
+      , "SELECT count(*)::int FROM updated"
       ]
-    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    uuidArrayEncoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    encoder = contramap fst uuidArrayEncoder <> contramap snd uuidArrayEncoder
+    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
 
-restoreProjectMemoriesS :: [UUID] -> UTCTime -> Session.Session ()
-restoreProjectMemoriesS [] _ = pure ()
-restoreProjectMemoriesS ids deletedAt =
-  Session.statement (ids, deletedAt) restoreProjectMemoriesStatement
+restoreProjectAndTaskMemoriesS :: [UUID] -> [UUID] -> UTCTime -> Session.Session Int
+restoreProjectAndTaskMemoriesS [] [] _ = pure 0
+restoreProjectAndTaskMemoriesS projectIds taskIds deletedAt =
+  Session.statement (projectIds, taskIds, deletedAt) restoreProjectAndTaskMemoriesStatement
 
-restoreProjectMemoriesStatement :: Statement.Statement ([UUID], UTCTime) ()
-restoreProjectMemoriesStatement = Statement.Statement sql encoder Dec.noResult True
+restoreProjectAndTaskMemoriesStatement :: Statement.Statement ([UUID], [UUID], UTCTime) Int
+restoreProjectAndTaskMemoriesStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
-      [ "UPDATE memories m"
-      , "SET deleted_at = NULL"
-      , "WHERE m.deleted_at IS NOT NULL"
-      , "  AND EXISTS ("
-      , "    SELECT 1 FROM project_memory_links pml"
-      , "    WHERE pml.memory_id = m.id"
-      , "      AND pml.project_id = ANY($1)"
-      , "  )"
-      , "  AND ("
-      , "    m.deleted_at = $2"
+      [ "WITH updated AS ("
+      , "  UPDATE memories m"
+      , "  SET deleted_at = NULL"
+      , "  WHERE m.deleted_at IS NOT NULL"
+      , "    AND ("
+      , "      EXISTS ("
+      , "        SELECT 1 FROM project_memory_links pml"
+      , "        WHERE pml.memory_id = m.id"
+      , "          AND pml.project_id = ANY($1)"
+      , "      )"
+      , "      OR EXISTS ("
+      , "        SELECT 1 FROM task_memory_links tml"
+      , "        WHERE tml.memory_id = m.id"
+      , "          AND tml.task_id = ANY($2)"
+      , "      )"
+      , "    )"
+      , "    AND ("
+      , "    m.deleted_at = $3"
       , "    OR EXISTS ("
       , "      SELECT 1"
       , "      FROM project_memory_links pml_deleted"
@@ -345,8 +567,8 @@ restoreProjectMemoriesStatement = Statement.Statement sql encoder Dec.noResult T
       , "      WHERE tml_deleted.memory_id = m.id"
       , "        AND t_deleted.deleted_at = m.deleted_at"
       , "    )"
-      , "  )"
-      , "  AND ("
+      , "    )"
+      , "    AND ("
       , "    EXISTS ("
       , "      SELECT 1"
       , "      FROM project_memory_links pml_active"
@@ -363,12 +585,29 @@ restoreProjectMemoriesStatement = Statement.Statement sql encoder Dec.noResult T
       , "        AND t_active.deleted_at IS NULL"
       , "        AND t_active.workspace_id = m.workspace_id"
       , "    )"
-      , "  )"
+      , "    )"
+      , "  RETURNING m.id"
+      , ")"
+      , "SELECT count(*)::int FROM updated"
       ]
     uuidArrayEncoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
     encoder =
-      contramap fst uuidArrayEncoder <>
-      contramap snd (Enc.param (Enc.nonNullable Enc.timestamptz))
+      contramap (\(projectIds, _, _) -> projectIds) uuidArrayEncoder <>
+      contramap (\(_, taskIds, _) -> taskIds) uuidArrayEncoder <>
+      contramap (\(_, _, deletedAt) -> deletedAt) (Enc.param (Enc.nonNullable Enc.timestamptz))
+    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
+
+softDeleteProjectTasksS :: [UUID] -> Session.Session Int
+softDeleteProjectTasksS [] = pure 0
+softDeleteProjectTasksS ids = Session.statement ids softDeleteProjectTasksStatement
+
+deleteProjectTaskDependenciesS :: [UUID] -> Session.Session Int
+deleteProjectTaskDependenciesS [] = pure 0
+deleteProjectTaskDependenciesS ids = Session.statement ids deleteProjectTaskDependenciesStatement
+
+purgeProjectTasksS :: [UUID] -> Session.Session Int
+purgeProjectTasksS [] = pure 0
+purgeProjectTasksS ids = Session.statement ids purgeProjectTasksStatement
 
 ------------------------------------------------------------------------
 -- List

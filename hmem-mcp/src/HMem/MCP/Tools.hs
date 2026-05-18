@@ -154,7 +154,7 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "entity_lifecycle" "Soft-delete, restore, or permanently purge any entity. Use action 'delete' to soft-delete (hides from views, recoverable). Use 'restore' to undo a soft-delete. Use 'purge' to permanently and irreversibly remove (must be soft-deleted first). For batch soft-delete, pass ids[] instead of entity_id (max 100). For projects and tasks, delete/restore cascades to child subtrees." $ object
+    , mkTool "entity_lifecycle" "Soft-delete, restore, or permanently purge any entity. Use action 'delete' to soft-delete (hides from views, recoverable). Use 'restore' to undo a soft-delete. Use 'purge' to permanently and irreversibly remove (must be soft-deleted first). For batch soft-delete, pass ids[] instead of entity_id (max 100). For projects and tasks, delete/restore/purge cascades to child subtrees; single delete/purge responses include cascade counts." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "entity_type" .= propEnum "string" "Type of entity" ["memory", "project", "task", "category", "workspace", "saved_view"]

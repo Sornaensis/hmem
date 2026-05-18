@@ -9,12 +9,15 @@ import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Test.Hspec
+import Hasql.Decoders qualified as D
+import Hasql.Encoders qualified as E
 import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 
 import HMem.DB.Pool (DBException(..), runSession)
 import HMem.DB.Memory (createMemory, getMemory, getProjectMemories, touchMemory, updateMemory)
 import HMem.DB.Project
-import HMem.DB.Task (createTask, deleteTask, getTask, listTasksByWorkspace, restoreTask, updateTask)
+import HMem.DB.Task (createTask, deleteTask, getTask, restoreTask, updateTask)
 import HMem.DB.TestHarness
 import HMem.Types
 import Data.UUID qualified as UUID
@@ -347,25 +350,68 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       ok <- deleteProject env.pool (read "00000000-0000-0000-0000-000000000099")
       ok `shouldBe` False
 
-    it "keeps tasks by clearing their project_id" $ \env -> do
+    it "deletes subprojects and tasks in the project subtree" $ \env -> do
       ws <- createTestWorkspace env "projtask-ws"
-      proj <- createProject env.pool CreateProject
+      parent <- createProject env.pool CreateProject
         { workspaceId = ws.id, parentId = Nothing, name = "To Archive"
         , description = Nothing, priority = Nothing, metadata = Nothing }
+      childProject <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Just parent.id, name = "Child Project"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
       task <- createTask env.pool CreateTask
-        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Keep me"
+        { workspaceId = ws.id, projectId = Just childProject.id, parentId = Nothing, title = "Delete me"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      subtask <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just childProject.id, parentId = Just task.id, title = "Delete subtask"
         , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
 
-      ok <- deleteProject env.pool proj.id
-      ok `shouldBe` True
+      result <- deleteProjectCascade env.pool parent.id
+      result `shouldSatisfy` isJust
+      let Just cascade = result
+      cascade.projectCount `shouldBe` 2
+      cascade.taskCount `shouldBe` 2
+      cascade.affected `shouldBe` 4
 
-      got <- getTask env.pool task.id
-      got `shouldSatisfy` isJust
-      let Just detached = got
-      detached.projectId `shouldBe` Nothing
+      getProject env.pool parent.id `shouldReturn` Nothing
+      getProject env.pool childProject.id `shouldReturn` Nothing
+      getTask env.pool task.id `shouldReturn` Nothing
+      getTask env.pool subtask.id `shouldReturn` Nothing
+      deleteProjectCascade env.pool parent.id `shouldReturn` Nothing
 
-      tasks <- listTasksByWorkspace env.pool ws.id Nothing Nothing Nothing Nothing
-      map (.id) tasks `shouldContain` [task.id]
+      restoreProject env.pool parent.id `shouldReturn` True
+      getProject env.pool childProject.id >>= (`shouldSatisfy` isJust)
+      getTask env.pool task.id >>= (`shouldSatisfy` isJust)
+      getTask env.pool subtask.id >>= (`shouldSatisfy` isJust)
+
+    it "purges deleted project subtrees without detaching tasks" $ \env -> do
+      ws <- createTestWorkspace env "proj-purge-cascade-ws"
+      parent <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Purge Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      childProject <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Just parent.id, name = "Purge Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just childProject.id, parentId = Nothing, title = "Purge task"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      preDeletedTask <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just childProject.id, parentId = Nothing, title = "Already deleted task"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      deleteTask env.pool preDeletedTask.id `shouldReturn` True
+      deleteProject env.pool childProject.id `shouldReturn` True
+
+      deleteProject env.pool parent.id `shouldReturn` True
+      purge <- purgeProjectCascade env.pool parent.id
+      purge `shouldSatisfy` isJust
+      let Just purged = purge
+      purged.projectCount `shouldBe` 2
+      purged.taskCount `shouldBe` 2
+
+      projectRowExists env parent.id `shouldReturn` False
+      projectRowExists env childProject.id `shouldReturn` False
+      taskRowExists env task.id `shouldReturn` False
+      taskRowExists env preDeletedTask.id `shouldReturn` False
+      purgeProjectCascade env.pool parent.id `shouldReturn` Nothing
 
   describe "listProjects" $ do
     it "lists projects for a workspace" $ \env -> do
@@ -510,3 +556,23 @@ expectLifecycle expected result = case result of
 
 execSql :: TestEnv -> String -> IO ()
 execSql env sql = runSession env.pool (Session.sql (BS8.pack sql))
+
+projectRowExists :: TestEnv -> UUID.UUID -> IO Bool
+projectRowExists env projectId = runSession env.pool $ Session.statement projectId projectRowExistsStatement
+
+projectRowExistsStatement :: Statement.Statement UUID.UUID Bool
+projectRowExistsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT EXISTS (SELECT 1 FROM projects WHERE id = $1)"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nonNullable D.bool))
+
+taskRowExists :: TestEnv -> UUID.UUID -> IO Bool
+taskRowExists env taskId = runSession env.pool $ Session.statement taskId taskRowExistsStatement
+
+taskRowExistsStatement :: Statement.Statement UUID.UUID Bool
+taskRowExistsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1)"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nonNullable D.bool))

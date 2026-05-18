@@ -124,6 +124,7 @@ module HMem.Types
   , BatchSetTagsItem(..)
   , BatchSetTagsRequest(..)
   , BatchResult(..)
+  , CascadeResult(..)
   , BatchUpdateMemoryItem(..)
   , BatchUpdateMemoryRequest(..)
   , BatchUpdateProjectItem(..)
@@ -1746,6 +1747,22 @@ newtype BatchResult = BatchResult
 instance ToJSON BatchResult where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON BatchResult where
+  parseJSON  = genericParseJSON jsonOptions
+
+-- | Summary of lifecycle operations that can cascade across entity trees.
+-- Counts intentionally avoid returning large ID lists by default while still
+-- making API/MCP deletion effects visible to callers.
+data CascadeResult = CascadeResult
+  { affected        :: Int
+  , projectCount    :: Int
+  , taskCount       :: Int
+  , memoryCount     :: Int
+  , dependencyCount :: Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON CascadeResult where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON CascadeResult where
   parseJSON  = genericParseJSON jsonOptions
 
 validateBatchDeleteRequest :: BatchDeleteRequest -> [Text]

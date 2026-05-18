@@ -353,20 +353,20 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         forceDeferredConstraints
       getMemory env.pool mem.id >>= (`shouldSatisfy` isJust)
 
-    it "rejects soft-deleting a linked project when it is the memory's only active target" $ \env -> do
+    it "soft-deletes a project-linked memory when deleting its only active target" $ \env -> do
       ws <- createTestWorkspace env "linked-project-delete-ws"
       proj <- createProject env.pool CreateProject
         { workspaceId = ws.id, parentId = Nothing, name = "Linked project"
         , description = Nothing, priority = Nothing, metadata = Nothing }
-      _ <- Mem.createMemory env.pool CreateMemory
+      mem <- Mem.createMemory env.pool CreateMemory
         { workspaceId = ws.id, projectId = Just proj.id, taskId = Nothing
         , content = "linked project memory", summary = Nothing, memoryType = ShortTerm
         , importance = Nothing, metadata = Nothing, expiresAt = Nothing, source = Nothing
         , confidence = Nothing, pinned = Nothing, tags = Nothing, ftsLanguage = Nothing }
-      expectWorkflowViolation "MEMORY_LINK_REQUIRED" $
-        runTransaction env.pool $ do
-          softDeleteProjectDirect proj.id
-          forceDeferredConstraints
+      runTransaction env.pool $ do
+        softDeleteProjectDirect proj.id
+        forceDeferredConstraints
+      getMemory env.pool mem.id >>= (`shouldSatisfy` isNothing)
 
     it "allows soft-deleting one linked project while another active target remains" $ \env -> do
       ws <- createTestWorkspace env "linked-project-delete-with-other-ws"

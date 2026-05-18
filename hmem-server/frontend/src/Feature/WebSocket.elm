@@ -7,7 +7,7 @@ module Feature.WebSocket exposing
 
 import Api
 import Dict
-import Helpers exposing (beginWorkspaceDataReload)
+import Helpers exposing (applyDependencyMutationResult, beginWorkspaceDataReload)
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
@@ -341,8 +341,13 @@ applyChangeEvent event model =
 
         Api.ETaskDependency ->
             let
+                mutationResult =
+                    Maybe.andThen (tryDecode Api.dependencyMutationResultDecoder) event.payload
+
                 taskId =
-                    payloadField "task_id" event.payload |> Maybe.withDefault event.entityId
+                    mutationResult
+                        |> Maybe.map .taskId
+                        |> Maybe.withDefault (payloadField "task_id" event.payload |> Maybe.withDefault event.entityId)
 
                 graphCmd =
                     case ( model.page, model.selectedWorkspaceId ) of
@@ -352,10 +357,15 @@ applyChangeEvent event model =
                         _ ->
                             Cmd.none
 
-                ( _, reloadCmd ) =
-                    beginWorkspaceDataReload False model
+                ( patchedModel, reloadCmd ) =
+                    case mutationResult of
+                        Just result ->
+                            ( applyDependencyMutationResult result model, Cmd.none )
+
+                        Nothing ->
+                            beginWorkspaceDataReload False model
             in
-            ( model
+            ( patchedModel
             , Cmd.batch
                 [ Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId)
                 , reloadCmd

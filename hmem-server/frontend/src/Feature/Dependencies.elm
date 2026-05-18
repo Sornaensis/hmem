@@ -113,8 +113,10 @@ update msg model =
 
         DependencyMutationDone taskId result ->
             case result of
-                Ok () ->
-                    ( model, Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId) )
+                Ok mutationResult ->
+                    ( applyDependencyMutationResult mutationResult model
+                    , Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId)
+                    )
 
                 Err _ ->
                     addToast Error "Failed to update dependency" model

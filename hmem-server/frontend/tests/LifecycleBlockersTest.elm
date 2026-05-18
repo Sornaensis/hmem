@@ -4,6 +4,7 @@ import Api
 import Expect
 import Feature.Cards
 import Feature.DataLoading
+import Json.Decode as Decode
 import String
 import Test exposing (..)
 
@@ -132,6 +133,53 @@ suite =
             \_ ->
                 Feature.Cards.cascadeDeleteFailureFallback { entityType = "task", entityId = "root", preview = Nothing }
                     |> Expect.equal "Failed to delete task. The item may already have changed; refreshing workspace data."
+        , test "dependency mutation responses decode affected task status patches" <|
+            \_ ->
+                let
+                    body =
+                        """{"action":"add","task_id":"dependent","depends_on_id":"dependency","affected_tasks":[{"task":{"id":"dependent","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Dependent","description":null,"status":"blocked","priority":5,"due_at":null,"completed_at":null,"dependency_count":1,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:01Z"},"previous_status":"todo","current_status":"blocked","previous_auto_blocked":false,"auto_blocked":true,"previous_open_dependency_count":0,"open_dependency_count":1,"reason":"blocked_by_open_dependencies"}]}"""
+                in
+                case Decode.decodeString Api.dependencyMutationResultDecoder body of
+                    Ok result ->
+                        case result.affectedTasks of
+                            [ change ] ->
+                                [ result.action == "add"
+                                , result.taskId == "dependent"
+                                , change.task.status == Api.Blocked
+                                , change.task.dependencyCount == 1
+                                , change.previousStatus == Api.Todo
+                                , change.currentStatus == Api.Blocked
+                                , change.autoBlocked == True
+                                , change.reason == "blocked_by_open_dependencies"
+                                ]
+                                    |> Expect.equal (List.repeat 8 True)
+
+                            other ->
+                                Expect.fail ("Expected one affected task, got " ++ String.fromInt (List.length other))
+
+                    Err err ->
+                        Expect.fail (Decode.errorToString err)
+        , test "task update responses decode flattened task plus dependency effects" <|
+            \_ ->
+                let
+                    body =
+                        """{"id":"dependency","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Dependency","description":null,"status":"done","priority":5,"due_at":null,"completed_at":"2026-01-01T00:00:02Z","dependency_count":0,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:02Z","dependency_effects":[{"task":{"id":"dependent","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Dependent","description":null,"status":"todo","priority":5,"due_at":null,"completed_at":null,"dependency_count":1,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:02Z"},"previous_status":"blocked","current_status":"todo","previous_auto_blocked":true,"auto_blocked":false,"previous_open_dependency_count":1,"open_dependency_count":0,"reason":"unblocked_dependencies_resolved"}]}"""
+                in
+                case ( Decode.decodeString Api.taskDecoder body, Decode.decodeString Api.taskMutationResultDecoder body ) of
+                    ( Ok plainTask, Ok mutationResult ) ->
+                        [ plainTask.id == "dependency"
+                        , plainTask.status == Api.Done
+                        , mutationResult.task.id == "dependency"
+                        , mutationResult.task.status == Api.Done
+                        , List.map (\change -> ( change.task.id, change.task.status, change.reason )) mutationResult.dependencyEffects == [ ( "dependent", Api.Todo, "unblocked_dependencies_resolved" ) ]
+                        ]
+                            |> Expect.equal (List.repeat 5 True)
+
+                    ( Err err, _ ) ->
+                        Expect.fail (Decode.errorToString err)
+
+                    ( _, Err err ) ->
+                        Expect.fail (Decode.errorToString err)
         ]
 
 

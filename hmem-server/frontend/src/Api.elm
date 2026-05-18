@@ -1,7 +1,7 @@
 module Api exposing
     ( Workspace, Project, Task, Memory, MemoryLink
     , WorkspaceGroup, WorkspaceMembership
-    , TaskDependencySummary, TaskOverview
+    , TaskDependencySummary, TaskDependencyStatusChange, DependencyMutationResult, TaskMutationResult, TaskOverview
     , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, UnifiedSearchResults
     , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
     , AuditAction(..), AuditLogEntry, RevertResult
@@ -33,7 +33,7 @@ module Api exposing
     , fetchWorkspaceGroups, createWorkspaceGroup, deleteWorkspaceGroup
     , fetchGroupMembers, addGroupMember, removeGroupMember
     , fetchAuditLog, fetchEntityHistory, revertAuditEntry
-    , decodeChangeEvent
+    , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder
     , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, auditLogEntryDecoder
     , memoryTypeToString, memoryTypeFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
     , auditActionToString, auditActionFromString
@@ -92,6 +92,32 @@ type alias Task =
     , memoryLinkCount : Int
     , createdAt : String
     , updatedAt : String
+    }
+
+
+type alias TaskDependencyStatusChange =
+    { task : Task
+    , previousStatus : TaskStatus
+    , currentStatus : TaskStatus
+    , previousAutoBlocked : Bool
+    , autoBlocked : Bool
+    , previousOpenDependencyCount : Int
+    , openDependencyCount : Int
+    , reason : String
+    }
+
+
+type alias DependencyMutationResult =
+    { action : String
+    , taskId : String
+    , dependsOnId : String
+    , affectedTasks : List TaskDependencyStatusChange
+    }
+
+
+type alias TaskMutationResult =
+    { task : Task
+    , dependencyEffects : List TaskDependencyStatusChange
     }
 
 
@@ -713,6 +739,39 @@ taskDecoder =
         |> optional "memory_link_count" D.int 0
         |> required "created_at" D.string
         |> required "updated_at" D.string
+
+
+taskDependencyStatusChangeDecoder : Decoder TaskDependencyStatusChange
+taskDependencyStatusChangeDecoder =
+    D.succeed TaskDependencyStatusChange
+        |> required "task" taskDecoder
+        |> required "previous_status" taskStatusDecoder
+        |> required "current_status" taskStatusDecoder
+        |> required "previous_auto_blocked" D.bool
+        |> required "auto_blocked" D.bool
+        |> required "previous_open_dependency_count" D.int
+        |> required "open_dependency_count" D.int
+        |> required "reason" D.string
+
+
+dependencyMutationResultDecoder : Decoder DependencyMutationResult
+dependencyMutationResultDecoder =
+    D.succeed DependencyMutationResult
+        |> required "action" D.string
+        |> required "task_id" D.string
+        |> required "depends_on_id" D.string
+        |> required "affected_tasks" (D.list taskDependencyStatusChangeDecoder)
+
+
+taskMutationResultDecoder : Decoder TaskMutationResult
+taskMutationResultDecoder =
+    D.map2 TaskMutationResult
+        taskDecoder
+        (D.oneOf
+            [ D.field "dependency_effects" (D.list taskDependencyStatusChangeDecoder)
+            , D.succeed []
+            ]
+        )
 
 
 cascadeResultDecoder : Decoder CascadeResult
@@ -1423,7 +1482,7 @@ createTask apiUrl wsId mProjectId title requestId toMsg =
         }
 
 
-updateTask : String -> String -> List ( String, E.Value ) -> (Result ApiError Task -> msg) -> Cmd msg
+updateTask : String -> String -> List ( String, E.Value ) -> (Result ApiError TaskMutationResult -> msg) -> Cmd msg
 updateTask apiUrl taskId fields toMsg =
     let
         headers =
@@ -1434,7 +1493,7 @@ updateTask apiUrl taskId fields toMsg =
         , headers = headers
         , url = apiUrl ++ "/api/v1/tasks/" ++ taskId
         , body = Http.jsonBody (E.object fields)
-        , expect = expectJsonWithApiError taskDecoder toMsg
+        , expect = expectJsonWithApiError taskMutationResultDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }
@@ -1660,27 +1719,27 @@ fetchTaskOverview apiUrl taskId toMsg =
         }
 
 
-addTaskDependency : String -> String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+addTaskDependency : String -> String -> String -> String -> (Result Http.Error DependencyMutationResult -> msg) -> Cmd msg
 addTaskDependency apiUrl taskId dependsOnId requestId toMsg =
     Http.request
         { method = "POST"
         , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/tasks/" ++ taskId ++ "/dependencies"
         , body = Http.jsonBody (E.object [ ( "depends_on_id", E.string dependsOnId ), ( "request_id", E.string requestId ) ])
-        , expect = Http.expectWhatever toMsg
+        , expect = Http.expectJson toMsg dependencyMutationResultDecoder
         , timeout = Nothing
         , tracker = Nothing
         }
 
 
-removeTaskDependency : String -> String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+removeTaskDependency : String -> String -> String -> String -> (Result Http.Error DependencyMutationResult -> msg) -> Cmd msg
 removeTaskDependency apiUrl taskId dependsOnId requestId toMsg =
     Http.request
         { method = "DELETE"
         , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/tasks/" ++ taskId ++ "/dependencies/" ++ dependsOnId
         , body = Http.jsonBody (E.object [ ( "depends_on_id", E.string dependsOnId ), ( "request_id", E.string requestId ) ])
-        , expect = Http.expectWhatever toMsg
+        , expect = Http.expectJson toMsg dependencyMutationResultDecoder
         , timeout = Nothing
         , tracker = Nothing
         }

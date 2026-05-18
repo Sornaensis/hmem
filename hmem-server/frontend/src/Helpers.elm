@@ -368,6 +368,37 @@ trackLocalMutations entityIds model =
     ( updatedModel, clearCmd )
 
 
+insertTasks : List Api.Task -> Model -> Model
+insertTasks tasks model =
+    { model
+        | tasks =
+            List.foldl
+                (\task acc -> Dict.insert task.id task acc)
+                model.tasks
+                tasks
+    }
+
+
+applyDependencyStatusChanges : List Api.TaskDependencyStatusChange -> Model -> Model
+applyDependencyStatusChanges changes model =
+    insertTasks (List.map .task changes) model
+
+
+applyDependencyMutationResult : Api.DependencyMutationResult -> Model -> Model
+applyDependencyMutationResult result model =
+    applyDependencyStatusChanges result.affectedTasks model
+
+
+applyTaskMutationResult : Api.TaskMutationResult -> Model -> Model
+applyTaskMutationResult result model =
+    insertTasks (result.task :: List.map .task result.dependencyEffects) model
+
+
+taskMutationResultIds : Api.TaskMutationResult -> List String
+taskMutationResultIds result =
+    result.task.id :: List.map (\change -> change.task.id) result.dependencyEffects
+
+
 beginTrackedMutation : List String -> Model -> ( Model, String, Cmd Msg )
 beginTrackedMutation entityIds model =
     let

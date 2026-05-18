@@ -390,7 +390,7 @@ type Msg
     | TaskCreated (Result Api.ApiError Api.Task)
     | MemoryCreated (Result Http.Error Api.Memory)
     | ProjectUpdated (Result Api.ApiError Api.Project)
-    | TaskUpdated (Result Api.ApiError Api.Task)
+    | TaskUpdated (Result Api.ApiError Api.TaskMutationResult)
     | MemoryUpdated (Result Http.Error Api.Memory)
     | WorkspaceUpdated (Result Http.Error Api.Workspace)
     | WorkspaceCreated (Result Http.Error Api.Workspace)
@@ -459,7 +459,7 @@ type Msg
     | DependencySearch String
     | PerformAddDependency String String
     | PerformRemoveDependency String String
-    | DependencyMutationDone String (Result Http.Error ())
+    | DependencyMutationDone String (Result Http.Error Api.DependencyMutationResult)
     | CancelAddDependency
       -- Navigation
     | ScrollToEntity String

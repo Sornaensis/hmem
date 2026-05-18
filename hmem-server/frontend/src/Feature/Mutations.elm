@@ -2,7 +2,7 @@ module Feature.Mutations exposing (init, update)
 
 import Dict
 import Api
-import Helpers exposing (beginWorkspaceDataReload, trackLocalMutation)
+import Helpers exposing (applyTaskMutationResult, beginWorkspaceDataReload, taskMutationResultIds, trackLocalMutation, trackLocalMutations)
 import Toast exposing (addToast)
 import Types exposing (..)
 import Browser.Navigation as Nav
@@ -150,11 +150,13 @@ update msg model =
 
         TaskUpdated result ->
             case result of
-                Ok task ->
+                Ok mutationResult ->
                     let
+                        updatedModel =
+                            applyTaskMutationResult mutationResult model
+
                         ( trackedModel, trackCmd ) =
-                            trackLocalMutation task.id
-                                { model | tasks = Dict.insert task.id task model.tasks }
+                            trackLocalMutations (taskMutationResultIds mutationResult) updatedModel
                     in
                     ( trackedModel, trackCmd )
 

@@ -9,9 +9,13 @@ module Permissions exposing
     , currentWorkspaceRoleLabel
     , hasImplicitLocalSuperadmin
     , hasSession
+    , isImplicitLocalSuperadminSession
     , isLocalMode
     , isSuperadmin
     , principalAttributionLabel
+    , shouldShowLocalSessionDetails
+    , shouldShowMembershipAdmin
+    , shouldShowPermissionSummary
     )
 
 import Api
@@ -48,13 +52,30 @@ isLocalMode model =
 hasImplicitLocalSuperadmin : Model -> Bool
 hasImplicitLocalSuperadmin model =
     model.sessionContext
-        |> Maybe.map
-            (\session ->
-                session.authMode == localAuthMode
-                    && session.globalPermissions.superadmin
-                    && session.principal.authority == localSuperadminAuthority
-            )
+        |> Maybe.map isImplicitLocalSuperadminSession
         |> Maybe.withDefault False
+
+
+isImplicitLocalSuperadminSession : Api.SessionContext -> Bool
+isImplicitLocalSuperadminSession session =
+    session.authMode == localAuthMode
+        && session.globalPermissions.superadmin
+        && session.principal.authority == localSuperadminAuthority
+
+
+shouldShowPermissionSummary : Model -> Bool
+shouldShowPermissionSummary model =
+    not (hasImplicitLocalSuperadmin model)
+
+
+shouldShowMembershipAdmin : Model -> Bool
+shouldShowMembershipAdmin model =
+    not (hasImplicitLocalSuperadmin model)
+
+
+shouldShowLocalSessionDetails : Model -> Bool
+shouldShowLocalSessionDetails model =
+    not (hasImplicitLocalSuperadmin model)
 
 
 isSuperadmin : Model -> Bool

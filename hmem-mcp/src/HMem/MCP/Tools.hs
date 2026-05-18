@@ -100,16 +100,7 @@ toolDefinitions =
                                               , "fts_language" .= prop "string" "Full-text search language (default 'english'). Use a PostgreSQL regconfig name, e.g. 'spanish', 'german', 'simple'."
                                               ]
                                           , "required" .= (["workspace_id", "content", "memory_type"] :: [Text])
-                                          , "anyOf" .=
-                                              [ object ["required" .= (["project_id"] :: [Text])]
-                                              , object ["required" .= (["task_id"] :: [Text])]
-                                              ]
                                           ]]
-          ]
-      , "anyOf" .=
-          [ object ["required" .= (["items"] :: [Text])]
-          , object ["required" .= (["workspace_id", "content", "memory_type", "project_id"] :: [Text])]
-          , object ["required" .= (["workspace_id", "content", "memory_type", "task_id"] :: [Text])]
           ]
       , "required" .= ([] :: [Text])
       ]

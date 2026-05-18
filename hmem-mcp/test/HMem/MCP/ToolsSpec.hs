@@ -1159,7 +1159,7 @@ spec = do
       textField "description" taskIdSchema `shouldSatisfy` maybe False (T.isInfixOf "top-level")
       objectField "project_id" properties `shouldSatisfy` (/= Nothing)
       objectField "task_id" properties `shouldSatisfy` (/= Nothing)
-      objectField "anyOf" schema `shouldSatisfy` (/= Nothing)
+      schema `shouldSatisfy` isPlainTopLevelInputSchema
 
     it "advertises batch items support on memory_create" $ do
       schema <- requireJust "memory_create schema" (inputSchemaFor "memory_create")
@@ -1170,7 +1170,10 @@ spec = do
       itemMemoryTypeSchema <- requireJust "memory_create batch item memory_type schema" (objectField "memory_type" itemProperties)
       objectField "enum" itemMemoryTypeSchema `shouldBe` Just (toJSON (["short_term", "long_term"] :: [Text]))
       objectField "required" itemSchema `shouldBe` Just (toJSON (["workspace_id", "content", "memory_type"] :: [Text]))
-      objectField "anyOf" itemSchema `shouldSatisfy` (/= Nothing)
+
+    it "uses MCP-compatible top-level input schemas" $ do
+      let schemas = [schema | Object tool <- toolDefinitions, Just schema <- [KM.lookup "inputSchema" tool]]
+      schemas `shouldSatisfy` all isPlainTopLevelInputSchema
 
     it "advertises list filter timestamps and task priority" $ do
       memorySchema <- requireJust "memory_list schema" (inputSchemaFor "memory_list")
@@ -1357,3 +1360,11 @@ numberField key (Object obj) = case KM.lookup (Key.fromText key) obj of
   Just (Number value) -> Just value
   _                   -> Nothing
 numberField _ _ = Nothing
+
+isPlainTopLevelInputSchema :: Value -> Bool
+isPlainTopLevelInputSchema (Object obj) =
+  KM.lookup "type" obj == Just (String "object")
+    && not (any (`KM.member` obj) disallowedTopLevelSchemaKeys)
+  where
+    disallowedTopLevelSchemaKeys = Key.fromText <$> ["oneOf", "anyOf", "allOf", "enum", "not"]
+isPlainTopLevelInputSchema _ = False

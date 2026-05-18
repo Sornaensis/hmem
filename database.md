@@ -163,13 +163,13 @@
                                   │                           │ 1           │
                                   │ 1                         │             │
                                   ▼ *                         ▼ *           │
-                   ╔═════════════════════════╗ ╔══════════════════════╗     │
-                   ║   task_memory_links     ║ ║  task_dependencies   ║     │
-                   ╠═════════════════════════╣ ╠══════════════════════╣     │
-                   ║PK task_id ──► tasks     ║ ║PK task_id ──► tasks  ║     │
-                   ║PK memory_id ──► memories║ ║PK depends_on_id      ║     │
-                   ╚═════════════════════════╝ ║          ──► tasks   ║     │
-                          │                    ╚══════════════════════╝     │
+                   ╔══════════════════════════╗ ╔══════════════════════╗     │
+                   ║   task_memory_links      ║ ║  task_dependencies   ║     │
+                   ╠══════════════════════════╣ ╠══════════════════════╣     │
+                   ║PK task_id ──► tasks      ║ ║PK task_id ──► tasks ║     │
+                   ║PK memory_id ──► memories ║ ║PK depends_on_id      ║     │
+                   ╚══════════════════════════╝ ║          ──► tasks  ║     │
+                          │                     ╚═════════════════════╝     │
                           │                                                 │
                           └─────────────────────────────────────────────────┘
                                             (FK to memories)
@@ -198,7 +198,7 @@
  ║           audit_log              ║
  ╠══════════════════════════════════╣
  ║ PK id           UUID             ║
- ║    workspace_id  UUID             ║
+ ║    workspace_id  UUID            ║
  ║    entity_type  TEXT             ║
  ║    entity_id    TEXT             ║
  ║    action       audit_action     ║
@@ -230,48 +230,8 @@
                                   │ audit_action_enum:                                    │
                                   │   create │ update │ delete                            │
                                   │ workspace_role_enum:                                  │
-                                  │   read │ edit │ admin                                │
+                                  │   read │ edit │ admin                                 │
                                   │ actor_type_enum:                                      │
                                   │   user │ bot                                          │
                                   └───────────────────────────────────────────────────────┘
 ```
-
-## Auth/access table semantics
-
-`users.disabled_at` disables provider JWT and persisted PAT/service-token
-resolution for that grant-bearing user. Authorization helpers treat disabled
-users as missing grants/roles, so disabled accounts fail closed even when their
-workspace memberships or token rows remain in the database for later re-enable
-or audit review.
-
-The `access_tokens` table is the minimal v1 storage surface for PAT, bot, and
-service-token access. It stores token identity and lifecycle metadata, not raw
-bearer secrets.
-
-- `token_hash` stores the canonical digest of the bearer token. Legacy rows use
-  `sha256:`. When `auth.deployed.token_hash_secret` is configured, new
-  operator-issued/rotated rows use `hmac-sha256-v1:` and the server still checks
-  legacy `sha256:` as a compatibility fallback. Raw deployed token material is
-  only available to the operator at issuance time.
-- `actor_type = bot` means requests authenticate as a bot actor for audit and
-  event attribution. The token row `id` is the stable token identity used as
-  that token's bot `actor_id`; token rotation creates a replacement actor id.
-- `actor_type = user` is reserved for PAT-style user attribution where the
-  grant-bearing user is also the actor.
-- `actor_label` is a non-secret, human-readable attribution label copied into
-  audit rows and client-visible principal summaries.
-- `grant_user_id` points to the canonical `users` row whose global permissions
-  and `workspace_memberships` are evaluated. Bot/service tokens do not have a
-  separate permissions table in v1.
-- `expires_at` and `revoked_at` provide lifecycle controls for operator-managed
-  issuance, rotation, and emergency revocation.
-- `last_used_at` is operational usage metadata updated when persisted PATs are
-  used. The access-token audit trigger ignores it so routine authentication does
-  not create per-request audit noise.
-- `token_hash` and `last_used_at` are omitted from `access_tokens` audit
-  snapshots; audit rows should carry actor attribution and lifecycle changes,
-  not secret digests or high-volume usage timestamps.
-
-Local configured bot tokens may be represented in local config/bootstrap
-material instead of `access_tokens` during the local compatibility period, but
-deployed bot/service tokens should use persisted hashed rows.

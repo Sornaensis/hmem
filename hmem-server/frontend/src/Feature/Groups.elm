@@ -310,28 +310,32 @@ viewSidebar model =
 
 viewSessionFooter : Model -> Html Msg
 viewSessionFooter model =
-    case Permissions.principalAttributionLabel model of
-        Just attribution ->
-            div [ class "sidebar-session" ]
-                [ div [ class "sidebar-session-mode" ]
-                    [ text
-                        (if Permissions.isLocalMode model then
-                            "Local session"
+    if not (Permissions.shouldShowLocalSessionDetails model) then
+        text ""
 
-                         else
-                            "Signed in"
-                        )
+    else
+        case Permissions.principalAttributionLabel model of
+            Just attribution ->
+                div [ class "sidebar-session" ]
+                    [ div [ class "sidebar-session-mode" ]
+                        [ text
+                            (if Permissions.isLocalMode model then
+                                "Local session"
+
+                             else
+                                "Signed in"
+                            )
+                        ]
+                    , div [ class "sidebar-session-principal" ] [ text attribution ]
+                    , if not (Permissions.isLocalMode model) && (model.flags.authTokenPresent || model.flags.logoutUrl /= Nothing) then
+                        button [ class "sidebar-session-action", onClick LogoutRequested ] [ text "Sign out" ]
+
+                      else
+                        text ""
                     ]
-                , div [ class "sidebar-session-principal" ] [ text attribution ]
-                , if not (Permissions.isLocalMode model) && (model.flags.authTokenPresent || model.flags.logoutUrl /= Nothing) then
-                    button [ class "sidebar-session-action", onClick LogoutRequested ] [ text "Sign out" ]
 
-                  else
-                    text ""
-                ]
-
-        Nothing ->
-            text ""
+            Nothing ->
+                text ""
 
 
 viewSidebarGroup : Model -> Api.WorkspaceGroup -> Html Msg
@@ -498,7 +502,7 @@ viewNoVisibleWorkspaces model =
 
 viewLocalModeNotice : Model -> Html Msg
 viewLocalModeNotice model =
-    if Permissions.isLocalMode model then
+    if Permissions.isLocalMode model && Permissions.shouldShowLocalSessionDetails model then
         let
             attribution =
                 Permissions.principalAttributionLabel model

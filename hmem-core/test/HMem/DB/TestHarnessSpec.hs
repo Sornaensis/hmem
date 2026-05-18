@@ -199,6 +199,69 @@ spec = do
                 Session.statement manualBlockedId taskAutoBlockedStatement
               manualAutoBlocked `shouldBe` False
 
+    it "autoBlockMigration preserves legacy blockers inside closed lifecycle trees" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              preV12Dir <- copyMigrationSubset sandbox migrations "pre-v012" (\name -> name < "V012")
+              v12AndV13Dir <- copyMigrationSubset sandbox migrations "v012-v013" (\name -> name >= "V012" && name < "V014")
+              v14OnlyDir <- copyMigrationSubset sandbox migrations "v014-only-closed-project" (== "V014__recursive_task_auto_blocking.sql")
+
+              preResult <- Migration.runMigrations pool preV12Dir
+              preResult.failed `shouldBe` Nothing
+
+              wsId <- runSession pool $
+                Session.statement ("legacy-closed-project-autoblock-ws" :: Text) insertWorkspaceDirectStatement
+              projectId <- runSession pool $
+                Session.statement (wsId, "Legacy Closed Project" :: Text) insertProjectDirectStatement
+              dependencyId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "open dependency" :: Text, "todo" :: Text) insertTaskDirectStatement
+              dependentId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "done dependent" :: Text, "done" :: Text) insertTaskDirectStatement
+              runSession pool $
+                Session.statement (dependentId, dependencyId) insertTaskDependencyDirectStatement
+              runSession pool $
+                Session.statement (projectId, "completed" :: Text) updateProjectStatusDirectStatement
+
+              activeProjectId <- runSession pool $
+                Session.statement (wsId, "Legacy Done Ancestor Project" :: Text) insertProjectDirectStatement
+              doneParentId <- runSession pool $
+                Session.statement (wsId, activeProjectId, Nothing, "done parent" :: Text, "done" :: Text) insertTaskDirectStatement
+              childDependencyId <- runSession pool $
+                Session.statement (wsId, activeProjectId, Nothing, "child dependency" :: Text, "todo" :: Text) insertTaskDirectStatement
+              childUnderDoneId <- runSession pool $
+                Session.statement (wsId, activeProjectId, Just doneParentId, "child under done parent" :: Text, "todo" :: Text) insertTaskDirectStatement
+              runSession pool $
+                Session.statement (childUnderDoneId, childDependencyId) insertTaskDependencyDirectStatement
+
+              v12AndV13Result <- Migration.runMigrations pool v12AndV13Dir
+              v12AndV13Result.failed `shouldBe` Nothing
+
+              v14Result <- Migration.runMigrations pool v14OnlyDir
+              v14Result.failed `shouldBe` Nothing
+
+              dependentStatus <- runSession pool $
+                Session.statement dependentId taskStatusTextStatement
+              dependentStatus `shouldBe` "done"
+              dependentAutoBlocked <- runSession pool $
+                Session.statement dependentId taskAutoBlockedStatement
+              dependentAutoBlocked `shouldBe` False
+              projectStatus <- runSession pool $
+                Session.statement projectId projectStatusTextStatement
+              projectStatus `shouldBe` "completed"
+
+              doneParentStatus <- runSession pool $
+                Session.statement doneParentId taskStatusTextStatement
+              doneParentStatus `shouldBe` "done"
+              childUnderDoneStatus <- runSession pool $
+                Session.statement childUnderDoneId taskStatusTextStatement
+              childUnderDoneStatus `shouldBe` "todo"
+              childUnderDoneAutoBlocked <- runSession pool $
+                Session.statement childUnderDoneId taskAutoBlockedStatement
+              childUnderDoneAutoBlocked `shouldBe` False
+
     it "explicitMemoryTypeMigration backfills null rows and rejects new missing types" $
       withTestSandbox $ \sandbox -> do
         migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
@@ -343,6 +406,29 @@ insertTaskDirectStatement = Statement.Statement sql encoder decoder True
       contramap (\(_, _, _, title, _) -> title) (E.param (E.nonNullable E.text)) <>
       contramap (\(_, _, _, _, status) -> status) (E.param (E.nonNullable E.text))
     decoder = D.singleRow (D.column (D.nonNullable D.uuid))
+
+insertTaskDependencyDirectStatement :: Statement.Statement (UUID, UUID) ()
+insertTaskDependencyDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "INSERT INTO task_dependencies (task_id, depends_on_id) VALUES ($1, $2)"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
+
+updateProjectStatusDirectStatement :: Statement.Statement (UUID, Text) ()
+updateProjectStatusDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "UPDATE projects SET status = $2::project_status_enum WHERE id = $1"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.text))
+
+projectStatusTextStatement :: Statement.Statement UUID Text
+projectStatusTextStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT status::text FROM projects WHERE id = $1"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nonNullable D.text))
 
 taskStatusTextStatement :: Statement.Statement UUID Text
 taskStatusTextStatement = Statement.Statement sql encoder decoder True

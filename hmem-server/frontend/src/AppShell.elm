@@ -154,16 +154,20 @@ handleOwned ownedMsg model =
                                 bootstrapAfterSession expectedWorkspace sessionContext model
 
                             mMembershipWorkspaceId =
-                                case sessionContext.workspace of
-                                    Just workspaceContext ->
-                                        if sessionContext.globalPermissions.superadmin || workspaceContext.canAdmin then
-                                            Just workspaceContext.workspaceId
+                                if Permissions.isImplicitLocalSuperadminSession sessionContext then
+                                    Nothing
 
-                                        else
+                                else
+                                    case sessionContext.workspace of
+                                        Just workspaceContext ->
+                                            if sessionContext.globalPermissions.superadmin || workspaceContext.canAdmin then
+                                                Just workspaceContext.workspaceId
+
+                                            else
+                                                Nothing
+
+                                        Nothing ->
                                             Nothing
-
-                                    Nothing ->
-                                        Nothing
 
                             fetchMembershipsCmd =
                                 case mMembershipWorkspaceId of

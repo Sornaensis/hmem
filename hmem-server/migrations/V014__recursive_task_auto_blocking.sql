@@ -44,6 +44,72 @@ RETURNS BOOLEAN AS $$
     );
 $$ LANGUAGE sql STABLE;
 
+-- Legacy databases can already contain open tasks or done tasks with open
+-- dependencies inside completed/archived project trees or under done task
+-- ancestors.  V012 prevents new writes like that, but does not backfill old
+-- rows.  Auto-blocking those rows during this migration would turn closed work
+-- back into an open "blocked" state and trip the V012 lifecycle triggers.
+-- Treat closed project/task trees as frozen for auto-block recomputation; they
+-- can be normalized by reopening the project/task or explicitly editing the
+-- affected tasks later.
+CREATE OR REPLACE FUNCTION hmem_task_is_inside_closed_project(task_id_to_check UUID)
+RETURNS BOOLEAN AS $$
+  WITH RECURSIVE task_ancestors(id, parent_id, project_id) AS (
+    SELECT task_to_check.id, task_to_check.parent_id, task_to_check.project_id
+      FROM tasks task_to_check
+     WHERE task_to_check.id = task_id_to_check
+       AND task_to_check.deleted_at IS NULL
+    UNION ALL
+    SELECT parent.id, parent.parent_id, parent.project_id
+      FROM tasks parent
+      JOIN task_ancestors child ON child.parent_id = parent.id
+     WHERE parent.deleted_at IS NULL
+  ),
+  project_seeds(id) AS (
+    SELECT DISTINCT project_id
+      FROM task_ancestors
+     WHERE project_id IS NOT NULL
+  ),
+  project_ancestors(id, parent_id, status) AS (
+    SELECT project.id, project.parent_id, project.status
+      FROM projects project
+      JOIN project_seeds seed ON seed.id = project.id
+     WHERE project.deleted_at IS NULL
+    UNION ALL
+    SELECT parent.id, parent.parent_id, parent.status
+      FROM projects parent
+      JOIN project_ancestors child ON child.parent_id = parent.id
+     WHERE parent.deleted_at IS NULL
+  )
+  SELECT EXISTS (
+    SELECT 1
+      FROM project_ancestors
+     WHERE hmem_is_closed_project_status(status)
+  );
+$$ LANGUAGE sql STABLE;
+
+CREATE OR REPLACE FUNCTION hmem_task_has_done_ancestor(task_id_to_check UUID)
+RETURNS BOOLEAN AS $$
+  WITH RECURSIVE task_ancestors(id, parent_id, status) AS (
+    SELECT parent.id, parent.parent_id, parent.status
+      FROM tasks task_to_check
+      JOIN tasks parent ON parent.id = task_to_check.parent_id
+     WHERE task_to_check.id = task_id_to_check
+       AND task_to_check.deleted_at IS NULL
+       AND parent.deleted_at IS NULL
+    UNION ALL
+    SELECT parent.id, parent.parent_id, parent.status
+      FROM tasks parent
+      JOIN task_ancestors child ON child.parent_id = parent.id
+     WHERE parent.deleted_at IS NULL
+  )
+  SELECT EXISTS (
+    SELECT 1
+      FROM task_ancestors
+     WHERE status = 'done'::task_status_enum
+  );
+$$ LANGUAGE sql STABLE;
+
 CREATE OR REPLACE FUNCTION hmem_enforce_task_dependency_workspace()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -131,6 +197,8 @@ BEGIN
         FROM tasks task_to_check
         JOIN targets ON targets.id = task_to_check.id
        WHERE task_to_check.deleted_at IS NULL
+         AND NOT hmem_task_is_inside_closed_project(task_to_check.id)
+         AND NOT hmem_task_has_done_ancestor(task_to_check.id)
     )
     UPDATE tasks task_to_update
        SET status = CASE

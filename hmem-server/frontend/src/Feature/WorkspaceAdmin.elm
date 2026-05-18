@@ -240,26 +240,30 @@ update msg model =
 
 viewPermissionSummary : Model -> Html Msg
 viewPermissionSummary model =
-    case model.sessionContext of
-        Nothing ->
-            div [ class "permission-summary permission-summary-loading" ]
-                [ text "Loading permissions..." ]
+    if not (Permissions.shouldShowPermissionSummary model) then
+        text ""
 
-        Just session ->
-            div [ class "permission-summary" ]
-                [ span [] [ text ("Signed in as " ++ session.principal.actorLabel) ]
-                , span [] [ text ("Role: " ++ Permissions.currentWorkspaceRoleLabel model) ]
-                , if session.globalPermissions.createWorkspace then
-                    span [ class "permission-pill" ] [ text "create workspace" ]
+    else
+        case model.sessionContext of
+            Nothing ->
+                div [ class "permission-summary permission-summary-loading" ]
+                    [ text "Loading permissions..." ]
 
-                  else
-                    text ""
-                , if session.globalPermissions.superadmin then
-                    span [ class "permission-pill permission-pill-superadmin" ] [ text "superadmin" ]
+            Just session ->
+                div [ class "permission-summary" ]
+                    [ span [] [ text ("Signed in as " ++ session.principal.actorLabel) ]
+                    , span [] [ text ("Role: " ++ Permissions.currentWorkspaceRoleLabel model) ]
+                    , if session.globalPermissions.createWorkspace then
+                        span [ class "permission-pill" ] [ text "create workspace" ]
 
-                  else
-                    text ""
-                ]
+                      else
+                        text ""
+                    , if session.globalPermissions.superadmin then
+                        span [ class "permission-pill permission-pill-superadmin" ] [ text "superadmin" ]
+
+                      else
+                        text ""
+                    ]
 
 
 viewWorkspaceAdminPanel : Api.Workspace -> Model -> Html Msg
@@ -274,7 +278,11 @@ viewWorkspaceAdminPanel ws model =
                 |> Maybe.map (\workspaceContext -> workspaceContext.workspaceId == ws.id)
                 |> Maybe.withDefault False
     in
-    if Permissions.canAdminCurrentWorkspace model && (workspaceSessionMatches || membershipLoaded) then
+    if Permissions.hasImplicitLocalSuperadmin model && Permissions.canAdminCurrentWorkspace model then
+        div [ class "workspace-admin-panel workspace-admin-panel-local" ]
+            [ viewDangerZone ws model ]
+
+    else if Permissions.canAdminCurrentWorkspace model && (workspaceSessionMatches || membershipLoaded) then
         div [ class "workspace-admin-panel" ]
             [ h3 [] [ text "Workspace administration" ]
             , p [ class "help-text" ] [ text "Client affordances reflect server-provided permissions; the server remains authoritative for every action." ]
@@ -296,40 +304,44 @@ viewWorkspaceAdminPanel ws model =
 
 viewMembershipManager : Api.Workspace -> Model -> Html Msg
 viewMembershipManager ws model =
-    let
-        memberships =
-            Dict.get ws.id model.workspaceAdmin.memberships |> Maybe.withDefault []
+    if not (Permissions.shouldShowMembershipAdmin model) then
+        text ""
 
-        loading =
-            Dict.get ws.id model.workspaceAdmin.loadingMemberships |> Maybe.withDefault False
-    in
-    div [ class "workspace-memberships" ]
-        [ h4 [] [ text "Memberships" ]
-        , if loading && List.isEmpty memberships then
-            div [ class "loading-indicator" ] [ text "Loading memberships..." ]
+    else
+        let
+            memberships =
+                Dict.get ws.id model.workspaceAdmin.memberships |> Maybe.withDefault []
 
-          else if List.isEmpty memberships then
-            div [ class "empty-state" ] [ text "No explicit memberships found. Superadmins may still have access." ]
+            loading =
+                Dict.get ws.id model.workspaceAdmin.loadingMemberships |> Maybe.withDefault False
+        in
+        div [ class "workspace-memberships" ]
+            [ h4 [] [ text "Memberships" ]
+            , if loading && List.isEmpty memberships then
+                div [ class "loading-indicator" ] [ text "Loading memberships..." ]
 
-          else
-            div [ class "membership-list" ] (List.map (viewMembershipRow ws.id) memberships)
-        , div [ class "membership-form" ]
-            [ input
-                [ class "form-input"
-                , placeholder "User UUID"
-                , value model.workspaceAdmin.membershipUserId
-                , onInput UpdateMembershipUserId
+              else if List.isEmpty memberships then
+                div [ class "empty-state" ] [ text "No explicit memberships found. Superadmins may still have access." ]
+
+              else
+                div [ class "membership-list" ] (List.map (viewMembershipRow ws.id) memberships)
+            , div [ class "membership-form" ]
+                [ input
+                    [ class "form-input"
+                    , placeholder "User UUID"
+                    , value model.workspaceAdmin.membershipUserId
+                    , onInput UpdateMembershipUserId
+                    ]
+                    []
+                , select [ class "form-input", value model.workspaceAdmin.membershipRole, onInput UpdateMembershipRole ]
+                    [ option [ value "read" ] [ text "read" ]
+                    , option [ value "edit" ] [ text "edit" ]
+                    , option [ value "admin" ] [ text "admin" ]
+                    ]
+                , button [ class "btn btn-primary", onClick (SubmitWorkspaceMembership ws.id) ]
+                    [ text "Grant / update" ]
                 ]
-                []
-            , select [ class "form-input", value model.workspaceAdmin.membershipRole, onInput UpdateMembershipRole ]
-                [ option [ value "read" ] [ text "read" ]
-                , option [ value "edit" ] [ text "edit" ]
-                , option [ value "admin" ] [ text "admin" ]
-                ]
-            , button [ class "btn btn-primary", onClick (SubmitWorkspaceMembership ws.id) ]
-                [ text "Grant / update" ]
             ]
-        ]
 
 
 viewMembershipRow : String -> Api.WorkspaceMembership -> Html Msg

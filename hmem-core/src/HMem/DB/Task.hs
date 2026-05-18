@@ -21,15 +21,20 @@ module HMem.DB.Task
 
 import Control.Exception (throwIO)
 import Control.Monad (when)
-import Data.Aeson (Object, toJSON)
+import Data.Aeson (Object, object, (.=), toJSON)
+import Data.Aeson qualified as Aeson
 import Data.ByteString.Char8 qualified as BS8
+import Data.ByteString.Lazy qualified as BL
 import Data.Functor.Contravariant ((>$<), contramap)
 import Data.Int (Int16, Int32, Int64)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Pool (Pool)
+import Data.Text (Text)
+import Data.Text.Encoding qualified as TE
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
+import Data.UUID qualified as UUID
 import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
@@ -212,15 +217,66 @@ ensureTaskParent pool workspaceId (Just parentId) = do
     throwIO $ DBCheckViolation "Parent task must belong to the same workspace"
   pure (Just parent)
 
-ensureTaskPlacement :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Maybe UUID -> IO ()
+ensureTaskPlacement :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Maybe UUID -> IO (Maybe Task)
 ensureTaskPlacement pool workspaceId projectId parentId = do
   ensureTaskProject pool workspaceId projectId
   mParent <- ensureTaskParent pool workspaceId parentId
   case mParent of
-    Nothing -> pure ()
-    Just parent ->
+    Nothing -> pure Nothing
+    Just parent -> do
       when (parent.projectId /= projectId) $
         throwIO $ DBCheckViolation "Task and parent task must belong to the same project"
+      when (parent.parentId /= Nothing) $
+        throwIO $ lifecycleViolation
+          "TASK_SUBTASK_DEPTH_EXCEEDED"
+          "Cannot create or move a task under a subtask."
+          (Just $ blockerDetail parent.id)
+          (Just "Move the target parent to the top level before adding subtasks, or attach this task to a top-level task.")
+      pure (Just parent)
+
+ensureTaskCanBecomeSubtask :: Pool Hasql.Connection -> UUID -> Maybe UUID -> IO ()
+ensureTaskCanBecomeSubtask _ _ Nothing = pure ()
+ensureTaskCanBecomeSubtask pool taskId (Just _) = do
+  mFirstChild <- taskFirstActiveChild pool taskId
+  case mFirstChild of
+    Nothing -> pure ()
+    Just childId ->
+      throwIO $ lifecycleViolation
+        "TASK_SUBTASK_DEPTH_EXCEEDED"
+        "Cannot move a task with subtasks under another task."
+        (Just $ blockerDetail childId)
+        (Just "Move, delete, or detach existing subtasks before making this task a subtask.")
+
+ensureSubtaskStartAllowed :: Bool -> Maybe Task -> TaskStatus -> IO ()
+ensureSubtaskStartAllowed shouldEnforce mParent targetStatus =
+  case (shouldEnforce, mParent, targetStatus) of
+    (True, Just parent, InProgress) | parent.status /= InProgress ->
+      throwIO $ lifecycleViolation
+        "TASK_SUBTASK_START_BLOCKED"
+        "Cannot start a subtask while its parent task is not in progress."
+        (Just $ blockerDetail parent.id)
+        (Just "Start the parent task before moving a subtask to in_progress.")
+    _ -> pure ()
+
+taskFirstActiveChild :: Pool Hasql.Connection -> UUID -> IO (Maybe UUID)
+taskFirstActiveChild pool taskId =
+  runSession pool $ Session.statement taskId taskFirstActiveChildStatement
+
+taskFirstActiveChildStatement :: Statement.Statement UUID (Maybe UUID)
+taskFirstActiveChildStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT id FROM tasks WHERE parent_id = $1 AND deleted_at IS NULL ORDER BY id LIMIT 1"
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.rowMaybe (Dec.column (Dec.nonNullable Dec.uuid))
+
+lifecycleViolation :: Text -> Text -> Maybe Text -> Maybe Text -> DBException
+lifecycleViolation = DBLifecycleViolation
+
+blockerDetail :: UUID -> Text
+blockerDetail blockerId = TE.decodeUtf8 . BL.toStrict . Aeson.encode $ object
+  [ "blocker_count" .= (1 :: Int)
+  , "blocker_ids" .= [UUID.toText blockerId]
+  ]
 
 ------------------------------------------------------------------------
 -- Create
@@ -228,7 +284,7 @@ ensureTaskPlacement pool workspaceId projectId parentId = do
 
 createTask :: Pool Hasql.Connection -> CreateTask -> IO Task
 createTask pool ct = do
-  ensureTaskPlacement pool ct.workspaceId ct.projectId ct.parentId
+  _ <- ensureTaskPlacement pool ct.workspaceId ct.projectId ct.parentId
   let pri  = maybe 5 fromIntegral (ct.priority) :: Int16
       meta = fromMaybe (toJSON (mempty :: Object)) (ct.metadata)
   rows <- runSession pool $ Session.statement () $ run $
@@ -289,7 +345,15 @@ updateTask pool tid ut = do
     Just task -> do
       let targetProjectId = applyFieldUpdateMaybe task.projectId ut.projectId
           targetParentId = applyFieldUpdateMaybe task.parentId ut.parentId
-      ensureTaskPlacement pool task.workspaceId targetProjectId targetParentId
+          targetStatus = fromMaybe task.status ut.status
+          enforcingStartGate =
+            targetParentId /= Nothing &&
+              ( (ut.status == Just InProgress && task.status /= InProgress)
+                || (targetParentId /= task.parentId && targetStatus == InProgress)
+              )
+      mParent <- ensureTaskPlacement pool task.workspaceId targetProjectId targetParentId
+      ensureTaskCanBecomeSubtask pool tid targetParentId
+      ensureSubtaskStartAllowed enforcingStartGate mParent targetStatus
       mTask <- runTransaction pool $ do
         when (task.projectId /= targetProjectId) $ do
           ids <- Session.statement tid taskSubtreeIdsStatement

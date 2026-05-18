@@ -793,6 +793,10 @@ viewTaskCard showProject model task =
         isSubtask =
             task.parentId /= Nothing
 
+        parentTask =
+            task.parentId
+                |> Maybe.andThen (\parentId -> Dict.get parentId model.tasks)
+
         typeLabel =
             if isSubtask then
                 "SUB"
@@ -820,12 +824,13 @@ viewTaskCard showProject model task =
         allTasks =
             Dict.values model.tasks
 
-        descendantTaskIds =
-            collectDescendantTaskIds allTasks task.id
+        childTasksForTask =
+            allTasks
+                |> List.filter (\t -> t.parentId == Just task.id)
 
         openDescendantTaskCount =
-            allTasks
-                |> List.filter (\t -> t.id /= task.id && List.member t.id descendantTaskIds && isOpenTaskStatus t.status)
+            childTasksForTask
+                |> List.filter (\t -> isOpenTaskStatus t.status)
                 |> List.length
 
         completionBlockerReason =
@@ -834,6 +839,9 @@ viewTaskCard showProject model task =
         taskStatusDisabled status =
             if status == Api.Done then
                 completionBlockerReason
+
+            else if status == Api.InProgress && isSubtask && Maybe.map .status parentTask /= Just Api.InProgress then
+                Just "Start the parent task before moving this subtask to in progress."
 
             else
                 Nothing
@@ -844,10 +852,13 @@ viewTaskCard showProject model task =
                 |> Maybe.withDefault True
 
         taskAllowsOpenChildren =
-            task.status /= Api.Done && not (hasDoneTaskAncestor allTasks task) && taskProjectAllowsOpenTasks
+            not isSubtask && task.status /= Api.Done && not (hasDoneTaskAncestor allTasks task) && taskProjectAllowsOpenTasks
 
         taskCreateChildReason =
-            if task.status == Api.Done then
+            if isSubtask then
+                "Subtasks cannot have subtasks."
+
+            else if task.status == Api.Done then
                 "Reopen this task before adding open subtasks."
 
             else if hasDoneTaskAncestor allTasks task then
@@ -903,7 +914,7 @@ viewTaskCard showProject model task =
             ]
         , let
             childTasks =
-                model.tasks |> Dict.values |> List.filter (\t -> t.parentId == Just task.id)
+                childTasksForTask
 
             remainingSubtasks =
                 childTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length

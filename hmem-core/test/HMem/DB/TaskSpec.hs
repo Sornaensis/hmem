@@ -3,7 +3,7 @@
 module HMem.DB.TaskSpec (spec) where
 
 import Control.Exception (try)
-import Control.Monad (forM_, void)
+import Control.Monad (forM_, void, when)
 import Data.ByteString.Char8 qualified as BS8
 import Data.List (sort)
 import Data.Maybe (isJust, isNothing)
@@ -225,7 +225,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         Left (DBCheckViolation _) -> pure ()
         other -> expectationFailure $ "Expected DBCheckViolation, got: " <> show other
 
-    it "rejects cycles when reparenting tasks" $ \env -> do
+    it "rejects making a parent task into a subtask" $ \env -> do
       ws <- createTestWorkspace env "taskcyclehier-ws"
       proj <- createProject env.pool CreateProject
         { workspaceId = ws.id, parentId = Nothing, name = "Proj"
@@ -233,15 +233,66 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       root <- createTask env.pool CreateTask
         { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Root"
         , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
-      child <- createTask env.pool CreateTask
+      _child <- createTask env.pool CreateTask
         { workspaceId = ws.id, projectId = Just proj.id, parentId = Just root.id, title = "Child"
         , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
-      grandchild <- createTask env.pool CreateTask
-        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just child.id, title = "Grandchild"
+      targetParent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Target parent"
         , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
 
       result <- try @DBException $ updateTask env.pool root.id UpdateTask
-        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = SetTo grandchild.id
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = SetTo targetParent.id
+        , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      expectLifecycle "TASK_SUBTASK_DEPTH_EXCEEDED" result
+
+    it "rejects creating a subtask under another subtask" $ \env -> do
+      ws <- createTestWorkspace env "task-flat-subtask-create-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      result <- try @DBException $ createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just child.id, title = "Grandchild"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      expectLifecycle "TASK_SUBTASK_DEPTH_EXCEEDED" result
+
+    it "requires parent in_progress before starting a subtask" $ \env -> do
+      ws <- createTestWorkspace env "task-subtask-start-gate-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      blockedStart <- try @DBException $ updateTask env.pool child.id (taskStatusUpdate InProgress)
+      expectLifecycle "TASK_SUBTASK_START_BLOCKED" blockedStart
+
+      void $ updateTask env.pool parent.id (taskStatusUpdate InProgress)
+      started <- updateTask env.pool child.id (taskStatusUpdate InProgress)
+      let Just startedChild = started
+      startedChild.status `shouldBe` InProgress
+
+    it "preserves cycle detection for self-parenting" $ \env -> do
+      ws <- createTestWorkspace env "task-self-cycle-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Proj"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      task <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Self"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      result <- try @DBException $ updateTask env.pool task.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = SetTo task.id
         , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
       case result of
         Left (DBCycleDetected _) -> pure ()
@@ -259,6 +310,8 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         child <- createTask env.pool CreateTask
           { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
           , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        when (childStatus == InProgress) $
+          void $ updateTask env.pool parent.id (taskStatusUpdate InProgress)
         whenStatus childStatus $ \statusValue ->
           void $ updateTask env.pool child.id (taskStatusUpdate statusValue)
 
@@ -318,7 +371,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       void $ updateTask env.pool parent.id (taskStatusUpdate Done)
 
       result <- try @DBException $ updateTask env.pool child.id (taskStatusUpdate InProgress)
-      expectLifecycle "TASK_OPEN_UNDER_DONE_TASK" result
+      expectLifecycle "TASK_SUBTASK_START_BLOCKED" result
 
     it "rejects reparenting an open task under a done task" $ \env -> do
       ws <- createTestWorkspace env "task-reparent-under-done-ws"
@@ -358,7 +411,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       result <- try @DBException $ updateTask env.pool cancelledParent.id UpdateTask
         { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = SetTo doneParent.id
         , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
-      expectLifecycle "TASK_OPEN_UNDER_DONE_TASK" result
+      expectLifecycle "TASK_SUBTASK_DEPTH_EXCEEDED" result
 
     it "rejects moving a cancelled task subtree with open descendants into a closed project" $ \env -> do
       ws <- createTestWorkspace env "task-move-cancelled-subtree-closed-project-ws"
@@ -730,28 +783,10 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       child <- createTask env.pool CreateTask
         { workspaceId = ws.id, projectId = Just proj.id, parentId = Just root.id, title = "Child"
         , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
-      leaf <- createTask env.pool CreateTask
-        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just child.id, title = "Leaf"
-        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
-
-      getTask env.pool child.id >>= (\case
-        Just task -> task.status `shouldBe` Todo
-        Nothing -> expectationFailure "child task not found")
       getTask env.pool root.id >>= (\case
         Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "root task not found")
-      taskAutoBlocked env child.id `shouldReturn` False
       taskAutoBlocked env root.id `shouldReturn` False
-
-      _ <- updateTask env.pool leaf.id UpdateTask
-        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
-        , status = Just Done, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
-      getTask env.pool child.id >>= (\case
-        Just task -> task.status `shouldBe` Todo
-        Nothing -> expectationFailure "child task not found")
-      getTask env.pool root.id >>= (\case
-        Just task -> task.status `shouldBe` Todo
-        Nothing -> expectationFailure "root task not found")
 
       _ <- updateTask env.pool child.id UpdateTask
         { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
@@ -989,30 +1024,6 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       readyAfterChildDone <- listNextTasks env.pool proj.id False 10
       map (.task.id) readyAfterChildDone `shouldBe` [parent.id]
       map (.completionGated) readyAfterChildDone `shouldBe` [False]
-
-    it "recurses through migrated nested subtasks and gates each by its immediate parent" $ \env -> do
-      ws <- createTestWorkspace env "next-task-nested-gate-ws"
-      proj <- createProject env.pool CreateProject
-        { workspaceId = ws.id, parentId = Nothing, name = "Next Nested Gate"
-        , description = Nothing, priority = Nothing, metadata = Nothing }
-      root <- createTask env.pool CreateTask
-        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Root"
-        , description = Nothing, priority = Just 9, metadata = Nothing, dueAt = Nothing }
-      child <- createTask env.pool CreateTask
-        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just root.id, title = "Nested child"
-        , description = Nothing, priority = Just 8, metadata = Nothing, dueAt = Nothing }
-      grandchild <- createTask env.pool CreateTask
-        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just child.id, title = "Migrated grandchild"
-        , description = Nothing, priority = Just 7, metadata = Nothing, dueAt = Nothing }
-      void $ updateTask env.pool root.id (taskStatusUpdate InProgress)
-
-      readyBeforeChildStart <- listNextTasks env.pool proj.id False 10
-      map (.task.id) readyBeforeChildStart `shouldBe` [root.id, child.id]
-      map (.completionGated) readyBeforeChildStart `shouldBe` [True, True]
-
-      void $ updateTask env.pool child.id (taskStatusUpdate InProgress)
-      readyAfterChildStart <- listNextTasks env.pool proj.id False 10
-      map (.task.id) readyAfterChildStart `shouldBe` [root.id, child.id, grandchild.id]
 
     it "excludes dependency-blocked tasks by default and includes them on request" $ \env -> do
       ws <- createTestWorkspace env "next-task-dependency-blocked-ws"

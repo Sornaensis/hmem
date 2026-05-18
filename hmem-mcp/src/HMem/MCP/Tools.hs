@@ -214,7 +214,7 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "task_create" "Create a workspace- or project-scoped task. Use parent_id for subtasks; when parent_id is set, project_id should match the parent task's project. After creating, add ordering constraints with task_dependency, and attach relevant context with task_link_memory." $ object
+    , mkTool "task_create" "Create a workspace- or project-scoped task. Use parent_id only for direct subtasks of top-level tasks; subtasks cannot have children, and project_id must match the parent task's project. After creating, add ordering constraints with task_dependency, and attach relevant context with task_link_memory." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "workspace_id" .= prop "string" "UUID of the workspace"
@@ -249,7 +249,7 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "task_update" "Update one or more tasks. For single: pass task_id + fields. For batch: pass items[] array (max 100) of {id, ...fields}. Use project_id and/or parent_id to reorganize; null clears those fields. Moving a task across projects also moves its subtree." $ object
+    , mkTool "task_update" "Update one or more tasks. For single: pass task_id + fields. For batch: pass items[] array (max 100) of {id, ...fields}. Use project_id and/or parent_id to reorganize; null clears those fields. Only top-level tasks may have direct subtasks; subtasks cannot have children, and a subtask can move to in_progress only when its parent is already in_progress. Moving a task across projects also moves its subtree." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id"     .= prop "string" "UUID of the task (single mode)"

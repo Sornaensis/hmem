@@ -163,34 +163,40 @@ update msg model =
         DropActionMakeSubtask ->
             case model.dragDrop.dropActionModal of
                 Just modal ->
-                    let
-                        ( trackedModel, requestId, clearCmd ) =
-                            beginTrackedMutation [ modal.dragTaskId, modal.targetTaskId ]
-                                (updateDragDropModel (
-                                    \dd -> { dd | dropActionModal = Nothing }
-                                  ) model)
+                    case ( Dict.get modal.dragTaskId model.tasks, Dict.get modal.targetTaskId model.tasks ) of
+                        ( Just dragTask, Just targetTask ) ->
+                            if canMakeSubtask model dragTask targetTask then
+                                let
+                                    ( trackedModel, requestId, clearCmd ) =
+                                        beginTrackedMutation [ modal.dragTaskId, modal.targetTaskId ]
+                                            (updateDragDropModel (
+                                                \dd -> { dd | dropActionModal = Nothing }
+                                              ) model)
+                                in
+                                ( trackedModel
+                                , Cmd.batch
+                                    [ clearCmd
+                                    , Api.updateTask model.flags.apiUrl modal.dragTaskId
+                                        [ ( "parent_id", Encode.string modal.targetTaskId )
+                                        , ( "project_id"
+                                          , case targetTask.projectId of
+                                                Just pid ->
+                                                    Encode.string pid
 
-                        targetTask =
-                            Dict.get modal.targetTaskId model.tasks
-                    in
-                    ( trackedModel
-                    , Cmd.batch
-                        [ clearCmd
-                        , Api.updateTask model.flags.apiUrl modal.dragTaskId
-                            [ ( "parent_id", Encode.string modal.targetTaskId )
-                            , ( "project_id"
-                              , case targetTask |> Maybe.andThen .projectId of
-                                    Just pid ->
-                                        Encode.string pid
+                                                Nothing ->
+                                                    Encode.null
+                                          )
+                                        , ( "request_id", Encode.string requestId )
+                                        ]
+                                        TaskUpdated
+                                    ]
+                                )
 
-                                    Nothing ->
-                                        Encode.null
-                              )
-                            , ( "request_id", Encode.string requestId )
-                            ]
-                            TaskUpdated
-                        ]
-                    )
+                            else
+                                ( updateDragDropModel (\dd -> { dd | dropActionModal = Nothing }) model, Cmd.none )
+
+                        _ ->
+                            ( updateDragDropModel (\dd -> { dd | dropActionModal = Nothing }) model, Cmd.none )
 
                 Nothing ->
                     ( model, Cmd.none )
@@ -362,15 +368,36 @@ viewDropActionModal model =
 
         Just modal ->
             let
-                dragName =
+                dragTask =
                     Dict.get modal.dragTaskId model.tasks
+
+                targetTask =
+                    Dict.get modal.targetTaskId model.tasks
+
+                dragName =
+                    dragTask
                         |> Maybe.map .title
                         |> Maybe.withDefault "Task"
 
                 targetName =
-                    Dict.get modal.targetTaskId model.tasks
+                    targetTask
                         |> Maybe.map .title
                         |> Maybe.withDefault "Task"
+
+                subtaskAllowed =
+                    case ( dragTask, targetTask ) of
+                        ( Just drag, Just target ) ->
+                            canMakeSubtask model drag target
+
+                        _ ->
+                            False
+
+                subtaskTitle =
+                    if subtaskAllowed then
+                        "Make this task a subtask"
+
+                    else
+                        "Subtasks can only be attached to top-level tasks, and tasks with subtasks cannot become subtasks."
             in
             div [ class "modal-overlay", onClick CancelDropAction ]
                 [ div [ class "modal drop-action-modal", stopPropagationOn "click" (Decode.succeed ( NoOp, True )) ]
@@ -383,7 +410,7 @@ viewDropActionModal model =
                         , text "?"
                         ]
                     , div [ class "drop-action-buttons" ]
-                        [ button [ class "btn drop-action-btn", onClick DropActionMakeSubtask ]
+                        [ button [ class "btn drop-action-btn", disabled (not subtaskAllowed), title subtaskTitle, onClick DropActionMakeSubtask ]
                             [ span [ class "drop-action-icon" ] [ text "↳" ]
                             , span [] [ text "Subtask" ]
                             ]
@@ -396,3 +423,15 @@ viewDropActionModal model =
                         [ button [ class "btn btn-secondary", onClick CancelDropAction ] [ text "Cancel" ] ]
                     ]
                 ]
+
+
+canMakeSubtask : Model -> Api.Task -> Api.Task -> Bool
+canMakeSubtask model dragTask targetTask =
+    targetTask.parentId == Nothing && not (taskHasChildren model dragTask.id)
+
+
+taskHasChildren : Model -> String -> Bool
+taskHasChildren model taskId =
+    model.tasks
+        |> Dict.values
+        |> List.any (\task -> task.parentId == Just taskId)

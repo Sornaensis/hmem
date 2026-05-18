@@ -1107,9 +1107,17 @@ spec = around withApp $ do
           ])
       let Just child = decode (respBody childResp) :: Maybe Task
 
+      leftParentProgressResp <- putJSON app (uuidPath "/api/v1/tasks" leftParent.id)
+        (object ["status" .= ("in_progress" :: T.Text)])
+      respStatus leftParentProgressResp `shouldBe` 200
+
       progressResp <- putJSON app (uuidPath "/api/v1/tasks" child.id)
         (object ["status" .= ("in_progress" :: T.Text)])
       respStatus progressResp `shouldBe` 200
+
+      rightParentProgressResp <- putJSON app (uuidPath "/api/v1/tasks" rightParent.id)
+        (object ["status" .= ("in_progress" :: T.Text)])
+      respStatus rightParentProgressResp `shouldBe` 200
 
       moveResp <- putJSON app (uuidPath "/api/v1/tasks" child.id)
         (object ["project_id" .= rightProj.id, "parent_id" .= rightParent.id])
@@ -1142,13 +1150,45 @@ spec = around withApp $ do
         (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= root.id, "title" .= ("Child" :: T.Text)])
       let Just child = decode (respBody childResp) :: Maybe Task
 
-      grandchildResp <- postJSON app "/api/v1/tasks"
-        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= child.id, "title" .= ("Grandchild" :: T.Text)])
-      let Just grandchild = decode (respBody grandchildResp) :: Maybe Task
-
       cycleResp <- putJSON app (uuidPath "/api/v1/tasks" root.id)
-        (object ["parent_id" .= grandchild.id])
+        (object ["parent_id" .= child.id])
       respStatus cycleResp `shouldBe` 409
+
+      selfCycleResp <- putJSON app (uuidPath "/api/v1/tasks" child.id)
+        (object ["parent_id" .= child.id])
+      respStatus selfCycleResp `shouldBe` 409
+
+    it "returns lifecycle codes for flat-subtask rule violations" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-flat-subtask-api-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Flat Tasks" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Parent" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Task
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= parent.id, "title" .= ("Child" :: T.Text)])
+      let Just child = decode (respBody childResp) :: Maybe Task
+
+      nestedResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= child.id, "title" .= ("Nested" :: T.Text)])
+      respStatus nestedResp `shouldBe` 409
+      assertLifecycleError "TASK_SUBTASK_DEPTH_EXCEEDED" nestedResp
+
+      startBlockedResp <- putJSON app (uuidPath "/api/v1/tasks" child.id)
+        (object ["status" .= ("in_progress" :: T.Text)])
+      respStatus startBlockedResp `shouldBe` 409
+      assertLifecycleError "TASK_SUBTASK_START_BLOCKED" startBlockedResp
+
+      startParentResp <- putJSON app (uuidPath "/api/v1/tasks" parent.id)
+        (object ["status" .= ("in_progress" :: T.Text)])
+      respStatus startParentResp `shouldBe` 200
+      startChildResp <- putJSON app (uuidPath "/api/v1/tasks" child.id)
+        (object ["status" .= ("in_progress" :: T.Text)])
+      respStatus startChildResp `shouldBe` 200
 
     it "returns a lifecycle conflict body when task completion is blocked" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"

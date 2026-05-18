@@ -332,6 +332,12 @@ structuredErrorToUserMessage fallback apiError =
                 Just "TASK_OPEN_UNDER_CLOSED_PROJECT" ->
                     "Reopen the project before adding or reopening open tasks."
 
+                Just "TASK_SUBTASK_DEPTH_EXCEEDED" ->
+                    "Subtasks can only be added to top-level tasks. Move existing subtasks before nesting this task."
+
+                Just "TASK_SUBTASK_START_BLOCKED" ->
+                    "Start the parent task before moving a subtask to in progress."
+
                 _ ->
                     apiError.requiredAction
                         |> Maybe.withDefault (Maybe.withDefault apiError.message apiError.hint)

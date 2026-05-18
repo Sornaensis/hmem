@@ -3,6 +3,7 @@ module LifecycleBlockersTest exposing (suite)
 import Api
 import Expect
 import Feature.Cards
+import Feature.DataLoading
 import Test exposing (..)
 
 
@@ -54,4 +55,13 @@ suite =
                         [ Just "Complete/archive 1 child project and finish/cancel 2 tasks before closing this project."
                         , Just "Finish or cancel 3 subtasks before marking this task done."
                         ]
+        , test "workspace data pagination advances only when a non-empty page has more results" <|
+            \_ ->
+                [ Feature.DataLoading.nextPageOffset 0 { items = [ "a", "b" ], hasMore = True }
+                , Feature.DataLoading.nextPageOffset 200 { items = [ "c" ], hasMore = False }
+                , Feature.DataLoading.nextPageOffset 200 { items = [], hasMore = True }
+                , Feature.DataLoading.nextPageOffset 9800 { items = List.repeat 200 "x", hasMore = True }
+                , Feature.DataLoading.nextPageOffset 10000 { items = [ "x" ], hasMore = True }
+                ]
+                    |> Expect.equal [ Just 2, Nothing, Nothing, Just 10000, Nothing ]
         ]

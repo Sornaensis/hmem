@@ -191,7 +191,7 @@ restoreCategory pool cid = do
 
 listCategories :: Pool Hasql.Connection -> UUID -> Maybe Int -> Maybe Int -> IO [MemoryCategory]
 listCategories pool wsId mlimit moffset = do
-  let (lim, off) = capPagination mlimit moffset
+  let (lim, off) = capPaginationOverfetch mlimit moffset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $ do
       row <- each memoryCategorySchema
@@ -203,7 +203,7 @@ listCategories pool wsId mlimit moffset = do
 -- | List global categories (no workspace).
 listGlobalCategories :: Pool Hasql.Connection -> Maybe Int -> Maybe Int -> IO [MemoryCategory]
 listGlobalCategories pool mlimit moffset = do
-  let (lim, off) = capPagination mlimit moffset
+  let (lim, off) = capPaginationOverfetch mlimit moffset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $ do
       row <- each memoryCategorySchema
@@ -259,4 +259,3 @@ linkMemoryCategoryBatch pool catId mids =
         , returning = NoReturning
         }
     pure (length mids)
-

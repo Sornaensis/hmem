@@ -333,9 +333,9 @@ beginWorkspaceDataReload showLoading model =
             in
             ( { model | dataLoading = updatedDataLoading }
             , Cmd.batch
-                [ Api.fetchProjects model.flags.apiUrl wsId (GotProjects wsId (Just token))
-                , Api.fetchTasks model.flags.apiUrl wsId (GotTasks wsId (Just token))
-                , Api.fetchMemories model.flags.apiUrl wsId (GotMemories wsId (Just token))
+                [ Api.fetchProjects model.flags.apiUrl wsId (GotProjects wsId (Just token) 0)
+                , Api.fetchTasks model.flags.apiUrl wsId (GotTasks wsId (Just token) 0)
+                , Api.fetchMemories model.flags.apiUrl wsId (GotMemories wsId (Just token) 0)
                 ]
             )
 

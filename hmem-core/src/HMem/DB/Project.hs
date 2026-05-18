@@ -397,7 +397,7 @@ listProjects pool wsId mstatus mlimit moffset =
 
 listProjectsWithQuery :: Pool Hasql.Connection -> ProjectListQuery -> IO [Project]
 listProjectsWithQuery pool pq = do
-  let (lim, off) = capPagination pq.limit pq.offset
+  let (lim, off) = capPaginationOverfetch pq.limit pq.offset
       searchLang = fromMaybe "english" pq.searchLanguage
       applyFilters row = do
         case pq.workspaceId of

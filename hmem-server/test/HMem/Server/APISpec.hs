@@ -8,6 +8,7 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
+import Control.Monad (forM_)
 import Control.Lens ((&), (?~))
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Functor.Contravariant (contramap)
@@ -2591,6 +2592,46 @@ spec = around withApp $ do
       let Just page = decode (respBody resp) :: Maybe (PaginatedResult Task)
       map (\item -> item.id) page.items `shouldBe` [highTask.id]
       page.items `shouldNotSatisfy` any ((== lowTask.id) . (\item -> item.id))
+
+    it "reports has_more when the max task page limit has additional rows" $ \_ ->
+      withAppEnv $ \env app -> do
+        ws <- createTestWorkspace env "task-max-pagination-ws"
+        proj <- Proj.createProject env.pool CreateProject
+          { workspaceId = ws.id
+          , parentId = Nothing
+          , name = "Task Max Pagination Project"
+          , description = Nothing
+          , priority = Nothing
+          , metadata = Nothing
+          }
+        forM_ [1 .. 201 :: Int] $ \n ->
+          Task.createTask env.pool CreateTask
+            { workspaceId = ws.id
+            , projectId = Just proj.id
+            , parentId = Nothing
+            , title = "Paginated task " <> T.pack (show n)
+            , description = Nothing
+            , priority = Just 5
+            , metadata = Nothing
+            , dueAt = Nothing
+            }
+        firstResp <- get_ app
+          ( "/api/v1/tasks?workspace_id=" <> encodeUtf8 (T.pack (show ws.id))
+         <> "&limit=200&offset=0"
+          )
+        respStatus firstResp `shouldBe` 200
+        let Just firstPage = decode (respBody firstResp) :: Maybe (PaginatedResult Task)
+        length firstPage.items `shouldBe` 200
+        firstPage.hasMore `shouldBe` True
+
+        secondResp <- get_ app
+          ( "/api/v1/tasks?workspace_id=" <> encodeUtf8 (T.pack (show ws.id))
+         <> "&limit=200&offset=200"
+          )
+        respStatus secondResp `shouldBe` 200
+        let Just secondPage = decode (respBody secondResp) :: Maybe (PaginatedResult Task)
+        length secondPage.items `shouldBe` 1
+        secondPage.hasMore `shouldBe` False
 
     it "filters and sorts memories by access_count" $ \_ ->
       withAppEnv $ \env app -> do

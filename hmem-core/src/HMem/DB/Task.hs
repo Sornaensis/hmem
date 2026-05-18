@@ -519,7 +519,7 @@ listTasks pool projId mstatus mlimit moffset =
 
 listTasksWithQuery :: Pool Hasql.Connection -> TaskListQuery -> IO [Task]
 listTasksWithQuery pool tq = do
-  let (lim, off) = capPagination tq.limit tq.offset
+  let (lim, off) = capPaginationOverfetch tq.limit tq.offset
       searchLang = fromMaybe "english" tq.searchLanguage
       applyFilters row = do
         where_ $ activeTask row

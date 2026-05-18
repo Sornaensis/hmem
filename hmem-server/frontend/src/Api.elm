@@ -12,9 +12,9 @@ module Api exposing
     , ChangeEvent, ChangeType(..), EntityType(..)
     , fetchSessionContext, fetchWorkspaces, fetchWorkspace, createWorkspace, updateWorkspace, deleteWorkspace, purgeWorkspace
     , fetchWorkspaceMemberships, upsertWorkspaceMembership, deleteWorkspaceMembership
-    , fetchProjects, fetchProject
-    , fetchTasks, fetchTask
-    , fetchMemories, fetchMemory
+    , fetchProjects, fetchProjectsPage, fetchProject
+    , fetchTasks, fetchTasksPage, fetchTask
+    , fetchMemories, fetchMemoriesPage, fetchMemory
     , fetchMemoryLinks
     , fetchWorkspaceLinks
     , fetchProjectMemories, fetchTaskMemories
@@ -1194,8 +1194,13 @@ deleteWorkspaceMembership apiUrl wsId userId requestId toMsg =
 
 fetchProjects : String -> String -> (Result Http.Error (PaginatedResult Project) -> msg) -> Cmd msg
 fetchProjects apiUrl wsId toMsg =
+    fetchProjectsPage apiUrl wsId 0 toMsg
+
+
+fetchProjectsPage : String -> String -> Int -> (Result Http.Error (PaginatedResult Project) -> msg) -> Cmd msg
+fetchProjectsPage apiUrl wsId offset toMsg =
     Http.get
-        { url = apiUrl ++ "/api/v1/projects?workspace_id=" ++ wsId ++ "&limit=200"
+        { url = apiUrl ++ "/api/v1/projects?workspace_id=" ++ wsId ++ "&limit=200&offset=" ++ String.fromInt offset
         , expect = Http.expectJson toMsg (paginatedDecoder projectDecoder)
         }
 
@@ -1210,8 +1215,13 @@ fetchProject apiUrl projId toMsg =
 
 fetchTasks : String -> String -> (Result Http.Error (PaginatedResult Task) -> msg) -> Cmd msg
 fetchTasks apiUrl wsId toMsg =
+    fetchTasksPage apiUrl wsId 0 toMsg
+
+
+fetchTasksPage : String -> String -> Int -> (Result Http.Error (PaginatedResult Task) -> msg) -> Cmd msg
+fetchTasksPage apiUrl wsId offset toMsg =
     Http.get
-        { url = apiUrl ++ "/api/v1/tasks?workspace_id=" ++ wsId ++ "&limit=200"
+        { url = apiUrl ++ "/api/v1/tasks?workspace_id=" ++ wsId ++ "&limit=200&offset=" ++ String.fromInt offset
         , expect = Http.expectJson toMsg (paginatedDecoder taskDecoder)
         }
 
@@ -1226,8 +1236,13 @@ fetchTask apiUrl taskId toMsg =
 
 fetchMemories : String -> String -> (Result Http.Error (PaginatedResult Memory) -> msg) -> Cmd msg
 fetchMemories apiUrl wsId toMsg =
+    fetchMemoriesPage apiUrl wsId 0 toMsg
+
+
+fetchMemoriesPage : String -> String -> Int -> (Result Http.Error (PaginatedResult Memory) -> msg) -> Cmd msg
+fetchMemoriesPage apiUrl wsId offset toMsg =
     Http.get
-        { url = apiUrl ++ "/api/v1/memories?workspace_id=" ++ wsId ++ "&limit=200"
+        { url = apiUrl ++ "/api/v1/memories?workspace_id=" ++ wsId ++ "&limit=200&offset=" ++ String.fromInt offset
         , expect = Http.expectJson toMsg (paginatedDecoder memoryDecoder)
         }
 

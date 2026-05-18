@@ -1,5 +1,6 @@
-module Feature.DataLoading exposing (init, prepareForPageLoad, update)
+module Feature.DataLoading exposing (init, nextPageOffset, prepareForPageLoad, update)
 
+import Api
 import Dict
 import Helpers exposing (indexBy)
 import Permissions
@@ -90,6 +91,37 @@ acceptWorkspaceLoad maybeToken dataLoading =
             True
 
 
+maxWorkspacePageOffset : Int
+maxWorkspacePageOffset =
+    10000
+
+
+nextPageOffset : Int -> Api.PaginatedResult a -> Maybe Int
+nextPageOffset offset paginated =
+    let
+        nextOffset =
+            offset + List.length paginated.items
+    in
+    if paginated.hasMore && not (List.isEmpty paginated.items) && nextOffset <= maxWorkspacePageOffset then
+        Just nextOffset
+
+    else
+        Nothing
+
+
+mergePageById : Int -> List { item | id : String } -> Dict.Dict String { item | id : String } -> Dict.Dict String { item | id : String }
+mergePageById offset items existing =
+    let
+        pageItems =
+            indexBy .id items
+    in
+    if offset == 0 then
+        pageItems
+
+    else
+        Dict.union pageItems existing
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
@@ -143,7 +175,7 @@ update msg model =
                     Err _ ->
                         addToast Error "Failed to load workspace" model
 
-        GotProjects wsId maybeToken result ->
+        GotProjects wsId maybeToken offset result ->
             if model.selectedWorkspaceId /= Just wsId then
                 ( model, Cmd.none )
 
@@ -154,18 +186,26 @@ update msg model =
                 case result of
                     Ok paginated ->
                         let
-                            currentDataLoading =
-                                model.dataLoading
+                            updatedProjects =
+                                mergePageById offset paginated.items model.projects
 
-                            updatedDataLoading =
-                                finishWorkspaceLoad maybeToken currentDataLoading
+                            modelWithPage =
+                                { model | projects = updatedProjects }
                         in
-                        ( { model
-                            | projects = indexBy .id paginated.items
-                            , dataLoading = updatedDataLoading
-                          }
-                        , Cmd.none
-                        )
+                        case nextPageOffset offset paginated of
+                            Just nextOffset ->
+                                ( modelWithPage
+                                , Api.fetchProjectsPage model.flags.apiUrl wsId nextOffset (GotProjects wsId maybeToken nextOffset)
+                                )
+
+                            Nothing ->
+                                let
+                                    updatedDataLoading =
+                                        finishWorkspaceLoad maybeToken model.dataLoading
+                                in
+                                ( { modelWithPage | dataLoading = updatedDataLoading }
+                                , Cmd.none
+                                )
 
                     Err _ ->
                         let
@@ -178,7 +218,7 @@ update msg model =
                         addToast Error "Failed to load projects"
                             { model | dataLoading = updatedDataLoading }
 
-        GotTasks wsId maybeToken result ->
+        GotTasks wsId maybeToken offset result ->
             if model.selectedWorkspaceId /= Just wsId then
                 ( model, Cmd.none )
 
@@ -189,10 +229,24 @@ update msg model =
                 case result of
                     Ok paginated ->
                         let
-                            updatedDataLoading =
-                                finishWorkspaceLoad maybeToken model.dataLoading
+                            updatedTasks =
+                                mergePageById offset paginated.items model.tasks
+
+                            modelWithPage =
+                                { model | tasks = updatedTasks }
                         in
-                        ( { model | tasks = indexBy .id paginated.items, dataLoading = updatedDataLoading }, Cmd.none )
+                        case nextPageOffset offset paginated of
+                            Just nextOffset ->
+                                ( modelWithPage
+                                , Api.fetchTasksPage model.flags.apiUrl wsId nextOffset (GotTasks wsId maybeToken nextOffset)
+                                )
+
+                            Nothing ->
+                                let
+                                    updatedDataLoading =
+                                        finishWorkspaceLoad maybeToken model.dataLoading
+                                in
+                                ( { modelWithPage | dataLoading = updatedDataLoading }, Cmd.none )
 
                     Err _ ->
                         let
@@ -201,7 +255,7 @@ update msg model =
                         in
                         addToast Error "Failed to load tasks" { model | dataLoading = updatedDataLoading }
 
-        GotMemories wsId maybeToken result ->
+        GotMemories wsId maybeToken offset result ->
             if model.selectedWorkspaceId /= Just wsId then
                 ( model, Cmd.none )
 
@@ -212,10 +266,24 @@ update msg model =
                 case result of
                     Ok paginated ->
                         let
-                            updatedDataLoading =
-                                finishWorkspaceLoad maybeToken model.dataLoading
+                            updatedMemories =
+                                mergePageById offset paginated.items model.memories
+
+                            modelWithPage =
+                                { model | memories = updatedMemories }
                         in
-                        ( { model | memories = indexBy .id paginated.items, dataLoading = updatedDataLoading }, Cmd.none )
+                        case nextPageOffset offset paginated of
+                            Just nextOffset ->
+                                ( modelWithPage
+                                , Api.fetchMemoriesPage model.flags.apiUrl wsId nextOffset (GotMemories wsId maybeToken nextOffset)
+                                )
+
+                            Nothing ->
+                                let
+                                    updatedDataLoading =
+                                        finishWorkspaceLoad maybeToken model.dataLoading
+                                in
+                                ( { modelWithPage | dataLoading = updatedDataLoading }, Cmd.none )
 
                     Err _ ->
                         let

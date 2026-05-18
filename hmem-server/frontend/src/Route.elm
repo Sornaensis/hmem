@@ -19,9 +19,9 @@ import Url.Parser as Parser exposing ((</>), Parser)
 loadWorkspaceData : String -> String -> Maybe Int -> Cmd Msg
 loadWorkspaceData apiUrl wsId maybeLoadToken =
     Cmd.batch
-        [ Api.fetchProjects apiUrl wsId (GotProjects wsId maybeLoadToken)
-        , Api.fetchTasks apiUrl wsId (GotTasks wsId maybeLoadToken)
-        , Api.fetchMemories apiUrl wsId (GotMemories wsId maybeLoadToken)
+        [ Api.fetchProjects apiUrl wsId (GotProjects wsId maybeLoadToken 0)
+        , Api.fetchTasks apiUrl wsId (GotTasks wsId maybeLoadToken 0)
+        , Api.fetchMemories apiUrl wsId (GotMemories wsId maybeLoadToken 0)
         ]
 
 

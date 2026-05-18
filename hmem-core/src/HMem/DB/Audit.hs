@@ -21,7 +21,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 
 import HMem.DB.Pool (runSession)
-import HMem.Types (AuditLogEntry(..), AuditLogQuery(..), auditActionFromText, auditActionToText, capPagination)
+import HMem.Types (AuditLogEntry(..), AuditLogQuery(..), auditActionFromText, auditActionToText, capPagination, capPaginationOverfetch)
 
 ------------------------------------------------------------------------
 -- Row decoder (shared)
@@ -111,7 +111,7 @@ getAuditByEntityStatement = Statement.Statement sql encoder decoder True
 
 getAuditLog :: Pool Hasql.Connection -> AuditLogQuery -> IO [AuditLogEntry]
 getAuditLog pool q = do
-  let (lim, off) = capPagination q.limit q.offset
+  let (lim, off) = capPaginationOverfetch q.limit q.offset
       params = ( q.workspaceId
                , q.entityType
                , q.entityId

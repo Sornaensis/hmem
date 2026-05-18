@@ -93,7 +93,7 @@ deleteGroup pool gid = do
 
 listGroups :: Pool Hasql.Connection -> Maybe Int -> Maybe Int -> IO [WorkspaceGroup]
 listGroups pool mlimit moffset = do
-  let (lim, off) = capPagination mlimit moffset
+  let (lim, off) = capPaginationOverfetch mlimit moffset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $
     orderBy ((\row -> row.wgName) >$< asc) $

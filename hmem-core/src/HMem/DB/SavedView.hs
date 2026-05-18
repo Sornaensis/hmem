@@ -164,7 +164,7 @@ purgeSavedView pool sid = do
 
 listSavedViews :: Pool Hasql.Connection -> UUID -> Maybe Int -> Maybe Int -> IO [SavedView]
 listSavedViews pool wsId mlimit moffset = do
-  let (lim, off) = capPagination mlimit moffset
+  let (lim, off) = capPaginationOverfetch mlimit moffset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $
     orderBy ((\row -> row.svName) >$< asc) $ do

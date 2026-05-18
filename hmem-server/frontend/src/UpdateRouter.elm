@@ -78,13 +78,13 @@ update msg model =
         GotSessionContext expectedWorkspace result ->
             Err (HandleInAppShell (AppShell.SessionContextLoadedMsg expectedWorkspace result))
 
-        GotProjects _ _ _ ->
+        GotProjects _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
-        GotTasks _ _ _ ->
+        GotTasks _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
-        GotMemories _ _ _ ->
+        GotMemories _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
         GotSingleMemory _ ->

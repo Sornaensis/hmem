@@ -160,7 +160,7 @@ cleanByCount pool wsId policy =
 
 getCleanupPolicies :: Pool Hasql.Connection -> UUID -> Maybe Int -> Maybe Int -> IO [CleanupPolicy]
 getCleanupPolicies pool wsId mlimit moffset = do
-  let (lim, off) = capPagination mlimit moffset
+  let (lim, off) = capPaginationOverfetch mlimit moffset
   rows <- runSession pool $ Session.statement () $ run $ select $
     limit (fromIntegral lim) $ offset (fromIntegral off) $ do
       row <- each cleanupPolicySchema
@@ -233,4 +233,3 @@ decayStaleImportance pool wsId policy = case policy.maxAgeHours of
             &&. row.memImportance >. lit (1 :: Int16)
         , returning = NoReturning
         }
-

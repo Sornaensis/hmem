@@ -342,6 +342,11 @@ spec = do
     it "caps extreme values" $
       capPagination (Just 999999) (Just 999999) `shouldBe` (maxPaginationLimit, maxPaginationOffset)
 
+    it "allows one internal over-fetch row without changing public pagination caps" $ do
+      capPagination (Just (maxPaginationLimit + 1)) Nothing `shouldBe` (maxPaginationLimit, 0)
+      capPaginationOverfetch (Just (maxPaginationLimit + 1)) Nothing `shouldBe` (maxPaginationLimit + 1, 0)
+      capPaginationOverfetch (Just 999999) Nothing `shouldBe` (maxPaginationLimit + 1, 0)
+
     it "clamps negative limit to 1" $
       fst (capPagination (Just (-5)) Nothing) `shouldBe` 1
 

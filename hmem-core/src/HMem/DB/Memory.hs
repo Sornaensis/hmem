@@ -426,7 +426,7 @@ listMemories pool mWsId mtype mlimit moffset =
 
 listMemoriesWithQuery :: Pool Hasql.Connection -> MemoryListQuery -> IO [Memory]
 listMemoriesWithQuery pool mq = do
-  let (lim, off) = capPagination mq.limit mq.offset
+  let (lim, off) = capPaginationOverfetch mq.limit mq.offset
       ordering = case mq.sortBy of
         Just SortImportance  -> ((\row -> row.memImportance) >$< desc) <> ((\row -> row.memCreatedAt) >$< desc)
         Just SortAccessCount -> ((\row -> row.memAccessCount) >$< desc) <> ((\row -> row.memUpdatedAt) >$< desc)

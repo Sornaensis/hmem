@@ -162,6 +162,7 @@ module HMem.Types
   , maxPaginationOffset
   , maxPaginationLimit
   , capPagination
+  , capPaginationOverfetch
   , validateCreateWorkspaceInput
   , validateUpdateWorkspaceInput
   , validateCreateMemoryInput
@@ -298,7 +299,21 @@ maxPaginationLimit = 200
 -- Offset defaults to 0, capped at 'maxPaginationOffset'.
 capPagination :: Maybe Int -> Maybe Int -> (Int, Int)
 capPagination mlimit moffset =
-  ( min maxPaginationLimit  (max 1 (fromMaybe 50 mlimit))
+  capPaginationWithMax maxPaginationLimit mlimit moffset
+
+-- | Cap limit and offset for internal over-fetching pagination queries.
+--
+-- API handlers expose 'maxPaginationLimit' items to callers but request one
+-- additional row from the database to compute @has_more@ without a COUNT
+-- query.  Keep this separate from 'capPagination' so public list limits remain
+-- capped at 200 while internal page-boundary detection can fetch 201 rows.
+capPaginationOverfetch :: Maybe Int -> Maybe Int -> (Int, Int)
+capPaginationOverfetch mlimit moffset =
+  capPaginationWithMax (maxPaginationLimit + 1) mlimit moffset
+
+capPaginationWithMax :: Int -> Maybe Int -> Maybe Int -> (Int, Int)
+capPaginationWithMax maxLimit mlimit moffset =
+  ( min maxLimit  (max 1 (fromMaybe 50 mlimit))
   , min maxPaginationOffset (max 0 (fromMaybe 0  moffset))
   )
 

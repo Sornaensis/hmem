@@ -365,9 +365,9 @@ type Msg
     | GotWorkspaces Int (Result Http.Error (Api.PaginatedResult Api.Workspace))
     | GotWorkspace String (Result Http.Error Api.Workspace)
     | GotSessionContext (Maybe String) (Result Http.Error Api.SessionContext)
-    | GotProjects String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Project))
-    | GotTasks String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Task))
-    | GotMemories String (Maybe Int) (Result Http.Error (Api.PaginatedResult Api.Memory))
+    | GotProjects String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Project))
+    | GotTasks String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Task))
+    | GotMemories String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Memory))
     | GotSingleMemory (Result Http.Error Api.Memory)
     | GotVisualization String (Result Http.Error Api.WorkspaceVisualization)
       -- Mutation responses

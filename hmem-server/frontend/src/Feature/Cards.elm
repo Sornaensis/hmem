@@ -1,7 +1,12 @@
 module Feature.Cards exposing
-    ( handleEscape
+    ( cascadeDeleteFailureFallback
+    , cascadeDeletePreview
+    , cascadeDeleteSuccessMessage
+    , handleEscape
     , init
+    , projectCascadePreview
     , projectCompletionBlockerReason
+    , taskCascadePreview
     , taskCompletionBlockerReason
     , update
     , viewDeleteConfirmModal
@@ -137,20 +142,29 @@ update msg model =
                 currentCards =
                     model.cards
 
+                confirmation =
+                    { entityType = entityType
+                    , entityId = entityId
+                    , preview = cascadeDeletePreview model entityType entityId
+                    }
+
                 updatedCards =
-                    { currentCards | deleteConfirmation = Just ( entityType, entityId ) }
+                    { currentCards | deleteConfirmation = Just confirmation }
             in
-            ( { model | cards = updatedCards }, Cmd.none )
+            ( { model | cards = updatedCards }, focusElement "delete-confirm-cancel" )
 
         PerformDelete ->
             case model.cards.deleteConfirmation of
-                Just ( entityType, entityId ) ->
-                    if not (canDeleteEntity model entityType) then
+                Just confirmation ->
+                    if not (canDeleteEntity model confirmation.entityType) then
                         addToast Warning "You no longer have permission to delete this item"
                             (updateCardsModel (\records -> { records | deleteConfirmation = Nothing }) model)
 
                     else
                         let
+                            entityId =
+                                confirmation.entityId
+
                             currentCards =
                                 model.cards
 
@@ -161,12 +175,12 @@ update msg model =
                                 beginTrackedMutation [ entityId ] { model | cards = updatedCards }
 
                             cmd =
-                                case entityType of
+                                case confirmation.entityType of
                                     "project" ->
-                                        Api.deleteProject model.flags.apiUrl entityId requestId (MutationDone "project")
+                                        Api.deleteProject model.flags.apiUrl entityId requestId (CascadeDeleteDone confirmation)
 
                                     "task" ->
-                                        Api.deleteTask model.flags.apiUrl entityId requestId (MutationDone "task")
+                                        Api.deleteTask model.flags.apiUrl entityId requestId (CascadeDeleteDone confirmation)
 
                                     "memory" ->
                                         Api.deleteMemory model.flags.apiUrl entityId requestId (MutationDone "memory")
@@ -184,6 +198,28 @@ update msg model =
 
                 Nothing ->
                     ( model, Cmd.none )
+
+        CascadeDeleteDone confirmation result ->
+            case result of
+                Ok cascade ->
+                    let
+                        ( toastedModel, toastCmd ) =
+                            addToast Success (cascadeDeleteSuccessMessage confirmation cascade) model
+
+                        ( reloadedModel, reloadCmd ) =
+                            beginWorkspaceDataReload False toastedModel
+                    in
+                    ( reloadedModel, Cmd.batch [ toastCmd, reloadCmd ] )
+
+                Err err ->
+                    let
+                        ( toastedModel, toastCmd ) =
+                            addToast Error (Api.apiErrorToUserMessage (cascadeDeleteFailureFallback confirmation) err) model
+
+                        ( reloadedModel, reloadCmd ) =
+                            beginWorkspaceDataReload False toastedModel
+                    in
+                    ( reloadedModel, Cmd.batch [ toastCmd, reloadCmd ] )
 
         CancelDelete ->
             let
@@ -238,6 +274,251 @@ canDeleteEntity model entityType =
 
         _ ->
             Permissions.canEditCurrentWorkspace model
+
+
+cascadeDeletePreview : Model -> String -> String -> Maybe CascadeDeletePreview
+cascadeDeletePreview model entityType entityId =
+    case entityType of
+        "project" ->
+            projectCascadePreview entityId (Dict.values model.projects) (Dict.values model.tasks)
+
+        "task" ->
+            taskCascadePreview entityId (Dict.values model.tasks)
+
+        _ ->
+            Nothing
+
+
+taskCascadePreview : String -> List Api.Task -> Maybe CascadeDeletePreview
+taskCascadePreview taskId tasks =
+    if List.any (\task -> task.id == taskId) tasks then
+        let
+            taskIds =
+                collectTaskSubtreeIds tasks [ taskId ] Dict.empty
+
+            taskCount =
+                Dict.size taskIds
+        in
+        Just { affected = taskCount, projectCount = 0, taskCount = taskCount }
+
+    else
+        Nothing
+
+
+projectCascadePreview : String -> List Api.Project -> List Api.Task -> Maybe CascadeDeletePreview
+projectCascadePreview projectId projects tasks =
+    if List.any (\project -> project.id == projectId) projects then
+        let
+            projectIds =
+                collectProjectSubtreeIds projects [ projectId ] Dict.empty
+
+            seedTaskIds =
+                tasks
+                    |> List.filter (\task -> Maybe.map (\pid -> Dict.member pid projectIds) task.projectId |> Maybe.withDefault False)
+                    |> List.map .id
+
+            taskIds =
+                collectTaskSubtreeIds tasks seedTaskIds Dict.empty
+
+            projectCount =
+                Dict.size projectIds
+
+            taskCount =
+                Dict.size taskIds
+        in
+        Just { affected = projectCount + taskCount, projectCount = projectCount, taskCount = taskCount }
+
+    else
+        Nothing
+
+
+collectProjectSubtreeIds : List Api.Project -> List String -> Dict.Dict String Bool -> Dict.Dict String Bool
+collectProjectSubtreeIds projects pending seen =
+    case pending of
+        [] ->
+            seen
+
+        projectId :: rest ->
+            if Dict.member projectId seen then
+                collectProjectSubtreeIds projects rest seen
+
+            else
+                let
+                    childIds =
+                        projects
+                            |> List.filter (\project -> project.parentId == Just projectId)
+                            |> List.map .id
+                in
+                collectProjectSubtreeIds projects (childIds ++ rest) (Dict.insert projectId True seen)
+
+
+collectTaskSubtreeIds : List Api.Task -> List String -> Dict.Dict String Bool -> Dict.Dict String Bool
+collectTaskSubtreeIds tasks pending seen =
+    case pending of
+        [] ->
+            seen
+
+        taskId :: rest ->
+            if Dict.member taskId seen then
+                collectTaskSubtreeIds tasks rest seen
+
+            else
+                let
+                    childIds =
+                        tasks
+                            |> List.filter (\task -> task.parentId == Just taskId)
+                            |> List.map .id
+                in
+                collectTaskSubtreeIds tasks (childIds ++ rest) (Dict.insert taskId True seen)
+
+
+cascadeDeleteSuccessMessage : DeleteConfirmation -> Api.CascadeResult -> String
+cascadeDeleteSuccessMessage confirmation result =
+    let
+        baseMessage =
+            case confirmation.entityType of
+                "project" ->
+                    projectDeleteSuccessMessage result
+
+                "task" ->
+                    taskDeleteSuccessMessage result
+
+                _ ->
+                    "Deleted item."
+
+        finalPreview =
+            { affected = result.affected
+            , projectCount = result.projectCount
+            , taskCount = result.taskCount
+            }
+
+        staleSuffix =
+            case confirmation.preview of
+                Just preview ->
+                    if preview == finalPreview then
+                        ""
+
+                    else
+                        " Server counts changed since preview (preview: " ++ cascadePreviewCountsText preview ++ "; final: " ++ cascadePreviewCountsText finalPreview ++ ")."
+
+                Nothing ->
+                    " Final server counts: " ++ cascadePreviewCountsText finalPreview ++ "."
+    in
+    baseMessage ++ staleSuffix ++ cascadeCleanupSuffix result
+
+
+cascadeDeleteFailureFallback : DeleteConfirmation -> String
+cascadeDeleteFailureFallback confirmation =
+    "Failed to delete " ++ deleteEntityNoun confirmation.entityType ++ ". The item may already have changed; refreshing workspace data."
+
+
+projectDeleteSuccessMessage : Api.CascadeResult -> String
+projectDeleteSuccessMessage result =
+    let
+        subprojectCount =
+            Basics.max 0 (result.projectCount - 1)
+
+        projectPart =
+            if result.projectCount > 1 then
+                Just (countPhrase result.projectCount "project" "projects" ++ " (including " ++ countPhrase subprojectCount "subproject" "subprojects" ++ ")")
+
+            else if result.projectCount == 1 then
+                Just "1 project"
+
+            else
+                Nothing
+
+        taskPart =
+            if result.taskCount > 0 then
+                Just (countPhrase result.taskCount "task" "tasks")
+
+            else
+                Nothing
+
+        deletedParts =
+            List.filterMap identity [ projectPart, taskPart ]
+    in
+    if result.projectCount <= 1 && result.taskCount == 0 then
+        "Deleted project."
+
+    else
+        "Deleted project subtree: " ++ joinHuman deletedParts ++ " were deleted."
+
+
+taskDeleteSuccessMessage : Api.CascadeResult -> String
+taskDeleteSuccessMessage result =
+    let
+        subtaskCount =
+            Basics.max 0 (result.taskCount - 1)
+    in
+    if result.taskCount <= 1 then
+        "Deleted task."
+
+    else
+        "Deleted task cascade: " ++ countPhrase result.taskCount "task" "tasks" ++ " (including " ++ countPhrase subtaskCount "subtask" "subtasks" ++ ") were deleted."
+
+
+cascadeCleanupSuffix : Api.CascadeResult -> String
+cascadeCleanupSuffix result =
+    let
+        cleanupParts =
+            List.filterMap identity
+                [ if result.memoryCount > 0 then
+                    Just (countPhrase result.memoryCount "linked memory" "linked memories")
+
+                  else
+                    Nothing
+                , if result.dependencyCount > 0 then
+                    Just (countPhrase result.dependencyCount "task dependency" "task dependencies")
+
+                  else
+                    Nothing
+                ]
+    in
+    case cleanupParts of
+        [] ->
+            ""
+
+        _ ->
+            " Also updated " ++ joinHuman cleanupParts ++ "."
+
+
+cascadePreviewCountsText : CascadeDeletePreview -> String
+cascadePreviewCountsText preview =
+    let
+        parts =
+            List.filterMap identity
+                [ if preview.projectCount > 0 then
+                    Just (countPhrase preview.projectCount "project" "projects")
+
+                  else
+                    Nothing
+                , if preview.taskCount > 0 then
+                    Just (countPhrase preview.taskCount "task" "tasks")
+
+                  else
+                    Nothing
+                ]
+    in
+    case parts of
+        [] ->
+            "0 project/task items"
+
+        _ ->
+            String.join " and " parts
+
+
+deleteEntityNoun : String -> String
+deleteEntityNoun entityType =
+    case entityType of
+        "project" ->
+            "project"
+
+        "task" ->
+            "task"
+
+        _ ->
+            "item"
 
 
 isOpenProjectStatus : Api.ProjectStatus -> Bool
@@ -308,6 +589,24 @@ taskCompletionBlockerReason openTaskCount =
 
     else
         Just ("Finish or cancel " ++ countPhrase openTaskCount "subtask" "subtasks" ++ " before marking this task done.")
+
+
+joinHuman : List String -> String
+joinHuman parts =
+    case parts of
+        [] ->
+            ""
+
+        [ one ] ->
+            one
+
+        [ one, two ] ->
+            one ++ " and " ++ two
+
+        first :: rest ->
+            String.join ", " (first :: List.take (List.length rest - 1) rest)
+                ++ ", and "
+                ++ (List.reverse rest |> List.head |> Maybe.withDefault "")
 
 
 countPhrase : Int -> String -> String -> String
@@ -1062,8 +1361,14 @@ viewDeleteConfirmModal model =
         Nothing ->
             text ""
 
-        Just ( entityType, entityId ) ->
+        Just confirmation ->
             let
+                entityType =
+                    confirmation.entityType
+
+                entityId =
+                    confirmation.entityId
+
                 entityName =
                     case entityType of
                         "project" ->
@@ -1102,21 +1407,142 @@ viewDeleteConfirmModal model =
 
                         _ ->
                             "item"
+
+                modalTitle =
+                    case entityType of
+                        "project" ->
+                            "Delete project subtree?"
+
+                        "task" ->
+                            "Delete task cascade?"
+
+                        _ ->
+                            "Delete " ++ typeLabel ++ "?"
+
+                describedBy =
+                    if isCascadeDelete confirmation then
+                        "delete-confirm-desc delete-confirm-warning"
+
+                    else
+                        "delete-confirm-desc"
             in
             div [ class "modal-overlay", onClick CancelDelete ]
-                [ div [ class "modal delete-confirm-modal", stopPropagationOn "click" (Decode.succeed ( NoOp, True )) ]
-                    [ h3 [ class "modal-title" ] [ text ("Delete " ++ typeLabel ++ "?") ]
-                    , p [ class "delete-confirm-desc" ]
+                [ div
+                    [ class "modal delete-confirm-modal"
+                    , attribute "role" "dialog"
+                    , attribute "aria-modal" "true"
+                    , attribute "aria-labelledby" "delete-confirm-title"
+                    , attribute "aria-describedby" describedBy
+                    , stopPropagationOn "click" (Decode.succeed ( NoOp, True ))
+                    ]
+                    [ h3 [ class "modal-title", id "delete-confirm-title" ] [ text modalTitle ]
+                    , p [ class "delete-confirm-desc", id "delete-confirm-desc" ]
                         [ text "Are you sure you want to delete "
                         , strong [] [ text (truncateText 60 entityName) ]
                         , text "? This action cannot be undone."
                         ]
+                    , viewCascadeDeleteWarning confirmation
                     , div [ class "modal-actions" ]
-                        [ button [ class "btn btn-danger", onClick PerformDelete ] [ text "Delete" ]
-                        , button [ class "btn btn-secondary", onClick CancelDelete ] [ text "Cancel" ]
+                        [ button [ class "btn btn-danger", onClick PerformDelete ] [ text (deleteButtonLabel confirmation) ]
+                        , button [ class "btn btn-secondary", id "delete-confirm-cancel", onClick CancelDelete ] [ text "Cancel" ]
                         ]
                     ]
                 ]
+
+
+viewCascadeDeleteWarning : DeleteConfirmation -> Html Msg
+viewCascadeDeleteWarning confirmation =
+    if isCascadeDelete confirmation then
+        div [ class "delete-cascade-warning", id "delete-confirm-warning", attribute "role" "alert" ]
+            [ strong [] [ text "Cascade delete warning" ]
+            , p [] [ text (cascadeDeleteWarningText confirmation) ]
+            , p [ class "delete-cascade-warning-note" ]
+                [ text "The server will verify the tree again when you confirm. If anything changed, the final delete result will show the updated counts." ]
+            ]
+
+    else
+        text ""
+
+
+isCascadeDelete : DeleteConfirmation -> Bool
+isCascadeDelete confirmation =
+    confirmation.entityType == "project" || confirmation.entityType == "task"
+
+
+cascadeDeleteWarningText : DeleteConfirmation -> String
+cascadeDeleteWarningText confirmation =
+    case ( confirmation.entityType, confirmation.preview ) of
+        ( "task", Just preview ) ->
+            let
+                subtaskCount =
+                    Basics.max 0 (preview.taskCount - 1)
+            in
+            if subtaskCount == 0 then
+                "Loaded preview: only this task is shown in the delete tree. This is still a cascading task delete, not a simple row removal."
+
+            else
+                "Loaded preview: this task and " ++ countPhrase subtaskCount "subtask" "subtasks" ++ " will be deleted (" ++ countPhrase preview.taskCount "task" "tasks" ++ " total). This is not a single-row delete."
+
+        ( "project", Just preview ) ->
+            let
+                subprojectCount =
+                    Basics.max 0 (preview.projectCount - 1)
+
+                descendantParts =
+                    List.filterMap identity
+                        [ if subprojectCount > 0 then
+                            Just (countPhrase subprojectCount "subproject" "subprojects")
+
+                          else
+                            Nothing
+                        , if preview.taskCount > 0 then
+                            Just (countPhrase preview.taskCount "task" "tasks")
+
+                          else
+                            Nothing
+                        ]
+            in
+            if subprojectCount == 0 && preview.taskCount == 0 then
+                "Loaded preview: only this project is shown in the delete tree. This is still a cascading project-subtree delete, not a simple row removal."
+
+            else
+                "Loaded preview: this project and " ++ joinHuman descendantParts ++ " will be deleted (" ++ String.fromInt preview.affected ++ " affected project/task items). This is not a single-row delete."
+
+        ( "task", Nothing ) ->
+            "The current subtask preview is unavailable. Confirming will still perform a cascading task delete and then report the final server counts."
+
+        ( "project", Nothing ) ->
+            "The current project-subtree preview is unavailable. Confirming will still perform a cascading project delete and then report the final server counts."
+
+        _ ->
+            ""
+
+
+deleteButtonLabel : DeleteConfirmation -> String
+deleteButtonLabel confirmation =
+    case ( confirmation.entityType, confirmation.preview ) of
+        ( "task", Just preview ) ->
+            if preview.taskCount > 1 then
+                "Delete " ++ countPhrase preview.taskCount "task" "tasks"
+
+            else
+                "Delete task"
+
+        ( "project", Just preview ) ->
+            if preview.affected > 1 then
+                "Delete " ++ cascadePreviewCountsText preview
+
+            else
+                "Delete project"
+
+        ( "task", Nothing ) ->
+            "Delete task cascade"
+
+        ( "project", Nothing ) ->
+            "Delete project subtree"
+
+        _ ->
+            "Delete"
 
 
 

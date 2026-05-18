@@ -6,6 +6,7 @@ module Api exposing
     , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
     , AuditAction(..), AuditLogEntry, RevertResult
     , ApiError, apiErrorToUserMessage, decodeApiErrorBody, isLifecycleConflict
+    , CascadeResult
     , PaginatedResult
     , SessionContext, SessionPrincipal, SessionGlobalPermissions, SessionWorkspaceContext
     , MemoryType(..), ProjectStatus(..), TaskStatus(..), WorkspaceType(..)
@@ -177,6 +178,15 @@ type alias UnifiedSearchResults =
 type alias PaginatedResult a =
     { items : List a
     , hasMore : Bool
+    }
+
+
+type alias CascadeResult =
+    { affected : Int
+    , projectCount : Int
+    , taskCount : Int
+    , memoryCount : Int
+    , dependencyCount : Int
     }
 
 
@@ -703,6 +713,16 @@ taskDecoder =
         |> optional "memory_link_count" D.int 0
         |> required "created_at" D.string
         |> required "updated_at" D.string
+
+
+cascadeResultDecoder : Decoder CascadeResult
+cascadeResultDecoder =
+    D.succeed CascadeResult
+        |> required "affected" D.int
+        |> required "project_count" D.int
+        |> required "task_count" D.int
+        |> required "memory_count" D.int
+        |> required "dependency_count" D.int
 
 
 memoryDecoder : Decoder Memory
@@ -1362,14 +1382,14 @@ updateProject apiUrl projectId fields toMsg =
         }
 
 
-deleteProject : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+deleteProject : String -> String -> String -> (Result ApiError CascadeResult -> msg) -> Cmd msg
 deleteProject apiUrl projectId requestId toMsg =
     Http.request
         { method = "DELETE"
         , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/projects/" ++ projectId
         , body = Http.emptyBody
-        , expect = Http.expectWhatever toMsg
+        , expect = expectJsonWithApiError cascadeResultDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }
@@ -1420,14 +1440,14 @@ updateTask apiUrl taskId fields toMsg =
         }
 
 
-deleteTask : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+deleteTask : String -> String -> String -> (Result ApiError CascadeResult -> msg) -> Cmd msg
 deleteTask apiUrl taskId requestId toMsg =
     Http.request
         { method = "DELETE"
         , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/tasks/" ++ taskId
         , body = Http.emptyBody
-        , expect = Http.expectWhatever toMsg
+        , expect = expectJsonWithApiError cascadeResultDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }

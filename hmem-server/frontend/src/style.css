@@ -1387,7 +1387,7 @@ a:hover {
 }
 
 .delete-confirm-modal {
-  max-width: 400px;
+  max-width: 520px;
 }
 
 .delete-confirm-desc {
@@ -1399,6 +1399,35 @@ a:hover {
 
 .delete-confirm-desc strong {
   color: var(--text);
+}
+
+.delete-cascade-warning {
+  margin-top: 1rem;
+  padding: 0.875rem;
+  border: 1px solid #7f1d1d;
+  border-radius: 0.5rem;
+  background: rgba(153, 27, 27, 0.16);
+  color: #fecaca;
+  line-height: 1.45;
+}
+
+.delete-cascade-warning strong {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: #fee2e2;
+}
+
+.delete-cascade-warning p {
+  margin: 0;
+}
+
+.delete-cascade-warning p + p {
+  margin-top: 0.5rem;
+}
+
+.delete-cascade-warning-note {
+  color: var(--text-muted);
+  font-size: 0.85rem;
 }
 
 .btn-danger {

@@ -246,6 +246,9 @@ update msg model =
         PerformDelete ->
             Ok (Feature.Cards.update msg model)
 
+        CascadeDeleteDone _ _ ->
+            Ok (Feature.Cards.update msg model)
+
         CancelDelete ->
             Ok (Feature.Cards.update msg model)
 

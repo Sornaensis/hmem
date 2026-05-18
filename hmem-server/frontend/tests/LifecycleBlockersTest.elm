@@ -4,6 +4,7 @@ import Api
 import Expect
 import Feature.Cards
 import Feature.DataLoading
+import String
 import Test exposing (..)
 
 
@@ -64,4 +65,104 @@ suite =
                 , Feature.DataLoading.nextPageOffset 10000 { items = [ "x" ], hasMore = True }
                 ]
                     |> Expect.equal [ Just 2, Nothing, Nothing, Just 10000, Nothing ]
+        , test "task cascade delete preview covers empty, small, and large descendant trees" <|
+            \_ ->
+                let
+                    root =
+                        task "root" Nothing (Just "project-a")
+
+                    smallTree =
+                        [ root
+                        , task "child-a" (Just "root") (Just "project-a")
+                        , task "child-b" (Just "root") (Just "project-a")
+                        , task "unrelated" Nothing (Just "project-a")
+                        ]
+
+                    largeTree =
+                        root
+                            :: (List.range 1 30
+                                    |> List.map (\n -> task ("child-" ++ String.fromInt n) (Just "root") (Just "project-a"))
+                               )
+                in
+                [ Feature.Cards.taskCascadePreview "root" [ root ] |> Maybe.map .taskCount
+                , Feature.Cards.taskCascadePreview "root" smallTree |> Maybe.map .taskCount
+                , Feature.Cards.taskCascadePreview "root" largeTree |> Maybe.map .taskCount
+                , Feature.Cards.taskCascadePreview "missing" smallTree |> Maybe.map .taskCount
+                ]
+                    |> Expect.equal [ Just 1, Just 3, Just 31, Nothing ]
+        , test "project cascade delete preview counts subprojects, tasks, and task descendants" <|
+            \_ ->
+                let
+                    projects =
+                        [ project "root-project" Nothing
+                        , project "child-project" (Just "root-project")
+                        , project "grandchild-project" (Just "child-project")
+                        , project "unrelated-project" Nothing
+                        ]
+
+                    tasks =
+                        [ task "root-task" Nothing (Just "root-project")
+                        , task "child-project-task" Nothing (Just "child-project")
+                        , task "drifted-descendant-task" (Just "child-project-task") (Just "unrelated-project")
+                        , task "unrelated-task" Nothing (Just "unrelated-project")
+                        ]
+                in
+                Feature.Cards.projectCascadePreview "root-project" projects tasks
+                    |> Expect.equal (Just { affected = 6, projectCount = 3, taskCount = 3 })
+        , test "stale cascade delete result communicates final server counts" <|
+            \_ ->
+                let
+                    confirmation =
+                        { entityType = "project"
+                        , entityId = "root-project"
+                        , preview = Just { affected = 2, projectCount = 1, taskCount = 1 }
+                        }
+
+                    result =
+                        { affected = 4
+                        , projectCount = 2
+                        , taskCount = 2
+                        , memoryCount = 2
+                        , dependencyCount = 1
+                        }
+                in
+                Feature.Cards.cascadeDeleteSuccessMessage confirmation result
+                    |> Expect.equal "Deleted project subtree: 2 projects (including 1 subproject) and 2 tasks were deleted. Server counts changed since preview (preview: 1 project and 1 task; final: 2 projects and 2 tasks). Also updated 2 linked memories and 1 task dependency."
+        , test "cascade delete error fallback prompts a refresh-safe retry" <|
+            \_ ->
+                Feature.Cards.cascadeDeleteFailureFallback { entityType = "task", entityId = "root", preview = Nothing }
+                    |> Expect.equal "Failed to delete task. The item may already have changed; refreshing workspace data."
         ]
+
+
+project : String -> Maybe String -> Api.Project
+project id parentId =
+    { id = id
+    , workspaceId = "workspace-a"
+    , parentId = parentId
+    , name = id
+    , description = Nothing
+    , status = Api.ProjActive
+    , priority = 5
+    , createdAt = "2026-01-01T00:00:00Z"
+    , updatedAt = "2026-01-01T00:00:00Z"
+    }
+
+
+task : String -> Maybe String -> Maybe String -> Api.Task
+task id parentId projectId =
+    { id = id
+    , workspaceId = "workspace-a"
+    , projectId = projectId
+    , parentId = parentId
+    , title = id
+    , description = Nothing
+    , status = Api.Todo
+    , priority = 5
+    , dueAt = Nothing
+    , completedAt = Nothing
+    , dependencyCount = 0
+    , memoryLinkCount = 0
+    , createdAt = "2026-01-01T00:00:00Z"
+    , updatedAt = "2026-01-01T00:00:00Z"
+    }

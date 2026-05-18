@@ -134,7 +134,21 @@ type alias DependenciesModel =
 type alias CardsModel =
     { expandedCards : Dict String Bool
     , collapsedNodes : Dict String Bool
-    , deleteConfirmation : Maybe ( String, String )
+    , deleteConfirmation : Maybe DeleteConfirmation
+    }
+
+
+type alias CascadeDeletePreview =
+    { affected : Int
+    , projectCount : Int
+    , taskCount : Int
+    }
+
+
+type alias DeleteConfirmation =
+    { entityType : String
+    , entityId : String
+    , preview : Maybe CascadeDeletePreview
     }
 
 
@@ -471,6 +485,7 @@ type Msg
       -- Delete
     | ConfirmDelete String String
     | PerformDelete
+    | CascadeDeleteDone DeleteConfirmation (Result Api.ApiError Api.CascadeResult)
     | CancelDelete
     | CopyId String
       -- Local storage

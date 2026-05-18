@@ -279,15 +279,13 @@ viewWorkspaceAdminPanel ws model =
                 |> Maybe.withDefault False
     in
     if Permissions.hasImplicitLocalSuperadmin model && Permissions.canAdminCurrentWorkspace model then
-        div [ class "workspace-admin-panel workspace-admin-panel-local" ]
-            [ viewDangerZone ws model ]
+        text ""
 
     else if Permissions.canAdminCurrentWorkspace model && (workspaceSessionMatches || membershipLoaded) then
         div [ class "workspace-admin-panel" ]
             [ h3 [] [ text "Workspace administration" ]
             , p [ class "help-text" ] [ text "Client affordances reflect server-provided permissions; the server remains authoritative for every action." ]
             , viewMembershipManager ws model
-            , viewDangerZone ws model
             ]
 
     else if model.sessionContext == Nothing || (Permissions.isSuperadmin model && not workspaceSessionMatches && not membershipLoaded) then
@@ -351,16 +349,6 @@ viewMembershipRow wsId membership =
         , span [ class ("badge badge-" ++ membership.role) ] [ text membership.role ]
         , span [ class "membership-updated" ] [ text ("Updated " ++ formatDate membership.updatedAt) ]
         , button [ class "btn-small btn-danger-subtle", onClick (RemoveWorkspaceMembership wsId membership.userId) ] [ text "Remove" ]
-        ]
-
-
-viewDangerZone : Api.Workspace -> Model -> Html Msg
-viewDangerZone ws _ =
-    div [ class "workspace-danger-zone" ]
-        [ h4 [] [ text "Danger zone" ]
-        , p [ class "help-text" ] [ text "Deleting is reversible from the API. Purging first deletes this active workspace, then permanently removes it." ]
-        , button [ class "btn btn-danger", onClick (ConfirmDelete "workspace" ws.id) ] [ text "Delete workspace" ]
-        , button [ class "btn btn-danger", onClick (ConfirmWorkspacePurge ws.id), title "Permanently delete and purge this workspace" ] [ text "Purge workspace" ]
         ]
 
 

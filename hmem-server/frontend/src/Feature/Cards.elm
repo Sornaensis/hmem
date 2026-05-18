@@ -630,12 +630,11 @@ viewProjectNode allProjects model depth project hasSearch query =
                         span [ class "tree-toggle-spacer" ] []
                     , span [ class "entity-type-label entity-type-project" ] [ text "PRJ" ]
                     , Feature.Editing.viewEditableText model "project" project.id "name" project.name
-                    ]
-                , div [ class "card-actions" ]
-                    [ Feature.Editing.viewStatusSelectWithDisabled model "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString projectStatusDisabled ChangeProjectStatus
-                    , viewCompletionNote completionBlockerReason
-                    , Feature.Editing.viewPrioritySelect model "project" project.id project.priority ChangeProjectPriority
-                    , if Permissions.canEditCurrentWorkspace model then
+                ]
+            , div [ class "card-actions" ]
+                [ Feature.Editing.viewStatusSelectWithDisabled model "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString projectStatusDisabled ChangeProjectStatus
+                , Feature.Editing.viewPrioritySelect model "project" project.id project.priority ChangeProjectPriority
+                , if Permissions.canEditCurrentWorkspace model then
                         button [ class "btn-icon btn-danger", onClick (ConfirmDelete "project" project.id), title "Delete" ] [ text "✕" ]
 
                       else

@@ -180,6 +180,7 @@ instance ToSchema Project              where declareNamedSchema = genericDeclare
 instance ToSchema CreateProject        where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema UpdateProject        where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema Task                 where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema NextTaskCandidate    where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CreateTask           where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema UpdateTask           where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CleanupPolicy        where declareNamedSchema = genericDeclareNamedSchema opts

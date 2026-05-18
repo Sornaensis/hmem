@@ -10,6 +10,7 @@ module HMem.DB.Task
   , listTasks
   , listTasksWithQuery
   , listTasksByWorkspace
+  , listNextTasks
   , enrichTaskCounts
   , addDependency
   , removeDependency
@@ -23,7 +24,7 @@ import Control.Monad (when)
 import Data.Aeson (Object, toJSON)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant ((>$<), contramap)
-import Data.Int (Int16, Int64)
+import Data.Int (Int16, Int32, Int64)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Pool (Pool)
@@ -63,6 +64,42 @@ rowToTask r = Task
   , createdAt       = r.taskCreatedAt
   , updatedAt       = r.taskUpdatedAt
   }
+
+rawTaskRowDecoder :: Dec.Row Task
+rawTaskRowDecoder = do
+  taskId <- Dec.column (Dec.nonNullable Dec.uuid)
+  taskWorkspaceId <- Dec.column (Dec.nonNullable Dec.uuid)
+  taskProjectId <- Dec.column (Dec.nullable Dec.uuid)
+  taskParentId <- Dec.column (Dec.nullable Dec.uuid)
+  taskTitle <- Dec.column (Dec.nonNullable Dec.text)
+  taskDescription <- Dec.column (Dec.nullable Dec.text)
+  taskStatusText <- Dec.column (Dec.nonNullable Dec.text)
+  taskStatus <- case taskStatusFromText taskStatusText of
+    Just parsed -> pure parsed
+    Nothing -> fail $ "Unexpected task_status_enum value: " <> show taskStatusText
+  taskPriority <- Dec.column (Dec.nonNullable Dec.int2)
+  taskMetadata <- Dec.column (Dec.nonNullable Dec.jsonb)
+  taskDueAt <- Dec.column (Dec.nullable Dec.timestamptz)
+  taskCompletedAt <- Dec.column (Dec.nullable Dec.timestamptz)
+  taskCreatedAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
+  taskUpdatedAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
+  pure Task
+    { id = taskId
+    , workspaceId = taskWorkspaceId
+    , projectId = taskProjectId
+    , parentId = taskParentId
+    , title = taskTitle
+    , description = taskDescription
+    , status = taskStatus
+    , priority = fromIntegral taskPriority
+    , metadata = taskMetadata
+    , dueAt = taskDueAt
+    , completedAt = taskCompletedAt
+    , dependencyCount = 0
+    , memoryLinkCount = 0
+    , createdAt = taskCreatedAt
+    , updatedAt = taskUpdatedAt
+    }
 
 -- | Enrich a list of tasks with dependency and memory-link counts.
 -- Uses two GROUP BY queries across all task IDs in a single round-trip each.
@@ -593,6 +630,136 @@ listTasksByWorkspace pool wsId mstatus mprojId mlimit moffset =
     , updatedBefore = Nothing
     , limit = mlimit
     , offset = moffset
+    }
+
+-- | Return the next actionable tasks for a project subtree.
+--
+-- A task is actionable when it is still open and either has no open
+-- dependencies or dependency-blocked diagnostics were explicitly requested.
+-- Project subprojects are included recursively, and descendants of in-scope
+-- tasks are included for migrated task trees.  Subtasks are only startable
+-- when their immediate parent is in_progress.  Parents with open descendants
+-- are returned with completionGated/openDescendantCount annotations rather
+-- than being filtered out.
+listNextTasks :: Pool Hasql.Connection -> UUID -> Bool -> Int -> IO [NextTaskCandidate]
+listNextTasks pool projectId includeBlocked limitRows = do
+  rows <- runSession pool $ Session.statement (projectId, includeBlocked, toInt32 sanitizedLimit) listNextTasksStatement
+  enrichedTasks <- enrichTaskCounts pool (map (.task) rows)
+  let enrichedById = Map.fromList [(task.id, task) | task <- enrichedTasks]
+      enrichCandidate candidate = NextTaskCandidate
+        { task = fromMaybe candidate.task (Map.lookup candidate.task.id enrichedById)
+        , completionGated = candidate.completionGated
+        , openDescendantCount = candidate.openDescendantCount
+        , dependencyBlocked = candidate.dependencyBlocked
+        , openDependencyCount = candidate.openDependencyCount
+        }
+  pure (map enrichCandidate rows)
+  where
+    sanitizedLimit = Prelude.min 200 . Prelude.max 1 $ limitRows
+
+    toInt32 :: Int -> Int32
+    toInt32 = fromIntegral
+
+listNextTasksStatement :: Statement.Statement (UUID, Bool, Int32) [NextTaskCandidate]
+listNextTasksStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE project_tree(id, workspace_id) AS ("
+      , "  SELECT id, workspace_id"
+      , "    FROM projects"
+      , "   WHERE id = $1"
+      , "     AND deleted_at IS NULL"
+      , "     AND status IN ('active'::project_status_enum, 'paused'::project_status_enum)"
+      , "  UNION ALL"
+      , "  SELECT child.id, child.workspace_id"
+      , "    FROM projects child"
+      , "    JOIN project_tree pt ON child.parent_id = pt.id"
+      , "   WHERE child.deleted_at IS NULL"
+      , "     AND child.status IN ('active'::project_status_enum, 'paused'::project_status_enum)"
+      , "     AND child.workspace_id = pt.workspace_id"
+      , "),"
+      , "scoped_tasks(id, workspace_id, project_id, parent_id, title, description, status, priority, metadata, due_at, completed_at, created_at, updated_at) AS ("
+      , "  SELECT t.id, t.workspace_id, t.project_id, t.parent_id, t.title, t.description,"
+      , "         t.status, t.priority, t.metadata, t.due_at, t.completed_at, t.created_at, t.updated_at"
+      , "    FROM tasks t"
+      , "    JOIN project_tree pt ON t.project_id = pt.id"
+      , "   WHERE t.deleted_at IS NULL"
+      , "     AND t.workspace_id = pt.workspace_id"
+      , "  UNION"
+      , "  SELECT child.id, child.workspace_id, child.project_id, child.parent_id, child.title, child.description,"
+      , "         child.status, child.priority, child.metadata, child.due_at, child.completed_at, child.created_at, child.updated_at"
+      , "    FROM tasks child"
+      , "    JOIN scoped_tasks parent ON child.parent_id = parent.id"
+      , "   WHERE child.deleted_at IS NULL"
+      , "     AND child.workspace_id = parent.workspace_id"
+      , "),"
+      , "candidate_tasks AS ("
+      , "  SELECT task.*"
+      , "    FROM scoped_tasks task"
+      , "    LEFT JOIN scoped_tasks parent ON task.parent_id = parent.id"
+      , "   WHERE task.status IN ('todo'::task_status_enum, 'in_progress'::task_status_enum, 'blocked'::task_status_enum)"
+      , "     AND ($2 OR task.status <> 'blocked'::task_status_enum)"
+      , "     AND (task.parent_id IS NULL OR parent.status = 'in_progress'::task_status_enum)"
+      , "),"
+      , "open_descendant_ancestors(descendant_id, ancestor_id) AS ("
+      , "  SELECT child.id, parent.id"
+      , "    FROM scoped_tasks child"
+      , "    JOIN scoped_tasks parent ON child.parent_id = parent.id"
+      , "   WHERE child.status IN ('todo'::task_status_enum, 'in_progress'::task_status_enum, 'blocked'::task_status_enum)"
+      , "  UNION"
+      , "  SELECT current.descendant_id, parent.id"
+      , "    FROM open_descendant_ancestors current"
+      , "    JOIN scoped_tasks ancestor ON ancestor.id = current.ancestor_id"
+      , "    JOIN scoped_tasks parent ON ancestor.parent_id = parent.id"
+      , "),"
+      , "open_descendant_counts AS ("
+      , "  SELECT ancestor_id AS id, count(DISTINCT descendant_id)::bigint AS open_descendant_count"
+      , "    FROM open_descendant_ancestors"
+      , "   GROUP BY ancestor_id"
+      , "),"
+      , "open_dependency_counts AS ("
+      , "  SELECT candidate.id, count(DISTINCT dep.id)::bigint AS open_dependency_count"
+      , "    FROM candidate_tasks candidate"
+      , "    JOIN task_dependencies dep_link ON dep_link.task_id = candidate.id"
+      , "    JOIN tasks dep ON dep.id = dep_link.depends_on_id"
+      , "   WHERE dep.deleted_at IS NULL"
+      , "     AND dep.status IN ('todo'::task_status_enum, 'in_progress'::task_status_enum, 'blocked'::task_status_enum)"
+      , "   GROUP BY candidate.id"
+      , ")"
+      , "SELECT candidate.id, candidate.workspace_id, candidate.project_id, candidate.parent_id,"
+      , "       candidate.title, candidate.description, candidate.status::text, candidate.priority,"
+      , "       candidate.metadata, candidate.due_at, candidate.completed_at,"
+      , "       candidate.created_at, candidate.updated_at,"
+      , "       coalesce(open_desc.open_descendant_count, 0) > 0 AS completion_gated,"
+      , "       coalesce(open_desc.open_descendant_count, 0)::bigint AS open_descendant_count,"
+      , "       coalesce(open_dep.open_dependency_count, 0) > 0 AS dependency_blocked,"
+      , "       coalesce(open_dep.open_dependency_count, 0)::bigint AS open_dependency_count"
+      , "  FROM candidate_tasks candidate"
+      , "  LEFT JOIN open_descendant_counts open_desc ON open_desc.id = candidate.id"
+      , "  LEFT JOIN open_dependency_counts open_dep ON open_dep.id = candidate.id"
+      , " WHERE ($2 OR coalesce(open_dep.open_dependency_count, 0) = 0)"
+      , " ORDER BY candidate.priority DESC, candidate.created_at ASC, candidate.id ASC"
+      , " LIMIT $3"
+      ]
+    encoder =
+      contramap (\(projectId, _, _) -> projectId) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_, includeBlocked, _) -> includeBlocked) (Enc.param (Enc.nonNullable Enc.bool)) <>
+      contramap (\(_, _, limitRows) -> limitRows) (Enc.param (Enc.nonNullable Enc.int4))
+    decoder = Dec.rowList nextTaskCandidateRowDecoder
+
+nextTaskCandidateRowDecoder :: Dec.Row NextTaskCandidate
+nextTaskCandidateRowDecoder = do
+  task <- rawTaskRowDecoder
+  completionGated <- Dec.column (Dec.nonNullable Dec.bool)
+  openDescendantCount <- Dec.column (Dec.nonNullable Dec.int8)
+  dependencyBlocked <- Dec.column (Dec.nonNullable Dec.bool)
+  openDependencyCount <- Dec.column (Dec.nonNullable Dec.int8)
+  pure NextTaskCandidate
+    { task = task
+    , completionGated = completionGated
+    , openDescendantCount = fromIntegral openDescendantCount
+    , dependencyBlocked = dependencyBlocked
+    , openDependencyCount = fromIntegral openDependencyCount
     }
 
 ------------------------------------------------------------------------

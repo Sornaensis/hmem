@@ -1945,10 +1945,32 @@ spec = around withApp $ do
         _ <- grantWorkspaceRole env ws.id readUserId Auth.WorkspaceRoleRead
         _ <- grantWorkspaceRole env ws.id editUserId Auth.WorkspaceRoleEdit
         _ <- grantWorkspaceRole env ws.id adminUserId Auth.WorkspaceRoleAdmin
+        readProject <- Proj.createProject env.pool CreateProject
+          { workspaceId = ws.id
+          , name = "read next-task project"
+          , description = Nothing
+          , parentId = Nothing
+          , priority = Nothing
+          , metadata = Nothing
+          }
+        readTask <- Task.createTask env.pool CreateTask
+          { workspaceId = ws.id
+          , projectId = Just readProject.id
+          , parentId = Nothing
+          , title = "read next-task task"
+          , description = Nothing
+          , priority = Nothing
+          , metadata = Nothing
+          , dueAt = Nothing
+          }
 
         withPrincipalApp env deployedAuthCfg (grantPrincipal readUserId) $ \readApp -> do
           getWsResp <- get_ readApp (uuidPath "/api/v1/workspaces" ws.id)
           respStatus getWsResp `shouldBe` 200
+          allowedNextTasksResp <- get_ readApp (uuidPath "/api/v1/projects" readProject.id <> "/next-tasks")
+          respStatus allowedNextTasksResp `shouldBe` 200
+          let Just allowedNextTasks = decode (respBody allowedNextTasksResp) :: Maybe [NextTaskCandidate]
+          map (.task.id) allowedNextTasks `shouldBe` [readTask.id]
           deniedCreateMemoryResp <- postJSON readApp "/api/v1/memories"
             (object ["workspace_id" .= ws.id, "content" .= ("read denied" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
           respStatus deniedCreateMemoryResp `shouldBe` 403
@@ -2049,6 +2071,9 @@ spec = around withApp $ do
 
           deniedProjectResp <- get_ app (uuidPath "/api/v1/projects" projectB.id)
           respStatus deniedProjectResp `shouldBe` 403
+
+          deniedNextTasksResp <- get_ app (uuidPath "/api/v1/projects" projectB.id <> "/next-tasks")
+          respStatus deniedNextTasksResp `shouldBe` 403
 
           deniedTaskResp <- get_ app (uuidPath "/api/v1/tasks" taskB.id)
           respStatus deniedTaskResp `shouldBe` 403
@@ -3113,6 +3138,132 @@ spec = around withApp $ do
       let Just extraProjectOverview = decode (respBody extraProjectResp) :: Maybe ProjectOverview
       map (.scope) extraProjectOverview.connectedMemories `shouldBe` [ScopeProject, ScopeWorkspace]
       map (.id) extraProjectOverview.connectedMemories `shouldBe` [projectMem.id, workspaceMem.id]
+
+    it "returns deterministic project next tasks with dependency and descendant blockers" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("project-next-tasks-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Next Tasks Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      childProjectResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "parent_id" .= proj.id, "name" .= ("Next Tasks Child Project" :: T.Text)])
+      let Just childProject = decode (respBody childProjectResp) :: Maybe Project
+
+      depResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependency" :: T.Text), "priority" .= (5 :: Int)])
+      let Just depTask = decode (respBody depResp) :: Maybe Task
+
+      dependentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependent" :: T.Text), "priority" .= (10 :: Int)])
+      let Just dependentTask = decode (respBody dependentResp) :: Maybe Task
+
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Parent" :: T.Text), "priority" .= (9 :: Int)])
+      let Just parentTask = decode (respBody parentResp) :: Maybe Task
+
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= parentTask.id, "title" .= ("Child" :: T.Text), "priority" .= (8 :: Int)])
+      let Just childTask = decode (respBody childResp) :: Maybe Task
+
+      childProjectTaskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= childProject.id, "title" .= ("Child project ready" :: T.Text), "priority" .= (7 :: Int)])
+      let Just childProjectTask = decode (respBody childProjectTaskResp) :: Maybe Task
+
+      addDepResp <- postJSON app (uuidPath "/api/v1/tasks" dependentTask.id <> "/dependencies")
+        (object ["depends_on_id" .= depTask.id])
+      respStatus addDepResp `shouldBe` 200
+
+      initialResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks?limit=2")
+      respStatus initialResp `shouldBe` 200
+      let Just initialReady = decode (respBody initialResp) :: Maybe [NextTaskCandidate]
+      map (.task.id) initialReady `shouldBe` [parentTask.id, childProjectTask.id]
+      map (.completionGated) initialReady `shouldBe` [True, False]
+
+      dependencyBlockedResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks?include_blocked=true")
+      respStatus dependencyBlockedResp `shouldBe` 200
+      let Just dependencyBlockedReady = decode (respBody dependencyBlockedResp) :: Maybe [NextTaskCandidate]
+      case [candidate | candidate <- dependencyBlockedReady, candidate.task.id == dependentTask.id] of
+        [candidate] -> do
+          candidate.dependencyBlocked `shouldBe` True
+          candidate.openDependencyCount `shouldBe` 1
+        other -> expectationFailure $ "Expected one dependency-blocked candidate, got: " <> show other
+
+      startedParentResp <- putJSON app (uuidPath "/api/v1/tasks" parentTask.id)
+        (object ["status" .= ("in_progress" :: T.Text)])
+      respStatus startedParentResp `shouldBe` 200
+      runningResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks?limit=3")
+      respStatus runningResp `shouldBe` 200
+      let Just runningReady = decode (respBody runningResp) :: Maybe [NextTaskCandidate]
+      map (.task.id) runningReady `shouldBe` [parentTask.id, childTask.id, childProjectTask.id]
+      map (.completionGated) runningReady `shouldBe` [True, False, False]
+
+      doneDepResp <- putJSON app (uuidPath "/api/v1/tasks" depTask.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus doneDepResp `shouldBe` 200
+      doneChildResp <- putJSON app (uuidPath "/api/v1/tasks" childTask.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus doneChildResp `shouldBe` 200
+
+      readyResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks")
+      respStatus readyResp `shouldBe` 200
+      let Just ready = decode (respBody readyResp) :: Maybe [NextTaskCandidate]
+      map (.task.id) ready `shouldSatisfy` \ids -> dependentTask.id `elem` ids && parentTask.id `elem` ids
+      map (.completionGated) (filter ((== parentTask.id) . (.task.id)) ready) `shouldBe` [False]
+
+      manualBlockedResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Manual blocked" :: T.Text), "priority" .= (10 :: Int)])
+      let Just manualBlocked = decode (respBody manualBlockedResp) :: Maybe Task
+      blockResp <- putJSON app (uuidPath "/api/v1/tasks" manualBlocked.id)
+        (object ["status" .= ("blocked" :: T.Text)])
+      respStatus blockResp `shouldBe` 200
+
+      defaultResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks")
+      let Just defaultReady = decode (respBody defaultResp) :: Maybe [NextTaskCandidate]
+      map (.task.id) defaultReady `shouldNotContain` [manualBlocked.id]
+
+      includeBlockedResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks?include_blocked=true")
+      let Just readyIncludingBlocked = decode (respBody includeBlockedResp) :: Maybe [NextTaskCandidate]
+      map (.task.id) readyIncludingBlocked `shouldContain` [manualBlocked.id]
+
+    it "uses default and clamped project next-task limits" $ \_ ->
+      withAppEnv $ \env app -> do
+        ws <- createTestWorkspace env "project-next-task-limit-ws"
+        proj <- Proj.createProject env.pool CreateProject
+          { workspaceId = ws.id
+          , name = "Next Task Limits"
+          , description = Nothing
+          , parentId = Nothing
+          , priority = Nothing
+          , metadata = Nothing
+          }
+        _tasks <- mapM (\n -> Task.createTask env.pool CreateTask
+          { workspaceId = ws.id
+          , projectId = Just proj.id
+          , parentId = Nothing
+          , title = "Limit task " <> T.pack (show n)
+          , description = Nothing
+          , priority = Nothing
+          , metadata = Nothing
+          , dueAt = Nothing
+          }) ([1..201] :: [Int])
+
+        defaultResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks")
+        respStatus defaultResp `shouldBe` 200
+        let Just defaultReady = decode (respBody defaultResp) :: Maybe [NextTaskCandidate]
+        length defaultReady `shouldBe` 5
+
+        lowClampResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks?limit=0")
+        respStatus lowClampResp `shouldBe` 200
+        let Just lowClampReady = decode (respBody lowClampResp) :: Maybe [NextTaskCandidate]
+        length lowClampReady `shouldBe` 1
+
+        highClampResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks?limit=500")
+        respStatus highClampResp `shouldBe` 200
+        let Just highClampReady = decode (respBody highClampResp) :: Maybe [NextTaskCandidate]
+        length highClampReady `shouldBe` 200
 
   describe "workspace update and delete" $ do
     it "updates and deletes a workspace" $ \app -> do

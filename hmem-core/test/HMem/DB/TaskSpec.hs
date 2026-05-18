@@ -5,6 +5,7 @@ module HMem.DB.TaskSpec (spec) where
 import Control.Exception (try)
 import Control.Monad (forM_, void)
 import Data.ByteString.Char8 qualified as BS8
+import Data.List (sort)
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -718,7 +719,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         Just task -> task.status `shouldBe` Cancelled
         Nothing -> expectationFailure "dependent task not found")
 
-    it "auto-blocks recursively through task ancestors" $ \env -> do
+    it "does not auto-block task ancestors for open subtasks" $ \env -> do
       ws <- createTestWorkspace env "taskdep-recursive-autoblock-ws"
       proj <- createProject env.pool CreateProject
         { workspaceId = ws.id, parentId = Nothing, name = "Recursive AutoBlock"
@@ -734,11 +735,13 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
 
       getTask env.pool child.id >>= (\case
-        Just task -> task.status `shouldBe` Blocked
+        Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "child task not found")
       getTask env.pool root.id >>= (\case
-        Just task -> task.status `shouldBe` Blocked
+        Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "root task not found")
+      taskAutoBlocked env child.id `shouldReturn` False
+      taskAutoBlocked env root.id `shouldReturn` False
 
       _ <- updateTask env.pool leaf.id UpdateTask
         { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
@@ -747,7 +750,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "child task not found")
       getTask env.pool root.id >>= (\case
-        Just task -> task.status `shouldBe` Blocked
+        Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "root task not found")
 
       _ <- updateTask env.pool child.id UpdateTask
@@ -795,7 +798,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         Just task -> task.status `shouldBe` Blocked
         Nothing -> expectationFailure "A task not found")
 
-    it "moves blocking status when a subtask is reparented" $ \env -> do
+    it "keeps parents unblocked when a subtask is reparented" $ \env -> do
       ws <- createTestWorkspace env "task-reparent-autoblock-ws"
       proj <- createProject env.pool CreateProject
         { workspaceId = ws.id, parentId = Nothing, name = "Reparent AutoBlock"
@@ -810,7 +813,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         { workspaceId = ws.id, projectId = Just proj.id, parentId = Just oldParent.id, title = "Child"
         , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
       getTask env.pool oldParent.id >>= (\case
-        Just task -> task.status `shouldBe` Blocked
+        Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "old parent not found")
 
       _ <- updateTask env.pool child.id UpdateTask
@@ -821,10 +824,10 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "old parent not found")
       getTask env.pool newParent.id >>= (\case
-        Just task -> task.status `shouldBe` Blocked
+        Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "new parent not found")
 
-    it "unblocks and re-blocks ancestors when an open subtask is deleted and restored" $ \env -> do
+    it "keeps ancestors unblocked when an open subtask is deleted and restored" $ \env -> do
       ws <- createTestWorkspace env "task-restore-autoblock-ws"
       proj <- createProject env.pool CreateProject
         { workspaceId = ws.id, parentId = Nothing, name = "Restore AutoBlock"
@@ -836,7 +839,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
         , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
       getTask env.pool parent.id >>= (\case
-        Just task -> task.status `shouldBe` Blocked
+        Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "parent not found")
 
       deleteTask env.pool child.id `shouldReturn` True
@@ -846,7 +849,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
       restoreTask env.pool child.id `shouldReturn` True
       getTask env.pool parent.id >>= (\case
-        Just task -> task.status `shouldBe` Blocked
+        Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "parent not found")
 
     it "unblocks dependent tasks when a blocking dependency is deleted" $ \env -> do
@@ -870,7 +873,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "dependent not found")
 
-    it "preserves auto-blocked status across project batch moves" $ \env -> do
+    it "preserves unblocked parent status across project batch moves" $ \env -> do
       ws <- createTestWorkspace env "task-batch-move-autoblock-ws"
       sourceProj <- createProject env.pool CreateProject
         { workspaceId = ws.id, parentId = Nothing, name = "Source"
@@ -885,14 +888,14 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Just parent.id, title = "Child"
         , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
       getTask env.pool parent.id >>= (\case
-        Just task -> task.status `shouldBe` Blocked
+        Just task -> task.status `shouldBe` Todo
         Nothing -> expectationFailure "parent not found")
 
       moveTasksBatch env.pool [parent.id, child.id] (Just targetProj.id) `shouldReturn` 2
       getTask env.pool parent.id >>= (\case
         Just task -> do
           task.projectId `shouldBe` Just targetProj.id
-          task.status `shouldBe` Blocked
+          task.status `shouldBe` Todo
         Nothing -> expectationFailure "parent not found")
       getTask env.pool child.id >>= (\case
         Just task -> task.projectId `shouldBe` Just targetProj.id
@@ -918,6 +921,180 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       case result of
         Left (DBCheckViolation _) -> pure ()
         other -> expectationFailure $ "Expected DBCheckViolation, got: " <> show other
+
+  describe "listNextTasks" $ do
+    it "returns ready tasks from project subtrees sorted by priority" $ \env -> do
+      ws <- createTestWorkspace env "next-task-priority-ws"
+      rootProj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Root Next"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      childProj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Just rootProj.id, name = "Child Next"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      _low <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just rootProj.id, parentId = Nothing, title = "Low root"
+        , description = Nothing, priority = Just 3, metadata = Nothing, dueAt = Nothing }
+      high <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just childProj.id, parentId = Nothing, title = "High child"
+        , description = Nothing, priority = Just 9, metadata = Nothing, dueAt = Nothing }
+      mid <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just rootProj.id, parentId = Nothing, title = "Mid root"
+        , description = Nothing, priority = Just 6, metadata = Nothing, dueAt = Nothing }
+
+      ready <- listNextTasks env.pool rootProj.id False 2
+      map (.task.id) ready `shouldBe` [high.id, mid.id]
+      map (.completionGated) ready `shouldBe` [False, False]
+
+    it "uses stable tie-breakers for same-priority tasks" $ \env -> do
+      ws <- createTestWorkspace env "next-task-tiebreak-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Next Tiebreak"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      first <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Same first"
+        , description = Nothing, priority = Just 5, metadata = Nothing, dueAt = Nothing }
+      second <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Same second"
+        , description = Nothing, priority = Just 5, metadata = Nothing, dueAt = Nothing }
+      execSql env $ "UPDATE tasks SET created_at = '2026-01-01 00:00:00+00' WHERE id IN ('" <> show first.id <> "', '" <> show second.id <> "')"
+
+      ready <- listNextTasks env.pool proj.id False 10
+      map (.task.id) ready `shouldBe` sort [first.id, second.id]
+
+    it "annotates completion-gated parents and gates subtasks until their parent is in progress" $ \env -> do
+      ws <- createTestWorkspace env "next-task-subtask-gate-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Next Subtask Gate"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      parent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Parent"
+        , description = Nothing, priority = Just 9, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just parent.id, title = "Child"
+        , description = Nothing, priority = Just 8, metadata = Nothing, dueAt = Nothing }
+      execSql env $ "UPDATE tasks SET project_id = NULL WHERE id = '" <> show child.id <> "'"
+
+      readyBeforeStart <- listNextTasks env.pool proj.id False 10
+      map (.task.id) readyBeforeStart `shouldBe` [parent.id]
+      map (.completionGated) readyBeforeStart `shouldBe` [True]
+      map (.openDescendantCount) readyBeforeStart `shouldBe` [1]
+      map (.dependencyBlocked) readyBeforeStart `shouldBe` [False]
+
+      void $ updateTask env.pool parent.id (taskStatusUpdate InProgress)
+      readyWhenParentRunning <- listNextTasks env.pool proj.id False 10
+      map (.task.id) readyWhenParentRunning `shouldBe` [parent.id, child.id]
+      map (.completionGated) readyWhenParentRunning `shouldBe` [True, False]
+
+      execSql env $ "UPDATE tasks SET status = 'done'::task_status_enum WHERE id = '" <> show child.id <> "'"
+      readyAfterChildDone <- listNextTasks env.pool proj.id False 10
+      map (.task.id) readyAfterChildDone `shouldBe` [parent.id]
+      map (.completionGated) readyAfterChildDone `shouldBe` [False]
+
+    it "recurses through migrated nested subtasks and gates each by its immediate parent" $ \env -> do
+      ws <- createTestWorkspace env "next-task-nested-gate-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Next Nested Gate"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      root <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Root"
+        , description = Nothing, priority = Just 9, metadata = Nothing, dueAt = Nothing }
+      child <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just root.id, title = "Nested child"
+        , description = Nothing, priority = Just 8, metadata = Nothing, dueAt = Nothing }
+      grandchild <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Just child.id, title = "Migrated grandchild"
+        , description = Nothing, priority = Just 7, metadata = Nothing, dueAt = Nothing }
+      void $ updateTask env.pool root.id (taskStatusUpdate InProgress)
+
+      readyBeforeChildStart <- listNextTasks env.pool proj.id False 10
+      map (.task.id) readyBeforeChildStart `shouldBe` [root.id, child.id]
+      map (.completionGated) readyBeforeChildStart `shouldBe` [True, True]
+
+      void $ updateTask env.pool child.id (taskStatusUpdate InProgress)
+      readyAfterChildStart <- listNextTasks env.pool proj.id False 10
+      map (.task.id) readyAfterChildStart `shouldBe` [root.id, child.id, grandchild.id]
+
+    it "excludes dependency-blocked tasks by default and includes them on request" $ \env -> do
+      ws <- createTestWorkspace env "next-task-dependency-blocked-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Next Dependency Blocked"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      dependency <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependency"
+        , description = Nothing, priority = Just 7, metadata = Nothing, dueAt = Nothing }
+      dependent <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Dependent"
+        , description = Nothing, priority = Just 10, metadata = Nothing, dueAt = Nothing }
+      addDependency env.pool dependent.id dependency.id
+
+      defaultReady <- listNextTasks env.pool proj.id False 10
+      map (.task.id) defaultReady `shouldBe` [dependency.id]
+
+      includingBlocked <- listNextTasks env.pool proj.id True 10
+      map (.task.id) includingBlocked `shouldBe` [dependent.id, dependency.id]
+      map (.dependencyBlocked) includingBlocked `shouldBe` [True, False]
+      map (.openDependencyCount) includingBlocked `shouldBe` [1, 0]
+
+    it "advances through transitive dependency chains" $ \env -> do
+      ws <- createTestWorkspace env "next-task-chain-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Next Chain"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      first <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "First"
+        , description = Nothing, priority = Just 5, metadata = Nothing, dueAt = Nothing }
+      second <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Second"
+        , description = Nothing, priority = Just 6, metadata = Nothing, dueAt = Nothing }
+      third <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Third"
+        , description = Nothing, priority = Just 7, metadata = Nothing, dueAt = Nothing }
+      addDependency env.pool second.id first.id
+      addDependency env.pool third.id second.id
+
+      listNextTasks env.pool proj.id False 10 >>= \ready -> map (.task.id) ready `shouldBe` [first.id]
+
+      void $ updateTask env.pool first.id (taskStatusUpdate Done)
+      listNextTasks env.pool proj.id False 10 >>= \ready -> map (.task.id) ready `shouldBe` [second.id]
+
+      void $ updateTask env.pool second.id (taskStatusUpdate Done)
+      listNextTasks env.pool proj.id False 10 >>= \ready -> map (.task.id) ready `shouldBe` [third.id]
+
+    it "excludes manually blocked tasks by default and includes them on request" $ \env -> do
+      ws <- createTestWorkspace env "next-task-blocked-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Next Blocked"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      manualBlocked <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Manual blocked"
+        , description = Nothing, priority = Just 10, metadata = Nothing, dueAt = Nothing }
+      readyTask <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Ready"
+        , description = Nothing, priority = Just 5, metadata = Nothing, dueAt = Nothing }
+      void $ updateTask env.pool manualBlocked.id (taskStatusUpdate Blocked)
+
+      defaultReady <- listNextTasks env.pool proj.id False 10
+      map (.task.id) defaultReady `shouldBe` [readyTask.id]
+
+      includingBlocked <- listNextTasks env.pool proj.id True 10
+      map (.task.id) includingBlocked `shouldBe` [manualBlocked.id, readyTask.id]
+      map (.dependencyBlocked) includingBlocked `shouldBe` [False, False]
+
+    it "returns an empty list when no tasks are ready" $ \env -> do
+      ws <- createTestWorkspace env "next-task-empty-ws"
+      proj <- createProject env.pool CreateProject
+        { workspaceId = ws.id, parentId = Nothing, name = "Next Empty"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      doneTask <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Done"
+        , description = Nothing, priority = Just 5, metadata = Nothing, dueAt = Nothing }
+      cancelledTask <- createTask env.pool CreateTask
+        { workspaceId = ws.id, projectId = Just proj.id, parentId = Nothing, title = "Cancelled"
+        , description = Nothing, priority = Just 5, metadata = Nothing, dueAt = Nothing }
+      void $ updateTask env.pool doneTask.id (taskStatusUpdate Done)
+      void $ updateTask env.pool cancelledTask.id (taskStatusUpdate Cancelled)
+
+      listNextTasks env.pool proj.id False 10 `shouldReturn` []
 
   describe "memory links" $ do
     it "keeps task memory link creation idempotent" $ \env -> do

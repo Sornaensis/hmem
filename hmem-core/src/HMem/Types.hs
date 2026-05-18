@@ -46,6 +46,7 @@ module HMem.Types
     -- * Task types
   , TaskStatus(..)
   , Task(..)
+  , NextTaskCandidate(..)
   , CreateTask(..)
   , UpdateTask(..)
   , TaskListQuery(..)
@@ -1235,6 +1236,19 @@ data Task = Task
 instance ToJSON Task where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON Task where
+  parseJSON  = genericParseJSON jsonOptions
+
+data NextTaskCandidate = NextTaskCandidate
+  { task                :: Task
+  , completionGated     :: Bool
+  , openDescendantCount :: Int
+  , dependencyBlocked   :: Bool
+  , openDependencyCount :: Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON NextTaskCandidate where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON NextTaskCandidate where
   parseJSON  = genericParseJSON jsonOptions
 
 data CreateTask = CreateTask

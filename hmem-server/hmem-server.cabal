@@ -29,6 +29,7 @@ data-files:
     migrations/V013__explicit_memory_creation_links.sql
     migrations/V014__recursive_task_auto_blocking.sql
     migrations/V015__require_explicit_memory_type.sql
+    migrations/V016__subtasks_completion_gated_not_auto_blocking.sql
 
 library
   exposed-modules:

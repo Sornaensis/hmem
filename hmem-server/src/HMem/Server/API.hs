@@ -185,6 +185,10 @@ type ProjectAPI =
     :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
     :<|> "batch-update" :> ReqBody '[JSON] BatchUpdateProjectRequest :> Post '[JSON] BatchResult
   :<|> Capture "projectId" UUID :> "overview" :> QueryParam "extra_context" Bool :> Get '[JSON] ProjectOverview
+  :<|> Capture "projectId" UUID :> "next-tasks"
+       :> QueryParam "limit" Int
+       :> QueryParam "include_blocked" Bool
+       :> Get '[JSON] [NextTaskCandidate]
 type TaskAPI =
        QueryParam "workspace_id" UUID
          :> QueryParam "project_id" UUID
@@ -1460,6 +1464,7 @@ projectHandlers pool bc =
   :<|> batchDeleteH
   :<|> batchUpdateH
   :<|> projectOverviewH
+  :<|> projectNextTasksH
   where
     requireProjectH :: UUID -> Handler Project
     requireProjectH pid = handleDBErrors (Proj.getProject pool pid) >>= maybe (throwError err404) pure
@@ -1614,6 +1619,12 @@ projectHandlers pool bc =
       _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
       let extraContext = fromMaybe False mExtraContext
       handleDBErrors (Overview.getProjectOverview pool pid extraContext) >>= maybe (throwError err404) pure
+
+    projectNextTasksH pid mlimit mIncludeBlocked = do
+      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
+      let lim = Prelude.min 200 . Prelude.max 1 $ fromMaybe 5 mlimit
+          includeBlocked = fromMaybe False mIncludeBlocked
+      handleDBErrors $ Task.listNextTasks pool pid includeBlocked lim
 
     authorizeProjectUpdateItem item = do
       projectScope <- requireEntityRoleH pool Auth.EntityProject item.id Auth.WorkspaceRoleEdit

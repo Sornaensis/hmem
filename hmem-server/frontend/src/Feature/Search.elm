@@ -1,7 +1,7 @@
 module Feature.Search exposing (init, update, viewSearchBar, viewUnifiedSearchResults)
 
 import Api
-import Helpers exposing (saveFiltersCmd)
+import Helpers exposing (saveFiltersCmd, taskStatusBadgeClass, taskStatusDisplayText, taskStatusTitle)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
@@ -559,8 +559,8 @@ viewSearchTaskResult model result =
     div [ class "search-result-card" ]
         [ div [ class "card-header" ]
             [ span [ class "card-title" ] [ text result.task.title ]
-            , span [ class ("badge badge-" ++ Api.taskStatusToString result.task.status) ]
-                [ text (Api.taskStatusToString result.task.status) ]
+            , span [ class (taskStatusBadgeClass result.task.status), title (taskStatusTitle result.task.status) ]
+                [ text (taskStatusDisplayText result.task.status) ]
             , span [ class "badge badge-priority" ]
                 [ text ("P" ++ String.fromInt result.task.priority) ]
             ]

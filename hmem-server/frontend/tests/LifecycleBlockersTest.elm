@@ -4,6 +4,7 @@ import Api
 import Expect
 import Feature.Cards
 import Feature.DataLoading
+import Helpers
 import Json.Decode as Decode
 import String
 import Test exposing (..)
@@ -133,6 +134,19 @@ suite =
             \_ ->
                 Feature.Cards.cascadeDeleteFailureFallback { entityType = "task", entityId = "root", preview = Nothing }
                     |> Expect.equal "Failed to delete task. The item may already have changed; refreshing workspace data."
+        , test "blocked task status surfaces use dependency text instead of badge classes" <|
+            \_ ->
+                [ Helpers.taskStatusDisplayText Api.Blocked
+                , Helpers.taskStatusBadgeClass Api.Blocked
+                , Helpers.taskPopoverStatusClass Api.Blocked
+                , Helpers.taskCardStatusClass Api.Blocked
+                ]
+                    |> Expect.equal
+                        [ "blocked by dependencies"
+                        , "task-status-text task-status-dependency-blocked"
+                        , "popover-card-status task-status-text task-status-dependency-blocked"
+                        , ""
+                        ]
         , test "dependency mutation responses decode affected task status patches" <|
             \_ ->
                 let

@@ -624,11 +624,11 @@ sentenceCase value =
             value
 
 
-viewCompletionNote : Maybe String -> Html Msg
-viewCompletionNote reason =
+viewCompletionGateNote : Maybe String -> Html Msg
+viewCompletionGateNote reason =
     case reason of
         Just message ->
-            span [ class "completion-blocker-note", title message ] [ text "blocked" ]
+            span [ class "completion-gate-note", title message ] [ text "completion gated" ]
 
         Nothing ->
             text ""
@@ -1167,7 +1167,7 @@ viewTaskCard showProject model task =
                 "Reopen the project before adding open subtasks."
     in
     div
-        ([ class ("card tree-card " ++ cardClass ++ " card-status-" ++ Api.taskStatusToString task.status ++ Feature.DragDrop.dragOverClass model task.id)
+        ([ class ("card tree-card " ++ cardClass ++ taskCardStatusClass task.status ++ Feature.DragDrop.dragOverClass model task.id)
         , draggable (if Permissions.canEditCurrentWorkspace model then "true" else "false")
         , id ("entity-" ++ task.id)
         , on "dragstart" (Decode.succeed (DragStartCard "task" task.id))
@@ -1202,7 +1202,7 @@ viewTaskCard showProject model task =
                 ]
             , div [ class "card-actions" ]
                 [ Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) Api.allTaskStatuses Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
-                , viewCompletionNote completionBlockerReason
+                , viewCompletionGateNote completionBlockerReason
                 , Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority
                 , if Permissions.canEditCurrentWorkspace model then
                     button [ class "btn-icon btn-danger", onClick (ConfirmDelete "task" task.id), title "Delete" ] [ text "✕" ]

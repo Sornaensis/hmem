@@ -436,6 +436,56 @@ indexBy key items =
     List.foldl (\item acc -> Dict.insert (key item) item acc) Dict.empty items
 
 
+taskStatusDisplayText : Api.TaskStatus -> String
+taskStatusDisplayText status =
+    case status of
+        Api.Blocked ->
+            "blocked by dependencies"
+
+        _ ->
+            Api.taskStatusToString status |> String.replace "_" " "
+
+
+taskStatusTitle : Api.TaskStatus -> String
+taskStatusTitle status =
+    case status of
+        Api.Blocked ->
+            "Blocked by incomplete dependencies"
+
+        _ ->
+            taskStatusDisplayText status
+
+
+taskStatusBadgeClass : Api.TaskStatus -> String
+taskStatusBadgeClass status =
+    case status of
+        Api.Blocked ->
+            "task-status-text task-status-dependency-blocked"
+
+        _ ->
+            "badge badge-" ++ Api.taskStatusToString status
+
+
+taskPopoverStatusClass : Api.TaskStatus -> String
+taskPopoverStatusClass status =
+    case status of
+        Api.Blocked ->
+            "popover-card-status task-status-text task-status-dependency-blocked"
+
+        _ ->
+            "popover-card-status card-status-" ++ Api.taskStatusToString status
+
+
+taskCardStatusClass : Api.TaskStatus -> String
+taskCardStatusClass status =
+    case status of
+        Api.Blocked ->
+            ""
+
+        _ ->
+            " card-status-" ++ Api.taskStatusToString status
+
+
 editElementId : String -> String -> String
 editElementId entityId field =
     "edit-" ++ entityId ++ "-" ++ field

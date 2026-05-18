@@ -850,10 +850,25 @@ viewStatusSelect model entityType entityId currentStr allValues toString toMsg =
 
 viewStatusSelectWithDisabled : Model -> String -> String -> String -> List a -> (a -> String) -> (a -> Maybe String) -> (String -> a -> Msg) -> Html Msg
 viewStatusSelectWithDisabled model entityType entityId currentStr allValues toString disabledReason toMsg =
+    let
+        selectClass =
+            if entityType == "task" && currentStr == "blocked" then
+                "status-select task-status-select-blocked"
+
+            else
+                "status-select badge badge-" ++ currentStr
+
+        selectTitle =
+            if entityType == "task" && currentStr == "blocked" then
+                [ title "Blocked by incomplete dependencies" ]
+
+            else
+                []
+    in
     select
-        [ class ("status-select badge badge-" ++ currentStr)
-        , disabled (not (Permissions.canEditCurrentWorkspace model))
-        , onInput
+        ([ class selectClass
+         , disabled (not (Permissions.canEditCurrentWorkspace model))
+         , onInput
             (\s ->
                 let
                     matched =
@@ -866,7 +881,9 @@ viewStatusSelectWithDisabled model entityType entityId currentStr allValues toSt
                     Nothing ->
                         NoOp
             )
-        ]
+         ]
+            ++ selectTitle
+        )
         (List.map
             (\v ->
                 let

@@ -262,8 +262,8 @@ viewAddDependencyPopover model taskId deps =
                                               else
                                                 text ""
                                             , div [ class "popover-card-meta" ]
-                                                [ span [ class ("popover-card-status card-status-" ++ Api.taskStatusToString t.status) ]
-                                                    [ text (Api.taskStatusToString t.status |> String.replace "_" " ") ]
+                                                [ span [ class (taskPopoverStatusClass t.status), title (taskStatusTitle t.status) ]
+                                                    [ text (taskStatusDisplayText t.status) ]
                                                 , span [ class "popover-card-priority" ] [ text ("P" ++ String.fromInt t.priority) ]
                                                 , case t.description of
                                                     Just d ->
@@ -339,8 +339,8 @@ viewDependencyItem model taskId dep =
                   else
                     text ""
                 , div [ class "popover-card-meta" ]
-                    [ span [ class ("popover-card-status card-status-" ++ Api.taskStatusToString t.status) ]
-                        [ text (Api.taskStatusToString t.status |> String.replace "_" " ") ]
+                    [ span [ class (taskPopoverStatusClass t.status), title (taskStatusTitle t.status) ]
+                        [ text (taskStatusDisplayText t.status) ]
                     , span [ class "popover-card-priority" ] [ text ("P" ++ String.fromInt t.priority) ]
                     , case t.description of
                         Just d ->

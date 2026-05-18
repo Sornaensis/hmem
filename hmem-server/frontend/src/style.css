@@ -370,7 +370,6 @@ a:hover {
 .badge-archived { background: var(--bg-elevated); color: var(--text-muted); }
 .badge-todo { background: var(--bg-elevated); color: var(--text-muted); }
 .badge-in-progress { background: #1e3a5f; color: #93c5fd; }
-.badge-blocked { background: #7f1d1d; color: #fca5a5; }
 .badge-done { background: #064e3b; color: #6ee7b7; }
 .badge-cancelled { background: var(--bg-elevated); color: var(--text-muted); }
 
@@ -861,15 +860,33 @@ a:hover {
   flex-shrink: 0;
 }
 
-.completion-blocker-note {
-  border: 1px solid rgba(252, 165, 165, 0.35);
-  border-radius: 9999px;
-  color: #fca5a5;
+.completion-gate-note {
+  color: var(--text-muted);
   font-size: 0.625rem;
   font-weight: 600;
   letter-spacing: 0.04em;
-  padding: 0.0625rem 0.375rem;
   text-transform: uppercase;
+}
+
+.task-status-text {
+  color: var(--text-muted);
+  font-size: 0.625rem;
+  font-weight: 500;
+}
+
+.task-status-dependency-blocked {
+  color: #fbbf24;
+}
+
+.task-status-select-blocked {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  color: #fbbf24;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 0.125rem 0.5rem;
 }
 
 /* Inline editing */
@@ -2121,8 +2138,7 @@ a:hover {
   border-color: rgba(14, 165, 233, 0.25);
 }
 
-.card-status-paused,
-.card-status-blocked {
+.card-status-paused {
   background: rgba(234, 179, 8, 0.06);
   border-color: rgba(234, 179, 8, 0.25);
 }

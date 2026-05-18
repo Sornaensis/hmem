@@ -303,6 +303,137 @@ spec = do
                 Left other -> expectationFailure $ "Expected MEMORY_TYPE_REQUIRED, got: " <> show other
                 Right _ -> expectationFailure "Expected new missing-type memory insert to fail after V015"
 
+    it "flatSubtaskMigration flattens nested tasks, preserves safe dependency edges, and repairs legacy orphans" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              preV17Dir <- copyMigrationSubset sandbox migrations "pre-v017" (\name -> name < "V017")
+              v17AndV18Dir <- copyMigrationSubset sandbox migrations "v017-v018" (\name -> name >= "V017" && name < "V019")
+
+              preResult <- Migration.runMigrations pool preV17Dir
+              preResult.failed `shouldBe` Nothing
+
+              wsId <- runSession pool $
+                Session.statement ("flat-subtask-migration-ws" :: Text) insertWorkspaceDirectStatement
+              projectId <- runSession pool $
+                Session.statement (wsId, "Flat Migration Project" :: Text) insertProjectDirectStatement
+
+              rootId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "root" :: Text, "todo" :: Text) insertTaskDirectStatement
+              childId <- runSession pool $
+                Session.statement (wsId, projectId, Just rootId, "child" :: Text, "todo" :: Text) insertTaskDirectStatement
+              grandchildId <- runSession pool $
+                Session.statement (wsId, projectId, Just childId, "grandchild" :: Text, "todo" :: Text) insertTaskDirectStatement
+              greatGrandchildId <- runSession pool $
+                Session.statement (wsId, projectId, Just grandchildId, "great grandchild" :: Text, "todo" :: Text) insertTaskDirectStatement
+              -- Duplicate edge candidate: migration should keep exactly one.
+              runSession pool $
+                Session.statement (grandchildId, childId) insertTaskDependencyDirectStatement
+
+              cycleRootId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "cycle root" :: Text, "todo" :: Text) insertTaskDirectStatement
+              cycleChildId <- runSession pool $
+                Session.statement (wsId, projectId, Just cycleRootId, "cycle child" :: Text, "todo" :: Text) insertTaskDirectStatement
+              cycleGrandchildId <- runSession pool $
+                Session.statement (wsId, projectId, Just cycleChildId, "cycle grandchild" :: Text, "todo" :: Text) insertTaskDirectStatement
+              -- The reverse dependency means migration must skip cycleGrandchild -> cycleChild.
+              runSession pool $
+                Session.statement (cycleChildId, cycleGrandchildId) insertTaskDependencyDirectStatement
+
+              hierarchyCycleRootId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "hierarchy cycle root" :: Text, "todo" :: Text) insertTaskDirectStatement
+              hierarchyCycleChildId <- runSession pool $
+                Session.statement (wsId, projectId, Just hierarchyCycleRootId, "hierarchy cycle child" :: Text, "todo" :: Text) insertTaskDirectStatement
+              hierarchyCycleGrandchildId <- runSession pool $
+                Session.statement (wsId, projectId, Just hierarchyCycleChildId, "hierarchy cycle grandchild" :: Text, "todo" :: Text) insertTaskDirectStatement
+              runSession pool $ do
+                Session.sql "ALTER TABLE tasks DISABLE TRIGGER trg_task_auto_blocking_from_task"
+                Session.sql "ALTER TABLE tasks DISABLE TRIGGER trg_task_lifecycle_invariants"
+                Session.sql "ALTER TABLE tasks DISABLE TRIGGER trg_task_no_cycle"
+                Session.statement (hierarchyCycleRootId, Just hierarchyCycleGrandchildId) setTaskParentDirectStatement
+                Session.sql "ALTER TABLE tasks ENABLE TRIGGER trg_task_no_cycle"
+                Session.sql "ALTER TABLE tasks ENABLE TRIGGER trg_task_lifecycle_invariants"
+                Session.sql "ALTER TABLE tasks ENABLE TRIGGER trg_task_auto_blocking_from_task"
+
+              batchCycleRootId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "batch cycle root" :: Text, "todo" :: Text) insertTaskDirectStatement
+              batchCycleChildId <- runSession pool $
+                Session.statement (wsId, projectId, Just batchCycleRootId, "batch cycle child" :: Text, "todo" :: Text) insertTaskDirectStatement
+              batchCycleGrandchildId <- runSession pool $
+                Session.statement (wsId, projectId, Just batchCycleChildId, "batch cycle grandchild" :: Text, "todo" :: Text) insertTaskDirectStatement
+              batchCycleGreatGrandchildId <- runSession pool $
+                Session.statement (wsId, projectId, Just batchCycleGrandchildId, "batch cycle great grandchild" :: Text, "todo" :: Text) insertTaskDirectStatement
+              -- This existing edge is safe before flattening, but only one of
+              -- the two migration-created edges can be added without making a
+              -- dependency cycle across the accepted batch.
+              runSession pool $
+                Session.statement (batchCycleChildId, batchCycleGreatGrandchildId) insertTaskDependencyDirectStatement
+
+              mixedRootId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "mixed root" :: Text, "todo" :: Text) insertTaskDirectStatement
+              mixedChildId <- runSession pool $
+                Session.statement (wsId, projectId, Just mixedRootId, "mixed child" :: Text, "todo" :: Text) insertTaskDirectStatement
+              doneGrandchildId <- runSession pool $
+                Session.statement (wsId, projectId, Just mixedChildId, "done grandchild" :: Text, "done" :: Text) insertTaskDirectStatement
+              cancelledGrandchildId <- runSession pool $
+                Session.statement (wsId, projectId, Just mixedChildId, "cancelled grandchild" :: Text, "cancelled" :: Text) insertTaskDirectStatement
+
+              deletedParentId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "deleted parent" :: Text, "todo" :: Text) insertTaskDirectStatement
+              orphanedChildId <- runSession pool $
+                Session.statement (wsId, projectId, Just deletedParentId, "orphaned child" :: Text, "todo" :: Text) insertTaskDirectStatement
+              runSession pool $
+                Session.statement deletedParentId softDeleteTaskDirectStatement
+
+              missingParentId <- runSession pool $
+                Session.statement (wsId, projectId, Nothing, "missing parent" :: Text, "todo" :: Text) insertTaskDirectStatement
+              missingParentChildId <- runSession pool $
+                Session.statement (wsId, projectId, Just missingParentId, "missing parent child" :: Text, "todo" :: Text) insertTaskDirectStatement
+              runSession pool $ do
+                Session.sql "ALTER TABLE tasks DISABLE TRIGGER ALL"
+                Session.statement missingParentId hardDeleteTaskDirectStatement
+                Session.sql "ALTER TABLE tasks ENABLE TRIGGER ALL"
+
+              v18Result <- Migration.runMigrations pool v17AndV18Dir
+              v18Result.failed `shouldBe` Nothing
+
+              activeNested <- runSession pool $ Session.statement () activeNestedSubtaskCountStatement
+              activeNested `shouldBe` 0
+
+              runSession pool (Session.statement grandchildId taskParentIdStatement) `shouldReturn` Just rootId
+              runSession pool (Session.statement greatGrandchildId taskParentIdStatement) `shouldReturn` Just rootId
+              runSession pool (Session.statement cycleGrandchildId taskParentIdStatement) `shouldReturn` Just cycleRootId
+              runSession pool (Session.statement batchCycleGrandchildId taskParentIdStatement) `shouldReturn` Just batchCycleRootId
+              runSession pool (Session.statement batchCycleGreatGrandchildId taskParentIdStatement) `shouldReturn` Just batchCycleRootId
+              runSession pool (Session.statement hierarchyCycleRootId taskParentIdStatement) `shouldReturn` Nothing
+              runSession pool (Session.statement hierarchyCycleChildId taskParentIdStatement) `shouldReturn` Nothing
+              runSession pool (Session.statement hierarchyCycleGrandchildId taskParentIdStatement) `shouldReturn` Nothing
+              runSession pool (Session.statement doneGrandchildId taskParentIdStatement) `shouldReturn` Just mixedRootId
+              runSession pool (Session.statement cancelledGrandchildId taskParentIdStatement) `shouldReturn` Just mixedRootId
+              runSession pool (Session.statement orphanedChildId taskParentIdStatement) `shouldReturn` Nothing
+              runSession pool (Session.statement missingParentChildId taskParentIdStatement) `shouldReturn` Nothing
+
+              runSession pool (Session.statement (grandchildId, childId) taskDependencyCountStatement) `shouldReturn` 1
+              runSession pool (Session.statement (greatGrandchildId, grandchildId) taskDependencyCountStatement) `shouldReturn` 1
+              runSession pool (Session.statement (doneGrandchildId, mixedChildId) taskDependencyCountStatement) `shouldReturn` 1
+              runSession pool (Session.statement (cancelledGrandchildId, mixedChildId) taskDependencyCountStatement) `shouldReturn` 1
+              runSession pool (Session.statement (cycleChildId, cycleGrandchildId) taskDependencyCountStatement) `shouldReturn` 1
+              runSession pool (Session.statement (cycleGrandchildId, cycleChildId) taskDependencyCountStatement) `shouldReturn` 0
+              runSession pool (Session.statement (batchCycleChildId, batchCycleGreatGrandchildId) taskDependencyCountStatement) `shouldReturn` 1
+              runSession pool (Session.statement (batchCycleGrandchildId, batchCycleChildId) taskDependencyCountStatement) `shouldReturn` 1
+              runSession pool (Session.statement (batchCycleGreatGrandchildId, batchCycleGrandchildId) taskDependencyCountStatement) `shouldReturn` 0
+              -- V018 creates real dependency edges for all active moved tasks,
+              -- so existing auto-blocking rules reopen done tasks whose new
+              -- dependency is still open; cancelled tasks remain closed.
+              runSession pool (Session.statement doneGrandchildId taskStatusTextStatement) `shouldReturn` "blocked"
+              runSession pool (Session.statement cancelledGrandchildId taskStatusTextStatement) `shouldReturn` "cancelled"
+              runSession pool (Session.statement orphanedChildId deletedParentReportCountStatement) `shouldReturn` 1
+              runSession pool (Session.statement (missingParentChildId, missingParentId) missingParentReportDetailStatement) `shouldReturn` True
+              runSession pool (Session.statement (batchCycleGreatGrandchildId, batchCycleGrandchildId) dependencyCycleSkippedReportDetailStatement) `shouldReturn` True
+              runSession pool (Session.statement hierarchyCycleRootId hierarchyCycleReportCountStatement) `shouldReturn` 1
+
     it "resolves the repository root from a non-repo cwd" $
       withTestSandbox $ \sandbox ->
         withCurrentDirectory sandbox.sandboxTmpDir $ do
@@ -442,4 +573,78 @@ taskAutoBlockedStatement = Statement.Statement sql encoder decoder True
   where
     sql = "SELECT auto_blocked FROM tasks WHERE id = $1"
     encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nonNullable D.bool))
+
+softDeleteTaskDirectStatement :: Statement.Statement UUID ()
+softDeleteTaskDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "UPDATE tasks SET deleted_at = now() WHERE id = $1"
+    encoder = E.param (E.nonNullable E.uuid)
+
+hardDeleteTaskDirectStatement :: Statement.Statement UUID ()
+hardDeleteTaskDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "DELETE FROM tasks WHERE id = $1"
+    encoder = E.param (E.nonNullable E.uuid)
+
+setTaskParentDirectStatement :: Statement.Statement (UUID, Maybe UUID) ()
+setTaskParentDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "UPDATE tasks SET parent_id = $2 WHERE id = $1"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nullable E.uuid))
+
+taskParentIdStatement :: Statement.Statement UUID (Maybe UUID)
+taskParentIdStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT parent_id FROM tasks WHERE id = $1"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (D.column (D.nullable D.uuid))
+
+activeNestedSubtaskCountStatement :: Statement.Statement () Int
+activeNestedSubtaskCountStatement = Statement.Statement sql E.noParams decoder True
+  where
+    sql = "SELECT count(*)::int FROM tasks child JOIN tasks parent ON parent.id = child.parent_id WHERE child.deleted_at IS NULL AND parent.deleted_at IS NULL AND parent.parent_id IS NOT NULL"
+    decoder = D.singleRow (fromIntegral <$> D.column (D.nonNullable D.int4))
+
+taskDependencyCountStatement :: Statement.Statement (UUID, UUID) Int
+taskDependencyCountStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT count(*)::int FROM task_dependencies WHERE task_id = $1 AND depends_on_id = $2"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
+    decoder = D.singleRow (fromIntegral <$> D.column (D.nonNullable D.int4))
+
+deletedParentReportCountStatement :: Statement.Statement UUID Int
+deletedParentReportCountStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT count(*)::int FROM task_flatten_migration_report WHERE task_id = $1 AND issue = 'deleted_parent_detached'"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (fromIntegral <$> D.column (D.nonNullable D.int4))
+
+hierarchyCycleReportCountStatement :: Statement.Statement UUID Int
+hierarchyCycleReportCountStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT count(*)::int FROM task_flatten_migration_report WHERE task_id = $1 AND issue = 'hierarchy_cycle_detached'"
+    encoder = E.param (E.nonNullable E.uuid)
+    decoder = D.singleRow (fromIntegral <$> D.column (D.nonNullable D.int4))
+
+missingParentReportDetailStatement :: Statement.Statement (UUID, UUID) Bool
+missingParentReportDetailStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT EXISTS (SELECT 1 FROM task_flatten_migration_report WHERE task_id = $1 AND issue = 'missing_parent_detached' AND detail->>'parent_missing' = 'true' AND detail->>'legacy_parent_id' = $2::text)"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
+    decoder = D.singleRow (D.column (D.nonNullable D.bool))
+
+dependencyCycleSkippedReportDetailStatement :: Statement.Statement (UUID, UUID) Bool
+dependencyCycleSkippedReportDetailStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT EXISTS (SELECT 1 FROM task_flatten_migration_report WHERE task_id = $1 AND issue = 'dependency_cycle_edge_skipped' AND detail->>'depends_on_id' = $2::text)"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
     decoder = D.singleRow (D.column (D.nonNullable D.bool))

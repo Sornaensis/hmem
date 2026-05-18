@@ -5,7 +5,7 @@ module HMem.Server.OpenAPI
   ( openApiSpec
   ) where
 
-import Control.Lens ((&), (.~), (?~), at)
+import Control.Lens ((&), (.~), (?~), (%~), at)
 import Data.Aeson (Value)
 import Data.OpenApi
 import Data.Proxy (Proxy (..))
@@ -181,6 +181,18 @@ instance ToSchema CreateProject        where declareNamedSchema = genericDeclare
 instance ToSchema UpdateProject        where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema Task                 where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema NextTaskCandidate    where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TaskDependencyAutoBlockSnapshot where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TaskDependencyStatusChange where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema DependencyMutationResult where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TaskMutationResult where
+  declareNamedSchema _ = do
+    NamedSchema _ taskSchema <- declareNamedSchema (Proxy @Task)
+    dependencyEffectsSchema <- declareSchemaRef (Proxy @[TaskDependencyStatusChange])
+    pure $ NamedSchema (Just "TaskMutationResult") $
+      taskSchema
+        & description ?~ "Task object fields plus dependency_effects describing dependency-driven status changes caused by the mutation."
+        & properties . at "dependency_effects" ?~ dependencyEffectsSchema
+        & required %~ ("dependency_effects" :)
 instance ToSchema CreateTask           where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema UpdateTask           where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CleanupPolicy        where declareNamedSchema = genericDeclareNamedSchema opts

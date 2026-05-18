@@ -47,6 +47,10 @@ module HMem.Types
   , TaskStatus(..)
   , Task(..)
   , NextTaskCandidate(..)
+  , TaskDependencyAutoBlockSnapshot(..)
+  , TaskDependencyStatusChange(..)
+  , DependencyMutationResult(..)
+  , TaskMutationResult(..)
   , CreateTask(..)
   , UpdateTask(..)
   , TaskListQuery(..)
@@ -1251,6 +1255,67 @@ instance ToJSON NextTaskCandidate where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON NextTaskCandidate where
   parseJSON  = genericParseJSON jsonOptions
+
+-- | Current dependency-derived blocking state for a task.  This intentionally
+-- separates dependency auto-blocking from completion-gating subtasks.
+data TaskDependencyAutoBlockSnapshot = TaskDependencyAutoBlockSnapshot
+  { task                :: Task
+  , autoBlocked         :: Bool
+  , openDependencyCount :: Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TaskDependencyAutoBlockSnapshot where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON TaskDependencyAutoBlockSnapshot where
+  parseJSON  = genericParseJSON jsonOptions
+
+data TaskDependencyStatusChange = TaskDependencyStatusChange
+  { task                    :: Task
+  , previousStatus          :: TaskStatus
+  , currentStatus           :: TaskStatus
+  , previousAutoBlocked     :: Bool
+  , autoBlocked             :: Bool
+  , previousOpenDependencyCount :: Int
+  , openDependencyCount     :: Int
+  , reason                  :: Text
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TaskDependencyStatusChange where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON TaskDependencyStatusChange where
+  parseJSON  = genericParseJSON jsonOptions
+
+data DependencyMutationResult = DependencyMutationResult
+  { action        :: Text
+  , taskId        :: UUID
+  , dependsOnId   :: UUID
+  , affectedTasks :: [TaskDependencyStatusChange]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON DependencyMutationResult where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON DependencyMutationResult where
+  parseJSON  = genericParseJSON jsonOptions
+
+-- | Task update response that remains backward-compatible with plain Task JSON
+-- decoders by flattening the task fields and adding dependency_effects.
+data TaskMutationResult = TaskMutationResult
+  { task              :: Task
+  , dependencyEffects :: [TaskDependencyStatusChange]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TaskMutationResult where
+  toJSON result = case toJSON result.task of
+    Object obj -> Object (KM.insert "dependency_effects" (toJSON result.dependencyEffects) obj)
+    other      -> object ["task" .= other, "dependency_effects" .= result.dependencyEffects]
+
+instance FromJSON TaskMutationResult where
+  parseJSON value@(Object obj) = TaskMutationResult
+    <$> parseJSON value
+    <*> obj .:? "dependency_effects" .!= []
+  parseJSON other = TaskMutationResult
+    <$> parseJSON other
+    <*> pure []
 
 data CreateTask = CreateTask
   { workspaceId :: UUID

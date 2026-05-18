@@ -12,6 +12,7 @@ module HMem.Server.API
 
 import Control.Exception (try)
 import Control.Applicative ((<|>))
+import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON (..), ToJSON (..), genericToJSON, genericParseJSON, Value(..), object, (.=))
 import Data.Aeson qualified as Aeson
@@ -19,7 +20,7 @@ import Data.Aeson.Key qualified as Aeson (fromText)
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Pool (Pool, tryWithResource)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -205,7 +206,7 @@ type TaskAPI =
          :> Get '[JSON] (PaginatedResult Task)
   :<|> ReqBody '[JSON] CreateTask :> Post '[JSON] Task
   :<|> Capture "taskId" UUID :> Get '[JSON] Task
-  :<|> Capture "taskId" UUID :> ReqBody '[JSON] UpdateTask :> Put '[JSON] Task
+  :<|> Capture "taskId" UUID :> ReqBody '[JSON] UpdateTask :> Put '[JSON] TaskMutationResult
   :<|> Capture "taskId" UUID :> Delete '[JSON] CascadeResult
   :<|> Capture "taskId" UUID :> "restore" :> Post '[JSON] NoContent
   :<|> Capture "taskId" UUID :> "purge" :> Delete '[JSON] CascadeResult
@@ -214,9 +215,9 @@ type TaskAPI =
   :<|> Capture "taskId" UUID :> "memories" :> Capture "memoryId" UUID
          :> Delete '[JSON] NoContent
   :<|> Capture "taskId" UUID :> "dependencies" :> ReqBody '[JSON] LinkDependency
-         :> Post '[JSON] NoContent
+         :> Post '[JSON] DependencyMutationResult
   :<|> Capture "taskId" UUID :> "dependencies" :> Capture "dependsOnId" UUID
-         :> Delete '[JSON] NoContent
+         :> Delete '[JSON] DependencyMutationResult
   :<|> Capture "taskId" UUID :> "memories"
          :> QueryParam "query" Text
          :> QueryParams "tag" Text
@@ -743,6 +744,64 @@ inferEventWorkspace _ _ _ = Nothing
 emitManyInScopes :: Broadcast -> ChangeType -> EntityType -> [(UUID, Auth.EntityScope)] -> Handler ()
 emitManyInScopes bc ct et entries =
   mapM_ (\(eid, scope) -> emitInScope scope bc ct et eid Nothing) entries
+
+dependencyMutationResult :: Text -> UUID -> UUID -> [TaskDependencyAutoBlockSnapshot] -> [TaskDependencyAutoBlockSnapshot] -> DependencyMutationResult
+dependencyMutationResult action taskId dependsOnId before after = DependencyMutationResult
+  { action = action
+  , taskId = taskId
+  , dependsOnId = dependsOnId
+  , affectedTasks = dependencyStatusChanges before after
+  }
+
+dependencyStatusChanges :: [TaskDependencyAutoBlockSnapshot] -> [TaskDependencyAutoBlockSnapshot] -> [TaskDependencyStatusChange]
+dependencyStatusChanges before after =
+  let beforeById = Map.fromList [(snapshot.task.id, snapshot) | snapshot <- before]
+      mkChange current = do
+        previous <- Map.lookup current.task.id beforeById
+        let statusChanged = previous.task.status /= current.task.status
+            autoChanged = previous.autoBlocked /= current.autoBlocked
+            dependencyChanged = previous.openDependencyCount /= current.openDependencyCount
+        if statusChanged || autoChanged || dependencyChanged
+          then Just TaskDependencyStatusChange
+            { task = current.task
+            , previousStatus = previous.task.status
+            , currentStatus = current.task.status
+            , previousAutoBlocked = previous.autoBlocked
+            , autoBlocked = current.autoBlocked
+            , previousOpenDependencyCount = previous.openDependencyCount
+            , openDependencyCount = current.openDependencyCount
+            , reason = dependencyStatusChangeReason previous current
+            }
+          else Nothing
+  in mapMaybe mkChange after
+
+dependencyStatusChangeReason :: TaskDependencyAutoBlockSnapshot -> TaskDependencyAutoBlockSnapshot -> Text
+dependencyStatusChangeReason previous current
+  | previous.openDependencyCount == 0 && current.openDependencyCount > 0 && current.autoBlocked = "blocked_by_open_dependencies"
+  | previous.openDependencyCount > 0 && current.openDependencyCount == 0 && previous.autoBlocked && not current.autoBlocked = "unblocked_dependencies_resolved"
+  | current.openDependencyCount > previous.openDependencyCount = "open_dependency_added"
+  | current.openDependencyCount < previous.openDependencyCount = "open_dependency_removed"
+  | current.openDependencyCount > 0 && current.autoBlocked = "blocked_by_open_dependencies"
+  | previous.task.status /= current.task.status = "dependency_status_recomputed"
+  | otherwise = "dependency_context_changed"
+
+emitDependencyMutationResult :: UUID -> Broadcast -> ChangeType -> UUID -> DependencyMutationResult -> Handler ()
+emitDependencyMutationResult wsId bc changeType taskId result = do
+  emitInWorkspace wsId bc changeType ETTaskDependency taskId (Just $ toJSON result)
+  mapM_ emitAffectedTask result.affectedTasks
+  where
+    emitAffectedTask change =
+      let changedTask = change.task
+      in emitInWorkspace wsId bc Updated ETTask changedTask.id (Just $ toJSON changedTask)
+
+emitDependencyStatusChanges :: UUID -> Broadcast -> UUID -> [TaskDependencyStatusChange] -> Handler ()
+emitDependencyStatusChanges wsId bc primaryTaskId changes =
+  mapM_ emitChangedDependent changes
+  where
+    emitChangedDependent change = do
+      let changedTask = change.task
+      when (changedTask.id /= primaryTaskId) $
+        emitInWorkspace wsId bc Updated ETTask changedTask.id (Just $ toJSON changedTask)
 
 -- Health handler ---------------------------------------------------
 
@@ -1721,12 +1780,14 @@ taskHandlers pool bc =
           pure ()
         _ -> pure ()
       rejectValidationErrors (validateUpdateTaskInput ut)
-      mt <- handleDBErrors (Task.updateTask pool tid ut)
-      case mt of
+      updateResult <- handleDBErrors (Task.updateTaskWithDependencySnapshots pool tid ut)
+      case updateResult of
         Nothing -> throwError err404
-        Just task -> do
+        Just (task, beforeDependencyState, afterDependencyState) -> do
+          let dependencyEffects = dependencyStatusChanges beforeDependencyState afterDependencyState
           emit bc Updated ETTask tid (Just $ toJSON task)
-          pure task
+          emitDependencyStatusChanges task.workspaceId bc tid dependencyEffects
+          pure TaskMutationResult { task = task, dependencyEffects = dependencyEffects }
 
     deleteTaskH tid = do
       scope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
@@ -1783,18 +1844,24 @@ taskHandlers pool bc =
       _ <- requireSameWorkspaceScopesH taskScope depScope
       task <- requireTaskH tid
       _ <- requireTaskH ld.dependsOnId
-      handleDBErrorsInWorkspace task.workspaceId $ Task.addDependency pool tid ld.dependsOnId
-      emitInWorkspace task.workspaceId bc Created ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= ld.dependsOnId])
-      pure NoContent
+      (beforeRaw, afterRaw) <- handleDBErrorsInWorkspace task.workspaceId $ Task.addDependencyWithSnapshots pool tid ld.dependsOnId
+      beforeDependencyState <- handleDBErrors $ Task.enrichDependencyAutoBlockSnapshots pool beforeRaw
+      afterDependencyState <- handleDBErrors $ Task.enrichDependencyAutoBlockSnapshots pool afterRaw
+      let result = dependencyMutationResult "add" tid ld.dependsOnId beforeDependencyState afterDependencyState
+      emitDependencyMutationResult task.workspaceId bc Created tid result
+      pure result
 
     removeDepH tid depId = do
       taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
       depScope <- requireEntityRoleH pool Auth.EntityTask depId Auth.WorkspaceRoleRead
       _ <- requireSameWorkspaceScopesH taskScope depScope
       task <- requireTaskH tid
-      handleDBErrorsInWorkspace task.workspaceId $ Task.removeDependency pool tid depId
-      emitInWorkspace task.workspaceId bc Deleted ETTaskDependency tid (Just $ object ["task_id" .= tid, "depends_on_id" .= depId])
-      pure NoContent
+      (beforeRaw, afterRaw) <- handleDBErrorsInWorkspace task.workspaceId $ Task.removeDependencyWithSnapshots pool tid depId
+      beforeDependencyState <- handleDBErrors $ Task.enrichDependencyAutoBlockSnapshots pool beforeRaw
+      afterDependencyState <- handleDBErrors $ Task.enrichDependencyAutoBlockSnapshots pool afterRaw
+      let result = dependencyMutationResult "remove" tid depId beforeDependencyState afterDependencyState
+      emitDependencyMutationResult task.workspaceId bc Deleted tid result
+      pure result
 
     getTaskMemoriesH tid mQuery mTags mMinImportance mMemoryType mMinAccessCount = do
       _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleRead
@@ -1848,11 +1915,18 @@ taskHandlers pool bc =
 
     batchUpdateH bur = do
       requireAuthenticatedH
-      scopes <- mapM authorizeTaskUpdateItem bur.items
+      mapM_ authorizeTaskUpdateItem bur.items
       rejectValidationErrors (validateBatchUpdateTaskRequest bur)
-      n <- handleDBErrors $ Task.updateTaskBatch pool [(item.id, item.update) | item <- bur.items]
-      emitManyInScopes bc Updated ETTask (zip (map (.id) bur.items) scopes)
-      pure BatchResult { affected = n }
+      updateResults <- handleDBErrors $
+        mapM (\item -> Task.updateTaskWithDependencySnapshots pool item.id item.update) bur.items
+      let successfulUpdates = [result | Just result <- updateResults]
+      mapM_ emitTaskUpdate successfulUpdates
+      pure BatchResult { affected = length successfulUpdates }
+      where
+        emitTaskUpdate (task, beforeDependencyState, afterDependencyState) = do
+          let dependencyEffects = dependencyStatusChanges beforeDependencyState afterDependencyState
+          emitInWorkspace task.workspaceId bc Updated ETTask task.id (Just $ toJSON task)
+          emitDependencyStatusChanges task.workspaceId bc task.id dependencyEffects
 
     batchLinkMemoriesH tid blr = do
       requireAuthenticatedH

@@ -1201,6 +1201,26 @@ spec = do
       taskOverviewProps <- requireJust "task_overview properties" (objectField "properties" taskOverviewSchema)
       objectField "extra_context" taskOverviewProps `shouldSatisfy` (/= Nothing)
 
+    it "documents dependency auto-block effects for task_dependency" $ do
+      let descriptions =
+            [ desc
+            | Object tool <- toolDefinitions
+            , textField "name" (Object tool) == Just "task_dependency"
+            , Just desc <- [textField "description" (Object tool)]
+            ]
+      descriptions `shouldSatisfy` any (T.isInfixOf "affected task IDs")
+      descriptions `shouldSatisfy` any (T.isInfixOf "machine-readable reasons")
+
+    it "documents dependency effects in task_update responses" $ do
+      let descriptions =
+            [ desc
+            | Object tool <- toolDefinitions
+            , textField "name" (Object tool) == Just "task_update"
+            , Just desc <- [textField "description" (Object tool)]
+            ]
+      descriptions `shouldSatisfy` any (T.isInfixOf "dependency_effects")
+      descriptions `shouldSatisfy` any (T.isInfixOf "affected task IDs")
+
     it "defines project_overview extra_context and memory search/list access_count fields" $ do
       projectOverviewSchema <- requireJust "project_overview schema" (inputSchemaFor "project_overview")
       projectOverviewProps <- requireJust "project_overview properties" (objectField "properties" projectOverviewSchema)

@@ -2,6 +2,7 @@ module HMem.DB.Task
   ( createTask
   , getTask
   , updateTask
+  , updateTaskWithDependencySnapshots
   , updateTaskBatch
   , deleteTask
   , deleteTaskCascade
@@ -14,6 +15,10 @@ module HMem.DB.Task
   , listTasksByWorkspace
   , listNextTasks
   , enrichTaskCounts
+  , dependencyAutoBlockSnapshots
+  , enrichDependencyAutoBlockSnapshots
+  , addDependencyWithSnapshots
+  , removeDependencyWithSnapshots
   , addDependency
   , removeDependency
   , linkTaskMemory
@@ -22,7 +27,7 @@ module HMem.DB.Task
   ) where
 
 import Control.Exception (throwIO)
-import Control.Monad (when)
+import Control.Monad (void, when)
 import Data.Aeson (Object, object, (.=), toJSON)
 import Data.Aeson qualified as Aeson
 import Data.ByteString.Char8 qualified as BS8
@@ -422,7 +427,10 @@ getTask pool tid = do
 ------------------------------------------------------------------------
 
 updateTask :: Pool Hasql.Connection -> UUID -> UpdateTask -> IO (Maybe Task)
-updateTask pool tid ut = do
+updateTask pool tid ut = fmap (\(task, _, _) -> task) <$> updateTaskWithDependencySnapshots pool tid ut
+
+updateTaskWithDependencySnapshots :: Pool Hasql.Connection -> UUID -> UpdateTask -> IO (Maybe (Task, [TaskDependencyAutoBlockSnapshot], [TaskDependencyAutoBlockSnapshot]))
+updateTaskWithDependencySnapshots pool tid ut = do
   current <- getTask pool tid
   case current of
     Nothing -> pure Nothing
@@ -438,7 +446,8 @@ updateTask pool tid ut = do
       mParent <- ensureTaskPlacement pool task.workspaceId targetProjectId targetParentId
       ensureTaskCanBecomeSubtask pool tid targetParentId
       ensureSubtaskStartAllowed enforcingStartGate mParent targetStatus
-      mTask <- runTransaction pool $ do
+      (mTask, beforeRaw, afterRaw) <- runTransaction pool $ do
+        before <- dependencyAutoBlockSnapshotsS [tid]
         when (task.projectId /= targetProjectId) $ do
           ids <- Session.statement tid taskSubtreeIdsStatement
           Session.statement () $ run_ $
@@ -470,11 +479,22 @@ updateTask pool tid ut = do
             , returning = Returning id
             }
         case rows of
-          []    -> pure Nothing
-          (r:_) -> pure . Just $ rowToTask r
+          []    -> do
+            after <- dependencyAutoBlockSnapshotsS [tid]
+            pure (Nothing, before, after)
+          (r:_) -> do
+            after <- dependencyAutoBlockSnapshotsS [tid]
+            pure (Just $ rowToTask r, before, after)
       case mTask of
         Nothing -> pure Nothing
-        Just t -> getTask pool t.id
+        Just t -> do
+          mEnrichedTask <- getTask pool t.id
+          case mEnrichedTask of
+            Nothing -> pure Nothing
+            Just enrichedTask -> do
+              before <- enrichDependencyAutoBlockSnapshots pool beforeRaw
+              after <- enrichDependencyAutoBlockSnapshots pool afterRaw
+              pure $ Just (enrichedTask, before, after)
 
 ------------------------------------------------------------------------
 -- Delete
@@ -930,13 +950,124 @@ nextTaskCandidateRowDecoder = do
     , openDependencyCount = fromIntegral openDependencyCount
     }
 
+dependencyAutoBlockSnapshots :: Pool Hasql.Connection -> [UUID] -> IO [TaskDependencyAutoBlockSnapshot]
+dependencyAutoBlockSnapshots _ [] = pure []
+dependencyAutoBlockSnapshots pool seedIds = do
+  snapshots <- runSession pool $ dependencyAutoBlockSnapshotsS seedIds
+  enrichDependencyAutoBlockSnapshots pool snapshots
+
+enrichDependencyAutoBlockSnapshots :: Pool Hasql.Connection -> [TaskDependencyAutoBlockSnapshot] -> IO [TaskDependencyAutoBlockSnapshot]
+enrichDependencyAutoBlockSnapshots _ [] = pure []
+enrichDependencyAutoBlockSnapshots pool snapshots = do
+  enrichedTasks <- enrichTaskCounts pool (map (.task) snapshots)
+  let enrichedById = Map.fromList [(task.id, task) | task <- enrichedTasks]
+      enrichSnapshot :: TaskDependencyAutoBlockSnapshot -> TaskDependencyAutoBlockSnapshot
+      enrichSnapshot snapshot = TaskDependencyAutoBlockSnapshot
+        { task = Map.findWithDefault snapshot.task snapshot.task.id enrichedById
+        , autoBlocked = snapshot.autoBlocked
+        , openDependencyCount = snapshot.openDependencyCount
+        }
+  pure $ map enrichSnapshot snapshots
+
+dependencyAutoBlockSnapshotsS :: [UUID] -> Session.Session [TaskDependencyAutoBlockSnapshot]
+dependencyAutoBlockSnapshotsS seedIds = Session.statement seedIds dependencyAutoBlockSnapshotsStatement
+
+dependencyAutoBlockSnapshotsStatement :: Statement.Statement [UUID] [TaskDependencyAutoBlockSnapshot]
+dependencyAutoBlockSnapshotsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE seeds(id) AS ("
+      , "  SELECT DISTINCT seed_id"
+      , "    FROM unnest($1::uuid[]) AS seed_id"
+      , "   WHERE seed_id IS NOT NULL"
+      , "),"
+      , "dependency_dependents(id) AS ("
+      , "  SELECT td.task_id"
+      , "    FROM task_dependencies td"
+      , "    JOIN seeds s ON s.id = td.depends_on_id"
+      , "    JOIN tasks dependent ON dependent.id = td.task_id"
+      , "   WHERE dependent.deleted_at IS NULL"
+      , "  UNION"
+      , "  SELECT td.task_id"
+      , "    FROM task_dependencies td"
+      , "    JOIN dependency_dependents dd ON dd.id = td.depends_on_id"
+      , "    JOIN tasks dependent ON dependent.id = td.task_id"
+      , "   WHERE dependent.deleted_at IS NULL"
+      , "),"
+      , "direct_targets(id) AS ("
+      , "  SELECT t.id"
+      , "    FROM tasks t"
+      , "    JOIN seeds s ON s.id = t.id"
+      , "   WHERE t.deleted_at IS NULL"
+      , "  UNION"
+      , "  SELECT id FROM dependency_dependents"
+      , "),"
+      , "affected_tasks(id, parent_id) AS ("
+      , "  SELECT t.id, t.parent_id"
+      , "    FROM tasks t"
+      , "    JOIN direct_targets dt ON dt.id = t.id"
+      , "   WHERE t.deleted_at IS NULL"
+      , "  UNION"
+      , "  SELECT parent.id, parent.parent_id"
+      , "    FROM tasks parent"
+      , "    JOIN affected_tasks child ON child.parent_id = parent.id"
+      , "   WHERE parent.deleted_at IS NULL"
+      , "),"
+      , "targets(id) AS ("
+      , "  SELECT DISTINCT id FROM affected_tasks"
+      , ")"
+      , "SELECT t.id, t.workspace_id, t.project_id, t.parent_id, t.title, t.description,"
+      , "       t.status::text, t.priority, t.metadata, t.due_at, t.completed_at,"
+      , "       t.created_at, t.updated_at,"
+      , "       t.auto_blocked,"
+      , "       coalesce(open_dep.open_dependency_count, 0)::bigint"
+      , "  FROM tasks t"
+      , "  JOIN targets target ON target.id = t.id"
+      , "  LEFT JOIN LATERAL ("
+      , "    SELECT count(DISTINCT dep.id)::bigint AS open_dependency_count"
+      , "      FROM task_dependencies dep_link"
+      , "      JOIN tasks dep ON dep.id = dep_link.depends_on_id"
+      , "     WHERE dep_link.task_id = t.id"
+      , "       AND dep.deleted_at IS NULL"
+      , "       AND hmem_is_open_task_status(dep.status)"
+      , "  ) open_dep ON true"
+      , " WHERE t.deleted_at IS NULL"
+      , "   AND NOT hmem_task_is_inside_closed_project(t.id)"
+      , "   AND NOT hmem_task_has_done_ancestor(t.id)"
+      , " ORDER BY t.created_at ASC, t.id ASC"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowList dependencyAutoBlockSnapshotRowDecoder
+
+dependencyAutoBlockSnapshotRowDecoder :: Dec.Row TaskDependencyAutoBlockSnapshot
+dependencyAutoBlockSnapshotRowDecoder = do
+  task <- rawTaskRowDecoder
+  autoBlocked <- Dec.column (Dec.nonNullable Dec.bool)
+  openDependencyCount <- Dec.column (Dec.nonNullable Dec.int8)
+  pure TaskDependencyAutoBlockSnapshot
+    { task = task
+    , autoBlocked = autoBlocked
+    , openDependencyCount = fromIntegral openDependencyCount
+    }
+
 ------------------------------------------------------------------------
 -- Dependencies
 ------------------------------------------------------------------------
 
 addDependency :: Pool Hasql.Connection -> UUID -> UUID -> IO ()
-addDependency pool tid depId =
-  runSession pool $ Session.statement () $ run_ $
+addDependency pool tid depId = void $ addDependencyWithSnapshots pool tid depId
+
+addDependencyWithSnapshots :: Pool Hasql.Connection -> UUID -> UUID -> IO ([TaskDependencyAutoBlockSnapshot], [TaskDependencyAutoBlockSnapshot])
+addDependencyWithSnapshots pool tid depId =
+  runTransaction pool $ do
+    before <- dependencyAutoBlockSnapshotsS [tid, depId]
+    addDependencyS tid depId
+    after <- dependencyAutoBlockSnapshotsS [tid, depId]
+    pure (before, after)
+
+addDependencyS :: UUID -> UUID -> Session.Session ()
+addDependencyS tid depId =
+  Session.statement () $ run_ $
     insert Insert
       { into = taskDependencySchema
       , rows = values
@@ -950,8 +1081,19 @@ addDependency pool tid depId =
       }
 
 removeDependency :: Pool Hasql.Connection -> UUID -> UUID -> IO ()
-removeDependency pool tid depId =
-  runSession pool $ Session.statement () $ run_ $
+removeDependency pool tid depId = void $ removeDependencyWithSnapshots pool tid depId
+
+removeDependencyWithSnapshots :: Pool Hasql.Connection -> UUID -> UUID -> IO ([TaskDependencyAutoBlockSnapshot], [TaskDependencyAutoBlockSnapshot])
+removeDependencyWithSnapshots pool tid depId =
+  runTransaction pool $ do
+    before <- dependencyAutoBlockSnapshotsS [tid, depId]
+    removeDependencyS tid depId
+    after <- dependencyAutoBlockSnapshotsS [tid, depId]
+    pure (before, after)
+
+removeDependencyS :: UUID -> UUID -> Session.Session ()
+removeDependencyS tid depId =
+  Session.statement () $ run_ $
     delete Delete
       { from = taskDependencySchema
       , using = pure ()

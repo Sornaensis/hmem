@@ -10,7 +10,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Control.Monad (forM_)
 import Control.Lens ((&), (?~))
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Functor.Contravariant (contramap)
 import Data.Maybe (isJust)
 import Data.String (fromString)
@@ -3025,6 +3025,19 @@ spec = around withApp $ do
       depResp <- postJSON app (uuidPath "/api/v1/tasks" t2.id <> "/dependencies")
         (object ["depends_on_id" .= t1.id])
       respStatus depResp `shouldBe` 200
+      let Just depResult = decode (respBody depResp) :: Maybe DependencyMutationResult
+      depResult.action `shouldBe` "add"
+      depResult.taskId `shouldBe` t2.id
+      depResult.dependsOnId `shouldBe` t1.id
+      case depResult.affectedTasks of
+        [change] -> do
+          change.task.id `shouldBe` t2.id
+          change.previousStatus `shouldBe` Todo
+          change.currentStatus `shouldBe` Blocked
+          change.autoBlocked `shouldBe` True
+          change.openDependencyCount `shouldBe` 1
+          change.reason `shouldBe` "blocked_by_open_dependencies"
+        other -> expectationFailure $ "Expected one dependency status change, got: " <> show other
       blockedResp <- get_ app (uuidPath "/api/v1/tasks" t2.id)
       let Just blockedTask = decode (respBody blockedResp) :: Maybe Task
       blockedTask.status `shouldBe` Blocked
@@ -3038,9 +3051,192 @@ spec = around withApp $ do
       delResp <- del app (uuidPath "/api/v1/tasks" t2.id <> "/dependencies/"
                           <> encodeUtf8 (T.pack (show t1.id)))
       respStatus delResp `shouldBe` 200
+      let Just removeResult = decode (respBody delResp) :: Maybe DependencyMutationResult
+      removeResult.action `shouldBe` "remove"
+      case removeResult.affectedTasks of
+        [change] -> do
+          change.task.id `shouldBe` t2.id
+          change.previousStatus `shouldBe` Blocked
+          change.currentStatus `shouldBe` Todo
+          change.previousAutoBlocked `shouldBe` True
+          change.autoBlocked `shouldBe` False
+          change.previousOpenDependencyCount `shouldBe` 1
+          change.openDependencyCount `shouldBe` 0
+          change.reason `shouldBe` "unblocked_dependencies_resolved"
+        other -> expectationFailure $ "Expected one dependency removal status change, got: " <> show other
       unblockedResp <- get_ app (uuidPath "/api/v1/tasks" t2.id)
       let Just unblockedTask = decode (respBody unblockedResp) :: Maybe Task
       unblockedTask.status `shouldBe` Todo
+
+    it "returns dependency effects when completing a dependency" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("dep-complete-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Dep Complete" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+      dependencyResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependency" :: T.Text)])
+      let Just dependency = decode (respBody dependencyResp) :: Maybe Task
+      dependentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependent" :: T.Text)])
+      let Just dependent = decode (respBody dependentResp) :: Maybe Task
+
+      addResp <- postJSON app (uuidPath "/api/v1/tasks" dependent.id <> "/dependencies")
+        (object ["depends_on_id" .= dependency.id])
+      respStatus addResp `shouldBe` 200
+
+      completeResp <- putJSON app (uuidPath "/api/v1/tasks" dependency.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus completeResp `shouldBe` 200
+      let Just plainTask = decode (respBody completeResp) :: Maybe Task
+          Just mutationResult = decode (respBody completeResp) :: Maybe TaskMutationResult
+      plainTask.id `shouldBe` dependency.id
+      plainTask.status `shouldBe` Done
+      mutationResult.task.id `shouldBe` dependency.id
+      mutationResult.task.status `shouldBe` Done
+      case [change | change <- mutationResult.dependencyEffects, change.task.id == dependent.id] of
+        [change] -> do
+          change.previousStatus `shouldBe` Blocked
+          change.currentStatus `shouldBe` Todo
+          change.previousAutoBlocked `shouldBe` True
+          change.autoBlocked `shouldBe` False
+          change.previousOpenDependencyCount `shouldBe` 1
+          change.openDependencyCount `shouldBe` 0
+          change.reason `shouldBe` "unblocked_dependencies_resolved"
+        other -> expectationFailure $ "Expected one dependent dependency effect, got: " <> show other
+
+      dependentResp' <- get_ app (uuidPath "/api/v1/tasks" dependent.id)
+      let Just unblockedDependent = decode (respBody dependentResp') :: Maybe Task
+      unblockedDependent.status `shouldBe` Todo
+
+    it "reports partial dependency-count reasons while a task remains blocked" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("dep-partial-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Dep Partial" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+      dep1Resp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependency 1" :: T.Text)])
+      let Just dep1 = decode (respBody dep1Resp) :: Maybe Task
+      dep2Resp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependency 2" :: T.Text)])
+      let Just dep2 = decode (respBody dep2Resp) :: Maybe Task
+      dependentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependent" :: T.Text)])
+      let Just dependent = decode (respBody dependentResp) :: Maybe Task
+
+      firstAddResp <- postJSON app (uuidPath "/api/v1/tasks" dependent.id <> "/dependencies")
+        (object ["depends_on_id" .= dep1.id])
+      respStatus firstAddResp `shouldBe` 200
+      secondAddResp <- postJSON app (uuidPath "/api/v1/tasks" dependent.id <> "/dependencies")
+        (object ["depends_on_id" .= dep2.id])
+      respStatus secondAddResp `shouldBe` 200
+      let Just secondAddResult = decode (respBody secondAddResp) :: Maybe DependencyMutationResult
+      case secondAddResult.affectedTasks of
+        [change] -> do
+          change.task.id `shouldBe` dependent.id
+          change.previousStatus `shouldBe` Blocked
+          change.currentStatus `shouldBe` Blocked
+          change.previousOpenDependencyCount `shouldBe` 1
+          change.openDependencyCount `shouldBe` 2
+          change.reason `shouldBe` "open_dependency_added"
+        other -> expectationFailure $ "Expected one partial add effect, got: " <> show other
+
+      completeResp <- putJSON app (uuidPath "/api/v1/tasks" dep1.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus completeResp `shouldBe` 200
+      let Just mutationResult = decode (respBody completeResp) :: Maybe TaskMutationResult
+      case [change | change <- mutationResult.dependencyEffects, change.task.id == dependent.id] of
+        [change] -> do
+          change.previousStatus `shouldBe` Blocked
+          change.currentStatus `shouldBe` Blocked
+          change.previousAutoBlocked `shouldBe` True
+          change.autoBlocked `shouldBe` True
+          change.previousOpenDependencyCount `shouldBe` 2
+          change.openDependencyCount `shouldBe` 1
+          change.reason `shouldBe` "open_dependency_removed"
+        other -> expectationFailure $ "Expected one partial completion effect, got: " <> show other
+
+    it "emits task patches for dependency-triggered auto-block changes" $ \_ -> do
+      withTestEnv $ \env -> do
+        let principal = Principal
+              { actorType = ActorBot
+              , actorId = "dependency-event-bot"
+              , actorLabel = "Dependency Event Bot"
+              , authority = PrincipalSyntheticLocalSuperadmin
+              }
+        withCapturedBroadcastApp env principal $ \capturedApp eventsRef -> do
+          wsResp <- postJSON capturedApp "/api/v1/workspaces"
+            (object ["name" .= ("dep-event-ws" :: T.Text)])
+          let Just ws = decode (respBody wsResp) :: Maybe Workspace
+          projResp <- postJSON capturedApp "/api/v1/projects"
+            (object ["workspace_id" .= ws.id, "name" .= ("Dep Event" :: T.Text)])
+          let Just proj = decode (respBody projResp) :: Maybe Project
+          dependencyResp <- postJSON capturedApp "/api/v1/tasks"
+            (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependency" :: T.Text)])
+          let Just dependency = decode (respBody dependencyResp) :: Maybe Task
+          dependentResp <- postJSON capturedApp "/api/v1/tasks"
+            (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependent" :: T.Text)])
+          let Just dependent = decode (respBody dependentResp) :: Maybe Task
+
+          addResp <- postJSON capturedApp (uuidPath "/api/v1/tasks" dependent.id <> "/dependencies")
+            (object ["depends_on_id" .= dependency.id])
+          respStatus addResp `shouldBe` 200
+
+          events <- readIORef eventsRef
+          let taskDependencyEvents = [ev | ev <- events, ev.entityType == ETTaskDependency, ev.changeType == Created, ev.entityId == dependent.id]
+              taskPatchEvents = [ev | ev <- events, ev.entityType == ETTask, ev.changeType == Updated, ev.entityId == dependent.id]
+          length taskDependencyEvents `shouldBe` 1
+          length taskPatchEvents `shouldBe` 1
+          case taskPatchEvents of
+            [ChangeEvent { payload = Just payload }] -> do
+              let Just patchedTask = decode (encode payload) :: Maybe Task
+              patchedTask.status `shouldBe` Blocked
+            _ -> expectationFailure "Expected one task patch payload"
+
+    it "emits task patches for batch dependency completion" $ \_ -> do
+      withTestEnv $ \env -> do
+        let principal = Principal
+              { actorType = ActorBot
+              , actorId = "dependency-batch-event-bot"
+              , actorLabel = "Dependency Batch Event Bot"
+              , authority = PrincipalSyntheticLocalSuperadmin
+              }
+        withCapturedBroadcastApp env principal $ \capturedApp eventsRef -> do
+          wsResp <- postJSON capturedApp "/api/v1/workspaces"
+            (object ["name" .= ("dep-batch-event-ws" :: T.Text)])
+          let Just ws = decode (respBody wsResp) :: Maybe Workspace
+          projResp <- postJSON capturedApp "/api/v1/projects"
+            (object ["workspace_id" .= ws.id, "name" .= ("Dep Batch Event" :: T.Text)])
+          let Just proj = decode (respBody projResp) :: Maybe Project
+          dependencyResp <- postJSON capturedApp "/api/v1/tasks"
+            (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependency" :: T.Text)])
+          let Just dependency = decode (respBody dependencyResp) :: Maybe Task
+          dependentResp <- postJSON capturedApp "/api/v1/tasks"
+            (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependent" :: T.Text)])
+          let Just dependent = decode (respBody dependentResp) :: Maybe Task
+
+          addResp <- postJSON capturedApp (uuidPath "/api/v1/tasks" dependent.id <> "/dependencies")
+            (object ["depends_on_id" .= dependency.id])
+          respStatus addResp `shouldBe` 200
+          writeIORef eventsRef []
+
+          batchResp <- postJSON capturedApp "/api/v1/tasks/batch-update"
+            (object ["items" .= [object ["id" .= dependency.id, "status" .= ("done" :: T.Text)]]])
+          respStatus batchResp `shouldBe` 200
+          let Just batchResult = decode (respBody batchResp) :: Maybe BatchResult
+          batchResult.affected `shouldBe` 1
+
+          events <- readIORef eventsRef
+          let dependentPatchEvents = [ev | ev <- events, ev.entityType == ETTask, ev.changeType == Updated, ev.entityId == dependent.id]
+          length dependentPatchEvents `shouldBe` 1
+          case dependentPatchEvents of
+            [ChangeEvent { payload = Just payload }] -> do
+              let Just patchedTask = decode (encode payload) :: Maybe Task
+              patchedTask.status `shouldBe` Todo
+            _ -> expectationFailure "Expected one dependent task patch payload"
 
   describe "task overview endpoint" $ do
     it "returns dependency summaries and optional extra-context memories" $ \app -> do

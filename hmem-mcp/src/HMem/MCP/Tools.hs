@@ -249,7 +249,7 @@ toolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "task_update" "Update one or more tasks. For single: pass task_id + fields. For batch: pass items[] array (max 100) of {id, ...fields}. Use project_id and/or parent_id to reorganize; null clears those fields. Only top-level tasks may have direct subtasks; subtasks cannot have children, and a subtask can move to in_progress only when its parent is already in_progress. Moving a task across projects also moves its subtree." $ object
+    , mkTool "task_update" "Update one or more tasks. For single: pass task_id + fields; single-task responses include dependency_effects with affected task IDs, previous/current status, open dependency counts, and reasons when dependency auto-blocking changes because dependencies are completed or recomputed. For batch: pass items[] array (max 100) of {id, ...fields}. Use project_id and/or parent_id to reorganize; null clears those fields. Only top-level tasks may have direct subtasks; subtasks cannot have children, and a subtask can move to in_progress only when its parent is already in_progress. Moving a task across projects also moves its subtree." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id"     .= prop "string" "UUID of the task (single mode)"
@@ -419,7 +419,7 @@ toolDefinitions =
 
 
   -- Issue 3: Task dependencies
-    , mkTool "task_dependency" "Add or remove an ordering dependency between tasks. Use action 'add' to declare that the first task depends on the second (must complete before it). Use action 'remove' to delete the constraint. For parent/child hierarchy, use parent_id in task_create instead." $ object
+    , mkTool "task_dependency" "Add or remove an ordering dependency between tasks. Use action 'add' to declare that the first task depends on the second (must complete before it). Use action 'remove' to delete the constraint. Dependency changes may automatically move tasks to or from blocked status when open dependencies exist; the result includes affected task IDs, previous/current status, open dependency counts, and machine-readable reasons. For parent/child hierarchy, use parent_id in task_create instead." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "action"        .= propEnum "string" "Whether to add or remove the dependency" ["add", "remove"]

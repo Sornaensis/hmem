@@ -226,9 +226,11 @@ instance ToSchema SavedView              where declareNamedSchema = genericDecla
 instance ToSchema CreateSavedView        where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema UpdateSavedView        where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ProjectOverview        where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ProjectReadinessRollup where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema TaskDependencySummary  where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ConnectedMemorySummary where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema TaskOverview           where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TaskReadinessRollup    where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ContextInfo            where declareNamedSchema = genericDeclareNamedSchema opts
 
 instance ToSchema EntitySearchType       where

@@ -127,6 +127,8 @@ type alias MemoryModel =
 
 type alias DependenciesModel =
     { taskDependencies : Dict String (List Api.TaskDependencySummary)
+    , taskReadinessRollups : Dict String Api.TaskReadinessRollup
+    , projectReadinessRollups : Dict String Api.ProjectReadinessRollup
     , addingDependencyFor : Maybe AddDependencyState
     }
 
@@ -455,6 +457,7 @@ type Msg
     | CancelLinkEntity
       -- Task dependencies
     | GotTaskDependencies String (Result Http.Error Api.TaskOverview)
+    | GotProjectOverview String (Result Http.Error Api.ProjectOverview)
     | StartAddDependency String
     | DependencySearch String
     | PerformAddDependency String String

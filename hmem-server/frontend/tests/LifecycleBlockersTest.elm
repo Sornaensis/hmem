@@ -194,6 +194,32 @@ suite =
 
                     ( _, Err err ) ->
                         Expect.fail (Decode.errorToString err)
+        , test "overview readiness rollups decode for tasks and projects" <|
+            \_ ->
+                let
+                    taskOverviewBody =
+                        """{"task":{"id":"task-a","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Task A","description":null,"status":"todo","priority":5,"due_at":null,"completed_at":null,"dependency_count":1,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"dependencies":[],"connected_memories":[],"readiness_rollup":{"open_subtask_count":2,"done_subtask_count":3,"cancelled_subtask_count":1,"blocked_subtask_count":1,"dependency_blocked_task_count":1,"open_dependency_count":4,"completion_ready":false}}"""
+
+                    projectOverviewBody =
+                        """{"project":{"id":"project-a","workspace_id":"workspace-a","parent_id":null,"name":"Project A","description":null,"status":"active","priority":5,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"tasks":[],"subprojects":[],"linked_memories":[],"connected_memories":[],"readiness_rollup":{"open_project_count":1,"closed_project_count":2,"open_task_count":3,"done_task_count":4,"cancelled_task_count":1,"blocked_task_count":1,"dependency_blocked_task_count":1,"open_dependency_count":5,"completion_ready":false}}"""
+                in
+                case ( Decode.decodeString Api.taskOverviewDecoder taskOverviewBody, Decode.decodeString Api.projectOverviewDecoder projectOverviewBody ) of
+                    ( Ok taskOverview, Ok projectOverview ) ->
+                        [ taskOverview.readinessRollup.openSubtaskCount == 2
+                        , taskOverview.readinessRollup.openDependencyCount == 4
+                        , taskOverview.readinessRollup.completionReady == False
+                        , projectOverview.readinessRollup.openProjectCount == 1
+                        , projectOverview.readinessRollup.openTaskCount == 3
+                        , projectOverview.readinessRollup.openDependencyCount == 5
+                        , projectOverview.readinessRollup.completionReady == False
+                        ]
+                            |> Expect.equal (List.repeat 7 True)
+
+                    ( Err err, _ ) ->
+                        Expect.fail (Decode.errorToString err)
+
+                    ( _, Err err ) ->
+                        Expect.fail (Decode.errorToString err)
         ]
 
 

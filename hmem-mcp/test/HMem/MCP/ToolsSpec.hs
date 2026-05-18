@@ -1201,6 +1201,18 @@ spec = do
       taskOverviewProps <- requireJust "task_overview properties" (objectField "properties" taskOverviewSchema)
       objectField "extra_context" taskOverviewProps `shouldSatisfy` (/= Nothing)
 
+    it "documents readiness rollups in overview tools" $ do
+      let overviewDescriptions name =
+            [ desc
+            | Object tool <- toolDefinitions
+            , textField "name" (Object tool) == Just name
+            , Just desc <- [textField "description" (Object tool)]
+            ]
+      overviewDescriptions "task_overview" `shouldSatisfy` any (T.isInfixOf "readiness_rollup")
+      overviewDescriptions "task_overview" `shouldSatisfy` any (T.isInfixOf "open/done/cancelled/blocked subtasks")
+      overviewDescriptions "project_overview" `shouldSatisfy` any (T.isInfixOf "readiness_rollup")
+      overviewDescriptions "project_overview" `shouldSatisfy` any (T.isInfixOf "open/closed subprojects")
+
     it "documents dependency auto-block effects for task_dependency" $ do
       let descriptions =
             [ desc

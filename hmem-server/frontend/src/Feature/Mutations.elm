@@ -49,7 +49,7 @@ update msg model =
                         ( toastedModel, toastCmd ) =
                             addToast Success ("Created project: " ++ proj.name) trackedModel
                     in
-                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
+                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd, refreshReadinessCaches toastedModel ] )
 
                 Err err ->
                     handleApiMutationError "Failed to create project" err model
@@ -76,7 +76,7 @@ update msg model =
                         ( toastedModel, toastCmd ) =
                             addToast Success ("Created task: " ++ task.title) trackedModel
                     in
-                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
+                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd, refreshReadinessCaches toastedModel ] )
 
                 Err err ->
                     handleApiMutationError "Failed to create task" err model
@@ -143,7 +143,7 @@ update msg model =
                             trackLocalMutation proj.id
                                 { model | projects = Dict.insert proj.id proj model.projects }
                     in
-                    ( trackedModel, trackCmd )
+                    ( trackedModel, Cmd.batch [ trackCmd, refreshReadinessCaches trackedModel ] )
 
                 Err err ->
                     handleApiMutationError "Failed to update project" err model
@@ -158,7 +158,7 @@ update msg model =
                         ( trackedModel, trackCmd ) =
                             trackLocalMutations (taskMutationResultIds mutationResult) updatedModel
                     in
-                    ( trackedModel, trackCmd )
+                    ( trackedModel, Cmd.batch [ trackCmd, refreshReadinessCaches trackedModel ] )
 
                 Err err ->
                     handleApiMutationError "Failed to update task" err model
@@ -210,6 +210,20 @@ update msg model =
 refreshAfterMutation : Model -> ( Model, Cmd Msg )
 refreshAfterMutation model =
     beginWorkspaceDataReload False model
+
+
+refreshReadinessCaches : Model -> Cmd Msg
+refreshReadinessCaches model =
+    Cmd.batch
+        [ model.dependencies.taskDependencies
+            |> Dict.keys
+            |> List.map (\taskId -> Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId))
+            |> Cmd.batch
+        , model.dependencies.projectReadinessRollups
+            |> Dict.keys
+            |> List.map (\projectId -> Api.fetchProjectOverview model.flags.apiUrl projectId (GotProjectOverview projectId))
+            |> Cmd.batch
+        ]
 
 
 updateMutationsModel : (MutationsModel -> MutationsModel) -> Model -> Model

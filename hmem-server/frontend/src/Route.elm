@@ -228,6 +228,8 @@ handleUrlChange url model =
                     updatedDependencies =
                         { currentDependencies
                             | taskDependencies = Dict.empty
+                            , taskReadinessRollups = Dict.empty
+                            , projectReadinessRollups = Dict.empty
                             , addingDependencyFor = Nothing
                         }
 

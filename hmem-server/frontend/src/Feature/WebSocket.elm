@@ -223,15 +223,32 @@ applyChangeEvent event model =
         Api.EProject ->
             case event.changeType of
                 Api.Deleted ->
-                    ( { model | projects = Dict.remove event.entityId model.projects }
-                    , maybeGraphRefresh model
+                    let
+                        currentDependencies =
+                            model.dependencies
+
+                        updatedModel =
+                            { model
+                                | projects = Dict.remove event.entityId model.projects
+                                , dependencies =
+                                    { currentDependencies
+                                        | projectReadinessRollups = Dict.remove event.entityId currentDependencies.projectReadinessRollups
+                                    }
+                            }
+                    in
+                    ( updatedModel
+                    , Cmd.batch [ maybeGraphRefresh updatedModel, refreshReadinessCaches updatedModel ]
                     )
 
                 _ ->
                     case Maybe.andThen (tryDecode Api.projectDecoder) event.payload of
                         Just proj ->
-                            ( { model | projects = Dict.insert proj.id proj model.projects }
-                            , maybeGraphRefresh model
+                            let
+                                updatedModel =
+                                    { model | projects = Dict.insert proj.id proj model.projects }
+                            in
+                            ( updatedModel
+                            , Cmd.batch [ maybeGraphRefresh updatedModel, refreshReadinessCaches updatedModel ]
                             )
 
                         Nothing ->
@@ -258,17 +275,27 @@ applyChangeEvent event model =
                             model.dependencies
 
                         updatedDependencies =
-                            { currentDependencies | taskDependencies = Dict.remove event.entityId model.dependencies.taskDependencies }
+                            { currentDependencies
+                                | taskDependencies = Dict.remove event.entityId model.dependencies.taskDependencies
+                                , taskReadinessRollups = Dict.remove event.entityId model.dependencies.taskReadinessRollups
+                            }
+
+                        updatedModel =
+                            { model | tasks = Dict.remove event.entityId model.tasks, dependencies = updatedDependencies }
                     in
-                    ( { model | tasks = Dict.remove event.entityId model.tasks, dependencies = updatedDependencies }
-                    , Cmd.batch [ maybeGraphRefresh model, refreshTaskDependencyCaches model ]
+                    ( updatedModel
+                    , Cmd.batch [ maybeGraphRefresh updatedModel, refreshReadinessCaches updatedModel ]
                     )
 
                 _ ->
                     case Maybe.andThen (tryDecode Api.taskDecoder) event.payload of
                         Just task ->
-                            ( { model | tasks = Dict.insert task.id task model.tasks }
-                            , Cmd.batch [ maybeGraphRefresh model, refreshTaskDependencyCaches model ]
+                            let
+                                updatedModel =
+                                    { model | tasks = Dict.insert task.id task model.tasks }
+                            in
+                            ( updatedModel
+                            , Cmd.batch [ maybeGraphRefresh updatedModel, refreshReadinessCaches updatedModel ]
                             )
 
                         Nothing ->
@@ -368,6 +395,8 @@ applyChangeEvent event model =
             ( patchedModel
             , Cmd.batch
                 [ Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId)
+                , refreshTaskReadinessCaches patchedModel
+                , refreshProjectReadinessCaches patchedModel
                 , reloadCmd
                 , graphCmd
                 ]
@@ -469,7 +498,7 @@ requiresSelfRefresh event =
             event.changeType == Api.Deleted
 
         Api.EProject ->
-            payloadField "linked_memory" event.payload /= Nothing || payloadField "unlinked_memory" event.payload /= Nothing
+            event.changeType == Api.Deleted || payloadField "linked_memory" event.payload /= Nothing || payloadField "unlinked_memory" event.payload /= Nothing
 
         Api.ETask ->
             event.changeType == Api.Deleted || payloadField "linked_memory" event.payload /= Nothing || payloadField "unlinked_memory" event.payload /= Nothing
@@ -532,15 +561,36 @@ refreshCachedEntityData model =
             model.dependencies.taskDependencies
                 |> Dict.keys
                 |> List.map (\taskId -> Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId))
+
+        projectReadinessCmds =
+            model.dependencies.projectReadinessRollups
+                |> Dict.keys
+                |> List.map (\projectId -> Api.fetchProjectOverview model.flags.apiUrl projectId (GotProjectOverview projectId))
     in
-    Cmd.batch (entityMemoryCmds ++ dependencyCmds)
+    Cmd.batch (entityMemoryCmds ++ dependencyCmds ++ projectReadinessCmds)
 
 
-refreshTaskDependencyCaches : Model -> Cmd Msg
-refreshTaskDependencyCaches model =
+refreshReadinessCaches : Model -> Cmd Msg
+refreshReadinessCaches model =
+    Cmd.batch
+        [ refreshTaskReadinessCaches model
+        , refreshProjectReadinessCaches model
+        ]
+
+
+refreshTaskReadinessCaches : Model -> Cmd Msg
+refreshTaskReadinessCaches model =
     model.dependencies.taskDependencies
         |> Dict.keys
         |> List.map (\taskId -> Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId))
+        |> Cmd.batch
+
+
+refreshProjectReadinessCaches : Model -> Cmd Msg
+refreshProjectReadinessCaches model =
+    model.dependencies.projectReadinessRollups
+        |> Dict.keys
+        |> List.map (\projectId -> Api.fetchProjectOverview model.flags.apiUrl projectId (GotProjectOverview projectId))
         |> Cmd.batch
 
 

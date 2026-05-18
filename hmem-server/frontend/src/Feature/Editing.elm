@@ -601,6 +601,13 @@ update msg model =
                     else
                         Cmd.none
 
+                fetchProjectOverviewCmd =
+                    if Dict.member cardId model.projects && not (Dict.member cardId model.dependencies.projectReadinessRollups) then
+                        Api.fetchProjectOverview model.flags.apiUrl cardId (GotProjectOverview cardId)
+
+                    else
+                        Cmd.none
+
                 currentCards =
                     model.cards
 
@@ -625,7 +632,7 @@ update msg model =
                                     )
                         }
                     )
-            , Cmd.batch [ saveCmd, focusElement (editElementId entityId field), fetchMemCmd, fetchDepCmd ]
+            , Cmd.batch [ saveCmd, focusElement (editElementId entityId field), fetchMemCmd, fetchDepCmd, fetchProjectOverviewCmd ]
             )
 
         _ ->

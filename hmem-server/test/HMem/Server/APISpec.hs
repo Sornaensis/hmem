@@ -3311,12 +3311,98 @@ spec = around withApp $ do
       map (.name) overview.dependencies `shouldBe` ["Dependency"]
       map (.scope) overview.connectedMemories `shouldBe` [ScopeTask]
       map (.id) overview.connectedMemories `shouldBe` [taskMem.id]
+      overview.readinessRollup.openSubtaskCount `shouldBe` 0
+      overview.readinessRollup.dependencyBlockedTaskCount `shouldBe` 1
+      overview.readinessRollup.openDependencyCount `shouldBe` 1
+      overview.readinessRollup.completionReady `shouldBe` True
 
       extraResp <- get_ app (uuidPath "/api/v1/tasks" task.id <> "/overview?extra_context=true")
       respStatus extraResp `shouldBe` 200
       let Just extraOverview = decode (respBody extraResp) :: Maybe TaskOverview
       map (.scope) extraOverview.connectedMemories `shouldBe` [ScopeTask, ScopeProject, ScopeWorkspace]
       map (.id) extraOverview.connectedMemories `shouldBe` [taskMem.id, projectMem.id, workspaceMem.id]
+
+    it "computes task readiness rollups from subtasks and dependency changes" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-rollup-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Task Rollup Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Parent" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Task
+
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= parent.id, "title" .= ("Child" :: T.Text)])
+      let Just child = decode (respBody childResp) :: Maybe Task
+
+      dependencyResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Open Dependency" :: T.Text)])
+      let Just dependency = decode (respBody dependencyResp) :: Maybe Task
+
+      addDepResp <- postJSON app (uuidPath "/api/v1/tasks" child.id <> "/dependencies")
+        (object ["depends_on_id" .= dependency.id])
+      respStatus addDepResp `shouldBe` 200
+
+      blockedOverviewResp <- get_ app (uuidPath "/api/v1/tasks" parent.id <> "/overview")
+      respStatus blockedOverviewResp `shouldBe` 200
+      let Just blockedOverview = decode (respBody blockedOverviewResp) :: Maybe TaskOverview
+      blockedOverview.readinessRollup.openSubtaskCount `shouldBe` 1
+      blockedOverview.readinessRollup.blockedSubtaskCount `shouldBe` 1
+      blockedOverview.readinessRollup.dependencyBlockedTaskCount `shouldBe` 1
+      blockedOverview.readinessRollup.openDependencyCount `shouldBe` 1
+      blockedOverview.readinessRollup.completionReady `shouldBe` False
+
+      dependencyDoneResp <- putJSON app (uuidPath "/api/v1/tasks" dependency.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus dependencyDoneResp `shouldBe` 200
+
+      unblockedOverviewResp <- get_ app (uuidPath "/api/v1/tasks" parent.id <> "/overview")
+      respStatus unblockedOverviewResp `shouldBe` 200
+      let Just unblockedOverview = decode (respBody unblockedOverviewResp) :: Maybe TaskOverview
+      unblockedOverview.readinessRollup.openSubtaskCount `shouldBe` 1
+      unblockedOverview.readinessRollup.blockedSubtaskCount `shouldBe` 0
+      unblockedOverview.readinessRollup.openDependencyCount `shouldBe` 0
+      unblockedOverview.readinessRollup.completionReady `shouldBe` False
+
+      childDoneResp <- putJSON app (uuidPath "/api/v1/tasks" child.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus childDoneResp `shouldBe` 200
+
+      readyOverviewResp <- get_ app (uuidPath "/api/v1/tasks" parent.id <> "/overview")
+      respStatus readyOverviewResp `shouldBe` 200
+      let Just readyOverview = decode (respBody readyOverviewResp) :: Maybe TaskOverview
+      readyOverview.readinessRollup.openSubtaskCount `shouldBe` 0
+      readyOverview.readinessRollup.doneSubtaskCount `shouldBe` 1
+      readyOverview.readinessRollup.completionReady `shouldBe` True
+
+      cancelledChildResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= parent.id, "title" .= ("Cancelled Child" :: T.Text)])
+      let Just cancelledChild = decode (respBody cancelledChildResp) :: Maybe Task
+
+      cancelledDependencyResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Still Open Dependency" :: T.Text)])
+      let Just cancelledDependency = decode (respBody cancelledDependencyResp) :: Maybe Task
+
+      addCancelledDepResp <- postJSON app (uuidPath "/api/v1/tasks" cancelledChild.id <> "/dependencies")
+        (object ["depends_on_id" .= cancelledDependency.id])
+      respStatus addCancelledDepResp `shouldBe` 200
+
+      cancelChildResp <- putJSON app (uuidPath "/api/v1/tasks" cancelledChild.id)
+        (object ["status" .= ("cancelled" :: T.Text)])
+      respStatus cancelChildResp `shouldBe` 200
+
+      cancelledOverviewResp <- get_ app (uuidPath "/api/v1/tasks" parent.id <> "/overview")
+      respStatus cancelledOverviewResp `shouldBe` 200
+      let Just cancelledOverview = decode (respBody cancelledOverviewResp) :: Maybe TaskOverview
+      cancelledOverview.readinessRollup.openSubtaskCount `shouldBe` 0
+      cancelledOverview.readinessRollup.cancelledSubtaskCount `shouldBe` 1
+      cancelledOverview.readinessRollup.dependencyBlockedTaskCount `shouldBe` 0
+      cancelledOverview.readinessRollup.openDependencyCount `shouldBe` 0
+      cancelledOverview.readinessRollup.completionReady `shouldBe` True
 
     it "returns project overview with optional extra-context workspace memories" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"
@@ -3368,12 +3454,110 @@ spec = around withApp $ do
       map (.id) overview.linkedMemories `shouldBe` [projectMem.id]
       map (.scope) overview.connectedMemories `shouldBe` [ScopeProject]
       map (.id) overview.connectedMemories `shouldBe` [projectMem.id]
+      overview.readinessRollup.openProjectCount `shouldBe` 0
+      overview.readinessRollup.openTaskCount `shouldBe` 1
+      overview.readinessRollup.doneTaskCount `shouldBe` 0
+      overview.readinessRollup.completionReady `shouldBe` False
 
       extraProjectResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/overview?extra_context=true")
       respStatus extraProjectResp `shouldBe` 200
       let Just extraProjectOverview = decode (respBody extraProjectResp) :: Maybe ProjectOverview
       map (.scope) extraProjectOverview.connectedMemories `shouldBe` [ScopeProject, ScopeWorkspace]
       map (.id) extraProjectOverview.connectedMemories `shouldBe` [projectMem.id, workspaceMem.id]
+
+    it "computes project readiness rollups from subprojects, tasks, and dependency changes" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("project-rollup-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      rootResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Root Rollup Project" :: T.Text)])
+      let Just root = decode (respBody rootResp) :: Maybe Project
+
+      childProjectResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "parent_id" .= root.id, "name" .= ("Child Rollup Project" :: T.Text)])
+      let Just childProject = decode (respBody childProjectResp) :: Maybe Project
+
+      dependencyResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= childProject.id, "title" .= ("Project Dependency" :: T.Text)])
+      let Just dependency = decode (respBody dependencyResp) :: Maybe Task
+
+      taskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= root.id, "title" .= ("Project Task" :: T.Text)])
+      let Just task = decode (respBody taskResp) :: Maybe Task
+
+      addDepResp <- postJSON app (uuidPath "/api/v1/tasks" task.id <> "/dependencies")
+        (object ["depends_on_id" .= dependency.id])
+      respStatus addDepResp `shouldBe` 200
+
+      blockedOverviewResp <- get_ app (uuidPath "/api/v1/projects" root.id <> "/overview")
+      respStatus blockedOverviewResp `shouldBe` 200
+      let Just blockedOverview = decode (respBody blockedOverviewResp) :: Maybe ProjectOverview
+      blockedOverview.readinessRollup.openProjectCount `shouldBe` 1
+      blockedOverview.readinessRollup.openTaskCount `shouldBe` 2
+      blockedOverview.readinessRollup.blockedTaskCount `shouldBe` 1
+      blockedOverview.readinessRollup.dependencyBlockedTaskCount `shouldBe` 1
+      blockedOverview.readinessRollup.openDependencyCount `shouldBe` 1
+      blockedOverview.readinessRollup.completionReady `shouldBe` False
+
+      dependencyDoneResp <- putJSON app (uuidPath "/api/v1/tasks" dependency.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus dependencyDoneResp `shouldBe` 200
+
+      unblockedOverviewResp <- get_ app (uuidPath "/api/v1/projects" root.id <> "/overview")
+      respStatus unblockedOverviewResp `shouldBe` 200
+      let Just unblockedOverview = decode (respBody unblockedOverviewResp) :: Maybe ProjectOverview
+      unblockedOverview.readinessRollup.openTaskCount `shouldBe` 1
+      unblockedOverview.readinessRollup.doneTaskCount `shouldBe` 1
+      unblockedOverview.readinessRollup.openDependencyCount `shouldBe` 0
+      unblockedOverview.readinessRollup.completionReady `shouldBe` False
+
+      taskDoneResp <- putJSON app (uuidPath "/api/v1/tasks" task.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus taskDoneResp `shouldBe` 200
+
+      tasksDoneOverviewResp <- get_ app (uuidPath "/api/v1/projects" root.id <> "/overview")
+      respStatus tasksDoneOverviewResp `shouldBe` 200
+      let Just tasksDoneOverview = decode (respBody tasksDoneOverviewResp) :: Maybe ProjectOverview
+      tasksDoneOverview.readinessRollup.openProjectCount `shouldBe` 1
+      tasksDoneOverview.readinessRollup.openTaskCount `shouldBe` 0
+      tasksDoneOverview.readinessRollup.doneTaskCount `shouldBe` 2
+      tasksDoneOverview.readinessRollup.completionReady `shouldBe` False
+
+      childProjectDoneResp <- putJSON app (uuidPath "/api/v1/projects" childProject.id)
+        (object ["status" .= ("completed" :: T.Text)])
+      respStatus childProjectDoneResp `shouldBe` 200
+
+      readyOverviewResp <- get_ app (uuidPath "/api/v1/projects" root.id <> "/overview")
+      respStatus readyOverviewResp `shouldBe` 200
+      let Just readyOverview = decode (respBody readyOverviewResp) :: Maybe ProjectOverview
+      readyOverview.readinessRollup.openProjectCount `shouldBe` 0
+      readyOverview.readinessRollup.closedProjectCount `shouldBe` 1
+      readyOverview.readinessRollup.completionReady `shouldBe` True
+
+      cancelledDependencyResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= root.id, "title" .= ("Cancelled Project Dependency" :: T.Text)])
+      let Just cancelledDependency = decode (respBody cancelledDependencyResp) :: Maybe Task
+
+      cancelledTaskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= root.id, "title" .= ("Cancelled Project Task" :: T.Text)])
+      let Just cancelledTask = decode (respBody cancelledTaskResp) :: Maybe Task
+
+      addCancelledDepResp <- postJSON app (uuidPath "/api/v1/tasks" cancelledTask.id <> "/dependencies")
+        (object ["depends_on_id" .= cancelledDependency.id])
+      respStatus addCancelledDepResp `shouldBe` 200
+
+      cancelTaskResp <- putJSON app (uuidPath "/api/v1/tasks" cancelledTask.id)
+        (object ["status" .= ("cancelled" :: T.Text)])
+      respStatus cancelTaskResp `shouldBe` 200
+
+      cancelledOverviewResp <- get_ app (uuidPath "/api/v1/projects" root.id <> "/overview")
+      respStatus cancelledOverviewResp `shouldBe` 200
+      let Just cancelledOverview = decode (respBody cancelledOverviewResp) :: Maybe ProjectOverview
+      cancelledOverview.readinessRollup.openTaskCount `shouldBe` 1
+      cancelledOverview.readinessRollup.cancelledTaskCount `shouldBe` 1
+      cancelledOverview.readinessRollup.dependencyBlockedTaskCount `shouldBe` 0
+      cancelledOverview.readinessRollup.openDependencyCount `shouldBe` 0
 
     it "returns deterministic project next tasks with dependency and descendant blockers" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"

@@ -14,8 +14,12 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
+import Data.ByteString.Char8 qualified as BS8
 import Hasql.Connection qualified as Hasql
+import Hasql.Decoders qualified as Dec
+import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import Rel8 hiding (filter, null)
 
 import HMem.DB.Memory qualified as Mem
@@ -57,10 +61,12 @@ getTaskOverview pool taskId extraContext = do
             <> [ memoryCandidateFromMemory ScopeProject memory | memory <- projectMemories ]
             <> workspaceMemories
           connectedMemories = summarizeCandidates candidates
+      readinessRollup <- getTaskReadinessRollup pool taskId
       pure $ Just TaskOverview
         { task = task
         , dependencies = dependencies
         , connectedMemories = connectedMemories
+        , readinessRollup = readinessRollup
         }
 
 -- | Retrieve context info for a task, with memories grouped by scope
@@ -138,13 +144,157 @@ getProjectOverview pool projId extraContext = do
             [ memoryCandidateFromMemory ScopeProject memory | memory <- directMemories ]
             <> workspaceMemories
           connectedMemories = summarizeCandidates candidates
+      readinessRollup <- getProjectReadinessRollup pool projId
       pure $ Just ProjectOverview
         { project = proj
         , tasks = tasks
         , subprojects = childProjects
         , linkedMemories = directMemories
         , connectedMemories = connectedMemories
+        , readinessRollup = readinessRollup
         }
+
+getTaskReadinessRollup :: Pool Hasql.Connection -> UUID -> IO TaskReadinessRollup
+getTaskReadinessRollup pool taskId =
+  runSession pool $ Session.statement taskId taskReadinessRollupStatement
+
+taskReadinessRollupStatement :: Statement.Statement UUID TaskReadinessRollup
+taskReadinessRollupStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE task_tree(id, parent_id, status) AS ("
+      , "  SELECT id, parent_id, status"
+      , "    FROM tasks"
+      , "   WHERE id = $1"
+      , "     AND deleted_at IS NULL"
+      , "  UNION"
+      , "  SELECT child.id, child.parent_id, child.status"
+      , "    FROM tasks child"
+      , "    JOIN task_tree parent ON child.parent_id = parent.id"
+      , "   WHERE child.deleted_at IS NULL"
+      , "),"
+      , "desc_tasks AS ("
+      , "  SELECT * FROM task_tree WHERE id <> $1"
+      , "),"
+      , "open_dependency_edges AS ("
+      , "  SELECT DISTINCT tree.id AS task_id, dep.id AS dep_id"
+      , "    FROM task_tree tree"
+      , "    JOIN task_dependencies dep_link ON dep_link.task_id = tree.id"
+      , "    JOIN tasks dep ON dep.id = dep_link.depends_on_id"
+      , "   WHERE dep.deleted_at IS NULL"
+      , "     AND hmem_is_open_task_status(tree.status)"
+      , "     AND hmem_is_open_task_status(dep.status)"
+      , ")"
+      , "SELECT (SELECT count(*)::bigint FROM desc_tasks WHERE hmem_is_open_task_status(status)),"
+      , "       (SELECT count(*)::bigint FROM desc_tasks WHERE status = 'done'::task_status_enum),"
+      , "       (SELECT count(*)::bigint FROM desc_tasks WHERE status = 'cancelled'::task_status_enum),"
+      , "       (SELECT count(*)::bigint FROM desc_tasks WHERE status = 'blocked'::task_status_enum),"
+      , "       (SELECT count(DISTINCT task_id)::bigint FROM open_dependency_edges),"
+      , "       (SELECT count(*)::bigint FROM open_dependency_edges),"
+      , "       NOT EXISTS (SELECT 1 FROM desc_tasks WHERE hmem_is_open_task_status(status))"
+      ]
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.singleRow taskReadinessRollupRowDecoder
+
+taskReadinessRollupRowDecoder :: Dec.Row TaskReadinessRollup
+taskReadinessRollupRowDecoder = do
+  openSubtaskCount <- Dec.column (Dec.nonNullable Dec.int8)
+  doneSubtaskCount <- Dec.column (Dec.nonNullable Dec.int8)
+  cancelledSubtaskCount <- Dec.column (Dec.nonNullable Dec.int8)
+  blockedSubtaskCount <- Dec.column (Dec.nonNullable Dec.int8)
+  dependencyBlockedTaskCount <- Dec.column (Dec.nonNullable Dec.int8)
+  openDependencyCount <- Dec.column (Dec.nonNullable Dec.int8)
+  completionReady <- Dec.column (Dec.nonNullable Dec.bool)
+  pure TaskReadinessRollup
+    { openSubtaskCount = fromIntegral openSubtaskCount
+    , doneSubtaskCount = fromIntegral doneSubtaskCount
+    , cancelledSubtaskCount = fromIntegral cancelledSubtaskCount
+    , blockedSubtaskCount = fromIntegral blockedSubtaskCount
+    , dependencyBlockedTaskCount = fromIntegral dependencyBlockedTaskCount
+    , openDependencyCount = fromIntegral openDependencyCount
+    , completionReady = completionReady
+    }
+
+getProjectReadinessRollup :: Pool Hasql.Connection -> UUID -> IO ProjectReadinessRollup
+getProjectReadinessRollup pool projectId =
+  runSession pool $ Session.statement projectId projectReadinessRollupStatement
+
+projectReadinessRollupStatement :: Statement.Statement UUID ProjectReadinessRollup
+projectReadinessRollupStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE project_tree(id, parent_id, status, workspace_id) AS ("
+      , "  SELECT id, parent_id, status, workspace_id"
+      , "    FROM projects"
+      , "   WHERE id = $1"
+      , "     AND deleted_at IS NULL"
+      , "  UNION"
+      , "  SELECT child.id, child.parent_id, child.status, child.workspace_id"
+      , "    FROM projects child"
+      , "    JOIN project_tree parent ON child.parent_id = parent.id"
+      , "   WHERE child.deleted_at IS NULL"
+      , "     AND child.workspace_id = parent.workspace_id"
+      , "),"
+      , "desc_projects AS ("
+      , "  SELECT * FROM project_tree WHERE id <> $1"
+      , "),"
+      , "task_tree(id, parent_id, status) AS ("
+      , "  SELECT t.id, t.parent_id, t.status"
+      , "    FROM tasks t"
+      , "    JOIN project_tree project ON t.project_id = project.id"
+      , "   WHERE t.deleted_at IS NULL"
+      , "     AND t.workspace_id = project.workspace_id"
+      , "  UNION"
+      , "  SELECT child.id, child.parent_id, child.status"
+      , "    FROM tasks child"
+      , "    JOIN task_tree parent ON child.parent_id = parent.id"
+      , "   WHERE child.deleted_at IS NULL"
+      , "),"
+      , "open_dependency_edges AS ("
+      , "  SELECT DISTINCT tree.id AS task_id, dep.id AS dep_id"
+      , "    FROM task_tree tree"
+      , "    JOIN task_dependencies dep_link ON dep_link.task_id = tree.id"
+      , "    JOIN tasks dep ON dep.id = dep_link.depends_on_id"
+      , "   WHERE dep.deleted_at IS NULL"
+      , "     AND hmem_is_open_task_status(tree.status)"
+      , "     AND hmem_is_open_task_status(dep.status)"
+      , ")"
+      , "SELECT (SELECT count(*)::bigint FROM desc_projects WHERE status IN ('active'::project_status_enum, 'paused'::project_status_enum)),"
+      , "       (SELECT count(*)::bigint FROM desc_projects WHERE status IN ('completed'::project_status_enum, 'archived'::project_status_enum)),"
+      , "       (SELECT count(*)::bigint FROM task_tree WHERE hmem_is_open_task_status(status)),"
+      , "       (SELECT count(*)::bigint FROM task_tree WHERE status = 'done'::task_status_enum),"
+      , "       (SELECT count(*)::bigint FROM task_tree WHERE status = 'cancelled'::task_status_enum),"
+      , "       (SELECT count(*)::bigint FROM task_tree WHERE status = 'blocked'::task_status_enum),"
+      , "       (SELECT count(DISTINCT task_id)::bigint FROM open_dependency_edges),"
+      , "       (SELECT count(*)::bigint FROM open_dependency_edges),"
+      , "       NOT EXISTS (SELECT 1 FROM desc_projects WHERE status IN ('active'::project_status_enum, 'paused'::project_status_enum))"
+      , "       AND NOT EXISTS (SELECT 1 FROM task_tree WHERE hmem_is_open_task_status(status))"
+      ]
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.singleRow projectReadinessRollupRowDecoder
+
+projectReadinessRollupRowDecoder :: Dec.Row ProjectReadinessRollup
+projectReadinessRollupRowDecoder = do
+  openProjectCount <- Dec.column (Dec.nonNullable Dec.int8)
+  closedProjectCount <- Dec.column (Dec.nonNullable Dec.int8)
+  openTaskCount <- Dec.column (Dec.nonNullable Dec.int8)
+  doneTaskCount <- Dec.column (Dec.nonNullable Dec.int8)
+  cancelledTaskCount <- Dec.column (Dec.nonNullable Dec.int8)
+  blockedTaskCount <- Dec.column (Dec.nonNullable Dec.int8)
+  dependencyBlockedTaskCount <- Dec.column (Dec.nonNullable Dec.int8)
+  openDependencyCount <- Dec.column (Dec.nonNullable Dec.int8)
+  completionReady <- Dec.column (Dec.nonNullable Dec.bool)
+  pure ProjectReadinessRollup
+    { openProjectCount = fromIntegral openProjectCount
+    , closedProjectCount = fromIntegral closedProjectCount
+    , openTaskCount = fromIntegral openTaskCount
+    , doneTaskCount = fromIntegral doneTaskCount
+    , cancelledTaskCount = fromIntegral cancelledTaskCount
+    , blockedTaskCount = fromIntegral blockedTaskCount
+    , dependencyBlockedTaskCount = fromIntegral dependencyBlockedTaskCount
+    , openDependencyCount = fromIntegral openDependencyCount
+    , completionReady = completionReady
+    }
 
 listTaskDependencySummaries :: Pool Hasql.Connection -> UUID -> IO [TaskDependencySummary]
 listTaskDependencySummaries pool taskId = do

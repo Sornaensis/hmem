@@ -343,6 +343,9 @@ update msg model =
         GotTaskDependencies _ _ ->
             Ok (Feature.Dependencies.update msg model)
 
+        GotProjectOverview _ _ ->
+            Ok (Feature.Dependencies.update msg model)
+
         StartAddDependency _ ->
             Ok (Feature.Dependencies.update msg model)
 

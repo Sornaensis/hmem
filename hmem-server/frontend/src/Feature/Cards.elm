@@ -78,6 +78,13 @@ update msg model =
                     else
                         Cmd.none
 
+                fetchProjectOverviewCmd =
+                    if newExpanded && Dict.member cardId model.projects && not (Dict.member cardId model.dependencies.projectReadinessRollups) then
+                        Api.fetchProjectOverview model.flags.apiUrl cardId (GotProjectOverview cardId)
+
+                    else
+                        Cmd.none
+
                 currentCards =
                     model.cards
 
@@ -94,7 +101,7 @@ update msg model =
                 | cards = updatedCards
                 , editing = updatedEditing
               }
-            , Cmd.batch [ fetchMemCmd, fetchDepCmd ]
+            , Cmd.batch [ fetchMemCmd, fetchDepCmd, fetchProjectOverviewCmd ]
             )
 
         ToggleTreeNode nodeId ->
@@ -206,8 +213,21 @@ update msg model =
                         ( toastedModel, toastCmd ) =
                             addToast Success (cascadeDeleteSuccessMessage confirmation cascade) model
 
+                        currentDependencies =
+                            toastedModel.dependencies
+
+                        cacheClearedModel =
+                            { toastedModel
+                                | dependencies =
+                                    { currentDependencies
+                                        | taskDependencies = Dict.empty
+                                        , taskReadinessRollups = Dict.empty
+                                        , projectReadinessRollups = Dict.empty
+                                    }
+                            }
+
                         ( reloadedModel, reloadCmd ) =
-                            beginWorkspaceDataReload False toastedModel
+                            beginWorkspaceDataReload False cacheClearedModel
                     in
                     ( reloadedModel, Cmd.batch [ toastCmd, reloadCmd ] )
 
@@ -216,8 +236,21 @@ update msg model =
                         ( toastedModel, toastCmd ) =
                             addToast Error (Api.apiErrorToUserMessage (cascadeDeleteFailureFallback confirmation) err) model
 
+                        currentDependencies =
+                            toastedModel.dependencies
+
+                        cacheClearedModel =
+                            { toastedModel
+                                | dependencies =
+                                    { currentDependencies
+                                        | taskDependencies = Dict.empty
+                                        , taskReadinessRollups = Dict.empty
+                                        , projectReadinessRollups = Dict.empty
+                                    }
+                            }
+
                         ( reloadedModel, reloadCmd ) =
-                            beginWorkspaceDataReload False toastedModel
+                            beginWorkspaceDataReload False cacheClearedModel
                     in
                     ( reloadedModel, Cmd.batch [ toastCmd, reloadCmd ] )
 
@@ -861,13 +894,21 @@ viewProjectNode allProjects model depth project hasSearch query =
         linkedMems =
             Dict.get project.id model.memory.entityMemories |> Maybe.withDefault []
 
+        maybeProjectRollup =
+            Dict.get project.id model.dependencies.projectReadinessRollups
+
         projectSubtreeIds =
             collectDescendantProjectIds allProjects project.id
 
-        openSubprojectCount =
+        localOpenSubprojectCount =
             allProjects
                 |> List.filter (\p -> p.id /= project.id && List.member p.id projectSubtreeIds && isOpenProjectStatus p.status)
                 |> List.length
+
+        openSubprojectCount =
+            maybeProjectRollup
+                |> Maybe.map .openProjectCount
+                |> Maybe.withDefault localOpenSubprojectCount
 
         projectTaskTreeIds =
             model.tasks
@@ -881,10 +922,14 @@ viewProjectNode allProjects model depth project hasSearch query =
                 |> List.concatMap (\t -> collectDescendantTaskIds (Dict.values model.tasks) t.id)
 
         openProjectTaskCount =
-            model.tasks
-                |> Dict.values
-                |> List.filter (\t -> isOpenTaskStatus t.status && List.member t.id projectTaskTreeIds)
-                |> List.length
+            maybeProjectRollup
+                |> Maybe.map .openTaskCount
+                |> Maybe.withDefault
+                    (model.tasks
+                        |> Dict.values
+                        |> List.filter (\t -> isOpenTaskStatus t.status && List.member t.id projectTaskTreeIds)
+                        |> List.length
+                    )
 
         completionBlockerReason =
             projectCompletionBlockerReason openSubprojectCount openProjectTaskCount
@@ -955,21 +1000,39 @@ viewProjectNode allProjects model depth project hasSearch query =
                         |> List.filter (\p -> p.id /= project.id && List.member p.id allDescendantProjectIds)
 
                 remainingSubprojects =
-                    List.filter isProjectRemaining allDescendantProjects |> List.length
+                    maybeProjectRollup
+                        |> Maybe.map .openProjectCount
+                        |> Maybe.withDefault (List.filter isProjectRemaining allDescendantProjects |> List.length)
 
                 completedSubprojects =
-                    List.length allDescendantProjects - remainingSubprojects
+                    maybeProjectRollup
+                        |> Maybe.map .closedProjectCount
+                        |> Maybe.withDefault (List.length allDescendantProjects - remainingSubprojects)
 
                 allProjectTasks =
                     model.tasks
                         |> Dict.values
-                        |> List.filter (\t -> t.parentId == Nothing && (List.member (Maybe.withDefault "" (Maybe.map identity t.projectId)) allDescendantProjectIds))
+                        |> List.filter (\t -> List.member t.id projectTaskTreeIds)
 
                 remainingTasks =
-                    List.filter isTaskRemaining allProjectTasks |> List.length
+                    maybeProjectRollup
+                        |> Maybe.map .openTaskCount
+                        |> Maybe.withDefault (List.filter isTaskRemaining allProjectTasks |> List.length)
 
                 completedTasks =
-                    List.length allProjectTasks - remainingTasks
+                    maybeProjectRollup
+                        |> Maybe.map (\rollup -> rollup.doneTaskCount + rollup.cancelledTaskCount)
+                        |> Maybe.withDefault (List.length allProjectTasks - remainingTasks)
+
+                dependencyBlockedTasks =
+                    maybeProjectRollup
+                        |> Maybe.map .dependencyBlockedTaskCount
+                        |> Maybe.withDefault (allProjectTasks |> List.filter (\t -> t.status == Api.Blocked) |> List.length)
+
+                openDependencyCount =
+                    maybeProjectRollup
+                        |> Maybe.map .openDependencyCount
+                        |> Maybe.withDefault 0
 
                 memCount =
                     List.length linkedMems
@@ -978,6 +1041,16 @@ viewProjectNode allProjects model depth project hasSearch query =
                     List.filterMap identity
                         [ countLabel remainingSubprojects completedSubprojects "subproject" "subprojects"
                         , countLabel remainingTasks completedTasks "task" "tasks"
+                        , if dependencyBlockedTasks > 0 then
+                            Just (countPhrase dependencyBlockedTasks "dependency-blocked task" "dependency-blocked tasks")
+
+                          else
+                            Nothing
+                        , if openDependencyCount > 0 then
+                            Just (countPhrase openDependencyCount "open dependency" "open dependencies")
+
+                          else
+                            Nothing
                         , if memCount > 0 then
                             Just (String.fromInt memCount ++ " memor" ++ (if memCount > 1 then "ies" else "y"))
 
@@ -1215,11 +1288,23 @@ viewTaskCard showProject model task =
             childTasks =
                 childTasksForTask
 
+            maybeRollup =
+                Dict.get task.id model.dependencies.taskReadinessRollups
+
             remainingSubtasks =
-                childTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length
+                maybeRollup
+                    |> Maybe.map .openSubtaskCount
+                    |> Maybe.withDefault (childTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length)
 
             completedSubtasks =
-                List.length childTasks - remainingSubtasks
+                maybeRollup
+                    |> Maybe.map (\rollup -> rollup.doneSubtaskCount + rollup.cancelledSubtaskCount)
+                    |> Maybe.withDefault (List.length childTasks - remainingSubtasks)
+
+            openDependencyCount =
+                maybeRollup
+                    |> Maybe.map .openDependencyCount
+                    |> Maybe.withDefault 0
 
             depCount =
                 task.dependencyCount
@@ -1247,7 +1332,10 @@ viewTaskCard showProject model task =
             summaryParts =
                 List.filterMap identity
                     [ subtaskLabel
-                    , if depCount > 0 then
+                    , if openDependencyCount > 0 then
+                        Just (String.fromInt openDependencyCount ++ " open dep" ++ (if openDependencyCount > 1 then "s" else ""))
+
+                      else if depCount > 0 then
                         Just (String.fromInt depCount ++ " dep" ++ (if depCount > 1 then "s" else ""))
 
                       else

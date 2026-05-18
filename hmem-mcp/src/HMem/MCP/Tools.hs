@@ -381,7 +381,7 @@ toolDefinitions =
 
 
 
-  , mkTool "project_overview" "Get a project with its tasks, subprojects, and linked memories in one call. Use this to understand the full scope of a project before making changes, instead of calling project_get, task_list, and project_list_memories separately." $ object
+    , mkTool "project_overview" "Get a project with its tasks, subprojects, linked memories, and readiness_rollup in one call. The rollup summarizes open/closed subprojects, open/done/cancelled/blocked task counts, dependency blockers, open dependency counts, and whether the project is completion-ready under recursive gates. Use this to understand the full scope of a project before making changes, instead of calling project_get, task_list, and project_list_memories separately." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project"
@@ -398,7 +398,7 @@ toolDefinitions =
       , "required" .= [t "task_id"]
       ]
 
-    , mkTool "task_overview" "Get a task with dependency summaries and connected memories. Set extra_context=true to also pull in project- and workspace-linked memories for broader LLM context." $ object
+    , mkTool "task_overview" "Get a task with dependency summaries, connected memories, and readiness_rollup. The rollup summarizes open/done/cancelled/blocked subtasks, dependency blockers, open dependency counts, and whether the task is completion-ready under recursive gates. Set extra_context=true to also pull in project- and workspace-linked memories for broader LLM context." $ object
             [ "type" .= t "object"
             , "properties" .= object
                     [ "task_id" .= prop "string" "UUID of the task"

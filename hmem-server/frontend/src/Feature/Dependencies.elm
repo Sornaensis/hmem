@@ -21,6 +21,8 @@ import Types exposing (..)
 init : DependenciesModel
 init =
     { taskDependencies = Dict.empty
+    , taskReadinessRollups = Dict.empty
+    , projectReadinessRollups = Dict.empty
     , addingDependencyFor = Nothing
     }
 
@@ -52,10 +54,37 @@ update msg model =
                         dependenciesModel =
                             model.dependencies
                     in
-                    ( { model | dependencies = { dependenciesModel | taskDependencies = Dict.insert taskId overview.dependencies dependenciesModel.taskDependencies } }, Cmd.none )
+                    ( { model
+                        | dependencies =
+                            { dependenciesModel
+                                | taskDependencies = Dict.insert taskId overview.dependencies dependenciesModel.taskDependencies
+                                , taskReadinessRollups = Dict.insert taskId overview.readinessRollup dependenciesModel.taskReadinessRollups
+                            }
+                      }
+                    , Cmd.none
+                    )
 
                 Err _ ->
                     addToast Error "Failed to load task dependencies" model
+
+        GotProjectOverview projectId result ->
+            case result of
+                Ok overview ->
+                    let
+                        dependenciesModel =
+                            model.dependencies
+                    in
+                    ( { model
+                        | dependencies =
+                            { dependenciesModel
+                                | projectReadinessRollups = Dict.insert projectId overview.readinessRollup dependenciesModel.projectReadinessRollups
+                            }
+                      }
+                    , Cmd.none
+                    )
+
+                Err _ ->
+                    addToast Error "Failed to load project readiness" model
 
         StartAddDependency taskId ->
             let
@@ -114,8 +143,22 @@ update msg model =
         DependencyMutationDone taskId result ->
             case result of
                 Ok mutationResult ->
-                    ( applyDependencyMutationResult mutationResult model
-                    , Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId)
+                    let
+                        updatedModel =
+                            applyDependencyMutationResult mutationResult model
+
+                        projectReadinessCmds =
+                            updatedModel.dependencies.projectReadinessRollups
+                                |> Dict.keys
+                                |> List.map (\projectId -> Api.fetchProjectOverview updatedModel.flags.apiUrl projectId (GotProjectOverview projectId))
+
+                        taskReadinessCmds =
+                            updatedModel.dependencies.taskDependencies
+                                |> Dict.keys
+                                |> List.map (\cachedTaskId -> Api.fetchTaskOverview updatedModel.flags.apiUrl cachedTaskId (GotTaskDependencies cachedTaskId))
+                    in
+                    ( updatedModel
+                    , Cmd.batch ([ Api.fetchTaskOverview updatedModel.flags.apiUrl taskId (GotTaskDependencies taskId) ] ++ taskReadinessCmds ++ projectReadinessCmds)
                     )
 
                 Err _ ->

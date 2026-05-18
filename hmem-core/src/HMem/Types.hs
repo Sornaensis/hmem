@@ -35,10 +35,12 @@ module HMem.Types
   , UpdateProject(..)
   , ProjectListQuery(..)
   , ProjectOverview(..)
+  , ProjectReadinessRollup(..)
   , TaskDependencySummary(..)
   , ContextMemoryScope(..)
   , ConnectedMemorySummary(..)
   , TaskOverview(..)
+  , TaskReadinessRollup(..)
   , ContextDetailLevel(..)
   , contextDetailLimit
   , ContextInfo(..)
@@ -952,11 +954,29 @@ data ProjectOverview = ProjectOverview
   , subprojects    :: [Project]
   , linkedMemories :: [Memory]
   , connectedMemories :: [ConnectedMemorySummary]
+  , readinessRollup :: ProjectReadinessRollup
   } deriving (Show, Eq, Generic)
 
 instance ToJSON ProjectOverview where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON ProjectOverview where
+  parseJSON  = genericParseJSON jsonOptions
+
+data ProjectReadinessRollup = ProjectReadinessRollup
+  { openProjectCount             :: Int
+  , closedProjectCount           :: Int
+  , openTaskCount                :: Int
+  , doneTaskCount                :: Int
+  , cancelledTaskCount           :: Int
+  , blockedTaskCount             :: Int
+  , dependencyBlockedTaskCount   :: Int
+  , openDependencyCount          :: Int
+  , completionReady              :: Bool
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ProjectReadinessRollup where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON ProjectReadinessRollup where
   parseJSON  = genericParseJSON jsonOptions
 
 data TaskListQuery = TaskListQuery
@@ -1023,11 +1043,27 @@ data TaskOverview = TaskOverview
   { task              :: Task
   , dependencies      :: [TaskDependencySummary]
   , connectedMemories :: [ConnectedMemorySummary]
+  , readinessRollup   :: TaskReadinessRollup
   } deriving (Show, Eq, Generic)
 
 instance ToJSON TaskOverview where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON TaskOverview where
+  parseJSON  = genericParseJSON jsonOptions
+
+data TaskReadinessRollup = TaskReadinessRollup
+  { openSubtaskCount            :: Int
+  , doneSubtaskCount            :: Int
+  , cancelledSubtaskCount       :: Int
+  , blockedSubtaskCount         :: Int
+  , dependencyBlockedTaskCount  :: Int
+  , openDependencyCount         :: Int
+  , completionReady             :: Bool
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TaskReadinessRollup where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON TaskReadinessRollup where
   parseJSON  = genericParseJSON jsonOptions
 
 ------------------------------------------------------------------------

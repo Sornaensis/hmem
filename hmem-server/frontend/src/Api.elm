@@ -1,7 +1,8 @@
 module Api exposing
     ( Workspace, Project, Task, Memory, MemoryLink
     , WorkspaceGroup, WorkspaceMembership
-    , TaskDependencySummary, TaskDependencyStatusChange, DependencyMutationResult, TaskMutationResult, TaskOverview
+    , TaskDependencySummary, TaskDependencyStatusChange, TaskReadinessRollup, DependencyMutationResult, TaskMutationResult, TaskOverview
+    , ProjectReadinessRollup, ProjectOverview
     , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, UnifiedSearchResults
     , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
     , AuditAction(..), AuditLogEntry, RevertResult
@@ -21,7 +22,7 @@ module Api exposing
     , fetchProjectMemories, fetchTaskMemories
     , linkProjectMemory, unlinkProjectMemory
     , linkTaskMemory, unlinkTaskMemory
-    , fetchTaskOverview
+    , fetchTaskOverview, fetchProjectOverview
     , fetchVisualization
     , addTaskDependency, removeTaskDependency
     , searchMemories, unifiedSearch
@@ -33,7 +34,7 @@ module Api exposing
     , fetchWorkspaceGroups, createWorkspaceGroup, deleteWorkspaceGroup
     , fetchGroupMembers, addGroupMember, removeGroupMember
     , fetchAuditLog, fetchEntityHistory, revertAuditEntry
-    , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder
+    , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder
     , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, auditLogEntryDecoder
     , memoryTypeToString, memoryTypeFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
     , auditActionToString, auditActionFromString
@@ -171,6 +172,39 @@ type alias TaskDependencySummary =
 type alias TaskOverview =
     { task : Task
     , dependencies : List TaskDependencySummary
+    , readinessRollup : TaskReadinessRollup
+    }
+
+
+type alias TaskReadinessRollup =
+    { openSubtaskCount : Int
+    , doneSubtaskCount : Int
+    , cancelledSubtaskCount : Int
+    , blockedSubtaskCount : Int
+    , dependencyBlockedTaskCount : Int
+    , openDependencyCount : Int
+    , completionReady : Bool
+    }
+
+
+type alias ProjectOverview =
+    { project : Project
+    , tasks : List Task
+    , subprojects : List Project
+    , readinessRollup : ProjectReadinessRollup
+    }
+
+
+type alias ProjectReadinessRollup =
+    { openProjectCount : Int
+    , closedProjectCount : Int
+    , openTaskCount : Int
+    , doneTaskCount : Int
+    , cancelledTaskCount : Int
+    , blockedTaskCount : Int
+    , dependencyBlockedTaskCount : Int
+    , openDependencyCount : Int
+    , completionReady : Bool
     }
 
 
@@ -1719,6 +1753,14 @@ fetchTaskOverview apiUrl taskId toMsg =
         }
 
 
+fetchProjectOverview : String -> String -> (Result Http.Error ProjectOverview -> msg) -> Cmd msg
+fetchProjectOverview apiUrl projectId toMsg =
+    Http.get
+        { url = apiUrl ++ "/api/v1/projects/" ++ projectId ++ "/overview"
+        , expect = Http.expectJson toMsg projectOverviewDecoder
+        }
+
+
 addTaskDependency : String -> String -> String -> String -> (Result Http.Error DependencyMutationResult -> msg) -> Cmd msg
 addTaskDependency apiUrl taskId dependsOnId requestId toMsg =
     Http.request
@@ -1752,11 +1794,73 @@ taskDependencySummaryDecoder =
         |> required "name" D.string
 
 
+taskReadinessRollupDecoder : Decoder TaskReadinessRollup
+taskReadinessRollupDecoder =
+    D.succeed TaskReadinessRollup
+        |> optional "open_subtask_count" D.int 0
+        |> optional "done_subtask_count" D.int 0
+        |> optional "cancelled_subtask_count" D.int 0
+        |> optional "blocked_subtask_count" D.int 0
+        |> optional "dependency_blocked_task_count" D.int 0
+        |> optional "open_dependency_count" D.int 0
+        |> optional "completion_ready" D.bool True
+
+
+defaultTaskReadinessRollup : TaskReadinessRollup
+defaultTaskReadinessRollup =
+    { openSubtaskCount = 0
+    , doneSubtaskCount = 0
+    , cancelledSubtaskCount = 0
+    , blockedSubtaskCount = 0
+    , dependencyBlockedTaskCount = 0
+    , openDependencyCount = 0
+    , completionReady = True
+    }
+
+
+projectReadinessRollupDecoder : Decoder ProjectReadinessRollup
+projectReadinessRollupDecoder =
+    D.succeed ProjectReadinessRollup
+        |> optional "open_project_count" D.int 0
+        |> optional "closed_project_count" D.int 0
+        |> optional "open_task_count" D.int 0
+        |> optional "done_task_count" D.int 0
+        |> optional "cancelled_task_count" D.int 0
+        |> optional "blocked_task_count" D.int 0
+        |> optional "dependency_blocked_task_count" D.int 0
+        |> optional "open_dependency_count" D.int 0
+        |> optional "completion_ready" D.bool True
+
+
+defaultProjectReadinessRollup : ProjectReadinessRollup
+defaultProjectReadinessRollup =
+    { openProjectCount = 0
+    , closedProjectCount = 0
+    , openTaskCount = 0
+    , doneTaskCount = 0
+    , cancelledTaskCount = 0
+    , blockedTaskCount = 0
+    , dependencyBlockedTaskCount = 0
+    , openDependencyCount = 0
+    , completionReady = True
+    }
+
+
 taskOverviewDecoder : Decoder TaskOverview
 taskOverviewDecoder =
     D.succeed TaskOverview
         |> required "task" taskDecoder
         |> required "dependencies" (D.list taskDependencySummaryDecoder)
+        |> optional "readiness_rollup" taskReadinessRollupDecoder defaultTaskReadinessRollup
+
+
+projectOverviewDecoder : Decoder ProjectOverview
+projectOverviewDecoder =
+    D.succeed ProjectOverview
+        |> required "project" projectDecoder
+        |> required "tasks" (D.list taskDecoder)
+        |> required "subprojects" (D.list projectDecoder)
+        |> optional "readiness_rollup" projectReadinessRollupDecoder defaultProjectReadinessRollup
 
 
 

@@ -6,6 +6,7 @@ See also:
 
 - `auth.md` — canonical auth specification for local/deployed auth modes, principals, permissions, and policy rules
 - `database.md` — current database schema overview
+- `memory-compatibility.md` — migration and rollout policy for explicit memory types and creation links
 
 ## Architecture
 

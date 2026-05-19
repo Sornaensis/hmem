@@ -34,10 +34,12 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.Functor.Contravariant ((>$<), contramap)
 import Data.Int (Int16, Int32, Int64)
+import Data.List (intercalate, nub)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Pool (Pool)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
@@ -178,6 +180,30 @@ taskSubtreeIdsStatement = Statement.Statement sql encoder decoder True
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
+taskSubtreeIdsForUpdateStatement :: Statement.Statement UUID [UUID]
+taskSubtreeIdsForUpdateStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE task_tree AS ("
+      , "  SELECT id"
+      , "  FROM tasks"
+      , "  WHERE id = $1 AND deleted_at IS NULL"
+      , "  UNION ALL"
+      , "  SELECT child.id"
+      , "  FROM tasks child"
+      , "  JOIN task_tree parent_tree ON child.parent_id = parent_tree.id"
+      , "  WHERE child.deleted_at IS NULL"
+      , ")"
+      , "SELECT task_to_lock.id"
+      , "  FROM tasks task_to_lock"
+      , "  JOIN task_tree ON task_tree.id = task_to_lock.id"
+      , " WHERE task_to_lock.deleted_at IS NULL"
+      , " ORDER BY task_to_lock.id"
+      , " FOR UPDATE OF task_to_lock"
+      ]
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
 taskSubtreeIdsForRootsStatement :: Statement.Statement [UUID] [UUID]
 taskSubtreeIdsForRootsStatement = Statement.Statement sql encoder decoder True
   where
@@ -193,6 +219,30 @@ taskSubtreeIdsForRootsStatement = Statement.Statement sql encoder decoder True
       , "  WHERE t.deleted_at IS NULL"
       , ")"
       , "SELECT id FROM task_tree"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+taskSubtreeIdsForRootsForUpdateStatement :: Statement.Statement [UUID] [UUID]
+taskSubtreeIdsForRootsForUpdateStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE task_tree AS ("
+      , "  SELECT id"
+      , "  FROM tasks"
+      , "  WHERE id = ANY($1) AND deleted_at IS NULL"
+      , "  UNION"
+      , "  SELECT child.id"
+      , "  FROM tasks child"
+      , "  JOIN task_tree parent_tree ON child.parent_id = parent_tree.id"
+      , "  WHERE child.deleted_at IS NULL"
+      , ")"
+      , "SELECT task_to_lock.id"
+      , "  FROM tasks task_to_lock"
+      , "  JOIN task_tree ON task_tree.id = task_to_lock.id"
+      , " WHERE task_to_lock.deleted_at IS NULL"
+      , " ORDER BY task_to_lock.id"
+      , " FOR UPDATE OF task_to_lock"
       ]
     encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
@@ -362,10 +412,402 @@ lifecycleViolation :: Text -> Text -> Maybe Text -> Maybe Text -> DBException
 lifecycleViolation = DBLifecycleViolation
 
 blockerDetail :: UUID -> Text
-blockerDetail blockerId = TE.decodeUtf8 . BL.toStrict . Aeson.encode $ object
-  [ "blocker_count" .= (1 :: Int)
-  , "blocker_ids" .= [UUID.toText blockerId]
+blockerDetail blockerId = blockersDetail 1 [blockerId]
+
+blockersDetail :: Int -> [UUID] -> Text
+blockersDetail blockerCount blockerIds = TE.decodeUtf8 . BL.toStrict . Aeson.encode $ object
+  [ "blocker_count" .= blockerCount
+  , "blocker_ids" .= map UUID.toText blockerIds
   ]
+
+data MoveViolation = MoveViolation Int UUID UUID
+
+data ProjectPlacement = ProjectPlacement UUID UUID
+
+data ParentPlacement = ParentPlacement UUID UUID (Maybe UUID) (Maybe UUID)
+
+moveViolationDecoder :: Dec.Row MoveViolation
+moveViolationDecoder = MoveViolation
+  <$> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int8))
+  <*> Dec.column (Dec.nonNullable Dec.uuid)
+  <*> Dec.column (Dec.nonNullable Dec.uuid)
+
+projectPlacementDecoder :: Dec.Row ProjectPlacement
+projectPlacementDecoder = ProjectPlacement
+  <$> Dec.column (Dec.nonNullable Dec.uuid)
+  <*> Dec.column (Dec.nonNullable Dec.uuid)
+
+parentPlacementDecoder :: Dec.Row ParentPlacement
+parentPlacementDecoder = ParentPlacement
+  <$> Dec.column (Dec.nonNullable Dec.uuid)
+  <*> Dec.column (Dec.nonNullable Dec.uuid)
+  <*> Dec.column (Dec.nullable Dec.uuid)
+  <*> Dec.column (Dec.nullable Dec.uuid)
+
+moveViolationException :: Text -> Text -> MoveViolation -> Text -> DBException
+moveViolationException code message (MoveViolation blockerCount firstId secondId) hint =
+  lifecycleViolation code message (Just detail) (Just hint)
+  where
+    detail = blockersDetail blockerCount [firstId, secondId]
+
+lockTasksS :: [UUID] -> Session.Session ()
+lockTasksS [] = pure ()
+lockTasksS taskIds = void $ Session.statement (nub taskIds) lockTasksStatement
+
+lockTasksStatement :: Statement.Statement [UUID] [UUID]
+lockTasksStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "SELECT id"
+      , "  FROM tasks"
+      , " WHERE id = ANY($1)"
+      , "   AND deleted_at IS NULL"
+      , " ORDER BY id"
+      , " FOR UPDATE"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+lockIncidentDependencyTasksS :: [UUID] -> Session.Session ()
+lockIncidentDependencyTasksS [] = pure ()
+lockIncidentDependencyTasksS movedIds = void $ Session.statement (nub movedIds) lockIncidentDependencyTasksStatement
+
+lockIncidentDependencyTasksStatement :: Statement.Statement [UUID] [UUID]
+lockIncidentDependencyTasksStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH moved(id) AS ("
+      , "  SELECT DISTINCT moved_id"
+      , "    FROM unnest($1::uuid[]) AS moved_id"
+      , "   WHERE moved_id IS NOT NULL"
+      , "),"
+      , "incident_task_ids(id) AS ("
+      , "  SELECT td.task_id"
+      , "    FROM task_dependencies td"
+      , "   WHERE td.task_id IN (SELECT id FROM moved)"
+      , "      OR td.depends_on_id IN (SELECT id FROM moved)"
+      , "  UNION"
+      , "  SELECT td.depends_on_id"
+      , "    FROM task_dependencies td"
+      , "   WHERE td.task_id IN (SELECT id FROM moved)"
+      , "      OR td.depends_on_id IN (SELECT id FROM moved)"
+      , ")"
+      , "SELECT task_to_lock.id"
+      , "  FROM tasks task_to_lock"
+      , "  JOIN incident_task_ids incident ON incident.id = task_to_lock.id"
+      , " WHERE task_to_lock.deleted_at IS NULL"
+      , " ORDER BY task_to_lock.id"
+      , " FOR UPDATE OF task_to_lock"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+lockBatchMoveExternalParentsS :: [UUID] -> Session.Session ()
+lockBatchMoveExternalParentsS [] = pure ()
+lockBatchMoveExternalParentsS movedIds = void $ Session.statement (nub movedIds) lockBatchMoveExternalParentsStatement
+
+lockBatchMoveExternalParentsStatement :: Statement.Statement [UUID] [UUID]
+lockBatchMoveExternalParentsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH moved(id) AS ("
+      , "  SELECT DISTINCT moved_id"
+      , "    FROM unnest($1::uuid[]) AS moved_id"
+      , "   WHERE moved_id IS NOT NULL"
+      , "),"
+      , "external_parent_ids(id) AS ("
+      , "  SELECT DISTINCT parent.id"
+      , "  FROM tasks child"
+      , "  JOIN moved moved_child ON moved_child.id = child.id"
+      , "  JOIN tasks parent ON parent.id = child.parent_id AND parent.deleted_at IS NULL"
+      , "  LEFT JOIN moved moved_parent ON moved_parent.id = parent.id"
+      , " WHERE child.deleted_at IS NULL"
+      , "   AND moved_parent.id IS NULL"
+      , ")"
+      , "SELECT parent_to_lock.id"
+      , "  FROM tasks parent_to_lock"
+      , "  JOIN external_parent_ids external_parent ON external_parent.id = parent_to_lock.id"
+      , " ORDER BY parent_to_lock.id"
+      , " FOR UPDATE OF parent_to_lock"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+validateTaskProjectLockedS :: UUID -> Maybe UUID -> Session.Session (Maybe DBException)
+validateTaskProjectLockedS _ Nothing = pure Nothing
+validateTaskProjectLockedS workspaceId (Just projectId) = do
+  mProject <- Session.statement projectId taskProjectPlacementStatement
+  case mProject of
+    Nothing -> pure $ Just $ DBForeignKeyViolation "Referenced project does not exist"
+    Just (ProjectPlacement _ projectWorkspaceId)
+      | projectWorkspaceId /= workspaceId -> pure $ Just $ DBCheckViolation "Task project must belong to the same workspace"
+      | otherwise -> pure Nothing
+
+taskProjectPlacementStatement :: Statement.Statement UUID (Maybe ProjectPlacement)
+taskProjectPlacementStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "SELECT id, workspace_id"
+      , "  FROM projects"
+      , " WHERE id = $1"
+      , "   AND deleted_at IS NULL"
+      , " FOR UPDATE"
+      ]
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.rowMaybe projectPlacementDecoder
+
+validateTaskPlacementLockedS :: UUID -> Maybe UUID -> Maybe UUID -> Session.Session (Maybe DBException)
+validateTaskPlacementLockedS _ _ Nothing = pure Nothing
+validateTaskPlacementLockedS workspaceId projectId (Just parentId) = do
+  mParent <- Session.statement parentId taskParentPlacementStatement
+  case mParent of
+    Nothing -> pure $ Just $ DBForeignKeyViolation "Referenced parent task does not exist"
+    Just (ParentPlacement parentTaskId parentWorkspaceId parentProjectId parentParentId)
+      | parentWorkspaceId /= workspaceId -> pure $ Just $ DBCheckViolation "Parent task must belong to the same workspace"
+      | parentProjectId /= projectId -> pure $ Just $ DBCheckViolation "Task and parent task must belong to the same project"
+      | parentParentId /= Nothing -> pure $ Just $ lifecycleViolation
+          "TASK_SUBTASK_DEPTH_EXCEEDED"
+          "Cannot create or move a task under a subtask."
+          (Just $ blockerDetail parentTaskId)
+          (Just "Move the target parent to the top level before adding subtasks, or attach this task to a top-level task.")
+      | otherwise -> pure Nothing
+
+taskParentPlacementStatement :: Statement.Statement UUID (Maybe ParentPlacement)
+taskParentPlacementStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "SELECT id, workspace_id, project_id, parent_id"
+      , "  FROM tasks"
+      , " WHERE id = $1"
+      , "   AND deleted_at IS NULL"
+      ]
+    encoder = Enc.param (Enc.nonNullable Enc.uuid)
+    decoder = Dec.rowMaybe parentPlacementDecoder
+
+validateTaskMoveDependencyConsistencyS :: [UUID] -> Maybe UUID -> Session.Session (Maybe DBException)
+validateTaskMoveDependencyConsistencyS [] _ = pure Nothing
+validateTaskMoveDependencyConsistencyS movedIds targetProjectId = do
+  workspaceMismatch <- Session.statement normalizedMovedIds taskDependencyWorkspaceMismatchStatement
+  case workspaceMismatch of
+    Just violation -> pure $ Just $ moveViolationException
+      "TASK_DEPENDENCY_CROSS_WORKSPACE"
+      "Cannot move tasks while dependency endpoints span multiple workspaces."
+      violation
+      "Remove or repair cross-workspace dependency links before moving these tasks."
+    Nothing -> do
+      projectMismatch <- Session.statement (normalizedMovedIds, targetProjectId) taskDependencyProjectMismatchStatement
+      case projectMismatch of
+        Just violation -> pure $ Just $ moveViolationException
+          "TASK_DEPENDENCY_CROSS_PROJECT"
+          "Cannot move tasks because dependency endpoints would span projects."
+          violation
+          "Move dependent tasks together, move them to the dependency project, or remove the cross-project dependency first."
+        Nothing -> do
+          subtreeCycle <- Session.statement normalizedMovedIds taskSubtreeDependencyCycleStatement
+          case subtreeCycle of
+            Just violation -> pure $ Just $ moveViolationException
+              "TASK_DEPENDENCY_HIERARCHY_CYCLE"
+              "Cannot move a task subtree with a subtask that depends on its parent."
+              violation
+              "Remove the dependency from the subtask to its parent before moving this subtree."
+            Nothing -> pure Nothing
+  where
+    normalizedMovedIds = nub movedIds
+
+validateTaskParentDependencyConsistencyS :: UUID -> Maybe UUID -> Session.Session (Maybe DBException)
+validateTaskParentDependencyConsistencyS _ Nothing = pure Nothing
+validateTaskParentDependencyConsistencyS taskId (Just parentId) = do
+  hierarchyCycle <- Session.statement (taskId, parentId) taskParentDependencyCycleStatement
+  case hierarchyCycle of
+    Just violation -> pure $ Just $ moveViolationException
+      "TASK_DEPENDENCY_HIERARCHY_CYCLE"
+      "Cannot make a task a subtask of one of its dependencies."
+      violation
+      "Remove the dependency chain from the subtask to the target parent before reparenting."
+    Nothing -> pure Nothing
+
+validateBatchMoveParentPlacementS :: [UUID] -> Maybe UUID -> Session.Session (Maybe DBException)
+validateBatchMoveParentPlacementS [] _ = pure Nothing
+validateBatchMoveParentPlacementS movedIds targetProjectId = do
+  parentMismatch <- Session.statement (nub movedIds, targetProjectId) taskBatchMoveParentProjectMismatchStatement
+  case parentMismatch of
+    Just violation -> pure $ Just $ moveViolationException
+      "TASK_PARENT_PROJECT_MISMATCH"
+      "Cannot move a subtask away from its parent project."
+      violation
+      "Move the parent task with the subtask, detach the subtask first, or choose the parent task's project."
+    Nothing -> pure Nothing
+
+recomputeTaskAutoBlockingS :: [UUID] -> Session.Session ()
+recomputeTaskAutoBlockingS [] = pure ()
+recomputeTaskAutoBlockingS seedIds = Session.sql $ BS8.pack $
+  "DO $$ BEGIN PERFORM hmem_recompute_task_auto_blocking(ARRAY["
+    <> intercalate "," (map formatUUID (nub seedIds))
+    <> "]::uuid[]); END $$;"
+  where
+    formatUUID uuid = "'" <> T.unpack (UUID.toText uuid) <> "'::uuid"
+
+taskDependencyWorkspaceMismatchStatement :: Statement.Statement [UUID] (Maybe MoveViolation)
+taskDependencyWorkspaceMismatchStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH moved(id) AS ("
+      , "  SELECT DISTINCT moved_id"
+      , "    FROM unnest($1::uuid[]) AS moved_id"
+      , "   WHERE moved_id IS NOT NULL"
+      , "),"
+      , "incident_dependencies AS ("
+      , "  SELECT td.task_id, td.depends_on_id, task.workspace_id AS task_workspace_id, dep.workspace_id AS dep_workspace_id"
+      , "    FROM task_dependencies td"
+      , "    JOIN tasks task ON task.id = td.task_id AND task.deleted_at IS NULL"
+      , "    JOIN tasks dep ON dep.id = td.depends_on_id AND dep.deleted_at IS NULL"
+      , "   WHERE td.task_id IN (SELECT id FROM moved)"
+      , "      OR td.depends_on_id IN (SELECT id FROM moved)"
+      , "),"
+      , "violations AS ("
+      , "  SELECT task_id, depends_on_id"
+      , "    FROM incident_dependencies"
+      , "   WHERE task_workspace_id IS DISTINCT FROM dep_workspace_id"
+      , ")"
+      , "SELECT count(*) OVER ()::bigint, task_id, depends_on_id"
+      , "  FROM violations"
+      , " ORDER BY task_id, depends_on_id"
+      , " LIMIT 1"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowMaybe moveViolationDecoder
+
+taskDependencyProjectMismatchStatement :: Statement.Statement ([UUID], Maybe UUID) (Maybe MoveViolation)
+taskDependencyProjectMismatchStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH moved(id) AS ("
+      , "  SELECT DISTINCT moved_id"
+      , "    FROM unnest($1::uuid[]) AS moved_id"
+      , "   WHERE moved_id IS NOT NULL"
+      , "),"
+      , "incident_dependencies AS ("
+      , "  SELECT td.task_id, td.depends_on_id,"
+      , "         CASE WHEN moved_task.id IS NOT NULL THEN $2::uuid ELSE task.project_id END AS task_project_after,"
+      , "         CASE WHEN moved_dep.id IS NOT NULL THEN $2::uuid ELSE dep.project_id END AS dep_project_after"
+      , "    FROM task_dependencies td"
+      , "    JOIN tasks task ON task.id = td.task_id AND task.deleted_at IS NULL"
+      , "    JOIN tasks dep ON dep.id = td.depends_on_id AND dep.deleted_at IS NULL"
+      , "    LEFT JOIN moved moved_task ON moved_task.id = td.task_id"
+      , "    LEFT JOIN moved moved_dep ON moved_dep.id = td.depends_on_id"
+      , "   WHERE moved_task.id IS NOT NULL"
+      , "      OR moved_dep.id IS NOT NULL"
+      , "),"
+      , "violations AS ("
+      , "  SELECT task_id, depends_on_id"
+      , "    FROM incident_dependencies"
+      , "   WHERE task_project_after IS DISTINCT FROM dep_project_after"
+      , ")"
+      , "SELECT count(*) OVER ()::bigint, task_id, depends_on_id"
+      , "  FROM violations"
+      , " ORDER BY task_id, depends_on_id"
+      , " LIMIT 1"
+      ]
+    encoder =
+      contramap fst (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) <>
+      contramap snd (Enc.param (Enc.nullable Enc.uuid))
+    decoder = Dec.rowMaybe moveViolationDecoder
+
+taskSubtreeDependencyCycleStatement :: Statement.Statement [UUID] (Maybe MoveViolation)
+taskSubtreeDependencyCycleStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE moved(id) AS ("
+      , "  SELECT DISTINCT moved_id"
+      , "    FROM unnest($1::uuid[]) AS moved_id"
+      , "   WHERE moved_id IS NOT NULL"
+      , "),"
+      , "child_parent AS ("
+      , "  SELECT child.id AS child_id, parent.id AS parent_id"
+      , "    FROM tasks child"
+      , "    JOIN tasks parent ON parent.id = child.parent_id AND parent.deleted_at IS NULL"
+      , "    JOIN moved moved_child ON moved_child.id = child.id"
+      , "    JOIN moved moved_parent ON moved_parent.id = parent.id"
+      , "   WHERE child.deleted_at IS NULL"
+      , "),"
+      , "dependency_reachable(origin_id, dependency_id, path) AS ("
+      , "  SELECT cp.child_id, td.depends_on_id, ARRAY[td.depends_on_id]::uuid[]"
+      , "    FROM child_parent cp"
+      , "    JOIN task_dependencies td ON td.task_id = cp.child_id"
+      , "  UNION ALL"
+      , "  SELECT dr.origin_id, td.depends_on_id, dr.path || td.depends_on_id"
+      , "    FROM dependency_reachable dr"
+      , "    JOIN task_dependencies td ON td.task_id = dr.dependency_id"
+      , "   WHERE td.depends_on_id <> ALL(dr.path)"
+      , "),"
+      , "violations AS ("
+      , "  SELECT cp.child_id, cp.parent_id"
+      , "    FROM child_parent cp"
+      , "    JOIN dependency_reachable dr ON dr.origin_id = cp.child_id AND dr.dependency_id = cp.parent_id"
+      , ")"
+      , "SELECT count(*) OVER ()::bigint, child_id, parent_id"
+      , "  FROM violations"
+      , " ORDER BY child_id, parent_id"
+      , " LIMIT 1"
+      ]
+    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
+    decoder = Dec.rowMaybe moveViolationDecoder
+
+taskParentDependencyCycleStatement :: Statement.Statement (UUID, UUID) (Maybe MoveViolation)
+taskParentDependencyCycleStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE dependency_reachable(dependency_id, path) AS ("
+      , "  SELECT td.depends_on_id, ARRAY[td.depends_on_id]::uuid[]"
+      , "    FROM task_dependencies td"
+      , "   WHERE td.task_id = $1"
+      , "  UNION ALL"
+      , "  SELECT td.depends_on_id, dr.path || td.depends_on_id"
+      , "    FROM dependency_reachable dr"
+      , "    JOIN task_dependencies td ON td.task_id = dr.dependency_id"
+      , "   WHERE td.depends_on_id <> ALL(dr.path)"
+      , "),"
+      , "violations AS ("
+      , "  SELECT $1::uuid AS task_id, $2::uuid AS parent_id"
+      , "   WHERE EXISTS (SELECT 1 FROM dependency_reachable WHERE dependency_id = $2)"
+      , ")"
+      , "SELECT count(*) OVER ()::bigint, task_id, parent_id"
+      , "  FROM violations"
+      , " LIMIT 1"
+      ]
+    encoder =
+      contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap snd (Enc.param (Enc.nonNullable Enc.uuid))
+    decoder = Dec.rowMaybe moveViolationDecoder
+
+taskBatchMoveParentProjectMismatchStatement :: Statement.Statement ([UUID], Maybe UUID) (Maybe MoveViolation)
+taskBatchMoveParentProjectMismatchStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH moved(id) AS ("
+      , "  SELECT DISTINCT moved_id"
+      , "    FROM unnest($1::uuid[]) AS moved_id"
+      , "   WHERE moved_id IS NOT NULL"
+      , "),"
+      , "violations AS ("
+      , "  SELECT child.id AS task_id, parent.id AS parent_id"
+      , "    FROM tasks child"
+      , "    JOIN moved moved_child ON moved_child.id = child.id"
+      , "    JOIN tasks parent ON parent.id = child.parent_id AND parent.deleted_at IS NULL"
+      , "    LEFT JOIN moved moved_parent ON moved_parent.id = parent.id"
+      , "   WHERE child.deleted_at IS NULL"
+      , "     AND moved_parent.id IS NULL"
+      , "     AND parent.project_id IS DISTINCT FROM $2::uuid"
+      , ")"
+      , "SELECT count(*) OVER ()::bigint, task_id, parent_id"
+      , "  FROM violations"
+      , " ORDER BY task_id, parent_id"
+      , " LIMIT 1"
+      ]
+    encoder =
+      contramap fst (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))) <>
+      contramap snd (Enc.param (Enc.nullable Enc.uuid))
+    decoder = Dec.rowMaybe moveViolationDecoder
 
 ------------------------------------------------------------------------
 -- Create
@@ -446,45 +888,80 @@ updateTaskWithDependencySnapshots pool tid ut = do
       mParent <- ensureTaskPlacement pool task.workspaceId targetProjectId targetParentId
       ensureTaskCanBecomeSubtask pool tid targetParentId
       ensureSubtaskStartAllowed enforcingStartGate mParent targetStatus
-      (mTask, beforeRaw, afterRaw) <- runTransaction pool $ do
-        before <- dependencyAutoBlockSnapshotsS [tid]
-        when (task.projectId /= targetProjectId) $ do
-          ids <- Session.statement tid taskSubtreeIdsStatement
-          Session.statement () $ run_ $
-            update Update
-              { target = taskSchema
-              , from = pure ()
-              , set = \_ row -> row { taskProjectId = lit targetProjectId }
-              , updateWhere = \_ row -> in_ row.taskId (map lit ids) &&. activeTask row
-              , returning = NoReturning
-              }
+      let projectChanged = task.projectId /= targetProjectId
+          placementChanged = projectChanged || task.parentId /= targetParentId
+          parentSeedIds = [parentId | Just parentId <- [task.parentId, targetParentId]]
+      transactionResult <- runTransaction pool $ do
+        projectValidation <- validateTaskProjectLockedS task.workspaceId targetProjectId
+        case projectValidation of
+          Just err -> pure (Left err)
+          Nothing -> do
+            lockTasksS (tid : parentSeedIds)
+            movedIds <- if projectChanged
+              then Session.statement tid taskSubtreeIdsForUpdateStatement
+              else pure [tid]
+            lockTasksS movedIds
+            lockIncidentDependencyTasksS movedIds
+            let snapshotSeedIds = nub $ movedIds <> [tid] <> parentSeedIds
+            placementValidation <- validateTaskPlacementLockedS task.workspaceId targetProjectId targetParentId
+            validationFailure <- case placementValidation of
+              Just err -> pure (Just err)
+              Nothing -> if placementChanged
+                then do
+                  dependencyProjectValidation <- if projectChanged
+                    then validateTaskMoveDependencyConsistencyS movedIds targetProjectId
+                    else pure Nothing
+                  case dependencyProjectValidation of
+                    Just err -> pure (Just err)
+                    Nothing -> if task.parentId /= targetParentId
+                      then validateTaskParentDependencyConsistencyS tid targetParentId
+                      else pure Nothing
+                else pure Nothing
+            case validationFailure of
+              Just err -> pure (Left err)
+              Nothing -> do
+                before <- dependencyAutoBlockSnapshotsS snapshotSeedIds
+                when (task.projectId /= targetProjectId) $ do
+                  Session.statement () $ run_ $
+                    update Update
+                      { target = taskSchema
+                      , from = pure ()
+                      , set = \_ row -> row { taskProjectId = lit targetProjectId }
+                      , updateWhere = \_ row -> in_ row.taskId (map lit movedIds) &&. activeTask row
+                      , returning = NoReturning
+                      }
 
-        rows <- Session.statement () $ run $
-          update Update
-            { target = taskSchema
-            , from = pure ()
-            , set = \_ row -> row
-                { taskTitle       = maybe row.taskTitle       lit ut.title
-                , taskDescription = applyNullableUpdate row.taskDescription ut.description
-                , taskProjectId   = applyNullableUpdate row.taskProjectId ut.projectId
-                , taskParentId    = applyNullableUpdate row.taskParentId ut.parentId
-                , taskStatus      = maybe row.taskStatus      lit ut.status
-                , taskPriority    = maybe row.taskPriority    (lit . fromIntegral) ut.priority
-                , taskMetadata    = maybe row.taskMetadata    lit ut.metadata
-                , taskDueAt       = applyNullableUpdate row.taskDueAt ut.dueAt
-                -- completed_at is managed by the hmem_task_completion trigger
-                , taskCompletedAt = row.taskCompletedAt
-                }
-            , updateWhere = \_ row -> row.taskId ==. lit tid &&. activeTask row
-            , returning = Returning id
-            }
-        case rows of
-          []    -> do
-            after <- dependencyAutoBlockSnapshotsS [tid]
-            pure (Nothing, before, after)
-          (r:_) -> do
-            after <- dependencyAutoBlockSnapshotsS [tid]
-            pure (Just $ rowToTask r, before, after)
+                rows <- Session.statement () $ run $
+                  update Update
+                    { target = taskSchema
+                    , from = pure ()
+                    , set = \_ row -> row
+                        { taskTitle       = maybe row.taskTitle       lit ut.title
+                        , taskDescription = applyNullableUpdate row.taskDescription ut.description
+                        , taskProjectId   = applyNullableUpdate row.taskProjectId ut.projectId
+                        , taskParentId    = applyNullableUpdate row.taskParentId ut.parentId
+                        , taskStatus      = maybe row.taskStatus      lit ut.status
+                        , taskPriority    = maybe row.taskPriority    (lit . fromIntegral) ut.priority
+                        , taskMetadata    = maybe row.taskMetadata    lit ut.metadata
+                        , taskDueAt       = applyNullableUpdate row.taskDueAt ut.dueAt
+                        -- completed_at is managed by the hmem_task_completion trigger
+                        , taskCompletedAt = row.taskCompletedAt
+                        }
+                    , updateWhere = \_ row -> row.taskId ==. lit tid &&. activeTask row
+                    , returning = Returning id
+                    }
+                case rows of
+                  []    -> do
+                    recomputeTaskAutoBlockingS snapshotSeedIds
+                    after <- dependencyAutoBlockSnapshotsS snapshotSeedIds
+                    pure $ Right (Nothing, before, after)
+                  (r:_) -> do
+                    recomputeTaskAutoBlockingS snapshotSeedIds
+                    after <- dependencyAutoBlockSnapshotsS snapshotSeedIds
+                    pure $ Right (Just $ rowToTask r, before, after)
+      (mTask, beforeRaw, afterRaw) <- case transactionResult of
+        Left err -> throwIO err
+        Right result -> pure result
       case mTask of
         Nothing -> pure Nothing
         Just t -> do
@@ -705,15 +1182,52 @@ restoreTaskMemoriesStatement = Statement.Statement sql encoder Dec.noResult True
 moveTasksBatch :: Pool Hasql.Connection -> [UUID] -> Maybe UUID -> IO Int
 moveTasksBatch _pool [] _ = pure 0
 moveTasksBatch pool ids projectId = do
-  n <- runSession pool $ Session.statement () $ runN $
-    update Update
-      { target = taskSchema
-      , from = pure ()
-      , set = \_ row -> row { taskProjectId = lit projectId }
-      , updateWhere = \_ row -> in_ row.taskId (map lit ids) &&. activeTask row
-      , returning = NoReturning
-      }
-  pure (fromIntegral n)
+  let rootIds = nub ids
+  roots <- mapM (getTask pool) rootIds
+  case [task | Just task <- roots] of
+    [] -> pure 0
+    firstTask:activeRoots -> do
+      let rootTasks = firstTask : activeRoots
+          rootWorkspaceId = firstTask.workspaceId
+      case [task.id | task <- rootTasks, task.workspaceId /= rootWorkspaceId] of
+        otherTaskId:_ -> throwIO $ lifecycleViolation
+          "TASK_BATCH_MOVE_CROSS_WORKSPACE"
+          "Cannot batch-move tasks from multiple workspaces."
+          (Just $ blockersDetail 2 [firstTask.id, otherTaskId])
+          (Just "Move tasks from one workspace at a time.")
+        [] -> pure ()
+      ensureTaskProject pool rootWorkspaceId projectId
+      transactionResult <- runTransaction pool $ do
+        projectValidation <- validateTaskProjectLockedS rootWorkspaceId projectId
+        case projectValidation of
+          Just err -> pure (Left err)
+          Nothing -> do
+            movedIds <- Session.statement rootIds taskSubtreeIdsForRootsForUpdateStatement
+            lockBatchMoveExternalParentsS movedIds
+            lockIncidentDependencyTasksS movedIds
+            parentValidation <- validateBatchMoveParentPlacementS movedIds projectId
+            validationFailure <- case parentValidation of
+              Just err -> pure (Just err)
+              Nothing -> validateTaskMoveDependencyConsistencyS movedIds projectId
+            case validationFailure of
+              Just err -> pure (Left err)
+              Nothing -> do
+                _before <- dependencyAutoBlockSnapshotsS movedIds
+                movedCount <- Session.statement () $ runN $
+                  update Update
+                    { target = taskSchema
+                    , from = pure ()
+                    , set = \_ row -> row { taskProjectId = lit projectId }
+                    , updateWhere = \_ row -> in_ row.taskId (map lit movedIds) &&. activeTask row
+                    , returning = NoReturning
+                    }
+                recomputeTaskAutoBlockingS movedIds
+                _after <- dependencyAutoBlockSnapshotsS movedIds
+                pure (Right movedCount)
+      n <- case transactionResult of
+        Left err -> throwIO err
+        Right movedCount -> pure movedCount
+      pure (fromIntegral n)
 
 ------------------------------------------------------------------------
 -- List

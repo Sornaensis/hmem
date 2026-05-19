@@ -1134,6 +1134,171 @@ spec = around withApp $ do
       detached.projectId `shouldBe` Nothing
       detached.parentId `shouldBe` Nothing
 
+    it "allows priority-only task reorders while preserving dependency blocking" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-reorder-dependency-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Reorder" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      depResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependency" :: T.Text)])
+      let Just depTask = decode (respBody depResp) :: Maybe Task
+      dependentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependent" :: T.Text), "priority" .= (3 :: Int)])
+      let Just dependent = decode (respBody dependentResp) :: Maybe Task
+
+      addDepResp <- postJSON app (uuidPath "/api/v1/tasks" dependent.id <> "/dependencies")
+        (object ["depends_on_id" .= depTask.id])
+      respStatus addDepResp `shouldBe` 200
+
+      reorderResp <- putJSON app (uuidPath "/api/v1/tasks" dependent.id)
+        (object ["priority" .= (9 :: Int)])
+      respStatus reorderResp `shouldBe` 200
+      let Just reordered = decode (respBody reorderResp) :: Maybe TaskMutationResult
+      reordered.task.priority `shouldBe` 9
+      reordered.task.status `shouldBe` Blocked
+
+    it "rejects reparenting a task under one of its dependencies" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-reparent-dependency-cycle-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Dependency Cycle" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Parent" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Task
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Child" :: T.Text)])
+      let Just child = decode (respBody childResp) :: Maybe Task
+
+      addDepResp <- postJSON app (uuidPath "/api/v1/tasks" child.id <> "/dependencies")
+        (object ["depends_on_id" .= parent.id])
+      respStatus addDepResp `shouldBe` 200
+
+      reparentResp <- putJSON app (uuidPath "/api/v1/tasks" child.id)
+        (object ["project_id" .= proj.id, "parent_id" .= parent.id])
+      respStatus reparentResp `shouldBe` 409
+      assertLifecycleError "TASK_DEPENDENCY_HIERARCHY_CYCLE" reparentResp
+
+    it "rejects moving a dependent task away from its dependency project" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-cross-project-dependency-move-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      leftProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Left" :: T.Text)])
+      let Just leftProj = decode (respBody leftProjResp) :: Maybe Project
+      rightProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Right" :: T.Text)])
+      let Just rightProj = decode (respBody rightProjResp) :: Maybe Project
+
+      depResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "title" .= ("Dependency" :: T.Text)])
+      let Just depTask = decode (respBody depResp) :: Maybe Task
+      dependentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "title" .= ("Dependent" :: T.Text)])
+      let Just dependent = decode (respBody dependentResp) :: Maybe Task
+
+      addDepResp <- postJSON app (uuidPath "/api/v1/tasks" dependent.id <> "/dependencies")
+        (object ["depends_on_id" .= depTask.id])
+      respStatus addDepResp `shouldBe` 200
+
+      moveResp <- putJSON app (uuidPath "/api/v1/tasks" dependent.id)
+        (object ["project_id" .= rightProj.id, "parent_id" .= Null])
+      respStatus moveResp `shouldBe` 409
+      assertLifecycleError "TASK_DEPENDENCY_CROSS_PROJECT" moveResp
+
+    it "batch-moves whole task subtrees with internal dependencies" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-batch-move-subtree-dependency-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      leftProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Left" :: T.Text)])
+      let Just leftProj = decode (respBody leftProjResp) :: Maybe Project
+      rightProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Right" :: T.Text)])
+      let Just rightProj = decode (respBody rightProjResp) :: Maybe Project
+
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "title" .= ("Parent" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Task
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "parent_id" .= parent.id, "title" .= ("Child" :: T.Text)])
+      let Just child = decode (respBody childResp) :: Maybe Task
+
+      addDepResp <- postJSON app (uuidPath "/api/v1/tasks" parent.id <> "/dependencies")
+        (object ["depends_on_id" .= child.id])
+      respStatus addDepResp `shouldBe` 200
+
+      batchMoveResp <- postJSON app "/api/v1/tasks/batch-move"
+        (object ["task_ids" .= [parent.id], "project_id" .= rightProj.id])
+      respStatus batchMoveResp `shouldBe` 200
+      let Just batchResult = decode (respBody batchMoveResp) :: Maybe BatchResult
+      batchResult.affected `shouldBe` 2
+
+      movedParentResp <- get_ app (uuidPath "/api/v1/tasks" parent.id)
+      let Just movedParent = decode (respBody movedParentResp) :: Maybe Task
+      movedParent.projectId `shouldBe` Just rightProj.id
+      movedParent.status `shouldBe` Blocked
+
+      movedChildResp <- get_ app (uuidPath "/api/v1/tasks" child.id)
+      let Just movedChild = decode (respBody movedChildResp) :: Maybe Task
+      movedChild.projectId `shouldBe` Just rightProj.id
+      movedChild.parentId `shouldBe` Just parent.id
+
+    it "rejects batch-moving a subtree whose subtask depends on its parent" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-batch-move-subtree-cycle-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      leftProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Left" :: T.Text)])
+      let Just leftProj = decode (respBody leftProjResp) :: Maybe Project
+      rightProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Right" :: T.Text)])
+      let Just rightProj = decode (respBody rightProjResp) :: Maybe Project
+
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "title" .= ("Parent" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Task
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "parent_id" .= parent.id, "title" .= ("Child" :: T.Text)])
+      let Just child = decode (respBody childResp) :: Maybe Task
+
+      addDepResp <- postJSON app (uuidPath "/api/v1/tasks" child.id <> "/dependencies")
+        (object ["depends_on_id" .= parent.id])
+      respStatus addDepResp `shouldBe` 200
+
+      batchMoveResp <- postJSON app "/api/v1/tasks/batch-move"
+        (object ["task_ids" .= [parent.id], "project_id" .= rightProj.id])
+      respStatus batchMoveResp `shouldBe` 409
+      assertLifecycleError "TASK_DEPENDENCY_HIERARCHY_CYCLE" batchMoveResp
+
+    it "rejects batch-moving a subtask away from its parent project" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("task-batch-move-subtask-parent-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      leftProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Left" :: T.Text)])
+      let Just leftProj = decode (respBody leftProjResp) :: Maybe Project
+      rightProjResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Right" :: T.Text)])
+      let Just rightProj = decode (respBody rightProjResp) :: Maybe Project
+
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "title" .= ("Parent" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Task
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= leftProj.id, "parent_id" .= parent.id, "title" .= ("Child" :: T.Text)])
+      let Just child = decode (respBody childResp) :: Maybe Task
+
+      batchMoveResp <- postJSON app "/api/v1/tasks/batch-move"
+        (object ["task_ids" .= [child.id], "project_id" .= rightProj.id])
+      respStatus batchMoveResp `shouldBe` 409
+      assertLifecycleError "TASK_PARENT_PROJECT_MISMATCH" batchMoveResp
+
     it "rejects task hierarchy cycles" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("task-cycle-ws" :: T.Text)])

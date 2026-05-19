@@ -160,6 +160,21 @@ spec = do
       parseToolCall "task_finish" (object ["task_id" .= testUUID, "status" .= ("done" :: Text), "notes" .= ("done" :: Text)])
         `shouldBe` Right (TaskFinishCall parsedUUID Done (Just "done"))
 
+    it "parses task_update placement and reorder fields used by MCP move validation" $ do
+      let args = object
+            [ "task_id" .= testUUID
+            , "project_id" .= testUUID2
+            , "parent_id" .= testUUID2
+            , "priority" .= (9 :: Int)
+            ]
+      case parseToolCall "task_update" args of
+        Right (TaskUpdate tid ut) -> do
+          tid `shouldBe` parsedUUID
+          ut.projectId `shouldBe` SetTo parsedUUID2
+          ut.parentId `shouldBe` SetTo parsedUUID2
+          ut.priority `shouldBe` Just 9
+        other -> expectationFailure $ "Expected TaskUpdate, got: " <> show other
+
     it "parses queryless unified search for browsing" $ do
       case parseToolCall "search" (object ["workspace_id" .= testUUID, "entity_types" .= (["project"] :: [Text])]) of
         Right (UnifiedSearch usq) -> do

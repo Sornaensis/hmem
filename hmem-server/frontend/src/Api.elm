@@ -408,6 +408,21 @@ structuredErrorToUserMessage fallback apiError =
                 Just "TASK_SUBTASK_START_BLOCKED" ->
                     "Start the parent task before moving a subtask to in progress."
 
+                Just "TASK_DEPENDENCY_CROSS_WORKSPACE" ->
+                    "Move tasks only after removing or repairing dependencies that cross workspaces."
+
+                Just "TASK_DEPENDENCY_CROSS_PROJECT" ->
+                    "Move dependent tasks together, or remove the dependency before moving tasks across projects."
+
+                Just "TASK_DEPENDENCY_HIERARCHY_CYCLE" ->
+                    "Remove the dependency chain from the subtask to the target parent before moving it."
+
+                Just "TASK_PARENT_PROJECT_MISMATCH" ->
+                    "Move the parent task with the subtask, detach the subtask first, or choose the parent task's project."
+
+                Just "TASK_BATCH_MOVE_CROSS_WORKSPACE" ->
+                    "Move tasks from one workspace at a time."
+
                 _ ->
                     apiError.requiredAction
                         |> Maybe.withDefault (Maybe.withDefault apiError.message apiError.hint)

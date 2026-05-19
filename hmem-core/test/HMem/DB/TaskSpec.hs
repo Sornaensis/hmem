@@ -1015,6 +1015,34 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         Left (DBCheckViolation _) -> pure ()
         other -> expectationFailure $ "Expected DBCheckViolation, got: " <> show other
 
+    it "returns a structured move error for legacy cross-workspace dependency endpoints" $ \env -> do
+      wsA <- createTestWorkspace env "taskdep-legacy-cross-a"
+      wsB <- createTestWorkspace env "taskdep-legacy-cross-b"
+      projA <- createProject env.pool CreateProject
+        { workspaceId = wsA.id, parentId = Nothing, name = "A"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      projA2 <- createProject env.pool CreateProject
+        { workspaceId = wsA.id, parentId = Nothing, name = "A2"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      projB <- createProject env.pool CreateProject
+        { workspaceId = wsB.id, parentId = Nothing, name = "B"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      taskA <- createTask env.pool CreateTask
+        { workspaceId = wsA.id, projectId = Just projA.id, parentId = Nothing, title = "A"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+      taskB <- createTask env.pool CreateTask
+        { workspaceId = wsB.id, projectId = Just projB.id, parentId = Nothing, title = "B"
+        , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+      execSql env "ALTER TABLE task_dependencies DISABLE TRIGGER trg_task_dependencies_same_workspace"
+      execSql env $ "INSERT INTO task_dependencies (task_id, depends_on_id) VALUES ('" <> show taskA.id <> "', '" <> show taskB.id <> "')"
+      execSql env "ALTER TABLE task_dependencies ENABLE TRIGGER trg_task_dependencies_same_workspace"
+
+      result <- try @DBException $ updateTask env.pool taskA.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = SetTo projA2.id, parentId = Unchanged
+        , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+      expectLifecycle "TASK_DEPENDENCY_CROSS_WORKSPACE" result
+
   describe "listNextTasks" $ do
     it "returns ready tasks from project subtrees sorted by priority" $ \env -> do
       ws <- createTestWorkspace env "next-task-priority-ws"

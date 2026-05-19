@@ -54,8 +54,8 @@ rowToProject r = Project
   , updatedAt   = r.projUpdatedAt
   }
 
-projectSubtreeIdsStatement :: Statement.Statement UUID [UUID]
-projectSubtreeIdsStatement = Statement.Statement sql encoder decoder True
+projectSubtreeIdsForUpdateStatement :: Statement.Statement UUID [UUID]
+projectSubtreeIdsForUpdateStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
       [ "WITH RECURSIVE project_tree AS ("
@@ -63,18 +63,23 @@ projectSubtreeIdsStatement = Statement.Statement sql encoder decoder True
       , "  FROM projects"
       , "  WHERE id = $1 AND deleted_at IS NULL"
       , "  UNION ALL"
-      , "  SELECT p.id"
-      , "  FROM projects p"
-      , "  JOIN project_tree pt ON p.parent_id = pt.id"
-      , "  WHERE p.deleted_at IS NULL"
+      , "  SELECT child.id"
+      , "  FROM projects child"
+      , "  JOIN project_tree parent_tree ON child.parent_id = parent_tree.id"
+      , "  WHERE child.deleted_at IS NULL"
       , ")"
-      , "SELECT id FROM project_tree"
+      , "SELECT project_to_lock.id"
+      , "  FROM projects project_to_lock"
+      , "  JOIN project_tree ON project_tree.id = project_to_lock.id"
+      , " WHERE project_to_lock.deleted_at IS NULL"
+      , " ORDER BY project_to_lock.id"
+      , " FOR UPDATE OF project_to_lock"
       ]
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
-projectSubtreeIdsForRootsStatement :: Statement.Statement [UUID] [UUID]
-projectSubtreeIdsForRootsStatement = Statement.Statement sql encoder decoder True
+projectSubtreeIdsForRootsForUpdateStatement :: Statement.Statement [UUID] [UUID]
+projectSubtreeIdsForRootsForUpdateStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
       [ "WITH RECURSIVE project_tree AS ("
@@ -82,12 +87,17 @@ projectSubtreeIdsForRootsStatement = Statement.Statement sql encoder decoder Tru
       , "  FROM projects"
       , "  WHERE id = ANY($1) AND deleted_at IS NULL"
       , "  UNION"
-      , "  SELECT p.id"
-      , "  FROM projects p"
-      , "  JOIN project_tree pt ON p.parent_id = pt.id"
-      , "  WHERE p.deleted_at IS NULL"
+      , "  SELECT child.id"
+      , "  FROM projects child"
+      , "  JOIN project_tree parent_tree ON child.parent_id = parent_tree.id"
+      , "  WHERE child.deleted_at IS NULL"
       , ")"
-      , "SELECT id FROM project_tree"
+      , "SELECT project_to_lock.id"
+      , "  FROM projects project_to_lock"
+      , "  JOIN project_tree ON project_tree.id = project_to_lock.id"
+      , " WHERE project_to_lock.deleted_at IS NULL"
+      , " ORDER BY project_to_lock.id"
+      , " FOR UPDATE OF project_to_lock"
       ]
     encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
@@ -131,8 +141,8 @@ allProjectSubtreeIdsStatement = Statement.Statement sql encoder decoder True
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
 
-activeProjectTaskIdsStatement :: Statement.Statement [UUID] [UUID]
-activeProjectTaskIdsStatement = Statement.Statement sql encoder decoder True
+activeProjectTaskIdsForUpdateStatement :: Statement.Statement [UUID] [UUID]
+activeProjectTaskIdsForUpdateStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
       [ "WITH RECURSIVE task_tree AS ("
@@ -146,7 +156,12 @@ activeProjectTaskIdsStatement = Statement.Statement sql encoder decoder True
       , "    JOIN task_tree parent ON child.parent_id = parent.id"
       , "   WHERE child.deleted_at IS NULL"
       , ")"
-      , "SELECT id FROM task_tree"
+      , "SELECT task_to_lock.id"
+      , "  FROM tasks task_to_lock"
+      , "  JOIN task_tree ON task_tree.id = task_to_lock.id"
+      , " WHERE task_to_lock.deleted_at IS NULL"
+      , " ORDER BY task_to_lock.id"
+      , " FOR UPDATE OF task_to_lock"
       ]
     encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
     decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
@@ -369,7 +384,9 @@ deleteProject pool pid = maybe False (const True) <$> deleteProjectCascade pool 
 deleteProjectCascade :: Pool Hasql.Connection -> UUID -> IO (Maybe CascadeResult)
 deleteProjectCascade pool pid = do
   runTransaction pool $ do
-    projectIds <- Session.statement pid projectSubtreeIdsStatement
+    -- Lock projects before tasks so project deletion and task project-move
+    -- operations acquire rows in the same coarse order: projects, then tasks.
+    projectIds <- Session.statement pid projectSubtreeIdsForUpdateStatement
     deleteProjectIdsCascadeS projectIds
 
 -- | Soft-delete multiple projects by ID in a single transaction, cascading to
@@ -379,14 +396,15 @@ deleteProjectBatch :: Pool Hasql.Connection -> [UUID] -> IO Int
 deleteProjectBatch _pool [] = pure 0
 deleteProjectBatch pool ids = do
   runTransaction pool $ do
-    projectIds <- Session.statement ids projectSubtreeIdsForRootsStatement
+    -- Lock projects before tasks for the same order used by task project moves.
+    projectIds <- Session.statement ids projectSubtreeIdsForRootsForUpdateStatement
     mResult <- deleteProjectIdsCascadeS projectIds
     pure $ maybe 0 (.affected) mResult
 
 deleteProjectIdsCascadeS :: [UUID] -> Session.Session (Maybe CascadeResult)
 deleteProjectIdsCascadeS [] = pure Nothing
 deleteProjectIdsCascadeS projectIds = do
-  taskIds <- Session.statement projectIds activeProjectTaskIdsStatement
+  taskIds <- Session.statement projectIds activeProjectTaskIdsForUpdateStatement
   memoryCount <- softDeleteProjectAndTaskMemoriesS projectIds taskIds
   dependencyCount <- deleteProjectTaskDependenciesS taskIds
   taskCount <- softDeleteProjectTasksS taskIds

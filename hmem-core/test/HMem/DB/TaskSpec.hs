@@ -2,7 +2,10 @@
 
 module HMem.DB.TaskSpec (spec) where
 
-import Control.Exception (try)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.Async (async, wait)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
+import Control.Exception (SomeException, finally, throwIO, try)
 import Control.Monad (forM_, void, when)
 import Data.Functor.Contravariant (contramap)
 import Data.ByteString.Char8 qualified as BS8
@@ -12,12 +15,13 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
+import Hasql.Connection qualified as Hasql
 import Test.Hspec
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 
 import HMem.DB.Memory (createMemory, getMemory, getTaskMemories, touchMemory, updateMemory)
-import HMem.DB.Pool (DBException(..), runSession)
+import HMem.DB.Pool (DBException(..), runSession, setTestTransactionMode, withConn)
 import HMem.DB.Project (createProject, updateProject)
 import HMem.DB.Task
 import HMem.DB.TestHarness
@@ -994,6 +998,65 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         Just task -> task.projectId `shouldBe` Just targetProj.id
         Nothing -> expectationFailure "child not found")
 
+    it "fails safely when concurrent move validation blockers commit first" $ \_ ->
+      withConcurrentTestEnv $ \raceEnv -> do
+        ws <- createTestWorkspace raceEnv "task-move-concurrent-race-ws"
+        sourceProj <- createProject raceEnv.pool CreateProject
+          { workspaceId = ws.id, parentId = Nothing, name = "Source"
+          , description = Nothing, priority = Nothing, metadata = Nothing }
+
+        singleTarget <- createProject raceEnv.pool CreateProject
+          { workspaceId = ws.id, parentId = Nothing, name = "Single Target"
+          , description = Nothing, priority = Nothing, metadata = Nothing }
+        singleTask <- createTask raceEnv.pool CreateTask
+          { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Nothing, title = "Single"
+          , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+
+        singleResult <- runWithUncommittedSql raceEnv
+          ("UPDATE projects SET deleted_at = now() WHERE id = '" <> UUID.toString singleTarget.id <> "'") $
+          updateTask raceEnv.pool singleTask.id UpdateTask
+            { title = Nothing, description = Unchanged, projectId = SetTo singleTarget.id, parentId = Unchanged
+            , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+        expectForeignKey singleResult
+        getTask raceEnv.pool singleTask.id >>= (\case
+          Just task -> task.projectId `shouldBe` Just sourceProj.id
+          Nothing -> expectationFailure "single task not found")
+
+        batchTarget <- createProject raceEnv.pool CreateProject
+          { workspaceId = ws.id, parentId = Nothing, name = "Batch Target"
+          , description = Nothing, priority = Nothing, metadata = Nothing }
+        batchTask <- createTask raceEnv.pool CreateTask
+          { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Nothing, title = "Batch"
+          , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        batchResult <- runWithUncommittedSql raceEnv
+          ("UPDATE projects SET deleted_at = now() WHERE id = '" <> UUID.toString batchTarget.id <> "'") $
+          moveTasksBatch raceEnv.pool [batchTask.id] (Just batchTarget.id)
+        expectForeignKey batchResult
+        getTask raceEnv.pool batchTask.id >>= (\case
+          Just task -> task.projectId `shouldBe` Just sourceProj.id
+          Nothing -> expectationFailure "batch task not found")
+
+        parentTarget <- createProject raceEnv.pool CreateProject
+          { workspaceId = ws.id, parentId = Nothing, name = "Parent Target"
+          , description = Nothing, priority = Nothing, metadata = Nothing }
+        parent <- createTask raceEnv.pool CreateTask
+          { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Nothing, title = "Parent"
+          , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        child <- createTask raceEnv.pool CreateTask
+          { workspaceId = ws.id, projectId = Just sourceProj.id, parentId = Nothing, title = "Child"
+          , description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+        parentRaceResult <- runWithUncommittedSql raceEnv
+          ("UPDATE tasks SET project_id = '" <> UUID.toString parentTarget.id <> "' WHERE id = '" <> UUID.toString parent.id <> "'") $
+          updateTask raceEnv.pool child.id UpdateTask
+            { title = Nothing, description = Unchanged, projectId = SetTo sourceProj.id, parentId = SetTo parent.id
+            , status = Nothing, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+        expectCheckViolation parentRaceResult
+        getTask raceEnv.pool child.id >>= (\case
+          Just task -> do
+            task.projectId `shouldBe` Just sourceProj.id
+            task.parentId `shouldBe` Nothing
+          Nothing -> expectationFailure "child not found")
+
     it "rejects cross-workspace task dependencies at the database layer" $ \env -> do
       wsA <- createTestWorkspace env "taskdep-cross-a"
       wsB <- createTestWorkspace env "taskdep-cross-b"
@@ -1339,6 +1402,98 @@ expectLifecycle expected result = case result of
   Left (DBLifecycleViolation actual _ _ _) -> actual `shouldBe` expected
   Left other -> expectationFailure $ "Expected DBLifecycleViolation " <> show expected <> ", got: " <> show other
   Right _ -> expectationFailure $ "Expected DBLifecycleViolation " <> show expected <> ", got success"
+
+expectForeignKey :: Either DBException a -> Expectation
+expectForeignKey result = case result of
+  Left (DBForeignKeyViolation _) -> pure ()
+  Left other -> expectationFailure $ "Expected DBForeignKeyViolation, got: " <> show other
+  Right _ -> expectationFailure "Expected DBForeignKeyViolation, got success"
+
+expectCheckViolation :: Either DBException a -> Expectation
+expectCheckViolation result = case result of
+  Left (DBCheckViolation _) -> pure ()
+  Left other -> expectationFailure $ "Expected DBCheckViolation, got: " <> show other
+  Right _ -> expectationFailure "Expected DBCheckViolation, got success"
+
+withConcurrentTestEnv :: (TestEnv -> IO a) -> IO a
+withConcurrentTestEnv action = do
+  -- The regular TaskSpec examples run under a single-connection rollback
+  -- transaction.  These race regressions need multiple real connections and
+  -- committed visibility, so temporarily disable savepoint test mode and use a
+  -- normal pooled test environment against the same sandboxed PostgreSQL.
+  setTestTransactionMode False
+  (withTestEnv $ \raceEnv -> action raceEnv `finally` cleanDB raceEnv)
+    `finally` setTestTransactionMode True
+
+runWithUncommittedSql :: TestEnv -> String -> IO a -> IO (Either DBException a)
+runWithUncommittedSql env sql action = do
+  ready <- newEmptyMVar
+  release <- newEmptyMVar
+  done <- newEmptyMVar
+  _ <- forkIO $ do
+    result <- try @SomeException $ withConn env.pool $ \conn -> do
+      runSqlOnConn conn "BEGIN"
+      runSqlOnConn conn sql
+      putMVar ready (Right ())
+      takeMVar release
+      runSqlOnConn conn "COMMIT"
+    case result of
+      Left err -> do
+        _ <- tryPutMVar ready (Left err)
+        putMVar done (Left err)
+      Right () -> putMVar done (Right ())
+
+  readyResult <- takeMVar ready
+  case readyResult of
+    Left err -> throwIO err
+    Right () -> pure ()
+
+  actionAsync <- async (try @DBException action)
+  observedWait <- waitForMoveValidationLockWait env
+  putMVar release ()
+  actionResult <- wait actionAsync
+  deleteResult <- takeMVar done
+  case deleteResult of
+    Left err -> throwIO err
+    Right () -> do
+      when (not observedWait) $
+        expectationFailure "Expected move validation to wait on an uncommitted row lock"
+      pure actionResult
+
+waitForMoveValidationLockWait :: TestEnv -> IO Bool
+waitForMoveValidationLockWait env = go (50 :: Int)
+  where
+    go 0 = pure False
+    go remaining = do
+      waiting <- runSession env.pool $ Session.statement () moveValidationLockWaitStatement
+      if waiting
+        then pure True
+        else do
+          threadDelay 20000
+          go (remaining - 1)
+
+moveValidationLockWaitStatement :: Statement.Statement () Bool
+moveValidationLockWaitStatement = Statement.Statement sql E.noParams decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "SELECT EXISTS ("
+      , "  SELECT 1"
+      , "    FROM pg_stat_activity"
+      , "   WHERE datname = current_database()"
+      , "     AND pid <> pg_backend_pid()"
+      , "     AND wait_event_type = 'Lock'"
+      , "     AND state = 'active'"
+      , "     AND query ILIKE '%FOR UPDATE%'"
+      , ")"
+      ]
+    decoder = D.singleRow (D.column (D.nonNullable D.bool))
+
+runSqlOnConn :: Hasql.Connection -> String -> IO ()
+runSqlOnConn conn sql = do
+  result <- Session.run (Session.sql $ BS8.pack sql) conn
+  case result of
+    Left err -> fail $ "SQL failed: " <> sql <> ": " <> show err
+    Right _ -> pure ()
 
 execSql :: TestEnv -> String -> IO ()
 execSql env sql = runSession env.pool (Session.sql (BS8.pack sql))

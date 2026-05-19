@@ -2,6 +2,12 @@ module Feature.Editing exposing
     ( clearForTabSwitch
     , handleEscape
     , init
+    , MemoryTargetOption
+    , memoryContextTargetHint
+    , memoryContextTargetValue
+    , memoryContextTargetValueFrom
+    , memoryTargetOptionsForWorkspace
+    , selectedMemoryTargetValueFrom
     , onKeyDown
     , update
     , viewCreateFormModal
@@ -29,6 +35,7 @@ import Json.Encode as Encode
 import Markdown.Parser
 import Markdown.Renderer
 import Permissions
+import Set exposing (Set)
 import Toast exposing (addToast)
 import Types exposing (..)
 
@@ -54,45 +61,137 @@ memoryTargetOptions model =
             []
 
         Just wsId ->
-            let
-                projectOptions =
-                    model.projects
-                        |> Dict.values
-                        |> List.filter (\p -> p.workspaceId == wsId)
-                        |> List.sortBy .name
-                        |> List.map
-                            (\p ->
-                                { value = "project:" ++ p.id
-                                , label = "Project: " ++ p.name
-                                }
-                            )
+            memoryTargetOptionsForWorkspace wsId (Dict.values model.projects) (Dict.values model.tasks)
 
-                taskOptions =
-                    model.tasks
-                        |> Dict.values
-                        |> List.filter (\t -> t.workspaceId == wsId)
-                        |> List.sortBy .title
-                        |> List.map
-                            (\t ->
-                                { value = "task:" ++ t.id
-                                , label = "Task: " ++ t.title
-                                }
-                            )
-            in
-            projectOptions ++ taskOptions
+
+memoryTargetOptionsForWorkspace : String -> List Api.Project -> List Api.Task -> List MemoryTargetOption
+memoryTargetOptionsForWorkspace wsId projects tasks =
+    let
+        projectOptions =
+            projects
+                |> List.filter (\p -> p.workspaceId == wsId)
+                |> List.sortBy .name
+                |> List.map
+                    (\p ->
+                        { value = "project:" ++ p.id
+                        , label = "Project: " ++ p.name
+                        }
+                    )
+
+        taskOptions =
+            tasks
+                |> List.filter (\t -> t.workspaceId == wsId && t.parentId == Nothing)
+                |> List.sortBy .title
+                |> List.map
+                    (\t ->
+                        { value = "task:" ++ t.id
+                        , label = "Top-level task: " ++ t.title
+                        }
+                    )
+    in
+    projectOptions ++ taskOptions
 
 
 selectedMemoryTargetValue : Model -> String -> Maybe String
 selectedMemoryTargetValue model target =
-    let
-        options =
-            memoryTargetOptions model
-    in
+    selectedMemoryTargetValueFrom (memoryTargetOptions model) target
+
+
+selectedMemoryTargetValueFrom : List MemoryTargetOption -> String -> Maybe String
+selectedMemoryTargetValueFrom options target =
     if List.any (\option -> option.value == target) options then
         Just target
 
     else
-        List.head options |> Maybe.map .value
+        Nothing
+
+
+memoryContextTargetValue : Model -> String -> String -> Maybe String
+memoryContextTargetValue model entityType entityId =
+    memoryContextTargetValueFrom (Dict.values model.projects) (Dict.values model.tasks) entityType entityId
+
+
+memoryContextTargetValueFrom : List Api.Project -> List Api.Task -> String -> String -> Maybe String
+memoryContextTargetValueFrom projects tasks entityType entityId =
+    case entityType of
+        "project" ->
+            projects
+                |> List.filter (\project -> project.id == entityId)
+                |> List.head
+                |> Maybe.map (\project -> "project:" ++ project.id)
+
+        "task" ->
+            case tasks |> List.filter (\task -> task.id == entityId) |> List.head of
+                Just task ->
+                    case nearestTopLevelTask tasks task of
+                        Just topTask ->
+                            Just ("task:" ++ topTask.id)
+
+                        Nothing ->
+                            task.projectId
+                                |> Maybe.andThen
+                                    (\projectId ->
+                                        projects
+                                            |> List.filter (\project -> project.id == projectId)
+                                            |> List.head
+                                            |> Maybe.map (\project -> "project:" ++ project.id)
+                                    )
+
+                Nothing ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+nearestTopLevelTask : List Api.Task -> Api.Task -> Maybe Api.Task
+nearestTopLevelTask tasks task =
+    nearestTopLevelTaskHelp tasks Set.empty task
+
+
+nearestTopLevelTaskHelp : List Api.Task -> Set String -> Api.Task -> Maybe Api.Task
+nearestTopLevelTaskHelp tasks visitedTaskIds task =
+    if Set.member task.id visitedTaskIds then
+        Nothing
+
+    else
+        let
+            visited =
+                Set.insert task.id visitedTaskIds
+        in
+        case task.parentId of
+            Nothing ->
+                Just task
+
+            Just parentId ->
+                tasks
+                    |> List.filter (\candidate -> candidate.id == parentId)
+                    |> List.head
+                    |> Maybe.andThen (nearestTopLevelTaskHelp tasks visited)
+
+
+memoryContextTargetHint : Model -> String -> String -> Maybe String
+memoryContextTargetHint model entityType entityId =
+    case entityType of
+        "task" ->
+            case Dict.get entityId model.tasks of
+                Just task ->
+                    if task.parentId /= Nothing then
+                        case memoryContextTargetValue model entityType entityId of
+                            Just _ ->
+                                Just "Subtask memory creation attaches the new memory to the nearest top-level task or project, so it may appear with that ancestor rather than directly on this subtask; direct subtask-linked creation is not allowed."
+
+                            Nothing ->
+                                Just "Subtask-linked memory creation is not allowed, and no eligible project or top-level task is loaded."
+
+                    else
+                        Nothing
+
+                Nothing ->
+                    Nothing
+
+        _ ->
+            Nothing
 
 
 memoryCreateTargetIds : Model -> String -> Maybe ( Maybe String, Maybe String )
@@ -472,7 +571,7 @@ update msg model =
                                         ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId projectId taskId f.content memoryType requestId MemoryCreated ] )
 
                                     ( Nothing, _ ) ->
-                                        addToast Warning "Select a project or task for this memory" model
+                                        addToast Warning "Select a project or top-level task for this memory" model
 
                                     ( _, Nothing ) ->
                                         addToast Warning "Select short-term or long-term for this memory" model
@@ -550,7 +649,7 @@ update msg model =
                                     ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId projectId taskId content selectedType requestId MemoryCreated ] )
 
                                 ( Nothing, _ ) ->
-                                    addToast Warning "Select a project or task for this memory" model
+                                    addToast Warning "Select a project or top-level task for this memory" model
 
                                 ( _, Nothing ) ->
                                     addToast Warning "Select short-term or long-term for this memory" model
@@ -1178,7 +1277,7 @@ viewCreateFormContent model form =
                 , div [ class "form-group" ]
                     [ label [ class "form-label" ] [ text "Link target" ]
                     , if List.isEmpty targetOptions then
-                        div [ class "form-hint" ] [ text "Create a project or task before adding memories." ]
+                        div [ class "form-hint" ] [ text "Create a project or top-level task before adding memories." ]
 
                       else
                         select
@@ -1186,7 +1285,8 @@ viewCreateFormContent model form =
                             , value selectedTarget
                             , onInput (\s -> UpdateCreateForm (CreateMemoryForm { f | target = s }))
                             ]
-                            (List.map
+                            (option [ value "", selected (selectedTarget == "") ] [ text "Select project or top-level task..." ]
+                                :: List.map
                                 (\optionItem ->
                                     option [ value optionItem.value, selected (optionItem.value == selectedTarget) ]
                                         [ text optionItem.label ]
@@ -1216,7 +1316,7 @@ viewCreateFormContent model form =
                     ]
                 , div [ class "modal-actions" ]
                     [ button [ class "btn btn-secondary", onClick CancelCreateForm ] [ text "Cancel" ]
-                    , button [ class "btn btn-primary", disabled (List.isEmpty targetOptions || f.memoryType == Nothing), onClick SubmitCreateForm ] [ text "Create" ]
+                    , button [ class "btn btn-primary", disabled (String.isEmpty (String.trim f.content) || selectedTarget == "" || f.memoryType == Nothing), onClick SubmitCreateForm ] [ text "Create" ]
                     ]
                 ]
 
@@ -1286,19 +1386,16 @@ viewInlineCreateMemory model =
         let
             targetOptions =
                 memoryTargetOptions model
-
-            defaultTarget =
-                selectedMemoryTargetValue model "" |> Maybe.withDefault ""
         in
         if List.isEmpty targetOptions then
-            div [ class "inline-create-row empty-state" ] [ text "Create a project or task before adding memories." ]
+            div [ class "inline-create-row empty-state" ] [ text "Create a project or top-level task before adding memories." ]
 
         else
             case model.editing.inlineCreate of
                 Just (InlineCreateMemory f) ->
                     let
                         selectedTarget =
-                            selectedMemoryTargetValue model f.target |> Maybe.withDefault defaultTarget
+                            selectedMemoryTargetValue model f.target |> Maybe.withDefault ""
 
                         selectedType =
                             f.memoryType |> Maybe.map Api.memoryTypeToString |> Maybe.withDefault ""
@@ -1309,7 +1406,8 @@ viewInlineCreateMemory model =
                             , value selectedTarget
                             , onInput (\s -> UpdateInlineCreate (InlineCreateMemory { f | target = s }))
                             ]
-                            (List.map
+                            (option [ value "", selected (selectedTarget == "") ] [ text "Target..." ]
+                                :: List.map
                                 (\optionItem ->
                                     option [ value optionItem.value, selected (optionItem.value == selectedTarget) ]
                                         [ text optionItem.label ]
@@ -1358,7 +1456,7 @@ viewInlineCreateMemory model =
                     div [ class "inline-create-row" ]
                         [ button
                             [ class "btn-inline-create-top"
-                            , onClick (ShowInlineCreate (InlineCreateMemory { content = "", memoryType = Nothing, target = defaultTarget }))
+                            , onClick (ShowInlineCreate (InlineCreateMemory { content = "", memoryType = Nothing, target = "" }))
                             ]
                             [ text "+ New Memory" ]
                         ]

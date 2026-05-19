@@ -396,7 +396,7 @@ type Msg
     | MutationDone String (Result Http.Error ())
     | ProjectCreated (Result Api.ApiError Api.Project)
     | TaskCreated (Result Api.ApiError Api.Task)
-    | MemoryCreated (Result Http.Error Api.Memory)
+    | MemoryCreated (Result Api.ApiError Api.Memory)
     | ProjectUpdated (Result Api.ApiError Api.Project)
     | TaskUpdated (Result Api.ApiError Api.TaskMutationResult)
     | MemoryUpdated (Result Http.Error Api.Memory)

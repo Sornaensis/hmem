@@ -4,6 +4,7 @@ import Api
 import Expect
 import Feature.Cards
 import Feature.DataLoading
+import Feature.Editing
 import Helpers
 import Json.Decode as Decode
 import String
@@ -49,6 +50,15 @@ suite =
                         [ "Reopen the parent task before adding or reopening open subtasks."
                         , "Reopen the project before adding or reopening open tasks."
                         ]
+        , test "memory creation validation details are shown to users" <|
+            \_ ->
+                let
+                    body =
+                        """{"error":"validation","message":"Request validation failed","details":["memory_type is required and must be short_term or long_term","project_id or task_id is required"]}"""
+                in
+                Api.decodeApiErrorBody 400 body
+                    |> Api.apiErrorToUserMessage "Failed to create memory"
+                    |> Expect.equal "memory_type is required and must be short_term or long_term; project_id or task_id is required"
         , test "known project and task blockers produce control tooltip reasons" <|
             \_ ->
                 [ Feature.Cards.projectCompletionBlockerReason 1 2
@@ -263,6 +273,100 @@ suite =
                         [ "No ready tasks found. Checking blocked diagnostics…"
                         , "No ready tasks found. Blocked candidates are listed below with their dependency/manual-blocking rationale."
                         , "No ready tasks found. Start parent tasks, then resolve any remaining blockers, to make waiting subtasks actionable."
+                        ]
+        , test "memory target options include projects and top-level tasks only" <|
+            \_ ->
+                let
+                    otherWorkspaceProject =
+                        let
+                            base =
+                                project "other-project" Nothing
+                        in
+                        { base | workspaceId = "workspace-b" }
+
+                    otherWorkspaceTask =
+                        let
+                            base =
+                                task "other-task" Nothing Nothing
+                        in
+                        { base | workspaceId = "workspace-b" }
+                in
+                Feature.Editing.memoryTargetOptionsForWorkspace "workspace-a"
+                    [ project "project-a" Nothing
+                    , project "project-b" (Just "project-a")
+                    , otherWorkspaceProject
+                    ]
+                    [ task "parent-task" Nothing (Just "project-a")
+                    , task "child-task" (Just "parent-task") (Just "project-a")
+                    , otherWorkspaceTask
+                    ]
+                    |> Expect.equal
+                        [ { value = "project:project-a", label = "Project: project-a" }
+                        , { value = "project:project-b", label = "Project: project-b" }
+                        , { value = "task:parent-task", label = "Top-level task: parent-task" }
+                        ]
+        , test "memory target selection does not silently fall back" <|
+            \_ ->
+                let
+                    options =
+                        [ { value = "project:project-a", label = "Project: project-a" }
+                        , { value = "task:parent-task", label = "Top-level task: parent-task" }
+                        ]
+                in
+                [ Feature.Editing.selectedMemoryTargetValueFrom options "project:project-a"
+                , Feature.Editing.selectedMemoryTargetValueFrom options ""
+                , Feature.Editing.selectedMemoryTargetValueFrom options "task:child-task"
+                ]
+                    |> Expect.equal [ Just "project:project-a", Nothing, Nothing ]
+        , test "memory context targets resolve subtasks to eligible ancestors" <|
+            \_ ->
+                let
+                    projects =
+                        [ project "project-a" Nothing ]
+
+                    parentTask =
+                        task "parent-task" Nothing (Just "project-a")
+
+                    childTask =
+                        task "child-task" (Just "parent-task") (Just "project-a")
+
+                    orphanSubtask =
+                        task "orphan-subtask" (Just "missing-parent") (Just "project-a")
+
+                    unlinkedOrphanSubtask =
+                        task "unlinked-orphan" (Just "missing-parent") Nothing
+
+                    cyclicTask =
+                        task "cycle-a" (Just "cycle-b") (Just "project-a")
+
+                    cyclicParent =
+                        task "cycle-b" (Just "cycle-a") (Just "project-a")
+
+                    unlinkedCyclicTask =
+                        task "unlinked-cycle-a" (Just "unlinked-cycle-b") Nothing
+
+                    unlinkedCyclicParent =
+                        task "unlinked-cycle-b" (Just "unlinked-cycle-a") Nothing
+
+                    tasks =
+                        [ parentTask, childTask, orphanSubtask, unlinkedOrphanSubtask, cyclicTask, cyclicParent, unlinkedCyclicTask, unlinkedCyclicParent ]
+                in
+                [ Feature.Editing.memoryContextTargetValueFrom projects tasks "project" "project-a"
+                , Feature.Editing.memoryContextTargetValueFrom projects tasks "task" "parent-task"
+                , Feature.Editing.memoryContextTargetValueFrom projects tasks "task" "child-task"
+                , Feature.Editing.memoryContextTargetValueFrom projects tasks "task" "orphan-subtask"
+                , Feature.Editing.memoryContextTargetValueFrom projects tasks "task" "unlinked-orphan"
+                , Feature.Editing.memoryContextTargetValueFrom projects tasks "task" "cycle-a"
+                , Feature.Editing.memoryContextTargetValueFrom projects tasks "task" "unlinked-cycle-a"
+                ]
+                    |> Expect.equal
+                        [ Just "project:project-a"
+                        , Just "task:parent-task"
+                        , Just "task:parent-task"
+                        , Just "project:project-a"
+                        , Nothing
+                        , Just "project:project-a"
+                        , Nothing
                         ]
         ]
 

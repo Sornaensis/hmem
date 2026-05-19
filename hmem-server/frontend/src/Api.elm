@@ -291,6 +291,7 @@ type alias StructuredErrorBody =
     { error : String
     , code : Maybe String
     , message : String
+    , details : List String
     , detail : Maybe ErrorDetail
     , hint : Maybe String
     , requiredAction : Maybe String
@@ -352,6 +353,7 @@ structuredApiErrorDecoder =
         |> required "error" D.string
         |> optional "code" (D.nullable D.string) Nothing
         |> optional "message" D.string "Server rejected the request."
+        |> optional "details" (D.list D.string) []
         |> optional "detail" (D.nullable errorDetailDecoder) Nothing
         |> optional "hint" (D.nullable D.string) Nothing
         |> optional "required_action" (D.nullable D.string) Nothing
@@ -433,8 +435,12 @@ structuredErrorToUserMessage fallback apiError =
                     "Move tasks from one workspace at a time."
 
                 _ ->
-                    apiError.requiredAction
-                        |> Maybe.withDefault (Maybe.withDefault apiError.message apiError.hint)
+                    if List.isEmpty apiError.details then
+                        apiError.requiredAction
+                            |> Maybe.withDefault (Maybe.withDefault apiError.message apiError.hint)
+
+                    else
+                        String.join "; " apiError.details
 
         detailText =
             apiError.detail
@@ -1580,7 +1586,7 @@ deleteTask apiUrl taskId requestId toMsg =
         }
 
 
-createMemory : String -> String -> Maybe String -> Maybe String -> String -> MemoryType -> String -> (Result Http.Error Memory -> msg) -> Cmd msg
+createMemory : String -> String -> Maybe String -> Maybe String -> String -> MemoryType -> String -> (Result ApiError Memory -> msg) -> Cmd msg
 createMemory apiUrl wsId projectId taskId content mtype requestId toMsg =
     let
         targetFields =
@@ -1604,7 +1610,7 @@ createMemory apiUrl wsId projectId taskId content mtype requestId toMsg =
                         ++ targetFields
                     )
                 )
-        , expect = Http.expectJson toMsg memoryDecoder
+        , expect = expectJsonWithApiError memoryDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }

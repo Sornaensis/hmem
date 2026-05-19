@@ -739,11 +739,26 @@ viewLinkedMemories model entityType entityId linkedMems =
 
                 Nothing ->
                     False
+
+        newMemoryTarget =
+            Feature.Editing.memoryContextTargetValue model entityType entityId
+
+        newMemoryHint =
+            Feature.Editing.memoryContextTargetHint model entityType entityId
+
+        newMemoryTitle =
+            Maybe.withDefault "Create and link a new memory" newMemoryHint
     in
     div [ class "linked-memories-section" ]
         [ div [ class "linked-memories-header" ]
             [ span [ class "linked-memories-title" ] [ text ("Linked Memories (" ++ String.fromInt (List.length linkedMems) ++ ")") ]
             ]
+        , case newMemoryHint of
+            Just hintText ->
+                div [ class "form-hint" ] [ text hintText ]
+
+            Nothing ->
+                text ""
         , if List.isEmpty linkedMems then
             div [ class "linked-memories-empty" ] [ text "No linked memories" ]
 
@@ -772,6 +787,20 @@ viewLinkedMemories model entityType entityId linkedMems =
                         [ text "+ Link" ]
                     , viewLinkMemoryPopover model entityType entityId linkedMems
                     ]
+                , button
+                    [ class "btn-inline-create"
+                    , disabled (newMemoryTarget == Nothing)
+                    , title newMemoryTitle
+                    , onClick
+                        (case newMemoryTarget of
+                            Just target ->
+                                ShowCreateForm (CreateMemoryForm { content = "", memoryType = Nothing, target = target })
+
+                            Nothing ->
+                                NoOp
+                        )
+                    ]
+                    [ text "+ New" ]
                 ]
 
           else

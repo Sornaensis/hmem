@@ -89,7 +89,7 @@ update msg model =
                             model.editing
 
                         updatedEditing =
-                            { currentEditing | createForm = Nothing }
+                            { currentEditing | createForm = Nothing, inlineCreate = Nothing }
 
                         updatedModel =
                             { model
@@ -105,8 +105,8 @@ update msg model =
                     in
                     ( toastedModel, Cmd.batch [ trackCmd, toastCmd ] )
 
-                Err _ ->
-                    addToast Error "Failed to create memory" model
+                Err err ->
+                    handleApiMutationError "Failed to create memory" err model
 
         WorkspaceCreated result ->
             case result of

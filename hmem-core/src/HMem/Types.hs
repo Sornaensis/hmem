@@ -2006,7 +2006,7 @@ instance FromJSON EntitySearchType where
 
 data UnifiedSearchQuery = UnifiedSearchQuery
   { workspaceId    :: Maybe UUID
-  , query          :: Text
+  , query          :: Maybe Text
   , entityTypes    :: Maybe [EntitySearchType]
   , searchLanguage :: Maybe Text
   , limit          :: Maybe Int
@@ -2079,6 +2079,6 @@ instance FromJSON UnifiedSearchResults where
 
 validateUnifiedSearchQuery :: UnifiedSearchQuery -> [Text]
 validateUnifiedSearchQuery usq =
-  ["query is required and must not be empty" | T.null (T.strip usq.query)]
+  ["query must not be empty" | maybe False (T.null . T.strip) usq.query]
   <> validateOptionalIntRange "min_importance" 1 10 usq.minImportance
   <> validateOptionalIntRange "task_priority" 1 10 usq.taskPriority

@@ -1,5 +1,6 @@
 module HMem.MCP.Server
   ( runMCPServer
+  , injectWorkspaceContext
   ) where
 
 import Control.Monad (replicateM_)
@@ -309,6 +310,11 @@ injectWorkspaceContext wsContext params = do
           | not (KM.member "workspace_id" args) ->
               Object $ KM.insert "arguments"
                 (Object $ KM.insert "workspace_id" (toJSON wsId) args) o
+        Nothing ->
+          Object $ KM.insert "arguments"
+            (object ["workspace_id" .= wsId]) o
+        Just Null ->
+          Object $ KM.insert "arguments"
+            (object ["workspace_id" .= wsId]) o
         _ -> params
       _ -> params
-

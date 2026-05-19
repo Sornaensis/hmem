@@ -566,8 +566,13 @@ refreshCachedEntityData model =
             model.dependencies.projectReadinessRollups
                 |> Dict.keys
                 |> List.map (\projectId -> Api.fetchProjectOverview model.flags.apiUrl projectId (GotProjectOverview projectId))
+
+        projectNextTaskCmds =
+            model.cards.projectNextTasks
+                |> Dict.keys
+                |> List.map (refreshProjectNextTaskCache model)
     in
-    Cmd.batch (entityMemoryCmds ++ dependencyCmds ++ projectReadinessCmds)
+    Cmd.batch (entityMemoryCmds ++ dependencyCmds ++ projectReadinessCmds ++ projectNextTaskCmds)
 
 
 refreshReadinessCaches : Model -> Cmd Msg
@@ -575,6 +580,7 @@ refreshReadinessCaches model =
     Cmd.batch
         [ refreshTaskReadinessCaches model
         , refreshProjectReadinessCaches model
+        , refreshProjectNextTaskCaches model
         ]
 
 
@@ -592,6 +598,22 @@ refreshProjectReadinessCaches model =
         |> Dict.keys
         |> List.map (\projectId -> Api.fetchProjectOverview model.flags.apiUrl projectId (GotProjectOverview projectId))
         |> Cmd.batch
+
+
+refreshProjectNextTaskCaches : Model -> Cmd Msg
+refreshProjectNextTaskCaches model =
+    model.cards.projectNextTasks
+        |> Dict.keys
+        |> List.map (refreshProjectNextTaskCache model)
+        |> Cmd.batch
+
+
+refreshProjectNextTaskCache : Model -> String -> Cmd Msg
+refreshProjectNextTaskCache model projectId =
+    Cmd.batch
+        [ Api.fetchProjectNextTasks model.flags.apiUrl projectId 5 False (GotProjectNextTasks projectId)
+        , Api.fetchProjectNextTasks model.flags.apiUrl projectId 200 True (GotProjectNextTaskDiagnostics projectId)
+        ]
 
 
 changeEventDescription : Api.ChangeEvent -> String

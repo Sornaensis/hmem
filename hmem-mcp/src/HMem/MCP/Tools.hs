@@ -181,6 +181,16 @@ slimToolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
+    , mkTool "project_next_tasks" "Get the next actionable tasks for a project subtree, sorted by priority then creation time. By default returns only ready tasks; set include_blocked=true to include dependency-blocked/manual-blocked diagnostics. Open subtasks gate parent completion but are not dependency blockers." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "project_id" .= prop "string" "UUID of the project"
+          , "limit" .= prop "integer" "Maximum candidates to return (default 5, clamped 1..200)"
+          , "include_blocked" .= prop "boolean" "Include blocked tasks with dependency/manual-blocking rationale (default false)"
+          ]
+      , "required" .= [t "project_id"]
+      ]
+
     , mkTool "project_spec" "Create a project and its initial tasks in one call in the active workspace. Tasks are created under the new project in order." $ object
       [ "type" .= t "object"
       , "properties" .= object
@@ -314,6 +324,7 @@ data ToolCall
   | WorkspaceList (Maybe Int) (Maybe Int)
   | WorkspaceReg   CreateWorkspace
   | ProjectOverviewCall UUID
+  | ProjectNextTasksCall UUID (Maybe Int) Bool
   -- Workflow composite tools
   | TaskStartCall UUID ContextDetailLevel
   | TaskFinishCall UUID TaskStatus (Maybe Text)   -- task_id, status, notes
@@ -376,6 +387,7 @@ parseToolCall name args = case name of
     "workspace_list"           -> WorkspaceList <$> opt "limit" <*> pure Nothing
     "workspace_register"       -> WorkspaceReg <$> parse args
     "project_overview"          -> ProjectOverviewCall <$> need "project_id"
+    "project_next_tasks"        -> ProjectNextTasksCall <$> need "project_id" <*> opt "limit" <*> (fromMaybe False <$> opt "include_blocked")
     -- Workflow composite tools
     "task_start"                -> TaskStartCall <$> need "task_id" <*> (maybe ContextMedium id <$> opt "detail_level")
     "task_finish"               -> TaskFinishCall <$> need "task_id" <*> need "status" <*> opt "notes"
@@ -460,6 +472,7 @@ validateToolCall = \case
     TaskUpdate tid ut -> TaskUpdate tid ut <$ firstValidationError (validateUpdateTaskInput ut)
     WorkspaceReg cw -> WorkspaceReg cw <$ firstValidationError (validateCreateWorkspaceInput cw)
     WorkspaceList ml mo -> Right $ WorkspaceList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
+    ProjectNextTasksCall pid ml includeBlocked -> Right $ ProjectNextTasksCall pid (clampMaybe 1 200 <$> ml) includeBlocked
     -- Workflow composite tools — lightweight validation
     TaskStartCall tid level -> Right $ TaskStartCall tid level
     TaskFinishCall tid status mNotes -> Right $ TaskFinishCall tid status mNotes
@@ -593,6 +606,12 @@ executeToolCall mgr base mApiKey = \case
     ProjectOverviewCall pid ->
         getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/overview" <>
           buildQuery [("extra_context", Just "false")])
+    ProjectNextTasksCall pid ml includeBlocked ->
+        getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/next-tasks" <>
+          buildQuery
+            [ ("limit", show <$> ml)
+            , ("include_blocked", if includeBlocked then Just "true" else Nothing)
+            ])
     UnifiedSearch usq -> postJSON mgr base mApiKey "/api/v1/search" usq
 
     -- ================================================================

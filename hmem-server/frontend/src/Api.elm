@@ -1,5 +1,5 @@
 module Api exposing
-    ( Workspace, Project, Task, Memory, MemoryLink
+    ( Workspace, Project, Task, NextTaskCandidate, Memory, MemoryLink
     , WorkspaceGroup, WorkspaceMembership
     , TaskDependencySummary, TaskDependencyStatusChange, TaskReadinessRollup, DependencyMutationResult, TaskMutationResult, TaskOverview
     , ProjectReadinessRollup, ProjectOverview
@@ -22,7 +22,7 @@ module Api exposing
     , fetchProjectMemories, fetchTaskMemories
     , linkProjectMemory, unlinkProjectMemory
     , linkTaskMemory, unlinkTaskMemory
-    , fetchTaskOverview, fetchProjectOverview
+    , fetchTaskOverview, fetchProjectOverview, fetchProjectNextTasks
     , fetchVisualization
     , addTaskDependency, removeTaskDependency
     , searchMemories, unifiedSearch
@@ -34,7 +34,7 @@ module Api exposing
     , fetchWorkspaceGroups, createWorkspaceGroup, deleteWorkspaceGroup
     , fetchGroupMembers, addGroupMember, removeGroupMember
     , fetchAuditLog, fetchEntityHistory, revertAuditEntry
-    , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder
+    , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder, nextTaskCandidateDecoder
     , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, auditLogEntryDecoder
     , memoryTypeToString, memoryTypeFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
     , auditActionToString, auditActionFromString
@@ -93,6 +93,15 @@ type alias Task =
     , memoryLinkCount : Int
     , createdAt : String
     , updatedAt : String
+    }
+
+
+type alias NextTaskCandidate =
+    { task : Task
+    , completionGated : Bool
+    , openDescendantCount : Int
+    , dependencyBlocked : Bool
+    , openDependencyCount : Int
     }
 
 
@@ -788,6 +797,16 @@ taskDecoder =
         |> optional "memory_link_count" D.int 0
         |> required "created_at" D.string
         |> required "updated_at" D.string
+
+
+nextTaskCandidateDecoder : Decoder NextTaskCandidate
+nextTaskCandidateDecoder =
+    D.succeed NextTaskCandidate
+        |> required "task" taskDecoder
+        |> required "completion_gated" D.bool
+        |> required "open_descendant_count" D.int
+        |> required "dependency_blocked" D.bool
+        |> required "open_dependency_count" D.int
 
 
 taskDependencyStatusChangeDecoder : Decoder TaskDependencyStatusChange
@@ -1773,6 +1792,22 @@ fetchProjectOverview apiUrl projectId toMsg =
     Http.get
         { url = apiUrl ++ "/api/v1/projects/" ++ projectId ++ "/overview"
         , expect = Http.expectJson toMsg projectOverviewDecoder
+        }
+
+
+fetchProjectNextTasks : String -> String -> Int -> Bool -> (Result Http.Error (List NextTaskCandidate) -> msg) -> Cmd msg
+fetchProjectNextTasks apiUrl projectId limit includeBlocked toMsg =
+    let
+        blockedParam =
+            if includeBlocked then
+                "true"
+
+            else
+                "false"
+    in
+    Http.get
+        { url = apiUrl ++ "/api/v1/projects/" ++ projectId ++ "/next-tasks?limit=" ++ String.fromInt limit ++ "&include_blocked=" ++ blockedParam
+        , expect = Http.expectJson toMsg (D.list nextTaskCandidateDecoder)
         }
 
 

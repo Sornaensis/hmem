@@ -137,6 +137,12 @@ type alias CardsModel =
     { expandedCards : Dict String Bool
     , collapsedNodes : Dict String Bool
     , deleteConfirmation : Maybe DeleteConfirmation
+    , projectNextTasks : Dict String (List Api.NextTaskCandidate)
+    , projectNextTaskDiagnostics : Dict String (List Api.NextTaskCandidate)
+    , projectNextTasksLoading : Dict String Bool
+    , projectNextTaskDiagnosticsLoading : Dict String Bool
+    , projectNextTasksErrors : Dict String String
+    , projectNextTaskDiagnosticsErrors : Dict String String
     }
 
 
@@ -458,6 +464,9 @@ type Msg
       -- Task dependencies
     | GotTaskDependencies String (Result Http.Error Api.TaskOverview)
     | GotProjectOverview String (Result Http.Error Api.ProjectOverview)
+    | GotProjectNextTasks String (Result Http.Error (List Api.NextTaskCandidate))
+    | GotProjectNextTaskDiagnostics String (Result Http.Error (List Api.NextTaskCandidate))
+    | RefreshProjectNextTasks String
     | StartAddDependency String
     | DependencySearch String
     | PerformAddDependency String String

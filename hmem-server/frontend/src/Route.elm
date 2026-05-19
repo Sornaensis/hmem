@@ -258,6 +258,12 @@ handleUrlChange url model =
                         { currentCards
                             | collapsedNodes = Dict.empty
                             , expandedCards = Dict.empty
+                            , projectNextTasks = Dict.empty
+                            , projectNextTaskDiagnostics = Dict.empty
+                            , projectNextTasksLoading = Dict.empty
+                            , projectNextTaskDiagnosticsLoading = Dict.empty
+                            , projectNextTasksErrors = Dict.empty
+                            , projectNextTaskDiagnosticsErrors = Dict.empty
                         }
 
                     currentGraph =

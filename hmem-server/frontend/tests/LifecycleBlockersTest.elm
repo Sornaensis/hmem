@@ -220,6 +220,50 @@ suite =
 
                     ( _, Err err ) ->
                         Expect.fail (Decode.errorToString err)
+        , test "next task candidates decode and keep completion gates separate from dependency blockers" <|
+            \_ ->
+                let
+                    body =
+                        """{"task":{"id":"task-a","workspace_id":"workspace-a","project_id":"project-a","parent_id":null,"title":"Task A","description":null,"status":"todo","priority":8,"due_at":null,"completed_at":null,"dependency_count":0,"memory_link_count":0,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"completion_gated":true,"open_descendant_count":2,"dependency_blocked":false,"open_dependency_count":0}"""
+                in
+                case Decode.decodeString Api.nextTaskCandidateDecoder body of
+                    Ok candidate ->
+                        [ candidate.task.id == "task-a"
+                        , candidate.completionGated == True
+                        , candidate.openDescendantCount == 2
+                        , candidate.dependencyBlocked == False
+                        , Feature.Cards.nextTaskRationale candidate == "Ready now; completion is gated by 2 open subtasks."
+                        ]
+                            |> Expect.equal (List.repeat 5 True)
+
+                    Err err ->
+                        Expect.fail (Decode.errorToString err)
+        , test "next task empty-state copy distinguishes blocked diagnostics from parent-gated subtasks" <|
+            \_ ->
+                let
+                    blockedTask =
+                        task "blocked" Nothing (Just "project-a")
+
+                    blockedCandidate =
+                        { task = { blockedTask | status = Api.Blocked }
+                        , completionGated = False
+                        , openDescendantCount = 0
+                        , dependencyBlocked = True
+                        , openDependencyCount = 1
+                        }
+
+                    waitingSubtask =
+                        task "waiting-child" (Just "parent") (Just "project-a")
+                in
+                [ Feature.Cards.noReadyNextTaskMessage [] [] True
+                , Feature.Cards.noReadyNextTaskMessage [] [ blockedCandidate ] False
+                , Feature.Cards.noReadyNextTaskMessage [ waitingSubtask ] [] False
+                ]
+                    |> Expect.equal
+                        [ "No ready tasks found. Checking blocked diagnostics…"
+                        , "No ready tasks found. Blocked candidates are listed below with their dependency/manual-blocking rationale."
+                        , "No ready tasks found. Start parent tasks, then resolve any remaining blockers, to make waiting subtasks actionable."
+                        ]
         ]
 
 

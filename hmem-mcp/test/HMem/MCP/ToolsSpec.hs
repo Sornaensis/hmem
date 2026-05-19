@@ -43,6 +43,7 @@ slimToolNames =
   , "project_create"
   , "project_update"
   , "project_overview"
+  , "project_next_tasks"
   , "project_spec"
   , "project_archive"
   , "task_create"
@@ -160,6 +161,12 @@ spec = do
       parseToolCall "task_finish" (object ["task_id" .= testUUID, "status" .= ("done" :: Text), "notes" .= ("done" :: Text)])
         `shouldBe` Right (TaskFinishCall parsedUUID Done (Just "done"))
 
+    it "parses project next-task tool options" $ do
+      parseToolCall "project_next_tasks" (object ["project_id" .= testUUID])
+        `shouldBe` Right (ProjectNextTasksCall parsedUUID Nothing False)
+      parseToolCall "project_next_tasks" (object ["project_id" .= testUUID, "limit" .= (25 :: Int), "include_blocked" .= True])
+        `shouldBe` Right (ProjectNextTasksCall parsedUUID (Just 25) True)
+
     it "parses task_update placement and reorder fields used by MCP move validation" $ do
       let args = object
             [ "task_id" .= testUUID
@@ -228,6 +235,12 @@ spec = do
             , projectId = Nothing
             }
       validateToolCall (UnifiedSearch usq) `shouldSatisfy` either (const True) (const False)
+
+    it "clamps project next-task limits" $ do
+      validateToolCall (ProjectNextTasksCall parsedUUID (Just 999) True)
+        `shouldBe` Right (ProjectNextTasksCall parsedUUID (Just 200) True)
+      validateToolCall (ProjectNextTasksCall parsedUUID (Just 0) False)
+        `shouldBe` Right (ProjectNextTasksCall parsedUUID (Just 1) False)
   where
     isUnknownTool expected result = case result of
       Left msg -> msg == "Unknown tool: " <> T.unpack expected

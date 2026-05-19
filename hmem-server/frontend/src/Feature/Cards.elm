@@ -4,6 +4,8 @@ module Feature.Cards exposing
     , cascadeDeleteSuccessMessage
     , handleEscape
     , init
+    , nextTaskRationale
+    , noReadyNextTaskMessage
     , projectCascadePreview
     , projectCompletionBlockerReason
     , taskCascadePreview
@@ -39,6 +41,12 @@ init =
     { expandedCards = Dict.empty
     , collapsedNodes = Dict.empty
     , deleteConfirmation = Nothing
+    , projectNextTasks = Dict.empty
+    , projectNextTaskDiagnostics = Dict.empty
+    , projectNextTasksLoading = Dict.empty
+    , projectNextTaskDiagnosticsLoading = Dict.empty
+    , projectNextTasksErrors = Dict.empty
+    , projectNextTaskDiagnosticsErrors = Dict.empty
     }
 
 
@@ -85,11 +93,50 @@ update msg model =
                     else
                         Cmd.none
 
+                shouldFetchProjectNextTasks =
+                    newExpanded && Dict.member cardId model.projects && not (Dict.member cardId model.cards.projectNextTasks)
+
+                fetchProjectNextTasksCmd =
+                    if shouldFetchProjectNextTasks then
+                        Cmd.batch
+                            [ Api.fetchProjectNextTasks model.flags.apiUrl cardId 5 False (GotProjectNextTasks cardId)
+                            , Api.fetchProjectNextTasks model.flags.apiUrl cardId 200 True (GotProjectNextTaskDiagnostics cardId)
+                            ]
+
+                    else
+                        Cmd.none
+
                 currentCards =
                     model.cards
 
                 updatedCards =
-                    { currentCards | expandedCards = Dict.insert cardId newExpanded model.cards.expandedCards }
+                    { currentCards
+                        | expandedCards = Dict.insert cardId newExpanded model.cards.expandedCards
+                        , projectNextTasksLoading =
+                            if shouldFetchProjectNextTasks then
+                                Dict.insert cardId True model.cards.projectNextTasksLoading
+
+                            else
+                                model.cards.projectNextTasksLoading
+                        , projectNextTasksErrors =
+                            if shouldFetchProjectNextTasks then
+                                Dict.remove cardId model.cards.projectNextTasksErrors
+
+                            else
+                                model.cards.projectNextTasksErrors
+                        , projectNextTaskDiagnosticsLoading =
+                            if shouldFetchProjectNextTasks then
+                                Dict.insert cardId True model.cards.projectNextTaskDiagnosticsLoading
+
+                            else
+                                model.cards.projectNextTaskDiagnosticsLoading
+                        , projectNextTaskDiagnosticsErrors =
+                            if shouldFetchProjectNextTasks then
+                                Dict.remove cardId model.cards.projectNextTaskDiagnosticsErrors
+
+                            else
+                                model.cards.projectNextTaskDiagnosticsErrors
+                    }
 
                 currentEditing =
                     model.editing
@@ -101,8 +148,90 @@ update msg model =
                 | cards = updatedCards
                 , editing = updatedEditing
               }
-            , Cmd.batch [ fetchMemCmd, fetchDepCmd, fetchProjectOverviewCmd ]
+            , Cmd.batch [ fetchMemCmd, fetchDepCmd, fetchProjectOverviewCmd, fetchProjectNextTasksCmd ]
             )
+
+        RefreshProjectNextTasks projectId ->
+            let
+                currentCards =
+                    model.cards
+
+                updatedCards =
+                    { currentCards
+                        | projectNextTasksLoading = Dict.insert projectId True currentCards.projectNextTasksLoading
+                        , projectNextTaskDiagnosticsLoading = Dict.insert projectId True currentCards.projectNextTaskDiagnosticsLoading
+                        , projectNextTasksErrors = Dict.remove projectId currentCards.projectNextTasksErrors
+                        , projectNextTaskDiagnosticsErrors = Dict.remove projectId currentCards.projectNextTaskDiagnosticsErrors
+                    }
+            in
+            ( { model | cards = updatedCards }
+            , Cmd.batch
+                [ Api.fetchProjectNextTasks model.flags.apiUrl projectId 5 False (GotProjectNextTasks projectId)
+                , Api.fetchProjectNextTasks model.flags.apiUrl projectId 200 True (GotProjectNextTaskDiagnostics projectId)
+                ]
+            )
+
+        GotProjectNextTasks projectId result ->
+            let
+                currentCards =
+                    model.cards
+            in
+            case result of
+                Ok candidates ->
+                    ( { model
+                        | cards =
+                            { currentCards
+                                | projectNextTasks = Dict.insert projectId candidates currentCards.projectNextTasks
+                                , projectNextTasksLoading = Dict.insert projectId False currentCards.projectNextTasksLoading
+                                , projectNextTasksErrors = Dict.remove projectId currentCards.projectNextTasksErrors
+                            }
+                      }
+                    , Cmd.none
+                    )
+
+                Err _ ->
+                    ( { model
+                        | cards =
+                            { currentCards
+                                | projectNextTasksLoading = Dict.insert projectId False currentCards.projectNextTasksLoading
+                                , projectNextTasksErrors = Dict.insert projectId "Failed to load next tasks" currentCards.projectNextTasksErrors
+                            }
+                      }
+                    , Cmd.none
+                    )
+
+        GotProjectNextTaskDiagnostics projectId result ->
+            case result of
+                Ok candidates ->
+                    let
+                        currentCards =
+                            model.cards
+                    in
+                    ( { model
+                        | cards =
+                            { currentCards
+                                | projectNextTaskDiagnostics = Dict.insert projectId candidates currentCards.projectNextTaskDiagnostics
+                                , projectNextTaskDiagnosticsLoading = Dict.insert projectId False currentCards.projectNextTaskDiagnosticsLoading
+                                , projectNextTaskDiagnosticsErrors = Dict.remove projectId currentCards.projectNextTaskDiagnosticsErrors
+                            }
+                      }
+                    , Cmd.none
+                    )
+
+                Err _ ->
+                    let
+                        currentCards =
+                            model.cards
+                    in
+                    ( { model
+                        | cards =
+                            { currentCards
+                                | projectNextTaskDiagnosticsLoading = Dict.insert projectId False currentCards.projectNextTaskDiagnosticsLoading
+                                , projectNextTaskDiagnosticsErrors = Dict.insert projectId "Failed to load blocked diagnostics" currentCards.projectNextTaskDiagnosticsErrors
+                            }
+                      }
+                    , Cmd.none
+                    )
 
         ToggleTreeNode nodeId ->
             let
@@ -216,6 +345,9 @@ update msg model =
                         currentDependencies =
                             toastedModel.dependencies
 
+                        currentCards =
+                            toastedModel.cards
+
                         cacheClearedModel =
                             { toastedModel
                                 | dependencies =
@@ -223,6 +355,15 @@ update msg model =
                                         | taskDependencies = Dict.empty
                                         , taskReadinessRollups = Dict.empty
                                         , projectReadinessRollups = Dict.empty
+                                    }
+                                , cards =
+                                    { currentCards
+                                        | projectNextTasks = Dict.empty
+                                        , projectNextTaskDiagnostics = Dict.empty
+                                        , projectNextTasksLoading = Dict.empty
+                                        , projectNextTaskDiagnosticsLoading = Dict.empty
+                                        , projectNextTasksErrors = Dict.empty
+                                        , projectNextTaskDiagnosticsErrors = Dict.empty
                                     }
                             }
 
@@ -239,6 +380,9 @@ update msg model =
                         currentDependencies =
                             toastedModel.dependencies
 
+                        currentCards =
+                            toastedModel.cards
+
                         cacheClearedModel =
                             { toastedModel
                                 | dependencies =
@@ -246,6 +390,15 @@ update msg model =
                                         | taskDependencies = Dict.empty
                                         , taskReadinessRollups = Dict.empty
                                         , projectReadinessRollups = Dict.empty
+                                    }
+                                , cards =
+                                    { currentCards
+                                        | projectNextTasks = Dict.empty
+                                        , projectNextTaskDiagnostics = Dict.empty
+                                        , projectNextTasksLoading = Dict.empty
+                                        , projectNextTaskDiagnosticsLoading = Dict.empty
+                                        , projectNextTasksErrors = Dict.empty
+                                        , projectNextTaskDiagnosticsErrors = Dict.empty
                                     }
                             }
 
@@ -1078,7 +1231,8 @@ viewProjectNode allProjects model depth project hasSearch query =
                     ]
                 , if isExpanded model project.id then
                     div [ class "card-extras" ]
-                        [ Feature.Memory.viewLinkedMemories model "project" project.id linkedMems
+                        [ viewProjectNextTasksPanel model project
+                        , Feature.Memory.viewLinkedMemories model "project" project.id linkedMems
                         , Feature.AuditLog.viewEntityHistory model "project" project.id
                         ]
 
@@ -1137,6 +1291,286 @@ viewProjectNode allProjects model depth project hasSearch query =
           else
             text ""
         ]
+
+
+viewProjectNextTasksPanel : Model -> Api.Project -> Html Msg
+viewProjectNextTasksPanel model project =
+    let
+        candidates =
+            Dict.get project.id model.cards.projectNextTasks
+
+        blockedDiagnostics =
+            Dict.get project.id model.cards.projectNextTaskDiagnostics
+                |> Maybe.withDefault []
+                |> List.filter isBlockedNextTaskCandidate
+
+        loading =
+            Dict.get project.id model.cards.projectNextTasksLoading |> Maybe.withDefault False
+
+        diagnosticsLoading =
+            Dict.get project.id model.cards.projectNextTaskDiagnosticsLoading |> Maybe.withDefault False
+
+        errorMessage =
+            Dict.get project.id model.cards.projectNextTasksErrors
+
+        diagnosticsErrorMessage =
+            Dict.get project.id model.cards.projectNextTaskDiagnosticsErrors
+
+        waitingSubtasks =
+            waitingSubtasksForProject model project
+
+        candidateViews =
+            candidates
+                |> Maybe.withDefault []
+                |> List.map (viewNextTaskCandidate model)
+
+        blockedDiagnosticViews =
+            blockedDiagnostics
+                |> List.map (viewNextTaskCandidate model)
+    in
+    div [ class "project-next-tasks-section" ]
+        [ div [ class "project-next-tasks-header" ]
+            [ div []
+                [ div [ class "project-next-tasks-title" ] [ text "Next tasks" ]
+                , div [ class "project-next-tasks-subtitle" ]
+                    [ text "Top ready candidates first; blocked diagnostics are separated below." ]
+                ]
+            , button
+                [ class "btn-inline-create"
+                , disabled loading
+                , onClick (RefreshProjectNextTasks project.id)
+                ]
+                [ text (if loading then "Loading…" else "Refresh") ]
+            ]
+        , case errorMessage of
+            Just message ->
+                div [ class "project-next-tasks-error" ] [ text message ]
+
+            Nothing ->
+                text ""
+        , case diagnosticsErrorMessage of
+            Just message ->
+                div [ class "project-next-tasks-error" ] [ text message ]
+
+            Nothing ->
+                text ""
+        , case candidates of
+            Nothing ->
+                div [ class "project-next-tasks-empty" ]
+                    [ text
+                        (if loading then
+                            "Loading next tasks…"
+
+                         else
+                            "Expand or refresh to load next tasks."
+                        )
+                    ]
+
+            Just [] ->
+                div [ class "project-next-tasks-empty" ]
+                    [ text (noReadyNextTaskMessage waitingSubtasks blockedDiagnostics diagnosticsLoading) ]
+
+            Just _ ->
+                div [ class "project-next-tasks-list" ] candidateViews
+        , if not (List.isEmpty blockedDiagnostics) then
+            div [ class "project-next-tasks-diagnostics" ]
+                [ div [ class "project-next-tasks-diagnostics-title" ] [ text "Blocked diagnostics" ]
+                , div [ class "project-next-tasks-list" ] blockedDiagnosticViews
+                ]
+
+          else
+            text ""
+        , viewWaitingSubtasksNote waitingSubtasks
+        ]
+
+
+viewNextTaskCandidate : Model -> Api.NextTaskCandidate -> Html Msg
+viewNextTaskCandidate model candidate =
+    let
+        task =
+            candidate.task
+
+        disabledReason =
+            nextTaskStartDisabledReason candidate
+
+        canQuickStart =
+            Permissions.canEditCurrentWorkspace model && disabledReason == Nothing
+    in
+    div [ class ("next-task-candidate " ++ nextTaskCandidateClass candidate) ]
+        [ div [ class "next-task-main" ]
+            [ div [ class "next-task-title-row" ]
+                [ span [ class "next-task-title" ] [ text task.title ]
+                , span [ class "next-task-priority" ] [ text ("P" ++ String.fromInt task.priority) ]
+                , span [ class "next-task-status" ] [ text (Api.taskStatusToString task.status) ]
+                ]
+            , div [ class "next-task-rationale" ] [ text (nextTaskRationale candidate) ]
+            ]
+        , div [ class "next-task-actions" ]
+            [ button [ class "btn-inline-create", onClick (ScrollToEntity task.id) ] [ text "Jump" ]
+            , if Permissions.canEditCurrentWorkspace model then
+                button
+                    [ class "btn-inline-create"
+                    , disabled (not canQuickStart)
+                    , title (Maybe.withDefault "Start this task now" disabledReason)
+                    , onClick (ChangeTaskStatus task.id Api.InProgress)
+                    ]
+                    [ text "Start" ]
+
+              else
+                text ""
+            ]
+        ]
+
+
+nextTaskCandidateClass : Api.NextTaskCandidate -> String
+nextTaskCandidateClass candidate =
+    if candidate.dependencyBlocked then
+        "next-task-blocked"
+
+    else if candidate.task.status == Api.Blocked then
+        "next-task-blocked"
+
+    else if candidate.completionGated then
+        "next-task-completion-gated"
+
+    else
+        "next-task-ready"
+
+
+isBlockedNextTaskCandidate : Api.NextTaskCandidate -> Bool
+isBlockedNextTaskCandidate candidate =
+    candidate.dependencyBlocked || candidate.task.status == Api.Blocked
+
+
+nextTaskStartDisabledReason : Api.NextTaskCandidate -> Maybe String
+nextTaskStartDisabledReason candidate =
+    if candidate.dependencyBlocked then
+        Just ("Resolve " ++ countPhrase candidate.openDependencyCount "open dependency" "open dependencies" ++ " before starting.")
+
+    else if candidate.task.status == Api.Blocked then
+        Just "Unblock this task before starting it."
+
+    else if candidate.task.status == Api.InProgress then
+        Just "Already in progress."
+
+    else
+        Nothing
+
+
+nextTaskRationale : Api.NextTaskCandidate -> String
+nextTaskRationale candidate =
+    if candidate.dependencyBlocked then
+        "Dependency-blocked by " ++ countPhrase candidate.openDependencyCount "open dependency" "open dependencies" ++ "."
+
+    else if candidate.task.status == Api.Blocked then
+        "Blocked; no open dependency is counted by the next-task query."
+
+    else if candidate.completionGated then
+        "Ready now; completion is gated by " ++ countPhrase candidate.openDescendantCount "open subtask" "open subtasks" ++ "."
+
+    else if candidate.task.parentId /= Nothing then
+        "Ready subtask: parent is already in progress."
+
+    else
+        "Ready to start."
+
+
+waitingSubtasksForProject : Model -> Api.Project -> List Api.Task
+waitingSubtasksForProject model project =
+    let
+        projectIds =
+            collectDescendantProjectIds (Dict.values model.projects) project.id
+
+        allTasks =
+            Dict.values model.tasks
+
+        tasksById =
+            model.tasks
+
+        parentNotInProgress parentId =
+            Dict.get parentId model.tasks
+                |> Maybe.map (\parent -> parent.status /= Api.InProgress)
+                |> Maybe.withDefault True
+    in
+    allTasks
+        |> List.filter
+            (\task ->
+                isOpenTaskStatus task.status
+                    && taskInProjectTree projectIds tasksById task
+                    && (case task.parentId of
+                            Just parentId ->
+                                parentNotInProgress parentId
+
+                            Nothing ->
+                                False
+                       )
+            )
+        |> List.sortBy (\task -> ( negate task.priority, String.toLower task.title ))
+
+
+taskInProjectTree : List String -> Dict.Dict String Api.Task -> Api.Task -> Bool
+taskInProjectTree projectIds tasksById task =
+    let
+        directlyInProjectTree =
+            task.projectId
+                |> Maybe.map (\projectId -> List.member projectId projectIds)
+                |> Maybe.withDefault False
+    in
+    if directlyInProjectTree then
+        True
+
+    else
+        case task.parentId |> Maybe.andThen (\parentId -> Dict.get parentId tasksById) of
+            Just parent ->
+                taskInProjectTree projectIds tasksById parent
+
+            Nothing ->
+                False
+
+
+viewWaitingSubtasksNote : List Api.Task -> Html Msg
+viewWaitingSubtasksNote waitingSubtasks =
+    if List.isEmpty waitingSubtasks then
+        text ""
+
+    else
+        let
+            shown =
+                waitingSubtasks
+                    |> List.take 3
+                    |> List.map .title
+
+            suffix =
+                if List.length waitingSubtasks > 3 then
+                    " and " ++ String.fromInt (List.length waitingSubtasks - 3) ++ " more"
+
+                else
+                    ""
+        in
+        div [ class "project-next-tasks-note" ]
+            [ text
+                (countPhrase (List.length waitingSubtasks) "subtask" "subtasks"
+                    ++ " waiting for parent to be in progress before other blockers are evaluated: "
+                    ++ String.join ", " shown
+                    ++ suffix
+                    ++ "."
+                )
+            ]
+
+
+noReadyNextTaskMessage : List Api.Task -> List Api.NextTaskCandidate -> Bool -> String
+noReadyNextTaskMessage waitingSubtasks blockedDiagnostics diagnosticsLoading =
+    if diagnosticsLoading then
+        "No ready tasks found. Checking blocked diagnostics…"
+
+    else if not (List.isEmpty blockedDiagnostics) then
+        "No ready tasks found. Blocked candidates are listed below with their dependency/manual-blocking rationale."
+
+    else if List.isEmpty waitingSubtasks then
+        "No ready or blocked task candidates found for this project. Completed and cancelled work is hidden."
+
+    else
+        "No ready tasks found. Start parent tasks, then resolve any remaining blockers, to make waiting subtasks actionable."
 
 
 viewFocusedTaskNode : Model -> Api.Task -> Html Msg

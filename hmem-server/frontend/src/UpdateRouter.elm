@@ -346,6 +346,15 @@ update msg model =
         GotProjectOverview _ _ ->
             Ok (Feature.Dependencies.update msg model)
 
+        GotProjectNextTasks _ _ ->
+            Ok (Feature.Cards.update msg model)
+
+        GotProjectNextTaskDiagnostics _ _ ->
+            Ok (Feature.Cards.update msg model)
+
+        RefreshProjectNextTasks _ ->
+            Ok (Feature.Cards.update msg model)
+
         StartAddDependency _ ->
             Ok (Feature.Dependencies.update msg model)
 

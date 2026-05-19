@@ -223,6 +223,16 @@ refreshReadinessCaches model =
             |> Dict.keys
             |> List.map (\projectId -> Api.fetchProjectOverview model.flags.apiUrl projectId (GotProjectOverview projectId))
             |> Cmd.batch
+        , model.cards.projectNextTasks
+            |> Dict.keys
+            |> List.map
+                (\projectId ->
+                    Cmd.batch
+                        [ Api.fetchProjectNextTasks model.flags.apiUrl projectId 5 False (GotProjectNextTasks projectId)
+                        , Api.fetchProjectNextTasks model.flags.apiUrl projectId 200 True (GotProjectNextTaskDiagnostics projectId)
+                        ]
+                )
+            |> Cmd.batch
         ]
 
 

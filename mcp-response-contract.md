@@ -120,6 +120,7 @@ Optional fields:
   `source_id`, `target_id`, `depends_on_id`
 - `status` when lifecycle state changed
 - `summary`: an `EntitySummary` for the mutated entity
+- `changed_fields`: field names supplied to update-like mutations when known
 - `dependency_effects`: non-empty `DependencyEffectSummary` rows
 - `notes_memory`: `MemorySummary` when `task_finish` created a notes memory
 - `warnings`: bounded strings for partial composite workflows
@@ -282,7 +283,9 @@ auto-blocking change.
 
 ```json
 {
+  "ok": true,
   "action": "add",
+  "entity_type": "task_dependency",
   "task_id": "...",
   "depends_on_id": "...",
   "affected_tasks": []
@@ -327,22 +330,22 @@ Structured errors preserve every field needed for recovery:
 | `search` | `{ memories: [MemorySearchRow], projects: [ProjectSearchRow], tasks: [TaskSearchRow] }`. | Use `memory_get`, `project_overview`, `task_overview`, or `context_get` for details. |
 | `memory_create` | `MutationAck` with `summary: MemorySummary` and target IDs used at creation. | Use `memory_get` after creation for full content. |
 | `memory_get` | `MemoryDetail`: `MemorySummary` plus full `content`, optional non-empty metadata, optional expiry/source/confidence, and tags. | This is the dedicated memory detail tool. |
-| `memory_update` | `MutationAck` with updated `summary: MemorySummary`; include replaced `tags` when tags were changed. | Use `memory_get` for full content/metadata. |
+| `memory_update` | `MutationAck` with updated `summary: MemorySummary`; include `changed_fields` and replaced `tags` when tags were changed. | Use `memory_get` for full content/metadata. |
 | `memory_link` | For create/remove: `MutationAck` with `source_id`, `target_id`, and `relation_type`; for list: `{ links: [GraphEdge] }`. | Future optional `detail=true` may include bounded endpoint memory summaries. |
 | `link_memory` | `MutationAck` with `entity_type`, `entity_id`, and `memory_id`. | Use the entity overview or `memory_get` for details. |
 | `project_create` | `MutationAck` with `summary: ProjectSummary`. | Use `project_overview` for project detail. |
-| `project_update` | `MutationAck` with updated `summary: ProjectSummary`; include `status` when changed. | Use `project_overview` for project detail. |
+| `project_update` | `MutationAck` with updated `summary: ProjectSummary`; include `changed_fields` and `status` when changed. | Use `project_overview` for project detail. |
 | `project_overview` | `ProjectOverviewSummary`. Root project may include full description; child tasks/subprojects remain summaries. | This is the dedicated project detail/overview tool; future `include_descriptions=true` may expand child descriptions. |
 | `project_next_tasks` | `{ items: [NextTaskCandidateSummary] }` where each row includes `task: TaskSummary`, `dependency_blocked`, and only non-zero actionable gate counts. | `include_blocked=true` includes blocked diagnostics; `task_overview` explains a selected task. |
 | `project_spec` | `WorkflowSummary` with `project: ProjectSummary`, `tasks_created: [TaskSummary]`, and `tasks_failed` only when non-zero. | Use `project_overview` after creation for full context. |
-| `project_archive` | `MutationAck` with archived `ProjectSummary` and optional summary-memory ID. | Use `memory_get` for summary-memory content if needed. |
+| `project_archive` | `MutationAck` with archived `ProjectSummary`, `changed_fields: ["status"]`, and optional summary-memory ID. | Use `memory_get` for summary-memory content if needed. |
 | `task_create` | `MutationAck` with `summary: TaskSummary`. | Use `task_overview` or `context_get` for detail. |
-| `task_update` | `MutationAck` with updated `summary: TaskSummary` and non-empty `dependency_effects`. | Use `task_overview` for dependencies/memory context. |
+| `task_update` | `MutationAck` with updated `summary: TaskSummary`, `changed_fields`, and non-empty `dependency_effects`. | Use `task_overview` for dependencies/memory context. |
 | `task_overview` | `TaskOverviewSummary`. Root task may include full description; dependency and memory rows remain summaries. | This is the dedicated task detail/overview tool; future `include_description=false|true` can tune description size. |
 | `context_get` | `ContextSummary` bounded by `detail_level`. | Increase `detail_level` for more summaries; use `memory_get` for full memory content. |
-| `task_dependency` | `DependencyMutationSummary`: action, `task_id`, `depends_on_id`, and non-empty `affected_tasks` as `DependencyEffectSummary`. | Use `task_overview` for the resulting task state. |
+| `task_dependency` | `DependencyMutationSummary`: `ok`, action, `entity_type`, `task_id`, `depends_on_id`, and non-empty `affected_tasks` as `DependencyEffectSummary`. | Use `task_overview` for the resulting task state. |
 | `task_start` | On success, `WorkflowSummary`/`ContextSummary` with `started: true`; on blocked preflight, `StructuredError` with blockers and ready alternatives. | `detail_level` controls context breadth; `task_overview` explains blockers. |
-| `task_finish` | `MutationAck` with final task `status` and optional `notes_memory`. | Use `memory_get` for saved notes or `task_overview` for final readiness. |
+| `task_finish` | `MutationAck` with final task `status`, `changed_fields: ["status"]`, and optional `notes_memory`. | Use `memory_get` for saved notes or `task_overview` for final readiness. |
 
 ## Compatibility and deprecation notes
 

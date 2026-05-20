@@ -14,11 +14,13 @@ module HMem.MCP.Tools
   , compactTaskOverview
   , compactContextInfo
   , compactTaskMutationAck
+  , compactDependencyMutationAck
   , compactMemoryMutationAckWithTargets
   , compactMemoryMutationAckWithTags
   , compactTaskFinishAckWithNotes
   , compactProjectArchiveAck
   , compactNextTaskCandidateSummary
+  , addChangedFields
   , sanitizeServerResponse
   , mcpHttpError
   , rawHttpErrorText
@@ -569,22 +571,23 @@ executeToolCall mgr base mApiKey = \case
       maybe (postJSONWith (compactMemoryMutationAckWithTargets "created" cm.projectId cm.taskId) mgr base mApiKey "/api/v1/memories" cm) pure mTargetErr
     MemoryGet mid       -> getJSONWith compactMemoryDetail mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
     MemoryUpdate mid um mTags -> do
+      let changedFields = memoryUpdateChangedFields um mTags
       updateResult <- rawPutJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid) um
       case updateResult of
         Left err -> pure $ mcpErrorCodeFromRaw "MEMORY_UPDATE_FAILED" err
         Right _ -> case mTags of
-          Nothing -> getJSONWith (compactMemoryMutationAckWithTags "updated" Nothing) mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
+          Nothing -> getJSONWith (addChangedFields changedFields . compactMemoryMutationAckWithTags "updated" Nothing) mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
           Just tags -> do
             tagResult <- rawPutJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/tags") tags
             case tagResult of
               Left err -> pure $ mcpErrorCodeFromRaw "MEMORY_TAG_UPDATE_FAILED" err
-              Right _  -> getJSONWith (compactMemoryMutationAckWithTags "updated" (Just tags)) mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
+              Right _  -> getJSONWith (addChangedFields changedFields . compactMemoryMutationAckWithTags "updated" (Just tags)) mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
     LinkMemories sid cl -> postJSONWith (const $ memoryLinkAck "linked" sid cl.targetId cl.relationType) mgr base mApiKey ("/api/v1/memories/" <> uuidPath sid <> "/links") cl
     MemoryLinksList mid -> getJSONWith compactMemoryLinksList mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/links")
     MemoryUnlink sid tid rt -> delJSONWith (const $ memoryLinkAck "unlinked" sid tid rt) mgr base mApiKey ("/api/v1/memories/" <> uuidPath sid <> "/links/"
                                <> uuidPath tid <> "/" <> T.unpack (relationTypeToText rt))
     ProjectCreate cp    -> postJSONWith (compactProjectMutationAck "created") mgr base mApiKey "/api/v1/projects" cp
-    ProjectUpdate pid up -> putJSONWith (compactProjectMutationAck "updated") mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid) up
+    ProjectUpdate pid up -> putJSONWith (addChangedFields (projectUpdateChangedFields up) . compactProjectMutationAck "updated") mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid) up
     ProjectLinkMem pid mid -> postJSONWith (const $ entityMemoryLinkAck "linked" "project" pid mid) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
                                (object ["memory_id" .= mid])
     ProjectUnlinkMem pid mid -> delJSONWith (const $ entityMemoryLinkAck "unlinked" "project" pid mid) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories/"
@@ -600,7 +603,7 @@ executeToolCall mgr base mApiKey = \case
               ContextHeavy  -> "heavy"
         in getJSONWith compactContextInfo mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/context" <>
              buildQuery [("detail_level", Just levelStr)])
-    TaskUpdate tid ut   -> putJSONWith (compactTaskMutationAck "updated") mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid) ut
+    TaskUpdate tid ut   -> putJSONWith (addChangedFields (taskUpdateChangedFields ut) . compactTaskMutationAck "updated") mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid) ut
     TaskLinkMem tid mid -> do
       mTargetErr <- ensureTopLevelTaskTarget mgr base mApiKey tid
       maybe
@@ -615,9 +618,9 @@ executeToolCall mgr base mApiKey = \case
           <> uuidPath mid))
         pure
         mTargetErr
-    TaskDepAdd tid did  -> postJSONWith compactDependencyMutationSummary mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies")
+    TaskDepAdd tid did  -> postJSONWith (compactDependencyMutationAck "add") mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies")
                             (object ["depends_on_id" .= did])
-    TaskDepRemove tid did -> delJSONWith compactDependencyMutationSummary mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/"
+    TaskDepRemove tid did -> delJSONWith (compactDependencyMutationAck "remove") mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/"
                                <> uuidPath did)
     WorkspaceList ml mo      -> getJSONWith compactWorkspaceList mgr base mApiKey ("/api/v1/workspaces" <> buildQuery
                             [ ("limit", show <$> ml)
@@ -710,7 +713,7 @@ executeToolCall mgr base mApiKey = \case
             Just authErr -> pure authErr
             Nothing -> case updateResult of
               Left err -> pure $ mcpErrorCodeFromRaw "TASK_FINISH_FAILED" err
-              Right taskVal -> pure $ mcpResultWith id (encode (compactTaskFinishAckWithNotes "finished" mNotesMemory taskVal))
+              Right taskVal -> pure $ mcpResultWith id (encode (addChangedFields ["status"] (compactTaskFinishAckWithNotes "finished" mNotesMemory taskVal)))
 
     ProjectSpecCall wsId pName pDesc pPri tasks -> do
       -- 1. Create the project
@@ -798,7 +801,7 @@ executeToolCall mgr base mApiKey = \case
                 Just authErr -> pure authErr
                 Nothing -> case archiveResult of
                   Left err -> pure $ mcpErrorCodeFromRaw "PROJECT_ARCHIVE_FAILED" err
-                  Right archivedProject -> pure $ mcpResultWith id (encode (compactProjectArchiveAck mSummaryMemory archivedProject))
+                  Right archivedProject -> pure $ mcpResultWith id (encode (addChangedFields ["status"] (compactProjectArchiveAck mSummaryMemory archivedProject)))
 
 ------------------------------------------------------------------------
 -- Typed HTTP helpers
@@ -1073,9 +1076,11 @@ compactNextTaskCandidateSummary value = object $ catMaybes
   ]
 
 
-compactDependencyMutationSummary :: Value -> Value
-compactDependencyMutationSummary value = object $ catMaybes
-  [ copyField "action" value
+compactDependencyMutationAck :: Text -> Value -> Value
+compactDependencyMutationAck fallbackAction value = object $ catMaybes
+  [ Just $ "ok" .= True
+  , Just $ "action" .= actionTextFromValue fallbackAction value
+  , Just $ "entity_type" .= ("task_dependency" :: Text)
   , copyField "task_id" value
   , copyField "depends_on_id" value
   , nonEmptyMappedArrayField "affected_tasks" compactDependencyEffectSummary value
@@ -1134,6 +1139,69 @@ compactProjectArchiveAck mSummaryMemory value =
 
 compactWorkspaceMutationAck :: Text -> Value -> Value
 compactWorkspaceMutationAck action value = mutationAck action "workspace" (compactWorkspaceSummary value) []
+
+
+addChangedFields :: [Text] -> Value -> Value
+addChangedFields [] value = value
+addChangedFields fields (Object obj) = Object $ KM.insert "changed_fields" (toJSON fields) obj
+addChangedFields fields value = object
+  [ "result" .= value
+  , "changed_fields" .= fields
+  ]
+
+
+memoryUpdateChangedFields :: UpdateMemory -> Maybe [Text] -> [Text]
+memoryUpdateChangedFields um mTags = catMaybes
+  [ changedWhen "content" um.content
+  , fieldUpdateChanged "summary" um.summary
+  , changedWhen "memory_type" um.memoryType
+  , changedWhen "importance" um.importance
+  , changedWhen "metadata" um.metadata
+  , fieldUpdateChanged "expires_at" um.expiresAt
+  , fieldUpdateChanged "source" um.source
+  , changedWhen "confidence" um.confidence
+  , changedWhen "pinned" um.pinned
+  , changedWhen "tags" mTags
+  ]
+
+
+projectUpdateChangedFields :: UpdateProject -> [Text]
+projectUpdateChangedFields up = catMaybes
+  [ changedWhen "name" up.name
+  , fieldUpdateChanged "description" up.description
+  , fieldUpdateChanged "parent_id" up.parentId
+  , changedWhen "status" up.status
+  , changedWhen "priority" up.priority
+  , changedWhen "metadata" up.metadata
+  ]
+
+
+taskUpdateChangedFields :: UpdateTask -> [Text]
+taskUpdateChangedFields ut = catMaybes
+  [ changedWhen "title" ut.title
+  , fieldUpdateChanged "description" ut.description
+  , fieldUpdateChanged "project_id" ut.projectId
+  , fieldUpdateChanged "parent_id" ut.parentId
+  , changedWhen "status" ut.status
+  , changedWhen "priority" ut.priority
+  , changedWhen "metadata" ut.metadata
+  , fieldUpdateChanged "due_at" ut.dueAt
+  ]
+
+
+changedWhen :: Text -> Maybe a -> Maybe Text
+changedWhen field = fmap (const field)
+
+
+fieldUpdateChanged :: Text -> FieldUpdate a -> Maybe Text
+fieldUpdateChanged _ Unchanged = Nothing
+fieldUpdateChanged field _ = Just field
+
+
+actionTextFromValue :: Text -> Value -> Text
+actionTextFromValue fallbackAction value = case objectNonNullField "action" value of
+  Just (String action) -> action
+  _                    -> fallbackAction
 
 
 compactProjectSpecSummary :: Value -> Value

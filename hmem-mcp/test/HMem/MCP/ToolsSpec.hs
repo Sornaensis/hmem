@@ -125,6 +125,7 @@ spec = do
       doc <- readContractDoc
       mapM_ (`shouldContainText` doc)
         [ "MutationAck"
+        , "changed_fields"
         , "EntitySummary"
         , "MemoryDetail"
         , "SearchRow"
@@ -218,6 +219,37 @@ spec = do
       jsonField "dependency_effects" ack `shouldSatisfy` arrayLength 1
       jsonField "workspace_id" ack `shouldBe` Nothing
       jsonField "created_at" ack `shouldBe` Nothing
+
+    it "adds changed_fields to update acknowledgements without exposing full entity fields" $ do
+      let ack = addChangedFields ["title", "status"] (compactTaskMutationAck "updated" fullTaskValue)
+      jsonField "changed_fields" ack `shouldBe` Just (toJSON (["title", "status"] :: [Text]))
+      show ack `shouldNotContain` "full task description"
+      show ack `shouldNotContain` "created_at"
+
+    it "wraps dependency mutations as acknowledgements with compact affected tasks" $ do
+      let ack = compactDependencyMutationAck "add" $ object
+            [ "action" .= ("add" :: Text)
+            , "task_id" .= parsedUUID
+            , "depends_on_id" .= parsedUUID2
+            , "affected_tasks" .=
+                [ object
+                    [ "task" .= fullTaskValue
+                    , "previous_status" .= ("todo" :: Text)
+                    , "current_status" .= ("blocked" :: Text)
+                    , "auto_blocked" .= True
+                    , "open_dependency_count" .= (1 :: Int)
+                    , "reason" .= ("open_dependency_added" :: Text)
+                    ]
+                ]
+            ]
+      jsonField "ok" ack `shouldBe` Just (Bool True)
+      jsonField "action" ack `shouldBe` Just (String "add")
+      jsonField "entity_type" ack `shouldBe` Just (String "task_dependency")
+      jsonField "task_id" ack `shouldBe` Just (String testUUID)
+      jsonField "depends_on_id" ack `shouldBe` Just (String testUUID2)
+      jsonField "affected_tasks" ack `shouldSatisfy` arrayLength 1
+      show ack `shouldNotContain` "full task description"
+      show ack `shouldNotContain` "created_at"
 
     it "preserves mutation-specific memory targets and empty tag replacements" $ do
       let createAck = compactMemoryMutationAckWithTargets "created" (Just parsedUUID2) (Just parsedUUID3) fullMemoryValue

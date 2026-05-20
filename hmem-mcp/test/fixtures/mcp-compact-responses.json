@@ -1,0 +1,236 @@
+{
+  "task_create": {
+    "max_chars": 300,
+    "payload": {
+      "ok": true,
+      "action": "created",
+      "entity_type": "task",
+      "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "status": "todo",
+      "summary": {
+        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "title": "Task",
+        "status": "todo",
+        "priority": 9,
+        "project_id": "22222222-3333-4444-5555-666666666666"
+      }
+    }
+  },
+  "project_create": {
+    "max_chars": 280,
+    "payload": {
+      "ok": true,
+      "action": "created",
+      "entity_type": "project",
+      "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "status": "active",
+      "summary": {
+        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "name": "Project",
+        "status": "active",
+        "priority": 8
+      }
+    }
+  },
+  "memory_create": {
+    "max_chars": 360,
+    "payload": {
+      "ok": true,
+      "action": "created",
+      "entity_type": "memory",
+      "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "summary": {
+        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "memory_type": "long_term",
+        "importance": 7,
+        "tags": ["contract"],
+        "pinned": true
+      },
+      "project_id": "11111111-2222-3333-4444-555555555555",
+      "task_id": "22222222-3333-4444-5555-666666666666"
+    }
+  },
+  "project_spec_10_tasks": {
+    "max_chars": 1100,
+    "payload": {
+      "ok": true,
+      "action": "created",
+      "entity_type": "project_spec",
+      "project_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "name": "Project",
+      "status": "active",
+      "priority": 8,
+      "tasks_created": [
+        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
+        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
+        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
+        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
+        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
+        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
+        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
+        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
+        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
+        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 }
+      ]
+    }
+  },
+  "project_overview": {
+    "max_chars": 700,
+    "payload": {
+      "project": {
+        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "name": "Project",
+        "status": "active",
+        "priority": 8
+      },
+      "tasks": [
+        {
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "title": "Task",
+          "status": "todo",
+          "priority": 9,
+          "project_id": "22222222-3333-4444-5555-666666666666"
+        }
+      ],
+      "subprojects": [
+        {
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "name": "Project",
+          "status": "active",
+          "priority": 8
+        }
+      ],
+      "connected_memories": [
+        {
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "summary": "Project memory",
+          "scope": "project"
+        }
+      ],
+      "readiness_rollup": {
+        "completion_ready": false,
+        "open_task_count": 2,
+        "blocked_task_count": 1
+      }
+    }
+  },
+  "context_get": {
+    "max_chars": 680,
+    "payload": {
+      "task": {
+        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "title": "Task",
+        "status": "todo",
+        "priority": 9,
+        "project_id": "22222222-3333-4444-5555-666666666666"
+      },
+      "detail_level": "medium",
+      "task_memories": [
+        {
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "summary": "Task memory",
+          "scope": "task"
+        }
+      ],
+      "project_memories": [
+        {
+          "id": "11111111-2222-3333-4444-555555555555",
+          "summary": "Project memory",
+          "scope": "project"
+        }
+      ],
+      "workspace_memories": [
+        {
+          "id": "22222222-3333-4444-5555-666666666666",
+          "summary": "Workspace memory",
+          "scope": "workspace"
+        }
+      ]
+    }
+  },
+  "task_start": {
+    "max_chars": 560,
+    "payload": {
+      "result": "started",
+      "started": true,
+      "task_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "status": "todo",
+      "task": {
+        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "title": "Task",
+        "status": "todo",
+        "priority": 9,
+        "project_id": "22222222-3333-4444-5555-666666666666"
+      },
+      "detail_level": "light",
+      "task_memories": [],
+      "project_memories": [],
+      "workspace_memories": []
+    }
+  },
+  "unified_search": {
+    "max_chars": 900,
+    "payload": {
+      "memories": [
+        {
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "summary": "Search memory",
+          "memory_type": "long_term",
+          "importance": 7,
+          "tags": ["contract"],
+          "pinned": true
+        }
+      ],
+      "projects": [
+        {
+          "project": {
+            "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "name": "Project",
+            "status": "active",
+            "priority": 8
+          },
+          "linked_memories": [
+            {
+              "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+              "summary": "Linked memory",
+              "importance": 5,
+              "tags": ["linked"]
+            }
+          ]
+        }
+      ],
+      "tasks": [
+        {
+          "task": {
+            "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "title": "Task",
+            "status": "todo",
+            "priority": 9,
+            "project_id": "22222222-3333-4444-5555-666666666666"
+          },
+          "linked_memories": [
+            {
+              "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+              "summary": "Linked memory",
+              "importance": 5,
+              "tags": ["linked"]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "memory_graph": {
+    "max_chars": 200,
+    "payload": {
+      "links": [
+        {
+          "source_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "target_id": "11111111-2222-3333-4444-555555555555",
+          "relation_type": "related",
+          "strength": 0.75
+        }
+      ]
+    }
+  }
+}

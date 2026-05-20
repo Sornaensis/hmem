@@ -178,6 +178,17 @@ spec = do
         , "must dispatch through the same compact shapers"
         ]
 
+  describe "compact response regression fixtures" $ do
+    it "matches golden default MCP payloads and stable size budgets" $ do
+      fixtures <- readCompactResponseFixtures
+      mapM_ (assertCompactResponseFixture fixtures) compactResponseRegressionCases
+
+    it "treats saved_view execute as removed rather than a response-bloat bypass" $ do
+      fixtures <- readCompactResponseFixtures
+      fixturePayload "saved_view_execute" fixtures `shouldBe` Nothing
+      toolNames `shouldNotContain` ["saved_view"]
+      parseToolCall "saved_view" (object ["action" .= ("execute" :: Text)]) `shouldSatisfy` isUnknownTool "saved_view"
+
   describe "compact response shapers" $ do
     it "builds memory summaries without workspace, timestamps, metadata, or content" $ do
       compactMemorySummary fullMemoryValue `shouldBe` object
@@ -736,6 +747,121 @@ fullTaskValue = object
   ]
 
 
+compactResponseRegressionCases :: [(Text, Value -> Value, Value)]
+compactResponseRegressionCases =
+  [ ("task_create", compactTaskMutationAck "created", fullTaskValue)
+  , ("project_create", compactProjectMutationAck "created", fullProjectValue)
+  , ("memory_create", compactMemoryMutationAckWithTargets "created" (Just parsedUUID2) (Just parsedUUID3), fullMemoryValue)
+  , ("project_spec_10_tasks", compactProjectSpecSummary, projectSpecRegressionValue)
+  , ("project_overview", compactProjectOverview, projectOverviewRegressionValue)
+  , ("context_get", compactContextInfo, contextGetRegressionValue)
+  , ("task_start", compactTaskStartSuccess, taskStartRegressionValue)
+  , ("unified_search", compactSearchResults, unifiedSearchRegressionValue)
+  , ("memory_graph", compactMemoryLinksList, memoryGraphRegressionValue)
+  ]
+
+
+projectSpecRegressionValue :: Value
+projectSpecRegressionValue = object
+  [ "project" .= fullProjectValue
+  , "tasks" .= replicate 10 fullTaskValue
+  , "tasks_failed" .= (0 :: Int)
+  ]
+
+
+projectOverviewRegressionValue :: Value
+projectOverviewRegressionValue = object
+  [ "project" .= fullProjectValue
+  , "tasks" .= [fullTaskValue]
+  , "subprojects" .= [fullProjectValue]
+  , "connected_memories" .= [connectedMemoryValue parsedUUID "Project memory" "project"]
+  , "readiness_rollup" .= object
+      [ "completion_ready" .= False
+      , "open_task_count" .= (2 :: Int)
+      , "blocked_task_count" .= (1 :: Int)
+      , "done_task_count" .= (0 :: Int)
+      ]
+  ]
+
+
+contextGetRegressionValue :: Value
+contextGetRegressionValue = object
+  [ "task" .= fullTaskValue
+  , "detail_level" .= ("medium" :: Text)
+  , "task_memories" .= [connectedMemoryValue parsedUUID "Task memory" "task"]
+  , "project_memories" .= [connectedMemoryValue parsedUUID2 "Project memory" "project"]
+  , "workspace_memories" .= [connectedMemoryValue parsedUUID3 "Workspace memory" "workspace"]
+  ]
+
+
+taskStartRegressionValue :: Value
+taskStartRegressionValue = object
+  [ "task" .= fullTaskValue
+  , "detail_level" .= ("light" :: Text)
+  , "task_memories" .= ([] :: [Value])
+  , "project_memories" .= ([] :: [Value])
+  , "workspace_memories" .= ([] :: [Value])
+  ]
+
+
+unifiedSearchRegressionValue :: Value
+unifiedSearchRegressionValue = object
+  [ "memories" .= [searchMemoryValue]
+  , "projects" .=
+      [ object
+          [ "project" .= fullProjectValue
+          , "linked_memories" .= [linkedMemoryValue]
+          ]
+      ]
+  , "tasks" .=
+      [ object
+          [ "task" .= fullTaskValue
+          , "linked_memories" .= [linkedMemoryValue]
+          ]
+      ]
+  ]
+
+
+memoryGraphRegressionValue :: Value
+memoryGraphRegressionValue = toJSON
+  [ object
+      [ "source_id" .= parsedUUID
+      , "target_id" .= parsedUUID2
+      , "relation_type" .= ("related" :: Text)
+      , "strength" .= (0.75 :: Double)
+      , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+      , "source_memory" .= fullMemoryValue
+      , "target_memory" .= fullMemoryValue
+      ]
+  ]
+
+
+searchMemoryValue :: Value
+searchMemoryValue = object
+  [ "id" .= parsedUUID
+  , "workspace_id" .= parsedUUID2
+  , "summary" .= ("Search memory" :: Text)
+  , "content" .= ("full memory content" :: Text)
+  , "memory_type" .= ("long_term" :: Text)
+  , "importance" .= (7 :: Int)
+  , "tags" .= (["contract"] :: [Text])
+  , "pinned" .= True
+  , "metadata" .= object ([] :: [Pair])
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+  ]
+
+
+connectedMemoryValue :: UUID.UUID -> Text -> Text -> Value
+connectedMemoryValue mid summary scope = object
+  [ "id" .= mid
+  , "summary" .= summary
+  , "scope" .= scope
+  , "content" .= ("full memory content" :: Text)
+  , "metadata" .= object ([] :: [Pair])
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+  ]
+
+
 hasErrorCode :: Text -> Maybe Value -> Bool
 hasErrorCode code (Just value) = hasErrorCodeValue code value
 hasErrorCode _ Nothing = False
@@ -812,6 +938,89 @@ readContractDoc = do
   case rootResult of
     Right doc -> pure doc
     Left _    -> readFile "../mcp-response-contract.md"
+
+
+readCompactResponseFixtures :: IO Value
+readCompactResponseFixtures = do
+  bytes <- readFirstExisting
+    [ "hmem-mcp/test/fixtures/mcp-compact-responses.json"
+    , "test/fixtures/mcp-compact-responses.json"
+    , "../hmem-mcp/test/fixtures/mcp-compact-responses.json"
+    ]
+  case eitherDecode bytes of
+    Right value -> pure value
+    Left err    -> fail $ "Could not decode compact response fixture: " <> err
+
+
+readFirstExisting :: [FilePath] -> IO BL.ByteString
+readFirstExisting [] = fail "Could not find compact response fixture"
+readFirstExisting (path : paths) = do
+  result <- try @IOException (BL.readFile path)
+  case result of
+    Right bytes -> pure bytes
+    Left _      -> readFirstExisting paths
+
+
+assertCompactResponseFixture :: Value -> (Text, Value -> Value, Value) -> Expectation
+assertCompactResponseFixture fixtures (name, shaper, raw) =
+  case (fixturePayload name fixtures, fixtureMaxChars name fixtures, mcpTextValue (mcpResultWith shaper (encode raw))) of
+    (Just expected, Just maxChars, Just actual) -> do
+      actual `shouldBe` expected
+      encodedCharCount actual `shouldSatisfy` (<= maxChars)
+      shouldOmitDefaultNoise name actual
+    (Nothing, _, _) -> expectationFailure $ "Missing fixture payload for " <> T.unpack name
+    (_, Nothing, _) -> expectationFailure $ "Missing fixture max_chars for " <> T.unpack name
+    (_, _, Nothing) -> expectationFailure $ "Expected MCP JSON text for " <> T.unpack name
+
+
+fixturePayload :: Text -> Value -> Maybe Value
+fixturePayload name = fixtureField name "payload"
+
+
+fixtureMaxChars :: Text -> Value -> Maybe Int
+fixtureMaxChars name fixtures = do
+  raw <- fixtureField name "max_chars" fixtures
+  case fromJSON raw of
+    Success maxChars -> Just maxChars
+    Error _          -> Nothing
+
+
+fixtureField :: Text -> Text -> Value -> Maybe Value
+fixtureField name field (Object root) = do
+  Object entry <- KM.lookup (Key.fromText name) root
+  KM.lookup (Key.fromText field) entry
+fixtureField _ _ _ = Nothing
+
+
+encodedCharCount :: Value -> Int
+encodedCharCount = fromIntegral . BL.length . encode
+
+
+shouldOmitDefaultNoise :: Text -> Value -> Expectation
+shouldOmitDefaultNoise name payload =
+  mapM_ assertAbsent defaultNoisySubstrings
+  where
+    rendered = TE.decodeUtf8 $ BL.toStrict $ encode payload
+    assertAbsent needle =
+      if needle `T.isInfixOf` rendered
+        then expectationFailure $ "Unexpected default-noise substring " <> T.unpack needle <> " in fixture " <> T.unpack name
+        else pure ()
+
+
+defaultNoisySubstrings :: [Text]
+defaultNoisySubstrings =
+  [ "\"workspace_id\""
+  , "\"created_at\""
+  , "\"updated_at\""
+  , "\"metadata\""
+  , "\"content\""
+  , "\"content_preview\""
+  , "\"description\""
+  , "full memory content"
+  , "full project description"
+  , "full task description"
+  , "linked full content should be omitted"
+  ]
 
 
 shouldContainText :: String -> String -> Expectation

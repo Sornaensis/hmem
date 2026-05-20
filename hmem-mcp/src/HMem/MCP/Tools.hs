@@ -17,6 +17,7 @@ module HMem.MCP.Tools
   , compactContextInfo
   , compactTaskStartSuccess
   , compactTaskMutationAck
+  , compactProjectMutationAck
   , compactDependencyMutationAck
   , compactMemoryMutationAckWithTargets
   , compactMemoryMutationAckWithTags

@@ -123,7 +123,8 @@ Optional fields:
 - `summary`: an `EntitySummary` for the mutated entity
 - `changed_fields`: field names supplied to update-like mutations when known
 - `dependency_effects`: non-empty `DependencyEffectSummary` rows
-- `notes_memory`: `MemorySummary` when `task_finish` created a notes memory
+- `notes_memory_id` when `task_finish` created a notes memory
+- `summary_memory_id` when `project_archive` created a summary memory
 - `warnings`: bounded strings for partial composite workflows
 
 ### `EntitySummary`
@@ -308,11 +309,13 @@ multi-step workflows:
 - `task_start`: `ContextSummary` plus `started: true`; blocked starts return a
   `StructuredError` with `status_unchanged: true`, `blockers`, and bounded
   `ready_alternatives`.
-- `task_finish`: `MutationAck` for the final task status and optional
-  `notes_memory` summary.
-- `project_spec`: project summary plus `tasks_created` task summaries and
-  `tasks_failed` when non-zero.
-- `project_archive`: archive acknowledgement plus optional summary-memory ID.
+- `task_finish`: `MutationAck` for the final task status with `task_id` and
+  optional `notes_memory_id`.
+- `project_spec`: flat project identity fields (`project_id`, `name`, status and
+  priority when present) plus `tasks_created` rows containing task id/title/priority
+  and `tasks_failed` when non-zero.
+- `project_archive`: archive acknowledgement with `project_id` plus optional
+  `summary_memory_id`.
 
 ### `StructuredError`
 
@@ -342,15 +345,15 @@ Structured errors preserve every field needed for recovery:
 | `project_update` | `MutationAck` with updated `summary: ProjectSummary`; include `changed_fields` and `status` when changed. | Use `project_overview` for project detail. |
 | `project_overview` | `ProjectOverviewSummary`. Project, child tasks, and subprojects are compact summaries by default and omit full descriptions. | Set `include_descriptions=true` to include project, task, and subproject descriptions. |
 | `project_next_tasks` | `{ items: [NextTaskCandidateSummary] }` where each row includes `task: TaskSummary`, `dependency_blocked`, and only non-zero actionable gate counts. | `include_blocked=true` includes blocked diagnostics; `task_overview` explains a selected task. |
-| `project_spec` | `WorkflowSummary` with `project: ProjectSummary`, `tasks_created: [TaskSummary]`, and `tasks_failed` only when non-zero. | Use `project_overview` after creation for full context. |
-| `project_archive` | `MutationAck` with archived `ProjectSummary`, `changed_fields: ["status"]`, and optional summary-memory ID. | Use `memory_get` for summary-memory content if needed. |
+| `project_spec` | `WorkflowSummary` with flat `project_id`, `name`, optional status/priority, `tasks_created: [{id,title,priority}]`, and `tasks_failed` only when non-zero. | Use `project_overview` after creation for full context. |
+| `project_archive` | `MutationAck` with archived `ProjectSummary`, `project_id`, `changed_fields: ["status"]`, and optional `summary_memory_id`. | Use `memory_get` for summary-memory content if needed. |
 | `task_create` | `MutationAck` with `summary: TaskSummary`. | Use `task_overview` or `context_get` for detail. |
 | `task_update` | `MutationAck` with updated `summary: TaskSummary`, `changed_fields`, and non-empty `dependency_effects`. | Use `task_overview` for dependencies/memory context. |
 | `task_overview` | `TaskOverviewSummary`. Task, dependency, and memory rows are compact summaries by default and omit full descriptions. | Set `include_description=true` to include the task description. |
 | `context_get` | `ContextSummary` bounded by `detail_level`. | Increase `detail_level` for more summaries; use `memory_get` for full memory content. |
 | `task_dependency` | `DependencyMutationSummary`: `ok`, action, `entity_type`, `task_id`, `depends_on_id`, and non-empty `affected_tasks` as `DependencyEffectSummary`. | Use `task_overview` for the resulting task state. |
 | `task_start` | On success, `WorkflowSummary`/`ContextSummary` with `started: true`; on blocked preflight, `StructuredError` with blockers and ready alternatives. | `detail_level` controls context breadth; `task_overview` explains blockers. |
-| `task_finish` | `MutationAck` with final task `status`, `changed_fields: ["status"]`, and optional `notes_memory`. | Use `memory_get` for saved notes or `task_overview` for final readiness. |
+| `task_finish` | `MutationAck` with `task_id`, final task `status`, `changed_fields: ["status"]`, and optional `notes_memory_id`. | Use `memory_get` for saved notes or `task_overview` for final readiness. |
 
 ## Compatibility and deprecation notes
 

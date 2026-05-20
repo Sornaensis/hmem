@@ -288,21 +288,47 @@ spec = do
       show createAck `shouldNotContain` "full memory content"
       show updateAck `shouldNotContain` "full memory content"
 
-    it "includes workflow-created memory ids in finish/archive acknowledgements without echoing content" $ do
+    it "keeps workflow finish/archive acknowledgements to ids and statuses" $ do
       let finishAck = compactTaskFinishAckWithNotes "finished" (Just fullMemoryValue) fullTaskValue
+          finishWithoutNotes = compactTaskFinishAckWithNotes "finished" Nothing fullTaskValue
           archiveAck = compactProjectArchiveAck (Just fullMemoryValue) fullProjectValue
-      jsonField "notes_memory" finishAck `shouldSatisfy` hasObjectField "id"
+          archiveWithoutSummary = compactProjectArchiveAck Nothing fullProjectValue
+      jsonField "task_id" finishAck `shouldBe` Just (String testUUID)
+      jsonField "status" finishAck `shouldBe` Just (String "todo")
       jsonField "notes_memory_id" finishAck `shouldBe` Just (String testUUID)
-      jsonField "summary_memory" archiveAck `shouldSatisfy` hasObjectField "id"
+      jsonField "notes_memory" finishAck `shouldBe` Nothing
+      jsonField "notes_memory_id" finishWithoutNotes `shouldBe` Nothing
+      jsonField "project_id" archiveAck `shouldBe` Just (String testUUID)
+      jsonField "status" archiveAck `shouldBe` Just (String "active")
       jsonField "summary_memory_id" archiveAck `shouldBe` Just (String testUUID)
-      let notesMemory = jsonField "notes_memory" finishAck
-          summaryMemory = jsonField "summary_memory" archiveAck
-      (notesMemory >>= jsonField "content") `shouldBe` Nothing
-      (notesMemory >>= jsonField "content_preview") `shouldBe` Nothing
-      (summaryMemory >>= jsonField "content") `shouldBe` Nothing
-      (summaryMemory >>= jsonField "content_preview") `shouldBe` Nothing
+      jsonField "summary_memory" archiveAck `shouldBe` Nothing
+      jsonField "summary_memory_id" archiveWithoutSummary `shouldBe` Nothing
       show finishAck `shouldNotContain` "full memory content"
       show archiveAck `shouldNotContain` "full memory content"
+
+    it "compacts project_spec workflow output for many created tasks" $ do
+      let manyTasks = replicate 25 fullTaskValue
+          shaped = compactProjectSpecSummary $ object
+            [ "project" .= fullProjectValue
+            , "tasks" .= manyTasks
+            , "tasks_failed" .= (0 :: Int)
+            ]
+          firstTask = firstArrayItem "tasks_created" shaped
+      jsonField "ok" shaped `shouldBe` Just (Bool True)
+      jsonField "action" shaped `shouldBe` Just (String "created")
+      jsonField "entity_type" shaped `shouldBe` Just (String "project_spec")
+      jsonField "project_id" shaped `shouldBe` Just (String testUUID)
+      jsonField "name" shaped `shouldBe` Just (String "Project")
+      jsonField "tasks_created" shaped `shouldSatisfy` arrayLength 25
+      jsonField "tasks_failed" shaped `shouldBe` Nothing
+      (firstTask >>= jsonField "id") `shouldBe` Just (String testUUID)
+      (firstTask >>= jsonField "title") `shouldBe` Just (String "Task")
+      (firstTask >>= jsonField "priority") `shouldBe` Just (Number 9)
+      (firstTask >>= jsonField "description") `shouldBe` Nothing
+      jsonField "project" shaped `shouldBe` Nothing
+      show shaped `shouldNotContain` "workspace_id"
+      show shaped `shouldNotContain` "full project description"
+      show shaped `shouldNotContain` "full task description"
 
     it "compacts memory link lists to graph edges without endpoint content or timestamps" $ do
       let shaped = compactMemoryLinksList $ toJSON
@@ -381,6 +407,9 @@ spec = do
       (jsonField "project" overviewWithDescriptions >>= jsonField "description") `shouldBe` Just (String "full project description")
       (jsonField "task" taskOverviewWithDescription >>= jsonField "description") `shouldBe` Just (String "full task description")
       jsonField "started" taskStart `shouldBe` Just (Bool True)
+      jsonField "result" taskStart `shouldBe` Just (String "started")
+      jsonField "task_id" taskStart `shouldBe` Just (String testUUID)
+      jsonField "status" taskStart `shouldBe` Just (String "todo")
       jsonField "tasks" overview `shouldSatisfy` arrayLength 1
       jsonField "dependencies" taskOverview `shouldSatisfy` arrayLength 1
       show overview `shouldNotContain` "workspace_id"

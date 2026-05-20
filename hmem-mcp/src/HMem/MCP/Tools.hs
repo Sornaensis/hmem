@@ -22,6 +22,7 @@ module HMem.MCP.Tools
   , compactMemoryMutationAckWithTags
   , compactTaskFinishAckWithNotes
   , compactProjectArchiveAck
+  , compactProjectSpecSummary
   , compactMemoryLinksList
   , compactNextTaskCandidateSummary
   , addChangedFields
@@ -1052,9 +1053,12 @@ compactContextInfo value = object $ catMaybes
 
 
 compactTaskStartSuccess :: Value -> Value
-compactTaskStartSuccess value = case compactContextInfo value of
-  Object o -> Object (KM.insert "started" (Bool True) o)
-  other    -> other
+compactTaskStartSuccess value =
+  addNestedFieldAlias "task" "status" "status" value $
+  addNestedFieldAlias "task" "id" "task_id" value $
+  case compactContextInfo value of
+    Object o -> Object $ KM.insert "result" (String "started") $ KM.insert "started" (Bool True) o
+    other    -> other
 
 
 compactMemoryLinksList :: Value -> Value
@@ -1121,7 +1125,8 @@ compactTaskFinishAck action = compactTaskMutationAck action
 
 compactTaskFinishAckWithNotes :: Text -> Maybe Value -> Value -> Value
 compactTaskFinishAckWithNotes action mNotesMemory value =
-  insertOptionalSummary "notes_memory" mNotesMemory $ compactTaskFinishAck action value
+  insertOptionalEntityId "notes_memory_id" mNotesMemory $
+  addSourceFieldAlias "id" "task_id" value $ compactTaskFinishAck action value
 
 
 compactMemoryMutationAckWithTargets :: Text -> Maybe UUID -> Maybe UUID -> Value -> Value
@@ -1144,7 +1149,8 @@ compactProjectMutationAck action value = mutationAck action "project" (compactPr
 
 compactProjectArchiveAck :: Maybe Value -> Value -> Value
 compactProjectArchiveAck mSummaryMemory value =
-  insertOptionalSummary "summary_memory" mSummaryMemory $ compactProjectMutationAck "archived" value
+  insertOptionalEntityId "summary_memory_id" mSummaryMemory $
+  addSourceFieldAlias "id" "project_id" value $ compactProjectMutationAck "archived" value
 
 
 compactWorkspaceMutationAck :: Text -> Value -> Value
@@ -1216,9 +1222,23 @@ actionTextFromValue fallbackAction value = case objectNonNullField "action" valu
 
 compactProjectSpecSummary :: Value -> Value
 compactProjectSpecSummary value = object $ catMaybes
-  [ fieldWith "project" compactProjectSummary value
-  , renameMappedArrayField "tasks" "tasks_created" compactTaskSummary value
+  [ Just $ "ok" .= True
+  , Just $ "action" .= ("created" :: Text)
+  , Just $ "entity_type" .= ("project_spec" :: Text)
+  , nestedFieldAs "project" "id" "project_id" value
+  , nestedFieldAs "project" "name" "name" value
+  , nestedFieldAs "project" "status" "status" value
+  , nestedFieldAs "project" "priority" "priority" value
+  , renameMappedArrayField "tasks" "tasks_created" compactCreatedTaskSummary value
   , copyNonZeroNumberField "tasks_failed" value
+  ]
+
+
+compactCreatedTaskSummary :: Value -> Value
+compactCreatedTaskSummary value = object $ catMaybes
+  [ copyField "id" value
+  , copyField "title" value
+  , copyField "priority" value
   ]
 
 
@@ -1257,19 +1277,31 @@ entityMemoryLinkAck action entityType entityId memoryId = object
   ]
 
 
-insertOptionalSummary :: Key -> Maybe Value -> Value -> Value
-insertOptionalSummary _ Nothing base = base
-insertOptionalSummary key (Just entityValue) (Object base) =
-  let summary = compactMemorySummary entityValue
-      withSummary = KM.insert key summary base
-      withSummaryId = case objectNonNullField "id" entityValue of
-        Just summaryId -> KM.insert (key <> "_id") summaryId withSummary
-        Nothing        -> withSummary
-  in Object withSummaryId
-insertOptionalSummary key (Just entityValue) base = object
-  [ "result" .= base
-  , key .= compactMemorySummary entityValue
+insertOptionalEntityId :: Key -> Maybe Value -> Value -> Value
+insertOptionalEntityId _ Nothing base = base
+insertOptionalEntityId key (Just entityValue) base = addSourceFieldAlias "id" key entityValue base
+
+
+addSourceFieldAlias :: Key -> Key -> Value -> Value -> Value
+addSourceFieldAlias sourceKey targetKey source (Object target) = case objectNonNullField sourceKey source of
+  Just fieldValue -> Object $ KM.insert targetKey fieldValue target
+  Nothing         -> Object target
+addSourceFieldAlias sourceKey targetKey source target = object $ catMaybes
+  [ Just $ "result" .= target
+  , (targetKey .=) <$> objectNonNullField sourceKey source
   ]
+
+
+addNestedFieldAlias :: Key -> Key -> Key -> Value -> Value -> Value
+addNestedFieldAlias objectKey sourceKey targetKey source = case objectNonNullField objectKey source of
+  Just nested -> addSourceFieldAlias sourceKey targetKey nested
+  Nothing     -> id
+
+
+nestedFieldAs :: Key -> Key -> Key -> Value -> Maybe Pair
+nestedFieldAs objectKey sourceKey targetKey value = do
+  nested <- objectNonNullField objectKey value
+  (targetKey .=) <$> objectNonNullField sourceKey nested
 
 
 compactReadinessRollup :: Value -> Value

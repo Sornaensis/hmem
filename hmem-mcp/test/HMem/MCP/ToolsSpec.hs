@@ -98,6 +98,13 @@ toolSchemaProperties name = case [schema | Object tool <- toolDefinitions
     _ -> []
   _ -> []
 
+toolDescription :: Text -> Maybe Text
+toolDescription name = listToMaybe
+  [ desc | Object tool <- toolDefinitions
+         , KM.lookup (Key.fromText "name") tool == Just (String name)
+         , Just (String desc) <- [KM.lookup (Key.fromText "description") tool]
+  ]
+
 spec :: Spec
 spec = do
   describe "toolDefinitions" $ do
@@ -106,6 +113,10 @@ spec = do
 
     it "does not expose removed tools" $ do
       toolNames `shouldNotSatisfy` any (`elem` removedToolNames)
+
+    it "keeps saved_view execution out of MCP so it cannot bypass compact shapers" $ do
+      toolNames `shouldNotContain` ["saved_view"]
+      parseToolCall "saved_view" (object ["action" .= ("execute" :: Text)]) `shouldSatisfy` isUnknownTool "saved_view"
 
     it "omits noisy workspace and batch inputs from retained schemas" $ do
       toolSchemaProperties "memory_create" `shouldNotContain` ["workspace_id", "metadata", "items", "fts_language", "source", "confidence", "expires_at", "pinned"]
@@ -117,6 +128,15 @@ spec = do
       toolSchemaProperties "project_overview" `shouldContain` ["include_descriptions"]
       toolSchemaProperties "task_overview" `shouldContain` ["include_description"]
       toolSchemaProperties "search" `shouldNotContain` ["workspace_id", "search_language", "offset", "min_access_count", "min_importance", "category_id", "pinned_only", "task_priority"]
+
+    it "describes compact defaults and available detail paths" $ do
+      toolDescriptionShouldContain "search" "Returns compact summaries"
+      toolDescriptionShouldContain "search" "memory content/previews are omitted"
+      toolDescriptionShouldContain "memory_get" "detail path for compact memory summaries"
+      toolDescriptionShouldContain "context_get" "detail_level controls how many summaries"
+      toolDescriptionShouldContain "task_start" "detail_level controls context breadth"
+      toolDescriptionShouldContain "task_finish" "optional notes_memory_id"
+      toolDescriptionShouldContain "project_archive" "optional summary_memory_id"
 
   describe "MCP compact response contract" $ do
     it "maps every retained slim MCP tool" $ do
@@ -148,6 +168,14 @@ spec = do
         , "null fields"
         , "full memory `content` and full project/task descriptions except detail tools"
         , "dependency/memory counts"
+        ]
+
+    it "documents saved_view as unavailable on the slim MCP surface" $ do
+      doc <- readContractDoc
+      mapM_ (`shouldContainText` doc)
+        [ "does not expose `saved_view`"
+        , "cannot bypass MCP compaction"
+        , "must dispatch through the same compact shapers"
         ]
 
   describe "compact response shapers" $ do
@@ -788,3 +816,9 @@ readContractDoc = do
 
 shouldContainText :: String -> String -> Expectation
 shouldContainText needle haystack = haystack `shouldContain` needle
+
+
+toolDescriptionShouldContain :: Text -> Text -> Expectation
+toolDescriptionShouldContain name needle = case toolDescription name of
+  Just desc -> desc `shouldSatisfy` T.isInfixOf needle
+  Nothing   -> expectationFailure $ "Missing tool description for " <> T.unpack name

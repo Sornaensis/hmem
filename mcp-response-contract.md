@@ -370,6 +370,11 @@ Structured errors preserve every field needed for recovery:
 - No removed list/get/batch tools are restored. `search` remains the browsing
   replacement for legacy `memory_list`, `memory_search`, `project_list`, and
   `task_list` tools.
+- The slim MCP surface does not expose `saved_view`, so REST saved-view execution
+  cannot bypass MCP compaction. If a future MCP saved-view executor is added, it
+  must dispatch through the same compact shapers as `search`, `project_overview`,
+  `task_overview`, or `context_get`, and any full-output behavior must stay behind
+  optional bounded detail/include flags.
 - Saved-view entity labels such as `memory_search` and `memory_list` are persisted
   user data and are not rewritten by this MCP response contract.
 - Optional detail/include flags are additive compatibility affordances. They must

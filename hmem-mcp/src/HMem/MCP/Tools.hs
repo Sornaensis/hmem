@@ -103,7 +103,7 @@ slimToolDefinitions =
       , "required" .= [t "name"]
       ]
 
-    , mkTool "search" "Unified search and browsing across memories, projects, and tasks in the active workspace. Query is optional so filtered browsing can replace list tools. Project and task results include linked memory summaries." $ object
+    , mkTool "search" "Unified search and browsing across memories, projects, and tasks in the active workspace. Query is optional so filtered browsing can replace list tools. Returns compact summaries; memory content/previews are omitted, and project/task descriptions require overview/detail tools." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "query" .= prop "string" "Full-text search query (optional for filtered browsing)"
@@ -120,7 +120,7 @@ slimToolDefinitions =
       , "required" .= ([] :: [Text])
       ]
 
-    , mkTool "memory_create" "Create a memory in the active workspace. Requires explicit memory_type and at least one explicit target: project_id and/or a top-level task_id. Subtask task IDs are rejected." $ object
+    , mkTool "memory_create" "Create a memory in the active workspace. Requires explicit memory_type and at least one explicit target: project_id and/or a top-level task_id. Subtask task IDs are rejected. Returns a compact acknowledgement without echoing content; use memory_get for full detail." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of a project to link at creation time. Provide at least one of project_id or task_id."
@@ -135,13 +135,13 @@ slimToolDefinitions =
       , "required" .= [t "content", t "memory_type"]
       ]
 
-    , mkTool "memory_get" "Get a memory by ID with full detail." $ object
+    , mkTool "memory_get" "Get a memory by ID with full detail, including content. This is the detail path for compact memory summaries." $ object
       [ "type" .= t "object"
       , "properties" .= object [ "memory_id" .= prop "string" "UUID of the memory" ]
       , "required" .= [t "memory_id"]
       ]
 
-    , mkTool "memory_update" "Enrich or correct an existing memory, including replacing tags. Use null to clear summary." $ object
+    , mkTool "memory_update" "Enrich or correct an existing memory, including replacing tags. Use null to clear summary. Returns a compact acknowledgement without echoing content; use memory_get for full detail." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "memory_id" .= prop "string" "UUID of the memory to update"
@@ -222,7 +222,7 @@ slimToolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
-    , mkTool "project_spec" "Create a project and its initial tasks in one call in the active workspace. Tasks are created under the new project in order." $ object
+    , mkTool "project_spec" "Create a project and its initial tasks in one call in the active workspace. Tasks are created under the new project in order. Returns compact project/task IDs; use project_overview for full context." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "name" .= propMaxLength "string" "Project name" maxNameBytes
@@ -247,7 +247,7 @@ slimToolDefinitions =
       , "required" .= [t "name", t "tasks"]
       ]
 
-    , mkTool "project_archive" "Archive a completed project, optionally recording a summary as a linked long_term memory." $ object
+    , mkTool "project_archive" "Archive a completed project, optionally recording a summary as a linked long_term memory. Returns a compact acknowledgement with optional summary_memory_id; use memory_get for saved summary content." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project to archive"
@@ -293,7 +293,7 @@ slimToolDefinitions =
       , "required" .= [t "task_id"]
       ]
 
-    , mkTool "context_get" "Get relevant memories for a task, automatically collecting from the task itself, all ancestor projects, and the workspace." $ object
+    , mkTool "context_get" "Get compact relevant memory summaries for a task, automatically collecting from the task itself, all ancestor projects, and the workspace. detail_level controls how many summaries are returned per scope, not full memory content." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the task"
@@ -312,7 +312,7 @@ slimToolDefinitions =
       , "required" .= [t "action", t "task_id", t "depends_on_id"]
       ]
 
-    , mkTool "task_start" "Begin work on a task: preflights dependency blockers and subtask parent gates, then sets status to in_progress and loads relevant context. When blocked, returns actionable blockers and ready alternatives without changing status." $ object
+    , mkTool "task_start" "Begin work on a task: preflights dependency blockers and subtask parent gates, then sets status to in_progress and loads compact relevant context. detail_level controls context breadth, not full memory content. When blocked, returns actionable blockers and ready alternatives without changing status." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the task to start"
@@ -321,7 +321,7 @@ slimToolDefinitions =
       , "required" .= [t "task_id"]
       ]
 
-    , mkTool "task_finish" "Finish working on a task: optionally records notes as a linked long_term memory, then updates task status." $ object
+    , mkTool "task_finish" "Finish working on a task: optionally records notes as a linked long_term memory, then updates task status. Returns a compact acknowledgement with optional notes_memory_id; use memory_get for saved note content." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the task"

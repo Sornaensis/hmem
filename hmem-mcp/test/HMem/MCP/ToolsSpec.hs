@@ -10,7 +10,7 @@ import Data.ByteString.Lazy qualified as BL
 import Control.Exception (IOException, try)
 import Control.Concurrent.STM (newTVarIO)
 import Data.Foldable (toList)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -188,10 +188,23 @@ spec = do
       jsonField "memories" shaped `shouldSatisfy` arrayLength 1
       jsonField "projects" shaped `shouldSatisfy` arrayLength 1
       jsonField "tasks" shaped `shouldSatisfy` arrayLength 1
+      let projectSummary = firstArrayItem "projects" shaped >>= jsonField "project"
+          taskSummary = firstArrayItem "tasks" shaped >>= jsonField "task"
+      (projectSummary >>= jsonField "id") `shouldBe` Just (String testUUID)
+      (projectSummary >>= jsonField "name") `shouldBe` Just (String "Project")
+      (projectSummary >>= jsonField "status") `shouldBe` Just (String "active")
+      (projectSummary >>= jsonField "priority") `shouldBe` Just (Number 8)
+      (taskSummary >>= jsonField "id") `shouldBe` Just (String testUUID)
+      (taskSummary >>= jsonField "title") `shouldBe` Just (String "Task")
+      (taskSummary >>= jsonField "status") `shouldBe` Just (String "todo")
+      (taskSummary >>= jsonField "priority") `shouldBe` Just (Number 9)
+      (taskSummary >>= jsonField "project_id") `shouldBe` Just (String "22222222-3333-4444-5555-666666666666")
       show shaped `shouldNotContain` "workspace_id"
       show shaped `shouldNotContain` "created_at"
+      show shaped `shouldNotContain` "metadata"
       show shaped `shouldNotContain` "full project description"
       show shaped `shouldNotContain` "full task description"
+      show shaped `shouldNotContain` "linked full content should be omitted"
 
     it "wraps task mutations as acknowledgements with dependency effects" $ do
       let ack = compactTaskMutationAck "updated" $ object
@@ -641,6 +654,12 @@ hasObjectField _ _ = False
 arrayLength :: Int -> Maybe Value -> Bool
 arrayLength expected (Just (Array arr)) = length arr == expected
 arrayLength _ _ = False
+
+
+firstArrayItem :: Text -> Value -> Maybe Value
+firstArrayItem field value = case jsonField field value of
+  Just (Array arr) -> listToMaybe (toList arr)
+  _ -> Nothing
 
 
 mcpTextValue :: Value -> Maybe Value

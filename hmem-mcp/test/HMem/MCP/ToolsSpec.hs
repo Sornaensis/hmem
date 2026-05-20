@@ -5,6 +5,7 @@ module HMem.MCP.ToolsSpec (spec) where
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Control.Exception (IOException, try)
 import Control.Concurrent.STM (newTVarIO)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
@@ -110,6 +111,37 @@ spec = do
       toolSchemaProperties "task_create" `shouldNotContain` ["workspace_id", "metadata"]
       toolSchemaProperties "task_update" `shouldNotContain` ["metadata", "items"]
       toolSchemaProperties "search" `shouldNotContain` ["workspace_id", "search_language", "offset", "min_access_count", "min_importance", "category_id", "pinned_only", "task_priority"]
+
+  describe "MCP compact response contract" $ do
+    it "maps every retained slim MCP tool" $ do
+      doc <- readContractDoc
+      mapM_ (\name -> doc `shouldContain` ("| `" <> T.unpack name <> "` |")) slimToolNames
+
+    it "documents the DTO vocabulary and default omission policy" $ do
+      doc <- readContractDoc
+      mapM_ (`shouldContainText` doc)
+        [ "MutationAck"
+        , "EntitySummary"
+        , "MemoryDetail"
+        , "SearchRow"
+        , "OverviewSummary"
+        , "ContextSummary"
+        , "GraphSummary"
+        , "NextTaskCandidateSummary"
+        , "DependencyEffectSummary"
+        , "DependencyMutationSummary"
+        , "TaskDependencySummary"
+        , "ConnectedMemorySummary"
+        , "LinkedMemorySummary"
+        , "WorkflowSummary"
+        , "StructuredError"
+        , "timestamps"
+        , "workspace_id"
+        , "empty `metadata`"
+        , "null fields"
+        , "full memory `content` and full project/task descriptions except detail tools"
+        , "dependency/memory counts"
+        ]
 
   describe "workspace context injection" $ do
     it "creates an arguments object when omitted so queryless tools stay workspace-scoped" $ do
@@ -376,3 +408,15 @@ errorField field (Object o) = case KM.lookup (Key.fromText "error") o of
   Just (Object err) -> KM.lookup (Key.fromText field) err
   _ -> Nothing
 errorField _ _ = Nothing
+
+
+readContractDoc :: IO String
+readContractDoc = do
+  rootResult <- try @IOException (readFile "mcp-response-contract.md")
+  case rootResult of
+    Right doc -> pure doc
+    Left _    -> readFile "../mcp-response-contract.md"
+
+
+shouldContainText :: String -> String -> Expectation
+shouldContainText needle haystack = haystack `shouldContain` needle

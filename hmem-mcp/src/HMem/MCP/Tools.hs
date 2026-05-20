@@ -9,6 +9,10 @@ module HMem.MCP.Tools
   , rawHttpErrorText
   , mcpErrorCodeFromRaw
   , taskStartUpdateError
+  , taskStartDependencyBlockError
+  , taskStartOpenDependencyBlockers
+  , taskStartParentGateError
+  , taskStartProjectIdFromSelfOrAncestors
   , MemoryTarget(..)
   , isTopLevelTaskTarget
   , taskFinishNotesTarget
@@ -18,6 +22,8 @@ module HMem.MCP.Tools
   ) where
 
 import Control.Exception (SomeException, try)
+import Control.Applicative ((<|>))
+import Data.Foldable (toList)
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, Pair, parseEither)
@@ -25,7 +31,7 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32)
 import Data.List (intercalate)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -278,7 +284,7 @@ slimToolDefinitions =
       , "required" .= [t "action", t "task_id", t "depends_on_id"]
       ]
 
-    , mkTool "task_start" "Begin work on a task: sets status to in_progress and loads relevant context." $ object
+    , mkTool "task_start" "Begin work on a task: preflights dependency blockers and subtask parent gates, then sets status to in_progress and loads relevant context. When blocked, returns actionable blockers and ready alternatives without changing status." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the task to start"
@@ -621,19 +627,35 @@ executeToolCall mgr base mApiKey = \case
     -- ================================================================
 
     TaskStartCall tid level -> do
-      -- 1. Update task status to in_progress (best-effort; may already be in_progress)
-      updateResult <- rawPutJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
-              (object ["status" .= ("in_progress" :: Text)])
-      case taskStartUpdateError updateResult of
-        Just startErr -> pure startErr
-        Nothing -> do
-          -- 2. Load context for the task
-          let levelStr = case level of
-                ContextLight  -> "light"
-                ContextMedium -> "medium"
-                ContextHeavy  -> "heavy"
-          getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/context" <>
-            buildQuery [("detail_level", Just levelStr)])
+      -- 1. Load the task so task_start can fail before mutating when the
+      -- clarified workflow says the task is not startable.
+      taskResult <- rawGetJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+      case rawAuthErrorToMcp taskResult of
+        Just authErr -> pure authErr
+        Nothing -> case taskResult of
+          Left err -> pure $ mcpErrorCodeFromRaw "TASK_LOOKUP_FAILED" err
+          Right taskVal -> do
+            parentGate <- taskStartParentGatePreflight mgr base mApiKey tid taskVal
+            case parentGate of
+              Just gateErr -> pure gateErr
+              Nothing -> do
+                dependencyGate <- taskStartDependencyPreflight mgr base mApiKey tid taskVal
+                case dependencyGate of
+                  Just depErr -> pure depErr
+                  Nothing -> do
+                    -- 2. Update task status to in_progress (best-effort; may already be in_progress)
+                    updateResult <- rawPutJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+                            (object ["status" .= ("in_progress" :: Text)])
+                    case taskStartUpdateError updateResult of
+                      Just startErr -> pure startErr
+                      Nothing -> do
+                        -- 3. Load context for the task
+                        let levelStr = case level of
+                              ContextLight  -> "light"
+                              ContextMedium -> "medium"
+                              ContextHeavy  -> "heavy"
+                        getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/context" <>
+                          buildQuery [("detail_level", Just levelStr)])
 
     TaskFinishCall tid status mNotes -> do
       -- 1. If notes provided, create a linked memory
@@ -1159,6 +1181,236 @@ firstRawAuthError (Right _ : rest) = firstRawAuthError rest
 
 rawAuthErrorToMcp :: Either Text a -> Maybe Value
 rawAuthErrorToMcp result = mcpErrorCodeFromRaw "AUTH_FAILED" <$> firstRawAuthError [result]
+
+
+taskStartParentGatePreflight :: Manager -> String -> Maybe Text -> UUID -> Value -> IO (Maybe Value)
+taskStartParentGatePreflight mgr base mApiKey tid taskVal =
+  case taskParentId taskVal of
+    Nothing -> pure Nothing
+    Just parentId -> do
+      parentResult <- rawGetJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath parentId)
+      case rawAuthErrorToMcp parentResult of
+        Just authErr -> pure (Just authErr)
+        Nothing -> case parentResult of
+          Left err -> pure . Just $ mcpErrorCodeFromRaw "TASK_PARENT_LOOKUP_FAILED" err
+          Right parentVal -> pure $ taskStartParentGateError tid taskVal parentVal
+
+
+taskStartDependencyPreflight :: Manager -> String -> Maybe Text -> UUID -> Value -> IO (Maybe Value)
+taskStartDependencyPreflight mgr base mApiKey tid taskVal = do
+  overviewResult <- rawGetJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/overview" <>
+    buildQuery [("extra_context", Just "false")])
+  case rawAuthErrorToMcp overviewResult of
+    Just authErr -> pure (Just authErr)
+    Nothing -> case overviewResult of
+      Left err -> pure . Just $ mcpErrorCodeFromRaw "TASK_OVERVIEW_FAILED" err
+      Right overviewVal -> do
+        depTaskResult <- fetchTaskStartDependencyTasks mgr base mApiKey (taskOverviewDependencies overviewVal)
+        case depTaskResult of
+          Left depErr -> pure (Just depErr)
+          Right depTasks -> do
+            let blockers = taskStartOpenDependencyBlockers (taskOverviewDependencies overviewVal) depTasks
+            if null blockers
+              then pure Nothing
+              else do
+                (alternatives, mAlternativesError) <- taskStartReadyAlternatives mgr base mApiKey taskVal
+                pure . Just $ taskStartDependencyBlockError tid blockers alternatives mAlternativesError
+
+
+fetchTaskStartDependencyTasks :: Manager -> String -> Maybe Text -> [Value] -> IO (Either Value [Value])
+fetchTaskStartDependencyTasks _ _ _ [] = pure (Right [])
+fetchTaskStartDependencyTasks mgr base mApiKey (depSummary : rest) =
+  case objectUUIDField "id" depSummary of
+    Nothing -> fetchTaskStartDependencyTasks mgr base mApiKey rest
+    Just depId -> do
+      depResult <- rawGetJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath depId)
+      case rawAuthErrorToMcp depResult of
+        Just authErr -> pure (Left authErr)
+        Nothing -> case depResult of
+          Left err -> pure . Left $ mcpErrorCodeFromRaw "TASK_DEPENDENCY_LOOKUP_FAILED" err
+          Right depTask -> do
+            restResult <- fetchTaskStartDependencyTasks mgr base mApiKey rest
+            pure $ (depTask :) <$> restResult
+
+
+taskStartReadyAlternatives :: Manager -> String -> Maybe Text -> Value -> IO ([Value], Maybe Text)
+taskStartReadyAlternatives mgr base mApiKey taskVal = do
+  projectIdResult <- taskStartProjectId mgr base mApiKey taskVal
+  case projectIdResult of
+    Left err -> pure ([], Just err)
+    Right Nothing -> pure ([], Nothing)
+    Right (Just projectId) -> do
+      alternativesResult <- rawGetJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath projectId <> "/next-tasks" <>
+        buildQuery [("limit", Just "5")])
+      case alternativesResult of
+        Right alternatives -> pure (taskStartAlternativeCandidates alternatives, Nothing)
+        Left err           -> pure ([], Just err)
+
+
+taskStartProjectId :: Manager -> String -> Maybe Text -> Value -> IO (Either Text (Maybe UUID))
+taskStartProjectId mgr base mApiKey taskVal =
+  case taskProjectId taskVal of
+    Just projectId -> pure (Right (Just projectId))
+    Nothing -> case taskParentId taskVal of
+      Nothing -> pure (Right Nothing)
+      Just parentId -> do
+        ancestorsResult <- fetchTaskAncestors mgr base mApiKey parentId []
+        pure $ case ancestorsResult of
+          Right ancestors -> Right (taskStartProjectIdFromSelfOrAncestors taskVal ancestors)
+          Left err        -> Left (mcpErrorValueText err)
+
+
+taskStartProjectIdFromSelfOrAncestors :: Value -> [Value] -> Maybe UUID
+taskStartProjectIdFromSelfOrAncestors taskVal ancestors =
+  taskProjectId taskVal <|> listToMaybe (mapMaybe taskProjectId ancestors)
+
+
+taskStartParentGateError :: UUID -> Value -> Value -> Maybe Value
+taskStartParentGateError tid taskVal parentVal =
+  case taskParentId taskVal of
+    Nothing -> Nothing
+    Just parentId
+      | taskStatus parentVal == Just "in_progress" -> Nothing
+      | otherwise -> Just $ taskStartError
+          "lifecycle_conflict"
+          "TASK_SUBTASK_START_BLOCKED"
+          "Cannot start this subtask because its parent task is not in progress."
+          [ "task_id" .= tid
+          , "parent_task_id" .= parentId
+          , "parent_task" .= trimForLLM parentVal
+          , "status_unchanged" .= True
+          ]
+
+
+taskStartOpenDependencyBlockers :: [Value] -> [Value] -> [Value]
+taskStartOpenDependencyBlockers dependencySummaries dependencyTasks =
+  [ taskStartDependencyBlockerSummary depSummary depTask
+  | depSummary <- dependencySummaries
+  , Just depId <- [objectUUIDField "id" depSummary]
+  , depTask <- dependencyTasks
+  , taskIdValue depTask == Just depId
+  , taskIsOpen depTask
+  ]
+
+
+taskStartDependencyBlockerSummary :: Value -> Value -> Value
+taskStartDependencyBlockerSummary depSummary depTask = object $
+  [ "id" .= depId
+  | Just depId <- [taskIdValue depTask]
+  ] ++
+  [ "title" .= title
+  | Just title <- [taskTitle depTask <|> objectTextField "name" depSummary]
+  ] ++
+  [ "status" .= status
+  | Just status <- [taskStatus depTask]
+  ]
+
+
+taskStartDependencyBlockError :: UUID -> [Value] -> [Value] -> Maybe Text -> Value
+taskStartDependencyBlockError tid blockers alternatives mAlternativesError =
+  let blockerCount = length blockers
+      alternativeCount = length alternatives
+      message = "Cannot start this task while "
+        <> pluralCount blockerCount "dependency is" "dependencies are"
+        <> " still open."
+      action
+        | Just _ <- mAlternativesError = "Finish or cancel the dependency blockers first; ready alternatives could not be loaded."
+        | alternativeCount == 0 = "Finish or cancel the dependency blockers first; no ready alternatives were found in the same project."
+        | otherwise = "Work on one of the ready alternatives, or finish/cancel the dependency blockers first."
+  in taskStartError
+      "workflow_conflict"
+      "TASK_START_DEPENDENCY_BLOCKED"
+      action
+      ([ "task_id" .= tid
+       , "reason" .= message
+       , "blocker_count" .= blockerCount
+       , "blockers" .= blockers
+       , "ready_alternatives" .= alternatives
+       , "status_unchanged" .= True
+       ] ++
+       [ "alternatives_unavailable" .= True
+       | Just _ <- [mAlternativesError]
+       ] ++
+       [ "alternatives_error" .= rawMcpErrorDisplayText err
+       | Just err <- [mAlternativesError]
+       ])
+
+
+taskStartError :: Text -> Text -> Text -> [Pair] -> Value
+taskStartError errType code msg detailPairs = object
+  [ "isError" .= True
+  , "content" .= [object
+      [ "type" .= ("text" :: Text)
+      , "text" .= ("[" <> code <> "] " <> msg)
+      ]]
+  , "error" .= object
+      ([ "type" .= errType
+       , "code" .= code
+       , "message" .= msg
+       ] <> detailPairs)
+  ]
+
+
+taskOverviewDependencies :: Value -> [Value]
+taskOverviewDependencies overviewVal = objectArrayField "dependencies" overviewVal
+
+
+taskStartAlternativeCandidates :: Value -> [Value]
+taskStartAlternativeCandidates candidatesVal =
+  [ trimForLLM candidate
+  | candidate <- objectArrayValue candidatesVal
+  ]
+
+
+taskIsOpen :: Value -> Bool
+taskIsOpen taskVal = taskStatus taskVal `elem` map Just ["todo", "in_progress", "blocked"]
+
+
+taskStatus :: Value -> Maybe Text
+taskStatus = objectTextField "status"
+
+
+taskTitle :: Value -> Maybe Text
+taskTitle = objectTextField "title"
+
+
+objectArrayField :: Key -> Value -> [Value]
+objectArrayField key = \case
+  Object o -> case KM.lookup key o of
+    Just (Array arr) -> toList arr
+    _                -> []
+  _ -> []
+
+
+objectArrayValue :: Value -> [Value]
+objectArrayValue = \case
+  Array arr -> toList arr
+  _         -> []
+
+
+mcpErrorValueText :: Value -> Text
+mcpErrorValueText value@(Object o) =
+  case KM.lookup "content" o of
+    Just (Array contentItems) ->
+      case listToMaybe [textValue | Object item <- toList contentItems, Just (String textValue) <- [KM.lookup "text" item]] of
+        Just textValue -> textValue
+        Nothing        -> fallback
+    _ -> fallback
+  where
+    fallback = decodeUtf8 (encode value)
+mcpErrorValueText value = decodeUtf8 (encode value)
+
+
+rawMcpErrorDisplayText :: Text -> Text
+rawMcpErrorDisplayText raw =
+  case mcpErrorFromRawPayload raw of
+    Just structuredError -> mcpErrorValueText structuredError
+    Nothing              -> stripRawErrorCode raw
+
+
+pluralCount :: Int -> Text -> Text -> Text
+pluralCount 1 singular _ = T.pack (show (1 :: Int)) <> " " <> singular
+pluralCount n _ plural = T.pack (show n) <> " " <> plural
 
 
 taskStartUpdateError :: Either Text Value -> Maybe Value

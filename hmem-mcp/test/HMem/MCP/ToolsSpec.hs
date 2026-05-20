@@ -28,6 +28,9 @@ parsedUUID = read "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 parsedUUID2 :: UUID.UUID
 parsedUUID2 = read "11111111-2222-3333-4444-555555555555"
 
+parsedUUID3 :: UUID.UUID
+parsedUUID3 = read "22222222-3333-4444-5555-666666666666"
+
 slimToolNames :: [Text]
 slimToolNames =
   [ "set_workspace"
@@ -241,7 +244,135 @@ spec = do
         `shouldBe` Right (ProjectNextTasksCall parsedUUID (Just 200) True)
       validateToolCall (ProjectNextTasksCall parsedUUID (Just 0) False)
         `shouldBe` Right (ProjectNextTasksCall parsedUUID (Just 1) False)
+
+  describe "task_start preflight helpers" $ do
+    it "identifies direct open dependency blockers and ignores closed dependencies" $ do
+      let blockers = taskStartOpenDependencyBlockers
+            [ dependencySummary parsedUUID "Open dependency"
+            , dependencySummary parsedUUID2 "Closed dependency"
+            ]
+            [ taskValue parsedUUID "Open dependency" "todo" Nothing (Just parsedUUID3)
+            , taskValue parsedUUID2 "Closed dependency" "done" Nothing (Just parsedUUID3)
+            ]
+      blockers `shouldBe`
+        [ object
+            [ "id" .= parsedUUID
+            , "title" .= ("Open dependency" :: Text)
+            , "status" .= ("todo" :: Text)
+            ]
+        ]
+
+    it "returns a parent-not-in-progress error for subtasks and allows running parents" $ do
+      let child = taskValue parsedUUID "Child" "todo" (Just parsedUUID2) (Just parsedUUID3)
+          parentTodo = taskValue parsedUUID2 "Parent" "todo" Nothing (Just parsedUUID3)
+          parentRunning = taskValue parsedUUID2 "Parent" "in_progress" Nothing (Just parsedUUID3)
+      taskStartParentGateError parsedUUID child parentTodo `shouldSatisfy` hasErrorCode "TASK_SUBTASK_START_BLOCKED"
+      taskStartParentGateError parsedUUID child parentRunning `shouldBe` Nothing
+
+    it "keeps dependency-blocked task_start status unchanged and includes ready alternatives" $ do
+      let blockers =
+            [ object
+                [ "id" .= parsedUUID2
+                , "title" .= ("Blocked by" :: Text)
+                , "status" .= ("in_progress" :: Text)
+                ]
+            ]
+          alternatives =
+            [ object
+                [ "task" .= taskValue parsedUUID3 "Ready alternative" "todo" Nothing (Just parsedUUID3)
+                , "dependency_blocked" .= False
+                ]
+            ]
+          startError = taskStartDependencyBlockError parsedUUID blockers alternatives Nothing
+      startError `shouldSatisfy` hasErrorCodeValue "TASK_START_DEPENDENCY_BLOCKED"
+      startError `shouldSatisfy` errorBoolField "status_unchanged" True
+      startError `shouldSatisfy` errorArrayMinLength "ready_alternatives" 1
+
+    it "reports no-ready-alternative cases explicitly" $ do
+      let blockers =
+            [ object
+                [ "id" .= parsedUUID2
+                , "title" .= ("Blocked by" :: Text)
+                , "status" .= ("blocked" :: Text)
+                ]
+            ]
+          startError = taskStartDependencyBlockError parsedUUID blockers [] Nothing
+      startError `shouldSatisfy` hasErrorText "no ready alternatives"
+      startError `shouldSatisfy` errorArrayMinLength "ready_alternatives" 0
+
+    it "distinguishes unavailable alternatives from empty alternatives" $ do
+      let blockers =
+            [ object
+                [ "id" .= parsedUUID2
+                , "title" .= ("Blocked by" :: Text)
+                , "status" .= ("todo" :: Text)
+                ]
+            ]
+          startError = taskStartDependencyBlockError parsedUUID blockers [] (Just "[HTTP_500] next-task query failed")
+      startError `shouldSatisfy` hasErrorText "could not be loaded"
+      startError `shouldSatisfy` errorBoolField "alternatives_unavailable" True
+      errorField "alternatives_error" startError `shouldBe` Just (String "next-task query failed")
+
+    it "resolves project alternatives from one-layer subtask ancestors" $ do
+      let child = taskValue parsedUUID "Child" "todo" (Just parsedUUID2) Nothing
+          parent = taskValue parsedUUID2 "Parent" "in_progress" Nothing (Just parsedUUID3)
+      taskStartProjectIdFromSelfOrAncestors child [parent] `shouldBe` Just parsedUUID3
   where
     isUnknownTool expected result = case result of
       Left msg -> msg == "Unknown tool: " <> T.unpack expected
       Right _ -> False
+
+
+dependencySummary :: UUID.UUID -> Text -> Value
+dependencySummary depId name = object
+  [ "id" .= depId
+  , "name" .= name
+  ]
+
+
+taskValue :: UUID.UUID -> Text -> Text -> Maybe UUID.UUID -> Maybe UUID.UUID -> Value
+taskValue tid title status parentId projectId = object
+  [ "id" .= tid
+  , "title" .= title
+  , "status" .= status
+  , "parent_id" .= parentId
+  , "project_id" .= projectId
+  ]
+
+
+hasErrorCode :: Text -> Maybe Value -> Bool
+hasErrorCode code (Just value) = hasErrorCodeValue code value
+hasErrorCode _ Nothing = False
+
+
+hasErrorCodeValue :: Text -> Value -> Bool
+hasErrorCodeValue code value = errorField "code" value == Just (String code)
+
+
+hasErrorText :: Text -> Value -> Bool
+hasErrorText needle (Object o) = case KM.lookup (Key.fromText "content") o of
+  Just (Array contentItems) -> any contentItemHasText contentItems
+  _ -> False
+  where
+    contentItemHasText (Object item) = case KM.lookup (Key.fromText "text") item of
+      Just (String textValue) -> needle `T.isInfixOf` textValue
+      _ -> False
+    contentItemHasText _ = False
+hasErrorText _ _ = False
+
+
+errorBoolField :: Text -> Bool -> Value -> Bool
+errorBoolField field expected value = errorField field value == Just (Bool expected)
+
+
+errorArrayMinLength :: Text -> Int -> Value -> Bool
+errorArrayMinLength field minLength value = case errorField field value of
+  Just (Array arr) -> length arr >= minLength
+  _ -> False
+
+
+errorField :: Text -> Value -> Maybe Value
+errorField field (Object o) = case KM.lookup (Key.fromText "error") o of
+  Just (Object err) -> KM.lookup (Key.fromText field) err
+  _ -> Nothing
+errorField _ _ = Nothing

@@ -4,6 +4,21 @@ module HMem.MCP.Tools
   -- * Testing
   , parseToolCall
   , validateToolCall
+  , mcpResultWith
+  , compactMemorySummary
+  , compactMemoryDetail
+  , compactProjectSummary
+  , compactTaskSummary
+  , compactSearchResults
+  , compactProjectOverview
+  , compactTaskOverview
+  , compactContextInfo
+  , compactTaskMutationAck
+  , compactMemoryMutationAckWithTargets
+  , compactMemoryMutationAckWithTags
+  , compactTaskFinishAckWithNotes
+  , compactProjectArchiveAck
+  , compactNextTaskCandidateSummary
   , sanitizeServerResponse
   , mcpHttpError
   , rawHttpErrorText
@@ -31,7 +46,7 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32)
 import Data.List (intercalate)
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -551,74 +566,74 @@ executeToolCall :: Manager -> String -> Maybe Text -> ToolCall -> IO Value
 executeToolCall mgr base mApiKey = \case
     MemoryCreate cm -> do
       mTargetErr <- ensureTopLevelMemoryTaskTargets mgr base mApiKey [cm]
-      maybe (postJSON mgr base mApiKey "/api/v1/memories" cm) pure mTargetErr
-    MemoryGet mid       -> getJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
+      maybe (postJSONWith (compactMemoryMutationAckWithTargets "created" cm.projectId cm.taskId) mgr base mApiKey "/api/v1/memories" cm) pure mTargetErr
+    MemoryGet mid       -> getJSONWith compactMemoryDetail mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
     MemoryUpdate mid um mTags -> do
       updateResult <- rawPutJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid) um
       case updateResult of
         Left err -> pure $ mcpErrorCodeFromRaw "MEMORY_UPDATE_FAILED" err
         Right _ -> case mTags of
-          Nothing -> getJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
+          Nothing -> getJSONWith (compactMemoryMutationAckWithTags "updated" Nothing) mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
           Just tags -> do
             tagResult <- rawPutJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/tags") tags
             case tagResult of
               Left err -> pure $ mcpErrorCodeFromRaw "MEMORY_TAG_UPDATE_FAILED" err
-              Right _  -> getJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
-    LinkMemories sid cl -> postJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath sid <> "/links") cl
-    MemoryLinksList mid -> getJSON  mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/links")
-    MemoryUnlink sid tid rt -> delJSON mgr base mApiKey ("/api/v1/memories/" <> uuidPath sid <> "/links/"
+              Right _  -> getJSONWith (compactMemoryMutationAckWithTags "updated" (Just tags)) mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid)
+    LinkMemories sid cl -> postJSONWith (const $ memoryLinkAck "linked" sid cl.targetId cl.relationType) mgr base mApiKey ("/api/v1/memories/" <> uuidPath sid <> "/links") cl
+    MemoryLinksList mid -> getJSONWith compactMemoryLinksList mgr base mApiKey ("/api/v1/memories/" <> uuidPath mid <> "/links")
+    MemoryUnlink sid tid rt -> delJSONWith (const $ memoryLinkAck "unlinked" sid tid rt) mgr base mApiKey ("/api/v1/memories/" <> uuidPath sid <> "/links/"
                                <> uuidPath tid <> "/" <> T.unpack (relationTypeToText rt))
-    ProjectCreate cp    -> postJSON mgr base mApiKey "/api/v1/projects" cp
-    ProjectUpdate pid up -> putJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid) up
-    ProjectLinkMem pid mid -> postJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
-                              (object ["memory_id" .= mid])
-    ProjectUnlinkMem pid mid -> delJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories/"
-                                <> uuidPath mid)
-    TaskCreate ct       -> postJSON mgr base mApiKey "/api/v1/tasks" ct
+    ProjectCreate cp    -> postJSONWith (compactProjectMutationAck "created") mgr base mApiKey "/api/v1/projects" cp
+    ProjectUpdate pid up -> putJSONWith (compactProjectMutationAck "updated") mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid) up
+    ProjectLinkMem pid mid -> postJSONWith (const $ entityMemoryLinkAck "linked" "project" pid mid) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
+                               (object ["memory_id" .= mid])
+    ProjectUnlinkMem pid mid -> delJSONWith (const $ entityMemoryLinkAck "unlinked" "project" pid mid) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories/"
+                                 <> uuidPath mid)
+    TaskCreate ct       -> postJSONWith (compactTaskMutationAck "created") mgr base mApiKey "/api/v1/tasks" ct
     TaskOverviewCall tid ->
-        getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/overview" <>
+        getJSONWith compactTaskOverview mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/overview" <>
           buildQuery [("extra_context", Just "false")])
     ContextGetCall tid level ->
         let levelStr = case level of
               ContextLight  -> "light"
               ContextMedium -> "medium"
               ContextHeavy  -> "heavy"
-        in getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/context" <>
+        in getJSONWith compactContextInfo mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/context" <>
              buildQuery [("detail_level", Just levelStr)])
-    TaskUpdate tid ut   -> putJSON  mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid) ut
+    TaskUpdate tid ut   -> putJSONWith (compactTaskMutationAck "updated") mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid) ut
     TaskLinkMem tid mid -> do
       mTargetErr <- ensureTopLevelTaskTarget mgr base mApiKey tid
       maybe
-        (postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
+        (postJSONWith (const $ entityMemoryLinkAck "linked" "task" tid mid) mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories")
           (object ["memory_id" .= mid]))
         pure
         mTargetErr
     TaskUnlinkMem tid mid -> do
       mTargetErr <- ensureTopLevelTaskTarget mgr base mApiKey tid
       maybe
-        (delJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories/"
+        (delJSONWith (const $ entityMemoryLinkAck "unlinked" "task" tid mid) mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/memories/"
           <> uuidPath mid))
         pure
         mTargetErr
-    TaskDepAdd tid did  -> postJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies")
+    TaskDepAdd tid did  -> postJSONWith compactDependencyMutationSummary mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies")
                             (object ["depends_on_id" .= did])
-    TaskDepRemove tid did -> delJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/"
-                              <> uuidPath did)
-    WorkspaceList ml mo      -> getJSON  mgr base mApiKey ("/api/v1/workspaces" <> buildQuery
+    TaskDepRemove tid did -> delJSONWith compactDependencyMutationSummary mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/"
+                               <> uuidPath did)
+    WorkspaceList ml mo      -> getJSONWith compactWorkspaceList mgr base mApiKey ("/api/v1/workspaces" <> buildQuery
                             [ ("limit", show <$> ml)
                             , ("offset", show <$> mo)
                             ])
-    WorkspaceReg cw     -> postJSON mgr base mApiKey "/api/v1/workspaces" cw
+    WorkspaceReg cw     -> postJSONWith (compactWorkspaceMutationAck "created") mgr base mApiKey "/api/v1/workspaces" cw
     ProjectOverviewCall pid ->
-        getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/overview" <>
+        getJSONWith compactProjectOverview mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/overview" <>
           buildQuery [("extra_context", Just "false")])
     ProjectNextTasksCall pid ml includeBlocked ->
-        getJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/next-tasks" <>
+        getJSONWith compactNextTasks mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/next-tasks" <>
           buildQuery
             [ ("limit", show <$> ml)
             , ("include_blocked", if includeBlocked then Just "true" else Nothing)
             ])
-    UnifiedSearch usq -> postJSON mgr base mApiKey "/api/v1/search" usq
+    UnifiedSearch usq -> postJSONWith compactSearchResults mgr base mApiKey "/api/v1/search" usq
 
     -- ================================================================
     -- WORKFLOW COMPOSITE TOOLS
@@ -654,17 +669,17 @@ executeToolCall mgr base mApiKey = \case
                               ContextLight  -> "light"
                               ContextMedium -> "medium"
                               ContextHeavy  -> "heavy"
-                        getJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/context" <>
+                        getJSONWith compactTaskStartSuccess mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/context" <>
                           buildQuery [("detail_level", Just levelStr)])
 
     TaskFinishCall tid status mNotes -> do
       -- 1. If notes provided, create a linked memory
-      mAuthErr <- case mNotes of
+      notesResult <- case mNotes of
         Just notes | not (T.null (T.strip notes)) -> do
           -- First get the task to find workspace_id and an eligible memory target.
           taskResult <- rawGetJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
           case rawAuthErrorToMcp taskResult of
-            Just authErr -> pure (Just authErr)
+            Just authErr -> pure (Left authErr)
             Nothing -> case taskResult of
               Right taskVal -> do
                 let mWsId = objectTextField "workspace_id" taskVal
@@ -672,24 +687,30 @@ executeToolCall mgr base mApiKey = \case
                   Just wsId -> do
                     targetResult <- resolveTaskFinishNotesTarget mgr base mApiKey tid taskVal
                     case targetResult of
-                      Left targetErr -> pure (Just targetErr)
+                      Left targetErr -> pure (Left targetErr)
                       Right target -> do
                         -- Create the notes memory with its required eligible target link atomically.
                         let memBody = taskFinishNotesMemoryBody wsId target notes Nothing
                         memResult <- rawPostJSON mgr base mApiKey "/api/v1/memories" memBody
                         case rawAuthErrorToMcp memResult of
-                          Just authErr -> pure (Just authErr)
+                          Just authErr -> pure (Left authErr)
                           Nothing -> case memResult of
-                            Right _ -> pure Nothing
-                            Left err -> pure . Just $ mcpErrorCodeFromRaw "MEMORY_CREATE_FAILED" err
-                  Nothing -> pure . Just $ mcpErrorCode "MEMORY_TARGET_REQUIRED" "Could not determine the task workspace for the notes memory."
-              Left err -> pure . Just $ mcpErrorCodeFromRaw "TASK_LOOKUP_FAILED" err
-        _ -> pure Nothing
+                            Right memVal -> pure (Right (Just memVal))
+                            Left err -> pure . Left $ mcpErrorCodeFromRaw "MEMORY_CREATE_FAILED" err
+                  Nothing -> pure . Left $ mcpErrorCode "MEMORY_TARGET_REQUIRED" "Could not determine the task workspace for the notes memory."
+              Left err -> pure . Left $ mcpErrorCodeFromRaw "TASK_LOOKUP_FAILED" err
+        _ -> pure (Right Nothing)
       -- 2. Update task status
-      case mAuthErr of
-        Just authErr -> pure authErr
-        Nothing -> putJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
-          (object ["status" .= status])
+      case notesResult of
+        Left authErr -> pure authErr
+        Right mNotesMemory -> do
+          updateResult <- rawPutJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+            (object ["status" .= status])
+          case rawAuthErrorToMcp updateResult of
+            Just authErr -> pure authErr
+            Nothing -> case updateResult of
+              Left err -> pure $ mcpErrorCodeFromRaw "TASK_FINISH_FAILED" err
+              Right taskVal -> pure $ mcpResultWith id (encode (compactTaskFinishAckWithNotes "finished" mNotesMemory taskVal))
 
     ProjectSpecCall wsId pName pDesc pPri tasks -> do
       -- 1. Create the project
@@ -732,7 +753,7 @@ executeToolCall mgr base mApiKey = \case
                         , "tasks"   .= createdTasks
                         , "tasks_failed" .= failedCount
                         ]
-                  pure $ mcpResult (encode result)
+                  pure $ mcpResultWith compactProjectSpecSummary (encode result)
 
     ProjectArchiveCall pid mSummary -> do
       -- 1. Get project to find workspace_id
@@ -741,7 +762,7 @@ executeToolCall mgr base mApiKey = \case
         Left err -> pure $ mcpErrorCodeFromRaw "PROJECT_NOT_FOUND" err
         Right projVal -> do
           -- 2. If summary provided, create a linked memory
-          mAuthErr <- case mSummary of
+          summaryResult <- case mSummary of
             Just summary | not (T.null (T.strip summary)) -> do
               let mWsId = case projVal of
                     Object o -> case KM.lookup "workspace_id" o of
@@ -761,36 +782,42 @@ executeToolCall mgr base mApiKey = \case
                         ]
                   memResult <- rawPostJSON mgr base mApiKey "/api/v1/memories" memBody
                   case rawAuthErrorToMcp memResult of
-                    Just authErr -> pure (Just authErr)
+                    Just authErr -> pure (Left authErr)
                     Nothing -> case memResult of
-                      Right _ -> pure Nothing
-                      Left err -> pure . Just $ mcpErrorCodeFromRaw "MEMORY_CREATE_FAILED" err
-                Nothing -> pure Nothing
-            _ -> pure Nothing
+                      Right memVal -> pure (Right (Just memVal))
+                      Left err -> pure . Left $ mcpErrorCodeFromRaw "MEMORY_CREATE_FAILED" err
+                Nothing -> pure (Right Nothing)
+            _ -> pure (Right Nothing)
           -- 3. Archive the project
-          case mAuthErr of
-            Just authErr -> pure authErr
-            Nothing -> putJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
-              (object ["status" .= ("archived" :: Text)])
+          case summaryResult of
+            Left authErr -> pure authErr
+            Right mSummaryMemory -> do
+              archiveResult <- rawPutJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
+                (object ["status" .= ("archived" :: Text)])
+              case rawAuthErrorToMcp archiveResult of
+                Just authErr -> pure authErr
+                Nothing -> case archiveResult of
+                  Left err -> pure $ mcpErrorCodeFromRaw "PROJECT_ARCHIVE_FAILED" err
+                  Right archivedProject -> pure $ mcpResultWith id (encode (compactProjectArchiveAck mSummaryMemory archivedProject))
 
 ------------------------------------------------------------------------
 -- Typed HTTP helpers
 ------------------------------------------------------------------------
 
-postJSON :: ToJSON a => Manager -> String -> Maybe Text -> String -> a -> IO Value
-postJSON mgr base mApiKey path body = httpJSON mgr mApiKey "POST" (base <> path) (Just (encode body))
+postJSONWith :: ToJSON a => (Value -> Value) -> Manager -> String -> Maybe Text -> String -> a -> IO Value
+postJSONWith shaper mgr base mApiKey path body = httpJSONWith shaper mgr mApiKey "POST" (base <> path) (Just (encode body))
 
-getJSON :: Manager -> String -> Maybe Text -> String -> IO Value
-getJSON mgr base mApiKey path = httpJSON mgr mApiKey "GET" (base <> path) Nothing
+getJSONWith :: (Value -> Value) -> Manager -> String -> Maybe Text -> String -> IO Value
+getJSONWith shaper mgr base mApiKey path = httpJSONWith shaper mgr mApiKey "GET" (base <> path) Nothing
 
-putJSON :: ToJSON a => Manager -> String -> Maybe Text -> String -> a -> IO Value
-putJSON mgr base mApiKey path body = httpJSON mgr mApiKey "PUT" (base <> path) (Just (encode body))
+putJSONWith :: ToJSON a => (Value -> Value) -> Manager -> String -> Maybe Text -> String -> a -> IO Value
+putJSONWith shaper mgr base mApiKey path body = httpJSONWith shaper mgr mApiKey "PUT" (base <> path) (Just (encode body))
 
-delJSON :: Manager -> String -> Maybe Text -> String -> IO Value
-delJSON mgr base mApiKey path = httpJSON mgr mApiKey "DELETE" (base <> path) Nothing
+delJSONWith :: (Value -> Value) -> Manager -> String -> Maybe Text -> String -> IO Value
+delJSONWith shaper mgr base mApiKey path = httpJSONWith shaper mgr mApiKey "DELETE" (base <> path) Nothing
 
-httpJSON :: Manager -> Maybe Text -> String -> String -> Maybe BL.ByteString -> IO Value
-httpJSON mgr mApiKey httpMethod url mbody = do
+httpJSONWith :: (Value -> Value) -> Manager -> Maybe Text -> String -> String -> Maybe BL.ByteString -> IO Value
+httpJSONWith shaper mgr mApiKey httpMethod url mbody = do
   result <- try $ do
     initReq <- parseRequest url
     let authHeaders = bearerAuthHeaders mApiKey
@@ -803,7 +830,7 @@ httpJSON mgr mApiKey httpMethod url mbody = do
     let code = statusCode (responseStatus resp)
         body = responseBody resp
     if code >= 200 && code < 300
-      then pure $ mcpResult body
+      then pure $ mcpResultWith shaper body
       else pure $ mcpHttpError code body
   case result of
     Right v  -> pure v
@@ -847,16 +874,458 @@ bearerAuthHeaders :: Maybe Text -> RequestHeaders
 bearerAuthHeaders = maybe [] (\key -> [("Authorization", "Bearer " <> TE.encodeUtf8 key)])
 
 ------------------------------------------------------------------------
+-- Compact MCP response shaping helpers
+------------------------------------------------------------------------
+
+compactWorkspaceSummary :: Value -> Value
+compactWorkspaceSummary value = object $ catMaybes
+  [ copyField "id" value
+  , copyField "name" value
+  , copyField "workspace_type" value
+  , copyField "gh_owner" value
+  , copyField "gh_repo" value
+  ]
+
+
+compactMemorySummary :: Value -> Value
+compactMemorySummary value = object $ catMaybes
+  [ copyField "id" value
+  , copyField "summary" value
+  , contentPreviewWhenNoSummary value
+  , copyField "memory_type" value
+  , copyField "importance" value
+  , copyNonEmptyArrayField "tags" value
+  , copyTrueBoolField "pinned" value
+  ]
+
+
+compactMemoryDetail :: Value -> Value
+compactMemoryDetail value = object $ catMaybes
+  [ copyField "id" value
+  , copyField "summary" value
+  , copyField "content" value
+  , copyField "memory_type" value
+  , copyField "importance" value
+  , copyNonEmptyArrayField "tags" value
+  , copyTrueBoolField "pinned" value
+  , copyNonEmptyObjectField "metadata" value
+  , copyField "expires_at" value
+  , copyField "source" value
+  , copyField "confidence" value
+  ]
+
+
+compactProjectSummary :: Value -> Value
+compactProjectSummary value = object $ catMaybes
+  [ copyField "id" value
+  , copyField "name" value
+  , copyField "status" value
+  , copyField "priority" value
+  , copyField "parent_id" value
+  ]
+
+
+compactProjectDetail :: Value -> Value
+compactProjectDetail value = object $ catMaybes
+  [ copyField "id" value
+  , copyField "name" value
+  , copyField "description" value
+  , copyField "status" value
+  , copyField "priority" value
+  , copyField "parent_id" value
+  ]
+
+
+compactTaskSummary :: Value -> Value
+compactTaskSummary value = object $ catMaybes
+  [ copyField "id" value
+  , copyField "title" value
+  , copyField "status" value
+  , copyField "priority" value
+  , copyField "project_id" value
+  , copyField "parent_id" value
+  , copyField "due_at" value
+  ]
+
+
+compactTaskDetail :: Value -> Value
+compactTaskDetail value = object $ catMaybes
+  [ copyField "id" value
+  , copyField "title" value
+  , copyField "description" value
+  , copyField "status" value
+  , copyField "priority" value
+  , copyField "project_id" value
+  , copyField "parent_id" value
+  , copyField "due_at" value
+  ]
+
+
+compactSearchResults :: Value -> Value
+compactSearchResults value = object
+  [ "memories" .= mapArrayFieldOrEmpty "memories" compactMemorySummary value
+  , "projects" .= mapArrayFieldOrEmpty "projects" compactProjectSearchRow value
+  , "tasks" .= mapArrayFieldOrEmpty "tasks" compactTaskSearchRow value
+  ]
+
+
+compactProjectSearchRow :: Value -> Value
+compactProjectSearchRow value = object $ catMaybes
+  [ fieldWithDefault "project" compactProjectSummary compactProjectSummary value
+  , nonEmptyMappedArrayField "linked_memories" compactLinkedMemorySummary value
+  ]
+
+
+compactTaskSearchRow :: Value -> Value
+compactTaskSearchRow value = object $ catMaybes
+  [ fieldWithDefault "task" compactTaskSummary compactTaskSummary value
+  , nonEmptyMappedArrayField "linked_memories" compactLinkedMemorySummary value
+  ]
+
+
+compactLinkedMemorySummary :: Value -> Value
+compactLinkedMemorySummary value = object $ catMaybes
+  [ copyField "id" value
+  , copyField "summary" value
+  , copyField "importance" value
+  , copyNonEmptyArrayField "tags" value
+  ]
+
+
+compactConnectedMemorySummary :: Value -> Value
+compactConnectedMemorySummary value = object $ catMaybes
+  [ copyField "id" value
+  , copyField "summary" value
+  , copyField "scope" value
+  ]
+
+
+compactTaskDependencySummary :: Value -> Value
+compactTaskDependencySummary value = object $ catMaybes
+  [ copyField "id" value
+  , copyField "title" value <|> copyField "name" value
+  , copyField "status" value
+  ]
+
+
+compactProjectOverview :: Value -> Value
+compactProjectOverview value = object $ catMaybes
+  [ fieldWith "project" compactProjectDetail value
+  , mappedArrayField "tasks" compactTaskSummary value
+  , mappedArrayField "subprojects" compactProjectSummary value
+  , nonEmptyMappedArrayField "linked_memories" compactMemorySummary value
+  , mappedArrayField "connected_memories" compactConnectedMemorySummary value
+  , fieldWith "readiness_rollup" compactReadinessRollup value
+  ]
+
+
+compactTaskOverview :: Value -> Value
+compactTaskOverview value = object $ catMaybes
+  [ fieldWith "task" compactTaskDetail value
+  , mappedArrayField "dependencies" compactTaskDependencySummary value
+  , mappedArrayField "connected_memories" compactConnectedMemorySummary value
+  , fieldWith "readiness_rollup" compactReadinessRollup value
+  ]
+
+
+compactContextInfo :: Value -> Value
+compactContextInfo value = object $ catMaybes
+  [ fieldWith "task" compactTaskSummary value
+  , copyField "detail_level" value
+  , mappedArrayField "task_memories" compactConnectedMemorySummary value
+  , mappedArrayField "project_memories" compactConnectedMemorySummary value
+  , mappedArrayField "workspace_memories" compactConnectedMemorySummary value
+  ]
+
+
+compactTaskStartSuccess :: Value -> Value
+compactTaskStartSuccess value = case compactContextInfo value of
+  Object o -> Object (KM.insert "started" (Bool True) o)
+  other    -> other
+
+
+compactMemoryLinksList :: Value -> Value
+compactMemoryLinksList value = object
+  [ "links" .= map compactGraphEdge (objectArrayValue value) ]
+
+
+compactGraphEdge :: Value -> Value
+compactGraphEdge value = object $ catMaybes
+  [ copyField "source_id" value
+  , copyField "target_id" value
+  , copyField "relation_type" value
+  , copyField "strength" value
+  ]
+
+
+compactNextTasks :: Value -> Value
+compactNextTasks value = object
+  [ "items" .= map compactNextTaskCandidateSummary (objectArrayValue value) ]
+
+
+compactNextTaskCandidateSummary :: Value -> Value
+compactNextTaskCandidateSummary value = object $ catMaybes
+  [ fieldWith "task" compactTaskSummary value
+  , Just $ "dependency_blocked" .= fromMaybe False (objectBoolField "dependency_blocked" value)
+  , copyTrueBoolField "completion_gated" value
+  , copyNonZeroNumberField "open_descendant_count" value
+  , copyNonZeroNumberField "open_dependency_count" value
+  ]
+
+
+compactDependencyMutationSummary :: Value -> Value
+compactDependencyMutationSummary value = object $ catMaybes
+  [ copyField "action" value
+  , copyField "task_id" value
+  , copyField "depends_on_id" value
+  , nonEmptyMappedArrayField "affected_tasks" compactDependencyEffectSummary value
+  ]
+
+
+compactDependencyEffectSummary :: Value -> Value
+compactDependencyEffectSummary value = object $ catMaybes
+  [ fieldWith "task" compactTaskSummary value
+  , copyField "previous_status" value
+  , copyField "current_status" value
+  , copyTrueBoolField "auto_blocked" value
+  , copyNonZeroNumberField "open_dependency_count" value
+  , copyField "reason" value
+  ]
+
+
+compactTaskMutationAck :: Text -> Value -> Value
+compactTaskMutationAck action value =
+  let summary = compactTaskSummary value
+  in mutationAck action "task" summary
+      [ nonEmptyMappedArrayField "dependency_effects" compactDependencyEffectSummary value ]
+
+
+compactTaskFinishAck :: Text -> Value -> Value
+compactTaskFinishAck action = compactTaskMutationAck action
+
+
+compactTaskFinishAckWithNotes :: Text -> Maybe Value -> Value -> Value
+compactTaskFinishAckWithNotes action mNotesMemory value =
+  insertOptionalSummary "notes_memory" mNotesMemory $ compactTaskFinishAck action value
+
+
+compactMemoryMutationAckWithTargets :: Text -> Maybe UUID -> Maybe UUID -> Value -> Value
+compactMemoryMutationAckWithTargets action mProjectId mTaskId value =
+  mutationAck action "memory" (compactMemorySummary value)
+    [ ("project_id" .=) <$> mProjectId
+    , ("task_id" .=) <$> mTaskId
+    ]
+
+
+compactMemoryMutationAckWithTags :: Text -> Maybe [Text] -> Value -> Value
+compactMemoryMutationAckWithTags action mTags value =
+  mutationAck action "memory" (compactMemorySummary value)
+    [ ("tags" .=) <$> mTags ]
+
+
+compactProjectMutationAck :: Text -> Value -> Value
+compactProjectMutationAck action value = mutationAck action "project" (compactProjectSummary value) []
+
+
+compactProjectArchiveAck :: Maybe Value -> Value -> Value
+compactProjectArchiveAck mSummaryMemory value =
+  insertOptionalSummary "summary_memory" mSummaryMemory $ compactProjectMutationAck "archived" value
+
+
+compactWorkspaceMutationAck :: Text -> Value -> Value
+compactWorkspaceMutationAck action value = mutationAck action "workspace" (compactWorkspaceSummary value) []
+
+
+compactProjectSpecSummary :: Value -> Value
+compactProjectSpecSummary value = object $ catMaybes
+  [ fieldWith "project" compactProjectSummary value
+  , renameMappedArrayField "tasks" "tasks_created" compactTaskSummary value
+  , copyNonZeroNumberField "tasks_failed" value
+  ]
+
+
+mutationAck :: Text -> Text -> Value -> [Maybe Pair] -> Value
+mutationAck action entityType summary extraPairs = object $
+  [ "ok" .= True
+  , "action" .= action
+  , "entity_type" .= entityType
+  ]
+  <> catMaybes
+       [ copyField "id" summary
+       , copyField "status" summary
+       , Just ("summary" .= summary)
+       ]
+  <> catMaybes extraPairs
+
+
+memoryLinkAck :: Text -> UUID -> UUID -> RelationType -> Value
+memoryLinkAck action sourceId targetId relationType = object
+  [ "ok" .= True
+  , "action" .= action
+  , "entity_type" .= ("memory_link" :: Text)
+  , "source_id" .= sourceId
+  , "target_id" .= targetId
+  , "relation_type" .= relationType
+  ]
+
+
+entityMemoryLinkAck :: Text -> Text -> UUID -> UUID -> Value
+entityMemoryLinkAck action entityType entityId memoryId = object
+  [ "ok" .= True
+  , "action" .= action
+  , "entity_type" .= entityType
+  , "entity_id" .= entityId
+  , "memory_id" .= memoryId
+  ]
+
+
+insertOptionalSummary :: Key -> Maybe Value -> Value -> Value
+insertOptionalSummary _ Nothing base = base
+insertOptionalSummary key (Just entityValue) (Object base) =
+  let summary = compactMemorySummary entityValue
+      withSummary = KM.insert key summary base
+      withSummaryId = case objectNonNullField "id" entityValue of
+        Just summaryId -> KM.insert (key <> "_id") summaryId withSummary
+        Nothing        -> withSummary
+  in Object withSummaryId
+insertOptionalSummary key (Just entityValue) base = object
+  [ "result" .= base
+  , key .= compactMemorySummary entityValue
+  ]
+
+
+compactReadinessRollup :: Value -> Value
+compactReadinessRollup value = object $ catMaybes
+  [ copyField "completion_ready" value
+  , copyNonZeroNumberField "open_project_count" value
+  , copyNonZeroNumberField "closed_project_count" value
+  , copyNonZeroNumberField "open_task_count" value
+  , copyNonZeroNumberField "done_task_count" value
+  , copyNonZeroNumberField "cancelled_task_count" value
+  , copyNonZeroNumberField "blocked_task_count" value
+  , copyNonZeroNumberField "dependency_blocked_task_count" value
+  , copyNonZeroNumberField "open_dependency_count" value
+  , copyNonZeroNumberField "open_subtask_count" value
+  , copyNonZeroNumberField "done_subtask_count" value
+  , copyNonZeroNumberField "cancelled_subtask_count" value
+  , copyNonZeroNumberField "blocked_subtask_count" value
+  ]
+
+
+compactWorkspaceList :: Value -> Value
+compactWorkspaceList value = object $ catMaybes
+  [ Just $ "items" .= mapArrayFieldOrEmpty "items" compactWorkspaceSummary value
+  , copyTrueBoolField "has_more" value
+  ]
+
+
+fieldWith :: Key -> (Value -> Value) -> Value -> Maybe Pair
+fieldWith key shaper value = (key .=) . shaper <$> objectNonNullField key value
+
+
+fieldWithDefault :: Key -> (Value -> Value) -> (Value -> Value) -> Value -> Maybe Pair
+fieldWithDefault key shaper fallback value =
+  Just $ key .= maybe (fallback value) shaper (objectNonNullField key value)
+
+
+mappedArrayField :: Key -> (Value -> Value) -> Value -> Maybe Pair
+mappedArrayField key shaper value = (key .=) <$> mappedArray key shaper value
+
+
+renameMappedArrayField :: Key -> Key -> (Value -> Value) -> Value -> Maybe Pair
+renameMappedArrayField fromKey toKey shaper value = (toKey .=) <$> mappedArray fromKey shaper value
+
+
+nonEmptyMappedArrayField :: Key -> (Value -> Value) -> Value -> Maybe Pair
+nonEmptyMappedArrayField key shaper value = do
+  items <- mappedArray key shaper value
+  if null items then Nothing else Just (key .= items)
+
+
+mappedArray :: Key -> (Value -> Value) -> Value -> Maybe [Value]
+mappedArray key shaper value = case objectNonNullField key value of
+  Just (Array arr) -> Just $ map shaper (toList arr)
+  _                -> Nothing
+
+
+mapArrayFieldOrEmpty :: Key -> (Value -> Value) -> Value -> [Value]
+mapArrayFieldOrEmpty key shaper value = fromMaybe [] (mappedArray key shaper value)
+
+
+copyField :: Key -> Value -> Maybe Pair
+copyField key value = (key .=) <$> objectNonNullField key value
+
+
+copyNonEmptyArrayField :: Key -> Value -> Maybe Pair
+copyNonEmptyArrayField key value = case objectNonNullField key value of
+  Just (Array arr) | not (null arr) -> Just $ key .= Array arr
+  _                                -> Nothing
+
+
+copyNonEmptyObjectField :: Key -> Value -> Maybe Pair
+copyNonEmptyObjectField key value = case objectNonNullField key value of
+  Just (Object obj) | not (KM.null obj) -> Just $ key .= Object obj
+  _                                    -> Nothing
+
+
+copyTrueBoolField :: Key -> Value -> Maybe Pair
+copyTrueBoolField key value = case objectNonNullField key value of
+  Just (Bool True) -> Just $ key .= True
+  _                -> Nothing
+
+
+copyNonZeroNumberField :: Key -> Value -> Maybe Pair
+copyNonZeroNumberField key value = case objectNonNullField key value of
+  Just (Number n) | n /= 0 -> Just $ key .= Number n
+  _                        -> Nothing
+
+
+contentPreviewWhenNoSummary :: Value -> Maybe Pair
+contentPreviewWhenNoSummary value
+  | objectNonNullField "summary" value /= Nothing = Nothing
+  | otherwise = do
+      content <- objectTextField "content" value
+      Just $ "content_preview" .= previewText 200 content
+
+
+previewText :: Int -> Text -> Text
+previewText maxChars text =
+  let stripped = T.strip text
+  in if T.length stripped > maxChars
+    then T.take maxChars stripped <> "..."
+    else stripped
+
+
+objectField :: Key -> Value -> Maybe Value
+objectField key = \case
+  Object o -> KM.lookup key o
+  _        -> Nothing
+
+
+objectNonNullField :: Key -> Value -> Maybe Value
+objectNonNullField key value = case objectField key value of
+  Just Null -> Nothing
+  other     -> other
+
+
+objectBoolField :: Key -> Value -> Maybe Bool
+objectBoolField key value = case objectNonNullField key value of
+  Just (Bool boolValue) -> Just boolValue
+  _                     -> Nothing
+
+------------------------------------------------------------------------
 -- MCP content helpers
 ------------------------------------------------------------------------
 
--- | Wrap an API response for MCP, stripping verbose fields to reduce
--- LLM context consumption.
-mcpResult :: BL.ByteString -> Value
-mcpResult body =
+-- | Wrap an API response for MCP after applying a tool-specific response shaper.
+-- The generic 'trimForLLM' pass remains a safety net after the shaper runs.
+mcpResultWith :: (Value -> Value) -> BL.ByteString -> Value
+mcpResultWith shaper body =
   let trimmed = case eitherDecode body of
-        Right v  -> encode (trimForLLM v)
-        Left _   -> body   -- not JSON; pass through as-is
+        Right v -> encode (trimForLLM (shaper v))
+        Left _
+          | BL.null body -> encode (trimForLLM (shaper Null))
+          | otherwise    -> body   -- not JSON; pass through as-is
   in object
        [ "content" .= [object ["type" .= ("text" :: Text), "text" .= decodeUtf8 trimmed]] ]
 
@@ -1277,7 +1746,7 @@ taskStartParentGateError tid taskVal parentVal =
           "Cannot start this subtask because its parent task is not in progress."
           [ "task_id" .= tid
           , "parent_task_id" .= parentId
-          , "parent_task" .= trimForLLM parentVal
+          , "parent_task" .= compactTaskSummary parentVal
           , "status_unchanged" .= True
           ]
 
@@ -1357,7 +1826,7 @@ taskOverviewDependencies overviewVal = objectArrayField "dependencies" overviewV
 
 taskStartAlternativeCandidates :: Value -> [Value]
 taskStartAlternativeCandidates candidatesVal =
-  [ trimForLLM candidate
+  [ compactNextTaskCandidateSummary candidate
   | candidate <- objectArrayValue candidatesVal
   ]
 

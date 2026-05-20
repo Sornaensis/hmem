@@ -12,10 +12,12 @@ import Control.Concurrent.STM
 import Control.Exception (SomeException, catch, finally, try)
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Network.HTTP.Client (Manager, newManager, managerResponseTimeout, responseTimeoutMicro)
@@ -270,8 +272,11 @@ handleSetWorkspace wsContext req params = do
     Just Nothing -> do
       atomically $ modifyTVar' wsContext (const Nothing)
       hPutStrLn stderr "MCP server: workspace context cleared."
-      pure $ Just $ jsonRpcResponse req.reqId $ object
-        [ "content" .= [ object [ "type" .= t "text", "text" .= t "Workspace context cleared." ] ] ]
+      pure $ Just $ jsonRpcResponse req.reqId $ mcpJSON $ object
+        [ "ok" .= True
+        , "action" .= ("cleared" :: Text)
+        , "entity_type" .= ("workspace_context" :: Text)
+        ]
     Just (Just wsText) -> case UUID.fromText wsText of
       Nothing -> pure $ Just $ jsonRpcResponse req.reqId $ object
         [ "content" .= [ object [ "type" .= t "text", "text" .= ("Invalid UUID: " <> wsText) ] ]
@@ -280,8 +285,12 @@ handleSetWorkspace wsContext req params = do
       Just uuid -> do
         atomically $ modifyTVar' wsContext (const (Just uuid))
         hPutStrLn stderr $ "MCP server: workspace context set to " <> T.unpack wsText
-        pure $ Just $ jsonRpcResponse req.reqId $ object
-          [ "content" .= [ object [ "type" .= t "text", "text" .= ("Workspace context set to " <> wsText) ] ] ]
+        pure $ Just $ jsonRpcResponse req.reqId $ mcpJSON $ object
+          [ "ok" .= True
+          , "action" .= ("set" :: Text)
+          , "entity_type" .= ("workspace_context" :: Text)
+          , "workspace_id" .= uuid
+          ]
   where
     t :: Text -> Text
     t = id
@@ -290,11 +299,17 @@ handleSetWorkspace wsContext req params = do
 handleGetWorkspace :: TVar (Maybe UUID) -> JsonRpcRequest -> IO (Maybe Value)
 handleGetWorkspace wsContext req = do
   mws <- atomically $ readTVar wsContext
-  let msg = case mws of
-        Nothing   -> "No workspace context set."
-        Just uuid -> "Current workspace: " <> UUID.toText uuid
-  pure $ Just $ jsonRpcResponse req.reqId $ object
-    [ "content" .= [ object [ "type" .= ("text" :: Text), "text" .= msg ] ] ]
+  pure $ Just $ jsonRpcResponse req.reqId $ mcpJSON $ object
+    [ "workspace_id" .= mws ]
+
+
+mcpJSON :: Value -> Value
+mcpJSON value = object
+  [ "content" .= [ object [ "type" .= ("text" :: Text), "text" .= decodeUtf8 (encode value) ] ] ]
+
+
+decodeUtf8 :: BL.ByteString -> Text
+decodeUtf8 = TE.decodeUtf8 . BL.toStrict
 
 -- | Inject the stored workspace_id into tool call arguments when the
 -- arguments object does not already contain a workspace_id field.

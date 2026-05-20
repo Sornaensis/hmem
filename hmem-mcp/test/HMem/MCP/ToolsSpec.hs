@@ -3,13 +3,17 @@
 module HMem.MCP.ToolsSpec (spec) where
 
 import Data.Aeson
+import Data.Aeson.Types (Pair)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Lazy qualified as BL
 import Control.Exception (IOException, try)
 import Control.Concurrent.STM (newTVarIO)
+import Data.Foldable (toList)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.UUID qualified as UUID
 import Test.Hspec
 
@@ -142,6 +146,135 @@ spec = do
         , "full memory `content` and full project/task descriptions except detail tools"
         , "dependency/memory counts"
         ]
+
+  describe "compact response shapers" $ do
+    it "builds memory summaries without workspace, timestamps, metadata, or full content" $ do
+      compactMemorySummary fullMemoryValue `shouldBe` object
+        [ "id" .= parsedUUID
+        , "content_preview" .= ("full memory content" :: Text)
+        , "memory_type" .= ("long_term" :: Text)
+        , "importance" .= (7 :: Int)
+        , "tags" .= (["contract"] :: [Text])
+        , "pinned" .= True
+        ]
+
+    it "allows explicit memory detail to keep full content while trimming generic noise" $ do
+      let wrapped = mcpResultWith compactMemoryDetail (encode fullMemoryValue)
+      case mcpTextValue wrapped of
+        Just detailed -> do
+          jsonField "content" detailed `shouldBe` Just (String "full memory content")
+          jsonField "metadata" detailed `shouldBe` Just (object ["kept" .= True])
+          jsonField "workspace_id" detailed `shouldBe` Nothing
+          jsonField "created_at" detailed `shouldBe` Nothing
+        Nothing -> expectationFailure $ "Expected MCP JSON text, got: " <> show wrapped
+
+    it "shapes unified search rows into compact summaries" $ do
+      let shaped = compactSearchResults $ object
+            [ "memories" .= [fullMemoryValue]
+            , "projects" .=
+                [ object
+                    [ "project" .= fullProjectValue
+                    , "linked_memories" .= [linkedMemoryValue]
+                    ]
+                ]
+            , "tasks" .=
+                [ object
+                    [ "task" .= fullTaskValue
+                    , "linked_memories" .= [linkedMemoryValue]
+                    ]
+                ]
+            ]
+      jsonField "memories" shaped `shouldSatisfy` arrayLength 1
+      jsonField "projects" shaped `shouldSatisfy` arrayLength 1
+      jsonField "tasks" shaped `shouldSatisfy` arrayLength 1
+      show shaped `shouldNotContain` "workspace_id"
+      show shaped `shouldNotContain` "created_at"
+      show shaped `shouldNotContain` "full project description"
+      show shaped `shouldNotContain` "full task description"
+
+    it "wraps task mutations as acknowledgements with dependency effects" $ do
+      let ack = compactTaskMutationAck "updated" $ object
+            [ "id" .= parsedUUID
+            , "workspace_id" .= parsedUUID2
+            , "title" .= ("Task" :: Text)
+            , "status" .= ("blocked" :: Text)
+            , "priority" .= (9 :: Int)
+            , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+            , "dependency_effects" .=
+                [ object
+                    [ "task" .= fullTaskValue
+                    , "previous_status" .= ("todo" :: Text)
+                    , "current_status" .= ("blocked" :: Text)
+                    , "auto_blocked" .= True
+                    , "open_dependency_count" .= (1 :: Int)
+                    , "reason" .= ("dependency_added" :: Text)
+                    ]
+                ]
+            ]
+      jsonField "ok" ack `shouldBe` Just (Bool True)
+      jsonField "action" ack `shouldBe` Just (String "updated")
+      jsonField "entity_type" ack `shouldBe` Just (String "task")
+      jsonField "summary" ack `shouldSatisfy` hasObjectField "title"
+      jsonField "dependency_effects" ack `shouldSatisfy` arrayLength 1
+      jsonField "workspace_id" ack `shouldBe` Nothing
+      jsonField "created_at" ack `shouldBe` Nothing
+
+    it "preserves mutation-specific memory targets and empty tag replacements" $ do
+      let createAck = compactMemoryMutationAckWithTargets "created" (Just parsedUUID2) (Just parsedUUID3) fullMemoryValue
+          updateAck = compactMemoryMutationAckWithTags "updated" (Just []) fullMemoryValue
+      jsonField "project_id" createAck `shouldBe` Just (String testUUID2)
+      jsonField "task_id" createAck `shouldBe` Just (String "22222222-3333-4444-5555-666666666666")
+      jsonField "tags" updateAck `shouldBe` Just (Array mempty)
+
+    it "includes workflow-created memory summaries in finish/archive acknowledgements" $ do
+      let finishAck = compactTaskFinishAckWithNotes "finished" (Just fullMemoryValue) fullTaskValue
+          archiveAck = compactProjectArchiveAck (Just fullMemoryValue) fullProjectValue
+      jsonField "notes_memory" finishAck `shouldSatisfy` hasObjectField "content_preview"
+      jsonField "notes_memory_id" finishAck `shouldBe` Just (String testUUID)
+      jsonField "summary_memory" archiveAck `shouldSatisfy` hasObjectField "content_preview"
+      jsonField "summary_memory_id" archiveAck `shouldBe` Just (String testUUID)
+
+    it "compacts next-task candidates for task_start error alternatives" $ do
+      let candidate = compactNextTaskCandidateSummary $ object
+            [ "task" .= fullTaskValue
+            , "dependency_blocked" .= False
+            , "completion_gated" .= False
+            , "open_descendant_count" .= (0 :: Int)
+            , "open_dependency_count" .= (0 :: Int)
+            ]
+      jsonField "task" candidate `shouldSatisfy` hasObjectField "title"
+      jsonField "dependency_blocked" candidate `shouldBe` Just (Bool False)
+      show candidate `shouldNotContain` "full task description"
+      show candidate `shouldNotContain` "workspace_id"
+      show candidate `shouldNotContain` "open_descendant_count"
+
+    it "compacts overview and context payloads while preserving actionable readiness" $ do
+      let overview = compactProjectOverview $ object
+            [ "project" .= fullProjectValue
+            , "tasks" .= [fullTaskValue]
+            , "subprojects" .= [fullProjectValue]
+            , "connected_memories" .= [object ["id" .= parsedUUID, "summary" .= ("Memory" :: Text), "scope" .= ("project" :: Text)]]
+            , "readiness_rollup" .= object
+                [ "completion_ready" .= False
+                , "open_task_count" .= (2 :: Int)
+                , "done_task_count" .= (0 :: Int)
+                ]
+            ]
+          contextInfo = compactContextInfo $ object
+            [ "task" .= fullTaskValue
+            , "detail_level" .= ("medium" :: Text)
+            , "task_memories" .= [object ["id" .= parsedUUID, "summary" .= ("Task memory" :: Text), "scope" .= ("task" :: Text)]]
+            , "project_memories" .= ([] :: [Value])
+            , "workspace_memories" .= ([] :: [Value])
+            ]
+      jsonField "project" overview `shouldSatisfy` hasObjectField "description"
+      jsonField "tasks" overview `shouldSatisfy` arrayLength 1
+      show overview `shouldNotContain` "workspace_id"
+      show overview `shouldNotContain` "dependency_count"
+      show overview `shouldContain` "open_task_count"
+      show overview `shouldNotContain` "done_task_count"
+      jsonField "detail_level" contextInfo `shouldBe` Just (String "medium")
+      jsonField "task_memories" contextInfo `shouldSatisfy` arrayLength 1
 
   describe "workspace context injection" $ do
     it "creates an arguments object when omitted so queryless tools stay workspace-scoped" $ do
@@ -372,6 +505,59 @@ taskValue tid title status parentId projectId = object
   ]
 
 
+fullMemoryValue :: Value
+fullMemoryValue = object
+  [ "id" .= parsedUUID
+  , "workspace_id" .= parsedUUID2
+  , "content" .= ("full memory content" :: Text)
+  , "memory_type" .= ("long_term" :: Text)
+  , "importance" .= (7 :: Int)
+  , "tags" .= (["contract"] :: [Text])
+  , "pinned" .= True
+  , "metadata" .= object ["kept" .= True]
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+  , "updated_at" .= ("2026-05-20T00:00:00Z" :: Text)
+  ]
+
+
+linkedMemoryValue :: Value
+linkedMemoryValue = object
+  [ "id" .= parsedUUID
+  , "summary" .= ("Linked memory" :: Text)
+  , "importance" .= (5 :: Int)
+  , "tags" .= (["linked"] :: [Text])
+  , "content" .= ("linked full content should be omitted" :: Text)
+  ]
+
+
+fullProjectValue :: Value
+fullProjectValue = object
+  [ "id" .= parsedUUID
+  , "workspace_id" .= parsedUUID2
+  , "name" .= ("Project" :: Text)
+  , "description" .= ("full project description" :: Text)
+  , "status" .= ("active" :: Text)
+  , "priority" .= (8 :: Int)
+  , "metadata" .= object ([] :: [Pair])
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+  ]
+
+
+fullTaskValue :: Value
+fullTaskValue = object
+  [ "id" .= parsedUUID
+  , "workspace_id" .= parsedUUID2
+  , "project_id" .= parsedUUID3
+  , "title" .= ("Task" :: Text)
+  , "description" .= ("full task description" :: Text)
+  , "status" .= ("todo" :: Text)
+  , "priority" .= (9 :: Int)
+  , "dependency_count" .= (4 :: Int)
+  , "memory_link_count" .= (3 :: Int)
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+  ]
+
+
 hasErrorCode :: Text -> Maybe Value -> Bool
 hasErrorCode code (Just value) = hasErrorCodeValue code value
 hasErrorCode _ Nothing = False
@@ -408,6 +594,32 @@ errorField field (Object o) = case KM.lookup (Key.fromText "error") o of
   Just (Object err) -> KM.lookup (Key.fromText field) err
   _ -> Nothing
 errorField _ _ = Nothing
+
+
+jsonField :: Text -> Value -> Maybe Value
+jsonField field (Object o) = KM.lookup (Key.fromText field) o
+jsonField _ _ = Nothing
+
+
+hasObjectField :: Text -> Maybe Value -> Bool
+hasObjectField field (Just (Object o)) = KM.member (Key.fromText field) o
+hasObjectField _ _ = False
+
+
+arrayLength :: Int -> Maybe Value -> Bool
+arrayLength expected (Just (Array arr)) = length arr == expected
+arrayLength _ _ = False
+
+
+mcpTextValue :: Value -> Maybe Value
+mcpTextValue (Object o) = do
+  Array contentItems <- KM.lookup (Key.fromText "content") o
+  Object firstItem <- case toList contentItems of
+    item : _ -> Just item
+    []       -> Nothing
+  String textValue <- KM.lookup (Key.fromText "text") firstItem
+  decode (BL.fromStrict (TE.encodeUtf8 textValue))
+mcpTextValue _ = Nothing
 
 
 readContractDoc :: IO String

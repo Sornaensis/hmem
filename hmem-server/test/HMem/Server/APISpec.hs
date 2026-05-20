@@ -862,7 +862,7 @@ spec = around withApp $ do
           ])
       respStatus taskMemResp `shouldBe` 200
 
-    it "accepts subtask creation targets and rejects cross-workspace targets" $ \app -> do
+    it "rejects subtask creation targets and cross-workspace targets" $ \app -> do
       wsAResp <- postJSON app "/api/v1/workspaces"
         (object ["name" .= ("memory-link-invalid-a" :: T.Text)])
       let Just wsA = decode (respBody wsAResp) :: Maybe Workspace
@@ -889,7 +889,35 @@ spec = around withApp $ do
           , "content" .= ("subtask-linked" :: T.Text)
           , "memory_type" .= ("short_term" :: T.Text)
           ])
-      respStatus subtaskResp `shouldBe` 200
+      respStatus subtaskResp `shouldBe` 400
+      assertValidationErrorContains "top-level task" subtaskResp
+
+      deleteChildResp <- del app (uuidPath "/api/v1/tasks" child.id)
+      respStatus deleteChildResp `shouldBe` 200
+      deletedSubtaskResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= wsA.id
+          , "task_id" .= child.id
+          , "content" .= ("deleted subtask target" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          ])
+      respStatus deletedSubtaskResp `shouldBe` 400
+      assertValidationErrorContains "active top-level task" deletedSubtaskResp
+
+      deletedTopResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= wsA.id, "project_id" .= projA.id, "title" .= ("Deleted target" :: T.Text)])
+      let Just deletedTop = decode (respBody deletedTopResp) :: Maybe Task
+      deleteTopResp <- del app (uuidPath "/api/v1/tasks" deletedTop.id)
+      respStatus deleteTopResp `shouldBe` 200
+      deletedTopMemoryResp <- postJSON app "/api/v1/memories"
+        (object
+          [ "workspace_id" .= wsA.id
+          , "task_id" .= deletedTop.id
+          , "content" .= ("deleted top-level target" :: T.Text)
+          , "memory_type" .= ("short_term" :: T.Text)
+          ])
+      respStatus deletedTopMemoryResp `shouldBe` 400
+      assertValidationErrorContains "active top-level task" deletedTopMemoryResp
 
       crossWorkspaceResp <- postJSON app "/api/v1/memories"
         (object
@@ -3170,6 +3198,32 @@ spec = around withApp $ do
             ]
       batchResp <- postJSON app "/api/v1/memories/batch" (toJSON items)
       respStatus batchResp `shouldBe` 400
+
+    it "rejects batch memory creation targets that point at subtasks" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("batch-subtask-target-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Batch Subtask Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Batch Parent" :: T.Text)])
+      let Just parent = decode (respBody parentResp) :: Maybe Task
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= parent.id, "title" .= ("Batch Child" :: T.Text)])
+      let Just child = decode (respBody childResp) :: Maybe Task
+      let items =
+            [ object
+                [ "workspace_id" .= ws.id
+                , "task_id" .= child.id
+                , "content" .= ("batch subtask target" :: T.Text)
+                , "memory_type" .= ("short_term" :: T.Text)
+                ]
+            ]
+      batchResp <- postJSON app "/api/v1/memories/batch" (toJSON items)
+      respStatus batchResp `shouldBe` 400
+      assertValidationErrorContains "memories[0].task_id" batchResp
+      assertValidationErrorContains "top-level task" batchResp
 
   describe "task dependencies via API" $ do
     it "adds dependency and rejects cycle" $ \app -> do

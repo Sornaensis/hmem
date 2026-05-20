@@ -9,11 +9,13 @@ rules introduced by `V013__explicit_memory_creation_links.sql` and
 - New memories must specify `memory_type` as `short_term` or `long_term`.
 - New memories must be created with at least one valid same-workspace project or
   task link.
-- MCP and generated agent guidance expose the stricter user-facing rule: create
-  or attach memories only to projects or top-level tasks. If the context is a
-  subtask, use the containing project or nearest top-level task instead.
-- The broad HTTP API remains the compatibility boundary for older clients while
-  the web UI and MCP surface move to the top-level-task targeting policy.
+- The HTTP API, web UI, MCP, and generated agent guidance expose the stricter
+  user-facing creation rule: create memories only against projects or top-level
+  tasks. If the context is a subtask, use the containing project or nearest
+  top-level task instead.
+- The low-level link tables and direct SQL maintenance path remain the
+  compatibility boundary for existing subtask-linked rows while user-facing
+  creation surfaces enforce the top-level-task targeting policy.
 
 ## Upgrade behavior
 
@@ -66,7 +68,7 @@ is to keep existing saved views untouched.
 
 ### MCP agents and generated configs
 
-MCP is the stricter compatibility surface for agents:
+MCP remains a strict agent-facing surface:
 
 - `memory_create` requires `content`, explicit `memory_type`, and at least one
   creation target (`project_id` and/or top-level `task_id`);
@@ -80,11 +82,10 @@ MCP is the stricter compatibility surface for agents:
 
 Older agent prompts that omit `memory_type` or targets should fail fast with
 actionable validation errors rather than silently creating ambiguous memories.
-If an operator must remediate an existing subtask-linked memory during the REST
-compatibility window, use the HTTP API or direct SQL in a maintenance window to
-add a replacement project/top-level-task link before removing the subtask link;
-otherwise the deferred creation-link invariant rejects removing the last active
-link.
+If an operator must remediate an existing subtask-linked memory, use direct SQL
+or a dedicated maintenance script in a maintenance window to add a replacement
+project/top-level-task link before removing the subtask link; otherwise the
+deferred creation-link invariant rejects removing the last active link.
 
 ### HTTP and older clients
 
@@ -95,16 +96,16 @@ defaults:
 | --- | --- |
 | `POST /api/v1/memories` without `memory_type` | `400` validation error mentioning `memory_type`; DB-level drift maps to `MEMORY_TYPE_REQUIRED` |
 | `POST /api/v1/memories` without project/task target | `400` validation error mentioning the missing target; DB-level drift maps to `MEMORY_LINK_REQUIRED` |
+| `POST /api/v1/memories` with a subtask or deleted task target | `400` validation error mentioning active top-level task targets |
 | `POST /api/v1/memories/batch` with any item missing `memory_type` or target | Entire batch is rejected with per-item validation text; no partial create is expected |
 | Cross-workspace project/task target | `400` validation/workflow error / `MEMORY_LINK_CROSS_WORKSPACE` |
 | Existing saved view with legacy entity label | Preserved; no automatic rewrite |
 | Existing active unlinked memory | Grandfathered and readable/searchable |
 
-During the current compatibility window the HTTP API may still accept direct
-subtask task links for legacy callers. New UI and MCP workflows should avoid that
-shape and target the project or nearest top-level task. Tightening the REST API
-to reject subtask memory targets should be a separate migration task because it
-needs an operator plan for any existing subtask-linked memories.
+The HTTP API now rejects subtask memory creation targets so REST, web, and MCP
+creation semantics match. Existing subtask-linked rows are not rewritten by this
+API rule; operator remediation remains a deliberate maintenance activity because
+rewriting those rows requires project-specific context.
 
 ## Feature flags and rollout
 
@@ -134,7 +135,8 @@ Upgrade behavior is covered by `hmem-core:test:hmem-core-test` in
 
 API behavior is covered by `hmem-server:test:hmem-server-test` under the
 `explicit memory creation links` examples for required type, required target,
-same-workspace target validation, and atomic project/task link creation.
+same-workspace target validation, subtask/deleted task target rejection, and
+atomic project/task link creation.
 
 Saved-view preservation is covered indirectly by workspace lifecycle tests that
 create `memory_list` saved views and verify they survive normal create/read and

@@ -20,7 +20,7 @@ import Data.Aeson.Key qualified as Aeson (fromText)
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Pool (Pool, tryWithResource)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -1276,7 +1276,7 @@ memoryHandlers pool tracker bc pgvec =
     createMemoryH req = do
       cm <- parseCreateMemoryRequest Nothing req
       requireWorkspaceRoleH pool cm.workspaceId Auth.WorkspaceRoleEdit
-      authorizeCreateMemoryTarget cm
+      authorizeCreateMemoryTarget Nothing cm
       rejectValidationErrors (validateCreateMemoryInput cm)
       mem <- handleDBErrors $ Mem.createMemory pool cm
       emit bc Created ETMemory mem.id (Just $ toJSON mem)
@@ -1290,11 +1290,17 @@ memoryHandlers pool tracker bc pgvec =
             ]
           requireAuthenticatedH
           mapM_ (\wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleEdit) (dedupe $ map (.workspaceId) cms)
-          mapM_ authorizeCreateMemoryTarget cms
+          mapM_ (uncurry authorizeCreateMemoryTarget)
+            [ (Just idx, cm)
+            | (idx, cm) <- zip [(0 :: Int) ..] cms
+            ]
           rejectValidationErrors (validateCreateMemoryBatchInput cms)
           handleDBErrors $ Mem.createMemoryBatch pool cms
 
-    authorizeCreateMemoryTarget cm = do
+    authorizeCreateMemoryTarget mIndex cm = do
+      let prefix = case mIndex of
+            Nothing  -> ""
+            Just idx -> "memories[" <> T.pack (show idx) <> "]."
       case cm.projectId of
         Just pid -> do
           projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
@@ -1305,7 +1311,13 @@ memoryHandlers pool tracker bc pgvec =
         Just tid -> do
           taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
           _ <- requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope cm.workspaceId) taskScope
-          pure ()
+          mTask <- handleDBErrors $ Task.getTask pool tid
+          case mTask of
+            Nothing -> rejectValidationErrors
+              [ prefix <> "task_id must reference an active top-level task; deleted or missing task targets are not valid memory creation targets" ]
+            Just task | isJust (task.parentId) -> rejectValidationErrors
+              [ prefix <> "task_id must reference a top-level task; subtask task IDs are not valid memory creation targets" ]
+            Just _ -> pure ()
         Nothing -> pure ()
 
     searchMemoriesH mcompact sq = do

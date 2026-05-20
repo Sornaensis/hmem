@@ -87,14 +87,15 @@ The default for every MCP tool is compact. Full/detail output is allowed only in
 one of these ways:
 
 1. **Dedicated detail tools** already present in the slim surface:
-   `memory_get`, `project_overview`, `task_overview`, `context_get`, and
-   `task_start` after a successful start.
+   `memory_get` for full memory content.
 2. **Existing bounded detail knobs**, such as `detail_level` on `context_get` and
-   `task_start`.
+   `task_start`, and overview description flags such as
+   `project_overview.include_descriptions=true` or
+   `task_overview.include_description=true`.
 3. **Future optional flags** (`detail=true`, `include_content=true`,
-   `include_descriptions=true`, `include_metadata=true`, or similarly named
-   `include_*` fields). These flags must be optional, bounded, and documented;
-   adding them must not create new required inputs or new tools.
+   `include_metadata=true`, or similarly named `include_*` fields). These flags
+   must be optional, bounded, and documented; adding them must not create new
+   required inputs or new tools.
 
 Even in detail mode, MCP should still omit transport/debug fields, repeated
 workspace IDs, empty metadata, and nulls unless the caller explicitly requested
@@ -191,11 +192,15 @@ from "not requested".
 Aggregated project/task detail responses.
 
 - `ProjectOverviewSummary`:
-  `{ project, tasks, subprojects, connected_memories, readiness_rollup }`
+  `{ project, tasks, subprojects, connected_memories, readiness_rollup }`, where
+  `project` is a `ProjectSummary` by default.
 - `TaskOverviewSummary`:
-  `{ task, dependencies, connected_memories, readiness_rollup }`
+  `{ task, dependencies, connected_memories, readiness_rollup }`, where `task`
+  is a `TaskSummary` by default.
 
-`tasks` and `subprojects` are summary rows.
+`tasks` and `subprojects` are summary rows. Default overview responses omit full
+project/task descriptions unless `project_overview.include_descriptions=true` or
+`task_overview.include_description=true` requests them.
 
 `TaskDependencySummary`: `{ id, title|name, status? }`. Status is included when
 known or when it explains why a task is blocked.
@@ -335,13 +340,13 @@ Structured errors preserve every field needed for recovery:
 | `link_memory` | `MutationAck` with `entity_type`, `entity_id`, and `memory_id`. | Use the entity overview or `memory_get` for details. |
 | `project_create` | `MutationAck` with `summary: ProjectSummary`. | Use `project_overview` for project detail. |
 | `project_update` | `MutationAck` with updated `summary: ProjectSummary`; include `changed_fields` and `status` when changed. | Use `project_overview` for project detail. |
-| `project_overview` | `ProjectOverviewSummary`. Root project may include full description; child tasks/subprojects remain summaries. | This is the dedicated project detail/overview tool; future `include_descriptions=true` may expand child descriptions. |
+| `project_overview` | `ProjectOverviewSummary`. Project, child tasks, and subprojects are compact summaries by default and omit full descriptions. | Set `include_descriptions=true` to include project, task, and subproject descriptions. |
 | `project_next_tasks` | `{ items: [NextTaskCandidateSummary] }` where each row includes `task: TaskSummary`, `dependency_blocked`, and only non-zero actionable gate counts. | `include_blocked=true` includes blocked diagnostics; `task_overview` explains a selected task. |
 | `project_spec` | `WorkflowSummary` with `project: ProjectSummary`, `tasks_created: [TaskSummary]`, and `tasks_failed` only when non-zero. | Use `project_overview` after creation for full context. |
 | `project_archive` | `MutationAck` with archived `ProjectSummary`, `changed_fields: ["status"]`, and optional summary-memory ID. | Use `memory_get` for summary-memory content if needed. |
 | `task_create` | `MutationAck` with `summary: TaskSummary`. | Use `task_overview` or `context_get` for detail. |
 | `task_update` | `MutationAck` with updated `summary: TaskSummary`, `changed_fields`, and non-empty `dependency_effects`. | Use `task_overview` for dependencies/memory context. |
-| `task_overview` | `TaskOverviewSummary`. Root task may include full description; dependency and memory rows remain summaries. | This is the dedicated task detail/overview tool; future `include_description=false|true` can tune description size. |
+| `task_overview` | `TaskOverviewSummary`. Task, dependency, and memory rows are compact summaries by default and omit full descriptions. | Set `include_description=true` to include the task description. |
 | `context_get` | `ContextSummary` bounded by `detail_level`. | Increase `detail_level` for more summaries; use `memory_get` for full memory content. |
 | `task_dependency` | `DependencyMutationSummary`: `ok`, action, `entity_type`, `task_id`, `depends_on_id`, and non-empty `affected_tasks` as `DependencyEffectSummary`. | Use `task_overview` for the resulting task state. |
 | `task_start` | On success, `WorkflowSummary`/`ContextSummary` with `started: true`; on blocked preflight, `StructuredError` with blockers and ready alternatives. | `detail_level` controls context breadth; `task_overview` explains blockers. |

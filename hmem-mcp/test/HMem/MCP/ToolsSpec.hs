@@ -114,6 +114,8 @@ spec = do
       toolSchemaProperties "project_update" `shouldNotContain` ["metadata", "items"]
       toolSchemaProperties "task_create" `shouldNotContain` ["workspace_id", "metadata"]
       toolSchemaProperties "task_update" `shouldNotContain` ["metadata", "items"]
+      toolSchemaProperties "project_overview" `shouldContain` ["include_descriptions"]
+      toolSchemaProperties "task_overview" `shouldContain` ["include_description"]
       toolSchemaProperties "search" `shouldNotContain` ["workspace_id", "search_language", "offset", "min_access_count", "min_importance", "category_id", "pinned_only", "task_priority"]
 
   describe "MCP compact response contract" $ do
@@ -337,7 +339,7 @@ spec = do
       show candidate `shouldNotContain` "open_descendant_count"
 
     it "compacts overview and context payloads while preserving actionable readiness" $ do
-      let overview = compactProjectOverview $ object
+      let overviewInput = object
             [ "project" .= fullProjectValue
             , "tasks" .= [fullTaskValue]
             , "subprojects" .= [fullProjectValue]
@@ -348,6 +350,16 @@ spec = do
                 , "done_task_count" .= (0 :: Int)
                 ]
             ]
+          overview = compactProjectOverview overviewInput
+          overviewWithDescriptions = compactProjectOverviewWithDescriptions overviewInput
+          taskOverviewInput = object
+            [ "task" .= fullTaskValue
+            , "dependencies" .= [object ["id" .= parsedUUID2, "title" .= ("Dependency" :: Text), "status" .= ("todo" :: Text)]]
+            , "connected_memories" .= [object ["id" .= parsedUUID, "summary" .= ("Task memory" :: Text), "scope" .= ("task" :: Text)]]
+            , "readiness_rollup" .= object ["completion_ready" .= True]
+            ]
+          taskOverview = compactTaskOverview taskOverviewInput
+          taskOverviewWithDescription = compactTaskOverviewWithDescription taskOverviewInput
           contextInfo = compactContextInfo $ object
             [ "task" .= fullTaskValue
             , "detail_level" .= ("medium" :: Text)
@@ -355,10 +367,29 @@ spec = do
             , "project_memories" .= ([] :: [Value])
             , "workspace_memories" .= ([] :: [Value])
             ]
-      jsonField "project" overview `shouldSatisfy` hasObjectField "description"
+          taskStart = compactTaskStartSuccess $ object
+            [ "task" .= fullTaskValue
+            , "detail_level" .= ("light" :: Text)
+            , "task_memories" .= ([] :: [Value])
+            , "project_memories" .= ([] :: [Value])
+            , "workspace_memories" .= ([] :: [Value])
+            ]
+      (jsonField "project" overview >>= jsonField "description") `shouldBe` Nothing
+      (jsonField "task" taskOverview >>= jsonField "description") `shouldBe` Nothing
+      (jsonField "task" contextInfo >>= jsonField "description") `shouldBe` Nothing
+      (jsonField "task" taskStart >>= jsonField "description") `shouldBe` Nothing
+      (jsonField "project" overviewWithDescriptions >>= jsonField "description") `shouldBe` Just (String "full project description")
+      (jsonField "task" taskOverviewWithDescription >>= jsonField "description") `shouldBe` Just (String "full task description")
+      jsonField "started" taskStart `shouldBe` Just (Bool True)
       jsonField "tasks" overview `shouldSatisfy` arrayLength 1
+      jsonField "dependencies" taskOverview `shouldSatisfy` arrayLength 1
       show overview `shouldNotContain` "workspace_id"
       show overview `shouldNotContain` "dependency_count"
+      show overview `shouldNotContain` "full project description"
+      show overview `shouldNotContain` "full task description"
+      show taskOverview `shouldNotContain` "full task description"
+      show contextInfo `shouldNotContain` "full task description"
+      show taskStart `shouldNotContain` "full task description"
       show overview `shouldContain` "open_task_count"
       show overview `shouldNotContain` "done_task_count"
       jsonField "detail_level" contextInfo `shouldBe` Just (String "medium")
@@ -411,9 +442,11 @@ spec = do
             ]
       parseToolCall "link_memory" args `shouldBe` Right (ProjectLinkMem parsedUUID parsedUUID2)
 
-    it "parses overview and finish tools without removed boolean/tag knobs" $ do
-      parseToolCall "project_overview" (object ["project_id" .= testUUID]) `shouldBe` Right (ProjectOverviewCall parsedUUID)
-      parseToolCall "task_overview" (object ["task_id" .= testUUID]) `shouldBe` Right (TaskOverviewCall parsedUUID)
+    it "parses overview and finish tools with optional description detail flags" $ do
+      parseToolCall "project_overview" (object ["project_id" .= testUUID]) `shouldBe` Right (ProjectOverviewCall parsedUUID False)
+      parseToolCall "project_overview" (object ["project_id" .= testUUID, "include_descriptions" .= True]) `shouldBe` Right (ProjectOverviewCall parsedUUID True)
+      parseToolCall "task_overview" (object ["task_id" .= testUUID]) `shouldBe` Right (TaskOverviewCall parsedUUID False)
+      parseToolCall "task_overview" (object ["task_id" .= testUUID, "include_description" .= True]) `shouldBe` Right (TaskOverviewCall parsedUUID True)
       parseToolCall "task_finish" (object ["task_id" .= testUUID, "status" .= ("done" :: Text), "notes" .= ("done" :: Text)])
         `shouldBe` Right (TaskFinishCall parsedUUID Done (Just "done"))
 

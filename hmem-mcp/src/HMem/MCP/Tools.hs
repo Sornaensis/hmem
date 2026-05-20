@@ -11,8 +11,11 @@ module HMem.MCP.Tools
   , compactTaskSummary
   , compactSearchResults
   , compactProjectOverview
+  , compactProjectOverviewWithDescriptions
   , compactTaskOverview
+  , compactTaskOverviewWithDescription
   , compactContextInfo
+  , compactTaskStartSuccess
   , compactTaskMutationAck
   , compactDependencyMutationAck
   , compactMemoryMutationAckWithTargets
@@ -199,9 +202,12 @@ slimToolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
-    , mkTool "project_overview" "Get a project with its tasks, subprojects, linked memories, and readiness_rollup in one call." $ object
+    , mkTool "project_overview" "Get a compact project overview with tasks, subprojects, linked memories, and readiness_rollup. Set include_descriptions=true only when project/task/subproject descriptions are needed." $ object
       [ "type" .= t "object"
-      , "properties" .= object [ "project_id" .= prop "string" "UUID of the project" ]
+      , "properties" .= object
+          [ "project_id" .= prop "string" "UUID of the project"
+          , "include_descriptions" .= prop "boolean" "Include project, task, and subproject descriptions (default false)"
+          ]
       , "required" .= [t "project_id"]
       ]
 
@@ -277,9 +283,12 @@ slimToolDefinitions =
       , "required" .= [t "task_id"]
       ]
 
-    , mkTool "task_overview" "Get a task with dependency summaries, connected memories, and readiness_rollup." $ object
+    , mkTool "task_overview" "Get a compact task overview with dependency summaries, connected memories, and readiness_rollup. Set include_description=true only when the task description is needed." $ object
       [ "type" .= t "object"
-      , "properties" .= object [ "task_id" .= prop "string" "UUID of the task" ]
+      , "properties" .= object
+          [ "task_id" .= prop "string" "UUID of the task"
+          , "include_description" .= prop "boolean" "Include the task description (default false)"
+          ]
       , "required" .= [t "task_id"]
       ]
 
@@ -338,7 +347,7 @@ data ToolCall
   | ProjectLinkMem UUID UUID               -- project_id, memory_id
   | ProjectUnlinkMem UUID UUID             -- project_id, memory_id
   | TaskCreate     CreateTask
-  | TaskOverviewCall UUID
+  | TaskOverviewCall UUID Bool
   | ContextGetCall UUID ContextDetailLevel
   | TaskUpdate     UUID UpdateTask
   | TaskLinkMem    UUID UUID               -- task_id, memory_id
@@ -347,7 +356,7 @@ data ToolCall
   | TaskDepRemove  UUID UUID               -- task_id, depends_on_id
   | WorkspaceList (Maybe Int) (Maybe Int)
   | WorkspaceReg   CreateWorkspace
-  | ProjectOverviewCall UUID
+  | ProjectOverviewCall UUID Bool
   | ProjectNextTasksCall UUID (Maybe Int) Bool
   -- Workflow composite tools
   | TaskStartCall UUID ContextDetailLevel
@@ -399,7 +408,7 @@ parseToolCall name args = case name of
             ("task",     "unlink") -> Right $ TaskUnlinkMem eid mid
             _ -> Left $ "link_memory: invalid entity_type/action: " <> T.unpack entityType <> "/" <> T.unpack action
     "task_create"              -> TaskCreate <$> parse args
-    "task_overview"            -> TaskOverviewCall <$> need "task_id"
+    "task_overview"            -> TaskOverviewCall <$> need "task_id" <*> (fromMaybe False <$> opt "include_description")
     "context_get"              -> ContextGetCall <$> need "task_id" <*> (maybe ContextMedium id <$> opt "detail_level")
     "task_update"              -> TaskUpdate <$> need "task_id" <*> parse args
     "task_dependency"          -> do
@@ -410,7 +419,7 @@ parseToolCall name args = case name of
             _        -> Left "task_dependency: action must be 'add' or 'remove'"
     "workspace_list"           -> WorkspaceList <$> opt "limit" <*> pure Nothing
     "workspace_register"       -> WorkspaceReg <$> parse args
-    "project_overview"          -> ProjectOverviewCall <$> need "project_id"
+    "project_overview"          -> ProjectOverviewCall <$> need "project_id" <*> (fromMaybe False <$> opt "include_descriptions")
     "project_next_tasks"        -> ProjectNextTasksCall <$> need "project_id" <*> opt "limit" <*> (fromMaybe False <$> opt "include_blocked")
     -- Workflow composite tools
     "task_start"                -> TaskStartCall <$> need "task_id" <*> (maybe ContextMedium id <$> opt "detail_level")
@@ -491,11 +500,12 @@ validateToolCall = \case
     ProjectCreate cp -> ProjectCreate cp <$ firstValidationError (validateCreateProjectInput cp)
     ProjectUpdate pid up -> ProjectUpdate pid up <$ firstValidationError (validateUpdateProjectInput up)
     TaskCreate ct -> TaskCreate ct <$ firstValidationError (validateCreateTaskInput ct)
-    TaskOverviewCall tid -> Right $ TaskOverviewCall tid
+    TaskOverviewCall tid includeDescription -> Right $ TaskOverviewCall tid includeDescription
     ContextGetCall tid level -> Right $ ContextGetCall tid level
     TaskUpdate tid ut -> TaskUpdate tid ut <$ firstValidationError (validateUpdateTaskInput ut)
     WorkspaceReg cw -> WorkspaceReg cw <$ firstValidationError (validateCreateWorkspaceInput cw)
     WorkspaceList ml mo -> Right $ WorkspaceList (clampMaybe 1 200 <$> ml) (clampMaybe 0 10000 <$> mo)
+    ProjectOverviewCall pid includeDescriptions -> Right $ ProjectOverviewCall pid includeDescriptions
     ProjectNextTasksCall pid ml includeBlocked -> Right $ ProjectNextTasksCall pid (clampMaybe 1 200 <$> ml) includeBlocked
     -- Workflow composite tools — lightweight validation
     TaskStartCall tid level -> Right $ TaskStartCall tid level
@@ -594,8 +604,8 @@ executeToolCall mgr base mApiKey = \case
     ProjectUnlinkMem pid mid -> delJSONWith (const $ entityMemoryLinkAck "unlinked" "project" pid mid) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories/"
                                  <> uuidPath mid)
     TaskCreate ct       -> postJSONWith (compactTaskMutationAck "created") mgr base mApiKey "/api/v1/tasks" ct
-    TaskOverviewCall tid ->
-        getJSONWith compactTaskOverview mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/overview" <>
+    TaskOverviewCall tid includeDescription ->
+        getJSONWith (if includeDescription then compactTaskOverviewWithDescription else compactTaskOverview) mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/overview" <>
           buildQuery [("extra_context", Just "false")])
     ContextGetCall tid level ->
         let levelStr = case level of
@@ -628,8 +638,8 @@ executeToolCall mgr base mApiKey = \case
                             , ("offset", show <$> mo)
                             ])
     WorkspaceReg cw     -> postJSONWith (compactWorkspaceMutationAck "created") mgr base mApiKey "/api/v1/workspaces" cw
-    ProjectOverviewCall pid ->
-        getJSONWith compactProjectOverview mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/overview" <>
+    ProjectOverviewCall pid includeDescriptions ->
+        getJSONWith (if includeDescriptions then compactProjectOverviewWithDescriptions else compactProjectOverview) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/overview" <>
           buildQuery [("extra_context", Just "false")])
     ProjectNextTasksCall pid ml includeBlocked ->
         getJSONWith compactNextTasks mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/next-tasks" <>
@@ -928,15 +938,8 @@ compactProjectSummary value = object $ catMaybes
   ]
 
 
-compactProjectDetail :: Value -> Value
-compactProjectDetail value = object $ catMaybes
-  [ copyField "id" value
-  , copyField "name" value
-  , copyField "description" value
-  , copyField "status" value
-  , copyField "priority" value
-  , copyField "parent_id" value
-  ]
+compactProjectSummaryWithDescription :: Value -> Value
+compactProjectSummaryWithDescription value = insertOptionalField "description" value (compactProjectSummary value)
 
 
 compactTaskSummary :: Value -> Value
@@ -951,17 +954,8 @@ compactTaskSummary value = object $ catMaybes
   ]
 
 
-compactTaskDetail :: Value -> Value
-compactTaskDetail value = object $ catMaybes
-  [ copyField "id" value
-  , copyField "title" value
-  , copyField "description" value
-  , copyField "status" value
-  , copyField "priority" value
-  , copyField "project_id" value
-  , copyField "parent_id" value
-  , copyField "due_at" value
-  ]
+compactTaskSummaryWithDescription :: Value -> Value
+compactTaskSummaryWithDescription value = insertOptionalField "description" value (compactTaskSummary value)
 
 
 compactSearchResults :: Value -> Value
@@ -1012,10 +1006,18 @@ compactTaskDependencySummary value = object $ catMaybes
 
 
 compactProjectOverview :: Value -> Value
-compactProjectOverview value = object $ catMaybes
-  [ fieldWith "project" compactProjectDetail value
-  , mappedArrayField "tasks" compactTaskSummary value
-  , mappedArrayField "subprojects" compactProjectSummary value
+compactProjectOverview = compactProjectOverviewWith compactProjectSummary compactTaskSummary compactProjectSummary
+
+
+compactProjectOverviewWithDescriptions :: Value -> Value
+compactProjectOverviewWithDescriptions = compactProjectOverviewWith compactProjectSummaryWithDescription compactTaskSummaryWithDescription compactProjectSummaryWithDescription
+
+
+compactProjectOverviewWith :: (Value -> Value) -> (Value -> Value) -> (Value -> Value) -> Value -> Value
+compactProjectOverviewWith projectShaper taskShaper subprojectShaper value = object $ catMaybes
+  [ fieldWith "project" projectShaper value
+  , mappedArrayField "tasks" taskShaper value
+  , mappedArrayField "subprojects" subprojectShaper value
   , nonEmptyMappedArrayField "linked_memories" compactMemorySummary value
   , mappedArrayField "connected_memories" compactConnectedMemorySummary value
   , fieldWith "readiness_rollup" compactReadinessRollup value
@@ -1023,8 +1025,16 @@ compactProjectOverview value = object $ catMaybes
 
 
 compactTaskOverview :: Value -> Value
-compactTaskOverview value = object $ catMaybes
-  [ fieldWith "task" compactTaskDetail value
+compactTaskOverview = compactTaskOverviewWith compactTaskSummary
+
+
+compactTaskOverviewWithDescription :: Value -> Value
+compactTaskOverviewWithDescription = compactTaskOverviewWith compactTaskSummaryWithDescription
+
+
+compactTaskOverviewWith :: (Value -> Value) -> Value -> Value
+compactTaskOverviewWith taskShaper value = object $ catMaybes
+  [ fieldWith "task" taskShaper value
   , mappedArrayField "dependencies" compactTaskDependencySummary value
   , mappedArrayField "connected_memories" compactConnectedMemorySummary value
   , fieldWith "readiness_rollup" compactReadinessRollup value
@@ -1346,6 +1356,16 @@ copyNonZeroNumberField :: Key -> Value -> Maybe Pair
 copyNonZeroNumberField key value = case objectNonNullField key value of
   Just (Number n) | n /= 0 -> Just $ key .= Number n
   _                        -> Nothing
+
+
+insertOptionalField :: Key -> Value -> Value -> Value
+insertOptionalField key source (Object target) = case objectNonNullField key source of
+  Just fieldValue -> Object $ KM.insert key fieldValue target
+  Nothing         -> Object target
+insertOptionalField key source target = object $ catMaybes
+  [ Just $ "result" .= target
+  , copyField key source
+  ]
 
 
 objectField :: Key -> Value -> Maybe Value

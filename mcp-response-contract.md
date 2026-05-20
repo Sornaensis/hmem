@@ -132,8 +132,8 @@ Shared compact identity fields for entities.
 - `WorkspaceSummary`: `{ id, name, workspace_type }`, with GitHub owner/repo only
   when present and relevant.
 - `MemorySummary`: `{ id, summary?, memory_type, importance, tags?, pinned? }`.
-  `content_preview` may appear in list/search rows when no summary exists; full
-  `content` is detail-only.
+  It does not include full `content` or content previews by default; `content` is
+  detail-only through `memory_get`.
 - `ProjectSummary`: `{ id, name, status, priority, parent_id? }` plus
   `description_preview` only when useful for search disambiguation.
 - `TaskSummary`: `{ id, title, status, priority, project_id?, parent_id?, due_at? }`.
@@ -163,8 +163,8 @@ access counters by default.
 
 Rows returned by unified search or browsing.
 
-- `MemorySearchRow`: `MemorySummary` plus `content_preview` when the summary is
-  missing or the query match needs context.
+- `MemorySearchRow`: `MemorySummary` only by default. Full `content` and content
+  previews are omitted; use `memory_get` for full content.
 - `ProjectSearchRow`: `{ project: ProjectSummary, linked_memories? }`.
 - `TaskSearchRow`: `{ task: TaskSummary, linked_memories? }`.
 - `linked_memories` contains bounded `LinkedMemorySummary` rows.
@@ -233,7 +233,7 @@ No retained slim MCP tool currently exposes the full memory graph. The
 traversal. The compact DTO vocabulary reserves graph shapes so a future optional
 graph response does not reintroduce raw `Memory`/`MemoryLink` payloads:
 
-- `GraphNode`: `MemorySummary` plus optional `content_preview`.
+- `GraphNode`: `MemorySummary` without full content or content previews by default.
 - `GraphEdge`: `{ source_id, target_id, relation_type, strength? }`.
 
 Timestamps on links remain omitted. Graph responses should be bounded by an
@@ -327,10 +327,10 @@ Structured errors preserve every field needed for recovery:
 | `get_workspace` | `{ workspace_id: UUID|null }` | None. |
 | `workspace_list` | `{ items: [WorkspaceSummary], has_more? }` | Future optional `detail=true` may include GitHub owner/repo when relevant. |
 | `workspace_register` | `MutationAck` with `summary: WorkspaceSummary`. | Use `workspace_list`/future workspace detail if needed. |
-| `search` | `{ memories: [MemorySearchRow], projects: [ProjectSearchRow], tasks: [TaskSearchRow] }`. | Use `memory_get`, `project_overview`, `task_overview`, or `context_get` for details. |
-| `memory_create` | `MutationAck` with `summary: MemorySummary` and target IDs used at creation. | Use `memory_get` after creation for full content. |
+| `search` | `{ memories: [MemorySearchRow], projects: [ProjectSearchRow], tasks: [TaskSearchRow] }`; memory rows omit content/previews by default. | Use `memory_get`, `project_overview`, `task_overview`, or `context_get` for details. |
+| `memory_create` | `MutationAck` with `summary: MemorySummary` and target IDs used at creation; does not echo submitted content. | Use `memory_get` after creation for full content. |
 | `memory_get` | `MemoryDetail`: `MemorySummary` plus full `content`, optional non-empty metadata, optional expiry/source/confidence, and tags. | This is the dedicated memory detail tool. |
-| `memory_update` | `MutationAck` with updated `summary: MemorySummary`; include `changed_fields` and replaced `tags` when tags were changed. | Use `memory_get` for full content/metadata. |
+| `memory_update` | `MutationAck` with updated `summary: MemorySummary`; include `changed_fields` and replaced `tags` when tags were changed; does not echo updated content. | Use `memory_get` for full content/metadata. |
 | `memory_link` | For create/remove: `MutationAck` with `source_id`, `target_id`, and `relation_type`; for list: `{ links: [GraphEdge] }`. | Future optional `detail=true` may include bounded endpoint memory summaries. |
 | `link_memory` | `MutationAck` with `entity_type`, `entity_id`, and `memory_id`. | Use the entity overview or `memory_get` for details. |
 | `project_create` | `MutationAck` with `summary: ProjectSummary`. | Use `project_overview` for project detail. |

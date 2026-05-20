@@ -19,6 +19,7 @@ module HMem.MCP.Tools
   , compactMemoryMutationAckWithTags
   , compactTaskFinishAckWithNotes
   , compactProjectArchiveAck
+  , compactMemoryLinksList
   , compactNextTaskCandidateSummary
   , addChangedFields
   , sanitizeServerResponse
@@ -894,7 +895,6 @@ compactMemorySummary :: Value -> Value
 compactMemorySummary value = object $ catMaybes
   [ copyField "id" value
   , copyField "summary" value
-  , contentPreviewWhenNoSummary value
   , copyField "memory_type" value
   , copyField "importance" value
   , copyNonEmptyArrayField "tags" value
@@ -1346,22 +1346,6 @@ copyNonZeroNumberField :: Key -> Value -> Maybe Pair
 copyNonZeroNumberField key value = case objectNonNullField key value of
   Just (Number n) | n /= 0 -> Just $ key .= Number n
   _                        -> Nothing
-
-
-contentPreviewWhenNoSummary :: Value -> Maybe Pair
-contentPreviewWhenNoSummary value
-  | objectNonNullField "summary" value /= Nothing = Nothing
-  | otherwise = do
-      content <- objectTextField "content" value
-      Just $ "content_preview" .= previewText 200 content
-
-
-previewText :: Int -> Text -> Text
-previewText maxChars text =
-  let stripped = T.strip text
-  in if T.length stripped > maxChars
-    then T.take maxChars stripped <> "..."
-    else stripped
 
 
 objectField :: Key -> Value -> Maybe Value

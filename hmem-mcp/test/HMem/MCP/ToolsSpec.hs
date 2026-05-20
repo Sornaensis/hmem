@@ -149,10 +149,9 @@ spec = do
         ]
 
   describe "compact response shapers" $ do
-    it "builds memory summaries without workspace, timestamps, metadata, or full content" $ do
+    it "builds memory summaries without workspace, timestamps, metadata, or content" $ do
       compactMemorySummary fullMemoryValue `shouldBe` object
         [ "id" .= parsedUUID
-        , "content_preview" .= ("full memory content" :: Text)
         , "memory_type" .= ("long_term" :: Text)
         , "importance" .= (7 :: Int)
         , "tags" .= (["contract"] :: [Text])
@@ -188,8 +187,15 @@ spec = do
       jsonField "memories" shaped `shouldSatisfy` arrayLength 1
       jsonField "projects" shaped `shouldSatisfy` arrayLength 1
       jsonField "tasks" shaped `shouldSatisfy` arrayLength 1
-      let projectSummary = firstArrayItem "projects" shaped >>= jsonField "project"
+      let memorySummary = firstArrayItem "memories" shaped
+          projectSummary = firstArrayItem "projects" shaped >>= jsonField "project"
           taskSummary = firstArrayItem "tasks" shaped >>= jsonField "task"
+      (memorySummary >>= jsonField "id") `shouldBe` Just (String testUUID)
+      (memorySummary >>= jsonField "memory_type") `shouldBe` Just (String "long_term")
+      (memorySummary >>= jsonField "importance") `shouldBe` Just (Number 7)
+      (memorySummary >>= jsonField "tags") `shouldBe` Just (toJSON (["contract"] :: [Text]))
+      (memorySummary >>= jsonField "content") `shouldBe` Nothing
+      (memorySummary >>= jsonField "content_preview") `shouldBe` Nothing
       (projectSummary >>= jsonField "id") `shouldBe` Just (String testUUID)
       (projectSummary >>= jsonField "name") `shouldBe` Just (String "Project")
       (projectSummary >>= jsonField "status") `shouldBe` Just (String "active")
@@ -202,6 +208,7 @@ spec = do
       show shaped `shouldNotContain` "workspace_id"
       show shaped `shouldNotContain` "created_at"
       show shaped `shouldNotContain` "metadata"
+      show shaped `shouldNotContain` "full memory content"
       show shaped `shouldNotContain` "full project description"
       show shaped `shouldNotContain` "full task description"
       show shaped `shouldNotContain` "linked full content should be omitted"
@@ -270,14 +277,50 @@ spec = do
       jsonField "project_id" createAck `shouldBe` Just (String testUUID2)
       jsonField "task_id" createAck `shouldBe` Just (String "22222222-3333-4444-5555-666666666666")
       jsonField "tags" updateAck `shouldBe` Just (Array mempty)
+      let createSummary = jsonField "summary" createAck
+          updateSummary = jsonField "summary" updateAck
+      (createSummary >>= jsonField "content") `shouldBe` Nothing
+      (createSummary >>= jsonField "content_preview") `shouldBe` Nothing
+      (updateSummary >>= jsonField "content") `shouldBe` Nothing
+      (updateSummary >>= jsonField "content_preview") `shouldBe` Nothing
+      show createAck `shouldNotContain` "full memory content"
+      show updateAck `shouldNotContain` "full memory content"
 
-    it "includes workflow-created memory summaries in finish/archive acknowledgements" $ do
+    it "includes workflow-created memory ids in finish/archive acknowledgements without echoing content" $ do
       let finishAck = compactTaskFinishAckWithNotes "finished" (Just fullMemoryValue) fullTaskValue
           archiveAck = compactProjectArchiveAck (Just fullMemoryValue) fullProjectValue
-      jsonField "notes_memory" finishAck `shouldSatisfy` hasObjectField "content_preview"
+      jsonField "notes_memory" finishAck `shouldSatisfy` hasObjectField "id"
       jsonField "notes_memory_id" finishAck `shouldBe` Just (String testUUID)
-      jsonField "summary_memory" archiveAck `shouldSatisfy` hasObjectField "content_preview"
+      jsonField "summary_memory" archiveAck `shouldSatisfy` hasObjectField "id"
       jsonField "summary_memory_id" archiveAck `shouldBe` Just (String testUUID)
+      let notesMemory = jsonField "notes_memory" finishAck
+          summaryMemory = jsonField "summary_memory" archiveAck
+      (notesMemory >>= jsonField "content") `shouldBe` Nothing
+      (notesMemory >>= jsonField "content_preview") `shouldBe` Nothing
+      (summaryMemory >>= jsonField "content") `shouldBe` Nothing
+      (summaryMemory >>= jsonField "content_preview") `shouldBe` Nothing
+      show finishAck `shouldNotContain` "full memory content"
+      show archiveAck `shouldNotContain` "full memory content"
+
+    it "compacts memory link lists to graph edges without endpoint content or timestamps" $ do
+      let shaped = compactMemoryLinksList $ toJSON
+            [ object
+                [ "source_id" .= parsedUUID
+                , "target_id" .= parsedUUID2
+                , "relation_type" .= ("related" :: Text)
+                , "strength" .= (0.75 :: Double)
+                , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+                , "source_memory" .= fullMemoryValue
+                , "target_memory" .= fullMemoryValue
+                ]
+            ]
+      jsonField "links" shaped `shouldSatisfy` arrayLength 1
+      show shaped `shouldContain` "source_id"
+      show shaped `shouldContain` "target_id"
+      show shaped `shouldNotContain` "created_at"
+      show shaped `shouldNotContain` "full memory content"
+      show shaped `shouldNotContain` "source_memory"
+      show shaped `shouldNotContain` "target_memory"
 
     it "compacts next-task candidates for task_start error alternatives" $ do
       let candidate = compactNextTaskCandidateSummary $ object

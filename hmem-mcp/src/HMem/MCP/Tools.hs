@@ -12,6 +12,7 @@ module HMem.MCP.Tools
   , compactSearchResults
   , compactProjectOverview
   , compactProjectOverviewWithDescriptions
+  , maxProjectOverviewDescriptionChars
   , compactTaskOverview
   , compactTaskOverviewWithDescription
   , compactContextInfo
@@ -207,11 +208,11 @@ slimToolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
-    , mkTool "project_overview" "Get a compact project overview with tasks, subprojects, linked memories, and readiness_rollup. Set include_descriptions=true only when descriptions for all returned project/task/subproject rows are needed; this can grow on large projects, so prefer task_overview for one task description." $ object
+    , mkTool "project_overview" "Get a compact project overview with tasks, subprojects, linked memories, and readiness_rollup. Set include_descriptions=true only when descriptions for returned project/task/subproject rows are needed; descriptions are truncated per row to bound output, but broad projects can still grow, so prefer task_overview for one task description." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project"
-          , "include_descriptions" .= prop "boolean" "Include descriptions for all returned project, task, and subproject rows (default false; can be large on big projects)"
+          , "include_descriptions" .= prop "boolean" "Include bounded descriptions for returned project, task, and subproject rows (default false; broad projects can still be larger)"
           ]
       , "required" .= [t "project_id"]
       ]
@@ -943,8 +944,12 @@ compactProjectSummary value = object $ catMaybes
   ]
 
 
+maxProjectOverviewDescriptionChars :: Int
+maxProjectOverviewDescriptionChars = 600
+
+
 compactProjectSummaryWithDescription :: Value -> Value
-compactProjectSummaryWithDescription value = insertOptionalField "description" value (compactProjectSummary value)
+compactProjectSummaryWithDescription value = insertBoundedDescriptionField value (compactProjectSummary value)
 
 
 compactTaskSummary :: Value -> Value
@@ -961,6 +966,10 @@ compactTaskSummary value = object $ catMaybes
 
 compactTaskSummaryWithDescription :: Value -> Value
 compactTaskSummaryWithDescription value = insertOptionalField "description" value (compactTaskSummary value)
+
+
+compactTaskSummaryWithBoundedDescription :: Value -> Value
+compactTaskSummaryWithBoundedDescription value = insertBoundedDescriptionField value (compactTaskSummary value)
 
 
 compactSearchResults :: Value -> Value
@@ -1015,7 +1024,7 @@ compactProjectOverview = compactProjectOverviewWith compactProjectSummary compac
 
 
 compactProjectOverviewWithDescriptions :: Value -> Value
-compactProjectOverviewWithDescriptions = compactProjectOverviewWith compactProjectSummaryWithDescription compactTaskSummaryWithDescription compactProjectSummaryWithDescription
+compactProjectOverviewWithDescriptions = compactProjectOverviewWith compactProjectSummaryWithDescription compactTaskSummaryWithBoundedDescription compactProjectSummaryWithDescription
 
 
 compactProjectOverviewWith :: (Value -> Value) -> (Value -> Value) -> (Value -> Value) -> Value -> Value
@@ -1414,6 +1423,29 @@ insertOptionalField key source target = object $ catMaybes
   [ Just $ "result" .= target
   , copyField key source
   ]
+
+
+insertBoundedDescriptionField :: Value -> Value -> Value
+insertBoundedDescriptionField = insertBoundedTextField "description" "description_truncated" maxProjectOverviewDescriptionChars
+
+
+insertBoundedTextField :: Key -> Key -> Int -> Value -> Value -> Value
+insertBoundedTextField key truncatedKey maxChars source (Object target) = case objectNonNullField key source of
+  Just (String textValue) ->
+    let (boundedText, wasTruncated) = truncateTextWithEllipsis maxChars textValue
+        targetWithText = KM.insert key (String boundedText) target
+        targetWithFlag = if wasTruncated then KM.insert truncatedKey (Bool True) targetWithText else targetWithText
+    in Object targetWithFlag
+  Just fieldValue -> Object $ KM.insert key fieldValue target
+  Nothing         -> Object target
+insertBoundedTextField key _ _ source target = insertOptionalField key source target
+
+
+truncateTextWithEllipsis :: Int -> Text -> (Text, Bool)
+truncateTextWithEllipsis maxChars textValue
+  | T.length textValue <= maxChars = (textValue, False)
+  | maxChars <= 1 = (T.take maxChars textValue, True)
+  | otherwise = (T.take (maxChars - 1) textValue <> "…", True)
 
 
 objectField :: Key -> Value -> Maybe Value

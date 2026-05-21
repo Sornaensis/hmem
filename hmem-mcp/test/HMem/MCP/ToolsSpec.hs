@@ -150,7 +150,8 @@ spec = do
       toolDescriptionShouldContain "search" "Returns compact summaries"
       toolDescriptionShouldContain "search" "memory content/previews are omitted"
       toolDescriptionShouldContain "memory_get" "detail path for compact memory summaries"
-      toolDescriptionShouldContain "project_overview" "can grow on large projects"
+      toolDescriptionShouldContain "project_overview" "truncated per row"
+      toolDescriptionShouldContain "project_overview" "broad projects can still grow"
       toolDescriptionShouldContain "project_overview" "prefer task_overview"
       toolDescriptionShouldContain "context_get" "detail_level controls how many summaries"
       toolDescriptionShouldContain "task_start" "detail_level controls context breadth"
@@ -195,9 +196,10 @@ spec = do
     it "documents explicit project overview description growth risk" $ do
       doc <- readContractDoc
       mapM_ (`shouldContainText` doc)
-        [ "`project_overview.include_descriptions=true` attaches descriptions to every"
+        [ "`project_overview.include_descriptions=true` attaches bounded descriptions"
         , "returned project, task, and subproject row"
-        , "can grow on large projects"
+        , "truncated with `description_truncated: true`"
+        , "broad projects can still grow with row count"
         , "`task_overview.include_description=true`"
         ]
 
@@ -239,7 +241,8 @@ spec = do
           listedNames `shouldNotContain` ["saved_view"]
           toolArrayItemDescription "search" tools `shouldSatisfy` maybe False ("Returns compact summaries" `T.isInfixOf`)
           toolArrayItemDescription "search" tools `shouldSatisfy` maybe False ("memory content/previews are omitted" `T.isInfixOf`)
-          toolArrayItemDescription "project_overview" tools `shouldSatisfy` maybe False ("can grow on large projects" `T.isInfixOf`)
+          toolArrayItemDescription "project_overview" tools `shouldSatisfy` maybe False ("truncated per row" `T.isInfixOf`)
+          toolArrayItemDescription "project_overview" tools `shouldSatisfy` maybe False ("broad projects can still grow" `T.isInfixOf`)
           toolArrayItemDescription "memory_get" tools `shouldSatisfy` maybe False ("detail path for compact memory summaries" `T.isInfixOf`)
         other -> expectationFailure $ "Expected tools/list result tools array, got: " <> show other
 
@@ -748,6 +751,41 @@ spec = do
       show overview `shouldNotContain` "done_task_count"
       jsonField "detail_level" contextInfo `shouldBe` Just (String "medium")
       jsonField "task_memories" contextInfo `shouldSatisfy` arrayLength 1
+
+    it "bounds project overview include_descriptions rows" $ do
+      let longDescription = T.replicate (maxProjectOverviewDescriptionChars + 25) "x"
+          overviewInput = object
+            [ "project" .= object
+                [ "id" .= parsedUUID
+                , "name" .= ("Large project" :: Text)
+                , "description" .= longDescription
+                ]
+            , "tasks" .=
+                [ object
+                    [ "id" .= parsedUUID2
+                    , "title" .= ("Large task" :: Text)
+                    , "description" .= longDescription
+                    ]
+                ]
+            , "subprojects" .=
+                [ object
+                    [ "id" .= parsedUUID3
+                    , "name" .= ("Large subproject" :: Text)
+                    , "description" .= longDescription
+                    ]
+                ]
+            ]
+          overview = compactProjectOverviewWithDescriptions overviewInput
+          projectRow = jsonField "project" overview
+          taskRow = firstArrayItem "tasks" overview
+          subprojectRow = firstArrayItem "subprojects" overview
+      (projectRow >>= jsonField "description") `shouldSatisfy` boundedDescriptionValue
+      (taskRow >>= jsonField "description") `shouldSatisfy` boundedDescriptionValue
+      (subprojectRow >>= jsonField "description") `shouldSatisfy` boundedDescriptionValue
+      (projectRow >>= jsonField "description_truncated") `shouldBe` Just (Bool True)
+      (taskRow >>= jsonField "description_truncated") `shouldBe` Just (Bool True)
+      (subprojectRow >>= jsonField "description_truncated") `shouldBe` Just (Bool True)
+      show overview `shouldNotContain` T.unpack longDescription
 
   describe "workspace context injection" $ do
     it "creates an arguments object when omitted so queryless tools stay workspace-scoped" $ do
@@ -1290,6 +1328,12 @@ jsonField _ _ = Nothing
 hasObjectField :: Text -> Maybe Value -> Bool
 hasObjectField field (Just (Object o)) = KM.member (Key.fromText field) o
 hasObjectField _ _ = False
+
+
+boundedDescriptionValue :: Maybe Value -> Bool
+boundedDescriptionValue (Just (String textValue)) =
+  T.length textValue <= maxProjectOverviewDescriptionChars && "…" `T.isSuffixOf` textValue
+boundedDescriptionValue _ = False
 
 
 arrayLength :: Int -> Maybe Value -> Bool

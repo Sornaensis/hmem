@@ -31,6 +31,15 @@ testUUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 testUUID2 :: Text
 testUUID2 = "11111111-2222-3333-4444-555555555555"
 
+testUUID3 :: Text
+testUUID3 = "22222222-3333-4444-5555-666666666666"
+
+testNotesMemoryUUID :: Text
+testNotesMemoryUUID = "33333333-4444-5555-6666-777777777777"
+
+testSummaryMemoryUUID :: Text
+testSummaryMemoryUUID = "44444444-5555-6666-7777-888888888888"
+
 parsedUUID :: UUID.UUID
 parsedUUID = read "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
@@ -376,6 +385,19 @@ spec = do
         jsonField "summary" finishAck `shouldBe` Nothing
         show finishAck `shouldNotContain` "full task description"
 
+        finishWithNotes <- callMockTool mgr base "task_finish" $ object
+          [ "task_id" .= testUUID
+          , "status" .= ("done" :: Text)
+          , "notes" .= ("finished with notes" :: Text)
+          ]
+        jsonField "ok" finishWithNotes `shouldBe` Just (Bool True)
+        jsonField "task_id" finishWithNotes `shouldBe` Just (String testUUID)
+        jsonField "status" finishWithNotes `shouldBe` Just (String "done")
+        jsonField "notes_memory_id" finishWithNotes `shouldBe` Just (String testNotesMemoryUUID)
+        jsonField "summary" finishWithNotes `shouldBe` Nothing
+        show finishWithNotes `shouldNotContain` "finished with notes"
+        show finishWithNotes `shouldNotContain` "full memory content"
+
         archiveAck <- callMockTool mgr base "project_archive" $ object
           [ "project_id" .= testUUID ]
         jsonField "ok" archiveAck `shouldBe` Just (Bool True)
@@ -386,12 +408,32 @@ spec = do
         jsonField "summary_memory" archiveAck `shouldBe` Nothing
         show archiveAck `shouldNotContain` "full project description"
 
+        archiveWithSummary <- callMockTool mgr base "project_archive" $ object
+          [ "project_id" .= testUUID
+          , "summary" .= ("archive summary" :: Text)
+          ]
+        jsonField "ok" archiveWithSummary `shouldBe` Just (Bool True)
+        jsonField "project_id" archiveWithSummary `shouldBe` Just (String testUUID)
+        jsonField "status" archiveWithSummary `shouldBe` Just (String "archived")
+        jsonField "summary_memory_id" archiveWithSummary `shouldBe` Just (String testSummaryMemoryUUID)
+        jsonField "summary_memory" archiveWithSummary `shouldBe` Nothing
+        show archiveWithSummary `shouldNotContain` "archive summary"
+        show archiveWithSummary `shouldNotContain` "full memory content"
+
         specSummary <- callMockTool mgr base "project_spec" $ object
           [ "workspace_id" .= testUUID2
           , "name" .= ("Workflow project" :: Text)
+          , "description" .= ("workflow project description" :: Text)
           , "tasks" .=
-              [ object ["title" .= ("First task" :: Text)]
-              , object ["title" .= ("Second task" :: Text), "priority" .= (8 :: Int)]
+              [ object
+                  [ "title" .= ("First task" :: Text)
+                  , "description" .= ("first task description" :: Text)
+                  ]
+              , object
+                  [ "title" .= ("Second task" :: Text)
+                  , "description" .= ("second task description" :: Text)
+                  , "priority" .= (8 :: Int)
+                  ]
               ]
           ]
         jsonField "ok" specSummary `shouldBe` Just (Bool True)
@@ -1404,9 +1446,10 @@ mockHmemApplication :: Wai.Application
 mockHmemApplication req respond = do
   let respondJson value = respond $ Wai.responseLBS status200 [(hContentType, "application/json")] (encode value)
       respondBad message = respond $ Wai.responseLBS status400 [(hContentType, "application/json")] (encode $ object ["error" .= (message :: Text)])
-      jsonBodySatisfies predicate = do
+      jsonBodyValue = do
         body <- Wai.strictRequestBody req
-        pure $ maybe False predicate (decode body)
+        pure (decode body)
+      jsonBodySatisfies predicate = maybe False predicate <$> jsonBodyValue
       hasBearer token = lookup "Authorization" (Wai.requestHeaders req) == Just ("Bearer " <> TE.encodeUtf8 token)
   case (Wai.requestMethod req, Wai.rawPathInfo req) of
     (method, "/api/v1/search")
@@ -1415,8 +1458,10 @@ mockHmemApplication req respond = do
           respondJson unifiedSearchRegressionValue
     (method, "/api/v1/memories")
       | method == methodPost -> do
-          _ <- Wai.strictRequestBody req
-          respondJson fullMemoryValue
+          mBody <- jsonBodyValue
+          case mBody >>= mockMemoryCreateResponse of
+            Just value -> respondJson value
+            Nothing -> respondBad $ "unexpected memory create body: " <> T.pack (show mBody)
     (method, "/api/v1/memories/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
       | method == methodGet -> respondJson fullMemoryValue
       | method == methodPut -> do
@@ -1443,24 +1488,146 @@ mockHmemApplication req respond = do
     (method, "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
       | method == methodGet -> respondJson fullTaskValue
       | method == methodPut -> do
-          _ <- Wai.strictRequestBody req
-          respondJson finishedTaskValue
+          mBody <- jsonBodyValue
+          case mBody >>= mockTaskStatusUpdateResponse of
+            Just value -> respondJson value
+            Nothing -> respondBad $ "unexpected task status update body: " <> T.pack (show mBody)
     (method, "/api/v1/tasks/22222222-3333-4444-5555-666666666666")
       | method == methodGet -> respondJson (taskValue parsedUUID3 "Target task" "todo" Nothing (Just parsedUUID3))
     (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
       | method == methodGet -> respondJson fullProjectValue
       | method == methodPut -> do
-          _ <- Wai.strictRequestBody req
-          respondJson archivedProjectValue
+          mBody <- jsonBodyValue
+          if maybe False isProjectArchiveBody mBody
+            then respondJson archivedProjectValue
+            else respondBad $ "unexpected project archive body: " <> T.pack (show mBody)
     (method, "/api/v1/projects")
       | method == methodPost -> do
-          _ <- Wai.strictRequestBody req
-          respondJson fullProjectValue
+          mBody <- jsonBodyValue
+          if maybe False isProjectCreateBody mBody
+            then respondJson fullProjectValue
+            else respondBad $ "unexpected project create body: " <> T.pack (show mBody)
     (method, "/api/v1/tasks")
       | method == methodPost -> do
-          _ <- Wai.strictRequestBody req
-          respondJson fullTaskValue
+          mBody <- jsonBodyValue
+          if maybe False isTaskCreateBody mBody
+            then respondJson fullTaskValue
+            else respondBad $ "unexpected task create body: " <> T.pack (show mBody)
     _ -> respond $ Wai.responseLBS status404 [(hContentType, "application/json")] "{\"error\":\"not found\"}"
+
+
+mockMemoryCreateResponse :: Value -> Maybe Value
+mockMemoryCreateResponse body
+  | body == standaloneMemoryCreateBody = Just fullMemoryValue
+  | body == taskNotesMemoryCreateBody = Just notesMemoryValue
+  | body == projectSummaryMemoryCreateBody = Just summaryMemoryValue
+  | otherwise = Nothing
+
+
+standaloneMemoryCreateBody :: Value
+standaloneMemoryCreateBody = object
+  [ "workspace_id" .= testUUID2
+  , "project_id" .= testUUID2
+  , "task_id" .= testUUID3
+  , "content" .= ("full memory content" :: Text)
+  , "memory_type" .= ("long_term" :: Text)
+  ]
+
+
+taskNotesMemoryCreateBody :: Value
+taskNotesMemoryCreateBody = object
+  [ "workspace_id" .= testUUID2
+  , "task_id" .= testUUID
+  , "content" .= ("finished with notes" :: Text)
+  , "memory_type" .= ("long_term" :: Text)
+  , "importance" .= (6 :: Int)
+  , "source" .= ("inferred" :: Text)
+  , "tags" .= (["task-notes"] :: [Text])
+  ]
+
+
+projectSummaryMemoryCreateBody :: Value
+projectSummaryMemoryCreateBody = object
+  [ "workspace_id" .= testUUID2
+  , "project_id" .= testUUID
+  , "content" .= ("archive summary" :: Text)
+  , "memory_type" .= ("long_term" :: Text)
+  , "importance" .= (7 :: Int)
+  , "source" .= ("inferred" :: Text)
+  , "tags" .= (["project-summary"] :: [Text])
+  ]
+
+
+notesMemoryValue :: Value
+notesMemoryValue = object
+  [ "id" .= testNotesMemoryUUID
+  , "workspace_id" .= testUUID2
+  , "content" .= ("finished with notes" :: Text)
+  , "memory_type" .= ("long_term" :: Text)
+  ]
+
+
+summaryMemoryValue :: Value
+summaryMemoryValue = object
+  [ "id" .= testSummaryMemoryUUID
+  , "workspace_id" .= testUUID2
+  , "content" .= ("archive summary" :: Text)
+  , "memory_type" .= ("long_term" :: Text)
+  ]
+
+
+mockTaskStatusUpdateResponse :: Value -> Maybe Value
+mockTaskStatusUpdateResponse body
+  | body == object ["status" .= ("done" :: Text)] = Just finishedTaskValue
+  | body == object ["status" .= ("in_progress" :: Text)] = Just (taskValue parsedUUID "Task" "in_progress" Nothing (Just parsedUUID3))
+  | otherwise = Nothing
+
+
+isProjectArchiveBody :: Value -> Bool
+isProjectArchiveBody body = body == object ["status" .= ("archived" :: Text)]
+
+
+isProjectCreateBody :: Value -> Bool
+isProjectCreateBody body = body `elem`
+  [ object
+      [ "workspace_id" .= testUUID2
+      , "name" .= ("Project" :: Text)
+      ]
+  , object
+      [ "workspace_id" .= testUUID2
+      , "name" .= ("Workflow project" :: Text)
+      , "description" .= ("workflow project description" :: Text)
+      ]
+  ]
+
+
+isTaskCreateBody :: Value -> Bool
+isTaskCreateBody body = body `elem`
+  [ object
+      [ "workspace_id" .= testUUID2
+      , "project_id" .= testUUID3
+      , "title" .= ("Task" :: Text)
+      ]
+  , object
+      [ "workspace_id" .= testUUID2
+      , "project_id" .= testUUID
+      , "title" .= ("Task" :: Text)
+      , "priority" .= (9 :: Int)
+      ]
+  , object
+      [ "workspace_id" .= testUUID2
+      , "project_id" .= testUUID
+      , "title" .= ("First task" :: Text)
+      , "description" .= ("first task description" :: Text)
+      ]
+  , object
+      [ "workspace_id" .= testUUID2
+      , "project_id" .= testUUID
+      , "title" .= ("Second task" :: Text)
+      , "description" .= ("second task description" :: Text)
+      , "priority" .= (8 :: Int)
+      ]
+  ]
 
 
 readContractDoc :: IO String

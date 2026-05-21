@@ -16,7 +16,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID qualified as UUID
 import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
-import Network.HTTP.Types (hContentType, methodGet, methodPost, methodPut, status200, status404)
+import Network.HTTP.Types (hContentType, methodGet, methodPost, methodPut, status200, status400, status404)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
 import Test.Hspec
@@ -323,6 +323,42 @@ spec = do
         show overview `shouldNotContain` "full project description"
         show overview `shouldNotContain` "full task description"
         show overview `shouldNotContain` "full memory content"
+
+    it "routes additional slim tools with live request body, query, and auth checks" $ do
+      withMockHmemServer $ \mgr base -> do
+        memoryUpdate <- callMockTool mgr base "memory_update" $ object
+          [ "memory_id" .= testUUID
+          , "content" .= ("revised memory content" :: Text)
+          , "tags" .= (["new-tag"] :: [Text])
+          ]
+        jsonField "ok" memoryUpdate `shouldBe` Just (Bool True)
+        jsonField "action" memoryUpdate `shouldBe` Just (String "updated")
+        jsonField "changed_fields" memoryUpdate `shouldBe` Just (toJSON (["content", "tags"] :: [Text]))
+        show memoryUpdate `shouldNotContain` "full memory content"
+
+        taskOverview <- callMockTool mgr base "task_overview" $ object
+          [ "task_id" .= testUUID ]
+        (jsonField "task" taskOverview >>= jsonField "description") `shouldBe` Nothing
+        jsonField "readiness_rollup" taskOverview `shouldSatisfy` hasObjectField "completion_ready"
+        show taskOverview `shouldNotContain` "full task description"
+
+        contextValue <- callMockTool mgr base "context_get" $ object
+          [ "task_id" .= testUUID
+          , "detail_level" .= ("medium" :: Text)
+          ]
+        jsonField "detail_level" contextValue `shouldBe` Just (String "medium")
+        jsonField "task_memories" contextValue `shouldSatisfy` arrayLength 1
+        show contextValue `shouldNotContain` "full memory content"
+
+        nextTasks <- callMockToolWithApiKey mgr base (Just "request-shape-token") "project_next_tasks" $ object
+          [ "project_id" .= testUUID
+          , "limit" .= (3 :: Int)
+          , "include_blocked" .= True
+          ]
+        jsonField "items" nextTasks `shouldSatisfy` arrayLength 1
+        (firstArrayItem "items" nextTasks >>= jsonField "task" >>= jsonField "description") `shouldBe` Nothing
+        show nextTasks `shouldNotContain` "workspace_id"
+        show nextTasks `shouldNotContain` "full task description"
 
     it "routes composite workflow tools through HTTP compact workflow shaping" $ do
       withMockHmemServer $ \mgr base -> do
@@ -1170,6 +1206,18 @@ memoryGraphRegressionValue = toJSON
   ]
 
 
+nextTasksRegressionValue :: Value
+nextTasksRegressionValue = toJSON
+  [ object
+      [ "task" .= fullTaskValue
+      , "dependency_blocked" .= False
+      , "completion_gated" .= False
+      , "open_descendant_count" .= (0 :: Int)
+      , "open_dependency_count" .= (0 :: Int)
+      ]
+  ]
+
+
 searchMemoryValue :: Value
 searchMemoryValue = object
   [ "id" .= parsedUUID
@@ -1286,15 +1334,23 @@ withMockHmemServer action =
 
 
 callMockTool :: Manager -> String -> Text -> Value -> IO Value
-callMockTool mgr base name args = do
-  result <- callMockToolRaw mgr base name args
+callMockTool mgr base = callMockToolWithApiKey mgr base Nothing
+
+
+callMockToolWithApiKey :: Manager -> String -> Maybe Text -> Text -> Value -> IO Value
+callMockToolWithApiKey mgr base mApiKey name args = do
+  result <- callMockToolRawWithApiKey mgr base mApiKey name args
   case mcpTextValue result of
     Just value -> pure value
     Nothing    -> expectationFailure ("Expected MCP JSON text for " <> T.unpack name <> ", got: " <> show result) >> pure Null
 
 
 callMockToolRaw :: Manager -> String -> Text -> Value -> IO Value
-callMockToolRaw mgr base name args = handleToolCall mgr base Nothing $ object
+callMockToolRaw mgr base = callMockToolRawWithApiKey mgr base Nothing
+
+
+callMockToolRawWithApiKey :: Manager -> String -> Maybe Text -> Text -> Value -> IO Value
+callMockToolRawWithApiKey mgr base mApiKey name args = handleToolCall mgr base mApiKey $ object
   [ "name" .= name
   , "arguments" .= args
   ]
@@ -1303,6 +1359,11 @@ callMockToolRaw mgr base name args = handleToolCall mgr base Nothing $ object
 mockHmemApplication :: Wai.Application
 mockHmemApplication req respond = do
   let respondJson value = respond $ Wai.responseLBS status200 [(hContentType, "application/json")] (encode value)
+      respondBad message = respond $ Wai.responseLBS status400 [(hContentType, "application/json")] (encode $ object ["error" .= (message :: Text)])
+      jsonBodySatisfies predicate = do
+        body <- Wai.strictRequestBody req
+        pure $ maybe False predicate (decode body)
+      hasBearer token = lookup "Authorization" (Wai.requestHeaders req) == Just ("Bearer " <> TE.encodeUtf8 token)
   case (Wai.requestMethod req, Wai.rawPathInfo req) of
     (method, "/api/v1/search")
       | method == methodPost -> do
@@ -1314,15 +1375,27 @@ mockHmemApplication req respond = do
           respondJson fullMemoryValue
     (method, "/api/v1/memories/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
       | method == methodGet -> respondJson fullMemoryValue
+      | method == methodPut -> do
+          ok <- jsonBodySatisfies $ \body ->
+            jsonField "content" body == Just (String "revised memory content")
+              && jsonField "workspace_id" body == Nothing
+          if ok then respondJson fullMemoryValue else respondBad "unexpected memory_update body"
+    (method, "/api/v1/memories/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/tags")
+      | method == methodPut -> do
+          ok <- jsonBodySatisfies (== toJSON (["new-tag"] :: [Text]))
+          if ok then respondJson (object ["tags" .= (["new-tag"] :: [Text])]) else respondBad "unexpected memory_update tags body"
     (method, "/api/v1/memories/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/links")
       | method == methodGet -> respondJson memoryGraphRegressionValue
     (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview")
-      | method == methodGet -> respondJson projectOverviewRegressionValue
+      | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson projectOverviewRegressionValue
+    (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/next-tasks")
+      | method == methodGet && Wai.rawQueryString req == "?limit=3&include_blocked=true" && hasBearer "request-shape-token" -> respondJson nextTasksRegressionValue
+      | method == methodGet -> respondBad "unexpected project_next_tasks query or auth header"
     (method, "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview")
-      | method == methodGet -> respondJson taskOverviewRegressionValue
+      | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson taskOverviewRegressionValue
     (method, "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/context")
       | method == methodGet && Wai.rawQueryString req == "?detail_level=light" -> respondJson taskStartRegressionValue
-      | method == methodGet -> respondJson contextGetRegressionValue
+      | method == methodGet && Wai.rawQueryString req == "?detail_level=medium" -> respondJson contextGetRegressionValue
     (method, "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
       | method == methodGet -> respondJson fullTaskValue
       | method == methodPut -> do

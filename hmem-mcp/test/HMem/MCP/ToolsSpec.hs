@@ -16,7 +16,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID qualified as UUID
 import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
-import Network.HTTP.Types (hContentType, methodGet, methodPost, status200, status404)
+import Network.HTTP.Types (hContentType, methodGet, methodPost, methodPut, status200, status404)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
 import Test.Hspec
@@ -175,6 +175,8 @@ spec = do
         , "full memory `content` and full project/task descriptions except detail tools"
         , "dependency/memory counts"
         , "not a nested `summary_memory` object"
+        , "`project_spec`, `task`, or `task_dependency`"
+        , "Summary-less `MutationAck`"
         ]
 
     it "documents explicit project overview description growth risk" $ do
@@ -250,6 +252,44 @@ spec = do
         show overview `shouldNotContain` "full project description"
         show overview `shouldNotContain` "full task description"
         show overview `shouldNotContain` "full memory content"
+
+    it "routes composite workflow tools through HTTP compact workflow shaping" $ do
+      withMockHmemServer $ \mgr base -> do
+        finishAck <- callMockTool mgr base "task_finish" $ object
+          [ "task_id" .= testUUID
+          , "status" .= ("done" :: Text)
+          ]
+        jsonField "ok" finishAck `shouldBe` Just (Bool True)
+        jsonField "task_id" finishAck `shouldBe` Just (String testUUID)
+        jsonField "status" finishAck `shouldBe` Just (String "done")
+        jsonField "changed_fields" finishAck `shouldBe` Just (toJSON (["status"] :: [Text]))
+        jsonField "summary" finishAck `shouldBe` Nothing
+        show finishAck `shouldNotContain` "full task description"
+
+        archiveAck <- callMockTool mgr base "project_archive" $ object
+          [ "project_id" .= testUUID ]
+        jsonField "ok" archiveAck `shouldBe` Just (Bool True)
+        jsonField "project_id" archiveAck `shouldBe` Just (String testUUID)
+        jsonField "status" archiveAck `shouldBe` Just (String "archived")
+        jsonField "changed_fields" archiveAck `shouldBe` Just (toJSON (["status"] :: [Text]))
+        jsonField "summary" archiveAck `shouldBe` Nothing
+        jsonField "summary_memory" archiveAck `shouldBe` Nothing
+        show archiveAck `shouldNotContain` "full project description"
+
+        specSummary <- callMockTool mgr base "project_spec" $ object
+          [ "workspace_id" .= testUUID2
+          , "name" .= ("Workflow project" :: Text)
+          , "tasks" .=
+              [ object ["title" .= ("First task" :: Text)]
+              , object ["title" .= ("Second task" :: Text), "priority" .= (8 :: Int)]
+              ]
+          ]
+        jsonField "ok" specSummary `shouldBe` Just (Bool True)
+        jsonField "entity_type" specSummary `shouldBe` Just (String "project_spec")
+        jsonField "project_id" specSummary `shouldBe` Just (String testUUID)
+        jsonField "tasks_created" specSummary `shouldSatisfy` arrayLength 2
+        show specSummary `shouldNotContain` "full project description"
+        show specSummary `shouldNotContain` "full task description"
 
   describe "compact response shapers" $ do
     it "builds memory summaries without workspace, timestamps, metadata, or content" $ do
@@ -471,12 +511,16 @@ spec = do
       jsonField "status" finishAck `shouldBe` Just (String "todo")
       jsonField "notes_memory_id" finishAck `shouldBe` Just (String testUUID)
       jsonField "notes_memory" finishAck `shouldBe` Nothing
+      jsonField "summary" finishAck `shouldBe` Nothing
       jsonField "notes_memory_id" finishWithoutNotes `shouldBe` Nothing
+      jsonField "summary" finishWithoutNotes `shouldBe` Nothing
       jsonField "project_id" archiveAck `shouldBe` Just (String testUUID)
       jsonField "status" archiveAck `shouldBe` Just (String "active")
       jsonField "summary_memory_id" archiveAck `shouldBe` Just (String testUUID)
       jsonField "summary_memory" archiveAck `shouldBe` Nothing
+      jsonField "summary" archiveAck `shouldBe` Nothing
       jsonField "summary_memory_id" archiveWithoutSummary `shouldBe` Nothing
+      jsonField "summary" archiveWithoutSummary `shouldBe` Nothing
       show finishAck `shouldNotContain` "full memory content"
       show archiveAck `shouldNotContain` "full memory content"
 
@@ -887,6 +931,31 @@ fullTaskValue = object
   ]
 
 
+finishedTaskValue :: Value
+finishedTaskValue = object
+  [ "id" .= parsedUUID
+  , "workspace_id" .= parsedUUID2
+  , "project_id" .= parsedUUID3
+  , "title" .= ("Task" :: Text)
+  , "description" .= ("full task description" :: Text)
+  , "status" .= ("done" :: Text)
+  , "priority" .= (9 :: Int)
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+  ]
+
+
+archivedProjectValue :: Value
+archivedProjectValue = object
+  [ "id" .= parsedUUID
+  , "workspace_id" .= parsedUUID2
+  , "name" .= ("Project" :: Text)
+  , "description" .= ("full project description" :: Text)
+  , "status" .= ("archived" :: Text)
+  , "priority" .= (8 :: Int)
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+  ]
+
+
 compactResponseRegressionCases :: [(Text, Value -> Value, Value)]
 compactResponseRegressionCases =
   [ ("task_create", compactTaskMutationAck "created", fullTaskValue)
@@ -1104,6 +1173,24 @@ mockHmemApplication req respond = do
       | method == methodGet -> respondJson memoryGraphRegressionValue
     (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview")
       | method == methodGet -> respondJson projectOverviewRegressionValue
+    (method, "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+      | method == methodGet -> respondJson fullTaskValue
+      | method == methodPut -> do
+          _ <- Wai.strictRequestBody req
+          respondJson finishedTaskValue
+    (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+      | method == methodGet -> respondJson fullProjectValue
+      | method == methodPut -> do
+          _ <- Wai.strictRequestBody req
+          respondJson archivedProjectValue
+    (method, "/api/v1/projects")
+      | method == methodPost -> do
+          _ <- Wai.strictRequestBody req
+          respondJson fullProjectValue
+    (method, "/api/v1/tasks")
+      | method == methodPost -> do
+          _ <- Wai.strictRequestBody req
+          respondJson fullTaskValue
     _ -> respond $ Wai.responseLBS status404 [(hContentType, "application/json")] "{\"error\":\"not found\"}"
 
 

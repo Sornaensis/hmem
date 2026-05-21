@@ -1124,7 +1124,13 @@ compactTaskMutationAck action value =
 
 
 compactTaskFinishAck :: Text -> Value -> Value
-compactTaskFinishAck action = compactTaskMutationAck action
+compactTaskFinishAck action value = object $ catMaybes
+  [ Just $ "ok" .= True
+  , Just $ "action" .= action
+  , Just $ "entity_type" .= ("task" :: Text)
+  , copyField "id" value
+  , copyField "status" value
+  ]
 
 
 compactTaskFinishAckWithNotes :: Text -> Maybe Value -> Value -> Value
@@ -1154,7 +1160,13 @@ compactProjectMutationAck action value = mutationAck action "project" (compactPr
 compactProjectArchiveAck :: Maybe Value -> Value -> Value
 compactProjectArchiveAck mSummaryMemory value =
   insertOptionalEntityId "summary_memory_id" mSummaryMemory $
-  addSourceFieldAlias "id" "project_id" value $ compactProjectMutationAck "archived" value
+  addSourceFieldAlias "id" "project_id" value $ object $ catMaybes
+    [ Just $ "ok" .= True
+    , Just $ "action" .= ("archived" :: Text)
+    , Just $ "entity_type" .= ("project" :: Text)
+    , copyField "id" value
+    , copyField "status" value
+    ]
 
 
 compactWorkspaceMutationAck :: Text -> Value -> Value

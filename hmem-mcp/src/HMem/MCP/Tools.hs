@@ -207,11 +207,11 @@ slimToolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
-    , mkTool "project_overview" "Get a compact project overview with tasks, subprojects, linked memories, and readiness_rollup. Set include_descriptions=true only when project/task/subproject descriptions are needed." $ object
+    , mkTool "project_overview" "Get a compact project overview with tasks, subprojects, linked memories, and readiness_rollup. Set include_descriptions=true only when descriptions for all returned project/task/subproject rows are needed; this can grow on large projects, so prefer task_overview for one task description." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project"
-          , "include_descriptions" .= prop "boolean" "Include project, task, and subproject descriptions (default false)"
+          , "include_descriptions" .= prop "boolean" "Include descriptions for all returned project, task, and subproject rows (default false; can be large on big projects)"
           ]
       , "required" .= [t "project_id"]
       ]

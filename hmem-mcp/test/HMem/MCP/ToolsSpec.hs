@@ -137,6 +137,8 @@ spec = do
       toolDescriptionShouldContain "search" "Returns compact summaries"
       toolDescriptionShouldContain "search" "memory content/previews are omitted"
       toolDescriptionShouldContain "memory_get" "detail path for compact memory summaries"
+      toolDescriptionShouldContain "project_overview" "can grow on large projects"
+      toolDescriptionShouldContain "project_overview" "prefer task_overview"
       toolDescriptionShouldContain "context_get" "detail_level controls how many summaries"
       toolDescriptionShouldContain "task_start" "detail_level controls context breadth"
       toolDescriptionShouldContain "task_finish" "optional notes_memory_id"
@@ -173,6 +175,15 @@ spec = do
         , "full memory `content` and full project/task descriptions except detail tools"
         , "dependency/memory counts"
         , "not a nested `summary_memory` object"
+        ]
+
+    it "documents explicit project overview description growth risk" $ do
+      doc <- readContractDoc
+      mapM_ (`shouldContainText` doc)
+        [ "`project_overview.include_descriptions=true` attaches descriptions to every"
+        , "returned project, task, and subproject row"
+        , "can grow on large projects"
+        , "`task_overview.include_description=true`"
         ]
 
     it "documents saved_view as unavailable on the slim MCP surface" $ do

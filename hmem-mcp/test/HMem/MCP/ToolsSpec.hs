@@ -168,6 +168,7 @@ spec = do
         , "null fields"
         , "full memory `content` and full project/task descriptions except detail tools"
         , "dependency/memory counts"
+        , "not a nested `summary_memory` object"
         ]
 
     it "documents saved_view as unavailable on the slim MCP surface" $ do
@@ -286,6 +287,58 @@ spec = do
       jsonField "changed_fields" ack `shouldBe` Just (toJSON (["title", "status"] :: [Text]))
       show ack `shouldNotContain` "full task description"
       show ack `shouldNotContain` "created_at"
+
+    it "computes changed_fields from parsed update inputs" $ do
+      let memoryArgs = object
+            [ "memory_id" .= testUUID
+            , "content" .= ("new content" :: Text)
+            , "summary" .= Null
+            , "memory_type" .= ("short_term" :: Text)
+            , "importance" .= (4 :: Int)
+            , "metadata" .= object ["source" .= ("test" :: Text)]
+            , "expires_at" .= Null
+            , "source" .= ("agent" :: Text)
+            , "confidence" .= (0.75 :: Double)
+            , "pinned" .= False
+            , "tags" .= (["updated"] :: [Text])
+            ]
+          projectArgs = object
+            [ "project_id" .= testUUID
+            , "name" .= ("Renamed project" :: Text)
+            , "description" .= Null
+            , "parent_id" .= testUUID2
+            , "status" .= ("paused" :: Text)
+            , "priority" .= (3 :: Int)
+            , "metadata" .= object ["source" .= ("test" :: Text)]
+            ]
+          taskArgs = object
+            [ "task_id" .= testUUID
+            , "title" .= ("Renamed task" :: Text)
+            , "description" .= ("New description" :: Text)
+            , "project_id" .= Null
+            , "parent_id" .= testUUID2
+            , "status" .= ("blocked" :: Text)
+            , "priority" .= (6 :: Int)
+            , "metadata" .= object ["source" .= ("test" :: Text)]
+            , "due_at" .= Null
+            ]
+      case parseToolCall "memory_update" memoryArgs of
+        Right (MemoryUpdate _ um tags) ->
+          memoryUpdateChangedFields um tags `shouldBe`
+            [ "content", "summary", "memory_type", "importance", "metadata"
+            , "expires_at", "source", "confidence", "pinned", "tags"
+            ]
+        other -> expectationFailure $ "Expected MemoryUpdate, got: " <> show other
+      case parseToolCall "project_update" projectArgs of
+        Right (ProjectUpdate _ up) ->
+          projectUpdateChangedFields up `shouldBe`
+            [ "name", "description", "parent_id", "status", "priority", "metadata" ]
+        other -> expectationFailure $ "Expected ProjectUpdate, got: " <> show other
+      case parseToolCall "task_update" taskArgs of
+        Right (TaskUpdate _ ut) ->
+          taskUpdateChangedFields ut `shouldBe`
+            [ "title", "description", "project_id", "parent_id", "status", "priority", "metadata", "due_at" ]
+        other -> expectationFailure $ "Expected TaskUpdate, got: " <> show other
 
     it "wraps dependency mutations as acknowledgements with compact affected tasks" $ do
       let ack = compactDependencyMutationAck "add" $ object

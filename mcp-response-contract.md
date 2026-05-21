@@ -124,7 +124,9 @@ Optional fields:
 - `changed_fields`: field names supplied to update-like mutations when known
 - `dependency_effects`: non-empty `DependencyEffectSummary` rows
 - `notes_memory_id` when `task_finish` created a notes memory
-- `summary_memory_id` when `project_archive` created a summary memory
+- `summary_memory_id` when `project_archive` created a summary memory; the
+  acknowledgement returns this ID, not a nested `summary_memory` object, so use
+  `memory_get` when summary memory content is needed
 - `warnings`: bounded strings for partial composite workflows
 
 ### `EntitySummary`

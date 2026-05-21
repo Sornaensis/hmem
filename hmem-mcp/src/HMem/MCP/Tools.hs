@@ -18,6 +18,9 @@ module HMem.MCP.Tools
   , compactTaskStartSuccess
   , compactTaskMutationAck
   , compactProjectMutationAck
+  , memoryUpdateChangedFields
+  , projectUpdateChangedFields
+  , taskUpdateChangedFields
   , compactDependencyMutationAck
   , compactMemoryMutationAckWithTargets
   , compactMemoryMutationAckWithTags

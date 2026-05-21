@@ -212,7 +212,7 @@ spec = do
 
     it "shapes unified search rows into compact summaries" $ do
       let shaped = compactSearchResults $ object
-            [ "memories" .= [fullMemoryValue]
+            [ "memories" .= [searchMemoryValue]
             , "projects" .=
                 [ object
                     [ "project" .= fullProjectValue
@@ -226,27 +226,47 @@ spec = do
                     ]
                 ]
             ]
+          expectedMemorySummary = object
+            [ "id" .= parsedUUID
+            , "summary" .= ("Search memory" :: Text)
+            , "memory_type" .= ("long_term" :: Text)
+            , "importance" .= (7 :: Int)
+            , "tags" .= (["contract"] :: [Text])
+            , "pinned" .= True
+            ]
+          expectedProjectSummary = object
+            [ "id" .= parsedUUID
+            , "name" .= ("Project" :: Text)
+            , "status" .= ("active" :: Text)
+            , "priority" .= (8 :: Int)
+            ]
+          expectedTaskSummary = object
+            [ "id" .= parsedUUID
+            , "title" .= ("Task" :: Text)
+            , "status" .= ("todo" :: Text)
+            , "priority" .= (9 :: Int)
+            , "project_id" .= parsedUUID3
+            ]
+          expectedLinkedMemorySummary = object
+            [ "id" .= parsedUUID
+            , "summary" .= ("Linked memory" :: Text)
+            , "importance" .= (5 :: Int)
+            , "tags" .= (["linked"] :: [Text])
+            ]
+          expectedProjectRow = object
+            [ "project" .= expectedProjectSummary
+            , "linked_memories" .= [expectedLinkedMemorySummary]
+            ]
+          expectedTaskRow = object
+            [ "task" .= expectedTaskSummary
+            , "linked_memories" .= [expectedLinkedMemorySummary]
+            ]
       jsonField "memories" shaped `shouldSatisfy` arrayLength 1
       jsonField "projects" shaped `shouldSatisfy` arrayLength 1
       jsonField "tasks" shaped `shouldSatisfy` arrayLength 1
-      let memorySummary = firstArrayItem "memories" shaped
-          projectSummary = firstArrayItem "projects" shaped >>= jsonField "project"
-          taskSummary = firstArrayItem "tasks" shaped >>= jsonField "task"
-      (memorySummary >>= jsonField "id") `shouldBe` Just (String testUUID)
-      (memorySummary >>= jsonField "memory_type") `shouldBe` Just (String "long_term")
-      (memorySummary >>= jsonField "importance") `shouldBe` Just (Number 7)
-      (memorySummary >>= jsonField "tags") `shouldBe` Just (toJSON (["contract"] :: [Text]))
-      (memorySummary >>= jsonField "content") `shouldBe` Nothing
-      (memorySummary >>= jsonField "content_preview") `shouldBe` Nothing
-      (projectSummary >>= jsonField "id") `shouldBe` Just (String testUUID)
-      (projectSummary >>= jsonField "name") `shouldBe` Just (String "Project")
-      (projectSummary >>= jsonField "status") `shouldBe` Just (String "active")
-      (projectSummary >>= jsonField "priority") `shouldBe` Just (Number 8)
-      (taskSummary >>= jsonField "id") `shouldBe` Just (String testUUID)
-      (taskSummary >>= jsonField "title") `shouldBe` Just (String "Task")
-      (taskSummary >>= jsonField "status") `shouldBe` Just (String "todo")
-      (taskSummary >>= jsonField "priority") `shouldBe` Just (Number 9)
-      (taskSummary >>= jsonField "project_id") `shouldBe` Just (String "22222222-3333-4444-5555-666666666666")
+      firstArrayItem "memories" shaped `shouldBe` Just expectedMemorySummary
+      firstArrayItem "projects" shaped `shouldBe` Just expectedProjectRow
+      firstArrayItem "tasks" shaped `shouldBe` Just expectedTaskRow
       show shaped `shouldNotContain` "workspace_id"
       show shaped `shouldNotContain` "created_at"
       show shaped `shouldNotContain` "metadata"
@@ -254,6 +274,7 @@ spec = do
       show shaped `shouldNotContain` "full project description"
       show shaped `shouldNotContain` "full task description"
       show shaped `shouldNotContain` "linked full content should be omitted"
+      show shaped `shouldNotContain` "linked preview should be omitted"
 
     it "wraps task mutations as acknowledgements with dependency effects" $ do
       let ack = compactTaskMutationAck "updated" $ object
@@ -765,10 +786,15 @@ fullMemoryValue = object
 linkedMemoryValue :: Value
 linkedMemoryValue = object
   [ "id" .= parsedUUID
+  , "workspace_id" .= parsedUUID2
   , "summary" .= ("Linked memory" :: Text)
+  , "memory_type" .= ("long_term" :: Text)
   , "importance" .= (5 :: Int)
   , "tags" .= (["linked"] :: [Text])
   , "content" .= ("linked full content should be omitted" :: Text)
+  , "content_preview" .= ("linked preview should be omitted" :: Text)
+  , "metadata" .= object ["kept" .= True]
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
   ]
 
 

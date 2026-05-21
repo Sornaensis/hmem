@@ -1,6 +1,6 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.38.1.
+-- This file has been generated from package.yaml by hpack version 0.39.1.
 --
 -- see: https://github.com/sol/hpack
 
@@ -90,6 +90,7 @@ test-suite hmem-mcp-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      HMem.MCP.ServerSpec
       HMem.MCP.ToolsSpec
       Paths_hmem_mcp
   hs-source-dirs:

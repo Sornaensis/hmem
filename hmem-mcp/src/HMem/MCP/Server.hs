@@ -4,6 +4,7 @@ module HMem.MCP.Server
   -- * Testing
   , JsonRpcRequest(..)
   , handleRequest
+  , handleStdioLine
   ) where
 
 import Control.Monad (replicateM_)
@@ -142,25 +143,32 @@ readLoop lock queue = do
           readLoop lock queue
 
 processLine :: Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe UUID) -> BS8.ByteString -> IO ()
-processLine mgr lock serverUrl mApiKey initialized wsContext line
-  | BS8.null line = pure ()
+processLine mgr lock serverUrl mApiKey initialized wsContext line = do
+  mresp <- handleStdioLine mgr serverUrl mApiKey initialized wsContext line
+  case mresp of
+    Nothing   -> pure ()
+    Just resp -> sendResponse lock resp
+
+-- | Handle one line-delimited JSON-RPC message read from stdin.
+-- Returns 'Nothing' for blank lines and notifications, matching the
+-- stdio loop's no-response behavior.
+handleStdioLine :: Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe UUID) -> BS8.ByteString -> IO (Maybe Value)
+handleStdioLine mgr serverUrl mApiKey initialized wsContext line
+  | BS8.null line = pure Nothing
   | otherwise = case eitherDecodeStrict @Value line of
       Left _err ->
         -- Invalid JSON → -32700 Parse error (JSON-RPC 2.0 §5.1)
-        sendResponse lock $ jsonRpcError Nothing (-32700) "Parse error"
+        pure $ Just $ jsonRpcError Nothing (-32700) "Parse error"
       Right val -> case eitherDecodeStrict @JsonRpcRequest line of
         Left _err ->
           -- Valid JSON but missing required fields (e.g. "method") → -32600
-          sendResponse lock $ jsonRpcError (extractId val) (-32600)
+          pure $ Just $ jsonRpcError (extractId val) (-32600)
             "Invalid Request: missing required 'method' field"
-        Right req -> do
-          mresp <- handleRequest mgr serverUrl mApiKey initialized wsContext req
+        Right req ->
+          handleRequest mgr serverUrl mApiKey initialized wsContext req
             `catch` \(e :: SomeException) ->
               pure $ Just $ jsonRpcError req.reqId (-32603)
                 ("Internal error: " <> T.pack (show e))
-          case mresp of
-            Nothing   -> pure ()  -- notification: no response
-            Just resp -> sendResponse lock resp
 
 -- | Try to extract the "id" from arbitrary JSON for error responses.
 extractId :: Value -> Maybe Value

@@ -15,6 +15,10 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID qualified as UUID
+import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
+import Network.HTTP.Types (hContentType, methodGet, methodPost, status200, status404)
+import Network.Wai qualified as Wai
+import Network.Wai.Handler.Warp (testWithApplication)
 import Test.Hspec
 
 import HMem.MCP.Tools
@@ -189,6 +193,52 @@ spec = do
       fixturePayload "saved_view_execute" fixtures `shouldBe` Nothing
       toolNames `shouldNotContain` ["saved_view"]
       parseToolCall "saved_view" (object ["action" .= ("execute" :: Text)]) `shouldSatisfy` isUnknownTool "saved_view"
+
+  describe "live HTTP tool dispatch" $ do
+    it "routes representative slim MCP tools through HTTP compact shapers" $ do
+      withMockHmemServer $ \mgr base -> do
+        searchValue <- callMockTool mgr base "search" $ object
+          [ "workspace_id" .= testUUID2
+          , "entity_types" .= (["memory", "project", "task"] :: [Text])
+          , "limit" .= (5 :: Int)
+          ]
+        firstArrayItem "memories" searchValue `shouldBe` Just (object
+          [ "id" .= parsedUUID
+          , "summary" .= ("Search memory" :: Text)
+          , "memory_type" .= ("long_term" :: Text)
+          , "importance" .= (7 :: Int)
+          , "tags" .= (["contract"] :: [Text])
+          , "pinned" .= True
+          ])
+        show searchValue `shouldNotContain` "workspace_id"
+        show searchValue `shouldNotContain` "full memory content"
+        show searchValue `shouldNotContain` "linked preview should be omitted"
+
+        memoryDetail <- callMockTool mgr base "memory_get" $ object
+          [ "memory_id" .= testUUID ]
+        jsonField "content" memoryDetail `shouldBe` Just (String "full memory content")
+        jsonField "metadata" memoryDetail `shouldBe` Just (object ["kept" .= True])
+        jsonField "workspace_id" memoryDetail `shouldBe` Nothing
+        jsonField "created_at" memoryDetail `shouldBe` Nothing
+
+        memoryLinks <- callMockTool mgr base "memory_link" $ object
+          [ "action" .= ("list" :: Text)
+          , "memory_id" .= testUUID
+          ]
+        jsonField "links" memoryLinks `shouldSatisfy` arrayLength 1
+        show memoryLinks `shouldContain` "source_id"
+        show memoryLinks `shouldNotContain` "source_memory"
+        show memoryLinks `shouldNotContain` "full memory content"
+
+        overview <- callMockTool mgr base "project_overview" $ object
+          [ "project_id" .= testUUID ]
+        (jsonField "project" overview >>= jsonField "description") `shouldBe` Nothing
+        (firstArrayItem "tasks" overview >>= jsonField "description") `shouldBe` Nothing
+        jsonField "connected_memories" overview `shouldSatisfy` arrayLength 1
+        show overview `shouldNotContain` "workspace_id"
+        show overview `shouldNotContain` "full project description"
+        show overview `shouldNotContain` "full task description"
+        show overview `shouldNotContain` "full memory content"
 
   describe "compact response shapers" $ do
     it "builds memory summaries without workspace, timestamps, metadata, or content" $ do
@@ -1009,6 +1059,41 @@ mcpTextValue (Object o) = do
   String textValue <- KM.lookup (Key.fromText "text") firstItem
   decode (BL.fromStrict (TE.encodeUtf8 textValue))
 mcpTextValue _ = Nothing
+
+
+withMockHmemServer :: (Manager -> String -> IO a) -> IO a
+withMockHmemServer action =
+  testWithApplication (pure mockHmemApplication) $ \port -> do
+    mgr <- newManager defaultManagerSettings
+    action mgr ("http://127.0.0.1:" <> show port)
+
+
+callMockTool :: Manager -> String -> Text -> Value -> IO Value
+callMockTool mgr base name args = do
+  result <- handleToolCall mgr base Nothing $ object
+    [ "name" .= name
+    , "arguments" .= args
+    ]
+  case mcpTextValue result of
+    Just value -> pure value
+    Nothing    -> expectationFailure ("Expected MCP JSON text for " <> T.unpack name <> ", got: " <> show result) >> pure Null
+
+
+mockHmemApplication :: Wai.Application
+mockHmemApplication req respond = do
+  let respondJson value = respond $ Wai.responseLBS status200 [(hContentType, "application/json")] (encode value)
+  case (Wai.requestMethod req, Wai.rawPathInfo req) of
+    (method, "/api/v1/search")
+      | method == methodPost -> do
+          _ <- Wai.strictRequestBody req
+          respondJson unifiedSearchRegressionValue
+    (method, "/api/v1/memories/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+      | method == methodGet -> respondJson fullMemoryValue
+    (method, "/api/v1/memories/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/links")
+      | method == methodGet -> respondJson memoryGraphRegressionValue
+    (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview")
+      | method == methodGet -> respondJson projectOverviewRegressionValue
+    _ -> respond $ Wai.responseLBS status404 [(hContentType, "application/json")] "{\"error\":\"not found\"}"
 
 
 readContractDoc :: IO String

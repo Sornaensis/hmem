@@ -256,6 +256,28 @@ spec = do
       (mResult >>= jsonField "isError") `shouldBe` Just (Bool True)
       (mResult >>= mcpTextContent) `shouldBe` Just "Unknown tool: saved_view"
 
+    it "routes search tools/call through JSON-RPC dispatch and compact shaping" $ do
+      fixtures <- readCompactResponseFixtures
+      withMockHmemServer $ \mgr base -> do
+        initialized <- newTVarIO True
+        wsContext <- newTVarIO Nothing
+        mResponse <- handleRequest mgr base Nothing initialized wsContext $
+          JsonRpcRequest (Just (String "search-call")) "tools/call" $ Just $ object
+            [ "name" .= ("search" :: Text)
+            , "arguments" .= object
+                [ "workspace_id" .= testUUID2
+                , "entity_types" .= (["memory", "project", "task"] :: [Text])
+                , "limit" .= (5 :: Int)
+                ]
+            ]
+        (mResponse >>= jsonField "jsonrpc") `shouldBe` Just (String "2.0")
+        case (fixturePayload "unified_search" fixtures, mResponse >>= jsonField "result" >>= mcpTextValue) of
+          (Just expected, Just actual) -> do
+            actual `shouldBe` expected
+            shouldOmitDefaultNoise "unified_search" actual
+          (Nothing, _) -> expectationFailure "Missing fixture payload for unified_search"
+          (_, Nothing) -> expectationFailure $ "Expected compact search MCP payload, got: " <> show mResponse
+
   describe "live HTTP tool dispatch" $ do
     it "routes representative slim MCP tools through HTTP compact shapers" $ do
       withMockHmemServer $ \mgr base -> do

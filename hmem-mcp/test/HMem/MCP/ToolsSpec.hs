@@ -8,7 +8,7 @@ import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
 import Control.Exception (IOException, try)
-import Control.Concurrent.STM (newTVarIO)
+import Control.Concurrent.STM (TVar, newTVarIO)
 import Data.Foldable (toList)
 import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Text (Text)
@@ -229,6 +229,13 @@ spec = do
       fixtures <- readCompactResponseFixtures
       withMockHmemServer $ \mgr base ->
         mapM_ (assertDispatcherResponseFixture fixtures mgr base) dispatcherResponseRegressionCases
+
+    it "matches golden payloads through JSON-RPC tools/call envelopes and outer budgets" $ do
+      fixtures <- readCompactResponseFixtures
+      withMockHmemServer $ \mgr base -> do
+        initialized <- newTVarIO True
+        wsContext <- newTVarIO Nothing
+        mapM_ (assertJsonRpcResponseFixture fixtures mgr base initialized wsContext) dispatcherResponseRegressionCases
 
     it "treats saved_view execute as removed rather than a response-bloat bypass" $ do
       fixtures <- readCompactResponseFixtures
@@ -1454,8 +1461,10 @@ mockHmemApplication req respond = do
   case (Wai.requestMethod req, Wai.rawPathInfo req) of
     (method, "/api/v1/search")
       | method == methodPost -> do
-          _ <- Wai.strictRequestBody req
-          respondJson unifiedSearchRegressionValue
+          mBody <- jsonBodyValue
+          if mBody == Just unifiedSearchRequestBody
+            then respondJson unifiedSearchRegressionValue
+            else respondBad $ "unexpected search body: " <> T.pack (show mBody)
     (method, "/api/v1/memories")
       | method == methodPost -> do
           mBody <- jsonBodyValue
@@ -1514,6 +1523,14 @@ mockHmemApplication req respond = do
             then respondJson fullTaskValue
             else respondBad $ "unexpected task create body: " <> T.pack (show mBody)
     _ -> respond $ Wai.responseLBS status404 [(hContentType, "application/json")] "{\"error\":\"not found\"}"
+
+
+unifiedSearchRequestBody :: Value
+unifiedSearchRequestBody = object
+  [ "workspace_id" .= testUUID2
+  , "entity_types" .= (["memory", "project", "task"] :: [Text])
+  , "limit" .= (5 :: Int)
+  ]
 
 
 mockMemoryCreateResponse :: Value -> Maybe Value
@@ -1677,13 +1694,44 @@ assertDispatcherResponseFixture fixtures mgr base (name, toolName, args) = do
   case (fixturePayload name fixtures, fixtureMaxChars name fixtures, fixtureMaxEnvelopeChars name fixtures, mcpTextValue result) of
     (Just expected, Just maxChars, Just maxEnvelopeChars, Just actual) -> do
       actual `shouldBe` expected
-      encodedCharCount actual `shouldSatisfy` (<= maxChars)
-      encodedCharCount result `shouldSatisfy` (<= maxEnvelopeChars)
+      assertEncodedCharBudget (name <> " payload") actual maxChars
+      assertEncodedCharBudget (name <> " MCP envelope") result maxEnvelopeChars
       shouldOmitDefaultNoise name actual
     (Nothing, _, _, _) -> expectationFailure $ "Missing fixture payload for " <> T.unpack name
     (_, Nothing, _, _) -> expectationFailure $ "Missing fixture max_chars for " <> T.unpack name
     (_, _, Nothing, _) -> expectationFailure $ "Missing fixture max_envelope_chars for " <> T.unpack name
     (_, _, _, Nothing) -> expectationFailure $ "Expected dispatcher MCP JSON text for " <> T.unpack name <> ", got: " <> show result
+
+
+assertJsonRpcResponseFixture :: Value -> Manager -> String -> TVar Bool -> TVar (Maybe UUID.UUID) -> (Text, Text, Value) -> Expectation
+assertJsonRpcResponseFixture fixtures mgr base initialized wsContext (name, toolName, args) = do
+  mResponse <- handleRequest mgr base Nothing initialized wsContext $
+    JsonRpcRequest (Just (String (name <> "-jsonrpc"))) "tools/call" $ Just $ object
+      [ "name" .= toolName
+      , "arguments" .= args
+      ]
+  case (mResponse, fixturePayload name fixtures, fixtureMaxChars name fixtures, fixtureMaxEnvelopeChars name fixtures, mResponse >>= jsonField "result" >>= mcpTextValue) of
+    (Just response, Just expected, Just maxChars, Just maxEnvelopeChars, Just actual) -> do
+      jsonField "jsonrpc" response `shouldBe` Just (String "2.0")
+      jsonField "id" response `shouldBe` Just (String (name <> "-jsonrpc"))
+      actual `shouldBe` expected
+      assertEncodedCharBudget (name <> " payload") actual maxChars
+      assertEncodedCharBudget (name <> " JSON-RPC envelope") response maxEnvelopeChars
+      shouldOmitDefaultNoise name actual
+    (Nothing, _, _, _, _) -> expectationFailure $ "Expected JSON-RPC response for " <> T.unpack name
+    (_, Nothing, _, _, _) -> expectationFailure $ "Missing fixture payload for " <> T.unpack name
+    (_, _, Nothing, _, _) -> expectationFailure $ "Missing fixture max_chars for " <> T.unpack name
+    (_, _, _, Nothing, _) -> expectationFailure $ "Missing fixture max_envelope_chars for " <> T.unpack name
+    (_, _, _, _, Nothing) -> expectationFailure $ "Expected JSON-RPC MCP JSON text for " <> T.unpack name <> ", got: " <> show mResponse
+
+
+assertEncodedCharBudget :: Text -> Value -> Int -> Expectation
+assertEncodedCharBudget label value maxChars =
+  let actualChars = encodedCharCount value
+  in if actualChars <= maxChars
+    then pure ()
+    else expectationFailure $
+      T.unpack label <> " encoded size " <> show actualChars <> " exceeds budget " <> show maxChars
 
 
 fixturePayload :: Text -> Value -> Maybe Value

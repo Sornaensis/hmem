@@ -1,6 +1,9 @@
 module HMem.MCP.Server
   ( runMCPServer
   , injectWorkspaceContext
+  -- * Testing
+  , JsonRpcRequest(..)
+  , handleRequest
   ) where
 
 import Control.Monad (replicateM_)

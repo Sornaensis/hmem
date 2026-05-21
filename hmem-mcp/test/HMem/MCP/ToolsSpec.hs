@@ -22,7 +22,7 @@ import Network.Wai.Handler.Warp (testWithApplication)
 import Test.Hspec
 
 import HMem.MCP.Tools
-import HMem.MCP.Server (injectWorkspaceContext)
+import HMem.MCP.Server (JsonRpcRequest(..), handleRequest, injectWorkspaceContext)
 import HMem.Types
 
 testUUID :: Text
@@ -105,6 +105,19 @@ toolSchemaProperties name = case [schema | Object tool <- toolDefinitions
 toolDescription :: Text -> Maybe Text
 toolDescription name = listToMaybe
   [ desc | Object tool <- toolDefinitions
+         , KM.lookup (Key.fromText "name") tool == Just (String name)
+         , Just (String desc) <- [KM.lookup (Key.fromText "description") tool]
+  ]
+
+toolArrayItemName :: Value -> Maybe Text
+toolArrayItemName (Object tool) = case KM.lookup (Key.fromText "name") tool of
+  Just (String name) -> Just name
+  _                  -> Nothing
+toolArrayItemName _ = Nothing
+
+toolArrayItemDescription :: Text -> Array -> Maybe Text
+toolArrayItemDescription name tools = listToMaybe
+  [ desc | Object tool <- toList tools
          , KM.lookup (Key.fromText "name") tool == Just (String name)
          , Just (String desc) <- [KM.lookup (Key.fromText "description") tool]
   ]
@@ -206,6 +219,37 @@ spec = do
       fixturePayload "saved_view_execute" fixtures `shouldBe` Nothing
       toolNames `shouldNotContain` ["saved_view"]
       parseToolCall "saved_view" (object ["action" .= ("execute" :: Text)]) `shouldSatisfy` isUnknownTool "saved_view"
+
+  describe "JSON-RPC MCP method coverage" $ do
+    it "lists compact tool descriptions without saved_view" $ do
+      mgr <- newManager defaultManagerSettings
+      initialized <- newTVarIO True
+      wsContext <- newTVarIO Nothing
+      mResponse <- handleRequest mgr "http://127.0.0.1:9" Nothing initialized wsContext $
+        JsonRpcRequest (Just (String "tools-list")) "tools/list" Nothing
+      case mResponse >>= jsonField "result" >>= jsonField "tools" of
+        Just (Array tools) -> do
+          let listedNames = mapMaybe toolArrayItemName (toList tools)
+          listedNames `shouldBe` slimToolNames
+          listedNames `shouldNotContain` ["saved_view"]
+          toolArrayItemDescription "search" tools `shouldSatisfy` maybe False ("Returns compact summaries" `T.isInfixOf`)
+          toolArrayItemDescription "search" tools `shouldSatisfy` maybe False ("memory content/previews are omitted" `T.isInfixOf`)
+          toolArrayItemDescription "project_overview" tools `shouldSatisfy` maybe False ("can grow on large projects" `T.isInfixOf`)
+          toolArrayItemDescription "memory_get" tools `shouldSatisfy` maybe False ("detail path for compact memory summaries" `T.isInfixOf`)
+        other -> expectationFailure $ "Expected tools/list result tools array, got: " <> show other
+
+    it "rejects saved_view execute through tools/call before any HTTP dispatch" $ do
+      mgr <- newManager defaultManagerSettings
+      initialized <- newTVarIO True
+      wsContext <- newTVarIO Nothing
+      mResponse <- handleRequest mgr "http://127.0.0.1:9" Nothing initialized wsContext $
+        JsonRpcRequest (Just (String "saved-view-call")) "tools/call" $ Just $ object
+          [ "name" .= ("saved_view" :: Text)
+          , "arguments" .= object ["action" .= ("execute" :: Text)]
+          ]
+      let mResult = mResponse >>= jsonField "result"
+      (mResult >>= jsonField "isError") `shouldBe` Just (Bool True)
+      (mResult >>= mcpTextContent) `shouldBe` Just "Unknown tool: saved_view"
 
   describe "live HTTP tool dispatch" $ do
     it "routes representative slim MCP tools through HTTP compact shapers" $ do
@@ -1139,6 +1183,18 @@ mcpTextValue (Object o) = do
   String textValue <- KM.lookup (Key.fromText "text") firstItem
   decode (BL.fromStrict (TE.encodeUtf8 textValue))
 mcpTextValue _ = Nothing
+
+
+mcpTextContent :: Value -> Maybe Text
+mcpTextContent (Object o) = do
+  Array contentItems <- KM.lookup (Key.fromText "content") o
+  Object firstItem <- case toList contentItems of
+    item : _ -> Just item
+    []       -> Nothing
+  case KM.lookup (Key.fromText "text") firstItem of
+    Just (String textValue) -> Just textValue
+    _                       -> Nothing
+mcpTextContent _ = Nothing
 
 
 withMockHmemServer :: (Manager -> String -> IO a) -> IO a

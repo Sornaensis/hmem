@@ -214,6 +214,11 @@ spec = do
       fixtures <- readCompactResponseFixtures
       mapM_ (assertCompactResponseFixture fixtures) compactResponseRegressionCases
 
+    it "matches golden payloads through dispatcher wiring and MCP envelope budgets" $ do
+      fixtures <- readCompactResponseFixtures
+      withMockHmemServer $ \mgr base ->
+        mapM_ (assertDispatcherResponseFixture fixtures mgr base) dispatcherResponseRegressionCases
+
     it "treats saved_view execute as removed rather than a response-bloat bypass" $ do
       fixtures <- readCompactResponseFixtures
       fixturePayload "saved_view_execute" fixtures `shouldBe` Nothing
@@ -1014,6 +1019,51 @@ compactResponseRegressionCases =
   ]
 
 
+dispatcherResponseRegressionCases :: [(Text, Text, Value)]
+dispatcherResponseRegressionCases =
+  [ ("task_create", "task_create", object
+      [ "workspace_id" .= testUUID2
+      , "project_id" .= parsedUUID3
+      , "title" .= ("Task" :: Text)
+      ])
+  , ("project_create", "project_create", object
+      [ "workspace_id" .= testUUID2
+      , "name" .= ("Project" :: Text)
+      ])
+  , ("memory_create", "memory_create", object
+      [ "workspace_id" .= testUUID2
+      , "project_id" .= testUUID2
+      , "task_id" .= parsedUUID3
+      , "content" .= ("full memory content" :: Text)
+      , "memory_type" .= ("long_term" :: Text)
+      ])
+  , ("project_spec_10_tasks", "project_spec", object
+      [ "workspace_id" .= testUUID2
+      , "name" .= ("Project" :: Text)
+      , "tasks" .= replicate 10 (object ["title" .= ("Task" :: Text), "priority" .= (9 :: Int)])
+      ])
+  , ("project_overview", "project_overview", object
+      [ "project_id" .= testUUID ])
+  , ("context_get", "context_get", object
+      [ "task_id" .= testUUID
+      , "detail_level" .= ("medium" :: Text)
+      ])
+  , ("task_start", "task_start", object
+      [ "task_id" .= testUUID
+      , "detail_level" .= ("light" :: Text)
+      ])
+  , ("unified_search", "search", object
+      [ "workspace_id" .= testUUID2
+      , "entity_types" .= (["memory", "project", "task"] :: [Text])
+      , "limit" .= (5 :: Int)
+      ])
+  , ("memory_graph", "memory_link", object
+      [ "action" .= ("list" :: Text)
+      , "memory_id" .= testUUID
+      ])
+  ]
+
+
 projectSpecRegressionValue :: Value
 projectSpecRegressionValue = object
   [ "project" .= fullProjectValue
@@ -1034,6 +1084,15 @@ projectOverviewRegressionValue = object
       , "blocked_task_count" .= (1 :: Int)
       , "done_task_count" .= (0 :: Int)
       ]
+  ]
+
+
+taskOverviewRegressionValue :: Value
+taskOverviewRegressionValue = object
+  [ "task" .= fullTaskValue
+  , "dependencies" .= ([] :: [Value])
+  , "connected_memories" .= ([] :: [Value])
+  , "readiness_rollup" .= object ["completion_ready" .= True]
   ]
 
 
@@ -1206,13 +1265,17 @@ withMockHmemServer action =
 
 callMockTool :: Manager -> String -> Text -> Value -> IO Value
 callMockTool mgr base name args = do
-  result <- handleToolCall mgr base Nothing $ object
-    [ "name" .= name
-    , "arguments" .= args
-    ]
+  result <- callMockToolRaw mgr base name args
   case mcpTextValue result of
     Just value -> pure value
     Nothing    -> expectationFailure ("Expected MCP JSON text for " <> T.unpack name <> ", got: " <> show result) >> pure Null
+
+
+callMockToolRaw :: Manager -> String -> Text -> Value -> IO Value
+callMockToolRaw mgr base name args = handleToolCall mgr base Nothing $ object
+  [ "name" .= name
+  , "arguments" .= args
+  ]
 
 
 mockHmemApplication :: Wai.Application
@@ -1223,17 +1286,28 @@ mockHmemApplication req respond = do
       | method == methodPost -> do
           _ <- Wai.strictRequestBody req
           respondJson unifiedSearchRegressionValue
+    (method, "/api/v1/memories")
+      | method == methodPost -> do
+          _ <- Wai.strictRequestBody req
+          respondJson fullMemoryValue
     (method, "/api/v1/memories/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
       | method == methodGet -> respondJson fullMemoryValue
     (method, "/api/v1/memories/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/links")
       | method == methodGet -> respondJson memoryGraphRegressionValue
     (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview")
       | method == methodGet -> respondJson projectOverviewRegressionValue
+    (method, "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview")
+      | method == methodGet -> respondJson taskOverviewRegressionValue
+    (method, "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/context")
+      | method == methodGet && Wai.rawQueryString req == "?detail_level=light" -> respondJson taskStartRegressionValue
+      | method == methodGet -> respondJson contextGetRegressionValue
     (method, "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
       | method == methodGet -> respondJson fullTaskValue
       | method == methodPut -> do
           _ <- Wai.strictRequestBody req
           respondJson finishedTaskValue
+    (method, "/api/v1/tasks/22222222-3333-4444-5555-666666666666")
+      | method == methodGet -> respondJson (taskValue parsedUUID3 "Target task" "todo" Nothing (Just parsedUUID3))
     (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
       | method == methodGet -> respondJson fullProjectValue
       | method == methodPut -> do
@@ -1291,6 +1365,21 @@ assertCompactResponseFixture fixtures (name, shaper, raw) =
     (_, _, Nothing) -> expectationFailure $ "Expected MCP JSON text for " <> T.unpack name
 
 
+assertDispatcherResponseFixture :: Value -> Manager -> String -> (Text, Text, Value) -> Expectation
+assertDispatcherResponseFixture fixtures mgr base (name, toolName, args) = do
+  result <- callMockToolRaw mgr base toolName args
+  case (fixturePayload name fixtures, fixtureMaxChars name fixtures, fixtureMaxEnvelopeChars name fixtures, mcpTextValue result) of
+    (Just expected, Just maxChars, Just maxEnvelopeChars, Just actual) -> do
+      actual `shouldBe` expected
+      encodedCharCount actual `shouldSatisfy` (<= maxChars)
+      encodedCharCount result `shouldSatisfy` (<= maxEnvelopeChars)
+      shouldOmitDefaultNoise name actual
+    (Nothing, _, _, _) -> expectationFailure $ "Missing fixture payload for " <> T.unpack name
+    (_, Nothing, _, _) -> expectationFailure $ "Missing fixture max_chars for " <> T.unpack name
+    (_, _, Nothing, _) -> expectationFailure $ "Missing fixture max_envelope_chars for " <> T.unpack name
+    (_, _, _, Nothing) -> expectationFailure $ "Expected dispatcher MCP JSON text for " <> T.unpack name <> ", got: " <> show result
+
+
 fixturePayload :: Text -> Value -> Maybe Value
 fixturePayload name = fixtureField name "payload"
 
@@ -1298,6 +1387,14 @@ fixturePayload name = fixtureField name "payload"
 fixtureMaxChars :: Text -> Value -> Maybe Int
 fixtureMaxChars name fixtures = do
   raw <- fixtureField name "max_chars" fixtures
+  case fromJSON raw of
+    Success maxChars -> Just maxChars
+    Error _          -> Nothing
+
+
+fixtureMaxEnvelopeChars :: Text -> Value -> Maybe Int
+fixtureMaxEnvelopeChars name fixtures = do
+  raw <- fixtureField name "max_envelope_chars" fixtures
   case fromJSON raw of
     Success maxChars -> Just maxChars
     Error _          -> Nothing

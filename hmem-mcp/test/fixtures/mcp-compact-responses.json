@@ -1,6 +1,7 @@
 {
   "task_create": {
     "max_chars": 300,
+    "max_envelope_chars": 450,
     "payload": {
       "ok": true,
       "action": "created",
@@ -18,6 +19,7 @@
   },
   "project_create": {
     "max_chars": 280,
+    "max_envelope_chars": 420,
     "payload": {
       "ok": true,
       "action": "created",
@@ -34,6 +36,7 @@
   },
   "memory_create": {
     "max_chars": 360,
+    "max_envelope_chars": 540,
     "payload": {
       "ok": true,
       "action": "created",
@@ -52,6 +55,7 @@
   },
   "project_spec_10_tasks": {
     "max_chars": 1100,
+    "max_envelope_chars": 1700,
     "payload": {
       "ok": true,
       "action": "created",
@@ -76,6 +80,7 @@
   },
   "project_overview": {
     "max_chars": 700,
+    "max_envelope_chars": 1050,
     "payload": {
       "project": {
         "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -116,6 +121,7 @@
   },
   "context_get": {
     "max_chars": 680,
+    "max_envelope_chars": 1000,
     "payload": {
       "task": {
         "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -150,6 +156,7 @@
   },
   "task_start": {
     "max_chars": 560,
+    "max_envelope_chars": 850,
     "payload": {
       "result": "started",
       "started": true,
@@ -170,6 +177,7 @@
   },
   "unified_search": {
     "max_chars": 900,
+    "max_envelope_chars": 1350,
     "payload": {
       "memories": [
         {
@@ -222,6 +230,7 @@
   },
   "memory_graph": {
     "max_chars": 200,
+    "max_envelope_chars": 320,
     "payload": {
       "links": [
         {

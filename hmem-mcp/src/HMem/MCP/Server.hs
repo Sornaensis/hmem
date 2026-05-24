@@ -12,12 +12,12 @@ module HMem.MCP.Server
   ) where
 
 import Control.Monad (replicateM)
-import Control.Concurrent (ThreadId, forkIO, killThread)
+import Control.Concurrent (ThreadId, forkIO, forkIOWithUnmask, killThread)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM
   ( atomically, TBQueue, newTBQueueIO, readTBQueue, writeTBQueue
   , isEmptyTBQueue, isFullTBQueue, TVar, newTVarIO, readTVar, modifyTVar', retry )
-import Control.Exception (SomeAsyncException, SomeException, catch, finally, fromException, onException, throwIO, try)
+import Control.Exception (SomeAsyncException, SomeException, catch, finally, fromException, mask, onException, throwIO, try)
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
@@ -104,17 +104,20 @@ runMCPServerWithHandles = runMCPServerWithHandlesObserved (const $ pure ())
 -- input has been read and before drain/shutdown logging. This is a test seam
 -- for asserting shutdown cleanup.
 runMCPServerWithHandlesObserved :: ([ThreadId] -> IO ()) -> Int -> Int -> Handle -> Handle -> Handle -> Manager -> String -> Maybe Text -> IO ()
-runMCPServerWithHandlesObserved observeWorkers workerCount queueDepth input output errHandle mgr serverUrl mApiKey = do
+runMCPServerWithHandlesObserved observeWorkers workerCount queueDepth input output errHandle mgr serverUrl mApiKey = mask $ \restore -> do
   lock   <- newMVar ()
   queue  <- newTBQueueIO (fromIntegral $ max 1 queueDepth)
   active <- newTVarIO (0 :: Int)
   initialized <- newTVarIO False
   wsContext <- newTVarIO (Nothing :: Maybe UUID)
-  -- Spawn fixed worker pool
-  workerIds <- replicateM (max 1 workerCount) $ forkIO $ worker output mgr lock serverUrl mApiKey queue active initialized wsContext
+  -- Spawn fixed worker pool with async exceptions masked in the parent so a
+  -- cancellation cannot leak a partially-started pool. Workers are explicitly
+  -- unmasked so request processing remains interruptible.
+  workerIds <- replicateM (max 1 workerCount) $
+    forkIOWithUnmask $ \unmask -> unmask $ worker output mgr lock serverUrl mApiKey queue active initialized wsContext
   let cleanupWorkers = mapM_ killThread workerIds
       requestWorkerCleanup = mapM_ (forkIO . killThread) workerIds
-      runLoop = do
+      runLoop = restore $ do
         -- Read stdin → queue
         readLoop input output lock queue
         observeWorkers workerIds

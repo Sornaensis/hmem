@@ -2,7 +2,7 @@ module HMem.MCP.ServerSpec (spec) where
 
 import Control.Concurrent (ThreadId, threadDelay)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, putMVar, readMVar, tryReadMVar)
-import Control.Exception (bracket, finally)
+import Control.Exception (AsyncException(..), bracket, finally, throwIO)
 import Control.Concurrent.STM (TVar, newTVarIO)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
@@ -161,6 +161,20 @@ spec = do
           workerIds <- readMVar workerIdsVar
           workerIds `shouldSatisfy` ((== 1) . length)
           waitForStoppedThreads workerIds
+
+    it "cleans up idle workers when interrupted immediately after startup" $
+      withTempResponseFile $ \input ->
+      withTempResponseFile $ \output ->
+      withTempResponseFile $ \errHandle -> do
+        workerIdsVar <- newEmptyMVar
+        mgr <- newManager defaultManagerSettings
+        runMCPServerWithHandlesObserved
+            (\workerIds -> putMVar workerIdsVar workerIds >> throwIO ThreadKilled)
+            2 4 input output errHandle mgr unusedServerUrl Nothing
+          `shouldThrow` (== ThreadKilled)
+        workerIds <- readMVar workerIdsVar
+        workerIds `shouldSatisfy` ((== 2) . length)
+        waitForStoppedThreads workerIds
 
 unusedServerUrl :: String
 unusedServerUrl = "http://127.0.0.1:9"

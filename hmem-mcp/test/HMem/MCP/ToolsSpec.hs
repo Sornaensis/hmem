@@ -26,6 +26,11 @@ import Test.Hspec
 
 import HMem.MCP.Tools
 import HMem.MCP.Server (JsonRpcRequest(..), encodeStdioResponse, handleRequest, handleStdioLine, injectWorkspaceContext)
+import HMem.Config qualified as Config
+import HMem.DB.TestHarness (TestEnv(..), withTestEnv)
+import HMem.Server.AccessTracker (newAccessTracker)
+import HMem.Server.App (mkApp)
+import HMem.Server.WebSocket (newWSState)
 import HMem.Types
 
 testUUID :: Text
@@ -433,6 +438,82 @@ spec = do
         (firstArrayItem "tasks" overviewWithDescriptions >>= jsonField "description") `shouldBe` Just (String "full task description")
         (firstArrayItem "tasks" overviewWithDescriptions >>= jsonField "description_truncated") `shouldBe` Nothing
         jsonField "descriptions_omitted" overviewWithDescriptions `shouldBe` Nothing
+
+    it "round-trips compact MCP dispatch against the real hmem-server app" $ do
+      withRealHmemServer $ \mgr base -> do
+        workspaceAck <- callTool mgr base "workspace_register" $ object
+          [ "name" .= ("mcp-real-dto-ws" :: Text) ]
+        workspaceId <- expectTextField "id" workspaceAck
+
+        projectAck <- callTool mgr base "project_create" $ object
+          [ "workspace_id" .= workspaceId
+          , "name" .= ("Real DTO project" :: Text)
+          , "description" .= ("real project description" :: Text)
+          , "priority" .= (4 :: Int)
+          ]
+        projectId <- expectTextField "id" projectAck
+
+        taskAck <- callTool mgr base "task_create" $ object
+          [ "workspace_id" .= workspaceId
+          , "project_id" .= projectId
+          , "title" .= ("Real DTO task" :: Text)
+          , "description" .= ("real task description" :: Text)
+          , "priority" .= (6 :: Int)
+          ]
+        _taskId <- expectTextField "id" taskAck
+
+        overview <- callTool mgr base "project_overview" $ object
+          [ "project_id" .= projectId ]
+        (jsonField "project" overview >>= jsonField "name") `shouldBe` Just (String "Real DTO project")
+        (firstArrayItem "tasks" overview >>= jsonField "title") `shouldBe` Just (String "Real DTO task")
+        show overview `shouldNotContain` "real project description"
+        show overview `shouldNotContain` "real task description"
+        show overview `shouldNotContain` "workspace_id"
+
+        overviewWithDescriptions <- callTool mgr base "project_overview" $ object
+          [ "project_id" .= projectId
+          , "include_descriptions" .= True
+          ]
+        (jsonField "project" overviewWithDescriptions >>= jsonField "description") `shouldBe` Just (String "real project description")
+        (firstArrayItem "tasks" overviewWithDescriptions >>= jsonField "description") `shouldBe` Just (String "real task description")
+        jsonField "descriptions_omitted" overviewWithDescriptions `shouldBe` Nothing
+
+        initialized <- newTVarIO False
+        wsContext <- newTVarIO Nothing
+        _ <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("real-init" :: Text)
+          , "method" .= ("initialize" :: Text)
+          ]
+        setResponse <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("real-set-workspace" :: Text)
+          , "method" .= ("tools/call" :: Text)
+          , "params" .= object
+              [ "name" .= ("set_workspace" :: Text)
+              , "arguments" .= object ["workspace_id" .= workspaceId]
+              ]
+          ]
+        (setResponse >>= jsonField "result" >>= mcpTextValue >>= jsonField "workspace_id") `shouldBe` Just (String workspaceId)
+
+        searchResponse <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("real-search" :: Text)
+          , "method" .= ("tools/call" :: Text)
+          , "params" .= object
+              [ "name" .= ("search" :: Text)
+              , "arguments" .= object
+                  [ "entity_types" .= (["project", "task"] :: [Text])
+                  , "limit" .= (5 :: Int)
+                  ]
+              ]
+          ]
+        let mSearch = searchResponse >>= jsonField "result" >>= mcpTextValue
+        (searchProjectNames <$> mSearch) `shouldBe` Just ["Real DTO project"]
+        (searchTaskTitles <$> mSearch) `shouldBe` Just ["Real DTO task"]
+        show mSearch `shouldNotContain` "workspace_id"
+        show mSearch `shouldNotContain` "real project description"
+        show mSearch `shouldNotContain` "real task description"
 
     it "routes additional slim tools with live request body, query, and auth checks" $ do
       withMockHmemServer $ \mgr base -> do
@@ -1635,27 +1716,87 @@ withMockHmemServer action =
     action mgr ("http://127.0.0.1:" <> show port)
 
 
-callMockTool :: Manager -> String -> Text -> Value -> IO Value
-callMockTool mgr base = callMockToolWithApiKey mgr base Nothing
+withRealHmemServer :: (Manager -> String -> IO a) -> IO a
+withRealHmemServer action =
+  withTestEnv $ \env -> do
+    tracker <- newAccessTracker env.pool 3600
+    wsState <- newWSState
+    let cfg = Config.defaultConfig { Config.cors = Config.CorsConfig ["*"] }
+    app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState Nothing True
+    testWithApplication (pure app) $ \port -> do
+      mgr <- newManager defaultManagerSettings
+      action mgr ("http://127.0.0.1:" <> show port)
 
 
-callMockToolWithApiKey :: Manager -> String -> Maybe Text -> Text -> Value -> IO Value
-callMockToolWithApiKey mgr base mApiKey name args = do
-  result <- callMockToolRawWithApiKey mgr base mApiKey name args
+callTool :: Manager -> String -> Text -> Value -> IO Value
+callTool mgr base = callToolWithApiKey mgr base Nothing
+
+
+callToolWithApiKey :: Manager -> String -> Maybe Text -> Text -> Value -> IO Value
+callToolWithApiKey mgr base mApiKey name args = do
+  result <- callToolRawWithApiKey mgr base mApiKey name args
   case mcpTextValue result of
     Just value -> pure value
     Nothing    -> expectationFailure ("Expected MCP JSON text for " <> T.unpack name <> ", got: " <> show result) >> pure Null
 
 
-callMockToolRaw :: Manager -> String -> Text -> Value -> IO Value
-callMockToolRaw mgr base = callMockToolRawWithApiKey mgr base Nothing
+callToolRaw :: Manager -> String -> Text -> Value -> IO Value
+callToolRaw mgr base = callToolRawWithApiKey mgr base Nothing
 
 
-callMockToolRawWithApiKey :: Manager -> String -> Maybe Text -> Text -> Value -> IO Value
-callMockToolRawWithApiKey mgr base mApiKey name args = handleToolCall mgr base mApiKey $ object
+callToolRawWithApiKey :: Manager -> String -> Maybe Text -> Text -> Value -> IO Value
+callToolRawWithApiKey mgr base mApiKey name args = handleToolCall mgr base mApiKey $ object
   [ "name" .= name
   , "arguments" .= args
   ]
+
+
+callMockTool :: Manager -> String -> Text -> Value -> IO Value
+callMockTool = callTool
+
+
+callMockToolWithApiKey :: Manager -> String -> Maybe Text -> Text -> Value -> IO Value
+callMockToolWithApiKey = callToolWithApiKey
+
+
+callMockToolRaw :: Manager -> String -> Text -> Value -> IO Value
+callMockToolRaw = callToolRaw
+
+
+expectTextField :: Text -> Value -> IO Text
+expectTextField field value = case jsonField field value of
+  Just (String textValue) -> pure textValue
+  other -> expectationFailure ("Expected text field " <> T.unpack field <> ", got: " <> show other) >> pure ""
+
+
+searchProjectNames :: Value -> [Text]
+searchProjectNames value =
+  [ name
+  | row <- arrayFieldItems "projects" value
+  , Just project <- [jsonField "project" row]
+  , Just name <- [textField "name" project]
+  ]
+
+
+searchTaskTitles :: Value -> [Text]
+searchTaskTitles value =
+  [ title
+  | row <- arrayFieldItems "tasks" value
+  , Just task <- [jsonField "task" row]
+  , Just title <- [textField "title" task]
+  ]
+
+
+arrayFieldItems :: Text -> Value -> [Value]
+arrayFieldItems field value = case jsonField field value of
+  Just (Array items) -> toList items
+  _ -> []
+
+
+textField :: Text -> Value -> Maybe Text
+textField field value = case jsonField field value of
+  Just (String textValue) -> Just textValue
+  _ -> Nothing
 
 
 mockHmemApplication :: Wai.Application
@@ -1907,15 +2048,15 @@ assertCompactResponseFixture fixtures (name, shaper, raw) =
 assertDispatcherResponseFixture :: Value -> Manager -> String -> (Text, Text, Value) -> Expectation
 assertDispatcherResponseFixture fixtures mgr base (name, toolName, args) = do
   result <- callMockToolRaw mgr base toolName args
-  case (fixturePayload name fixtures, fixtureMaxChars name fixtures, fixtureMaxEnvelopeChars name fixtures, mcpTextValue result) of
-    (Just expected, Just maxChars, Just maxEnvelopeChars, Just actual) -> do
+  case (fixturePayload name fixtures, fixtureMaxChars name fixtures, fixtureMaxMcpEnvelopeChars name fixtures, mcpTextValue result) of
+    (Just expected, Just maxChars, Just maxMcpEnvelopeChars, Just actual) -> do
       actual `shouldBe` expected
       assertEncodedCharBudget (name <> " payload") actual maxChars
-      assertEncodedCharBudget (name <> " MCP envelope") result maxEnvelopeChars
+      assertEncodedCharBudget (name <> " MCP envelope") result maxMcpEnvelopeChars
       shouldOmitDefaultNoise name actual
     (Nothing, _, _, _) -> expectationFailure $ "Missing fixture payload for " <> T.unpack name
     (_, Nothing, _, _) -> expectationFailure $ "Missing fixture max_chars for " <> T.unpack name
-    (_, _, Nothing, _) -> expectationFailure $ "Missing fixture max_envelope_chars for " <> T.unpack name
+    (_, _, Nothing, _) -> expectationFailure $ "Missing fixture max_mcp_envelope_chars for " <> T.unpack name
     (_, _, _, Nothing) -> expectationFailure $ "Expected dispatcher MCP JSON text for " <> T.unpack name <> ", got: " <> show result
 
 
@@ -1926,18 +2067,18 @@ assertJsonRpcResponseFixture fixtures mgr base initialized wsContext (name, tool
       [ "name" .= toolName
       , "arguments" .= args
       ]
-  case (mResponse, fixturePayload name fixtures, fixtureMaxChars name fixtures, fixtureMaxEnvelopeChars name fixtures, mResponse >>= jsonField "result" >>= mcpTextValue) of
-    (Just response, Just expected, Just maxChars, Just maxEnvelopeChars, Just actual) -> do
+  case (mResponse, fixturePayload name fixtures, fixtureMaxChars name fixtures, fixtureMaxJsonRpcStdioChars name fixtures, mResponse >>= jsonField "result" >>= mcpTextValue) of
+    (Just response, Just expected, Just maxChars, Just maxJsonRpcStdioChars, Just actual) -> do
       jsonField "jsonrpc" response `shouldBe` Just (String "2.0")
       jsonField "id" response `shouldBe` Just (String (name <> "-jsonrpc"))
       actual `shouldBe` expected
       assertEncodedCharBudget (name <> " payload") actual maxChars
-      assertEncodedLineBudget (name <> " JSON-RPC stdio envelope") response maxEnvelopeChars
+      assertEncodedLineBudget (name <> " JSON-RPC stdio envelope") response maxJsonRpcStdioChars
       shouldOmitDefaultNoise name actual
     (Nothing, _, _, _, _) -> expectationFailure $ "Expected JSON-RPC response for " <> T.unpack name
     (_, Nothing, _, _, _) -> expectationFailure $ "Missing fixture payload for " <> T.unpack name
     (_, _, Nothing, _, _) -> expectationFailure $ "Missing fixture max_chars for " <> T.unpack name
-    (_, _, _, Nothing, _) -> expectationFailure $ "Missing fixture max_envelope_chars for " <> T.unpack name
+    (_, _, _, Nothing, _) -> expectationFailure $ "Missing fixture max_jsonrpc_stdio_chars for " <> T.unpack name
     (_, _, _, _, Nothing) -> expectationFailure $ "Expected JSON-RPC MCP JSON text for " <> T.unpack name <> ", got: " <> show mResponse
 
 
@@ -1971,9 +2112,17 @@ fixtureMaxChars name fixtures = do
     Error _          -> Nothing
 
 
-fixtureMaxEnvelopeChars :: Text -> Value -> Maybe Int
-fixtureMaxEnvelopeChars name fixtures = do
-  raw <- fixtureField name "max_envelope_chars" fixtures
+fixtureMaxMcpEnvelopeChars :: Text -> Value -> Maybe Int
+fixtureMaxMcpEnvelopeChars name fixtures = do
+  raw <- fixtureField name "max_mcp_envelope_chars" fixtures
+  case fromJSON raw of
+    Success maxChars -> Just maxChars
+    Error _          -> Nothing
+
+
+fixtureMaxJsonRpcStdioChars :: Text -> Value -> Maybe Int
+fixtureMaxJsonRpcStdioChars name fixtures = do
+  raw <- fixtureField name "max_jsonrpc_stdio_chars" fixtures
   case fromJSON raw of
     Success maxChars -> Just maxChars
     Error _          -> Nothing

@@ -17,7 +17,7 @@ import System.Directory (removeFile)
 import System.IO (Handle, SeekMode(..), hClose, hSeek, openTempFile)
 import Test.Hspec
 
-import HMem.MCP.Server (encodeStdioResponse, handleStdioLine, sendResponseToHandle)
+import HMem.MCP.Server (encodeStdioResponse, handleStdioLine, runMCPServerWithHandles, sendResponseToHandle)
 
 spec :: Spec
 spec = do
@@ -91,10 +91,33 @@ spec = do
         lock <- newMVar ()
         sendResponseToHandle handle lock response
         hSeek handle AbsoluteSeek 0
-        bytes <- BL.hGetContents handle
-        BL.length bytes `seq` pure bytes
+        strictHandleContents handle
       bytes `shouldBe` encodeStdioResponse response
       BL8.last bytes `shouldBe` '\n'
+
+    it "runs a finite stdin-to-stdout loop over explicit handles" $
+      withTempResponseFile $ \input ->
+      withTempResponseFile $ \output ->
+      withTempResponseFile $ \errHandle -> do
+        let request = object
+              [ "jsonrpc" .= ("2.0" :: Text)
+              , "id" .= ("init-loop" :: Text)
+              , "method" .= ("initialize" :: Text)
+              ]
+        BL.hPut input ("\n" <> encode request <> "\n")
+        hSeek input AbsoluteSeek 0
+        mgr <- newManager defaultManagerSettings
+        runMCPServerWithHandles 1 4 input output errHandle mgr unusedServerUrl Nothing
+        hSeek output AbsoluteSeek 0
+        bytes <- strictHandleContents output
+        case BL8.lines bytes of
+          [line] -> case decode line of
+            Just response -> do
+              jsonField "id" response `shouldBe` Just (String "init-loop")
+              (jsonField "result" response >>= jsonField "serverInfo" >>= jsonField "name")
+                `shouldBe` Just (String "hmem-mcp")
+            Nothing -> expectationFailure $ "Expected JSON-RPC response line, got: " <> show bytes
+          linesOut -> expectationFailure $ "Expected one response line, got: " <> show linesOut
 
 unusedServerUrl :: String
 unusedServerUrl = "http://127.0.0.1:9"
@@ -112,6 +135,11 @@ withTempResponseFile action =
     (openTempFile "." "mcp-response.jsonl")
     (\(path, handle) -> hClose handle >> removeFile path)
     (\(_, handle) -> action handle)
+
+strictHandleContents :: Handle -> IO BL.ByteString
+strictHandleContents handle = do
+  bytes <- BL.hGetContents handle
+  BL.length bytes `seq` pure bytes
 
 jsonLine :: Value -> BS8.ByteString
 jsonLine = BL.toStrict . encode

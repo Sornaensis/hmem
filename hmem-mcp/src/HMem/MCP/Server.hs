@@ -5,12 +5,13 @@ module HMem.MCP.Server
   , JsonRpcRequest(..)
   , handleRequest
   , handleStdioLine
+  , runMCPServerWithHandles
   , encodeStdioResponse
   , sendResponseToHandle
   ) where
 
-import Control.Monad (replicateM_)
-import Control.Concurrent (forkIO)
+import Control.Monad (replicateM)
+import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM
   ( atomically, TBQueue, newTBQueueIO, readTBQueue, writeTBQueue
@@ -87,27 +88,38 @@ runMCPServer serverUrl mApiKey = do
   hSetBuffering stdout LineBuffering
   mgr    <- newManager tlsManagerSettings
               { managerResponseTimeout = responseTimeoutMicro (30 * 1000000) }
+  runMCPServerWithHandles maxConcurrency maxQueueDepth stdin stdout stderr mgr serverUrl mApiKey
+
+-- | Run the MCP stdio loop against explicit handles.
+--
+-- This is the same read → queue → worker → write pipeline used by
+-- 'runMCPServer', but parameterized for handle-level tests. The explicit
+-- error handle receives loop drain/shutdown messages; protocol-level
+-- diagnostics inside request handlers still use the process stderr.
+runMCPServerWithHandles :: Int -> Int -> Handle -> Handle -> Handle -> Manager -> String -> Maybe Text -> IO ()
+runMCPServerWithHandles workerCount queueDepth input output errHandle mgr serverUrl mApiKey = do
   lock   <- newMVar ()
-  queue  <- newTBQueueIO (fromIntegral maxQueueDepth)
+  queue  <- newTBQueueIO (fromIntegral $ max 1 queueDepth)
   active <- newTVarIO (0 :: Int)
   initialized <- newTVarIO False
   wsContext <- newTVarIO (Nothing :: Maybe UUID)
   -- Spawn fixed worker pool
-  replicateM_ maxConcurrency $ forkIO $ worker mgr lock serverUrl mApiKey queue active initialized wsContext
+  workerIds <- replicateM (max 1 workerCount) $ forkIO $ worker output mgr lock serverUrl mApiKey queue active initialized wsContext
   -- Read stdin → queue
-  readLoop lock queue
+  readLoop input output lock queue
   -- Drain: wait for queue to empty and all workers to finish
-  hPutStrLn stderr "MCP server: stdin closed, draining in-flight requests..."
+  hPutStrLn errHandle "MCP server: stdin closed, draining in-flight requests..."
   atomically $ do
     empty <- isEmptyTBQueue queue
     n     <- readTVar active
     if empty && n == 0 then pure () else retry
-  hPutStrLn stderr "MCP server: shutdown complete."
+  hPutStrLn errHandle "MCP server: shutdown complete."
+  mapM_ killThread workerIds
 
 -- | Worker thread: reads from the queue and processes each line.
 -- Atomically dequeues + increments active counter to prevent drain races.
-worker :: Manager -> MVar () -> String -> Maybe Text -> TBQueue BS8.ByteString -> TVar Int -> TVar Bool -> TVar (Maybe UUID) -> IO ()
-worker mgr lock url mApiKey queue active initialized wsContext = go
+worker :: Handle -> Manager -> MVar () -> String -> Maybe Text -> TBQueue BS8.ByteString -> TVar Int -> TVar Bool -> TVar (Maybe UUID) -> IO ()
+worker output mgr lock url mApiKey queue active initialized wsContext = go
   where
     go = do
       mline <- try @SomeException $ atomically $ do
@@ -117,21 +129,21 @@ worker mgr lock url mApiKey queue active initialized wsContext = go
       case mline of
         Left _ -> pure ()  -- Worker exits cleanly
         Right line -> do
-          (processLine mgr lock url mApiKey initialized wsContext line `catch` \(_ :: SomeException) -> pure ())
+          (processLine output mgr lock url mApiKey initialized wsContext line `catch` \(_ :: SomeException) -> pure ())
             `finally` atomically (modifyTVar' active (subtract 1))
           go
 
--- | Main read loop: reads lines from stdin and enqueues them.
+-- | Main read loop: reads lines from an input handle and enqueues them.
 -- If the queue is full, sends an overload error immediately.
-readLoop :: MVar () -> TBQueue BS8.ByteString -> IO ()
-readLoop lock queue = do
-  eof <- hIsEOF stdin `catch` \(_ :: SomeException) -> pure True
+readLoop :: Handle -> Handle -> MVar () -> TBQueue BS8.ByteString -> IO ()
+readLoop input output lock queue = do
+  eof <- hIsEOF input `catch` \(_ :: SomeException) -> pure True
   if eof
     then pure ()
     else do
-      line <- BS8.hGetLine stdin
+      line <- BS8.hGetLine input
       if BS8.null line
-        then readLoop lock queue
+        then readLoop input output lock queue
         else do
           full <- atomically $ do
             f <- isFullTBQueue queue
@@ -140,16 +152,16 @@ readLoop lock queue = do
               writeTBQueue queue line
               pure False
           if full
-            then sendResponse lock $ jsonRpcError Nothing (-32000) "Server overloaded"
+            then sendResponseToHandle output lock $ jsonRpcError Nothing (-32000) "Server overloaded"
             else pure ()
-          readLoop lock queue
+          readLoop input output lock queue
 
-processLine :: Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe UUID) -> BS8.ByteString -> IO ()
-processLine mgr lock serverUrl mApiKey initialized wsContext line = do
+processLine :: Handle -> Manager -> MVar () -> String -> Maybe Text -> TVar Bool -> TVar (Maybe UUID) -> BS8.ByteString -> IO ()
+processLine output mgr lock serverUrl mApiKey initialized wsContext line = do
   mresp <- handleStdioLine mgr serverUrl mApiKey initialized wsContext line
   case mresp of
     Nothing   -> pure ()
-    Just resp -> sendResponse lock resp
+    Just resp -> sendResponseToHandle output lock resp
 
 -- | Handle one line-delimited JSON-RPC message read from stdin.
 -- Returns 'Nothing' for blank lines and notifications, matching the
@@ -253,9 +265,6 @@ isNotification :: JsonRpcRequest -> Bool
 isNotification req = case req.reqId of
   Nothing -> True
   _       -> False
-
-sendResponse :: MVar () -> Value -> IO ()
-sendResponse = sendResponseToHandle stdout
 
 sendResponseToHandle :: Handle -> MVar () -> Value -> IO ()
 sendResponseToHandle handle lock v = withMVar lock $ \_ -> do

@@ -7,11 +7,11 @@ module HMem.MCP.Server
   , handleStdioLine
   , runMCPServerWithHandles
   , runMCPServerWithHandlesObserved
+  , runMCPServerWithHandlesObservedWithFork
   , encodeStdioResponse
   , sendResponseToHandle
   ) where
 
-import Control.Monad (replicateM)
 import Control.Concurrent (ThreadId, forkIO, forkIOWithUnmask, killThread)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM
@@ -104,17 +104,24 @@ runMCPServerWithHandles = runMCPServerWithHandlesObserved (const $ pure ())
 -- input has been read and before drain/shutdown logging. This is a test seam
 -- for asserting shutdown cleanup.
 runMCPServerWithHandlesObserved :: ([ThreadId] -> IO ()) -> Int -> Int -> Handle -> Handle -> Handle -> Manager -> String -> Maybe Text -> IO ()
-runMCPServerWithHandlesObserved observeWorkers workerCount queueDepth input output errHandle mgr serverUrl mApiKey = mask $ \restore -> do
+runMCPServerWithHandlesObserved = runMCPServerWithHandlesObservedWithFork forkWorkerUnmasked
+
+-- | Like 'runMCPServerWithHandlesObserved', but allows tests to inject worker
+-- startup behavior. The fork action must run the supplied worker action
+-- unmasked so queue and request processing remain interruptible.
+runMCPServerWithHandlesObservedWithFork :: (IO () -> IO ThreadId) -> ([ThreadId] -> IO ()) -> Int -> Int -> Handle -> Handle -> Handle -> Manager -> String -> Maybe Text -> IO ()
+runMCPServerWithHandlesObservedWithFork forkWorker observeWorkers workerCount queueDepth input output errHandle mgr serverUrl mApiKey = mask $ \restore -> do
   lock   <- newMVar ()
   queue  <- newTBQueueIO (fromIntegral $ max 1 queueDepth)
   active <- newTVarIO (0 :: Int)
   initialized <- newTVarIO False
   wsContext <- newTVarIO (Nothing :: Maybe UUID)
   -- Spawn fixed worker pool with async exceptions masked in the parent so a
-  -- cancellation cannot leak a partially-started pool. Workers are explicitly
-  -- unmasked so request processing remains interruptible.
-  workerIds <- replicateM (max 1 workerCount) $
-    forkIOWithUnmask $ \unmask -> unmask $ worker output mgr lock serverUrl mApiKey queue active initialized wsContext
+  -- cancellation cannot leak a partially-started pool. Already-started workers
+  -- are cleaned up if a later startup step fails. Workers are explicitly
+  -- unmasked by the fork action so request processing remains interruptible.
+  workerIds <- spawnWorkers forkWorker (max 1 workerCount) $
+    worker output mgr lock serverUrl mApiKey queue active initialized wsContext
   let cleanupWorkers = mapM_ killThread workerIds
       requestWorkerCleanup = mapM_ (forkIO . killThread) workerIds
       runLoop = restore $ do
@@ -130,6 +137,18 @@ runMCPServerWithHandlesObserved observeWorkers workerCount queueDepth input outp
         hPutStrLn errHandle "MCP server: shutdown complete."
   runLoop `onException` requestWorkerCleanup
   cleanupWorkers
+
+forkWorkerUnmasked :: IO () -> IO ThreadId
+forkWorkerUnmasked action = forkIOWithUnmask $ \unmask -> unmask action
+
+spawnWorkers :: (IO () -> IO ThreadId) -> Int -> IO () -> IO [ThreadId]
+spawnWorkers forkWorker workerCount action = go workerCount []
+  where
+    go remaining started
+      | remaining <= 0 = pure $ reverse started
+      | otherwise = do
+          workerId <- forkWorker action
+          go (remaining - 1) (workerId : started) `onException` killThread workerId
 
 -- | Worker thread: reads from the queue and processes each line.
 -- Atomically dequeues + increments active counter to prevent drain races.

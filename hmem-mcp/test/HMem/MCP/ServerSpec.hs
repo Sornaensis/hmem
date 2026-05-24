@@ -1,7 +1,7 @@
 module HMem.MCP.ServerSpec (spec) where
 
-import Control.Concurrent (ThreadId, threadDelay)
-import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, putMVar, readMVar, tryReadMVar)
+import Control.Concurrent (ThreadId, forkIOWithUnmask, threadDelay)
+import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, tryReadMVar)
 import Control.Exception (AsyncException(..), bracket, finally, throwIO)
 import Control.Concurrent.STM (TVar, newTVarIO)
 import Data.Aeson
@@ -22,7 +22,7 @@ import System.IO (Handle, SeekMode(..), hClose, hSeek, openTempFile)
 import GHC.Conc (ThreadStatus(..), threadStatus)
 import Test.Hspec
 
-import HMem.MCP.Server (encodeStdioResponse, handleStdioLine, runMCPServerWithHandles, runMCPServerWithHandlesObserved, sendResponseToHandle)
+import HMem.MCP.Server (encodeStdioResponse, handleStdioLine, runMCPServerWithHandles, runMCPServerWithHandlesObserved, runMCPServerWithHandlesObservedWithFork, sendResponseToHandle)
 
 spec :: Spec
 spec = do
@@ -176,6 +176,21 @@ spec = do
         workerIds `shouldSatisfy` ((== 2) . length)
         waitForStoppedThreads workerIds
 
+    it "cleans up partially-started workers when startup fails during spawning" $
+      withTempResponseFile $ \input ->
+      withTempResponseFile $ \output ->
+      withTempResponseFile $ \errHandle -> do
+        firstWorkerVar <- newEmptyMVar
+        spawnAttemptVar <- newMVar (0 :: Int)
+        mgr <- newManager defaultManagerSettings
+        runMCPServerWithHandlesObservedWithFork
+            (failingSecondSpawn firstWorkerVar spawnAttemptVar)
+            (const $ pure ())
+            2 4 input output errHandle mgr unusedServerUrl Nothing
+          `shouldThrow` (== ThreadKilled)
+        firstWorker <- readMVar firstWorkerVar
+        waitForStoppedThreads [firstWorker]
+
 unusedServerUrl :: String
 unusedServerUrl = "http://127.0.0.1:9"
 
@@ -196,6 +211,18 @@ withBlockingHmemServer requestSeen blocker action =
       putMVar requestSeen ()
       readMVar blocker
       respond $ Wai.responseLBS status200 [(hContentType, "application/json")] "{}"
+
+failingSecondSpawn :: MVar ThreadId -> MVar Int -> IO () -> IO ThreadId
+failingSecondSpawn firstWorkerVar spawnAttemptVar action = do
+  attempt <- modifyMVar spawnAttemptVar $ \current -> do
+    let next = current + 1
+    pure (next, next)
+  if attempt == 1
+    then do
+      workerId <- forkIOWithUnmask $ \unmask -> unmask action
+      putMVar firstWorkerVar workerId
+      pure workerId
+    else throwIO ThreadKilled
 
 withTempResponseFile :: (Handle -> IO a) -> IO a
 withTempResponseFile action =

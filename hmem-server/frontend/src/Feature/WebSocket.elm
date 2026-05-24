@@ -7,7 +7,7 @@ module Feature.WebSocket exposing
 
 import Api
 import Dict
-import Helpers exposing (applyDependencyMutationResult, beginWorkspaceDataReload)
+import Helpers exposing (applyDependencyMutationResult, applyTaskDependencyLinkMutation, beginWorkspaceDataReload)
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
@@ -323,14 +323,14 @@ applyChangeEvent event model =
             case event.changeType of
                 Api.Deleted ->
                     ( { model | memories = Dict.remove event.entityId model.memories }
-                    , Cmd.batch [ maybeGraphRefresh model, refreshLinkedMemoryCachesFor event.entityId model ]
+                    , Cmd.batch [ maybeGraphRefresh model, refreshLinkedMemoryCachesFor event.entityId model, refreshWorkspaceCardHydration model ]
                     )
 
                 _ ->
                     case Maybe.andThen (tryDecode Api.memoryDecoder) event.payload of
                         Just mem ->
                             ( { model | memories = Dict.insert mem.id mem model.memories }
-                            , Cmd.batch [ maybeGraphRefresh model, refreshLinkedMemoryCachesFor mem.id model ]
+                            , Cmd.batch [ maybeGraphRefresh model, refreshLinkedMemoryCachesFor mem.id model, refreshWorkspaceCardHydration model ]
                             )
 
                         Nothing ->
@@ -387,7 +387,17 @@ applyChangeEvent event model =
                 ( patchedModel, reloadCmd ) =
                     case mutationResult of
                         Just result ->
-                            ( applyDependencyMutationResult result model, Cmd.none )
+                            let
+                                statusPatchedModel =
+                                    applyDependencyMutationResult result model
+
+                                dependenciesModel =
+                                    statusPatchedModel.dependencies
+
+                                updatedLinks =
+                                    applyTaskDependencyLinkMutation result dependenciesModel.taskDependencyLinks
+                            in
+                            ( { statusPatchedModel | dependencies = { dependenciesModel | taskDependencyLinks = updatedLinks } }, Cmd.none )
 
                         Nothing ->
                             beginWorkspaceDataReload False model
@@ -505,6 +515,16 @@ requiresSelfRefresh event =
 
         _ ->
             False
+
+
+refreshWorkspaceCardHydration : Model -> Cmd Msg
+refreshWorkspaceCardHydration model =
+    case model.selectedWorkspaceId of
+        Just wsId ->
+            Api.fetchWorkspaceCardHydration model.flags.apiUrl wsId (GotWorkspaceCardHydration wsId Nothing)
+
+        Nothing ->
+            Cmd.none
 
 
 maybeGraphRefresh : Model -> Cmd Msg

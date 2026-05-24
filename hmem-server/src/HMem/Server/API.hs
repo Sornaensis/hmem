@@ -103,6 +103,7 @@ type WorkspaceAPI =
          :> Post '[JSON] Auth.WorkspaceMembership
   :<|> Capture "workspaceId" UUID :> "memberships" :> Capture "userId" UUID
          :> Delete '[JSON] NoContent
+  :<|> Capture "workspaceId" UUID :> "card-hydration" :> Get '[JSON] WorkspaceCardHydration
 
 -- Memories
 type MemoryAPI =
@@ -861,6 +862,7 @@ workspaceHandlers pool bc =
   :<|> listMembershipsH
   :<|> upsertMembershipH
   :<|> deleteMembershipH
+  :<|> cardHydrationH
   where
     listWorkspacesH :: Maybe Int -> Maybe Int -> Handler (PaginatedResult Workspace)
     listWorkspacesH mlimit moffset = do
@@ -926,6 +928,58 @@ workspaceHandlers pool bc =
       case rows of
         (r:_) -> pure $ rowToWorkspace r
         []    -> throwError err404
+
+    cardHydrationH :: UUID -> Handler WorkspaceCardHydration
+    cardHydrationH wsId = do
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
+      handleDBErrors $ runSession pool $ do
+        projectMemoryRows <- Session.statement () $ run $ select $ do
+          link <- each projectMemoryLinkSchema
+          projectRow <- each projectSchema
+          where_ $ projectRow.projId ==. link.pmlProjectId
+          where_ $ projectRow.projWorkspaceId ==. lit wsId
+          where_ $ activeProject projectRow
+          memoryRow <- each memorySchema
+          where_ $ memoryRow.memId ==. link.pmlMemoryId
+          where_ $ memoryRow.memWorkspaceId ==. lit wsId
+          where_ $ activeMemory memoryRow
+          pure (link.pmlProjectId, link.pmlMemoryId)
+        taskMemoryRows <- Session.statement () $ run $ select $ do
+          link <- each taskMemoryLinkSchema
+          taskRow <- each taskSchema
+          where_ $ taskRow.taskId ==. link.tmlTaskId
+          where_ $ taskRow.taskWorkspaceId ==. lit wsId
+          where_ $ activeTask taskRow
+          memoryRow <- each memorySchema
+          where_ $ memoryRow.memId ==. link.tmlMemoryId
+          where_ $ memoryRow.memWorkspaceId ==. lit wsId
+          where_ $ activeMemory memoryRow
+          pure (link.tmlTaskId, link.tmlMemoryId)
+        taskDependencyRows <- Session.statement () $ run $ select $ do
+          dependency <- each taskDependencySchema
+          taskRow <- each taskSchema
+          where_ $ taskRow.taskId ==. dependency.tdTaskId
+          where_ $ taskRow.taskWorkspaceId ==. lit wsId
+          where_ $ activeTask taskRow
+          dependsOnTaskRow <- each taskSchema
+          where_ $ dependsOnTaskRow.taskId ==. dependency.tdDependsOnId
+          where_ $ dependsOnTaskRow.taskWorkspaceId ==. lit wsId
+          where_ $ activeTask dependsOnTaskRow
+          pure (dependency.tdTaskId, dependency.tdDependsOnId)
+        pure WorkspaceCardHydration
+          { projectMemoryLinks =
+              [ WorkspaceProjectMemoryLink { projectId = projectId, memoryId = memoryId }
+              | (projectId, memoryId) <- projectMemoryRows
+              ]
+          , taskMemoryLinks =
+              [ WorkspaceTaskMemoryLink { taskId = taskId, memoryId = memoryId }
+              | (taskId, memoryId) <- taskMemoryRows
+              ]
+          , taskDependencies =
+              [ WorkspaceTaskDependencyLink { taskId = taskId, dependsOnId = dependsOnId }
+              | (taskId, dependsOnId) <- taskDependencyRows
+              ]
+          }
 
     updateWorkspaceH :: UUID -> UpdateWorkspace -> Handler Workspace
     updateWorkspaceH wsId uw = do

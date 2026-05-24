@@ -6,6 +6,7 @@ import Helpers exposing (applyTaskMutationResult, beginWorkspaceDataReload, task
 import Toast exposing (addToast)
 import Types exposing (..)
 import Browser.Navigation as Nav
+import String
 
 
 init : MutationsModel
@@ -88,14 +89,25 @@ update msg model =
                         currentEditing =
                             model.editing
 
+                        targetEntityId =
+                            memoryCreationTargetEntityId currentEditing
+
                         updatedEditing =
                             { currentEditing | createForm = Nothing, inlineCreate = Nothing }
 
-                        updatedModel =
+                        modelWithMemory =
                             { model
                                 | memories = Dict.insert mem.id mem model.memories
                                 , editing = updatedEditing
                             }
+
+                        updatedModel =
+                            case targetEntityId of
+                                Just entityId ->
+                                    addCreatedMemoryToEntity entityId mem modelWithMemory
+
+                                Nothing ->
+                                    modelWithMemory
 
                         ( trackedModel, trackCmd ) =
                             trackLocalMutation mem.id updatedModel
@@ -239,6 +251,96 @@ refreshReadinessCaches model =
 updateMutationsModel : (MutationsModel -> MutationsModel) -> Model -> Model
 updateMutationsModel fn model =
     { model | mutations = fn model.mutations }
+
+
+memoryCreationTargetEntityId : EditingModel -> Maybe String
+memoryCreationTargetEntityId editing =
+    case editing.createForm of
+        Just (CreateMemoryForm form) ->
+            decodeMemoryTargetEntityId form.target
+
+        _ ->
+            case editing.inlineCreate of
+                Just (InlineCreateMemory form) ->
+                    decodeMemoryTargetEntityId form.target
+
+                _ ->
+                    Nothing
+
+
+decodeMemoryTargetEntityId : String -> Maybe String
+decodeMemoryTargetEntityId target =
+    if String.startsWith "project:" target then
+        target
+            |> String.dropLeft (String.length "project:")
+            |> nonEmptyString
+
+    else if String.startsWith "task:" target then
+        target
+            |> String.dropLeft (String.length "task:")
+            |> nonEmptyString
+
+    else
+        Nothing
+
+
+nonEmptyString : String -> Maybe String
+nonEmptyString value =
+    if String.isEmpty value then
+        Nothing
+
+    else
+        Just value
+
+
+addCreatedMemoryToEntity : String -> Api.Memory -> Model -> Model
+addCreatedMemoryToEntity entityId mem model =
+    let
+        currentMemory =
+            model.memory
+
+        currentIds =
+            Dict.get entityId currentMemory.entityMemoryIds |> Maybe.withDefault []
+
+        updatedIds =
+            if List.member mem.id currentIds then
+                currentIds
+
+            else
+                currentIds ++ [ mem.id ]
+
+        updatedEntityMemories =
+            case Dict.get entityId currentMemory.entityMemories of
+                Just memories ->
+                    let
+                        updatedMemories =
+                            if List.any (\existing -> existing.id == mem.id) memories then
+                                memories
+
+                            else
+                                memories ++ [ mem ]
+                    in
+                    Dict.insert entityId updatedMemories currentMemory.entityMemories
+
+                Nothing ->
+                    currentMemory.entityMemories
+
+        updatedTasks =
+            case Dict.get entityId model.tasks of
+                Just task ->
+                    Dict.insert entityId { task | memoryLinkCount = List.length updatedIds } model.tasks
+
+                Nothing ->
+                    model.tasks
+    in
+    { model
+        | memory =
+            { currentMemory
+                | entityMemoryIds = Dict.insert entityId updatedIds currentMemory.entityMemoryIds
+                , entityMemories = updatedEntityMemories
+            }
+        , tasks = updatedTasks
+    }
 
 
 handleApiMutationError : String -> Api.ApiError -> Model -> ( Model, Cmd Msg )

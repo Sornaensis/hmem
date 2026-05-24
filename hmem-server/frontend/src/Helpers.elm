@@ -328,7 +328,8 @@ beginWorkspaceDataReload showLoading model =
                         | activeWorkspaceLoadToken = Just token
                         , nextWorkspaceLoadToken = token + 1
                         , loadingWorkspaceData = if showLoading then True else currentDataLoading.loadingWorkspaceData
-                        , pendingWorkspaceLoads = 3
+                        , pendingWorkspaceLoads = 4
+                        , cardHydrationLoaded = False
                     }
             in
             ( { model | dataLoading = updatedDataLoading }
@@ -336,6 +337,7 @@ beginWorkspaceDataReload showLoading model =
                 [ Api.fetchProjects model.flags.apiUrl wsId (GotProjects wsId (Just token) 0)
                 , Api.fetchTasks model.flags.apiUrl wsId (GotTasks wsId (Just token) 0)
                 , Api.fetchMemories model.flags.apiUrl wsId (GotMemories wsId (Just token) 0)
+                , Api.fetchWorkspaceCardHydration model.flags.apiUrl wsId (GotWorkspaceCardHydration wsId (Just token))
                 ]
             )
 
@@ -397,6 +399,263 @@ applyTaskMutationResult result model =
 taskMutationResultIds : Api.TaskMutationResult -> List String
 taskMutationResultIds result =
     result.task.id :: List.map (\change -> change.task.id) result.dependencyEffects
+
+
+linkedMemoriesForEntity : Model -> String -> List Api.Memory
+linkedMemoriesForEntity model entityId =
+    case Dict.get entityId model.memory.entityMemories of
+        Just memories ->
+            memories
+
+        Nothing ->
+            model.memory.entityMemoryIds
+                |> Dict.get entityId
+                |> Maybe.withDefault []
+                |> List.filterMap (\memoryId -> Dict.get memoryId model.memories)
+
+
+hasLinkedMemoryData : Model -> String -> Bool
+hasLinkedMemoryData model entityId =
+    Dict.member entityId model.memory.entityMemories
+        || model.dataLoading.cardHydrationLoaded
+
+
+taskDependencySummariesForTask : Model -> String -> List Api.TaskDependencySummary
+taskDependencySummariesForTask model taskId =
+    case Dict.get taskId model.dependencies.taskDependencies of
+        Just dependencies ->
+            dependencies
+
+        Nothing ->
+            model.dependencies.taskDependencyLinks
+                |> List.filter (\link -> link.taskId == taskId)
+                |> List.filterMap
+                    (\link ->
+                        Dict.get link.dependsOnId model.tasks
+                            |> Maybe.map (\task -> { id = task.id, name = task.title })
+                    )
+
+
+hasTaskDependencyData : Model -> String -> Bool
+hasTaskDependencyData model taskId =
+    Dict.member taskId model.dependencies.taskDependencies
+        || model.dataLoading.cardHydrationLoaded
+
+
+applyTaskDependencyLinkMutation : Api.DependencyMutationResult -> List Api.WorkspaceTaskDependencyLink -> List Api.WorkspaceTaskDependencyLink
+applyTaskDependencyLinkMutation result links =
+    let
+        sameLink link =
+            link.taskId == result.taskId && link.dependsOnId == result.dependsOnId
+    in
+    case result.action of
+        "add" ->
+            if List.any sameLink links then
+                links
+
+            else
+                links ++ [ { taskId = result.taskId, dependsOnId = result.dependsOnId } ]
+
+        "remove" ->
+            List.filter (not << sameLink) links
+
+        _ ->
+            links
+
+
+taskReadinessRollupForTask : Model -> String -> Maybe Api.TaskReadinessRollup
+taskReadinessRollupForTask model taskId =
+    case Dict.get taskId model.dependencies.taskReadinessRollups of
+        Just rollup ->
+            Just rollup
+
+        Nothing ->
+            if model.dataLoading.cardHydrationLoaded then
+                Just (computeTaskReadinessRollup model taskId)
+
+            else
+                Nothing
+
+
+projectReadinessRollupForProject : Model -> String -> Maybe Api.ProjectReadinessRollup
+projectReadinessRollupForProject model projectId =
+    case Dict.get projectId model.dependencies.projectReadinessRollups of
+        Just rollup ->
+            Just rollup
+
+        Nothing ->
+            if model.dataLoading.cardHydrationLoaded then
+                Just (computeProjectReadinessRollup model projectId)
+
+            else
+                Nothing
+
+
+computeTaskReadinessRollup : Model -> String -> Api.TaskReadinessRollup
+computeTaskReadinessRollup model taskId =
+    computeTaskReadinessRollupFrom (Dict.values model.tasks) model.dependencies.taskDependencyLinks taskId
+
+
+computeTaskReadinessRollupFrom : List Api.Task -> List Api.WorkspaceTaskDependencyLink -> String -> Api.TaskReadinessRollup
+computeTaskReadinessRollupFrom allTasks taskDependencyLinks taskId =
+    let
+        tasksById =
+            indexBy .id allTasks
+
+        treeIds =
+            collectDescendantTaskIds allTasks taskId |> uniqueStringList
+
+        descendantTasks =
+            treeIds
+                |> List.filter ((/=) taskId)
+                |> List.filterMap (\id -> Dict.get id tasksById)
+
+        openDependencyEdges =
+            treeIds
+                |> List.filterMap (\id -> Dict.get id tasksById)
+                |> List.filter (\task -> isOpenTaskCardStatus task.status)
+                |> List.concatMap
+                    (\task ->
+                        taskDependencyLinks
+                            |> List.filter (\link -> link.taskId == task.id)
+                            |> List.filterMap
+                                (\link ->
+                                    Dict.get link.dependsOnId tasksById
+                                        |> Maybe.andThen
+                                            (\dependency ->
+                                                if isOpenTaskCardStatus dependency.status then
+                                                    Just ( task.id, dependency.id )
+
+                                                else
+                                                    Nothing
+                                            )
+                                )
+                    )
+                |> uniquePairs
+
+        dependencyBlockedTaskCount =
+            openDependencyEdges
+                |> List.map Tuple.first
+                |> uniqueStringList
+                |> List.length
+
+        openDependencyCount =
+            List.length openDependencyEdges
+    in
+    { openSubtaskCount = descendantTasks |> List.filter (\task -> isOpenTaskCardStatus task.status) |> List.length
+    , doneSubtaskCount = descendantTasks |> List.filter (\task -> task.status == Api.Done) |> List.length
+    , cancelledSubtaskCount = descendantTasks |> List.filter (\task -> task.status == Api.Cancelled) |> List.length
+    , blockedSubtaskCount = descendantTasks |> List.filter (\task -> task.status == Api.Blocked) |> List.length
+    , dependencyBlockedTaskCount = dependencyBlockedTaskCount
+    , openDependencyCount = openDependencyCount
+    , completionReady = not (List.any (\task -> isOpenTaskCardStatus task.status) descendantTasks)
+    }
+
+
+computeProjectReadinessRollup : Model -> String -> Api.ProjectReadinessRollup
+computeProjectReadinessRollup model projectId =
+    computeProjectReadinessRollupFrom (Dict.values model.projects) (Dict.values model.tasks) model.dependencies.taskDependencyLinks projectId
+
+
+computeProjectReadinessRollupFrom : List Api.Project -> List Api.Task -> List Api.WorkspaceTaskDependencyLink -> String -> Api.ProjectReadinessRollup
+computeProjectReadinessRollupFrom allProjects allTasks taskDependencyLinks projectId =
+    let
+        projectsById =
+            indexBy .id allProjects
+
+        tasksById =
+            indexBy .id allTasks
+
+        projectTreeIds =
+            collectDescendantProjectIds allProjects projectId |> uniqueStringList
+
+        descendantProjects =
+            projectTreeIds
+                |> List.filter ((/=) projectId)
+                |> List.filterMap (\id -> Dict.get id projectsById)
+
+        seededTaskIds =
+            allTasks
+                |> List.filter (\task -> task.projectId |> Maybe.map (\pid -> List.member pid projectTreeIds) |> Maybe.withDefault False)
+                |> List.concatMap (\task -> collectDescendantTaskIds allTasks task.id)
+                |> uniqueStringList
+
+        projectTasks =
+            seededTaskIds
+                |> List.filterMap (\id -> Dict.get id tasksById)
+
+        openDependencyEdges =
+            projectTasks
+                |> List.filter (\task -> isOpenTaskCardStatus task.status)
+                |> List.concatMap
+                    (\task ->
+                        taskDependencyLinks
+                            |> List.filter (\link -> link.taskId == task.id)
+                            |> List.filterMap
+                                (\link ->
+                                    Dict.get link.dependsOnId tasksById
+                                        |> Maybe.andThen
+                                            (\dependency ->
+                                                if isOpenTaskCardStatus dependency.status then
+                                                    Just ( task.id, dependency.id )
+
+                                                else
+                                                    Nothing
+                                            )
+                                )
+                    )
+                |> uniquePairs
+    in
+    { openProjectCount = descendantProjects |> List.filter (\project -> isOpenProjectCardStatus project.status) |> List.length
+    , closedProjectCount = descendantProjects |> List.filter (\project -> project.status == Api.ProjCompleted || project.status == Api.ProjArchived) |> List.length
+    , openTaskCount = projectTasks |> List.filter (\task -> isOpenTaskCardStatus task.status) |> List.length
+    , doneTaskCount = projectTasks |> List.filter (\task -> task.status == Api.Done) |> List.length
+    , cancelledTaskCount = projectTasks |> List.filter (\task -> task.status == Api.Cancelled) |> List.length
+    , blockedTaskCount = projectTasks |> List.filter (\task -> task.status == Api.Blocked) |> List.length
+    , dependencyBlockedTaskCount = openDependencyEdges |> List.map Tuple.first |> uniqueStringList |> List.length
+    , openDependencyCount = List.length openDependencyEdges
+    , completionReady =
+        not (List.any (\project -> isOpenProjectCardStatus project.status) descendantProjects)
+            && not (List.any (\task -> isOpenTaskCardStatus task.status) projectTasks)
+    }
+
+
+isOpenTaskCardStatus : Api.TaskStatus -> Bool
+isOpenTaskCardStatus status =
+    status == Api.Todo || status == Api.InProgress || status == Api.Blocked
+
+
+isOpenProjectCardStatus : Api.ProjectStatus -> Bool
+isOpenProjectCardStatus status =
+    status == Api.ProjActive || status == Api.ProjPaused
+
+
+uniqueStringList : List String -> List String
+uniqueStringList strings =
+    List.foldl
+        (\item acc ->
+            if List.member item acc then
+                acc
+
+            else
+                acc ++ [ item ]
+        )
+        []
+        strings
+
+
+uniquePairs : List ( String, String ) -> List ( String, String )
+uniquePairs pairs =
+    List.foldl
+        (\pair acc ->
+            if List.member pair acc then
+                acc
+
+            else
+                acc ++ [ pair ]
+        )
+        []
+        pairs
 
 
 beginTrackedMutation : List String -> Model -> ( Model, String, Cmd Msg )

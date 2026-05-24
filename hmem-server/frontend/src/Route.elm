@@ -22,6 +22,7 @@ loadWorkspaceData apiUrl wsId maybeLoadToken =
         [ Api.fetchProjects apiUrl wsId (GotProjects wsId maybeLoadToken 0)
         , Api.fetchTasks apiUrl wsId (GotTasks wsId maybeLoadToken 0)
         , Api.fetchMemories apiUrl wsId (GotMemories wsId maybeLoadToken 0)
+        , Api.fetchWorkspaceCardHydration apiUrl wsId (GotWorkspaceCardHydration wsId maybeLoadToken)
         ]
 
 
@@ -180,9 +181,10 @@ handleUrlChange url model =
                     updatedDataLoading =
                         { currentDataLoading
                             | loadingWorkspaceData = True
-                            , pendingWorkspaceLoads = 3
+                            , pendingWorkspaceLoads = 4
                             , activeWorkspaceLoadToken = Just currentDataLoading.nextWorkspaceLoadToken
                             , nextWorkspaceLoadToken = currentDataLoading.nextWorkspaceLoadToken + 1
+                            , cardHydrationLoaded = False
                         }
 
                     currentFocus =
@@ -220,6 +222,7 @@ handleUrlChange url model =
                             | linkingMemoryFor = Nothing
                             , linkingEntityFor = Nothing
                             , entityMemories = Dict.empty
+                            , entityMemoryIds = Dict.empty
                         }
 
                     currentDependencies =
@@ -228,6 +231,7 @@ handleUrlChange url model =
                     updatedDependencies =
                         { currentDependencies
                             | taskDependencies = Dict.empty
+                            , taskDependencyLinks = []
                             , taskReadinessRollups = Dict.empty
                             , projectReadinessRollups = Dict.empty
                             , addingDependencyFor = Nothing

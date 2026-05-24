@@ -1,6 +1,7 @@
 module Api exposing
     ( Workspace, Project, Task, NextTaskCandidate, Memory, MemoryLink
     , WorkspaceGroup, WorkspaceMembership
+    , WorkspaceCardHydration, WorkspaceProjectMemoryLink, WorkspaceTaskMemoryLink, WorkspaceTaskDependencyLink
     , TaskDependencySummary, TaskDependencyStatusChange, TaskReadinessRollup, DependencyMutationResult, TaskMutationResult, TaskOverview
     , ProjectReadinessRollup, ProjectOverview
     , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, UnifiedSearchResults
@@ -17,6 +18,7 @@ module Api exposing
     , fetchProjects, fetchProjectsPage, fetchProject
     , fetchTasks, fetchTasksPage, fetchTask
     , fetchMemories, fetchMemoriesPage, fetchMemory
+    , fetchWorkspaceCardHydration
     , fetchMemoryLinks
     , fetchWorkspaceLinks
     , fetchProjectMemories, fetchTaskMemories
@@ -34,7 +36,7 @@ module Api exposing
     , fetchWorkspaceGroups, createWorkspaceGroup, deleteWorkspaceGroup
     , fetchGroupMembers, addGroupMember, removeGroupMember
     , fetchAuditLog, fetchEntityHistory, revertAuditEntry
-    , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder, nextTaskCandidateDecoder
+    , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder, nextTaskCandidateDecoder, workspaceCardHydrationDecoder
     , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, auditLogEntryDecoder
     , memoryTypeToString, memoryTypeFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
     , auditActionToString, auditActionFromString
@@ -161,6 +163,31 @@ type alias WorkspaceMembership =
     , grantedBy : Maybe String
     , createdAt : String
     , updatedAt : String
+    }
+
+
+type alias WorkspaceProjectMemoryLink =
+    { projectId : String
+    , memoryId : String
+    }
+
+
+type alias WorkspaceTaskMemoryLink =
+    { taskId : String
+    , memoryId : String
+    }
+
+
+type alias WorkspaceTaskDependencyLink =
+    { taskId : String
+    , dependsOnId : String
+    }
+
+
+type alias WorkspaceCardHydration =
+    { projectMemoryLinks : List WorkspaceProjectMemoryLink
+    , taskMemoryLinks : List WorkspaceTaskMemoryLink
+    , taskDependencies : List WorkspaceTaskDependencyLink
     }
 
 
@@ -1414,6 +1441,14 @@ fetchMemory apiUrl memId toMsg =
         }
 
 
+fetchWorkspaceCardHydration : String -> String -> (Result Http.Error WorkspaceCardHydration -> msg) -> Cmd msg
+fetchWorkspaceCardHydration apiUrl wsId toMsg =
+    Http.get
+        { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/card-hydration"
+        , expect = Http.expectJson toMsg workspaceCardHydrationDecoder
+        }
+
+
 fetchMemoryLinks : String -> String -> (Result Http.Error (List MemoryLink) -> msg) -> Cmd msg
 fetchMemoryLinks apiUrl memId toMsg =
     Http.get
@@ -1848,6 +1883,35 @@ taskDependencySummaryDecoder =
     D.succeed TaskDependencySummary
         |> required "id" D.string
         |> required "name" D.string
+
+
+workspaceProjectMemoryLinkDecoder : Decoder WorkspaceProjectMemoryLink
+workspaceProjectMemoryLinkDecoder =
+    D.succeed WorkspaceProjectMemoryLink
+        |> required "project_id" D.string
+        |> required "memory_id" D.string
+
+
+workspaceTaskMemoryLinkDecoder : Decoder WorkspaceTaskMemoryLink
+workspaceTaskMemoryLinkDecoder =
+    D.succeed WorkspaceTaskMemoryLink
+        |> required "task_id" D.string
+        |> required "memory_id" D.string
+
+
+workspaceTaskDependencyLinkDecoder : Decoder WorkspaceTaskDependencyLink
+workspaceTaskDependencyLinkDecoder =
+    D.succeed WorkspaceTaskDependencyLink
+        |> required "task_id" D.string
+        |> required "depends_on_id" D.string
+
+
+workspaceCardHydrationDecoder : Decoder WorkspaceCardHydration
+workspaceCardHydrationDecoder =
+    D.succeed WorkspaceCardHydration
+        |> required "project_memory_links" (D.list workspaceProjectMemoryLinkDecoder)
+        |> required "task_memory_links" (D.list workspaceTaskMemoryLinkDecoder)
+        |> required "task_dependencies" (D.list workspaceTaskDependencyLinkDecoder)
 
 
 taskReadinessRollupDecoder : Decoder TaskReadinessRollup

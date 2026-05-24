@@ -90,6 +90,9 @@ update msg model =
         GotSingleMemory _ ->
             Ok (Feature.DataLoading.update msg model)
 
+        GotWorkspaceCardHydration _ _ _ ->
+            Ok (Feature.DataLoading.update msg model)
+
         GotVisualization _ _ ->
             Ok (Feature.Graph.update msg model)
 

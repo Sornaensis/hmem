@@ -248,6 +248,38 @@ suite =
 
                     Err err ->
                         Expect.fail (Decode.errorToString err)
+        , test "workspace card hydration decodes links and computes task readiness before card expansion" <|
+            \_ ->
+                let
+                    hydrationBody =
+                        """{"project_memory_links":[{"project_id":"project-a","memory_id":"project-memory"}],"task_memory_links":[{"task_id":"root","memory_id":"task-memory"},{"task_id":"child","memory_id":"child-memory"}],"task_dependencies":[{"task_id":"root","depends_on_id":"dependency"}]}"""
+
+                    root =
+                        task "root" Nothing (Just "project-a")
+
+                    child =
+                        task "child" (Just "root") (Just "project-a")
+
+                    dependency =
+                        task "dependency" Nothing (Just "project-a")
+                in
+                case Decode.decodeString Api.workspaceCardHydrationDecoder hydrationBody of
+                    Ok hydration ->
+                        let
+                            rollup =
+                                Helpers.computeTaskReadinessRollupFrom [ root, child, dependency ] hydration.taskDependencies "root"
+                        in
+                        [ List.length hydration.taskMemoryLinks == 2
+                        , List.length hydration.projectMemoryLinks == 1
+                        , rollup.openSubtaskCount == 1
+                        , rollup.openDependencyCount == 1
+                        , rollup.dependencyBlockedTaskCount == 1
+                        , rollup.completionReady == False
+                        ]
+                            |> Expect.equal (List.repeat 6 True)
+
+                    Err err ->
+                        Expect.fail (Decode.errorToString err)
         , test "next task empty-state copy distinguishes blocked diagnostics from parent-gated subtasks" <|
             \_ ->
                 let

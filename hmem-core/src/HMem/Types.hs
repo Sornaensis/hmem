@@ -23,6 +23,10 @@ module HMem.Types
   , Workspace(..)
   , CreateWorkspace(..)
   , UpdateWorkspace(..)
+  , WorkspaceCardHydration(..)
+  , WorkspaceProjectMemoryLink(..)
+  , WorkspaceTaskMemoryLink(..)
+  , WorkspaceTaskDependencyLink(..)
 
     -- * Workspace groups
   , WorkspaceGroup(..)
@@ -945,6 +949,49 @@ data ProjectListQuery = ProjectListQuery
 instance ToJSON ProjectListQuery where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON ProjectListQuery where
+  parseJSON  = genericParseJSON jsonOptions
+
+-- | Compact workspace-scoped relation data used to hydrate task/project cards
+-- without issuing one overview or linked-memory request per card.
+data WorkspaceProjectMemoryLink = WorkspaceProjectMemoryLink
+  { projectId :: UUID
+  , memoryId  :: UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspaceProjectMemoryLink where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON WorkspaceProjectMemoryLink where
+  parseJSON  = genericParseJSON jsonOptions
+
+data WorkspaceTaskMemoryLink = WorkspaceTaskMemoryLink
+  { taskId   :: UUID
+  , memoryId :: UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspaceTaskMemoryLink where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON WorkspaceTaskMemoryLink where
+  parseJSON  = genericParseJSON jsonOptions
+
+data WorkspaceTaskDependencyLink = WorkspaceTaskDependencyLink
+  { taskId      :: UUID
+  , dependsOnId :: UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspaceTaskDependencyLink where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON WorkspaceTaskDependencyLink where
+  parseJSON  = genericParseJSON jsonOptions
+
+data WorkspaceCardHydration = WorkspaceCardHydration
+  { projectMemoryLinks :: [WorkspaceProjectMemoryLink]
+  , taskMemoryLinks    :: [WorkspaceTaskMemoryLink]
+  , taskDependencies   :: [WorkspaceTaskDependencyLink]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspaceCardHydration where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON WorkspaceCardHydration where
   parseJSON  = genericParseJSON jsonOptions
 
 -- | Aggregated view of a project for planning workflows.

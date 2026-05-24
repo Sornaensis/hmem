@@ -17,6 +17,7 @@ init =
     , pendingWorkspaceLoads = 0
     , activeWorkspaceLoadToken = Nothing
     , nextWorkspaceLoadToken = 1
+    , cardHydrationLoaded = False
     }
 
 
@@ -33,7 +34,7 @@ prepareForPageLoad page dataLoading =
         , pendingWorkspaceLoads =
             case page of
                 WorkspacePage _ ->
-                    3
+                    4
 
                 _ ->
                     0
@@ -44,6 +45,7 @@ prepareForPageLoad page dataLoading =
 
                 _ ->
                     Nothing
+        , cardHydrationLoaded = False
         , nextWorkspaceLoadToken =
             case page of
                 WorkspacePage _ ->
@@ -120,6 +122,40 @@ mergePageById offset items existing =
 
     else
         Dict.union pageItems existing
+
+
+insertEntityMemoryId : String -> String -> Dict.Dict String (List String) -> Dict.Dict String (List String)
+insertEntityMemoryId entityId memoryId entityMemoryIds =
+    Dict.update entityId
+        (\existing ->
+            let
+                currentIds =
+                    Maybe.withDefault [] existing
+            in
+            Just
+                (if List.member memoryId currentIds then
+                    currentIds
+
+                 else
+                    currentIds ++ [ memoryId ]
+                )
+        )
+        entityMemoryIds
+
+
+entityMemoryIdsFromHydration : Api.WorkspaceCardHydration -> Dict.Dict String (List String)
+entityMemoryIdsFromHydration hydration =
+    let
+        withProjectLinks =
+            hydration.projectMemoryLinks
+                |> List.foldl
+                    (\link acc -> insertEntityMemoryId link.projectId link.memoryId acc)
+                    Dict.empty
+    in
+    hydration.taskMemoryLinks
+        |> List.foldl
+            (\link acc -> insertEntityMemoryId link.taskId link.memoryId acc)
+            withProjectLinks
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -299,6 +335,57 @@ update msg model =
 
                 Err _ ->
                     ( model, Cmd.none )
+
+        GotWorkspaceCardHydration wsId maybeToken result ->
+            if model.selectedWorkspaceId /= Just wsId then
+                ( model, Cmd.none )
+
+            else if not (acceptWorkspaceLoad maybeToken model.dataLoading) then
+                ( model, Cmd.none )
+
+            else
+                let
+                    finishedLoading loaded =
+                        let
+                            updated =
+                                finishWorkspaceLoad maybeToken model.dataLoading
+                        in
+                        { updated | cardHydrationLoaded = loaded }
+                in
+                case result of
+                    Ok hydration ->
+                        let
+                            currentMemory =
+                                model.memory
+
+                            currentDependencies =
+                                model.dependencies
+
+                            updatedMemory =
+                                { currentMemory
+                                    | entityMemories = Dict.empty
+                                    , entityMemoryIds = entityMemoryIdsFromHydration hydration
+                                }
+
+                            updatedDependencies =
+                                { currentDependencies
+                                    | taskDependencies = Dict.empty
+                                    , taskDependencyLinks = hydration.taskDependencies
+                                    , taskReadinessRollups = Dict.empty
+                                    , projectReadinessRollups = Dict.empty
+                                }
+                        in
+                        ( { model
+                            | memory = updatedMemory
+                            , dependencies = updatedDependencies
+                            , dataLoading = finishedLoading True
+                          }
+                        , Cmd.none
+                        )
+
+                    Err _ ->
+                        addToast Error "Failed to load task card details"
+                            { model | dataLoading = finishedLoading False }
 
         _ ->
             ( model, Cmd.none )

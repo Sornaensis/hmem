@@ -93,6 +93,7 @@ type alias DataLoadingModel =
     , pendingWorkspaceLoads : Int
     , activeWorkspaceLoadToken : Maybe Int
     , nextWorkspaceLoadToken : Int
+    , cardHydrationLoaded : Bool
     }
 
 
@@ -120,6 +121,7 @@ type alias EditingModel =
 
 type alias MemoryModel =
     { entityMemories : Dict String (List Api.Memory)
+    , entityMemoryIds : Dict String (List String)
     , linkingMemoryFor : Maybe LinkingState
     , linkingEntityFor : Maybe LinkingState
     }
@@ -127,6 +129,7 @@ type alias MemoryModel =
 
 type alias DependenciesModel =
     { taskDependencies : Dict String (List Api.TaskDependencySummary)
+    , taskDependencyLinks : List Api.WorkspaceTaskDependencyLink
     , taskReadinessRollups : Dict String Api.TaskReadinessRollup
     , projectReadinessRollups : Dict String Api.ProjectReadinessRollup
     , addingDependencyFor : Maybe AddDependencyState
@@ -391,6 +394,7 @@ type Msg
     | GotTasks String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Task))
     | GotMemories String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Memory))
     | GotSingleMemory (Result Http.Error Api.Memory)
+    | GotWorkspaceCardHydration String (Maybe Int) (Result Http.Error Api.WorkspaceCardHydration)
     | GotVisualization String (Result Http.Error Api.WorkspaceVisualization)
       -- Mutation responses
     | MutationDone String (Result Http.Error ())

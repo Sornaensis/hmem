@@ -546,6 +546,7 @@ stopAllLoading dataLoading =
         , loadingWorkspaceData = False
         , pendingWorkspaceLoads = 0
         , activeWorkspaceLoadToken = Nothing
+        , cardHydrationLoaded = False
     }
 
 

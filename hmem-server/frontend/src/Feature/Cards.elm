@@ -66,7 +66,7 @@ update msg model =
                     not current
 
                 fetchMemCmd =
-                    if newExpanded && not (Dict.member cardId model.memory.entityMemories) then
+                    if newExpanded && not (hasLinkedMemoryData model cardId) then
                         if Dict.member cardId model.projects then
                             Api.fetchProjectMemories model.flags.apiUrl cardId (GotEntityMemories cardId)
 
@@ -80,14 +80,14 @@ update msg model =
                         Cmd.none
 
                 fetchDepCmd =
-                    if newExpanded && Dict.member cardId model.tasks && not (Dict.member cardId model.dependencies.taskDependencies) then
+                    if newExpanded && Dict.member cardId model.tasks && not (hasTaskDependencyData model cardId) then
                         Api.fetchTaskOverview model.flags.apiUrl cardId (GotTaskDependencies cardId)
 
                     else
                         Cmd.none
 
                 fetchProjectOverviewCmd =
-                    if newExpanded && Dict.member cardId model.projects && not (Dict.member cardId model.dependencies.projectReadinessRollups) then
+                    if newExpanded && Dict.member cardId model.projects && Dict.get cardId model.dependencies.projectReadinessRollups == Nothing && not model.dataLoading.cardHydrationLoaded then
                         Api.fetchProjectOverview model.flags.apiUrl cardId (GotProjectOverview cardId)
 
                     else
@@ -353,6 +353,7 @@ update msg model =
                                 | dependencies =
                                     { currentDependencies
                                         | taskDependencies = Dict.empty
+                                        , taskDependencyLinks = []
                                         , taskReadinessRollups = Dict.empty
                                         , projectReadinessRollups = Dict.empty
                                     }
@@ -388,6 +389,7 @@ update msg model =
                                 | dependencies =
                                     { currentDependencies
                                         | taskDependencies = Dict.empty
+                                        , taskDependencyLinks = []
                                         , taskReadinessRollups = Dict.empty
                                         , projectReadinessRollups = Dict.empty
                                     }
@@ -1045,10 +1047,10 @@ viewProjectNode allProjects model depth project hasSearch query =
                    )
 
         linkedMems =
-            Dict.get project.id model.memory.entityMemories |> Maybe.withDefault []
+            linkedMemoriesForEntity model project.id
 
         maybeProjectRollup =
-            Dict.get project.id model.dependencies.projectReadinessRollups
+            projectReadinessRollupForProject model project.id
 
         projectSubtreeIds =
             collectDescendantProjectIds allProjects project.id
@@ -1625,7 +1627,7 @@ viewTaskCard showProject model task =
                 "card-task"
 
         linkedMems =
-            Dict.get task.id model.memory.entityMemories |> Maybe.withDefault []
+            linkedMemoriesForEntity model task.id
 
         allTasks =
             Dict.values model.tasks
@@ -1723,7 +1725,7 @@ viewTaskCard showProject model task =
                 childTasksForTask
 
             maybeRollup =
-                Dict.get task.id model.dependencies.taskReadinessRollups
+                taskReadinessRollupForTask model task.id
 
             remainingSubtasks =
                 maybeRollup
@@ -1744,7 +1746,11 @@ viewTaskCard showProject model task =
                 task.dependencyCount
 
             memCount =
-                task.memoryLinkCount
+                if model.dataLoading.cardHydrationLoaded then
+                    List.length linkedMems
+
+                else
+                    task.memoryLinkCount
 
             subtaskLabel =
                 let
@@ -1788,7 +1794,7 @@ viewTaskCard showProject model task =
             div [ class "card-summary" ] [ text (String.join " · " summaryParts) ]
         , let
             deps =
-                Dict.get task.id model.dependencies.taskDependencies |> Maybe.withDefault []
+                taskDependencySummariesForTask model task.id
 
             extrasExpanded =
                 isExpanded model task.id

@@ -28,6 +28,7 @@ import Types exposing (..)
 init : MemoryModel
 init =
     { entityMemories = Dict.empty
+    , entityMemoryIds = Dict.empty
     , linkingMemoryFor = Nothing
     , linkingEntityFor = Nothing
     }
@@ -141,7 +142,16 @@ update msg model =
         GotEntityMemories entityId result ->
             case result of
                 Ok mems ->
-                    ( updateMemoryModel (\mm -> { mm | entityMemories = Dict.insert entityId mems mm.entityMemories }) model, Cmd.none )
+                    ( updateMemoryModel
+                        (\mm ->
+                            { mm
+                                | entityMemories = Dict.insert entityId mems mm.entityMemories
+                                , entityMemoryIds = Dict.insert entityId (List.map .id mems) mm.entityMemoryIds
+                            }
+                        )
+                        model
+                    , Cmd.none
+                    )
 
                 Err _ ->
                     addToast Error "Failed to load linked memories" model

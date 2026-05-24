@@ -21,6 +21,7 @@ import Types exposing (..)
 init : DependenciesModel
 init =
     { taskDependencies = Dict.empty
+    , taskDependencyLinks = []
     , taskReadinessRollups = Dict.empty
     , projectReadinessRollups = Dict.empty
     , addingDependencyFor = Nothing
@@ -147,18 +148,27 @@ update msg model =
                         updatedModel =
                             applyDependencyMutationResult mutationResult model
 
+                        dependenciesModel =
+                            updatedModel.dependencies
+
+                        updatedDependencyLinks =
+                            applyTaskDependencyLinkMutation mutationResult dependenciesModel.taskDependencyLinks
+
+                        modelWithHydratedLinks =
+                            { updatedModel | dependencies = { dependenciesModel | taskDependencyLinks = updatedDependencyLinks } }
+
                         projectReadinessCmds =
-                            updatedModel.dependencies.projectReadinessRollups
+                            modelWithHydratedLinks.dependencies.projectReadinessRollups
                                 |> Dict.keys
-                                |> List.map (\projectId -> Api.fetchProjectOverview updatedModel.flags.apiUrl projectId (GotProjectOverview projectId))
+                                |> List.map (\projectId -> Api.fetchProjectOverview modelWithHydratedLinks.flags.apiUrl projectId (GotProjectOverview projectId))
 
                         taskReadinessCmds =
-                            updatedModel.dependencies.taskDependencies
+                            modelWithHydratedLinks.dependencies.taskDependencies
                                 |> Dict.keys
-                                |> List.map (\cachedTaskId -> Api.fetchTaskOverview updatedModel.flags.apiUrl cachedTaskId (GotTaskDependencies cachedTaskId))
+                                |> List.map (\cachedTaskId -> Api.fetchTaskOverview modelWithHydratedLinks.flags.apiUrl cachedTaskId (GotTaskDependencies cachedTaskId))
                     in
-                    ( updatedModel
-                    , Cmd.batch ([ Api.fetchTaskOverview updatedModel.flags.apiUrl taskId (GotTaskDependencies taskId) ] ++ taskReadinessCmds ++ projectReadinessCmds)
+                    ( modelWithHydratedLinks
+                    , Cmd.batch ([ Api.fetchTaskOverview modelWithHydratedLinks.flags.apiUrl taskId (GotTaskDependencies taskId) ] ++ taskReadinessCmds ++ projectReadinessCmds)
                     )
 
                 Err _ ->

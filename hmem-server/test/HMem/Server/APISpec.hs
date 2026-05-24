@@ -3225,6 +3225,58 @@ spec = around withApp $ do
       assertValidationErrorContains "memories[0].task_id" batchResp
       assertValidationErrorContains "top-level task" batchResp
 
+  describe "workspace card hydration" $ do
+    it "returns dependencies and linked memories for task cards in one workspace request" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("card-hydration-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      projResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Hydrated Project" :: T.Text)])
+      let Just proj = decode (respBody projResp) :: Maybe Project
+      rootResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Root" :: T.Text)])
+      let Just root = decode (respBody rootResp) :: Maybe Task
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "parent_id" .= root.id, "title" .= ("Child" :: T.Text)])
+      let Just child = decode (respBody childResp) :: Maybe Task
+      dependencyResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "title" .= ("Dependency" :: T.Text)])
+      let Just dependency = decode (respBody dependencyResp) :: Maybe Task
+
+      depResp <- postJSON app (uuidPath "/api/v1/tasks" root.id <> "/dependencies")
+        (object ["depends_on_id" .= dependency.id])
+      respStatus depResp `shouldBe` 200
+
+      projectMemResp <- postJSON app "/api/v1/memories"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "content" .= ("project memory" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
+      let Just projectMem = decode (respBody projectMemResp) :: Maybe Memory
+      taskMemResp <- postJSON app "/api/v1/memories"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "content" .= ("root memory" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
+      let Just taskMem = decode (respBody taskMemResp) :: Maybe Memory
+      childMemResp <- postJSON app "/api/v1/memories"
+        (object ["workspace_id" .= ws.id, "project_id" .= proj.id, "content" .= ("child memory" :: T.Text), "memory_type" .= ("short_term" :: T.Text)])
+      let Just childMem = decode (respBody childMemResp) :: Maybe Memory
+
+      linkProjectResp <- postJSON app (uuidPath "/api/v1/projects" proj.id <> "/memories")
+        (object ["memory_id" .= projectMem.id])
+      respStatus linkProjectResp `shouldBe` 200
+      linkTaskResp <- postJSON app (uuidPath "/api/v1/tasks" root.id <> "/memories")
+        (object ["memory_id" .= taskMem.id])
+      respStatus linkTaskResp `shouldBe` 200
+      linkChildResp <- postJSON app (uuidPath "/api/v1/tasks" child.id <> "/memories")
+        (object ["memory_id" .= childMem.id])
+      respStatus linkChildResp `shouldBe` 200
+
+      hydrationResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/card-hydration")
+      respStatus hydrationResp `shouldBe` 200
+      let Just hydration = decode (respBody hydrationResp) :: Maybe WorkspaceCardHydration
+      map (\link -> (link.taskId, link.dependsOnId)) hydration.taskDependencies
+        `shouldMatchList` [(root.id, dependency.id)]
+      map (\link -> (link.taskId, link.memoryId)) hydration.taskMemoryLinks
+        `shouldMatchList` [(root.id, taskMem.id), (child.id, childMem.id)]
+      map (\link -> (link.projectId, link.memoryId)) hydration.projectMemoryLinks
+        `shouldMatchList` [(proj.id, projectMem.id), (proj.id, taskMem.id), (proj.id, childMem.id)]
+
   describe "task dependencies via API" $ do
     it "adds dependency and rejects cycle" $ \app -> do
       wsResp <- postJSON app "/api/v1/workspaces"

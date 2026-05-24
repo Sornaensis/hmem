@@ -121,6 +121,73 @@ suite =
                 in
                 Feature.Cards.projectCascadePreview "root-project" projects tasks
                     |> Expect.equal (Just { affected = 6, projectCount = 3, taskCount = 3 })
+        , test "task filters keep parent context when only a subtask matches" <|
+            \_ ->
+                let
+                    parent =
+                        task "parent" Nothing (Just "project-a")
+
+                    matchingSubtask =
+                        { task "matching-subtask" (Just "parent") (Just "project-a") | status = Api.Done }
+
+                    hiddenSubtask =
+                        { task "hidden-subtask" (Just "parent") (Just "project-a") | status = Api.Todo }
+
+                    allTasks =
+                        [ parent, matchingSubtask, hiddenSubtask ]
+
+                    doneOnly candidate =
+                        candidate.status == Api.Done
+                in
+                ( Feature.Cards.visibleTaskTreeForCriteria "" False doneOnly allTasks [ parent ] |> List.map .id
+                , Feature.Cards.visibleTaskTreeForCriteria "" False doneOnly allTasks [ matchingSubtask, hiddenSubtask ] |> List.map .id
+                , Feature.Cards.taskShownForMatchingDescendant "" False doneOnly allTasks parent
+                )
+                    |> Expect.equal ( [ "parent" ], [ "matching-subtask" ], True )
+        , test "task text search includes parents for matching subtasks" <|
+            \_ ->
+                let
+                    parent =
+                        task "parent" Nothing (Just "project-a")
+
+                    matchingSubtask =
+                        { task "matching-subtask" (Just "parent") (Just "project-a") | title = "Needle child" }
+
+                    allTasks =
+                        [ parent, matchingSubtask ]
+
+                    anyTask _ =
+                        True
+                in
+                ( Feature.Cards.visibleTaskTreeForCriteria "needle" True anyTask allTasks [ parent ] |> List.map .id
+                , Feature.Cards.taskShownForMatchingDescendant "needle" True anyTask allTasks parent
+                )
+                    |> Expect.equal ( [ "parent" ], True )
+        , test "combined task search and filters must match the same subtask" <|
+            \_ ->
+                let
+                    parent =
+                        task "parent" Nothing (Just "project-a")
+
+                    searchOnlySubtask =
+                        { task "search-only" (Just "parent") (Just "project-a") | title = "Needle but todo", status = Api.Todo }
+
+                    filterOnlySubtask =
+                        { task "filter-only" (Just "parent") (Just "project-a") | title = "Done without query", status = Api.Done }
+
+                    matchingSubtask =
+                        { task "matching" (Just "parent") (Just "project-a") | title = "Needle and done", status = Api.Done }
+
+                    allTasks =
+                        [ parent, searchOnlySubtask, filterOnlySubtask, matchingSubtask ]
+
+                    doneOnly candidate =
+                        candidate.status == Api.Done
+                in
+                ( Feature.Cards.visibleTaskTreeForCriteria "needle" True doneOnly allTasks [ parent ] |> List.map .id
+                , Feature.Cards.visibleTaskTreeForCriteria "needle" True doneOnly allTasks [ searchOnlySubtask, filterOnlySubtask, matchingSubtask ] |> List.map .id
+                )
+                    |> Expect.equal ( [ "parent" ], [ "matching" ] )
         , test "stale cascade delete result communicates final server counts" <|
             \_ ->
                 let

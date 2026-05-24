@@ -10,7 +10,9 @@ module Feature.Cards exposing
     , projectCompletionBlockerReason
     , taskCascadePreview
     , taskCompletionBlockerReason
+    , taskShownForMatchingDescendant
     , update
+    , visibleTaskTreeForCriteria
     , viewDeleteConfirmModal
     , viewProjectsTree
     )
@@ -845,18 +847,17 @@ viewProjectsTree wsId model =
         hasSearch =
             not (String.isEmpty query)
 
-        hasActiveFilters =
-            model.search.filterShowOnly /= ShowAll || model.search.filterPriority /= AnyPriority || not (List.isEmpty model.search.filterProjectStatuses) || not (List.isEmpty model.search.filterTaskStatuses)
+        hasTreeCriteria =
+            treeCriteriaActive query model
 
-        projectPassesFilters p =
-            (model.search.filterShowOnly /= ShowTasksOnly)
-                && passesStatusFilter model.search.filterProjectStatuses (Api.projectStatusToString p.status)
-                && passesPriorityFilter model.search.filterPriority p.priority
+        projectStatusGate =
+            projectPassesStatusFilter model
 
-        taskPassesFilters t =
-            (model.search.filterShowOnly /= ShowProjectsOnly)
-                && passesStatusFilter model.search.filterTaskStatuses (Api.taskStatusToString t.status)
-                && passesPriorityFilter model.search.filterPriority t.priority
+        projectPassesFilters =
+            projectPassesCurrentFilters model
+
+        taskPassesFilters =
+            taskPassesCurrentFilters model
 
         expandCollapseBar =
             div [ class "tree-toolbar" ]
@@ -899,14 +900,8 @@ viewProjectsTree wsId model =
 
                                 visibleRootTasks =
                                     rootTasks
-                                        |> (if hasSearch then
-                                                List.filter (taskTreeMatchesSearch query wsTasks)
-
-                                            else
-                                                identity
-                                           )
-                                        |> (if hasActiveFilters then
-                                                List.filter (\t -> taskTreePassesFilters t wsTasks taskPassesFilters)
+                                        |> (if hasTreeCriteria then
+                                                visibleTaskTreeForCriteria query hasSearch taskPassesFilters wsTasks
 
                                             else
                                                 identity
@@ -923,14 +918,8 @@ viewProjectsTree wsId model =
 
                                 visibleRootProjects =
                                     rootProjects
-                                        |> (if hasSearch then
-                                                List.filter (projectTreeMatchesSearch query wsProjects wsTasks)
-
-                                            else
-                                                identity
-                                           )
-                                        |> (if hasActiveFilters then
-                                                List.filter (\p -> projectTreePassesFilters (\pp -> passesStatusFilter model.search.filterProjectStatuses (Api.projectStatusToString pp.status)) p wsProjects wsTasks projectPassesFilters taskPassesFilters)
+                                        |> (if hasTreeCriteria then
+                                                List.filter (projectTreeMatchesCriteria query hasSearch projectStatusGate wsProjects wsTasks projectPassesFilters taskPassesFilters)
 
                                             else
                                                 identity
@@ -943,14 +932,8 @@ viewProjectsTree wsId model =
 
                                 visibleOrphans =
                                     orphanTasks
-                                        |> (if hasSearch then
-                                                List.filter (taskTreeMatchesSearch query wsTasks)
-
-                                            else
-                                                identity
-                                           )
-                                        |> (if hasActiveFilters then
-                                                List.filter (\t -> taskTreePassesFilters t wsTasks taskPassesFilters)
+                                        |> (if hasTreeCriteria then
+                                                visibleTaskTreeForCriteria query hasSearch taskPassesFilters wsTasks
 
                                             else
                                                 identity
@@ -970,13 +953,31 @@ viewProjectsTree wsId model =
                                     else
                                         []
                                    )
+
+        contentWithEmptyState =
+            if List.isEmpty treeContent then
+                [ ( "empty-state"
+                  , div [ class "empty-state" ]
+                        [ text
+                            (if hasTreeCriteria then
+                                "No projects or tasks match the current filters."
+
+                             else
+                                "No projects or tasks yet."
+                            )
+                        ]
+                  )
+                ]
+
+            else
+                treeContent
     in
     Keyed.node "div"
         [ class "tree-view" ]
         (( "expand-collapse-bar", expandCollapseBar )
             :: ( "inline-create", inlineCreateView )
             :: ( "focus-breadcrumb", focusBreadcrumbBar )
-            :: treeContent
+            :: contentWithEmptyState
         )
 
 
@@ -986,18 +987,17 @@ viewProjectNode allProjects model depth project hasSearch query =
         allTasks =
             Dict.values model.tasks
 
-        hasActiveFilters =
-            model.search.filterShowOnly /= ShowAll || model.search.filterPriority /= AnyPriority || not (List.isEmpty model.search.filterProjectStatuses) || not (List.isEmpty model.search.filterTaskStatuses)
+        hasTreeCriteria =
+            treeCriteriaActive query model
 
-        projectPassesFilters p =
-            (model.search.filterShowOnly /= ShowTasksOnly)
-                && passesStatusFilter model.search.filterProjectStatuses (Api.projectStatusToString p.status)
-                && passesPriorityFilter model.search.filterPriority p.priority
+        projectStatusGate =
+            projectPassesStatusFilter model
 
-        taskPassesFilters t =
-            (model.search.filterShowOnly /= ShowProjectsOnly)
-                && passesStatusFilter model.search.filterTaskStatuses (Api.taskStatusToString t.status)
-                && passesPriorityFilter model.search.filterPriority t.priority
+        projectPassesFilters =
+            projectPassesCurrentFilters model
+
+        taskPassesFilters =
+            taskPassesCurrentFilters model
 
         children =
             allProjects
@@ -1006,14 +1006,8 @@ viewProjectNode allProjects model depth project hasSearch query =
 
         visibleChildren =
             children
-                |> (if hasSearch then
-                        List.filter (projectTreeMatchesSearch query allProjects allTasks)
-
-                    else
-                        identity
-                   )
-                |> (if hasActiveFilters then
-                        List.filter (\p -> projectTreePassesFilters (\pp -> passesStatusFilter model.search.filterProjectStatuses (Api.projectStatusToString pp.status)) p allProjects allTasks projectPassesFilters taskPassesFilters)
+                |> (if hasTreeCriteria then
+                        List.filter (projectTreeMatchesCriteria query hasSearch projectStatusGate allProjects allTasks projectPassesFilters taskPassesFilters)
 
                     else
                         identity
@@ -1033,14 +1027,8 @@ viewProjectNode allProjects model depth project hasSearch query =
 
         visibleTasks =
             projectTasks
-                |> (if hasSearch then
-                        List.filter (taskTreeMatchesSearch query allTasks)
-
-                    else
-                        identity
-                   )
-                |> (if hasActiveFilters then
-                        List.filter (\t -> taskTreePassesFilters t allTasks taskPassesFilters)
+                |> (if hasTreeCriteria then
+                        visibleTaskTreeForCriteria query hasSearch taskPassesFilters allTasks
 
                     else
                         identity
@@ -1636,6 +1624,21 @@ viewTaskCard showProject model task =
             allTasks
                 |> List.filter (\t -> t.parentId == Just task.id)
 
+        query =
+            String.toLower (String.trim model.search.query)
+
+        hasSearch =
+            not (String.isEmpty query)
+
+        hasTreeCriteria =
+            treeCriteriaActive query model
+
+        taskPassesFilters =
+            taskPassesCurrentFilters model
+
+        shownForMatchingSubtask =
+            hasTreeCriteria && taskShownForMatchingDescendant query hasSearch taskPassesFilters allTasks task
+
         openDescendantTaskCount =
             childTasksForTask
                 |> List.filter (\t -> isOpenTaskStatus t.status)
@@ -1792,6 +1795,11 @@ viewTaskCard showProject model task =
 
           else
             div [ class "card-summary" ] [ text (String.join " · " summaryParts) ]
+        , if shownForMatchingSubtask then
+            div [ class "card-filter-context-note" ] [ text "Shown because a subtask matches the current filters." ]
+
+          else
+            text ""
         , let
             deps =
                 taskDependencySummariesForTask model task.id
@@ -1870,9 +1878,13 @@ viewTaskCard showProject model task =
         , if hasChildren && not collapsed then
             let
                 childTasks =
-                    model.tasks
-                        |> Dict.values
-                        |> List.filter (\t -> t.parentId == Just task.id)
+                    childTasksForTask
+                        |> (if hasTreeCriteria then
+                                visibleTaskTreeForCriteria query hasSearch taskPassesFilters allTasks
+
+                            else
+                                identity
+                           )
                         |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
             in
             Keyed.node "div" [ class "tree-children" ]
@@ -2186,10 +2198,85 @@ viewProjectsWithZones model renderProject parentId projects =
             go projects 0 Nothing
 
 
-projectTreeMatchesSearch : String -> List Api.Project -> List Api.Task -> Api.Project -> Bool
-projectTreeMatchesSearch query allProjects allTasks project =
+treeCriteriaActive : String -> Model -> Bool
+treeCriteriaActive query model =
+    not (String.isEmpty query)
+        || model.search.filterShowOnly /= ShowAll
+        || model.search.filterPriority /= AnyPriority
+        || not (List.isEmpty model.search.filterProjectStatuses)
+        || not (List.isEmpty model.search.filterTaskStatuses)
+
+
+projectPassesStatusFilter : Model -> Api.Project -> Bool
+projectPassesStatusFilter model project =
+    passesStatusFilter model.search.filterProjectStatuses (Api.projectStatusToString project.status)
+
+
+projectPassesCurrentFilters : Model -> Api.Project -> Bool
+projectPassesCurrentFilters model project =
+    (model.search.filterShowOnly /= ShowTasksOnly)
+        && projectPassesStatusFilter model project
+        && passesPriorityFilter model.search.filterPriority project.priority
+
+
+taskPassesCurrentFilters : Model -> Api.Task -> Bool
+taskPassesCurrentFilters model task =
+    (model.search.filterShowOnly /= ShowProjectsOnly)
+        && passesStatusFilter model.search.filterTaskStatuses (Api.taskStatusToString task.status)
+        && passesPriorityFilter model.search.filterPriority task.priority
+
+
+projectMatchesActiveCriteria : String -> Bool -> (Api.Project -> Bool) -> Api.Project -> Bool
+projectMatchesActiveCriteria query hasSearch projectFilter project =
+    (not hasSearch || projectMatchesSearch query project)
+        && projectFilter project
+
+
+taskMatchesActiveCriteria : String -> Bool -> (Api.Task -> Bool) -> Api.Task -> Bool
+taskMatchesActiveCriteria query hasSearch taskFilter task =
+    (not hasSearch || taskMatchesSearch query task)
+        && taskFilter task
+
+
+projectTreeMatchesCriteria : String -> Bool -> (Api.Project -> Bool) -> List Api.Project -> List Api.Task -> (Api.Project -> Bool) -> (Api.Task -> Bool) -> Api.Project -> Bool
+projectTreeMatchesCriteria query hasSearch projectStatusGate allProjects allTasks projectFilter taskFilter project =
+    projectStatusGate project
+        && (projectMatchesActiveCriteria query hasSearch projectFilter project
+                || List.any (projectTreeMatchesCriteria query hasSearch projectStatusGate allProjects allTasks projectFilter taskFilter)
+                    (List.filter (\p -> p.parentId == Just project.id) allProjects)
+                || List.any (taskTreeMatchesCriteria query hasSearch allTasks taskFilter)
+                    (List.filter (\t -> t.projectId == Just project.id && t.parentId == Nothing) allTasks)
+           )
+
+
+taskTreeMatchesCriteria : String -> Bool -> List Api.Task -> (Api.Task -> Bool) -> Api.Task -> Bool
+taskTreeMatchesCriteria query hasSearch allTasks taskFilter task =
+    taskMatchesActiveCriteria query hasSearch taskFilter task
+        || List.any (taskTreeMatchesCriteria query hasSearch allTasks taskFilter)
+            (List.filter (\t -> t.parentId == Just task.id) allTasks)
+
+
+visibleTaskTreeForCriteria : String -> Bool -> (Api.Task -> Bool) -> List Api.Task -> List Api.Task -> List Api.Task
+visibleTaskTreeForCriteria query hasSearch taskFilter allTasks tasks =
+    List.filter (taskTreeMatchesCriteria query hasSearch allTasks taskFilter) tasks
+
+
+taskShownForMatchingDescendant : String -> Bool -> (Api.Task -> Bool) -> List Api.Task -> Api.Task -> Bool
+taskShownForMatchingDescendant query hasSearch taskFilter allTasks task =
+    (not (taskMatchesActiveCriteria query hasSearch taskFilter task))
+        && List.any (taskTreeMatchesCriteria query hasSearch allTasks taskFilter)
+            (List.filter (\candidate -> candidate.parentId == Just task.id) allTasks)
+
+
+projectMatchesSearch : String -> Api.Project -> Bool
+projectMatchesSearch query project =
     matchesSearch query project.name
         || (project.description |> Maybe.map (matchesSearch query) |> Maybe.withDefault False)
+
+
+projectTreeMatchesSearch : String -> List Api.Project -> List Api.Task -> Api.Project -> Bool
+projectTreeMatchesSearch query allProjects allTasks project =
+    projectMatchesSearch query project
         || List.any (projectTreeMatchesSearch query allProjects allTasks)
             (List.filter (\p -> p.parentId == Just project.id) allProjects)
         || List.any (taskMatchesSearch query)

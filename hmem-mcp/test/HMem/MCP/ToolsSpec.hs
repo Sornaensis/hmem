@@ -275,17 +275,23 @@ spec = do
       (mResult >>= jsonField "isError") `shouldBe` Just (Bool True)
       (mResult >>= mcpTextContent) `shouldBe` Just "Unknown tool: saved_view"
 
-    it "routes search tools/call through JSON-RPC dispatch and compact shaping" $ do
+    it "routes search tools/call through JSON-RPC dispatch with workspace context injection" $ do
       fixtures <- readCompactResponseFixtures
       withMockHmemServer $ \mgr base -> do
         initialized <- newTVarIO True
         wsContext <- newTVarIO Nothing
+        setResponse <- handleRequest mgr base Nothing initialized wsContext $
+          JsonRpcRequest (Just (String "set-workspace")) "tools/call" $ Just $ object
+            [ "name" .= ("set_workspace" :: Text)
+            , "arguments" .= object ["workspace_id" .= testUUID2]
+            ]
+        (setResponse >>= jsonField "result" >>= mcpTextValue >>= jsonField "workspace_id") `shouldBe` Just (String testUUID2)
+
         mResponse <- handleRequest mgr base Nothing initialized wsContext $
           JsonRpcRequest (Just (String "search-call")) "tools/call" $ Just $ object
             [ "name" .= ("search" :: Text)
             , "arguments" .= object
-                [ "workspace_id" .= testUUID2
-                , "entity_types" .= (["memory", "project", "task"] :: [Text])
+                [ "entity_types" .= (["memory", "project", "task"] :: [Text])
                 , "limit" .= (5 :: Int)
                 ]
             ]

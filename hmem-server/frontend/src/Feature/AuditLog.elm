@@ -1,4 +1,4 @@
-module Feature.AuditLog exposing (init, update, viewAuditLogPage, viewWorkspaceAuditPanel, viewEntityHistory, viewRevertConfirmModal)
+module Feature.AuditLog exposing (AuditFieldChange, auditActionDetailItems, auditChangedFieldItems, auditContextDetailItems, init, update, viewAuditLogPage, viewWorkspaceAuditPanel, viewEntityHistory, viewRevertConfirmModal)
 
 import Api
 import Browser.Navigation as Nav
@@ -8,6 +8,7 @@ import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Json.Decode as Decode
+import Json.Encode as Encode
 import Permissions
 import Toast exposing (addToast)
 import Types exposing (..)
@@ -612,6 +613,591 @@ auditEntitySummary model entry =
                     )
 
 
+type alias AuditFieldChange =
+    { field : String
+    , label : String
+    , oldValue : Maybe String
+    , newValue : Maybe String
+    }
+
+
+auditContextDetailItems : Api.AuditLogEntry -> List ( String, String )
+auditContextDetailItems entry =
+    [ ( "Actor", auditActorSummary entry )
+    , ( "Action type", auditActionToDisplay entry.action )
+    , ( "Target entity", auditEntityTypeLabel entry.entityType )
+    , ( "Target ID", entry.entityId )
+    , ( "Timestamp", entry.changedAt )
+    , ( "Audit entry ID", entry.id )
+    ]
+        ++ maybeDetail "Actor type" entry.actorType
+        ++ maybeDetail "Actor ID" entry.actorId
+        ++ maybeDetail "Workspace ID" entry.workspaceId
+        ++ maybeDetail "Request ID" entry.requestId
+
+
+auditActionDetailItems : Api.AuditLogEntry -> List ( String, String )
+auditActionDetailItems entry =
+    ( "Operation", auditOperationLabel entry )
+        :: (auditStatusChangeDetailItems entry
+                ++ auditRelationshipDetailItems entry
+                ++ auditSnapshotDetailItems entry
+           )
+
+
+auditChangedFieldItems : Api.AuditLogEntry -> List AuditFieldChange
+auditChangedFieldItems entry =
+    auditChangedFieldItemsFromValues entry.oldValues entry.newValues
+
+
+maybeDetail : String -> Maybe String -> List ( String, String )
+maybeDetail label mValue =
+    case mValue of
+        Just value ->
+            if String.isEmpty value then
+                []
+
+            else
+                [ ( label, value ) ]
+
+        Nothing ->
+            []
+
+
+auditActionToDisplay : Api.AuditAction -> String
+auditActionToDisplay action =
+    case action of
+        Api.AuditCreate ->
+            "Create"
+
+        Api.AuditUpdate ->
+            "Update"
+
+        Api.AuditDelete ->
+            "Delete"
+
+
+pastTenseAuditAction : Api.AuditAction -> String
+pastTenseAuditAction action =
+    case action of
+        Api.AuditCreate ->
+            "Created"
+
+        Api.AuditUpdate ->
+            "Updated"
+
+        Api.AuditDelete ->
+            "Deleted"
+
+
+auditEntityTypeLabel : String -> String
+auditEntityTypeLabel entityType =
+    case entityType of
+        "memory_link" ->
+            "memory link"
+
+        "memory_tag" ->
+            "memory tag"
+
+        "memory_category" ->
+            "memory category"
+
+        "memory_category_link" ->
+            "memory category link"
+
+        "project_memory_link" ->
+            "project memory link"
+
+        "task_memory_link" ->
+            "task memory link"
+
+        "task_dependency" ->
+            "task dependency"
+
+        "workspace_group" ->
+            "workspace group"
+
+        "workspace_group_member" ->
+            "workspace group member"
+
+        "cleanup_policy" ->
+            "cleanup policy"
+
+        other ->
+            String.replace "_" " " other
+
+
+auditOperationLabel : Api.AuditLogEntry -> String
+auditOperationLabel entry =
+    case auditStatusChangeLabel entry of
+        Just label ->
+            label
+
+        Nothing ->
+            case ( entry.entityType, entry.action ) of
+                ( "task_dependency", Api.AuditCreate ) ->
+                    "Added task dependency"
+
+                ( "task_dependency", Api.AuditDelete ) ->
+                    "Removed task dependency"
+
+                ( "project_memory_link", Api.AuditCreate ) ->
+                    "Linked memory to project"
+
+                ( "project_memory_link", Api.AuditDelete ) ->
+                    "Unlinked memory from project"
+
+                ( "task_memory_link", Api.AuditCreate ) ->
+                    "Linked memory to task"
+
+                ( "task_memory_link", Api.AuditDelete ) ->
+                    "Unlinked memory from task"
+
+                ( "memory_link", Api.AuditCreate ) ->
+                    "Linked memories"
+
+                ( "memory_link", Api.AuditDelete ) ->
+                    "Unlinked memories"
+
+                ( "memory_tag", Api.AuditCreate ) ->
+                    "Added memory tag"
+
+                ( "memory_tag", Api.AuditDelete ) ->
+                    "Removed memory tag"
+
+                ( "memory_category_link", Api.AuditCreate ) ->
+                    "Linked memory to category"
+
+                ( "memory_category_link", Api.AuditDelete ) ->
+                    "Unlinked memory from category"
+
+                ( "workspace_group_member", Api.AuditCreate ) ->
+                    "Added workspace to group"
+
+                ( "workspace_group_member", Api.AuditDelete ) ->
+                    "Removed workspace from group"
+
+                _ ->
+                    pastTenseAuditAction entry.action ++ " " ++ auditEntityTypeLabel entry.entityType
+
+
+auditStatusChangeLabel : Api.AuditLogEntry -> Maybe String
+auditStatusChangeLabel entry =
+    case auditStatusChange entry of
+        Just _ ->
+            case ( entry.entityType, entry.action, auditNewValueFor "status" entry ) of
+                ( "project", Api.AuditUpdate, Just "archived" ) ->
+                    Just "Archived project"
+
+                ( "project", Api.AuditUpdate, _ ) ->
+                    Just "Changed project status"
+
+                ( "task", Api.AuditUpdate, _ ) ->
+                    Just "Changed task status"
+
+                _ ->
+                    Just ("Changed " ++ auditEntityTypeLabel entry.entityType ++ " status")
+
+        Nothing ->
+            Nothing
+
+
+auditStatusChangeDetailItems : Api.AuditLogEntry -> List ( String, String )
+auditStatusChangeDetailItems entry =
+    case auditStatusChange entry of
+        Just ( oldStatus, newStatus ) ->
+            [ ( "Status change", oldStatus ++ " → " ++ newStatus ) ]
+
+        Nothing ->
+            []
+
+
+auditStatusChange : Api.AuditLogEntry -> Maybe ( String, String )
+auditStatusChange entry =
+    case ( auditOldValueFor "status" entry, auditNewValueFor "status" entry ) of
+        ( Just oldStatus, Just newStatus ) ->
+            if oldStatus == newStatus then
+                Nothing
+
+            else
+                Just ( oldStatus, newStatus )
+
+        _ ->
+            Nothing
+
+
+auditRelationshipDetailItems : Api.AuditLogEntry -> List ( String, String )
+auditRelationshipDetailItems entry =
+    case entry.entityType of
+        "memory_link" ->
+            auditFieldsAsDetails entry [ "source_id", "target_id", "relation_type", "strength" ]
+
+        "memory_tag" ->
+            auditFieldsAsDetails entry [ "memory_id", "tag" ]
+
+        "memory_category_link" ->
+            auditFieldsAsDetails entry [ "memory_id", "category_id" ]
+
+        "project_memory_link" ->
+            auditFieldsAsDetails entry [ "project_id", "memory_id" ]
+
+        "task_memory_link" ->
+            auditFieldsAsDetails entry [ "task_id", "memory_id" ]
+
+        "task_dependency" ->
+            auditFieldsAsDetails entry [ "task_id", "depends_on_id" ]
+
+        "workspace_group_member" ->
+            auditFieldsAsDetails entry [ "group_id", "workspace_id" ]
+
+        _ ->
+            []
+
+
+auditFieldsAsDetails : Api.AuditLogEntry -> List String -> List ( String, String )
+auditFieldsAsDetails entry fields =
+    fields
+        |> List.filterMap (\field -> auditValueFor field entry |> Maybe.map (\value -> ( auditFieldLabel field, value )))
+
+
+auditSnapshotDetailItems : Api.AuditLogEntry -> List ( String, String )
+auditSnapshotDetailItems entry =
+    let
+        relationshipFields =
+            auditRelationshipDetailItems entry |> List.map Tuple.first
+
+        includeField field =
+            not (List.member (auditFieldLabel field) relationshipFields)
+    in
+    case auditSnapshotValue entry of
+        Just value ->
+            auditSnapshotDetailItemsFromValue value
+                |> List.filter (\( label, _ ) -> includeField (auditFieldFromLabel label))
+
+        Nothing ->
+            []
+
+
+auditSnapshotValue : Api.AuditLogEntry -> Maybe Decode.Value
+auditSnapshotValue entry =
+    case entry.action of
+        Api.AuditDelete ->
+            entry.oldValues
+
+        _ ->
+            entry.newValues
+
+
+auditOldValueFor : String -> Api.AuditLogEntry -> Maybe String
+auditOldValueFor field entry =
+    Maybe.andThen (auditDisplayField field) entry.oldValues
+
+
+auditNewValueFor : String -> Api.AuditLogEntry -> Maybe String
+auditNewValueFor field entry =
+    Maybe.andThen (auditDisplayField field) entry.newValues
+
+
+auditValueFor : String -> Api.AuditLogEntry -> Maybe String
+auditValueFor field entry =
+    case auditNewValueFor field entry of
+        Just value ->
+            Just value
+
+        Nothing ->
+            auditOldValueFor field entry
+
+
+auditDisplayField : String -> Decode.Value -> Maybe String
+auditDisplayField field value =
+    if auditFieldHidden field then
+        Nothing
+
+    else
+        case Decode.decodeValue (Decode.dict Decode.value) value of
+            Ok dict ->
+                Dict.get field dict |> Maybe.map auditDisplayValue
+
+            Err _ ->
+                Nothing
+
+
+auditSnapshotDetailItemsFromValue : Decode.Value -> List ( String, String )
+auditSnapshotDetailItemsFromValue value =
+    case Decode.decodeValue (Decode.dict Decode.value) value of
+        Ok dict ->
+            orderedAuditFields dict
+                |> List.filter (not << auditFieldHidden)
+                |> List.filterMap (\field -> Dict.get field dict |> Maybe.map (\fieldValue -> ( auditFieldLabel field, auditDisplayValue fieldValue )))
+                |> List.take 8
+
+        Err _ ->
+            []
+
+
+orderedAuditFields : Dict.Dict String Decode.Value -> List String
+orderedAuditFields dict =
+    let
+        keys =
+            Dict.keys dict
+
+        priorityFields =
+            [ "name", "title", "status", "priority", "description", "content", "summary", "memory_type", "pinned", "tag", "relation_type", "strength", "project_id", "task_id", "memory_id", "category_id", "source_id", "target_id", "depends_on_id", "parent_id", "due_at", "completed_at" ]
+
+        prioritized =
+            List.filter (\field -> List.member field keys) priorityFields
+
+        remaining =
+            List.filter (\field -> not (List.member field prioritized)) keys
+    in
+    prioritized ++ remaining
+
+
+auditChangedFieldItemsFromValues : Maybe Decode.Value -> Maybe Decode.Value -> List AuditFieldChange
+auditChangedFieldItemsFromValues mOld mNew =
+    case ( mOld, mNew ) of
+        ( Just oldVal, Just newVal ) ->
+            case ( Decode.decodeValue (Decode.dict Decode.value) oldVal, Decode.decodeValue (Decode.dict Decode.value) newVal ) of
+                ( Ok oldDict, Ok newDict ) ->
+                    let
+                        changedKeys =
+                            Dict.merge
+                                (\k v acc -> auditChangeFromValues k (Just v) Nothing :: acc)
+                                (\k ov nv acc ->
+                                    if Encode.encode 0 ov /= Encode.encode 0 nv then
+                                        auditChangeFromValues k (Just ov) (Just nv) :: acc
+
+                                    else
+                                        acc
+                                )
+                                (\k v acc -> auditChangeFromValues k Nothing (Just v) :: acc)
+                                oldDict
+                                newDict
+                                []
+                                |> List.filterMap identity
+                                |> List.reverse
+                    in
+                    changedKeys
+
+                _ ->
+                    []
+
+        _ ->
+            []
+
+
+auditChangeFromValues : String -> Maybe Decode.Value -> Maybe Decode.Value -> Maybe AuditFieldChange
+auditChangeFromValues field mOld mNew =
+    if auditFieldHidden field then
+        Nothing
+
+    else
+        Just
+            { field = field
+            , label = auditFieldLabel field
+            , oldValue = Maybe.map auditDisplayValue mOld
+            , newValue = Maybe.map auditDisplayValue mNew
+            }
+
+
+auditDisplayValue : Decode.Value -> String
+auditDisplayValue value =
+    let
+        rawValue =
+            case Decode.decodeValue flexibleStringDecoder value of
+                Ok raw ->
+                    raw
+
+                Err _ ->
+                    Encode.encode 0 value
+    in
+    if rawValue == "null" then
+        "(unset)"
+
+    else if String.isEmpty rawValue then
+        "(empty)"
+
+    else
+        truncateAuditValue 160 rawValue
+
+
+truncateAuditValue : Int -> String -> String
+truncateAuditValue maxLength value =
+    if String.length value > maxLength then
+        String.left maxLength value ++ "…"
+
+    else
+        value
+
+
+auditFieldHidden : String -> Bool
+auditFieldHidden field =
+    let
+        lower =
+            String.toLower field
+    in
+    List.member lower
+        [ "id"
+        , "workspace_id"
+        , "created_at"
+        , "updated_at"
+        , "deleted_at"
+        , "search_vector"
+        , "metadata"
+        , "token_hash"
+        , "last_used_at"
+        , "session_hash"
+        , "csrf_token_hash"
+        , "password"
+        , "client_secret"
+        , "token_hash_secret"
+        , "authorization_code"
+        , "access_token"
+        , "refresh_token"
+        ]
+        || String.contains "secret" lower
+        || String.contains "token_hash" lower
+        || String.contains "access_token" lower
+        || String.contains "refresh_token" lower
+
+
+auditFieldLabel : String -> String
+auditFieldLabel field =
+    case field of
+        "actor_id" ->
+            "Actor ID"
+
+        "actor_label" ->
+            "Actor label"
+
+        "actor_type" ->
+            "Actor type"
+
+        "category_id" ->
+            "Category ID"
+
+        "completed_at" ->
+            "Completed at"
+
+        "depends_on_id" ->
+            "Depends on task ID"
+
+        "due_at" ->
+            "Due at"
+
+        "entity_id" ->
+            "Entity ID"
+
+        "group_id" ->
+            "Group ID"
+
+        "memory_id" ->
+            "Memory ID"
+
+        "memory_type" ->
+            "Memory type"
+
+        "name" ->
+            "Name"
+
+        "parent_id" ->
+            "Parent ID"
+
+        "project_id" ->
+            "Project ID"
+
+        "priority" ->
+            "Priority"
+
+        "relation_type" ->
+            "Relationship"
+
+        "request_id" ->
+            "Request ID"
+
+        "source_id" ->
+            "Source memory ID"
+
+        "target_id" ->
+            "Target memory ID"
+
+        "status" ->
+            "Status"
+
+        "summary" ->
+            "Summary"
+
+        "task_id" ->
+            "Task ID"
+
+        "title" ->
+            "Title"
+
+        "workspace_id" ->
+            "Workspace ID"
+
+        other ->
+            String.replace "_" " " other
+
+
+auditFieldFromLabel : String -> String
+auditFieldFromLabel label =
+    case label of
+        "Actor ID" ->
+            "actor_id"
+
+        "Category ID" ->
+            "category_id"
+
+        "Completed at" ->
+            "completed_at"
+
+        "Depends on task ID" ->
+            "depends_on_id"
+
+        "Due at" ->
+            "due_at"
+
+        "Entity ID" ->
+            "entity_id"
+
+        "Group ID" ->
+            "group_id"
+
+        "Memory ID" ->
+            "memory_id"
+
+        "Memory type" ->
+            "memory_type"
+
+        "Parent ID" ->
+            "parent_id"
+
+        "Project ID" ->
+            "project_id"
+
+        "Relationship" ->
+            "relation_type"
+
+        "Request ID" ->
+            "request_id"
+
+        "Source memory ID" ->
+            "source_id"
+
+        "Target memory ID" ->
+            "target_id"
+
+        "Task ID" ->
+            "task_id"
+
+        "Workspace ID" ->
+            "workspace_id"
+
+        other ->
+            String.replace " " "_" other
+
+
 isRevertableEntityType : String -> Bool
 isRevertableEntityType entityType =
     List.member entityType [ "memory", "project", "task", "memory_category" ]
@@ -674,25 +1260,9 @@ viewAuditLogEntry model entry =
             ]
         , if expanded then
             div [ class "audit-entry-detail" ]
-                [ case entry.action of
-                    Api.AuditUpdate ->
-                        viewChangedFields entry.oldValues entry.newValues
-
-                    Api.AuditCreate ->
-                        case entry.newValues of
-                            Just nv ->
-                                viewJsonSummary "Initial" nv
-
-                            Nothing ->
-                                text ""
-
-                    Api.AuditDelete ->
-                        case entry.oldValues of
-                            Just ov ->
-                                viewJsonSummary "Deleted" ov
-
-                            Nothing ->
-                                text ""
+                [ viewAuditDetailSection "Audit context" (auditContextDetailItemsForView model entry)
+                , viewAuditDetailSection "Action details" (auditActionDetailItems entry)
+                , viewAuditEntryChangeDetails entry
                 , div [ class "audit-entry-meta" ]
                     [ span [ class "audit-entry-id" ] [ text ("Entry: " ++ String.left 8 entry.id) ]
                     , span [ class "audit-entity-id" ] [ text ("Entity: " ++ String.left 8 entry.entityId) ]
@@ -708,6 +1278,52 @@ viewAuditLogEntry model entry =
           else
             text ""
         ]
+
+
+viewAuditEntryChangeDetails : Api.AuditLogEntry -> Html Msg
+viewAuditEntryChangeDetails entry =
+    case entry.action of
+        Api.AuditUpdate ->
+            viewChangedFields entry.oldValues entry.newValues
+
+        Api.AuditCreate ->
+            text ""
+
+        Api.AuditDelete ->
+            text ""
+
+
+viewAuditDetailSection : String -> List ( String, String ) -> Html Msg
+viewAuditDetailSection titleText rows =
+    if List.isEmpty rows then
+        text ""
+
+    else
+        div [ class "audit-detail-section" ]
+            [ h4 [ class "audit-detail-heading" ] [ text titleText ]
+            , dl [ class "audit-detail-grid" ]
+                (List.concatMap viewAuditDetailItem rows)
+            ]
+
+
+viewAuditDetailItem : ( String, String ) -> List (Html Msg)
+viewAuditDetailItem ( labelText, valueText ) =
+    [ dt [ class "audit-detail-label" ] [ text labelText ]
+    , dd [ class "audit-detail-value" ] [ text valueText ]
+    ]
+
+
+auditContextDetailItemsForView : Model -> Api.AuditLogEntry -> List ( String, String )
+auditContextDetailItemsForView model entry =
+    auditContextDetailItems entry
+        |> List.map
+            (\( label, valueText ) ->
+                if label == "Target entity" then
+                    ( label, valueText ++ " · " ++ auditEntitySummary model entry )
+
+                else
+                    ( label, valueText )
+            )
 
 
 auditActorSummary : Api.AuditLogEntry -> String
@@ -824,92 +1440,46 @@ viewHistoryEntry model entry =
 
 viewChangedFields : Maybe Decode.Value -> Maybe Decode.Value -> Html Msg
 viewChangedFields mOld mNew =
-    case ( mOld, mNew ) of
-        ( Just oldVal, Just newVal ) ->
-            case ( Decode.decodeValue (Decode.dict flexibleStringDecoder) oldVal, Decode.decodeValue (Decode.dict flexibleStringDecoder) newVal ) of
-                ( Ok oldDict, Ok newDict ) ->
-                    let
-                        changedKeys =
-                            Dict.merge
-                                (\k v acc -> ( k, Just v, Nothing ) :: acc)
-                                (\k ov nv acc ->
-                                    if ov /= nv then
-                                        ( k, Just ov, Just nv ) :: acc
+    let
+        changes =
+            auditChangedFieldItemsFromValues mOld mNew
+    in
+    if List.isEmpty changes then
+        text ""
 
-                                    else
-                                        acc
-                                )
-                                (\k v acc -> ( k, Nothing, Just v ) :: acc)
-                                oldDict
-                                newDict
-                                []
-                                |> List.reverse
-                    in
-                    if List.isEmpty changedKeys then
-                        text ""
+    else
+        div [ class "history-diff audit-changed-fields" ]
+            (h4 [ class "audit-detail-heading" ] [ text "Changed fields" ]
+                :: List.map viewChangedField changes
+            )
 
-                    else
-                        div [ class "history-diff" ]
-                            (List.map
-                                (\( field, mOldV, mNewV ) ->
-                                    div [ class "history-diff-field" ]
-                                        [ span [ class "history-diff-field-name" ] [ text field ]
-                                        , case ( mOldV, mNewV ) of
-                                            ( Just ov, Just nv ) ->
-                                                span []
-                                                    [ span [ class "history-diff-old" ] [ text ov ]
-                                                    , text " → "
-                                                    , span [ class "history-diff-new" ] [ text nv ]
-                                                    ]
 
-                                            ( Nothing, Just nv ) ->
-                                                span [ class "history-diff-new" ] [ text nv ]
+viewChangedField : AuditFieldChange -> Html Msg
+viewChangedField change =
+    div [ class "history-diff-field" ]
+        [ span [ class "history-diff-field-name" ] [ text change.label ]
+        , case ( change.oldValue, change.newValue ) of
+            ( Just oldValue, Just newValue ) ->
+                span []
+                    [ span [ class "history-diff-old" ] [ text oldValue ]
+                    , text " → "
+                    , span [ class "history-diff-new" ] [ text newValue ]
+                    ]
 
-                                            ( Just ov, Nothing ) ->
-                                                span [ class "history-diff-old" ] [ text ov ]
+            ( Nothing, Just newValue ) ->
+                span [ class "history-diff-new" ] [ text newValue ]
 
-                                            ( Nothing, Nothing ) ->
-                                                text ""
-                                        ]
-                                )
-                                changedKeys
-                            )
+            ( Just oldValue, Nothing ) ->
+                span [ class "history-diff-old" ] [ text oldValue ]
 
-                _ ->
-                    div [ class "history-diff" ]
-                        [ div [ class "history-diff-field" ] [ text "Fields changed" ] ]
-
-        _ ->
-            text ""
+            ( Nothing, Nothing ) ->
+                text ""
+        ]
 
 
 viewJsonSummary : String -> Decode.Value -> Html Msg
-viewJsonSummary _ val =
-    case Decode.decodeValue (Decode.dict flexibleStringDecoder) val of
-        Ok dict ->
-            let
-                items =
-                    Dict.toList dict
-                        |> List.filter (\( k, _ ) -> not (List.member k [ "id", "workspace_id", "created_at", "updated_at", "deleted_at" ]))
-                        |> List.take 5
-            in
-            if List.isEmpty items then
-                text ""
-
-            else
-                div [ class "history-diff" ]
-                    (List.map
-                        (\( field, v ) ->
-                            div [ class "history-diff-field" ]
-                                [ span [ class "history-diff-field-name" ] [ text field ]
-                                , span [ class "history-diff-new" ] [ text v ]
-                                ]
-                        )
-                        items
-                    )
-
-        _ ->
-            text ""
+viewJsonSummary titleText val =
+    viewAuditDetailSection titleText (auditSnapshotDetailItemsFromValue val)
 
 
 viewRevertConfirmModal : Model -> Html Msg
@@ -935,30 +1505,7 @@ viewRevertConfirmModal model =
                         Api.AuditUpdate ->
                             let
                                 fieldList =
-                                    case ( entry.oldValues, entry.newValues ) of
-                                        ( Just oldVal, Just newVal ) ->
-                                            case ( Decode.decodeValue (Decode.dict flexibleStringDecoder) oldVal, Decode.decodeValue (Decode.dict flexibleStringDecoder) newVal ) of
-                                                ( Ok oldDict, Ok newDict ) ->
-                                                    Dict.merge
-                                                        (\k _ acc -> k :: acc)
-                                                        (\k ov nv acc ->
-                                                            if ov /= nv then
-                                                                k :: acc
-
-                                                            else
-                                                                acc
-                                                        )
-                                                        (\k _ acc -> k :: acc)
-                                                        oldDict
-                                                        newDict
-                                                        []
-                                                        |> List.reverse
-
-                                                _ ->
-                                                    []
-
-                                        _ ->
-                                            []
+                                    auditChangedFieldItems entry |> List.map .label
 
                                 fieldStr =
                                     if List.isEmpty fieldList then

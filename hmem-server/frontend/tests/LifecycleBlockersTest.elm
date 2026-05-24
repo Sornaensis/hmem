@@ -2,6 +2,7 @@ module LifecycleBlockersTest exposing (suite)
 
 import Api
 import Expect
+import Feature.AuditLog
 import Feature.Cards
 import Feature.DataLoading
 import Feature.Editing
@@ -467,6 +468,149 @@ suite =
                         , Just "project:project-a"
                         , Nothing
                         ]
+        , test "audit expanded context includes actor target action timestamp and request identifiers" <|
+            \_ ->
+                case decodeAuditFixture createProjectAuditJson of
+                    Ok entry ->
+                        let
+                            contextRows =
+                                Feature.AuditLog.auditContextDetailItems entry
+                        in
+                        [ List.member ( "Actor", "Local User" ) contextRows
+                        , List.member ( "Actor type", "user" ) contextRows
+                        , List.member ( "Actor ID", "user-1" ) contextRows
+                        , List.member ( "Action type", "Create" ) contextRows
+                        , List.member ( "Target entity", "project" ) contextRows
+                        , List.member ( "Target ID", "project-1" ) contextRows
+                        , List.member ( "Workspace ID", "workspace-a" ) contextRows
+                        , List.member ( "Request ID", "req-create-project" ) contextRows
+                        , List.member ( "Timestamp", "2026-01-01T00:00:00Z" ) contextRows
+                        ]
+                            |> Expect.equal (List.repeat 9 True)
+
+                    Err err ->
+                        Expect.fail (Decode.errorToString err)
+        , test "audit action detail fixtures cover create link unlink dependency archive and status updates" <|
+            \_ ->
+                let
+                    decoded =
+                        List.map decodeAuditFixture
+                            [ createProjectAuditJson
+                            , linkProjectMemoryAuditJson
+                            , unlinkProjectMemoryAuditJson
+                            , addDependencyAuditJson
+                            , archiveProjectAuditJson
+                            , taskStatusAuditJson
+                            ]
+                in
+                case decoded of
+                    [ Ok createEntry, Ok linkEntry, Ok unlinkEntry, Ok dependencyEntry, Ok archiveEntry, Ok statusEntry ] ->
+                        let
+                            createDetails =
+                                Feature.AuditLog.auditActionDetailItems createEntry
+
+                            linkDetails =
+                                Feature.AuditLog.auditActionDetailItems linkEntry
+
+                            unlinkDetails =
+                                Feature.AuditLog.auditActionDetailItems unlinkEntry
+
+                            dependencyDetails =
+                                Feature.AuditLog.auditActionDetailItems dependencyEntry
+
+                            archiveDetails =
+                                Feature.AuditLog.auditActionDetailItems archiveEntry
+
+                            archiveChanges =
+                                Feature.AuditLog.auditChangedFieldItems archiveEntry
+                                    |> List.map (\change -> ( change.label, change.oldValue, change.newValue ))
+
+                            statusDetails =
+                                Feature.AuditLog.auditActionDetailItems statusEntry
+
+                            statusChanges =
+                                Feature.AuditLog.auditChangedFieldItems statusEntry
+                                    |> List.map (\change -> ( change.label, change.oldValue, change.newValue ))
+                        in
+                        [ List.member ( "Operation", "Created project" ) createDetails
+                        , List.member ( "Name", "Launch plan" ) createDetails
+                        , List.member ( "Operation", "Linked memory to project" ) linkDetails
+                        , List.member ( "Project ID", "project-1" ) linkDetails
+                        , List.member ( "Memory ID", "memory-1" ) linkDetails
+                        , List.member ( "Operation", "Unlinked memory from project" ) unlinkDetails
+                        , List.member ( "Operation", "Added task dependency" ) dependencyDetails
+                        , List.member ( "Task ID", "task-dependent" ) dependencyDetails
+                        , List.member ( "Depends on task ID", "task-prereq" ) dependencyDetails
+                        , List.member ( "Operation", "Archived project" ) archiveDetails
+                        , List.member ( "Status change", "active → archived" ) archiveDetails
+                        , List.member ( "Status", Just "active", Just "archived" ) archiveChanges
+                        , List.member ( "Operation", "Changed task status" ) statusDetails
+                        , List.member ( "Status change", "todo → done" ) statusDetails
+                        , List.member ( "Status", Just "todo", Just "done" ) statusChanges
+                        ]
+                            |> Expect.equal (List.repeat 15 True)
+
+                    [ Err err, _, _, _, _, _ ] ->
+                        Expect.fail (Decode.errorToString err)
+
+                    [ _, Err err, _, _, _, _ ] ->
+                        Expect.fail (Decode.errorToString err)
+
+                    [ _, _, Err err, _, _, _ ] ->
+                        Expect.fail (Decode.errorToString err)
+
+                    [ _, _, _, Err err, _, _ ] ->
+                        Expect.fail (Decode.errorToString err)
+
+                    [ _, _, _, _, Err err, _ ] ->
+                        Expect.fail (Decode.errorToString err)
+
+                    [ _, _, _, _, _, Err err ] ->
+                        Expect.fail (Decode.errorToString err)
+
+                    _ ->
+                        Expect.fail "Expected six audit fixtures"
+        , test "audit changed field details show non-status update before and after values" <|
+            \_ ->
+                case decodeAuditFixture taskTitleUpdateAuditJson of
+                    Ok entry ->
+                        let
+                            details =
+                                Feature.AuditLog.auditActionDetailItems entry
+
+                            changes =
+                                Feature.AuditLog.auditChangedFieldItems entry
+                                    |> List.map (\change -> ( change.label, change.oldValue, change.newValue ))
+                        in
+                        [ List.member ( "Operation", "Updated task" ) details
+                        , List.member ( "Title", Just "Draft UI", Just "Ship UI" ) changes
+                        ]
+                            |> Expect.equal [ True, True ]
+
+                    Err err ->
+                        Expect.fail (Decode.errorToString err)
+        , test "audit action detail helpers hide sensitive and internal snapshot fields" <|
+            \_ ->
+                case decodeAuditFixture accessTokenAuditJson of
+                    Ok entry ->
+                        let
+                            details =
+                                Feature.AuditLog.auditActionDetailItems entry
+
+                            detailText =
+                                details
+                                    |> List.map (\( label, value ) -> label ++ "=" ++ value)
+                                    |> String.join "|"
+                        in
+                        [ String.contains "token_hash" detailText
+                        , String.contains "secret-digest" detailText
+                        , String.contains "last_used_at" detailText
+                        , List.member ( "Actor label", "CI Bot" ) details
+                        ]
+                            |> Expect.equal [ False, False, False, True ]
+
+                    Err err ->
+                        Expect.fail (Decode.errorToString err)
         ]
 
 
@@ -501,3 +645,48 @@ task id parentId projectId =
     , createdAt = "2026-01-01T00:00:00Z"
     , updatedAt = "2026-01-01T00:00:00Z"
     }
+
+
+decodeAuditFixture : String -> Result Decode.Error Api.AuditLogEntry
+decodeAuditFixture =
+    Decode.decodeString Api.auditLogEntryDecoder
+
+
+createProjectAuditJson : String
+createProjectAuditJson =
+    """{"id":"audit-create-project","workspace_id":"workspace-a","entity_type":"project","entity_id":"project-1","action":"create","old_values":null,"new_values":{"id":"project-1","workspace_id":"workspace-a","name":"Launch plan","status":"active","priority":7,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"request_id":"req-create-project","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:00Z"}"""
+
+
+linkProjectMemoryAuditJson : String
+linkProjectMemoryAuditJson =
+    """{"id":"audit-link-project-memory","workspace_id":"workspace-a","entity_type":"project_memory_link","entity_id":"project-1:memory-1","action":"create","old_values":null,"new_values":{"project_id":"project-1","memory_id":"memory-1","created_at":"2026-01-01T00:00:00Z"},"request_id":"req-link-memory","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:01Z"}"""
+
+
+unlinkProjectMemoryAuditJson : String
+unlinkProjectMemoryAuditJson =
+    """{"id":"audit-unlink-project-memory","workspace_id":"workspace-a","entity_type":"project_memory_link","entity_id":"project-1:memory-1","action":"delete","old_values":{"project_id":"project-1","memory_id":"memory-1","created_at":"2026-01-01T00:00:00Z"},"new_values":null,"request_id":"req-unlink-memory","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:02Z"}"""
+
+
+addDependencyAuditJson : String
+addDependencyAuditJson =
+    """{"id":"audit-add-dependency","workspace_id":"workspace-a","entity_type":"task_dependency","entity_id":"task-dependent:task-prereq","action":"create","old_values":null,"new_values":{"task_id":"task-dependent","depends_on_id":"task-prereq","created_at":"2026-01-01T00:00:00Z"},"request_id":"req-add-dependency","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:03Z"}"""
+
+
+archiveProjectAuditJson : String
+archiveProjectAuditJson =
+    """{"id":"audit-archive-project","workspace_id":"workspace-a","entity_type":"project","entity_id":"project-1","action":"update","old_values":{"id":"project-1","workspace_id":"workspace-a","name":"Launch plan","status":"active","priority":7,"updated_at":"2026-01-01T00:00:00Z"},"new_values":{"id":"project-1","workspace_id":"workspace-a","name":"Launch plan","status":"archived","priority":7,"updated_at":"2026-01-01T00:00:04Z"},"request_id":"req-archive-project","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:04Z"}"""
+
+
+taskStatusAuditJson : String
+taskStatusAuditJson =
+    """{"id":"audit-task-status","workspace_id":"workspace-a","entity_type":"task","entity_id":"task-1","action":"update","old_values":{"id":"task-1","workspace_id":"workspace-a","title":"Ship UI","status":"todo","priority":5,"completed_at":null,"updated_at":"2026-01-01T00:00:00Z"},"new_values":{"id":"task-1","workspace_id":"workspace-a","title":"Ship UI","status":"done","priority":5,"completed_at":"2026-01-01T00:00:05Z","updated_at":"2026-01-01T00:00:05Z"},"request_id":"req-task-status","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:05Z"}"""
+
+
+taskTitleUpdateAuditJson : String
+taskTitleUpdateAuditJson =
+    """{"id":"audit-task-title","workspace_id":"workspace-a","entity_type":"task","entity_id":"task-1","action":"update","old_values":{"id":"task-1","workspace_id":"workspace-a","title":"Draft UI","status":"todo","priority":5,"updated_at":"2026-01-01T00:00:00Z"},"new_values":{"id":"task-1","workspace_id":"workspace-a","title":"Ship UI","status":"todo","priority":5,"updated_at":"2026-01-01T00:00:06Z"},"request_id":"req-task-title","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:06Z"}"""
+
+
+accessTokenAuditJson : String
+accessTokenAuditJson =
+    """{"id":"audit-access-token","workspace_id":null,"entity_type":"access_token","entity_id":"token-1","action":"create","old_values":null,"new_values":{"id":"token-1","actor_type":"bot","actor_label":"CI Bot","token_hash":"secret-digest","last_used_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z"},"request_id":"req-token","actor_type":"bot","actor_id":"bot-1","actor_label":"CI Bot","changed_at":"2026-01-01T00:00:06Z"}"""

@@ -2787,6 +2787,46 @@ a:hover {
   background: var(--bg);
 }
 
+.audit-detail-section {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+}
+
+.audit-detail-heading {
+  margin: 0 0 0.375rem;
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.audit-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr);
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+  font-size: 0.75rem;
+}
+
+.audit-detail-label {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.audit-detail-value {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.audit-changed-fields .audit-detail-heading {
+  margin-bottom: 0.25rem;
+}
+
 .audit-entry-meta {
   display: flex;
   gap: 1rem;

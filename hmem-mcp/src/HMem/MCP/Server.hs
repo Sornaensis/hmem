@@ -6,17 +6,18 @@ module HMem.MCP.Server
   , handleRequest
   , handleStdioLine
   , runMCPServerWithHandles
+  , runMCPServerWithHandlesObserved
   , encodeStdioResponse
   , sendResponseToHandle
   ) where
 
 import Control.Monad (replicateM)
-import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM
   ( atomically, TBQueue, newTBQueueIO, readTBQueue, writeTBQueue
   , isEmptyTBQueue, isFullTBQueue, TVar, newTVarIO, readTVar, modifyTVar', retry )
-import Control.Exception (SomeException, catch, finally, try)
+import Control.Exception (SomeAsyncException, SomeException, catch, finally, fromException, onException, throwIO, try)
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy qualified as BL
@@ -97,7 +98,13 @@ runMCPServer serverUrl mApiKey = do
 -- error handle receives loop drain/shutdown messages; protocol-level
 -- diagnostics inside request handlers still use the process stderr.
 runMCPServerWithHandles :: Int -> Int -> Handle -> Handle -> Handle -> Manager -> String -> Maybe Text -> IO ()
-runMCPServerWithHandles workerCount queueDepth input output errHandle mgr serverUrl mApiKey = do
+runMCPServerWithHandles = runMCPServerWithHandlesObserved (const $ pure ())
+
+-- | Like 'runMCPServerWithHandles', but reports worker thread IDs after
+-- input has been read and before drain/shutdown logging. This is a test seam
+-- for asserting shutdown cleanup.
+runMCPServerWithHandlesObserved :: ([ThreadId] -> IO ()) -> Int -> Int -> Handle -> Handle -> Handle -> Manager -> String -> Maybe Text -> IO ()
+runMCPServerWithHandlesObserved observeWorkers workerCount queueDepth input output errHandle mgr serverUrl mApiKey = do
   lock   <- newMVar ()
   queue  <- newTBQueueIO (fromIntegral $ max 1 queueDepth)
   active <- newTVarIO (0 :: Int)
@@ -105,16 +112,21 @@ runMCPServerWithHandles workerCount queueDepth input output errHandle mgr server
   wsContext <- newTVarIO (Nothing :: Maybe UUID)
   -- Spawn fixed worker pool
   workerIds <- replicateM (max 1 workerCount) $ forkIO $ worker output mgr lock serverUrl mApiKey queue active initialized wsContext
-  -- Read stdin → queue
-  readLoop input output lock queue
-  -- Drain: wait for queue to empty and all workers to finish
-  hPutStrLn errHandle "MCP server: stdin closed, draining in-flight requests..."
-  atomically $ do
-    empty <- isEmptyTBQueue queue
-    n     <- readTVar active
-    if empty && n == 0 then pure () else retry
-  hPutStrLn errHandle "MCP server: shutdown complete."
-  mapM_ killThread workerIds
+  let cleanupWorkers = mapM_ killThread workerIds
+      requestWorkerCleanup = mapM_ (forkIO . killThread) workerIds
+      runLoop = do
+        -- Read stdin → queue
+        readLoop input output lock queue
+        observeWorkers workerIds
+        -- Drain: wait for queue to empty and all workers to finish
+        hPutStrLn errHandle "MCP server: stdin closed, draining in-flight requests..."
+        atomically $ do
+          empty <- isEmptyTBQueue queue
+          n     <- readTVar active
+          if empty && n == 0 then pure () else retry
+        hPutStrLn errHandle "MCP server: shutdown complete."
+  runLoop `onException` requestWorkerCleanup
+  cleanupWorkers
 
 -- | Worker thread: reads from the queue and processes each line.
 -- Atomically dequeues + increments active counter to prevent drain races.
@@ -127,9 +139,9 @@ worker output mgr lock url mApiKey queue active initialized wsContext = go
         modifyTVar' active (+ 1)
         pure l
       case mline of
-        Left _ -> pure ()  -- Worker exits cleanly
+        Left e -> rethrowAsync e  -- Worker exits cleanly for non-async queue errors
         Right line -> do
-          (processLine output mgr lock url mApiKey initialized wsContext line `catch` \(_ :: SomeException) -> pure ())
+          (processLine output mgr lock url mApiKey initialized wsContext line `catch` \(e :: SomeException) -> rethrowAsync e)
             `finally` atomically (modifyTVar' active (subtract 1))
           go
 
@@ -137,7 +149,7 @@ worker output mgr lock url mApiKey queue active initialized wsContext = go
 -- If the queue is full, sends an overload error immediately.
 readLoop :: Handle -> Handle -> MVar () -> TBQueue BS8.ByteString -> IO ()
 readLoop input output lock queue = do
-  eof <- hIsEOF input `catch` \(_ :: SomeException) -> pure True
+  eof <- hIsEOF input `catch` \(e :: SomeException) -> rethrowAsync e >> pure True
   if eof
     then pure ()
     else do
@@ -180,9 +192,15 @@ handleStdioLine mgr serverUrl mApiKey initialized wsContext line
             "Invalid Request: missing required 'method' field"
         Right req ->
           handleRequest mgr serverUrl mApiKey initialized wsContext req
-            `catch` \(e :: SomeException) ->
+            `catch` \(e :: SomeException) -> do
+              rethrowAsync e
               pure $ Just $ jsonRpcError req.reqId (-32603)
                 ("Internal error: " <> T.pack (show e))
+
+rethrowAsync :: SomeException -> IO ()
+rethrowAsync e = case fromException e :: Maybe SomeAsyncException of
+  Just _  -> throwIO e
+  Nothing -> pure ()
 
 -- | Try to extract the "id" from arbitrary JSON for error responses.
 extractId :: Value -> Maybe Value

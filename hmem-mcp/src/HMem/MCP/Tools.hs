@@ -49,7 +49,7 @@ module HMem.MCP.Tools
   , ToolCall(..)
   ) where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeAsyncException, SomeException, fromException, throwIO, try)
 import Control.Applicative ((<|>))
 import Data.Foldable (toList)
 import Data.Aeson
@@ -855,7 +855,9 @@ httpJSONWith shaper mgr mApiKey httpMethod url mbody = do
       else pure $ mcpHttpError code body
   case result of
     Right v  -> pure v
-    Left (_ :: SomeException) -> pure $ mcpErrorCode "CONNECTION_ERROR" connectionErrorMessage
+    Left (e :: SomeException) -> do
+      rethrowAsync e
+      pure $ mcpErrorCode "CONNECTION_ERROR" connectionErrorMessage
 
 -- | Raw HTTP helpers for composite tools — return Either instead of MCP-wrapped values.
 -- These allow workflow handlers to chain calls and build combined responses.
@@ -879,7 +881,14 @@ rawHttpJSON' mgr mApiKey httpMethod url mbody = do
       else pure (Left (rawHttpErrorPayload code body))
   case result of
     Right v  -> pure v
-    Left (_ :: SomeException) -> pure (Left ("[CONNECTION_ERROR] " <> connectionErrorMessage))
+    Left (e :: SomeException) -> do
+      rethrowAsync e
+      pure (Left ("[CONNECTION_ERROR] " <> connectionErrorMessage))
+
+rethrowAsync :: SomeException -> IO ()
+rethrowAsync e = case fromException e :: Maybe SomeAsyncException of
+  Just _  -> throwIO e
+  Nothing -> pure ()
 
 rawGetJSON :: Manager -> String -> Maybe Text -> String -> IO (Either Text Value)
 rawGetJSON mgr base mApiKey path = rawHttpJSON' mgr mApiKey "GET" (base <> path) Nothing

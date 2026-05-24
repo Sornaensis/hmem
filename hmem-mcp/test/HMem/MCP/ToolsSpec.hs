@@ -159,8 +159,8 @@ spec = do
       toolDescriptionShouldContain "search" "Returns compact summaries"
       toolDescriptionShouldContain "search" "memory content/previews are omitted"
       toolDescriptionShouldContain "memory_get" "detail path for compact memory summaries"
+      toolDescriptionShouldContain "project_overview" "capped to a bounded number of rows"
       toolDescriptionShouldContain "project_overview" "truncated per row"
-      toolDescriptionShouldContain "project_overview" "broad projects can still grow"
       toolDescriptionShouldContain "project_overview" "prefer task_overview"
       toolDescriptionShouldContain "context_get" "detail_level controls how many summaries"
       toolDescriptionShouldContain "task_start" "detail_level controls context breadth"
@@ -206,9 +206,9 @@ spec = do
       doc <- readContractDoc
       mapM_ (`shouldContainText` doc)
         [ "`project_overview.include_descriptions=true` attaches bounded descriptions"
-        , "returned project, task, and subproject row"
+        , "returned project, task, and subproject rows up to an aggregate row cap"
         , "truncated with `description_truncated: true`"
-        , "broad projects can still grow with row count"
+        , "`descriptions_omitted`"
         , "`task_overview.include_description=true`"
         ]
 
@@ -257,8 +257,8 @@ spec = do
           listedNames `shouldNotContain` ["saved_view"]
           toolArrayItemDescription "search" tools `shouldSatisfy` maybe False ("Returns compact summaries" `T.isInfixOf`)
           toolArrayItemDescription "search" tools `shouldSatisfy` maybe False ("memory content/previews are omitted" `T.isInfixOf`)
+          toolArrayItemDescription "project_overview" tools `shouldSatisfy` maybe False ("capped to a bounded number of rows" `T.isInfixOf`)
           toolArrayItemDescription "project_overview" tools `shouldSatisfy` maybe False ("truncated per row" `T.isInfixOf`)
-          toolArrayItemDescription "project_overview" tools `shouldSatisfy` maybe False ("broad projects can still grow" `T.isInfixOf`)
           toolArrayItemDescription "memory_get" tools `shouldSatisfy` maybe False ("detail path for compact memory summaries" `T.isInfixOf`)
         other -> expectationFailure $ "Expected tools/list result tools array, got: " <> show other
 
@@ -348,6 +348,16 @@ spec = do
         show overview `shouldNotContain` "full project description"
         show overview `shouldNotContain` "full task description"
         show overview `shouldNotContain` "full memory content"
+
+        overviewWithDescriptions <- callMockTool mgr base "project_overview" $ object
+          [ "project_id" .= testUUID
+          , "include_descriptions" .= True
+          ]
+        (jsonField "project" overviewWithDescriptions >>= jsonField "description") `shouldBe` Just (String "full project description")
+        (jsonField "project" overviewWithDescriptions >>= jsonField "description_truncated") `shouldBe` Nothing
+        (firstArrayItem "tasks" overviewWithDescriptions >>= jsonField "description") `shouldBe` Just (String "full task description")
+        (firstArrayItem "tasks" overviewWithDescriptions >>= jsonField "description_truncated") `shouldBe` Nothing
+        jsonField "descriptions_omitted" overviewWithDescriptions `shouldBe` Nothing
 
     it "routes additional slim tools with live request body, query, and auth checks" $ do
       withMockHmemServer $ \mgr base -> do
@@ -788,6 +798,9 @@ spec = do
       (jsonField "task" contextInfo >>= jsonField "description") `shouldBe` Nothing
       (jsonField "task" taskStart >>= jsonField "description") `shouldBe` Nothing
       (jsonField "project" overviewWithDescriptions >>= jsonField "description") `shouldBe` Just (String "full project description")
+      (jsonField "project" overviewWithDescriptions >>= jsonField "description_truncated") `shouldBe` Nothing
+      (firstArrayItem "tasks" overviewWithDescriptions >>= jsonField "description_truncated") `shouldBe` Nothing
+      (firstArrayItem "subprojects" overviewWithDescriptions >>= jsonField "description_truncated") `shouldBe` Nothing
       (jsonField "task" taskOverviewWithDescription >>= jsonField "description") `shouldBe` Just (String "full task description")
       jsonField "started" taskStart `shouldBe` Just (Bool True)
       jsonField "result" taskStart `shouldBe` Just (String "started")
@@ -841,6 +854,29 @@ spec = do
       (taskRow >>= jsonField "description_truncated") `shouldBe` Just (Bool True)
       (subprojectRow >>= jsonField "description_truncated") `shouldBe` Just (Bool True)
       show overview `shouldNotContain` T.unpack longDescription
+
+    it "caps the number of project overview rows that include descriptions" $ do
+      let describedTaskCount = maxProjectOverviewDescriptionRows + 2
+          overviewInput = object
+            [ "project" .= object
+                [ "id" .= parsedUUID
+                , "name" .= ("Large project" :: Text)
+                , "description" .= ("project description" :: Text)
+                ]
+            , "tasks" .=
+                [ object
+                    [ "id" .= parsedUUID2
+                    , "title" .= ("Task " <> T.pack (show i) :: Text)
+                    , "description" .= ("task description" :: Text)
+                    ]
+                | i <- [1 .. describedTaskCount]
+                ]
+            , "subprojects" .= ([] :: [Value])
+            ]
+          overview = compactProjectOverviewWithDescriptions overviewInput
+      describedOverviewRowCount overview `shouldBe` maxProjectOverviewDescriptionRows
+      jsonField "description_limit" overview `shouldBe` Just (toJSON maxProjectOverviewDescriptionRows)
+      jsonField "descriptions_omitted" overview `shouldBe` Just (toJSON (describedTaskCount + 1 - maxProjectOverviewDescriptionRows))
 
   describe "workspace context injection" $ do
     it "creates an arguments object when omitted so queryless tools stay workspace-scoped" $ do
@@ -1389,6 +1425,21 @@ boundedDescriptionValue :: Maybe Value -> Bool
 boundedDescriptionValue (Just (String textValue)) =
   T.length textValue <= maxProjectOverviewDescriptionChars && "…" `T.isSuffixOf` textValue
 boundedDescriptionValue _ = False
+
+
+describedOverviewRowCount :: Value -> Int
+describedOverviewRowCount overview =
+  projectDescriptionCount + taskDescriptionCount + subprojectDescriptionCount
+  where
+    projectDescriptionCount = if hasObjectField "description" (jsonField "project" overview) then 1 else 0
+    taskDescriptionCount = length [() | task <- arrayItems "tasks" overview, hasObjectField "description" (Just task)]
+    subprojectDescriptionCount = length [() | subproject <- arrayItems "subprojects" overview, hasObjectField "description" (Just subproject)]
+
+
+arrayItems :: Text -> Value -> [Value]
+arrayItems field value = case jsonField field value of
+  Just (Array arr) -> toList arr
+  _ -> []
 
 
 arrayLength :: Int -> Maybe Value -> Bool

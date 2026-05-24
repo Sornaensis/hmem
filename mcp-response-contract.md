@@ -93,10 +93,11 @@ one of these ways:
    `project_overview.include_descriptions=true` or
    `task_overview.include_description=true`. Explicit
    `project_overview.include_descriptions=true` attaches bounded descriptions to
-   every returned project, task, and subproject row. Each included description is
-   truncated with `description_truncated: true` when it exceeds the MCP per-row
-   bound, but broad projects can still grow with row count; use it only when
-   those descriptions are needed, and prefer
+   returned project, task, and subproject rows up to an aggregate row cap. Each
+   included description is truncated with `description_truncated: true` when it
+   exceeds the MCP per-row bound; when the aggregate cap is reached,
+   `description_limit` reports the cap and `descriptions_omitted` reports
+   additional rows with omitted descriptions. Prefer
    `task_overview.include_description=true` when only one task description is
    needed.
 3. **Future optional flags** (`detail=true`, `include_content=true`,
@@ -211,12 +212,12 @@ Aggregated project/task detail responses.
 `tasks` and `subprojects` are summary rows. Default overview responses omit full
 project/task descriptions unless `project_overview.include_descriptions=true` or
 `task_overview.include_description=true` requests them. Explicit
-`project_overview.include_descriptions=true` applies bounded descriptions to each
-returned project, task, and subproject row; over-bound descriptions are truncated
-and annotated with `description_truncated: true`. Broad projects can still grow
-with row count, so callers should prefer a narrower
-`task_overview.include_description=true` request when only one task description
-is needed.
+`project_overview.include_descriptions=true` applies bounded descriptions to
+returned project, task, and subproject rows up to an aggregate row cap;
+over-bound descriptions are truncated and annotated with
+`description_truncated: true`. When the cap is reached, the response includes
+`description_limit` and `descriptions_omitted` so callers can switch to narrower
+`task_overview.include_description=true` requests for omitted task descriptions.
 
 `TaskDependencySummary`: `{ id, title|name, status? }`. Status is included when
 known or when it explains why a task is blocked.
@@ -358,7 +359,7 @@ Structured errors preserve every field needed for recovery:
 | `link_memory` | `MutationAck` with `entity_type`, `entity_id`, and `memory_id`. | Use the entity overview or `memory_get` for details. |
 | `project_create` | `MutationAck` with `summary: ProjectSummary`. | Use `project_overview` for project detail. |
 | `project_update` | `MutationAck` with updated `summary: ProjectSummary`; include `changed_fields` and `status` when changed. | Use `project_overview` for project detail. |
-| `project_overview` | `ProjectOverviewSummary`. Project, child tasks, and subprojects are compact summaries by default and omit full descriptions. | Set `include_descriptions=true` only when bounded descriptions for returned project, task, and subproject rows are needed; over-bound descriptions are truncated with `description_truncated: true`, and broad projects can still grow with row count. Prefer `task_overview.include_description=true` for one task. |
+| `project_overview` | `ProjectOverviewSummary`. Project, child tasks, and subprojects are compact summaries by default and omit full descriptions. | Set `include_descriptions=true` only when bounded descriptions for returned project, task, and subproject rows are needed; descriptions are capped by aggregate row count, over-bound descriptions are truncated with `description_truncated: true`, and cap hits include `description_limit`/`descriptions_omitted`. Prefer `task_overview.include_description=true` for one task. |
 | `project_next_tasks` | `{ items: [NextTaskCandidateSummary] }` where each row includes `task: TaskSummary`, `dependency_blocked`, and only non-zero actionable gate counts. | `include_blocked=true` includes blocked diagnostics; `task_overview` explains a selected task. |
 | `project_spec` | `WorkflowSummary` with flat `project_id`, `name`, optional status/priority, `tasks_created: [{id,title,priority}]`, and `tasks_failed` only when non-zero. | Use `project_overview` after creation for full context. |
 | `project_archive` | Summary-less `MutationAck` with `project_id`, archived `status`, `changed_fields: ["status"]`, and optional `summary_memory_id`. | Use `memory_get` for summary-memory content if needed. |

@@ -13,6 +13,7 @@ module HMem.MCP.Tools
   , compactProjectOverview
   , compactProjectOverviewWithDescriptions
   , maxProjectOverviewDescriptionChars
+  , maxProjectOverviewDescriptionRows
   , compactTaskOverview
   , compactTaskOverviewWithDescription
   , compactContextInfo
@@ -57,7 +58,7 @@ import Data.Aeson.Types (Parser, Pair, parseEither)
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32)
-import Data.List (intercalate)
+import Data.List (intercalate, mapAccumL)
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -208,11 +209,11 @@ slimToolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
-    , mkTool "project_overview" "Get a compact project overview with tasks, subprojects, linked memories, and readiness_rollup. Set include_descriptions=true only when descriptions for returned project/task/subproject rows are needed; descriptions are truncated per row to bound output, but broad projects can still grow, so prefer task_overview for one task description." $ object
+    , mkTool "project_overview" "Get a compact project overview with tasks, subprojects, linked memories, and readiness_rollup. Set include_descriptions=true only when descriptions for returned project/task/subproject rows are needed; descriptions are capped to a bounded number of rows and truncated per row, so prefer task_overview for one task description." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project"
-          , "include_descriptions" .= prop "boolean" "Include bounded descriptions for returned project, task, and subproject rows (default false; broad projects can still be larger)"
+          , "include_descriptions" .= prop "boolean" "Include bounded descriptions for returned project, task, and subproject rows (default false; row count and per-row text are capped)"
           ]
       , "required" .= [t "project_id"]
       ]
@@ -948,8 +949,8 @@ maxProjectOverviewDescriptionChars :: Int
 maxProjectOverviewDescriptionChars = 600
 
 
-compactProjectSummaryWithDescription :: Value -> Value
-compactProjectSummaryWithDescription value = insertBoundedDescriptionField value (compactProjectSummary value)
+maxProjectOverviewDescriptionRows :: Int
+maxProjectOverviewDescriptionRows = 25
 
 
 compactTaskSummary :: Value -> Value
@@ -966,10 +967,6 @@ compactTaskSummary value = object $ catMaybes
 
 compactTaskSummaryWithDescription :: Value -> Value
 compactTaskSummaryWithDescription value = insertOptionalField "description" value (compactTaskSummary value)
-
-
-compactTaskSummaryWithBoundedDescription :: Value -> Value
-compactTaskSummaryWithBoundedDescription value = insertBoundedDescriptionField value (compactTaskSummary value)
 
 
 compactSearchResults :: Value -> Value
@@ -1024,7 +1021,20 @@ compactProjectOverview = compactProjectOverviewWith compactProjectSummary compac
 
 
 compactProjectOverviewWithDescriptions :: Value -> Value
-compactProjectOverviewWithDescriptions = compactProjectOverviewWith compactProjectSummaryWithDescription compactTaskSummaryWithBoundedDescription compactProjectSummaryWithDescription
+compactProjectOverviewWithDescriptions value = object $ catMaybes $
+  [ projectPair
+  , tasksPair
+  , subprojectsPair
+  , nonEmptyMappedArrayField "linked_memories" compactMemorySummary value
+  , mappedArrayField "connected_memories" compactConnectedMemorySummary value
+  , fieldWith "readiness_rollup" compactReadinessRollup value
+  ]
+  <> descriptionLimitPairs finalBudget
+  where
+    initialBudget = (maxProjectOverviewDescriptionRows, 0)
+    (afterProject, projectPair) = fieldWithDescriptionBudget "project" compactProjectSummary value initialBudget
+    (afterTasks, tasksPair) = mappedArrayFieldWithDescriptionBudget "tasks" compactTaskSummary value afterProject
+    (finalBudget, subprojectsPair) = mappedArrayFieldWithDescriptionBudget "subprojects" compactProjectSummary value afterTasks
 
 
 compactProjectOverviewWith :: (Value -> Value) -> (Value -> Value) -> (Value -> Value) -> Value -> Value
@@ -1361,6 +1371,38 @@ fieldWith key shaper value = (key .=) . shaper <$> objectNonNullField key value
 fieldWithDefault :: Key -> (Value -> Value) -> (Value -> Value) -> Value -> Maybe Pair
 fieldWithDefault key shaper fallback value =
   Just $ key .= maybe (fallback value) shaper (objectNonNullField key value)
+
+
+fieldWithDescriptionBudget :: Key -> (Value -> Value) -> Value -> (Int, Int) -> ((Int, Int), Maybe Pair)
+fieldWithDescriptionBudget key shaper value budget = case objectNonNullField key value of
+  Just fieldValue ->
+    let (budget', shaped) = shapeWithDescriptionBudget shaper budget fieldValue
+    in (budget', Just (key .= shaped))
+  Nothing -> (budget, Nothing)
+
+
+mappedArrayFieldWithDescriptionBudget :: Key -> (Value -> Value) -> Value -> (Int, Int) -> ((Int, Int), Maybe Pair)
+mappedArrayFieldWithDescriptionBudget key shaper value budget = case objectNonNullField key value of
+  Just (Array arr) ->
+    let (budget', items) = mapAccumL (shapeWithDescriptionBudget shaper) budget (toList arr)
+    in (budget', Just (key .= items))
+  _ -> (budget, Nothing)
+
+
+shapeWithDescriptionBudget :: (Value -> Value) -> (Int, Int) -> Value -> ((Int, Int), Value)
+shapeWithDescriptionBudget shaper budget@(remaining, omitted) value = case objectNonNullField "description" value of
+  Just _ | remaining > 0 -> ((remaining - 1, omitted), insertBoundedDescriptionField value (shaper value))
+  Just _                 -> ((0, omitted + 1), shaper value)
+  Nothing                -> (budget, shaper value)
+
+
+descriptionLimitPairs :: (Int, Int) -> [Maybe Pair]
+descriptionLimitPairs (_, omitted)
+  | omitted > 0 =
+      [ Just $ "description_limit" .= maxProjectOverviewDescriptionRows
+      , Just $ "descriptions_omitted" .= omitted
+      ]
+  | otherwise = []
 
 
 mappedArrayField :: Key -> (Value -> Value) -> Value -> Maybe Pair

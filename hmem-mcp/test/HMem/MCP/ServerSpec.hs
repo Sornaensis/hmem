@@ -1,8 +1,8 @@
 module HMem.MCP.ServerSpec (spec) where
 
-import Control.Concurrent (ThreadId, forkIOWithUnmask, threadDelay)
-import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, tryReadMVar)
-import Control.Exception (AsyncException(..), bracket, finally, throwIO)
+import Control.Concurrent (ThreadId, forkIO, forkIOWithUnmask, killThread, threadDelay, throwTo)
+import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, tryPutMVar, tryReadMVar)
+import Control.Exception (AsyncException(..), SomeException, bracket, finally, fromException, throwIO, try)
 import Control.Concurrent.STM (TVar, newTVarIO)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
@@ -191,6 +191,32 @@ spec = do
         firstWorker <- readMVar firstWorkerVar
         waitForStoppedThreads [firstWorker]
 
+    it "cleans up partially-started workers when interrupted asynchronously during a blocking spawn" $
+      withTempResponseFile $ \input ->
+      withTempResponseFile $ \output ->
+      withTempResponseFile $ \errHandle -> do
+        firstWorkerVar <- newEmptyMVar
+        spawnAttemptVar <- newMVar (0 :: Int)
+        secondSpawnEntered <- newEmptyMVar
+        releaseSpawn <- newEmptyMVar
+        resultVar <- newEmptyMVar
+        mgr <- newManager defaultManagerSettings
+        parentThread <- forkIO $
+          try @SomeException
+            (runMCPServerWithHandlesObservedWithFork
+              (blockingSecondSpawn firstWorkerVar spawnAttemptVar secondSpawnEntered releaseSpawn)
+              (const $ pure ())
+              2 4 input output errHandle mgr unusedServerUrl Nothing)
+            >>= putMVar resultVar
+        result <- (do
+            waitForSignal secondSpawnEntered
+            throwTo parentThread ThreadKilled
+            waitForResult "Timed out waiting for async startup interruption" resultVar)
+          `finally` (tryPutMVar releaseSpawn () >> killThread parentThread)
+        assertThreadKilled result
+        firstWorker <- readMVar firstWorkerVar
+        waitForStoppedThreads [firstWorker]
+
 unusedServerUrl :: String
 unusedServerUrl = "http://127.0.0.1:9"
 
@@ -214,15 +240,31 @@ withBlockingHmemServer requestSeen blocker action =
 
 failingSecondSpawn :: MVar ThreadId -> MVar Int -> IO () -> IO ThreadId
 failingSecondSpawn firstWorkerVar spawnAttemptVar action = do
-  attempt <- modifyMVar spawnAttemptVar $ \current -> do
-    let next = current + 1
-    pure (next, next)
+  attempt <- nextSpawnAttempt spawnAttemptVar
   if attempt == 1
-    then do
-      workerId <- forkIOWithUnmask $ \unmask -> unmask action
-      putMVar firstWorkerVar workerId
-      pure workerId
+    then recordStartedWorker firstWorkerVar action
     else throwIO ThreadKilled
+
+blockingSecondSpawn :: MVar ThreadId -> MVar Int -> MVar () -> MVar () -> IO () -> IO ThreadId
+blockingSecondSpawn firstWorkerVar spawnAttemptVar secondSpawnEntered releaseSpawn action = do
+  attempt <- nextSpawnAttempt spawnAttemptVar
+  if attempt == 1
+    then recordStartedWorker firstWorkerVar action
+    else do
+      putMVar secondSpawnEntered ()
+      readMVar releaseSpawn
+      ioError $ userError "blocking spawn released without async interruption"
+
+nextSpawnAttempt :: MVar Int -> IO Int
+nextSpawnAttempt spawnAttemptVar = modifyMVar spawnAttemptVar $ \current -> do
+  let next = current + 1
+  pure (next, next)
+
+recordStartedWorker :: MVar ThreadId -> IO () -> IO ThreadId
+recordStartedWorker firstWorkerVar action = do
+  workerId <- forkIOWithUnmask $ \unmask -> unmask action
+  putMVar firstWorkerVar workerId
+  pure workerId
 
 withTempResponseFile :: (Handle -> IO a) -> IO a
 withTempResponseFile action =
@@ -244,14 +286,24 @@ strictHandleContents handle = do
   BL.length bytes `seq` pure bytes
 
 waitForSignal :: MVar () -> IO ()
-waitForSignal = go (100 :: Int)
+waitForSignal signal = waitForResult "Timed out waiting for signal" signal
+
+waitForResult :: String -> MVar a -> IO a
+waitForResult label = go (100 :: Int)
   where
-    go 0 _signal = expectationFailure "Timed out waiting for blocking request"
-    go attempts signal = do
-      mSeen <- tryReadMVar signal
-      case mSeen of
-        Just () -> pure ()
-        Nothing -> threadDelay 10000 >> go (attempts - 1) signal
+    go 0 _resultVar = expectationFailure label >> error label
+    go attempts resultVar = do
+      mResult <- tryReadMVar resultVar
+      case mResult of
+        Just result -> pure result
+        Nothing -> threadDelay 10000 >> go (attempts - 1) resultVar
+
+assertThreadKilled :: Either SomeException a -> Expectation
+assertThreadKilled result = case result of
+  Left e -> case fromException e of
+    Just ThreadKilled -> pure ()
+    other -> expectationFailure $ "Expected ThreadKilled, got: " <> show other <> " from " <> show e
+  Right _ -> expectationFailure "Expected ThreadKilled, but server loop completed successfully"
 
 waitForStoppedThreads :: [ThreadId] -> Expectation
 waitForStoppedThreads = go (50 :: Int)

@@ -53,6 +53,7 @@ tests:
       - hmem-server
       - hspec
       - scientific
+      - directory
       - wai
       - warp
 

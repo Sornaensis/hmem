@@ -6,14 +6,17 @@ import Data.Aeson
 import Data.Aeson.Types (Pair)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Control.Exception (IOException, try)
 import Control.Concurrent.STM (TVar, newTVarIO)
 import Data.Foldable (toList)
+import Data.List (sort)
 import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime)
 import Data.UUID qualified as UUID
 import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
 import Network.HTTP.Types (hContentType, methodGet, methodPost, methodPut, status200, status400, status404)
@@ -22,7 +25,7 @@ import Network.Wai.Handler.Warp (testWithApplication)
 import Test.Hspec
 
 import HMem.MCP.Tools
-import HMem.MCP.Server (JsonRpcRequest(..), handleRequest, injectWorkspaceContext)
+import HMem.MCP.Server (JsonRpcRequest(..), encodeStdioResponse, handleRequest, handleStdioLine, injectWorkspaceContext)
 import HMem.Types
 
 testUUID :: Text
@@ -303,6 +306,70 @@ spec = do
           (Nothing, _) -> expectationFailure "Missing fixture payload for unified_search"
           (_, Nothing) -> expectationFailure $ "Expected compact search MCP payload, got: " <> show mResponse
 
+    it "routes workspace-injected search through stdio line handling" $ do
+      fixtures <- readCompactResponseFixtures
+      withMockHmemServer $ \mgr base -> do
+        initialized <- newTVarIO False
+        wsContext <- newTVarIO Nothing
+        _ <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("init" :: Text)
+          , "method" .= ("initialize" :: Text)
+          ]
+        setResponse <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("set-workspace-stdio" :: Text)
+          , "method" .= ("tools/call" :: Text)
+          , "params" .= object
+              [ "name" .= ("set_workspace" :: Text)
+              , "arguments" .= object ["workspace_id" .= testUUID2]
+              ]
+          ]
+        (setResponse >>= jsonField "result" >>= mcpTextValue >>= jsonField "workspace_id") `shouldBe` Just (String testUUID2)
+
+        searchResponse <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("search-stdio" :: Text)
+          , "method" .= ("tools/call" :: Text)
+          , "params" .= object
+              [ "name" .= ("search" :: Text)
+              , "arguments" .= object
+                  [ "entity_types" .= (["memory", "project", "task"] :: [Text])
+                  , "limit" .= (5 :: Int)
+                  ]
+              ]
+          ]
+        case (fixturePayload "unified_search" fixtures, searchResponse >>= jsonField "result" >>= mcpTextValue) of
+          (Just expected, Just actual) -> actual `shouldBe` expected
+          (Nothing, _) -> expectationFailure "Missing fixture payload for unified_search"
+          (_, Nothing) -> expectationFailure $ "Expected stdio compact search payload, got: " <> show searchResponse
+
+    it "routes project_overview include_descriptions through stdio line handling" $ do
+      withMockHmemServer $ \mgr base -> do
+        initialized <- newTVarIO False
+        wsContext <- newTVarIO Nothing
+        _ <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("init" :: Text)
+          , "method" .= ("initialize" :: Text)
+          ]
+        overviewResponse <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("overview-stdio" :: Text)
+          , "method" .= ("tools/call" :: Text)
+          , "params" .= object
+              [ "name" .= ("project_overview" :: Text)
+              , "arguments" .= object
+                  [ "project_id" .= testUUID
+                  , "include_descriptions" .= True
+                  ]
+              ]
+          ]
+        let mOverview = overviewResponse >>= jsonField "result" >>= mcpTextValue
+        (mOverview >>= jsonField "project" >>= jsonField "description") `shouldBe` Just (String "full project description")
+        (mOverview >>= firstArrayItem "tasks" >>= jsonField "description") `shouldBe` Just (String "full task description")
+        (mOverview >>= jsonField "descriptions_omitted") `shouldBe` Nothing
+
   describe "live HTTP tool dispatch" $ do
     it "routes representative slim MCP tools through HTTP compact shapers" $ do
       withMockHmemServer $ \mgr base -> do
@@ -348,6 +415,14 @@ spec = do
         show overview `shouldNotContain` "full project description"
         show overview `shouldNotContain` "full task description"
         show overview `shouldNotContain` "full memory content"
+
+        typedOverview <- callMockTool mgr base "project_overview" $ object
+          [ "project_id" .= testUUID2 ]
+        (jsonField "project" typedOverview >>= jsonField "name") `shouldBe` Just (String "Typed project")
+        (firstArrayItem "tasks" typedOverview >>= jsonField "title") `shouldBe` Just (String "Typed task")
+        show typedOverview `shouldNotContain` "typed project description"
+        show typedOverview `shouldNotContain` "typed task description"
+        show typedOverview `shouldNotContain` "workspace_id"
 
         overviewWithDescriptions <- callMockTool mgr base "project_overview" $ object
           [ "project_id" .= testUUID
@@ -447,6 +522,7 @@ spec = do
           [ "workspace_id" .= testUUID2
           , "name" .= ("Workflow project" :: Text)
           , "description" .= ("workflow project description" :: Text)
+          , "priority" .= (6 :: Int)
           , "tasks" .=
               [ object
                   [ "title" .= ("First task" :: Text)
@@ -637,6 +713,18 @@ spec = do
             [ "title", "description", "project_id", "parent_id", "status", "priority", "metadata", "due_at" ]
         other -> expectationFailure $ "Expected TaskUpdate, got: " <> show other
 
+    it "omits changed_fields for omitted update inputs" $ do
+      case parseToolCall "memory_update" (object ["memory_id" .= testUUID]) of
+        Right (MemoryUpdate _ um tags) -> memoryUpdateChangedFields um tags `shouldBe` []
+        other -> expectationFailure $ "Expected empty MemoryUpdate, got: " <> show other
+      case parseToolCall "project_update" (object ["project_id" .= testUUID]) of
+        Right (ProjectUpdate _ up) -> projectUpdateChangedFields up `shouldBe` []
+        other -> expectationFailure $ "Expected empty ProjectUpdate, got: " <> show other
+      case parseToolCall "task_update" (object ["task_id" .= testUUID]) of
+        Right (TaskUpdate _ ut) -> taskUpdateChangedFields ut `shouldBe` []
+        other -> expectationFailure $ "Expected empty TaskUpdate, got: " <> show other
+      jsonField "changed_fields" (addChangedFields [] (compactTaskMutationAck "updated" fullTaskValue)) `shouldBe` Nothing
+
     it "wraps dependency mutations as acknowledgements with compact affected tasks" $ do
       let ack = compactDependencyMutationAck "add" $ object
             [ "action" .= ("add" :: Text)
@@ -678,26 +766,26 @@ spec = do
       show updateAck `shouldNotContain` "full memory content"
 
     it "keeps workflow finish/archive acknowledgements to ids and statuses" $ do
-      let finishAck = compactTaskFinishAckWithNotes "finished" (Just fullMemoryValue) fullTaskValue
+      let finishAck = compactTaskFinishAckWithNotes "finished" (Just notesMemoryValue) fullTaskValue
           finishWithoutNotes = compactTaskFinishAckWithNotes "finished" Nothing fullTaskValue
-          archiveAck = compactProjectArchiveAck (Just fullMemoryValue) fullProjectValue
+          archiveAck = compactProjectArchiveAck (Just summaryMemoryValue) fullProjectValue
           archiveWithoutSummary = compactProjectArchiveAck Nothing fullProjectValue
       jsonField "task_id" finishAck `shouldBe` Just (String testUUID)
       jsonField "status" finishAck `shouldBe` Just (String "todo")
-      jsonField "notes_memory_id" finishAck `shouldBe` Just (String testUUID)
+      jsonField "notes_memory_id" finishAck `shouldBe` Just (String testNotesMemoryUUID)
       jsonField "notes_memory" finishAck `shouldBe` Nothing
       jsonField "summary" finishAck `shouldBe` Nothing
       jsonField "notes_memory_id" finishWithoutNotes `shouldBe` Nothing
       jsonField "summary" finishWithoutNotes `shouldBe` Nothing
       jsonField "project_id" archiveAck `shouldBe` Just (String testUUID)
       jsonField "status" archiveAck `shouldBe` Just (String "active")
-      jsonField "summary_memory_id" archiveAck `shouldBe` Just (String testUUID)
+      jsonField "summary_memory_id" archiveAck `shouldBe` Just (String testSummaryMemoryUUID)
       jsonField "summary_memory" archiveAck `shouldBe` Nothing
       jsonField "summary" archiveAck `shouldBe` Nothing
       jsonField "summary_memory_id" archiveWithoutSummary `shouldBe` Nothing
       jsonField "summary" archiveWithoutSummary `shouldBe` Nothing
-      show finishAck `shouldNotContain` "full memory content"
-      show archiveAck `shouldNotContain` "full memory content"
+      show finishAck `shouldNotContain` "finished with notes"
+      show archiveAck `shouldNotContain` "archive summary"
 
     it "compacts project_spec workflow output for many created tasks" $ do
       let manyTasks = replicate 25 fullTaskValue
@@ -819,6 +907,19 @@ spec = do
       show overview `shouldNotContain` "done_task_count"
       jsonField "detail_level" contextInfo `shouldBe` Just (String "medium")
       jsonField "task_memories" contextInfo `shouldSatisfy` arrayLength 1
+
+    it "compacts HMem DTO-shaped project overview payloads" $ do
+      let overview = compactProjectOverview typedProjectOverviewValue
+          overviewWithDescriptions = compactProjectOverviewWithDescriptions typedProjectOverviewValue
+      (jsonField "project" overview >>= jsonField "name") `shouldBe` Just (String "Typed project")
+      (firstArrayItem "tasks" overview >>= jsonField "title") `shouldBe` Just (String "Typed task")
+      jsonField "connected_memories" overview `shouldSatisfy` arrayLength 1
+      show overview `shouldNotContain` "typed project description"
+      show overview `shouldNotContain` "typed task description"
+      show overview `shouldNotContain` "workspace_id"
+      (jsonField "project" overviewWithDescriptions >>= jsonField "description") `shouldBe` Just (String "typed project description")
+      (firstArrayItem "tasks" overviewWithDescriptions >>= jsonField "description") `shouldBe` Just (String "typed task description")
+      jsonField "descriptions_omitted" overviewWithDescriptions `shouldBe` Nothing
 
     it "bounds project overview include_descriptions rows" $ do
       let longDescription = T.replicate (maxProjectOverviewDescriptionChars + 25) "x"
@@ -1192,6 +1293,53 @@ archivedProjectValue = object
   ]
 
 
+typedProjectOverviewValue :: Value
+typedProjectOverviewValue = toJSON $ ProjectOverview
+  typedProject
+  [typedTask]
+  [typedProject]
+  []
+  [ConnectedMemorySummary parsedUUID "Typed memory" ScopeProject]
+  (ProjectReadinessRollup 0 0 1 0 0 0 0 0 False)
+
+
+typedProject :: Project
+typedProject = Project
+  parsedUUID
+  parsedUUID2
+  Nothing
+  "Typed project"
+  (Just "typed project description")
+  ProjActive
+  8
+  (object ([] :: [Pair]))
+  testTime
+  testTime
+
+
+typedTask :: Task
+typedTask = Task
+  parsedUUID
+  parsedUUID2
+  (Just parsedUUID3)
+  Nothing
+  "Typed task"
+  (Just "typed task description")
+  Todo
+  9
+  (object ([] :: [Pair]))
+  Nothing
+  Nothing
+  4
+  3
+  testTime
+  testTime
+
+
+testTime :: UTCTime
+testTime = UTCTime (fromGregorian 2026 5 20) (secondsToDiffTime 0)
+
+
 compactResponseRegressionCases :: [(Text, Value -> Value, Value)]
 compactResponseRegressionCases =
   [ ("task_create", compactTaskMutationAck "created", fullTaskValue)
@@ -1476,6 +1624,10 @@ mcpTextContent (Object o) = do
 mcpTextContent _ = Nothing
 
 
+jsonLine :: Value -> BS8.ByteString
+jsonLine = BL.toStrict . encode
+
+
 withMockHmemServer :: (Manager -> String -> IO a) -> IO a
 withMockHmemServer action =
   testWithApplication (pure mockHmemApplication) $ \port -> do
@@ -1543,8 +1695,10 @@ mockHmemApplication req respond = do
       | method == methodGet -> respondJson memoryGraphRegressionValue
     (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview")
       | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson projectOverviewRegressionValue
+    (method, "/api/v1/projects/11111111-2222-3333-4444-555555555555/overview")
+      | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson typedProjectOverviewValue
     (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/next-tasks")
-      | method == methodGet && Wai.rawQueryString req == "?limit=3&include_blocked=true" && hasBearer "request-shape-token" -> respondJson nextTasksRegressionValue
+      | method == methodGet && queryMatches [("limit", Just "3"), ("include_blocked", Just "true")] req && hasBearer "request-shape-token" -> respondJson nextTasksRegressionValue
       | method == methodGet -> respondBad "unexpected project_next_tasks query or auth header"
     (method, "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview")
       | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson taskOverviewRegressionValue
@@ -1580,6 +1734,10 @@ mockHmemApplication req respond = do
             then respondJson fullTaskValue
             else respondBad $ "unexpected task create body: " <> T.pack (show mBody)
     _ -> respond $ Wai.responseLBS status404 [(hContentType, "application/json")] "{\"error\":\"not found\"}"
+
+
+queryMatches :: [(BS8.ByteString, Maybe BS8.ByteString)] -> Wai.Request -> Bool
+queryMatches expected req = sort (Wai.queryString req) == sort expected
 
 
 unifiedSearchRequestBody :: Value
@@ -1671,6 +1829,7 @@ isProjectCreateBody body = body `elem`
       [ "workspace_id" .= testUUID2
       , "name" .= ("Workflow project" :: Text)
       , "description" .= ("workflow project description" :: Text)
+      , "priority" .= (6 :: Int)
       ]
   ]
 
@@ -1773,7 +1932,7 @@ assertJsonRpcResponseFixture fixtures mgr base initialized wsContext (name, tool
       jsonField "id" response `shouldBe` Just (String (name <> "-jsonrpc"))
       actual `shouldBe` expected
       assertEncodedCharBudget (name <> " payload") actual maxChars
-      assertEncodedCharBudget (name <> " JSON-RPC envelope") response maxEnvelopeChars
+      assertEncodedLineBudget (name <> " JSON-RPC stdio envelope") response maxEnvelopeChars
       shouldOmitDefaultNoise name actual
     (Nothing, _, _, _, _) -> expectationFailure $ "Expected JSON-RPC response for " <> T.unpack name
     (_, Nothing, _, _, _) -> expectationFailure $ "Missing fixture payload for " <> T.unpack name
@@ -1789,6 +1948,15 @@ assertEncodedCharBudget label value maxChars =
     then pure ()
     else expectationFailure $
       T.unpack label <> " encoded size " <> show actualChars <> " exceeds budget " <> show maxChars
+
+
+assertEncodedLineBudget :: Text -> Value -> Int -> Expectation
+assertEncodedLineBudget label value maxChars =
+  let actualChars = encodedLineCharCount value
+  in if actualChars <= maxChars
+    then pure ()
+    else expectationFailure $
+      T.unpack label <> " encoded line size " <> show actualChars <> " exceeds budget " <> show maxChars
 
 
 fixturePayload :: Text -> Value -> Maybe Value
@@ -1820,6 +1988,10 @@ fixtureField _ _ _ = Nothing
 
 encodedCharCount :: Value -> Int
 encodedCharCount = fromIntegral . BL.length . encode
+
+
+encodedLineCharCount :: Value -> Int
+encodedLineCharCount = fromIntegral . BL.length . encodeStdioResponse
 
 
 shouldOmitDefaultNoise :: Text -> Value -> Expectation

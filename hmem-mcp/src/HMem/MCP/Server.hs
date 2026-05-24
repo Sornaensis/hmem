@@ -5,6 +5,8 @@ module HMem.MCP.Server
   , JsonRpcRequest(..)
   , handleRequest
   , handleStdioLine
+  , encodeStdioResponse
+  , sendResponseToHandle
   ) where
 
 import Control.Monad (replicateM_)
@@ -26,7 +28,7 @@ import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Network.HTTP.Client (Manager, newManager, managerResponseTimeout, responseTimeoutMicro)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
-import System.IO (hFlush, hSetBuffering, stdin, stdout, stderr, hPutStrLn, BufferMode (..), hIsEOF)
+import System.IO (Handle, hFlush, hSetBuffering, stdin, stdout, stderr, hPutStrLn, BufferMode (..), hIsEOF)
 import HMem.MCP.Tools (handleToolCall, toolDefinitions)
 
 ------------------------------------------------------------------------
@@ -253,9 +255,15 @@ isNotification req = case req.reqId of
   _       -> False
 
 sendResponse :: MVar () -> Value -> IO ()
-sendResponse lock v = withMVar lock $ \_ -> do
-  BL8.putStrLn (encode v)
-  hFlush stdout
+sendResponse = sendResponseToHandle stdout
+
+sendResponseToHandle :: Handle -> MVar () -> Value -> IO ()
+sendResponseToHandle handle lock v = withMVar lock $ \_ -> do
+  BL.hPut handle (encodeStdioResponse v)
+  hFlush handle
+
+encodeStdioResponse :: Value -> BL.ByteString
+encodeStdioResponse = (`BL8.snoc` '\n') . encode
 
 ------------------------------------------------------------------------
 -- Workspace context helpers

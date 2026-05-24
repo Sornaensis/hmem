@@ -1,18 +1,23 @@
 module HMem.MCP.ServerSpec (spec) where
 
+import Control.Concurrent.MVar (newMVar)
+import Control.Exception (bracket)
 import Control.Concurrent.STM (TVar, newTVarIO)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
+import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Foldable (toList)
 import Data.Text (Text)
 import Data.UUID (UUID)
 import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
+import System.Directory (removeFile)
+import System.IO (Handle, SeekMode(..), hClose, hSeek, openTempFile)
 import Test.Hspec
 
-import HMem.MCP.Server (handleStdioLine)
+import HMem.MCP.Server (encodeStdioResponse, handleStdioLine, sendResponseToHandle)
 
 spec :: Spec
 spec = do
@@ -76,6 +81,21 @@ spec = do
           Just (Array tools) -> length (toList tools) `shouldSatisfy` (> 0)
           other -> expectationFailure $ "Expected tools/list array from stdio line, got: " <> show other
 
+    it "writes newline-delimited JSON responses to handles" $ do
+      let response = object
+            [ "jsonrpc" .= ("2.0" :: Text)
+            , "id" .= ("handle-test" :: Text)
+            , "result" .= object ["ok" .= True]
+            ]
+      bytes <- withTempResponseFile $ \handle -> do
+        lock <- newMVar ()
+        sendResponseToHandle handle lock response
+        hSeek handle AbsoluteSeek 0
+        bytes <- BL.hGetContents handle
+        BL.length bytes `seq` pure bytes
+      bytes `shouldBe` encodeStdioResponse response
+      BL8.last bytes `shouldBe` '\n'
+
 unusedServerUrl :: String
 unusedServerUrl = "http://127.0.0.1:9"
 
@@ -85,6 +105,13 @@ withStdioState action = do
   initialized <- newTVarIO False
   wsContext <- newTVarIO Nothing
   action mgr initialized wsContext
+
+withTempResponseFile :: (Handle -> IO a) -> IO a
+withTempResponseFile action =
+  bracket
+    (openTempFile "." "mcp-response.jsonl")
+    (\(path, handle) -> hClose handle >> removeFile path)
+    (\(_, handle) -> action handle)
 
 jsonLine :: Value -> BS8.ByteString
 jsonLine = BL.toStrict . encode

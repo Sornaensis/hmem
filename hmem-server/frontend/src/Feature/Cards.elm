@@ -11,6 +11,8 @@ module Feature.Cards exposing
     , taskCascadePreview
     , taskCompletionBlockerReason
     , taskShownForMatchingDescendant
+    , taskStatusOptionDisabledReason
+    , taskStatusOptionsForTask
     , update
     , visibleTaskTreeForCriteria
     , viewDeleteConfirmModal
@@ -779,6 +781,49 @@ taskCompletionBlockerReason openTaskCount =
 
     else
         Just ("Finish or cancel " ++ countPhrase openTaskCount "subtask" "subtasks" ++ " before marking this task done.")
+
+
+taskStatusOptionsForTask : Bool -> Api.Task -> List Api.TaskStatus
+taskStatusOptionsForTask dependencyBlocked task =
+    let
+        transitionTargets =
+            if dependencyBlocked then
+                [ Api.Blocked, Api.Cancelled ]
+
+            else
+                Api.allTaskStatuses
+    in
+    ensureTaskStatusOption task.status transitionTargets
+
+
+taskStatusOptionDisabledReason : Maybe String -> Bool -> Maybe Api.TaskStatus -> Api.TaskStatus -> Maybe String
+taskStatusOptionDisabledReason completionBlockerReason isSubtask mParentStatus status =
+    if status == Api.Done then
+        completionBlockerReason
+
+    else if status == Api.InProgress && isSubtask && mParentStatus /= Just Api.InProgress then
+        Just "Start the parent task before moving this subtask to in progress."
+
+    else
+        Nothing
+
+
+ensureTaskStatusOption : Api.TaskStatus -> List Api.TaskStatus -> List Api.TaskStatus
+ensureTaskStatusOption currentStatus statuses =
+    if List.member currentStatus statuses then
+        statuses
+
+    else
+        currentStatus :: statuses
+
+
+directOpenDependencyCountForTask : Model -> String -> Int
+directOpenDependencyCountForTask model taskId =
+    model.dependencies.taskDependencyLinks
+        |> List.filter (\link -> link.taskId == taskId)
+        |> List.filterMap (\link -> Dict.get link.dependsOnId model.tasks)
+        |> List.filter (\dependency -> isOpenTaskStatus dependency.status)
+        |> List.length
 
 
 joinHuman : List String -> String
@@ -1624,6 +1669,23 @@ viewTaskCard showProject model task =
             allTasks
                 |> List.filter (\t -> t.parentId == Just task.id)
 
+        maybeRollup =
+            taskReadinessRollupForTask model task.id
+
+        openDependencyCount =
+            maybeRollup
+                |> Maybe.map .openDependencyCount
+                |> Maybe.withDefault 0
+
+        directOpenDependencyCount =
+            directOpenDependencyCountForTask model task.id
+
+        dependencyBlockedForStatusOptions =
+            directOpenDependencyCount > 0
+
+        taskStatusOptions =
+            taskStatusOptionsForTask dependencyBlockedForStatusOptions task
+
         query =
             String.toLower (String.trim model.search.query)
 
@@ -1648,14 +1710,7 @@ viewTaskCard showProject model task =
             taskCompletionBlockerReason openDescendantTaskCount
 
         taskStatusDisabled status =
-            if status == Api.Done then
-                completionBlockerReason
-
-            else if status == Api.InProgress && isSubtask && Maybe.map .status parentTask /= Just Api.InProgress then
-                Just "Start the parent task before moving this subtask to in progress."
-
-            else
-                Nothing
+            taskStatusOptionDisabledReason completionBlockerReason isSubtask (Maybe.map .status parentTask) status
 
         taskProjectAllowsOpenTasks =
             task.projectId
@@ -1713,7 +1768,7 @@ viewTaskCard showProject model task =
                 , Feature.Editing.viewEditableText model "task" task.id "title" task.title
                 ]
             , div [ class "card-actions" ]
-                [ Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) Api.allTaskStatuses Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
+                [ Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) taskStatusOptions Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
                 , viewCompletionGateNote completionBlockerReason
                 , Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority
                 , if Permissions.canEditCurrentWorkspace model then
@@ -1727,9 +1782,6 @@ viewTaskCard showProject model task =
             childTasks =
                 childTasksForTask
 
-            maybeRollup =
-                taskReadinessRollupForTask model task.id
-
             remainingSubtasks =
                 maybeRollup
                     |> Maybe.map .openSubtaskCount
@@ -1739,11 +1791,6 @@ viewTaskCard showProject model task =
                 maybeRollup
                     |> Maybe.map (\rollup -> rollup.doneSubtaskCount + rollup.cancelledSubtaskCount)
                     |> Maybe.withDefault (List.length childTasks - remainingSubtasks)
-
-            openDependencyCount =
-                maybeRollup
-                    |> Maybe.map .openDependencyCount
-                    |> Maybe.withDefault 0
 
             depCount =
                 task.dependencyCount

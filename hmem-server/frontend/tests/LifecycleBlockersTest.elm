@@ -225,6 +225,40 @@ suite =
                         , "popover-card-status task-status-text task-status-dependency-blocked"
                         , ""
                         ]
+        , test "dependency-blocked task status options hide todo and in-progress transitions" <|
+            \_ ->
+                let
+                    blockedTask =
+                        { task "blocked" Nothing (Just "project-a") | status = Api.Blocked }
+
+                    normalTask =
+                        task "normal" Nothing (Just "project-a")
+
+                    staleTodoWithOpenDependencies =
+                        task "stale" Nothing (Just "project-a")
+                in
+                [ Feature.Cards.taskStatusOptionsForTask True blockedTask
+                , Feature.Cards.taskStatusOptionsForTask False blockedTask
+                , Feature.Cards.taskStatusOptionsForTask False normalTask
+                , Feature.Cards.taskStatusOptionsForTask True staleTodoWithOpenDependencies
+                ]
+                    |> Expect.equal
+                        [ [ Api.Blocked, Api.Cancelled ]
+                        , Api.allTaskStatuses
+                        , Api.allTaskStatuses
+                        , [ Api.Todo, Api.Blocked, Api.Cancelled ]
+                        ]
+        , test "task status option disabled reasons preserve subtask and completion gates" <|
+            \_ ->
+                [ Feature.Cards.taskStatusOptionDisabledReason Nothing True (Just Api.Todo) Api.InProgress
+                , Feature.Cards.taskStatusOptionDisabledReason Nothing True (Just Api.InProgress) Api.InProgress
+                , Feature.Cards.taskStatusOptionDisabledReason (Just "Finish subtasks first.") False Nothing Api.Done
+                ]
+                    |> Expect.equal
+                        [ Just "Start the parent task before moving this subtask to in progress."
+                        , Nothing
+                        , Just "Finish subtasks first."
+                        ]
         , test "dependency mutation responses decode affected task status patches" <|
             \_ ->
                 let

@@ -100,16 +100,27 @@ suite =
                 case Decode.decodeString Api.workspaceTimelineEventDecoder json of
                     Ok event ->
                         [ Feature.Timeline.timelineEventLabel event.eventType
+                        , Feature.Timeline.timelineEventToneClass event.eventType
                         , event.entityType
                         , event.navigation.entityType
                         , event.project |> Maybe.map .name |> Maybe.withDefault ""
                         , event.parentTask |> Maybe.map .title |> Maybe.withDefault ""
-                        , event.statusTransition |> Maybe.map .to |> Maybe.withDefault ""
+                        , Feature.Timeline.timelineStatusSummary event.statusTransition |> Maybe.withDefault ""
                         ]
-                            |> Expect.equal [ "Subtask completed", "subtask", "task", "Timeline project", "Parent task", "done" ]
+                            |> Expect.equal [ "Subtask completed", "timeline-event-completed", "subtask", "task", "Timeline project", "Parent task", "Todo → Done" ]
 
                     Err error ->
                         Expect.fail (Decode.errorToString error)
+        , test "workspace timeline events sort newest first with a stable tie-breaker" <|
+            \_ ->
+                [ timelineEvent "older" "2026-05-24T00:00:00Z" "audit-older"
+                , timelineEvent "same-a" "2026-05-25T00:00:00Z" "audit-a"
+                , timelineEvent "newer" "2026-05-26T00:00:00Z" "audit-newer"
+                , timelineEvent "same-z" "2026-05-25T00:00:00Z" "audit-z"
+                ]
+                    |> Feature.Timeline.sortTimelineEvents
+                    |> List.map .id
+                    |> Expect.equal [ "newer", "same-z", "same-a", "older" ]
         , test "task cascade delete preview covers empty, small, and large descendant trees" <|
             \_ ->
                 let
@@ -778,6 +789,24 @@ suite =
                     Err err ->
                         Expect.fail (Decode.errorToString err)
         ]
+
+
+timelineEvent : String -> String -> String -> Api.WorkspaceTimelineEvent
+timelineEvent id occurredAt sourceAuditId =
+    { id = id
+    , workspaceId = "workspace-a"
+    , eventType = "task_completed"
+    , entityType = "task"
+    , entityId = id
+    , title = id
+    , occurredAt = occurredAt
+    , actor = Nothing
+    , project = Nothing
+    , parentTask = Nothing
+    , statusTransition = Just { from = "in_progress", to = "done" }
+    , navigation = { entityType = "task", entityId = id }
+    , sourceAuditId = Just sourceAuditId
+    }
 
 
 project : String -> Maybe String -> Api.Project

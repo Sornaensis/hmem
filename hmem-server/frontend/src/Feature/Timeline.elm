@@ -1,7 +1,8 @@
-module Feature.Timeline exposing (ensureLoaded, init, timelineEventLabel, update, viewWorkspaceTimelinePanel)
+module Feature.Timeline exposing (ensureLoaded, init, sortTimelineEvents, timelineEventLabel, timelineEventToneClass, timelineStatusSummary, update, viewWorkspaceTimelinePanel)
 
 import Api
 import Browser.Navigation as Nav
+import Char
 import Helpers exposing (buildFragment, formatDate)
 import Html exposing (..)
 import Html.Attributes exposing (class, title)
@@ -156,6 +157,10 @@ viewTimelineBody wsId timeline =
                     ]
 
             else
+                let
+                    sortedEvents =
+                        sortTimelineEvents timeline.events
+                in
                 div []
                     [ if timeline.hasMore then
                         p [ class "timeline-more-note" ] [ text "Showing the latest 50 timeline events." ]
@@ -163,39 +168,93 @@ viewTimelineBody wsId timeline =
                       else
                         text ""
                     , div [ class "timeline-event-list", title ("Timeline for workspace " ++ wsId) ]
-                        (List.map viewTimelineEvent timeline.events)
+                        (List.map viewTimelineEvent sortedEvents)
                     ]
+
+
+sortTimelineEvents : List Api.WorkspaceTimelineEvent -> List Api.WorkspaceTimelineEvent
+sortTimelineEvents events =
+    List.sortWith compareTimelineEvents events
+
+
+compareTimelineEvents : Api.WorkspaceTimelineEvent -> Api.WorkspaceTimelineEvent -> Order
+compareTimelineEvents left right =
+    case compare right.occurredAt left.occurredAt of
+        EQ ->
+            compare (timelineTieBreaker right) (timelineTieBreaker left)
+
+        order ->
+            order
+
+
+timelineTieBreaker : Api.WorkspaceTimelineEvent -> String
+timelineTieBreaker event =
+    event.sourceAuditId |> Maybe.withDefault event.id
 
 
 viewTimelineEvent : Api.WorkspaceTimelineEvent -> Html Msg
 viewTimelineEvent event =
     button
-        [ class ("timeline-event-row timeline-event-" ++ event.entityType)
+        [ class ("timeline-event-card " ++ timelineEventToneClass event.eventType ++ " timeline-entity-" ++ event.entityType)
         , onClick (NavigateToTimelineEntity event.navigation.entityType event.navigation.entityId)
-        , title ("Go to " ++ event.entityType)
+        , title ("Open " ++ String.toLower (entityTypeLabel event.entityType))
         ]
-        [ div [ class "timeline-event-marker" ] [ text (timelineEventIcon event.eventType) ]
+        [ div [ class "timeline-event-rail" ]
+            [ span [ class "timeline-event-marker" ] [ text (timelineEventIcon event.eventType) ] ]
         , div [ class "timeline-event-content" ]
-            [ div [ class "timeline-event-main" ]
+            [ div [ class "timeline-event-topline" ]
                 [ span [ class "timeline-event-label" ] [ text (timelineEventLabel event.eventType) ]
-                , span [ class "timeline-event-title" ] [ text event.title ]
+                , span [ class ("timeline-entity-pill timeline-entity-pill-" ++ event.entityType) ] [ text (entityTypeLabel event.entityType) ]
+                , span [ class "timeline-event-time" ] [ text (formatDate event.occurredAt) ]
                 ]
-            , div [ class "timeline-event-meta" ]
-                (List.intersperse (span [ class "timeline-separator" ] [ text "·" ])
-                    (List.map (span [] << List.singleton << text) (timelineMetaSegments event))
-                )
+            , div [ class "timeline-event-title-row" ]
+                [ span [ class "timeline-event-title" ] [ text event.title ]
+                , span [ class "timeline-event-action" ] [ text ("Open " ++ entityTypeLabel event.entityType) ]
+                ]
+            , viewStatusTransition event.statusTransition
+            , viewTimelineContext event
             ]
         ]
 
 
-timelineMetaSegments : Api.WorkspaceTimelineEvent -> List String
-timelineMetaSegments event =
+viewStatusTransition : Maybe Api.TimelineStatusTransition -> Html Msg
+viewStatusTransition maybeTransition =
+    case maybeTransition of
+        Just transition ->
+            div [ class "timeline-status-transition" ]
+                [ span [ class "timeline-status-label" ] [ text "Status" ]
+                , span [ class "timeline-status-from" ] [ text (formatTimelineStatus transition.from) ]
+                , span [ class "timeline-status-arrow" ] [ text "→" ]
+                , span [ class "timeline-status-to" ] [ text (formatTimelineStatus transition.to) ]
+                ]
+
+        Nothing ->
+            text ""
+
+
+viewTimelineContext : Api.WorkspaceTimelineEvent -> Html Msg
+viewTimelineContext event =
+    let
+        contextItems =
+            timelineContextSegments event
+    in
+    if List.isEmpty contextItems then
+        text ""
+
+    else
+        div [ class "timeline-event-context" ]
+            (List.map viewTimelineContextChip contextItems)
+
+
+viewTimelineContextChip : String -> Html Msg
+viewTimelineContextChip label =
+    span [ class "timeline-context-chip" ] [ text label ]
+
+
+timelineContextSegments : Api.WorkspaceTimelineEvent -> List String
+timelineContextSegments event =
     List.filterMap identity
-        [ Just (entityTypeLabel event.entityType)
-        , Just (formatDate event.occurredAt)
-        , event.statusTransition
-            |> Maybe.map (\transition -> transition.from ++ " → " ++ transition.to)
-        , eventActorLabel event.actor
+        [ eventActorLabel event.actor
         , event.project |> Maybe.map (\project -> "Project: " ++ project.name)
         , event.parentTask |> Maybe.map (\task -> "Parent: " ++ task.title)
         ]
@@ -216,6 +275,29 @@ eventActorLabel maybeActor =
                     _ ->
                         Nothing
             )
+
+
+timelineStatusSummary : Maybe Api.TimelineStatusTransition -> Maybe String
+timelineStatusSummary maybeTransition =
+    maybeTransition
+        |> Maybe.map (\transition -> formatTimelineStatus transition.from ++ " → " ++ formatTimelineStatus transition.to)
+
+
+formatTimelineStatus : String -> String
+formatTimelineStatus status =
+    status
+        |> String.replace "_" " "
+        |> capitalizeFirst
+
+
+capitalizeFirst : String -> String
+capitalizeFirst value =
+    case String.uncons value of
+        Just ( first, rest ) ->
+            String.fromChar (Char.toUpper first) ++ rest
+
+        Nothing ->
+            ""
 
 
 entityTypeLabel : String -> String
@@ -266,6 +348,24 @@ timelineEventLabel eventType =
 
         _ ->
             eventType
+
+
+timelineEventToneClass : String -> String
+timelineEventToneClass eventType =
+    if String.contains "created" eventType then
+        "timeline-event-created"
+
+    else if String.contains "archived" eventType then
+        "timeline-event-archived"
+
+    else if String.contains "cancelled" eventType then
+        "timeline-event-cancelled"
+
+    else if String.contains "completed" eventType then
+        "timeline-event-completed"
+
+    else
+        "timeline-event-neutral"
 
 
 timelineEventIcon : String -> String

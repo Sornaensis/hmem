@@ -72,6 +72,47 @@ workflowConflictOpts = opts
       other             -> camelToSnakeField other
   }
 
+timelineActorOpts :: SchemaOptions
+timelineActorOpts = opts
+  { fieldLabelModifier = \case
+      "actorType"  -> "type"
+      "actorId"    -> "id"
+      "actorLabel" -> "label"
+      other         -> camelToSnakeField other
+  }
+
+timelineProjectContextOpts :: SchemaOptions
+timelineProjectContextOpts = opts
+  { fieldLabelModifier = \case
+      "projectContextId"   -> "id"
+      "projectContextName" -> "name"
+      other                -> camelToSnakeField other
+  }
+
+timelineTaskContextOpts :: SchemaOptions
+timelineTaskContextOpts = opts
+  { fieldLabelModifier = \case
+      "taskContextId"    -> "id"
+      "taskContextTitle" -> "title"
+      other              -> camelToSnakeField other
+  }
+
+timelineStatusTransitionOpts :: SchemaOptions
+timelineStatusTransitionOpts = opts
+  { fieldLabelModifier = \case
+      "transitionFrom" -> "from"
+      "transitionTo"   -> "to"
+      other            -> camelToSnakeField other
+  }
+
+timelineNavigationOpts :: SchemaOptions
+timelineNavigationOpts = opts
+  { fieldLabelModifier = \case
+      "navigationEntityType" -> "entity_type"
+      "navigationEntityId"   -> "entity_id"
+      other                  -> camelToSnakeField other
+  }
+
 -- Primitives / pre-existing
 instance ToSchema Value where
   declareNamedSchema _ = pure $ NamedSchema (Just "JSONValue") mempty
@@ -205,6 +246,12 @@ instance ToSchema CategoryLink         where declareNamedSchema = genericDeclare
 instance ToSchema CleanupRunReq        where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema GroupMemberReq       where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ActivityEvent        where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema WorkspaceTimelineEvent where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TimelineActor        where declareNamedSchema = genericDeclareNamedSchema timelineActorOpts
+instance ToSchema TimelineProjectContext where declareNamedSchema = genericDeclareNamedSchema timelineProjectContextOpts
+instance ToSchema TimelineTaskContext  where declareNamedSchema = genericDeclareNamedSchema timelineTaskContextOpts
+instance ToSchema TimelineStatusTransition where declareNamedSchema = genericDeclareNamedSchema timelineStatusTransitionOpts
+instance ToSchema TimelineNavigation   where declareNamedSchema = genericDeclareNamedSchema timelineNavigationOpts
 instance ToSchema LinkMemory           where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema LinkDependency       where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema a => ToSchema (PaginatedResult a) where

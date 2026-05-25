@@ -99,6 +99,12 @@ module HMem.Types
 
     -- * Activity timeline
   , ActivityEvent(..)
+  , WorkspaceTimelineEvent(..)
+  , TimelineActor(..)
+  , TimelineProjectContext(..)
+  , TimelineTaskContext(..)
+  , TimelineStatusTransition(..)
+  , TimelineNavigation(..)
 
     -- * Saved views
   , SavedView(..)
@@ -1608,6 +1614,112 @@ instance ToJSON ActivityEvent where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON ActivityEvent where
   parseJSON  = genericParseJSON jsonOptions
+
+-- | Curated workspace timeline event derived from audit data for the web UI.
+-- The shape intentionally exposes lifecycle context instead of raw audit JSON.
+data WorkspaceTimelineEvent = WorkspaceTimelineEvent
+  { id               :: Text
+  , workspaceId      :: UUID
+  , eventType        :: Text
+  , entityType       :: Text
+  , entityId         :: UUID
+  , title            :: Text
+  , occurredAt       :: UTCTime
+  , actor            :: Maybe TimelineActor
+  , project          :: Maybe TimelineProjectContext
+  , parentTask       :: Maybe TimelineTaskContext
+  , statusTransition :: Maybe TimelineStatusTransition
+  , navigation       :: TimelineNavigation
+  , sourceAuditId    :: Maybe UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspaceTimelineEvent where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON WorkspaceTimelineEvent where
+  parseJSON = genericParseJSON jsonOptions
+
+data TimelineActor = TimelineActor
+  { actorType  :: Maybe Text
+  , actorId    :: Maybe Text
+  , actorLabel :: Maybe Text
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TimelineActor where
+  toJSON TimelineActor {..} = object $ catMaybes
+    [ ("type" .=) <$> actorType
+    , ("id" .=) <$> actorId
+    , ("label" .=) <$> actorLabel
+    ]
+instance FromJSON TimelineActor where
+  parseJSON = withObject "TimelineActor" $ \o ->
+    TimelineActor
+      <$> o .:? "type"
+      <*> o .:? "id"
+      <*> o .:? "label"
+
+data TimelineProjectContext = TimelineProjectContext
+  { projectContextId   :: UUID
+  , projectContextName :: Text
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TimelineProjectContext where
+  toJSON TimelineProjectContext {..} = object
+    [ "id" .= projectContextId
+    , "name" .= projectContextName
+    ]
+instance FromJSON TimelineProjectContext where
+  parseJSON = withObject "TimelineProjectContext" $ \o ->
+    TimelineProjectContext
+      <$> o .: "id"
+      <*> o .: "name"
+
+data TimelineTaskContext = TimelineTaskContext
+  { taskContextId    :: UUID
+  , taskContextTitle :: Text
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TimelineTaskContext where
+  toJSON TimelineTaskContext {..} = object
+    [ "id" .= taskContextId
+    , "title" .= taskContextTitle
+    ]
+instance FromJSON TimelineTaskContext where
+  parseJSON = withObject "TimelineTaskContext" $ \o ->
+    TimelineTaskContext
+      <$> o .: "id"
+      <*> o .: "title"
+
+data TimelineStatusTransition = TimelineStatusTransition
+  { transitionFrom :: Text
+  , transitionTo   :: Text
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TimelineStatusTransition where
+  toJSON TimelineStatusTransition {..} = object
+    [ "from" .= transitionFrom
+    , "to" .= transitionTo
+    ]
+instance FromJSON TimelineStatusTransition where
+  parseJSON = withObject "TimelineStatusTransition" $ \o ->
+    TimelineStatusTransition
+      <$> o .: "from"
+      <*> o .: "to"
+
+data TimelineNavigation = TimelineNavigation
+  { navigationEntityType :: Text
+  , navigationEntityId   :: UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TimelineNavigation where
+  toJSON TimelineNavigation {..} = object
+    [ "entity_type" .= navigationEntityType
+    , "entity_id" .= navigationEntityId
+    ]
+instance FromJSON TimelineNavigation where
+  parseJSON = withObject "TimelineNavigation" $ \o ->
+    TimelineNavigation
+      <$> o .: "entity_type"
+      <*> o .: "entity_id"
 
 ------------------------------------------------------------------------
 -- Saved views

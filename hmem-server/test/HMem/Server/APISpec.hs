@@ -4622,6 +4622,170 @@ spec = around withApp $ do
       actResp <- get_ app "/api/v1/activity"
       respStatus actResp `shouldBe` 200
 
+  describe "workspace timeline" $ do
+    it "returns an empty timeline for a workspace without task or project events" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("timeline-empty-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      timelineResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/timeline")
+      respStatus timelineResp `shouldBe` 200
+      let Just timeline = decode (respBody timelineResp) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      timeline.items `shouldBe` []
+      timeline.hasMore `shouldBe` False
+
+    it "returns 404 for missing or deleted workspaces" $ \app -> do
+      missingResp <- get_ app "/api/v1/workspaces/00000000-0000-0000-0000-000000000099/timeline"
+      respStatus missingResp `shouldBe` 404
+
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("timeline-deleted-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+      _ <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Deleted Timeline Project" :: T.Text)])
+      deleteResp <- del app (uuidPath "/api/v1/workspaces" ws.id)
+      respStatus deleteResp `shouldBe` 200
+
+      deletedTimelineResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/timeline")
+      respStatus deletedTimelineResp `shouldBe` 404
+
+    it "returns curated project, task, and subtask lifecycle events" $ \app -> do
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("timeline-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      createdProjectResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Timeline Created Project" :: T.Text)])
+      let Just createdProject = decode (respBody createdProjectResp) :: Maybe Project
+
+      completedProjectResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Timeline Completed Project" :: T.Text)])
+      let Just completedProject = decode (respBody completedProjectResp) :: Maybe Project
+      completedResp <- putJSON app (uuidPath "/api/v1/projects" completedProject.id)
+        (object ["status" .= ("completed" :: T.Text)])
+      respStatus completedResp `shouldBe` 200
+
+      archivedProjectResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Timeline Archived Project" :: T.Text)])
+      let Just archivedProject = decode (respBody archivedProjectResp) :: Maybe Project
+      archivedResp <- putJSON app (uuidPath "/api/v1/projects" archivedProject.id)
+        (object ["status" .= ("archived" :: T.Text)])
+      respStatus archivedResp `shouldBe` 200
+
+      taskProjectResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Timeline Task Project" :: T.Text)])
+      let Just taskProject = decode (respBody taskProjectResp) :: Maybe Project
+
+      destinationProjectResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Timeline Destination Project" :: T.Text)])
+      let Just destinationProject = decode (respBody destinationProjectResp) :: Maybe Project
+
+      movedAfterCreateResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= taskProject.id, "title" .= ("Timeline Moved After Create" :: T.Text)])
+      let Just movedAfterCreateTask = decode (respBody movedAfterCreateResp) :: Maybe Task
+
+      moveParentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= taskProject.id, "title" .= ("Timeline Move Parent" :: T.Text)])
+      let Just moveParentTask = decode (respBody moveParentResp) :: Maybe Task
+
+      moveAfterCreateResp <- putJSON app (uuidPath "/api/v1/tasks" movedAfterCreateTask.id)
+        (object ["project_id" .= taskProject.id, "parent_id" .= moveParentTask.id])
+      respStatus moveAfterCreateResp `shouldBe` 200
+
+      movedDoneResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= taskProject.id, "title" .= ("Timeline Completed Then Moved" :: T.Text)])
+      let Just movedDoneTask = decode (respBody movedDoneResp) :: Maybe Task
+      movedDoneCompleteResp <- putJSON app (uuidPath "/api/v1/tasks" movedDoneTask.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus movedDoneCompleteResp `shouldBe` 200
+      movedDoneProjectMoveResp <- putJSON app (uuidPath "/api/v1/tasks" movedDoneTask.id)
+        (object ["project_id" .= destinationProject.id])
+      respStatus movedDoneProjectMoveResp `shouldBe` 200
+
+      parentResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= taskProject.id, "title" .= ("Timeline Parent Task" :: T.Text)])
+      let Just parentTask = decode (respBody parentResp) :: Maybe Task
+
+      childResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= taskProject.id, "parent_id" .= parentTask.id, "title" .= ("Timeline Child Task" :: T.Text)])
+      let Just childTask = decode (respBody childResp) :: Maybe Task
+
+      parentProgressResp <- putJSON app (uuidPath "/api/v1/tasks" parentTask.id)
+        (object ["status" .= ("in_progress" :: T.Text)])
+      respStatus parentProgressResp `shouldBe` 200
+      childDoneResp <- putJSON app (uuidPath "/api/v1/tasks" childTask.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus childDoneResp `shouldBe` 200
+      parentDoneResp <- putJSON app (uuidPath "/api/v1/tasks" parentTask.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus parentDoneResp `shouldBe` 200
+
+      cancelTaskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= taskProject.id, "title" .= ("Timeline Cancelled Task" :: T.Text)])
+      let Just cancelTask = decode (respBody cancelTaskResp) :: Maybe Task
+      cancelResp <- putJSON app (uuidPath "/api/v1/tasks" cancelTask.id)
+        (object ["status" .= ("cancelled" :: T.Text)])
+      respStatus cancelResp `shouldBe` 200
+
+      noisyTaskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= taskProject.id, "title" .= ("Noisy Timeline Task" :: T.Text)])
+      let Just noisyTask = decode (respBody noisyTaskResp) :: Maybe Task
+      noisyUpdateResp <- putJSON app (uuidPath "/api/v1/tasks" noisyTask.id)
+        (object ["title" .= ("Renamed Noisy Timeline Task" :: T.Text)])
+      respStatus noisyUpdateResp `shouldBe` 200
+
+      timelineResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/timeline?limit=100")
+      respStatus timelineResp `shouldBe` 200
+      let Just timeline = decode (respBody timelineResp) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+          events = timeline.items
+          hasEvent eventType entityId = any (\event -> event.eventType == eventType && event.entityId == entityId) events
+          noisyNonCreateEvents = filter (\event -> event.entityId == noisyTask.id && event.eventType /= "task_created") events
+          movedAfterCreateSubtaskCreates = filter (\event -> event.entityId == movedAfterCreateTask.id && event.eventType == "subtask_created") events
+
+      hasEvent "project_created" createdProject.id `shouldBe` True
+      hasEvent "project_completed" completedProject.id `shouldBe` True
+      hasEvent "project_archived" archivedProject.id `shouldBe` True
+      hasEvent "task_created" parentTask.id `shouldBe` True
+      hasEvent "subtask_created" childTask.id `shouldBe` True
+      hasEvent "task_completed" parentTask.id `shouldBe` True
+      hasEvent "subtask_completed" childTask.id `shouldBe` True
+      hasEvent "task_cancelled" cancelTask.id `shouldBe` True
+      noisyNonCreateEvents `shouldBe` []
+      movedAfterCreateSubtaskCreates `shouldBe` []
+      map (\event -> event.title) events `shouldSatisfy` notElem ("Renamed Noisy Timeline Task" :: T.Text)
+
+      case filter (\event -> event.eventType == "task_created" && event.entityId == movedAfterCreateTask.id) events of
+        (movedCreate:_) -> do
+          movedCreate.entityType `shouldBe` "task"
+          movedCreate.project `shouldSatisfy` maybe False (\project -> project.projectContextId == taskProject.id)
+        [] -> expectationFailure "Expected moved task creation to remain a top-level task event"
+
+      case filter (\event -> event.eventType == "task_completed" && event.entityId == movedDoneTask.id) events of
+        (movedDone:_) ->
+          movedDone.project `shouldSatisfy` maybe False (\project -> project.projectContextId == taskProject.id)
+        [] -> expectationFailure "Expected moved task completion to retain event-time project context"
+
+      case filter (\event -> event.eventType == "subtask_completed" && event.entityId == childTask.id) events of
+        (subtaskDone:_) -> do
+          subtaskDone.entityType `shouldBe` "subtask"
+          subtaskDone.statusTransition `shouldBe` Just (TimelineStatusTransition "todo" "done")
+          subtaskDone.navigation.navigationEntityType `shouldBe` "task"
+          subtaskDone.parentTask `shouldSatisfy` maybe False (\parent -> parent.taskContextId == parentTask.id)
+          subtaskDone.project `shouldSatisfy` maybe False (\project -> project.projectContextId == taskProject.id)
+        [] -> expectationFailure "Expected subtask completion timeline event"
+
+      filteredResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/timeline?entity_type=subtask&limit=10")
+      respStatus filteredResp `shouldBe` 200
+      let Just filteredTimeline = decode (respBody filteredResp) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      filteredTimeline.items `shouldSatisfy` all (\event -> event.entityType == "subtask")
+      length filteredTimeline.items `shouldSatisfy` (>= 2)
+
+      pagedResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/timeline?limit=1")
+      respStatus pagedResp `shouldBe` 200
+      let Just pagedTimeline = decode (respBody pagedResp) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      length pagedTimeline.items `shouldBe` 1
+      pagedTimeline.hasMore `shouldBe` True
+
   --------------------------------------------------------------------------
   -- Error paths
   --------------------------------------------------------------------------

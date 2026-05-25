@@ -49,6 +49,7 @@ import HMem.DB.SavedView qualified as SV
 import HMem.DB.Schema
 import HMem.DB.Search qualified as Search
 import HMem.DB.Task qualified as Task
+import HMem.DB.Timeline qualified as Timeline
 import HMem.DB.Workspace qualified as WorkspaceDB
 import HMem.DB.WorkspaceGroup qualified as WG
 import HMem.Config qualified as Config
@@ -104,6 +105,12 @@ type WorkspaceAPI =
   :<|> Capture "workspaceId" UUID :> "memberships" :> Capture "userId" UUID
          :> Delete '[JSON] NoContent
   :<|> Capture "workspaceId" UUID :> "card-hydration" :> Get '[JSON] WorkspaceCardHydration
+  :<|> Capture "workspaceId" UUID :> "timeline"
+         :> QueryParam "entity_type" Text
+         :> QueryParam "event_type" Text
+         :> QueryParam "limit" Int
+         :> QueryParam "offset" Int
+         :> Get '[JSON] (PaginatedResult WorkspaceTimelineEvent)
 
 -- Memories
 type MemoryAPI =
@@ -863,6 +870,7 @@ workspaceHandlers pool bc =
   :<|> upsertMembershipH
   :<|> deleteMembershipH
   :<|> cardHydrationH
+  :<|> timelineH
   where
     listWorkspacesH :: Maybe Int -> Maybe Int -> Handler (PaginatedResult Workspace)
     listWorkspacesH mlimit moffset = do
@@ -980,6 +988,15 @@ workspaceHandlers pool bc =
               | (taskId, dependsOnId) <- taskDependencyRows
               ]
           }
+
+    timelineH :: UUID -> Maybe Text -> Maybe Text -> Maybe Int -> Maybe Int -> Handler (PaginatedResult WorkspaceTimelineEvent)
+    timelineH wsId mEntityType mEventType mlimit moffset = do
+      requireActiveWorkspaceH pool wsId
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
+      let lim = capLimit mlimit
+          off = capOffset moffset
+      results <- handleDBErrors $ Timeline.listWorkspaceTimeline pool wsId mEntityType mEventType (Just (lim + 1)) (Just off)
+      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
     updateWorkspaceH :: UUID -> UpdateWorkspace -> Handler Workspace
     updateWorkspaceH wsId uw = do

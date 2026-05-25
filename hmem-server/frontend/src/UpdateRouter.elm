@@ -245,6 +245,9 @@ update msg model =
         CollapseAllNodes ->
             Ok (Feature.Cards.update msg model)
 
+        RegisterFocusClick _ _ _ ->
+            Ok (Feature.Cards.update msg model)
+
         -- Delete
         ConfirmDelete _ _ ->
             Ok (Feature.Cards.update msg model)

@@ -141,6 +141,7 @@ type alias CardsModel =
     { expandedCards : Dict String Bool
     , collapsedNodes : Dict String Bool
     , deleteConfirmation : Maybe DeleteConfirmation
+    , lastFocusClick : Maybe FocusClick
     , projectNextTasks : Dict String (List Api.NextTaskCandidate)
     , projectNextTaskDiagnostics : Dict String (List Api.NextTaskCandidate)
     , projectNextTasksLoading : Dict String Bool
@@ -161,6 +162,13 @@ type alias DeleteConfirmation =
     { entityType : String
     , entityId : String
     , preview : Maybe CascadeDeletePreview
+    }
+
+
+type alias FocusClick =
+    { entityType : String
+    , entityId : String
+    , timeStampMs : Float
     }
 
 
@@ -487,6 +495,7 @@ type Msg
     | ToggleTreeNode String
     | ExpandAllNodes
     | CollapseAllNodes
+    | RegisterFocusClick String String Float
       -- Expand + edit in one click
     | ExpandAndEdit String String String String String
       -- Drag and drop

@@ -261,6 +261,14 @@ suite =
                         , Nothing
                         , Just "Finish subtasks first."
                         ]
+        , test "focus double-click threshold accepts only fast repeated clicks" <|
+            \_ ->
+                [ Feature.Cards.focusClickIntervalTriggers 249
+                , Feature.Cards.focusClickIntervalTriggers 250
+                , Feature.Cards.focusClickIntervalTriggers 251
+                , Feature.Cards.focusClickIntervalTriggers -1
+                ]
+                    |> Expect.equal [ True, True, False, False ]
         , test "dependency mutation responses decode affected task status patches" <|
             \_ ->
                 let

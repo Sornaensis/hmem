@@ -263,6 +263,7 @@ handleUrlChange url model =
                         { currentCards
                             | collapsedNodes = Dict.empty
                             , expandedCards = Dict.empty
+                            , lastFocusClick = Nothing
                             , projectNextTasks = Dict.empty
                             , projectNextTaskDiagnostics = Dict.empty
                             , projectNextTasksLoading = Dict.empty
@@ -480,7 +481,7 @@ clearRouteConfirmations model =
         | editing = { currentEditing | editState = Nothing, createForm = Nothing, inlineCreate = Nothing }
         , memory = { currentMemory | linkingMemoryFor = Nothing, linkingEntityFor = Nothing }
         , dependencies = { currentDependencies | addingDependencyFor = Nothing }
-        , cards = { currentCards | deleteConfirmation = Nothing }
+        , cards = { currentCards | deleteConfirmation = Nothing, lastFocusClick = Nothing }
         , dragDrop = { currentDragDrop | dragging = Nothing, dragOver = Nothing, dropActionModal = Nothing }
         , auditLog = { currentAuditLog | revertConfirmation = Nothing, revertInFlight = False }
         , workspaceAdmin = { currentWorkspaceAdmin | purgeConfirmation = Nothing }

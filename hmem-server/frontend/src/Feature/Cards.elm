@@ -6,6 +6,7 @@ module Feature.Cards exposing
     , init
     , nextTaskRationale
     , noReadyNextTaskMessage
+    , focusClickIntervalTriggers
     , projectCascadePreview
     , projectCompletionBlockerReason
     , taskCascadePreview
@@ -45,6 +46,7 @@ init =
     { expandedCards = Dict.empty
     , collapsedNodes = Dict.empty
     , deleteConfirmation = Nothing
+    , lastFocusClick = Nothing
     , projectNextTasks = Dict.empty
     , projectNextTaskDiagnostics = Dict.empty
     , projectNextTasksLoading = Dict.empty
@@ -54,6 +56,19 @@ init =
     }
 
 
+{-| Focus mode uses a custom click interval instead of the browser dblclick
+threshold so slower repeated clicks do not accidentally enter focus mode.
+-}
+focusDoubleClickThresholdMs : Float
+focusDoubleClickThresholdMs =
+    250
+
+
+focusClickIntervalTriggers : Float -> Bool
+focusClickIntervalTriggers deltaMs =
+    deltaMs >= 0 && deltaMs <= focusDoubleClickThresholdMs
+
+
 
 -- UPDATE
 
@@ -61,6 +76,29 @@ init =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        RegisterFocusClick entityType entityId timeStampMs ->
+            let
+                currentClick =
+                    { entityType = entityType, entityId = entityId, timeStampMs = timeStampMs }
+
+                storeClick =
+                    updateCardsModel (\records -> { records | lastFocusClick = Just currentClick }) model
+
+                sameTarget previous =
+                    previous.entityType == entityType && previous.entityId == entityId
+            in
+            case model.cards.lastFocusClick of
+                Just previous ->
+                    if sameTarget previous && focusClickIntervalTriggers (timeStampMs - previous.timeStampMs) then
+                        Feature.Focus.update (FocusEntity entityType entityId)
+                            (updateCardsModel (\records -> { records | lastFocusClick = Nothing }) model)
+
+                    else
+                        ( storeClick, Cmd.none )
+
+                Nothing ->
+                    ( storeClick, Cmd.none )
+
         ToggleCardExpand cardId ->
             let
                 current =
@@ -826,6 +864,30 @@ directOpenDependencyCountForTask model taskId =
         |> List.length
 
 
+onFocusClick : String -> String -> Attribute Msg
+onFocusClick entityType entityId =
+    on "click" (focusClickDecoder entityType entityId)
+
+
+focusClickDecoder : String -> String -> Decode.Decoder Msg
+focusClickDecoder entityType entityId =
+    Decode.map2
+        (\targetTag timeStampMs ->
+            if focusClickTargetIsInteractive targetTag then
+                NoOp
+
+            else
+                RegisterFocusClick entityType entityId timeStampMs
+        )
+        (Decode.oneOf [ Decode.at [ "target", "tagName" ] Decode.string, Decode.succeed "" ])
+        (Decode.field "timeStamp" Decode.float)
+
+
+focusClickTargetIsInteractive : String -> Bool
+focusClickTargetIsInteractive tagName =
+    List.member (String.toUpper tagName) [ "A", "BUTTON", "INPUT", "OPTION", "SELECT", "TEXTAREA" ]
+
+
 joinHuman : List String -> String
 joinHuman parts =
     case parts of
@@ -1143,7 +1205,7 @@ viewProjectNode allProjects model depth project hasSearch query =
             , preventDefaultOn "dragover" (Decode.succeed ( DragOverCard project.id, True ))
             , preventDefaultOn "drop" (Decode.succeed ( DropOnCard "project" project.id, True ))
             , on "dragend" (Decode.succeed DragEndCard)
-            , onDoubleClick (FocusEntity "project" project.id)
+            , onFocusClick "project" project.id
             ]
             [ div [ class "card-header" ]
                 [ div [ class "tree-toggle-row" ]
@@ -1743,8 +1805,7 @@ viewTaskCard showProject model task =
         , on "dragend" (Decode.succeed DragEndCard)
         ]
         ++ (if not isSubtask then
-                [ onDoubleClick (FocusEntity "task" task.id) ]
-
+                [ onFocusClick "task" task.id ]
             else
                 []
            )

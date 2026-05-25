@@ -8,6 +8,7 @@ See also:
 - `database.md` — current database schema overview
 - `memory-compatibility.md` — migration and rollout policy for explicit memory types and creation links
 - `mcp-response-contract.md` — compact MCP response contract and DTO vocabulary
+- `timeline-contract.md` — workspace Timeline event semantics and REST/UI data contract
 
 ## Architecture
 

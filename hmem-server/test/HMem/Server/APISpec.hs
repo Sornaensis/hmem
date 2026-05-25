@@ -2862,7 +2862,7 @@ spec = around withApp $ do
           , priority = Nothing
           , metadata = Nothing
           }
-        forM_ [1 .. 201 :: Int] $ \n ->
+        forM_ [1 .. 401 :: Int] $ \n ->
           Task.createTask env.pool CreateTask
             { workspaceId = ws.id
             , projectId = Just proj.id
@@ -2888,6 +2888,93 @@ spec = around withApp $ do
           )
         respStatus secondResp `shouldBe` 200
         let Just secondPage = decode (respBody secondResp) :: Maybe (PaginatedResult Task)
+        length secondPage.items `shouldBe` 200
+        secondPage.hasMore `shouldBe` True
+
+        finalResp <- get_ app
+          ( "/api/v1/tasks?workspace_id=" <> encodeUtf8 (T.pack (show ws.id))
+         <> "&limit=200&offset=400"
+          )
+        respStatus finalResp `shouldBe` 200
+        let Just finalPage = decode (respBody finalResp) :: Maybe (PaginatedResult Task)
+        length finalPage.items `shouldBe` 1
+        finalPage.hasMore `shouldBe` False
+
+    it "reports has_more when the max project page limit has additional rows" $ \_ ->
+      withAppEnv $ \env app -> do
+        ws <- createTestWorkspace env "project-max-pagination-ws"
+        forM_ [1 .. 201 :: Int] $ \n ->
+          Proj.createProject env.pool CreateProject
+            { workspaceId = ws.id
+            , parentId = Nothing
+            , name = "Paginated project " <> T.pack (show n)
+            , description = Nothing
+            , priority = Nothing
+            , metadata = Nothing
+            }
+
+        firstResp <- get_ app
+          ( "/api/v1/projects?workspace_id=" <> encodeUtf8 (T.pack (show ws.id))
+         <> "&limit=200&offset=0"
+          )
+        respStatus firstResp `shouldBe` 200
+        let Just firstPage = decode (respBody firstResp) :: Maybe (PaginatedResult Project)
+        length firstPage.items `shouldBe` 200
+        firstPage.hasMore `shouldBe` True
+
+        secondResp <- get_ app
+          ( "/api/v1/projects?workspace_id=" <> encodeUtf8 (T.pack (show ws.id))
+         <> "&limit=200&offset=200"
+          )
+        respStatus secondResp `shouldBe` 200
+        let Just secondPage = decode (respBody secondResp) :: Maybe (PaginatedResult Project)
+        length secondPage.items `shouldBe` 1
+        secondPage.hasMore `shouldBe` False
+
+    it "reports has_more when the max memory page limit has additional rows" $ \_ ->
+      withAppEnv $ \env app -> do
+        ws <- createTestWorkspace env "memory-max-pagination-ws"
+        proj <- Proj.createProject env.pool CreateProject
+          { workspaceId = ws.id
+          , parentId = Nothing
+          , name = "Memory Max Pagination Project"
+          , description = Nothing
+          , priority = Nothing
+          , metadata = Nothing
+          }
+        forM_ [1 .. 201 :: Int] $ \n ->
+          Mem.createMemory env.pool CreateMemory
+            { workspaceId = ws.id
+            , projectId = Just proj.id
+            , taskId = Nothing
+            , content = "Paginated memory " <> T.pack (show n)
+            , summary = Nothing
+            , memoryType = ShortTerm
+            , importance = Just 5
+            , metadata = Nothing
+            , expiresAt = Nothing
+            , source = Nothing
+            , confidence = Nothing
+            , pinned = Nothing
+            , tags = Nothing
+            , ftsLanguage = Nothing
+            }
+
+        firstResp <- get_ app
+          ( "/api/v1/memories?workspace_id=" <> encodeUtf8 (T.pack (show ws.id))
+         <> "&limit=200&offset=0"
+          )
+        respStatus firstResp `shouldBe` 200
+        let Just firstPage = decode (respBody firstResp) :: Maybe (PaginatedResult Memory)
+        length firstPage.items `shouldBe` 200
+        firstPage.hasMore `shouldBe` True
+
+        secondResp <- get_ app
+          ( "/api/v1/memories?workspace_id=" <> encodeUtf8 (T.pack (show ws.id))
+         <> "&limit=200&offset=200"
+          )
+        respStatus secondResp `shouldBe` 200
+        let Just secondPage = decode (respBody secondResp) :: Maybe (PaginatedResult Memory)
         length secondPage.items `shouldBe` 1
         secondPage.hasMore `shouldBe` False
 

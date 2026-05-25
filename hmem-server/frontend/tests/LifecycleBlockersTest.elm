@@ -83,6 +83,37 @@ suite =
                 , Feature.DataLoading.nextPageOffset 10000 { items = [ "x" ], hasMore = True }
                 ]
                     |> Expect.equal [ Just 2, Nothing, Nothing, Just 10000, Nothing ]
+        , test "workspace summary hides partial counts while workspace data is still paging" <|
+            \_ ->
+                let
+                    activeProject =
+                        project "active-project" Nothing
+
+                    closedProject =
+                        { project "closed-project" Nothing | status = Api.ProjCompleted }
+
+                    openTask =
+                        task "open-task" Nothing (Just "active-project")
+
+                    blockedTask =
+                        { task "blocked-task" Nothing (Just "active-project") | status = Api.Blocked }
+
+                    doneTask =
+                        { task "done-task" Nothing (Just "active-project") | status = Api.Done }
+
+                    otherWorkspaceTask =
+                        { task "other-workspace-task" Nothing Nothing | workspaceId = "workspace-b" }
+
+                    workspaceMemory =
+                        memory "memory-a"
+
+                    otherWorkspaceMemory =
+                        { memory "memory-b" | workspaceId = "workspace-b" }
+                in
+                [ Page.Workspace.workspaceSummaryParts True "workspace-a" [ activeProject ] [ openTask ] [ workspaceMemory ]
+                , Page.Workspace.workspaceSummaryParts False "workspace-a" [ activeProject, closedProject ] [ openTask, blockedTask, doneTask, otherWorkspaceTask ] [ workspaceMemory, otherWorkspaceMemory ]
+                ]
+                    |> Expect.equal [ [], [ "1 open project", "2 open tasks", "1 memory" ] ]
         , test "timeline tab fragment round-trips and exposes a workspace tab label" <|
             \_ ->
                 [ (Helpers.parseFragment (Just "tab=timeline")).tab == TimelineTab
@@ -876,6 +907,21 @@ task id parentId projectId =
     , completedAt = Nothing
     , dependencyCount = 0
     , memoryLinkCount = 0
+    , createdAt = "2026-01-01T00:00:00Z"
+    , updatedAt = "2026-01-01T00:00:00Z"
+    }
+
+
+memory : String -> Api.Memory
+memory id =
+    { id = id
+    , workspaceId = "workspace-a"
+    , content = id
+    , summary = Nothing
+    , memoryType = Api.ShortTerm
+    , importance = 5
+    , pinned = False
+    , tags = []
     , createdAt = "2026-01-01T00:00:00Z"
     , updatedAt = "2026-01-01T00:00:00Z"
     }

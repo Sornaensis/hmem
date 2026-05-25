@@ -1,5 +1,6 @@
 module Page.Workspace exposing
     ( viewWorkspacePage
+    , workspaceSummaryParts
     , workspaceTabLabel
     )
 
@@ -38,42 +39,13 @@ viewWorkspacePage wsId model =
 viewReadableWorkspacePage : String -> Model -> Api.Workspace -> Html Msg
 viewReadableWorkspacePage wsId model ws =
     let
-        wsProjects =
-            model.projects |> Dict.values |> List.filter (\p -> p.workspaceId == wsId)
-
-        wsTasks =
-            model.tasks |> Dict.values |> List.filter (\t -> t.workspaceId == wsId)
-
-        wsMemories =
-            model.memories |> Dict.values |> List.filter (\m -> m.workspaceId == wsId)
-
-        activeProjects =
-            wsProjects |> List.filter (\p -> p.status == Api.ProjActive || p.status == Api.ProjPaused) |> List.length
-
-        activeTasks =
-            wsTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length
-
-        memoryCount =
-            List.length wsMemories
-
         summaryParts =
-            List.filterMap identity
-                [ if activeProjects > 0 then
-                    Just (String.fromInt activeProjects ++ " open " ++ (if activeProjects > 1 then "projects" else "project"))
-
-                  else
-                    Nothing
-                , if activeTasks > 0 then
-                    Just (String.fromInt activeTasks ++ " open " ++ (if activeTasks > 1 then "tasks" else "task"))
-
-                  else
-                    Nothing
-                , if memoryCount > 0 then
-                    Just (String.fromInt memoryCount ++ " memor" ++ (if memoryCount > 1 then "ies" else "y"))
-
-                  else
-                    Nothing
-                ]
+            workspaceSummaryParts
+                (model.dataLoading.loadingWorkspaceData || model.dataLoading.pendingWorkspaceLoads > 0)
+                wsId
+                (Dict.values model.projects)
+                (Dict.values model.tasks)
+                (Dict.values model.memories)
     in
     div [ class "page" ]
         [ viewStickyWorkspaceBar model ws summaryParts
@@ -154,6 +126,50 @@ viewReadableWorkspacePage wsId model ws =
                             viewTabContent wsId model
                 ]
         ]
+
+
+workspaceSummaryParts : Bool -> String -> List Api.Project -> List Api.Task -> List Api.Memory -> List String
+workspaceSummaryParts workspaceDataLoadActive wsId projects tasks memories =
+    if workspaceDataLoadActive then
+        []
+
+    else
+        let
+            wsProjects =
+                projects |> List.filter (\p -> p.workspaceId == wsId)
+
+            wsTasks =
+                tasks |> List.filter (\t -> t.workspaceId == wsId)
+
+            wsMemories =
+                memories |> List.filter (\m -> m.workspaceId == wsId)
+
+            activeProjects =
+                wsProjects |> List.filter (\p -> p.status == Api.ProjActive || p.status == Api.ProjPaused) |> List.length
+
+            activeTasks =
+                wsTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length
+
+            memoryCount =
+                List.length wsMemories
+        in
+        List.filterMap identity
+            [ if activeProjects > 0 then
+                Just (String.fromInt activeProjects ++ " open " ++ (if activeProjects > 1 then "projects" else "project"))
+
+              else
+                Nothing
+            , if activeTasks > 0 then
+                Just (String.fromInt activeTasks ++ " open " ++ (if activeTasks > 1 then "tasks" else "task"))
+
+              else
+                Nothing
+            , if memoryCount > 0 then
+                Just (String.fromInt memoryCount ++ " memor" ++ (if memoryCount > 1 then "ies" else "y"))
+
+              else
+                Nothing
+            ]
 
 
 viewUnauthorizedWorkspace : Model -> Html Msg

@@ -640,6 +640,7 @@ auditActionDetailItems : Api.AuditLogEntry -> List ( String, String )
 auditActionDetailItems entry =
     ( "Operation", auditOperationLabel entry )
         :: (auditStatusChangeDetailItems entry
+                ++ auditFieldUpdateDetailItems entry
                 ++ auditRelationshipDetailItems entry
                 ++ auditSnapshotDetailItems entry
            )
@@ -648,6 +649,21 @@ auditActionDetailItems entry =
 auditChangedFieldItems : Api.AuditLogEntry -> List AuditFieldChange
 auditChangedFieldItems entry =
     auditChangedFieldItemsFromValues entry.oldValues entry.newValues
+
+
+auditNonStatusFieldChanges : Api.AuditLogEntry -> List AuditFieldChange
+auditNonStatusFieldChanges entry =
+    let
+        statusOnlyFields =
+            case auditStatusChange entry of
+                Just _ ->
+                    [ "status", "completed_at" ]
+
+                Nothing ->
+                    [ "status" ]
+    in
+    auditChangedFieldItems entry
+        |> List.filter (\change -> not (List.member change.field statusOnlyFields))
 
 
 maybeDetail : String -> Maybe String -> List ( String, String )
@@ -734,72 +750,132 @@ auditOperationLabel entry =
             label
 
         Nothing ->
-            case ( entry.entityType, entry.action ) of
-                ( "task_dependency", Api.AuditCreate ) ->
-                    "Added task dependency"
+            case auditFieldUpdateLabel entry of
+                Just label ->
+                    label
 
-                ( "task_dependency", Api.AuditDelete ) ->
-                    "Removed task dependency"
+                Nothing ->
+                    case ( entry.entityType, entry.action ) of
+                        ( "task_dependency", Api.AuditCreate ) ->
+                            "Added task dependency"
 
-                ( "project_memory_link", Api.AuditCreate ) ->
-                    "Linked memory to project"
+                        ( "task_dependency", Api.AuditDelete ) ->
+                            "Removed task dependency"
 
-                ( "project_memory_link", Api.AuditDelete ) ->
-                    "Unlinked memory from project"
+                        ( "project_memory_link", Api.AuditCreate ) ->
+                            "Linked memory to project"
 
-                ( "task_memory_link", Api.AuditCreate ) ->
-                    "Linked memory to task"
+                        ( "project_memory_link", Api.AuditDelete ) ->
+                            "Unlinked memory from project"
 
-                ( "task_memory_link", Api.AuditDelete ) ->
-                    "Unlinked memory from task"
+                        ( "task_memory_link", Api.AuditCreate ) ->
+                            "Linked memory to task"
 
-                ( "memory_link", Api.AuditCreate ) ->
-                    "Linked memories"
+                        ( "task_memory_link", Api.AuditDelete ) ->
+                            "Unlinked memory from task"
 
-                ( "memory_link", Api.AuditDelete ) ->
-                    "Unlinked memories"
+                        ( "memory_link", Api.AuditCreate ) ->
+                            "Linked memories"
 
-                ( "memory_tag", Api.AuditCreate ) ->
-                    "Added memory tag"
+                        ( "memory_link", Api.AuditDelete ) ->
+                            "Unlinked memories"
 
-                ( "memory_tag", Api.AuditDelete ) ->
-                    "Removed memory tag"
+                        ( "memory_tag", Api.AuditCreate ) ->
+                            "Added memory tag"
 
-                ( "memory_category_link", Api.AuditCreate ) ->
-                    "Linked memory to category"
+                        ( "memory_tag", Api.AuditDelete ) ->
+                            "Removed memory tag"
 
-                ( "memory_category_link", Api.AuditDelete ) ->
-                    "Unlinked memory from category"
+                        ( "memory_category_link", Api.AuditCreate ) ->
+                            "Linked memory to category"
 
-                ( "workspace_group_member", Api.AuditCreate ) ->
-                    "Added workspace to group"
+                        ( "memory_category_link", Api.AuditDelete ) ->
+                            "Unlinked memory from category"
 
-                ( "workspace_group_member", Api.AuditDelete ) ->
-                    "Removed workspace from group"
+                        ( "workspace_group_member", Api.AuditCreate ) ->
+                            "Added workspace to group"
 
-                _ ->
-                    pastTenseAuditAction entry.action ++ " " ++ auditEntityTypeLabel entry.entityType
+                        ( "workspace_group_member", Api.AuditDelete ) ->
+                            "Removed workspace from group"
+
+                        _ ->
+                            pastTenseAuditAction entry.action ++ " " ++ auditEntityTypeLabel entry.entityType
+
+
+auditFieldUpdateLabel : Api.AuditLogEntry -> Maybe String
+auditFieldUpdateLabel entry =
+    case ( entry.action, auditNonStatusFieldChanges entry ) of
+        ( Api.AuditUpdate, _ :: _ ) ->
+            Just ("Updated " ++ auditUpdateEntityLabel entry ++ " fields")
+
+        _ ->
+            Nothing
 
 
 auditStatusChangeLabel : Api.AuditLogEntry -> Maybe String
 auditStatusChangeLabel entry =
     case auditStatusChange entry of
         Just _ ->
-            case ( entry.entityType, entry.action, auditNewValueFor "status" entry ) of
-                ( "project", Api.AuditUpdate, Just "archived" ) ->
-                    Just "Archived project"
+            let
+                baseLabel =
+                    case ( entry.entityType, entry.action, auditNewValueFor "status" entry ) of
+                        ( "project", Api.AuditUpdate, Just "archived" ) ->
+                            "Archived project"
 
-                ( "project", Api.AuditUpdate, _ ) ->
-                    Just "Changed project status"
+                        ( "project", Api.AuditUpdate, Just "completed" ) ->
+                            "Completed project"
 
-                ( "task", Api.AuditUpdate, _ ) ->
-                    Just "Changed task status"
+                        ( "project", Api.AuditUpdate, _ ) ->
+                            "Changed project status"
 
-                _ ->
-                    Just ("Changed " ++ auditEntityTypeLabel entry.entityType ++ " status")
+                        ( "task", Api.AuditUpdate, _ ) ->
+                            "Changed " ++ auditUpdateEntityLabel entry ++ " status"
+
+                        _ ->
+                            "Changed " ++ auditEntityTypeLabel entry.entityType ++ " status"
+            in
+            if List.isEmpty (auditNonStatusFieldChanges entry) then
+                Just baseLabel
+
+            else
+                Just (baseLabel ++ " and fields")
 
         Nothing ->
             Nothing
+
+
+auditUpdateEntityLabel : Api.AuditLogEntry -> String
+auditUpdateEntityLabel entry =
+    if entry.entityType == "task" && auditEntryIsSubtask entry then
+        "subtask"
+
+    else
+        auditEntityTypeLabel entry.entityType
+
+
+auditEntryIsSubtask : Api.AuditLogEntry -> Bool
+auditEntryIsSubtask entry =
+    case auditValueFor "parent_id" entry of
+        Just parentId ->
+            not (List.member parentId [ "", "(unset)", "null" ])
+
+        Nothing ->
+            False
+
+
+auditFieldUpdateDetailItems : Api.AuditLogEntry -> List ( String, String )
+auditFieldUpdateDetailItems entry =
+    let
+        fieldLabels =
+            auditNonStatusFieldChanges entry
+                |> List.map .label
+    in
+    case ( entry.action, fieldLabels ) of
+        ( Api.AuditUpdate, _ :: _ ) ->
+            [ ( "Field updates", String.join ", " fieldLabels ) ]
+
+        _ ->
+            []
 
 
 auditStatusChangeDetailItems : Api.AuditLogEntry -> List ( String, String )

@@ -582,13 +582,66 @@ suite =
                                 Feature.AuditLog.auditChangedFieldItems entry
                                     |> List.map (\change -> ( change.label, change.oldValue, change.newValue ))
                         in
-                        [ List.member ( "Operation", "Updated task" ) details
+                        [ List.member ( "Operation", "Updated task fields" ) details
+                        , List.member ( "Field updates", "Title" ) details
                         , List.member ( "Title", Just "Draft UI", Just "Ship UI" ) changes
                         ]
-                            |> Expect.equal [ True, True ]
+                            |> Expect.equal [ True, True, True ]
 
                     Err err ->
                         Expect.fail (Decode.errorToString err)
+        , test "audit status update classification covers subtasks tasks projects and mixed updates" <|
+            \_ ->
+                let
+                    decoded =
+                        List.map decodeAuditFixture
+                            [ subtaskStatusAuditJson
+                            , taskStatusAuditJson
+                            , projectCompletedAuditJson
+                            , taskMixedStatusAndTitleAuditJson
+                            ]
+                in
+                case decoded of
+                    [ Ok subtaskEntry, Ok taskEntry, Ok projectEntry, Ok mixedEntry ] ->
+                        let
+                            subtaskDetails =
+                                Feature.AuditLog.auditActionDetailItems subtaskEntry
+
+                            taskDetails =
+                                Feature.AuditLog.auditActionDetailItems taskEntry
+
+                            projectDetails =
+                                Feature.AuditLog.auditActionDetailItems projectEntry
+
+                            mixedDetails =
+                                Feature.AuditLog.auditActionDetailItems mixedEntry
+                        in
+                        [ List.member ( "Operation", "Changed subtask status" ) subtaskDetails
+                        , List.member ( "Status change", "todo → in_progress" ) subtaskDetails
+                        , List.member ( "Operation", "Changed task status" ) taskDetails
+                        , List.member ( "Field updates", "Completed at" ) taskDetails
+                        , List.member ( "Operation", "Completed project" ) projectDetails
+                        , List.member ( "Status change", "active → completed" ) projectDetails
+                        , List.member ( "Operation", "Changed task status and fields" ) mixedDetails
+                        , List.member ( "Status change", "todo → done" ) mixedDetails
+                        , List.member ( "Field updates", "Title" ) mixedDetails
+                        ]
+                            |> Expect.equal [ True, True, True, False, True, True, True, True, True ]
+
+                    [ Err err, _, _, _ ] ->
+                        Expect.fail (Decode.errorToString err)
+
+                    [ _, Err err, _, _ ] ->
+                        Expect.fail (Decode.errorToString err)
+
+                    [ _, _, Err err, _ ] ->
+                        Expect.fail (Decode.errorToString err)
+
+                    [ _, _, _, Err err ] ->
+                        Expect.fail (Decode.errorToString err)
+
+                    _ ->
+                        Expect.fail "Expected four audit status fixtures"
         , test "audit action detail helpers hide sensitive and internal snapshot fields" <|
             \_ ->
                 case decodeAuditFixture accessTokenAuditJson of
@@ -679,7 +732,22 @@ archiveProjectAuditJson =
 
 taskStatusAuditJson : String
 taskStatusAuditJson =
-    """{"id":"audit-task-status","workspace_id":"workspace-a","entity_type":"task","entity_id":"task-1","action":"update","old_values":{"id":"task-1","workspace_id":"workspace-a","title":"Ship UI","status":"todo","priority":5,"completed_at":null,"updated_at":"2026-01-01T00:00:00Z"},"new_values":{"id":"task-1","workspace_id":"workspace-a","title":"Ship UI","status":"done","priority":5,"completed_at":"2026-01-01T00:00:05Z","updated_at":"2026-01-01T00:00:05Z"},"request_id":"req-task-status","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:05Z"}"""
+    """{"id":"audit-task-status","workspace_id":"workspace-a","entity_type":"task","entity_id":"task-1","action":"update","old_values":{"id":"task-1","workspace_id":"workspace-a","parent_id":null,"title":"Ship UI","status":"todo","priority":5,"completed_at":null,"updated_at":"2026-01-01T00:00:00Z"},"new_values":{"id":"task-1","workspace_id":"workspace-a","parent_id":null,"title":"Ship UI","status":"done","priority":5,"completed_at":"2026-01-01T00:00:05Z","updated_at":"2026-01-01T00:00:05Z"},"request_id":"req-task-status","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:05Z"}"""
+
+
+subtaskStatusAuditJson : String
+subtaskStatusAuditJson =
+    """{"id":"audit-subtask-status","workspace_id":"workspace-a","entity_type":"task","entity_id":"subtask-1","action":"update","old_values":{"id":"subtask-1","workspace_id":"workspace-a","parent_id":"task-1","title":"Child work","status":"todo","priority":5,"updated_at":"2026-01-01T00:00:00Z"},"new_values":{"id":"subtask-1","workspace_id":"workspace-a","parent_id":"task-1","title":"Child work","status":"in_progress","priority":5,"updated_at":"2026-01-01T00:00:07Z"},"request_id":"req-subtask-status","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:07Z"}"""
+
+
+projectCompletedAuditJson : String
+projectCompletedAuditJson =
+    """{"id":"audit-project-completed","workspace_id":"workspace-a","entity_type":"project","entity_id":"project-1","action":"update","old_values":{"id":"project-1","workspace_id":"workspace-a","name":"Launch plan","status":"active","priority":7,"updated_at":"2026-01-01T00:00:00Z"},"new_values":{"id":"project-1","workspace_id":"workspace-a","name":"Launch plan","status":"completed","priority":7,"updated_at":"2026-01-01T00:00:08Z"},"request_id":"req-project-completed","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:08Z"}"""
+
+
+taskMixedStatusAndTitleAuditJson : String
+taskMixedStatusAndTitleAuditJson =
+    """{"id":"audit-task-mixed","workspace_id":"workspace-a","entity_type":"task","entity_id":"task-1","action":"update","old_values":{"id":"task-1","workspace_id":"workspace-a","parent_id":null,"title":"Draft UI","status":"todo","priority":5,"completed_at":null,"updated_at":"2026-01-01T00:00:00Z"},"new_values":{"id":"task-1","workspace_id":"workspace-a","parent_id":null,"title":"Ship UI","status":"done","priority":5,"completed_at":"2026-01-01T00:00:09Z","updated_at":"2026-01-01T00:00:09Z"},"request_id":"req-task-mixed","actor_type":"user","actor_id":"user-1","actor_label":"Local User","changed_at":"2026-01-01T00:00:09Z"}"""
 
 
 taskTitleUpdateAuditJson : String

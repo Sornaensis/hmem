@@ -70,3 +70,7 @@ hmem-server/static/
 # Test / coverage
 .coverage/
 test-results/
+
+# npm stuff
+**/dist/
+**/node_modules/

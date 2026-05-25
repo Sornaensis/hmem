@@ -2504,10 +2504,37 @@ a:hover {
   font-size: 0.875rem;
 }
 
-.timeline-event-list {
+.timeline-filter-bar {
+  margin-bottom: 1rem;
+}
+
+.timeline-more-note {
+  margin-bottom: 0.75rem;
+}
+
+.timeline-event-list,
+.timeline-date-events {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+.timeline-date-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.timeline-date-group + .timeline-date-group {
+  margin-top: 1.25rem;
+}
+
+.timeline-date-heading {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .timeline-event-card {

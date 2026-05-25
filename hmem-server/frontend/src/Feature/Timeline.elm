@@ -1,4 +1,4 @@
-module Feature.Timeline exposing (ensureLoaded, init, sortTimelineEvents, timelineEventLabel, timelineEventToneClass, timelineStatusSummary, update, viewWorkspaceTimelinePanel)
+module Feature.Timeline exposing (ensureLoaded, filterTimelineEvents, groupTimelineEvents, init, sortTimelineEvents, timelineDateKey, timelineEventLabel, timelineEventToneClass, timelineStatusSummary, update, viewWorkspaceTimelinePanel)
 
 import Api
 import Browser.Navigation as Nav
@@ -18,6 +18,8 @@ init =
     , loading = False
     , error = Nothing
     , loadedWorkspaceId = Nothing
+    , entityFilter = TimelineAllEntities
+    , eventFilter = TimelineAllEvents
     }
 
 
@@ -79,6 +81,20 @@ update msg model =
 
                 Nothing ->
                     ( model, Cmd.none )
+
+        SetTimelineEntityFilter entityFilter ->
+            let
+                currentTimeline =
+                    model.timeline
+            in
+            ( { model | timeline = { currentTimeline | entityFilter = entityFilter } }, Cmd.none )
+
+        SetTimelineEventFilter eventFilter ->
+            let
+                currentTimeline =
+                    model.timeline
+            in
+            ( { model | timeline = { currentTimeline | eventFilter = eventFilter } }, Cmd.none )
 
         GotWorkspaceTimeline wsId result ->
             if model.selectedWorkspaceId /= Just wsId then
@@ -158,18 +174,67 @@ viewTimelineBody wsId timeline =
 
             else
                 let
-                    sortedEvents =
-                        sortTimelineEvents timeline.events
+                    visibleEvents =
+                        timeline.events
+                            |> filterTimelineEvents timeline.entityFilter timeline.eventFilter
+                            |> sortTimelineEvents
+
+                    groupedEvents =
+                        groupTimelineEvents visibleEvents
                 in
                 div []
-                    [ if timeline.hasMore then
-                        p [ class "timeline-more-note" ] [ text "Showing the latest 50 timeline events." ]
+                    [ viewTimelineFilters timeline
+                    , if timeline.hasMore then
+                        p [ class "timeline-more-note" ] [ text "Showing and filtering the latest 50 timeline events." ]
 
                       else
                         text ""
-                    , div [ class "timeline-event-list", title ("Timeline for workspace " ++ wsId) ]
-                        (List.map viewTimelineEvent sortedEvents)
+                    , if List.isEmpty visibleEvents then
+                        div [ class "empty-state timeline-state" ]
+                            [ h3 [] [ text "No loaded timeline events match these filters" ]
+                            , p [] [ text "Filters apply to the latest loaded events. Adjust them to broaden this timeline view." ]
+                            ]
+
+                      else
+                        div [ class "timeline-event-list", title ("Timeline for workspace " ++ wsId) ]
+                            (List.map viewTimelineGroup groupedEvents)
                     ]
+
+
+viewTimelineFilters : TimelineModel -> Html Msg
+viewTimelineFilters timeline =
+    div [ class "filter-bar timeline-filter-bar" ]
+        [ div [ class "filter-group" ]
+            [ span [ class "filter-label", title "Filters apply to the latest loaded timeline events." ] [ text "Entity:" ]
+            , viewFilterPill "All" (timeline.entityFilter == TimelineAllEntities) (SetTimelineEntityFilter TimelineAllEntities)
+            , viewFilterPill "Projects" (timeline.entityFilter == TimelineProjectsOnly) (SetTimelineEntityFilter TimelineProjectsOnly)
+            , viewFilterPill "Tasks" (timeline.entityFilter == TimelineTasksOnly) (SetTimelineEntityFilter TimelineTasksOnly)
+            , viewFilterPill "Subtasks" (timeline.entityFilter == TimelineSubtasksOnly) (SetTimelineEntityFilter TimelineSubtasksOnly)
+            ]
+        , div [ class "filter-group" ]
+            [ span [ class "filter-label", title "Filters apply to the latest loaded timeline events." ] [ text "Lifecycle:" ]
+            , viewFilterPill "All" (timeline.eventFilter == TimelineAllEvents) (SetTimelineEventFilter TimelineAllEvents)
+            , viewFilterPill "Created" (timeline.eventFilter == TimelineCreatedEvents) (SetTimelineEventFilter TimelineCreatedEvents)
+            , viewFilterPill "Completed" (timeline.eventFilter == TimelineCompletedEvents) (SetTimelineEventFilter TimelineCompletedEvents)
+            , viewFilterPill "Archived" (timeline.eventFilter == TimelineArchivedEvents) (SetTimelineEventFilter TimelineArchivedEvents)
+            , viewFilterPill "Cancelled" (timeline.eventFilter == TimelineCancelledEvents) (SetTimelineEventFilter TimelineCancelledEvents)
+            ]
+        ]
+
+
+viewFilterPill : String -> Bool -> Msg -> Html Msg
+viewFilterPill label active msg =
+    button
+        [ class
+            (if active then
+                "filter-pill filter-pill-active"
+
+             else
+                "filter-pill"
+            )
+        , onClick msg
+        ]
+        [ text label ]
 
 
 sortTimelineEvents : List Api.WorkspaceTimelineEvent -> List Api.WorkspaceTimelineEvent
@@ -190,6 +255,105 @@ compareTimelineEvents left right =
 timelineTieBreaker : Api.WorkspaceTimelineEvent -> String
 timelineTieBreaker event =
     event.sourceAuditId |> Maybe.withDefault event.id
+
+
+filterTimelineEvents : TimelineEntityFilter -> TimelineEventFilter -> List Api.WorkspaceTimelineEvent -> List Api.WorkspaceTimelineEvent
+filterTimelineEvents entityFilter eventFilter events =
+    events
+        |> List.filter (timelineEntityMatches entityFilter)
+        |> List.filter (timelineEventMatches eventFilter)
+
+
+timelineEntityMatches : TimelineEntityFilter -> Api.WorkspaceTimelineEvent -> Bool
+timelineEntityMatches entityFilter event =
+    case entityFilter of
+        TimelineAllEntities ->
+            True
+
+        TimelineProjectsOnly ->
+            event.entityType == "project"
+
+        TimelineTasksOnly ->
+            event.entityType == "task"
+
+        TimelineSubtasksOnly ->
+            event.entityType == "subtask"
+
+
+timelineEventMatches : TimelineEventFilter -> Api.WorkspaceTimelineEvent -> Bool
+timelineEventMatches eventFilter event =
+    case eventFilter of
+        TimelineAllEvents ->
+            True
+
+        TimelineCreatedEvents ->
+            String.contains "created" event.eventType
+
+        TimelineCompletedEvents ->
+            String.contains "completed" event.eventType
+
+        TimelineArchivedEvents ->
+            String.contains "archived" event.eventType
+
+        TimelineCancelledEvents ->
+            String.contains "cancelled" event.eventType
+
+
+groupTimelineEvents : List Api.WorkspaceTimelineEvent -> List ( String, List Api.WorkspaceTimelineEvent )
+groupTimelineEvents events =
+    case events of
+        [] ->
+            []
+
+        first :: rest ->
+            let
+                key =
+                    timelineDateKey first
+
+                ( sameDay, remaining ) =
+                    spanTimelineGroup key rest
+            in
+            ( key, first :: sameDay ) :: groupTimelineEvents remaining
+
+
+spanTimelineGroup : String -> List Api.WorkspaceTimelineEvent -> ( List Api.WorkspaceTimelineEvent, List Api.WorkspaceTimelineEvent )
+spanTimelineGroup key events =
+    case events of
+        [] ->
+            ( [], [] )
+
+        first :: rest ->
+            if timelineDateKey first == key then
+                let
+                    ( matching, remaining ) =
+                        spanTimelineGroup key rest
+                in
+                ( first :: matching, remaining )
+
+            else
+                ( [], events )
+
+
+timelineDateKey : Api.WorkspaceTimelineEvent -> String
+timelineDateKey event =
+    let
+        datePart =
+            String.left 10 event.occurredAt
+    in
+    if datePart == "" then
+        "Unknown date"
+
+    else
+        datePart
+
+
+viewTimelineGroup : ( String, List Api.WorkspaceTimelineEvent ) -> Html Msg
+viewTimelineGroup ( dateLabel, events ) =
+    div [ class "timeline-date-group" ]
+        [ div [ class "timeline-date-heading" ] [ text dateLabel ]
+        , div [ class "timeline-date-events" ]
+            (List.map viewTimelineEvent events)
+        ]
 
 
 viewTimelineEvent : Api.WorkspaceTimelineEvent -> Html Msg

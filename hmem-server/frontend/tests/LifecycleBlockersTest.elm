@@ -14,7 +14,7 @@ import Json.Decode as Decode
 import Page.Workspace
 import String
 import Test exposing (..)
-import Types exposing (WorkspaceTab(..))
+import Types exposing (TimelineEntityFilter(..), TimelineEventFilter(..), WorkspaceTab(..))
 
 
 suite : Test
@@ -121,6 +121,44 @@ suite =
                     |> Feature.Timeline.sortTimelineEvents
                     |> List.map .id
                     |> Expect.equal [ "newer", "same-z", "same-a", "older" ]
+        , test "workspace timeline filter state defaults to the curated all-events view" <|
+            \_ ->
+                [ Feature.Timeline.init.entityFilter == TimelineAllEntities
+                , Feature.Timeline.init.eventFilter == TimelineAllEvents
+                ]
+                    |> Expect.equal [ True, True ]
+        , test "workspace timeline filters entity and lifecycle types" <|
+            \_ ->
+                let
+                    projectCreated =
+                        timelineEvent "project-created" "2026-05-25T00:00:00Z" "audit-project"
+                            |> (\event -> { event | entityType = "project", eventType = "project_created" })
+
+                    taskCompleted =
+                        timelineEvent "task-completed" "2026-05-25T00:00:01Z" "audit-task"
+                            |> (\event -> { event | entityType = "task", eventType = "task_completed" })
+
+                    subtaskCancelled =
+                        timelineEvent "subtask-cancelled" "2026-05-25T00:00:02Z" "audit-subtask"
+                            |> (\event -> { event | entityType = "subtask", eventType = "subtask_cancelled" })
+
+                    events =
+                        [ projectCreated, taskCompleted, subtaskCancelled ]
+                in
+                [ Feature.Timeline.filterTimelineEvents TimelineProjectsOnly TimelineAllEvents events |> List.map .id
+                , Feature.Timeline.filterTimelineEvents TimelineAllEntities TimelineCompletedEvents events |> List.map .id
+                , Feature.Timeline.filterTimelineEvents TimelineSubtasksOnly TimelineCancelledEvents events |> List.map .id
+                ]
+                    |> Expect.equal [ [ "project-created" ], [ "task-completed" ], [ "subtask-cancelled" ] ]
+        , test "workspace timeline groups sorted events by date" <|
+            \_ ->
+                [ timelineEvent "newer-a" "2026-05-26T08:00:00Z" "audit-newer-a"
+                , timelineEvent "newer-b" "2026-05-26T07:00:00Z" "audit-newer-b"
+                , timelineEvent "older" "2026-05-25T09:00:00Z" "audit-older"
+                ]
+                    |> Feature.Timeline.groupTimelineEvents
+                    |> List.map (\( label, events ) -> ( label, List.map .id events ))
+                    |> Expect.equal [ ( "2026-05-26", [ "newer-a", "newer-b" ] ), ( "2026-05-25", [ "older" ] ) ]
         , test "task cascade delete preview covers empty, small, and large descendant trees" <|
             \_ ->
                 let

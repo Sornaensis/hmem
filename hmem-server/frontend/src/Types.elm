@@ -229,7 +229,24 @@ type alias TimelineModel =
     , loading : Bool
     , error : Maybe String
     , loadedWorkspaceId : Maybe String
+    , entityFilter : TimelineEntityFilter
+    , eventFilter : TimelineEventFilter
     }
+
+
+type TimelineEntityFilter
+    = TimelineAllEntities
+    | TimelineProjectsOnly
+    | TimelineTasksOnly
+    | TimelineSubtasksOnly
+
+
+type TimelineEventFilter
+    = TimelineAllEvents
+    | TimelineCreatedEvents
+    | TimelineCompletedEvents
+    | TimelineArchivedEvents
+    | TimelineCancelledEvents
 
 
 type alias WorkspaceAdminModel =
@@ -566,6 +583,8 @@ type Msg
       -- Audit log
     | GotAuditLog AuditLogFilters (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
     | GotEntityHistory String (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
+    | SetTimelineEntityFilter TimelineEntityFilter
+    | SetTimelineEventFilter TimelineEventFilter
     | ToggleEntityHistory String String
     | LoadMoreHistory String String
     | SetAuditFilter String String

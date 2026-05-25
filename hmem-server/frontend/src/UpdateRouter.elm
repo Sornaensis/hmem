@@ -97,6 +97,12 @@ update msg model =
         GotWorkspaceTimeline _ _ ->
             Ok (Feature.Timeline.update msg model)
 
+        SetTimelineEntityFilter _ ->
+            Ok (Feature.Timeline.update msg model)
+
+        SetTimelineEventFilter _ ->
+            Ok (Feature.Timeline.update msg model)
+
         GotVisualization _ _ ->
             Ok (Feature.Graph.update msg model)
 

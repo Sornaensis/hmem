@@ -252,6 +252,7 @@ handleUrlChange url model =
                             , filterMemoryTypes = []
                             , filterImportance = AnyPriority
                             , filterMemoryPinned = Nothing
+                            , filterMemoryActiveLinked = False
                             , filterTags = []
                         }
 

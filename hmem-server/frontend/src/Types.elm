@@ -108,6 +108,7 @@ type alias SearchModel =
     , filterMemoryTypes : List String
     , filterImportance : FilterPriority
     , filterMemoryPinned : Maybe Bool
+    , filterMemoryActiveLinked : Bool
     , filterTags : List String
     }
 
@@ -424,6 +425,7 @@ type Msg
     | ToggleFilterMemoryType String
     | SetFilterImportance FilterPriority
     | SetFilterMemoryPinned (Maybe Bool)
+    | ToggleFilterMemoryActiveLinked Bool
     | ToggleFilterTag String
       -- Inline editing
     | StartEdit String String String String

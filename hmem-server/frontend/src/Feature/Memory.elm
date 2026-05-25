@@ -2,6 +2,7 @@ module Feature.Memory exposing
     ( clearForTabSwitch
     , handleEscape
     , init
+    , memoryHasActiveLinkedUsage
     , update
     , viewLinkedMemories
     , viewMemoriesList
@@ -254,6 +255,10 @@ viewMemoriesList wsId model =
             else
                 List.any (\t -> List.member t m.tags) model.search.filterTags
 
+        memoryPassesActiveLinkedFilter m =
+            not model.search.filterMemoryActiveLinked
+                || memoryHasActiveLinkedUsage m.id (Dict.values model.projects) (Dict.values model.tasks) model.memory.entityMemoryIds
+
         allWsMemories =
             model.memories
                 |> Dict.values
@@ -282,6 +287,7 @@ viewMemoriesList wsId model =
                 |> List.filter memoryPassesPinnedFilter
                 |> List.filter memoryPassesImportanceFilter
                 |> List.filter memoryPassesTagFilter
+                |> List.filter memoryPassesActiveLinkedFilter
                 |> List.sortBy (\m -> ( negate m.importance, String.toLower (m.summary |> Maybe.withDefault m.content) ))
 
         inlineCreateView =
@@ -324,6 +330,29 @@ viewTagCloud model allTags =
                     allTags
                 )
             ]
+
+
+{-| The active-linked memory filter includes a memory when any linked task is
+not done/cancelled or any linked project is not archived. Mixed active and
+inactive links are included because the memory still supports active work.
+-}
+memoryHasActiveLinkedUsage : String -> List Api.Project -> List Api.Task -> Dict.Dict String (List String) -> Bool
+memoryHasActiveLinkedUsage memoryId projects tasks entityMemoryIds =
+    let
+        entityLinksMemory entityId =
+            entityMemoryIds
+                |> Dict.get entityId
+                |> Maybe.map (List.member memoryId)
+                |> Maybe.withDefault False
+
+        projectIsActive project =
+            project.status /= Api.ProjArchived
+
+        taskIsActive task =
+            task.status /= Api.Done && task.status /= Api.Cancelled
+    in
+    List.any (\project -> projectIsActive project && entityLinksMemory project.id) projects
+        || List.any (\task -> taskIsActive task && entityLinksMemory task.id) tasks
 
 
 updateMemoryModel : (MemoryModel -> MemoryModel) -> Model -> Model

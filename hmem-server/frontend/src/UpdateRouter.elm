@@ -170,6 +170,9 @@ update msg model =
         SetFilterMemoryPinned _ ->
             Ok (Feature.Search.update msg model)
 
+        ToggleFilterMemoryActiveLinked _ ->
+            Ok (Feature.Search.update msg model)
+
         ToggleFilterTag _ ->
             Ok (Feature.Search.update msg model)
 

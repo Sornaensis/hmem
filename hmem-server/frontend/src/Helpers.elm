@@ -172,6 +172,7 @@ encodeFilterState model =
                 Nothing ->
                     Encode.null
           )
+        , ( "filterMemoryActiveLinked", Encode.bool model.search.filterMemoryActiveLinked )
         , ( "filterTags", Encode.list Encode.string model.search.filterTags )
         , ( "collapsedNodes"
           , model.cards.collapsedNodes
@@ -258,6 +259,7 @@ applyStoredFilters json model =
                 , filterMemoryTypes = Decode.decodeValue (Decode.field "filterMemoryTypes" (Decode.list Decode.string)) json |> Result.withDefault currentSearch.filterMemoryTypes
                 , filterImportance = Decode.decodeValue (Decode.field "filterImportance" decodeFilterPriority) json |> Result.withDefault currentSearch.filterImportance
                 , filterMemoryPinned = Decode.decodeValue (Decode.field "filterMemoryPinned" decodePinned) json |> Result.withDefault currentSearch.filterMemoryPinned
+                , filterMemoryActiveLinked = Decode.decodeValue (Decode.field "filterMemoryActiveLinked" Decode.bool) json |> Result.withDefault currentSearch.filterMemoryActiveLinked
                 , filterTags = Decode.decodeValue (Decode.field "filterTags" (Decode.list Decode.string)) json |> Result.withDefault currentSearch.filterTags
             }
 

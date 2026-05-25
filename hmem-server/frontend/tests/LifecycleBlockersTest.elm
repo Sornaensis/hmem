@@ -1,11 +1,13 @@
 module LifecycleBlockersTest exposing (suite)
 
 import Api
+import Dict
 import Expect
 import Feature.AuditLog
 import Feature.Cards
 import Feature.DataLoading
 import Feature.Editing
+import Feature.Memory
 import Helpers
 import Json.Decode as Decode
 import String
@@ -452,6 +454,45 @@ suite =
                 , Feature.Editing.selectedMemoryTargetValueFrom options "task:child-task"
                 ]
                     |> Expect.equal [ Just "project:project-a", Nothing, Nothing ]
+        , test "active-linked memory filter follows task and project lifecycle state" <|
+            \_ ->
+                let
+                    activeProject =
+                        project "active-project" Nothing
+
+                    archivedProject =
+                        { project "archived-project" Nothing | status = Api.ProjArchived }
+
+                    activeTask =
+                        task "active-task" Nothing (Just "project-a")
+
+                    doneTask =
+                        { task "done-task" Nothing (Just "project-a") | status = Api.Done }
+
+                    cancelledTask =
+                        { task "cancelled-task" Nothing (Just "project-a") | status = Api.Cancelled }
+
+                    links =
+                        Dict.fromList
+                            [ ( "active-task", [ "mem-task-active" ] )
+                            , ( "done-task", [ "mem-task-done", "mem-mixed" ] )
+                            , ( "cancelled-task", [ "mem-task-cancelled" ] )
+                            , ( "active-project", [ "mem-project-active", "mem-mixed" ] )
+                            , ( "archived-project", [ "mem-project-archived" ] )
+                            ]
+
+                    hasActiveUsage memoryId =
+                        Feature.Memory.memoryHasActiveLinkedUsage memoryId [ activeProject, archivedProject ] [ activeTask, doneTask, cancelledTask ] links
+                in
+                [ hasActiveUsage "mem-task-active"
+                , hasActiveUsage "mem-task-done"
+                , hasActiveUsage "mem-task-cancelled"
+                , hasActiveUsage "mem-project-active"
+                , hasActiveUsage "mem-project-archived"
+                , hasActiveUsage "mem-mixed"
+                , hasActiveUsage "mem-unlinked"
+                ]
+                    |> Expect.equal [ True, False, False, True, False, True, False ]
         , test "memory context targets resolve subtasks to eligible ancestors" <|
             \_ ->
                 let

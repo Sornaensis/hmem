@@ -20,6 +20,7 @@ init =
     , filterMemoryTypes = []
     , filterImportance = AnyPriority
     , filterMemoryPinned = Nothing
+    , filterMemoryActiveLinked = False
     , filterTags = []
     }
 
@@ -166,6 +167,16 @@ update msg model =
 
                 newModel =
                     { model | search = { searchModel | filterMemoryPinned = pinned } }
+            in
+            ( newModel, saveFiltersCmd newModel )
+
+        ToggleFilterMemoryActiveLinked active ->
+            let
+                searchModel =
+                    model.search
+
+                newModel =
+                    { model | search = { searchModel | filterMemoryActiveLinked = active } }
             in
             ( newModel, saveFiltersCmd newModel )
 
@@ -366,6 +377,21 @@ viewMemoryFilterBar model =
             , viewFilterPill "All" (model.search.filterMemoryPinned == Nothing) (SetFilterMemoryPinned Nothing)
             , viewFilterPill "Pinned" (model.search.filterMemoryPinned == Just True) (SetFilterMemoryPinned (Just True))
             , viewFilterPill "Unpinned" (model.search.filterMemoryPinned == Just False) (SetFilterMemoryPinned (Just False))
+            ]
+        , div [ class "filter-group" ]
+            [ span [ class "filter-label" ] [ text "Usage:" ]
+            , button
+                [ class
+                    (if model.search.filterMemoryActiveLinked then
+                        "filter-pill filter-pill-active"
+
+                     else
+                        "filter-pill"
+                    )
+                , title "Show memories linked to at least one non-archived project or non-done/non-cancelled task."
+                , onClick (ToggleFilterMemoryActiveLinked (not model.search.filterMemoryActiveLinked))
+                ]
+                [ text "Active links" ]
             ]
         , div [ class "filter-group" ]
             [ span [ class "filter-label" ] [ text "Importance:" ]

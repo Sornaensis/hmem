@@ -103,11 +103,12 @@ suite =
                         , Feature.Timeline.timelineEventToneClass event.eventType
                         , event.entityType
                         , event.navigation.entityType
+                        , event.navigation.entityId
                         , event.project |> Maybe.map .name |> Maybe.withDefault ""
                         , event.parentTask |> Maybe.map .title |> Maybe.withDefault ""
                         , Feature.Timeline.timelineStatusSummary event.statusTransition |> Maybe.withDefault ""
                         ]
-                            |> Expect.equal [ "Subtask completed", "timeline-event-completed", "subtask", "task", "Timeline project", "Parent task", "Todo → Done" ]
+                            |> Expect.equal [ "Subtask completed", "timeline-event-completed", "subtask", "task", "task-1", "Timeline project", "Parent task", "Todo → Done" ]
 
                     Err error ->
                         Expect.fail (Decode.errorToString error)

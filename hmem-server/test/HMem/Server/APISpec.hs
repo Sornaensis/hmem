@@ -4730,9 +4730,18 @@ spec = around withApp $ do
       noisyTaskResp <- postJSON app "/api/v1/tasks"
         (object ["workspace_id" .= ws.id, "project_id" .= taskProject.id, "title" .= ("Noisy Timeline Task" :: T.Text)])
       let Just noisyTask = decode (respBody noisyTaskResp) :: Maybe Task
-      noisyUpdateResp <- putJSON app (uuidPath "/api/v1/tasks" noisyTask.id)
-        (object ["title" .= ("Renamed Noisy Timeline Task" :: T.Text)])
-      respStatus noisyUpdateResp `shouldBe` 200
+      forM_ ([1 .. 30] :: [Int]) $ \n -> do
+        noisyUpdateResp <- putJSON app (uuidPath "/api/v1/tasks" noisyTask.id)
+          (object ["title" .= T.pack ("Renamed Noisy Timeline Task " <> show n)])
+        respStatus noisyUpdateResp `shouldBe` 200
+
+      noisyLimitedResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/timeline?limit=5")
+      respStatus noisyLimitedResp `shouldBe` 200
+      let Just noisyLimitedTimeline = decode (respBody noisyLimitedResp) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+          noisyRenamedTitle event = "Renamed Noisy Timeline Task" `T.isPrefixOf` event.title
+      length noisyLimitedTimeline.items `shouldBe` 5
+      noisyLimitedTimeline.items `shouldSatisfy` any (\event -> event.eventType == "task_created" && event.entityId == noisyTask.id)
+      noisyLimitedTimeline.items `shouldSatisfy` all (not . noisyRenamedTitle)
 
       timelineResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/timeline?limit=100")
       respStatus timelineResp `shouldBe` 200
@@ -4740,6 +4749,7 @@ spec = around withApp $ do
           events = timeline.items
           hasEvent eventType entityId = any (\event -> event.eventType == eventType && event.entityId == entityId) events
           noisyNonCreateEvents = filter (\event -> event.entityId == noisyTask.id && event.eventType /= "task_created") events
+          renamedNoisyEvents = filter noisyRenamedTitle events
           movedAfterCreateSubtaskCreates = filter (\event -> event.entityId == movedAfterCreateTask.id && event.eventType == "subtask_created") events
 
       hasEvent "project_created" createdProject.id `shouldBe` True
@@ -4751,8 +4761,15 @@ spec = around withApp $ do
       hasEvent "subtask_completed" childTask.id `shouldBe` True
       hasEvent "task_cancelled" cancelTask.id `shouldBe` True
       noisyNonCreateEvents `shouldBe` []
+      renamedNoisyEvents `shouldBe` []
       movedAfterCreateSubtaskCreates `shouldBe` []
-      map (\event -> event.title) events `shouldSatisfy` notElem ("Renamed Noisy Timeline Task" :: T.Text)
+
+      case filter (\event -> event.eventType == "project_created" && event.entityId == createdProject.id) events of
+        (projectCreate:_) -> do
+          projectCreate.entityType `shouldBe` "project"
+          projectCreate.navigation.navigationEntityType `shouldBe` "project"
+          projectCreate.navigation.navigationEntityId `shouldBe` createdProject.id
+        [] -> expectationFailure "Expected project creation timeline event with project navigation"
 
       case filter (\event -> event.eventType == "task_created" && event.entityId == movedAfterCreateTask.id) events of
         (movedCreate:_) -> do
@@ -4770,6 +4787,7 @@ spec = around withApp $ do
           subtaskDone.entityType `shouldBe` "subtask"
           subtaskDone.statusTransition `shouldBe` Just (TimelineStatusTransition "todo" "done")
           subtaskDone.navigation.navigationEntityType `shouldBe` "task"
+          subtaskDone.navigation.navigationEntityId `shouldBe` childTask.id
           subtaskDone.parentTask `shouldSatisfy` maybe False (\parent -> parent.taskContextId == parentTask.id)
           subtaskDone.project `shouldSatisfy` maybe False (\project -> project.projectContextId == taskProject.id)
         [] -> expectationFailure "Expected subtask completion timeline event"
@@ -4779,6 +4797,12 @@ spec = around withApp $ do
       let Just filteredTimeline = decode (respBody filteredResp) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
       filteredTimeline.items `shouldSatisfy` all (\event -> event.entityType == "subtask")
       length filteredTimeline.items `shouldSatisfy` (>= 2)
+
+      eventTypeFilteredResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/timeline?event_type=task_completed&limit=10")
+      respStatus eventTypeFilteredResp `shouldBe` 200
+      let Just eventTypeFilteredTimeline = decode (respBody eventTypeFilteredResp) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      eventTypeFilteredTimeline.items `shouldSatisfy` all (\event -> event.eventType == "task_completed")
+      eventTypeFilteredTimeline.items `shouldSatisfy` any (\event -> event.entityId == parentTask.id)
 
       pagedResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/timeline?limit=1")
       respStatus pagedResp `shouldBe` 200

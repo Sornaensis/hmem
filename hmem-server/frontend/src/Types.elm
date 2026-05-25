@@ -57,6 +57,7 @@ type alias Model =
     , mutations : MutationsModel
     , groups : GroupsModel
     , auditLog : AuditLogModel
+    , timeline : TimelineModel
     , workspaceAdmin : WorkspaceAdminModel
     }
 
@@ -222,6 +223,15 @@ type alias AuditLogModel =
     }
 
 
+type alias TimelineModel =
+    { events : List Api.WorkspaceTimelineEvent
+    , hasMore : Bool
+    , loading : Bool
+    , error : Maybe String
+    , loadedWorkspaceId : Maybe String
+    }
+
+
 type alias WorkspaceAdminModel =
     { memberships : Dict String (List Api.WorkspaceMembership)
     , loadingMemberships : Dict String Bool
@@ -301,6 +311,7 @@ type ToastLevel
 type WorkspaceTab
     = ProjectsTab
     | MemoriesTab
+    | TimelineTab
     | AuditTab
 
 
@@ -404,6 +415,7 @@ type Msg
     | GotMemories String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Memory))
     | GotSingleMemory (Result Http.Error Api.Memory)
     | GotWorkspaceCardHydration String (Maybe Int) (Result Http.Error Api.WorkspaceCardHydration)
+    | GotWorkspaceTimeline String (Result Http.Error (Api.PaginatedResult Api.WorkspaceTimelineEvent))
     | GotVisualization String (Result Http.Error Api.WorkspaceVisualization)
       -- Mutation responses
     | MutationDone String (Result Http.Error ())
@@ -523,6 +535,7 @@ type Msg
     | FocusEntity String String
     | FocusEntityKeepForward String String
     | NavigateToAuditEntity Api.AuditLogEntry
+    | NavigateToTimelineEntity String String
     | FocusBreadcrumbNav Int
     | ClearFocus
     | GlobalKeyDown Int

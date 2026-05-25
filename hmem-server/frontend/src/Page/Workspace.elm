@@ -1,5 +1,6 @@
 module Page.Workspace exposing
     ( viewWorkspacePage
+    , workspaceTabLabel
     )
 
 import Api
@@ -9,6 +10,7 @@ import Feature.Cards
 import Feature.Editing
 import Feature.Memory
 import Feature.Search
+import Feature.Timeline
 import Feature.WorkspaceAdmin
 import Helpers exposing (formatDate)
 import Html exposing (..)
@@ -131,7 +133,7 @@ viewReadableWorkspacePage wsId model ws =
           else
             div []
                 [ Feature.WorkspaceAdmin.viewWorkspaceAdminPanel ws model
-                , if model.activeTab == AuditTab then
+                , if model.activeTab == AuditTab || model.activeTab == TimelineTab then
                     text ""
 
                   else
@@ -140,7 +142,7 @@ viewReadableWorkspacePage wsId model ws =
                 , if model.dataLoading.loadingWorkspaceData then
                     div [ class "loading-indicator" ] [ text "Loading..." ]
 
-                  else if model.activeTab == AuditTab then
+                  else if model.activeTab == AuditTab || model.activeTab == TimelineTab then
                     viewTabContent wsId model
 
                   else
@@ -208,15 +210,32 @@ viewTabs : Model -> Html Msg
 viewTabs model =
     div [ class "tabs" ]
         (List.filterMap identity
-            [ Just (viewTab ProjectsTab model.activeTab "Projects")
-            , Just (viewTab MemoriesTab model.activeTab "Memories")
+            [ Just (viewTab ProjectsTab model.activeTab (workspaceTabLabel ProjectsTab))
+            , Just (viewTab MemoriesTab model.activeTab (workspaceTabLabel MemoriesTab))
+            , Just (viewTab TimelineTab model.activeTab (workspaceTabLabel TimelineTab))
             , if Permissions.canViewCurrentWorkspaceAudit model then
-                Just (viewTab AuditTab model.activeTab "Audit")
+                Just (viewTab AuditTab model.activeTab (workspaceTabLabel AuditTab))
 
               else
                 Nothing
             ]
         )
+
+
+workspaceTabLabel : WorkspaceTab -> String
+workspaceTabLabel tab =
+    case tab of
+        ProjectsTab ->
+            "Projects"
+
+        MemoriesTab ->
+            "Memories"
+
+        TimelineTab ->
+            "Timeline"
+
+        AuditTab ->
+            "Audit"
 
 
 viewTab : WorkspaceTab -> WorkspaceTab -> String -> Html Msg
@@ -242,6 +261,9 @@ viewTabContent wsId model =
 
         MemoriesTab ->
             Feature.Memory.viewMemoriesList wsId model
+
+        TimelineTab ->
+            Feature.Timeline.viewWorkspaceTimelinePanel wsId model
 
         AuditTab ->
             Feature.AuditLog.viewWorkspaceAuditPanel wsId model

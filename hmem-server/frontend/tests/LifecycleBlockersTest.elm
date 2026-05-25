@@ -8,10 +8,13 @@ import Feature.Cards
 import Feature.DataLoading
 import Feature.Editing
 import Feature.Memory
+import Feature.Timeline
 import Helpers
 import Json.Decode as Decode
+import Page.Workspace
 import String
 import Test exposing (..)
+import Types exposing (WorkspaceTab(..))
 
 
 suite : Test
@@ -80,6 +83,33 @@ suite =
                 , Feature.DataLoading.nextPageOffset 10000 { items = [ "x" ], hasMore = True }
                 ]
                     |> Expect.equal [ Just 2, Nothing, Nothing, Just 10000, Nothing ]
+        , test "timeline tab fragment round-trips and exposes a workspace tab label" <|
+            \_ ->
+                [ (Helpers.parseFragment (Just "tab=timeline")).tab == TimelineTab
+                , Helpers.buildFragment TimelineTab Nothing == "tab=timeline"
+                , (Helpers.parseFragment (Just "tab=timeline&focus=task:abc")).focus == Just ( "task", "abc" )
+                , Page.Workspace.workspaceTabLabel TimelineTab == "Timeline"
+                ]
+                    |> Expect.equal [ True, True, True, True ]
+        , test "workspace timeline event decoder preserves basic rendering fields" <|
+            \_ ->
+                let
+                    json =
+                        """{"id":"audit:11111111-1111-1111-1111-111111111111","workspace_id":"workspace-1","event_type":"subtask_completed","entity_type":"subtask","entity_id":"task-1","title":"Child task","occurred_at":"2026-05-25T00:00:00Z","actor":{"type":"bot","id":"actor-1","label":"Timeline bot"},"project":{"id":"project-1","name":"Timeline project"},"parent_task":{"id":"parent-1","title":"Parent task"},"status_transition":{"from":"todo","to":"done"},"navigation":{"entity_type":"task","entity_id":"task-1"},"source_audit_id":"11111111-1111-1111-1111-111111111111"}"""
+                in
+                case Decode.decodeString Api.workspaceTimelineEventDecoder json of
+                    Ok event ->
+                        [ Feature.Timeline.timelineEventLabel event.eventType
+                        , event.entityType
+                        , event.navigation.entityType
+                        , event.project |> Maybe.map .name |> Maybe.withDefault ""
+                        , event.parentTask |> Maybe.map .title |> Maybe.withDefault ""
+                        , event.statusTransition |> Maybe.map .to |> Maybe.withDefault ""
+                        ]
+                            |> Expect.equal [ "Subtask completed", "subtask", "task", "Timeline project", "Parent task", "done" ]
+
+                    Err error ->
+                        Expect.fail (Decode.errorToString error)
         , test "task cascade delete preview covers empty, small, and large descendant trees" <|
             \_ ->
                 let

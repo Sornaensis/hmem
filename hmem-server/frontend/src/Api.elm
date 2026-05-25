@@ -7,6 +7,7 @@ module Api exposing
     , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, UnifiedSearchResults
     , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
     , AuditAction(..), AuditLogEntry, RevertResult
+    , WorkspaceTimelineEvent, TimelineActor, TimelineProjectContext, TimelineTaskContext, TimelineStatusTransition, TimelineNavigation
     , ApiError, apiErrorToUserMessage, decodeApiErrorBody, isLifecycleConflict
     , CascadeResult
     , PaginatedResult
@@ -35,9 +36,9 @@ module Api exposing
     , createMemory, updateMemory, deleteMemory, setTags
     , fetchWorkspaceGroups, createWorkspaceGroup, deleteWorkspaceGroup
     , fetchGroupMembers, addGroupMember, removeGroupMember
-    , fetchAuditLog, fetchEntityHistory, revertAuditEntry
+    , fetchAuditLog, fetchEntityHistory, revertAuditEntry, fetchWorkspaceTimeline
     , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder, nextTaskCandidateDecoder, workspaceCardHydrationDecoder
-    , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, auditLogEntryDecoder
+    , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, auditLogEntryDecoder, workspaceTimelineEventDecoder
     , memoryTypeToString, memoryTypeFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
     , auditActionToString, auditActionFromString
     , projectStatusFromString, taskStatusFromString
@@ -305,6 +306,54 @@ type alias AuditLogEntry =
     , actorId : Maybe String
     , actorLabel : Maybe String
     , changedAt : String
+    }
+
+
+type alias WorkspaceTimelineEvent =
+    { id : String
+    , workspaceId : String
+    , eventType : String
+    , entityType : String
+    , entityId : String
+    , title : String
+    , occurredAt : String
+    , actor : Maybe TimelineActor
+    , project : Maybe TimelineProjectContext
+    , parentTask : Maybe TimelineTaskContext
+    , statusTransition : Maybe TimelineStatusTransition
+    , navigation : TimelineNavigation
+    , sourceAuditId : Maybe String
+    }
+
+
+type alias TimelineActor =
+    { actorType : Maybe String
+    , actorId : Maybe String
+    , actorLabel : Maybe String
+    }
+
+
+type alias TimelineProjectContext =
+    { id : String
+    , name : String
+    }
+
+
+type alias TimelineTaskContext =
+    { id : String
+    , title : String
+    }
+
+
+type alias TimelineStatusTransition =
+    { from : String
+    , to : String
+    }
+
+
+type alias TimelineNavigation =
+    { entityType : String
+    , entityId : String
     }
 
 
@@ -1099,6 +1148,60 @@ auditLogEntryDecoder =
         |> required "changed_at" D.string
 
 
+workspaceTimelineEventDecoder : Decoder WorkspaceTimelineEvent
+workspaceTimelineEventDecoder =
+    D.succeed WorkspaceTimelineEvent
+        |> required "id" D.string
+        |> required "workspace_id" D.string
+        |> required "event_type" D.string
+        |> required "entity_type" D.string
+        |> required "entity_id" D.string
+        |> required "title" D.string
+        |> required "occurred_at" D.string
+        |> optional "actor" (D.nullable timelineActorDecoder) Nothing
+        |> optional "project" (D.nullable timelineProjectContextDecoder) Nothing
+        |> optional "parent_task" (D.nullable timelineTaskContextDecoder) Nothing
+        |> optional "status_transition" (D.nullable timelineStatusTransitionDecoder) Nothing
+        |> required "navigation" timelineNavigationDecoder
+        |> optional "source_audit_id" (D.nullable D.string) Nothing
+
+
+timelineActorDecoder : Decoder TimelineActor
+timelineActorDecoder =
+    D.succeed TimelineActor
+        |> optional "type" (D.nullable D.string) Nothing
+        |> optional "id" (D.nullable D.string) Nothing
+        |> optional "label" (D.nullable D.string) Nothing
+
+
+timelineProjectContextDecoder : Decoder TimelineProjectContext
+timelineProjectContextDecoder =
+    D.succeed TimelineProjectContext
+        |> required "id" D.string
+        |> required "name" D.string
+
+
+timelineTaskContextDecoder : Decoder TimelineTaskContext
+timelineTaskContextDecoder =
+    D.succeed TimelineTaskContext
+        |> required "id" D.string
+        |> required "title" D.string
+
+
+timelineStatusTransitionDecoder : Decoder TimelineStatusTransition
+timelineStatusTransitionDecoder =
+    D.succeed TimelineStatusTransition
+        |> required "from" D.string
+        |> required "to" D.string
+
+
+timelineNavigationDecoder : Decoder TimelineNavigation
+timelineNavigationDecoder =
+    D.succeed TimelineNavigation
+        |> required "entity_type" D.string
+        |> required "entity_id" D.string
+
+
 revertResultDecoder : Decoder RevertResult
 revertResultDecoder =
     D.succeed RevertResult
@@ -1446,6 +1549,14 @@ fetchWorkspaceCardHydration apiUrl wsId toMsg =
     Http.get
         { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/card-hydration"
         , expect = Http.expectJson toMsg workspaceCardHydrationDecoder
+        }
+
+
+fetchWorkspaceTimeline : String -> String -> (Result Http.Error (PaginatedResult WorkspaceTimelineEvent) -> msg) -> Cmd msg
+fetchWorkspaceTimeline apiUrl wsId toMsg =
+    Http.get
+        { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/timeline?limit=50"
+        , expect = Http.expectJson toMsg (paginatedDecoder workspaceTimelineEventDecoder)
         }
 
 

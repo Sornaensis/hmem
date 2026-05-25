@@ -5,6 +5,7 @@ import Browser
 import Browser.Navigation as Nav
 import Dict
 import Helpers exposing (localStorageKey, parseFragment)
+import Feature.Timeline
 import Permissions
 import Ports exposing (destroyCytoscape, disconnectWebSocket, requestLocalStorage)
 import Types exposing (..)
@@ -158,10 +159,13 @@ handleUrlChange url model =
                         }
                             |> clearRouteConfirmations
 
-                    ( finalModel, auditCmd ) =
+                    ( auditModel, auditCmd ) =
                         prepareWorkspaceAuditFromRoute wsId frag.tab updatedModel
+
+                    ( finalModel, timelineCmd ) =
+                        prepareWorkspaceTimelineFromRoute wsId frag.tab auditModel
                 in
-                ( finalModel, auditCmd )
+                ( finalModel, Cmd.batch [ auditCmd, timelineCmd ] )
 
             else
                 let
@@ -290,6 +294,9 @@ handleUrlChange url model =
                             , entityHistoryHasMore = Dict.empty
                             , historyExpanded = Dict.empty
                         }
+
+                    updatedTimeline =
+                        Feature.Timeline.init
                 in
                 ( { model
                     | url = url
@@ -312,6 +319,7 @@ handleUrlChange url model =
                     , cards = updatedCards
                     , graph = updatedGraph
                     , auditLog = updatedAuditLog
+                    , timeline = updatedTimeline
                   }
                     |> clearRouteConfirmations
                 , Cmd.batch
@@ -421,6 +429,19 @@ prepareWorkspaceAuditFromRoute wsId tab model =
         ( { model | auditLog = auditLog }
         , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
         )
+
+    else
+        ( model, Cmd.none )
+
+
+prepareWorkspaceTimelineFromRoute : String -> WorkspaceTab -> Model -> ( Model, Cmd Msg )
+prepareWorkspaceTimelineFromRoute wsId tab model =
+    if tab == TimelineTab then
+        let
+            ( timeline, timelineCmd ) =
+                Feature.Timeline.ensureLoaded model.flags.apiUrl wsId model.timeline
+        in
+        ( { model | timeline = timeline }, timelineCmd )
 
     else
         ( model, Cmd.none )

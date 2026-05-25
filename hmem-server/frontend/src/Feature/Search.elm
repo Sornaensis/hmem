@@ -234,6 +234,9 @@ viewSearchBar model =
                     MemoriesTab ->
                         viewMemoryFilterBar model
 
+                    TimelineTab ->
+                        text ""
+
                     AuditTab ->
                         text ""
         ]

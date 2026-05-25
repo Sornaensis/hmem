@@ -14,6 +14,7 @@ import Feature.Groups
 import Feature.Memory
 import Feature.Mutations
 import Feature.Search
+import Feature.Timeline
 import Feature.WebSocket
 import Feature.WorkspaceAdmin
 import Toast
@@ -92,6 +93,9 @@ update msg model =
 
         GotWorkspaceCardHydration _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
+
+        GotWorkspaceTimeline _ _ ->
+            Ok (Feature.Timeline.update msg model)
 
         GotVisualization _ _ ->
             Ok (Feature.Graph.update msg model)
@@ -393,6 +397,9 @@ update msg model =
 
         NavigateToAuditEntity _ ->
             Ok (Feature.AuditLog.update msg model)
+
+        NavigateToTimelineEntity _ _ ->
+            Ok (Feature.Timeline.update msg model)
 
         FocusBreadcrumbNav _ ->
             Ok (Feature.Focus.update msg model)

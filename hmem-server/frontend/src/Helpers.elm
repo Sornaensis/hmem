@@ -54,6 +54,9 @@ parseFragment fragment =
                         "memories" ->
                             MemoriesTab
 
+                        "timeline" ->
+                            TimelineTab
+
                         "audit" ->
                             AuditTab
 
@@ -97,6 +100,9 @@ buildFragment tab focus =
 
                 MemoriesTab ->
                     "tab=memories"
+
+                TimelineTab ->
+                    "tab=timeline"
 
                 AuditTab ->
                     "tab=audit"

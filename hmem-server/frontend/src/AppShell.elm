@@ -17,6 +17,7 @@ import Feature.Groups
 import Feature.Memory
 import Feature.Mutations
 import Feature.Search
+import Feature.Timeline
 import Feature.WebSocket
 import Feature.WorkspaceAdmin
 import Helpers exposing (applyStoredFiltersIfCurrentWorkspace, replaceFragment)
@@ -83,6 +84,7 @@ initModel key url page flags storedFilters frag =
             , mutations = Feature.Mutations.init
             , groups = Feature.Groups.init
             , auditLog = Feature.AuditLog.init
+            , timeline = Feature.Timeline.init
             , workspaceAdmin = Feature.WorkspaceAdmin.init
             }
     in
@@ -140,10 +142,18 @@ handleOwned ownedMsg model =
                         _ ->
                             ( newModel.auditLog, Cmd.none )
 
+                ( timeline, timelineCmd ) =
+                    case ( tab, newModel.selectedWorkspaceId ) of
+                        ( TimelineTab, Just wsId ) ->
+                            Feature.Timeline.ensureLoaded newModel.flags.apiUrl wsId newModel.timeline
+
+                        _ ->
+                            ( newModel.timeline, Cmd.none )
+
                 finalModel =
-                    { newModel | auditLog = auditLog }
+                    { newModel | auditLog = auditLog, timeline = timeline }
             in
-            ( finalModel, Cmd.batch [ replaceFragment finalModel, auditCmd ] )
+            ( finalModel, Cmd.batch [ replaceFragment finalModel, auditCmd, timelineCmd ] )
 
         SessionContextLoadedMsg expectedWorkspace result ->
             if sessionContextResponseMatches expectedWorkspace model then
@@ -217,10 +227,22 @@ handleOwned ownedMsg model =
 
                                     _ ->
                                         ( model.auditLog, Cmd.none )
+
+                            ( nextTimeline, fetchTimelineCmd ) =
+                                case ( expectedWorkspace, model.page ) of
+                                    ( Just wsId, WorkspacePage currentWsId ) ->
+                                        if wsId == currentWsId && model.activeTab == TimelineTab && sessionCanReadWorkspace wsId sessionContext then
+                                            Feature.Timeline.ensureLoaded model.flags.apiUrl wsId model.timeline
+
+                                        else
+                                            ( model.timeline, Cmd.none )
+
+                                    _ ->
+                                        ( model.timeline, Cmd.none )
                         in
-                        ( { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin, auditLog = nextAuditLog }
+                        ( { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin, auditLog = nextAuditLog, timeline = nextTimeline }
                             |> updateLoadingAfterSession expectedWorkspace sessionContext
-                        , Cmd.batch [ sessionBootstrapCmd, fetchMembershipsCmd, fetchAuditCmd ]
+                        , Cmd.batch [ sessionBootstrapCmd, fetchMembershipsCmd, fetchAuditCmd, fetchTimelineCmd ]
                         )
 
                     Err _ ->
@@ -568,6 +590,7 @@ clearSessionScopedState model =
         , focus = Feature.Focus.init Nothing
         , groups = Feature.Groups.init
         , auditLog = Feature.AuditLog.init
+        , timeline = Feature.Timeline.init
         , workspaceAdmin = Feature.WorkspaceAdmin.init
         , webSocket = { state = Disconnected }
     }

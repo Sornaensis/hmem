@@ -12,6 +12,7 @@ import Feature.Timeline
 import Helpers
 import Json.Decode as Decode
 import Page.Workspace
+import Permissions
 import String
 import Test exposing (..)
 import Types exposing (TimelineEntityFilter(..), TimelineEventFilter(..), WorkspaceTab(..))
@@ -74,6 +75,30 @@ suite =
                         [ Just "Complete/archive 1 child project and finish/cancel 2 tasks before closing this project."
                         , Just "Finish or cancel 3 subtasks before marking this task done."
                         ]
+        , test "local implicit superadmin hides only local authorization presentation details" <|
+            \_ ->
+                let
+                    localImplicitSuperadmin =
+                        sessionContext "local" "user" "local_superadmin" True True (Just "admin")
+
+                    deployedSuperadmin =
+                        sessionContext "deployed" "user" "grant_user" True True (Just "admin")
+
+                    deployedWorkspaceAdmin =
+                        sessionContext "deployed" "user" "grant_user" False False (Just "admin")
+
+                    localBot =
+                        sessionContext "local" "bot" "bot_token" False False Nothing
+                in
+                [ Permissions.isImplicitLocalSuperadminSession localImplicitSuperadmin
+                , Permissions.isImplicitLocalSuperadminSession deployedSuperadmin
+                , Permissions.shouldShowAuthDetailsForSession Nothing
+                , Permissions.shouldShowAuthDetailsForSession (Just localImplicitSuperadmin)
+                , Permissions.shouldShowAuthDetailsForSession (Just deployedSuperadmin)
+                , Permissions.shouldShowAuthDetailsForSession (Just deployedWorkspaceAdmin)
+                , Permissions.shouldShowAuthDetailsForSession (Just localBot)
+                ]
+                    |> Expect.equal [ True, False, True, False, True, True, True ]
         , test "workspace data pagination advances only when a non-empty page has more results" <|
             \_ ->
                 [ Feature.DataLoading.nextPageOffset 0 { items = [ "a", "b" ], hasMore = True }
@@ -924,6 +949,39 @@ memory id =
     , tags = []
     , createdAt = "2026-01-01T00:00:00Z"
     , updatedAt = "2026-01-01T00:00:00Z"
+    }
+
+
+sessionContext : String -> String -> String -> Bool -> Bool -> Maybe String -> Api.SessionContext
+sessionContext authMode actorType authority createWorkspace superadmin workspaceRole =
+    { authMode = authMode
+    , principal =
+        { actorType = actorType
+        , actorId = "principal-a"
+        , actorLabel = "Test Principal"
+        , authority = authority
+        , grantUserId =
+            if authority == "grant_user" then
+                Just "user-a"
+
+            else
+                Nothing
+        }
+    , globalPermissions =
+        { createWorkspace = createWorkspace
+        , superadmin = superadmin
+        }
+    , workspace =
+        Maybe.map
+            (\role ->
+                { workspaceId = "workspace-a"
+                , role = Just role
+                , canRead = True
+                , canEdit = role == "edit" || role == "admin"
+                , canAdmin = role == "admin"
+                }
+            )
+            workspaceRole
     }
 
 

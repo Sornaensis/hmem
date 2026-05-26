@@ -13,6 +13,7 @@ module Permissions exposing
     , isLocalMode
     , isSuperadmin
     , principalAttributionLabel
+    , shouldShowAuthDetailsForSession
     , shouldShowLocalSessionDetails
     , shouldShowMembershipAdmin
     , shouldShowPermissionSummary
@@ -63,19 +64,26 @@ isImplicitLocalSuperadminSession session =
         && session.principal.authority == localSuperadminAuthority
 
 
+shouldShowAuthDetailsForSession : Maybe Api.SessionContext -> Bool
+shouldShowAuthDetailsForSession maybeSession =
+    maybeSession
+        |> Maybe.map (not << isImplicitLocalSuperadminSession)
+        |> Maybe.withDefault True
+
+
 shouldShowPermissionSummary : Model -> Bool
 shouldShowPermissionSummary model =
-    not (hasImplicitLocalSuperadmin model)
+    shouldShowAuthDetailsForSession model.sessionContext
 
 
 shouldShowMembershipAdmin : Model -> Bool
 shouldShowMembershipAdmin model =
-    not (hasImplicitLocalSuperadmin model)
+    shouldShowAuthDetailsForSession model.sessionContext
 
 
 shouldShowLocalSessionDetails : Model -> Bool
 shouldShowLocalSessionDetails model =
-    not (hasImplicitLocalSuperadmin model)
+    shouldShowAuthDetailsForSession model.sessionContext
 
 
 isSuperadmin : Model -> Bool

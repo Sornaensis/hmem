@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "hmem": {
-      "command": "hmem-mcp",
-      "args": []
-    }
-  }
-}

@@ -4897,6 +4897,105 @@ spec = around withApp $ do
       length pagedTimeline.items `shouldBe` 1
       pagedTimeline.hasMore `shouldBe` True
 
+    it "returns timeline bucket summaries with entity and lifecycle counts" $ \app -> do
+      now <- getCurrentTime
+      let since = addUTCTime (-86400) now
+          until = addUTCTime 86400 now
+          queryText = encodeUtf8 . T.pack
+          rangeQuery bucket = queryText ("?since=" <> iso8601Show since <> "&until=" <> iso8601Show until <> "&bucket=" <> bucket)
+
+      wsResp <- postJSON app "/api/v1/workspaces"
+        (object ["name" .= ("timeline-buckets-ws" :: T.Text)])
+      let Just ws = decode (respBody wsResp) :: Maybe Workspace
+
+      rootProjectResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "name" .= ("Bucket Root Project" :: T.Text)])
+      let Just rootProject = decode (respBody rootProjectResp) :: Maybe Project
+
+      subprojectResp <- postJSON app "/api/v1/projects"
+        (object ["workspace_id" .= ws.id, "parent_id" .= rootProject.id, "name" .= ("Bucket Subproject" :: T.Text)])
+      let Just subproject = decode (respBody subprojectResp) :: Maybe Project
+      archiveSubprojectResp <- putJSON app (uuidPath "/api/v1/projects" subproject.id)
+        (object ["status" .= ("archived" :: T.Text)])
+      respStatus archiveSubprojectResp `shouldBe` 200
+
+      parentTaskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= rootProject.id, "title" .= ("Bucket Parent Task" :: T.Text)])
+      let Just parentTask = decode (respBody parentTaskResp) :: Maybe Task
+      parentProgressResp <- putJSON app (uuidPath "/api/v1/tasks" parentTask.id)
+        (object ["status" .= ("in_progress" :: T.Text)])
+      respStatus parentProgressResp `shouldBe` 200
+
+      subtaskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= rootProject.id, "parent_id" .= parentTask.id, "title" .= ("Bucket Subtask" :: T.Text)])
+      let Just subtask = decode (respBody subtaskResp) :: Maybe Task
+      subtaskDoneResp <- putJSON app (uuidPath "/api/v1/tasks" subtask.id)
+        (object ["status" .= ("done" :: T.Text)])
+      respStatus subtaskDoneResp `shouldBe` 200
+
+      cancelTaskResp <- postJSON app "/api/v1/tasks"
+        (object ["workspace_id" .= ws.id, "project_id" .= rootProject.id, "title" .= ("Bucket Cancelled Task" :: T.Text)])
+      let Just cancelTask = decode (respBody cancelTaskResp) :: Maybe Task
+      cancelledResp <- putJSON app (uuidPath "/api/v1/tasks" cancelTask.id)
+        (object ["status" .= ("cancelled" :: T.Text)])
+      respStatus cancelledResp `shouldBe` 200
+
+      forM_ (["day", "week", "month", "quarter"] :: [String]) $ \bucket -> do
+        resp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/timeline/buckets" <> rangeQuery bucket)
+        respStatus resp `shouldBe` 200
+        let Just bucketResponse = decode (respBody resp) :: Maybe WorkspaceTimelineBucketsResponse
+        bucketResponse.timelineBucketsWorkspaceId `shouldBe` ws.id
+        bucketResponse.timelineBucketsBucket `shouldBe` T.pack bucket
+        bucketResponse.timelineBucketsBuckets `shouldSatisfy` (not . null)
+        sum (map (\b -> b.timelineBucketTotals.created) bucketResponse.timelineBucketsBuckets) `shouldBe` 5
+        sum (map (\b -> b.timelineBucketTotals.completed) bucketResponse.timelineBucketsBuckets) `shouldBe` 2
+        sum (map (\b -> b.timelineBucketTotals.cancelled) bucketResponse.timelineBucketsBuckets) `shouldBe` 1
+
+      dayResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> "/timeline/buckets" <> rangeQuery "day")
+      let Just dayBuckets = decode (respBody dayResp) :: Maybe WorkspaceTimelineBucketsResponse
+          bucketTotals selector = sum (map selector dayBuckets.timelineBucketsBuckets)
+          countProjectCreated b = b.timelineBucketCounts.projectCounts.created
+          countSubprojectCreated b = b.timelineBucketCounts.subprojectCounts.created
+          countSubprojectCompleted b = b.timelineBucketCounts.subprojectCounts.completed
+          countTaskCreated b = b.timelineBucketCounts.taskCounts.created
+          countTaskCancelled b = b.timelineBucketCounts.taskCounts.cancelled
+          countSubtaskCreated b = b.timelineBucketCounts.subtaskCounts.created
+          countSubtaskCompleted b = b.timelineBucketCounts.subtaskCounts.completed
+          countTotalCreated b = b.timelineBucketTotals.created
+          countTotalCompleted b = b.timelineBucketTotals.completed
+          countTotalCancelled b = b.timelineBucketTotals.cancelled
+
+      bucketTotals countProjectCreated `shouldBe` 1
+      bucketTotals countSubprojectCreated `shouldBe` 1
+      bucketTotals countSubprojectCompleted `shouldBe` 1
+      bucketTotals countTaskCreated `shouldBe` 2
+      bucketTotals countTaskCancelled `shouldBe` 1
+      bucketTotals countSubtaskCreated `shouldBe` 1
+      bucketTotals countSubtaskCompleted `shouldBe` 1
+      bucketTotals countTotalCreated `shouldBe` 5
+      bucketTotals countTotalCompleted `shouldBe` 2
+      bucketTotals countTotalCancelled `shouldBe` 1
+
+      futureTimelineResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> queryText ("/timeline?since=" <> iso8601Show (addUTCTime 86400 now) <> "&until=" <> iso8601Show (addUTCTime (2 * 86400) now)))
+      respStatus futureTimelineResp `shouldBe` 200
+      let Just futureTimeline = decode (respBody futureTimelineResp) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      futureTimeline.items `shouldBe` []
+
+      emptyBucketResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> queryText ("/timeline/buckets?since=" <> iso8601Show (addUTCTime 86400 now) <> "&until=" <> iso8601Show (addUTCTime (2 * 86400) now) <> "&bucket=day"))
+      respStatus emptyBucketResp `shouldBe` 200
+      let Just emptyBuckets = decode (respBody emptyBucketResp) :: Maybe WorkspaceTimelineBucketsResponse
+      emptyBuckets.timelineBucketsBuckets `shouldSatisfy` (not . null)
+      sum (map (\bucket -> bucket.timelineBucketTotals.created + bucket.timelineBucketTotals.completed + bucket.timelineBucketTotals.cancelled) emptyBuckets.timelineBucketsBuckets) `shouldBe` 0
+
+      invalidBucketResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> queryText ("/timeline/buckets?since=" <> iso8601Show since <> "&until=" <> iso8601Show until <> "&bucket=year"))
+      respStatus invalidBucketResp `shouldBe` 400
+
+      invalidRangeResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> queryText ("/timeline/buckets?since=" <> iso8601Show until <> "&until=" <> iso8601Show since <> "&bucket=day"))
+      respStatus invalidRangeResp `shouldBe` 400
+
+      tooManyBucketsResp <- get_ app (uuidPath "/api/v1/workspaces" ws.id <> queryText ("/timeline/buckets?since=" <> iso8601Show (addUTCTime (-400 * 86400) now) <> "&until=" <> iso8601Show now <> "&bucket=day"))
+      respStatus tooManyBucketsResp `shouldBe` 400
+
   --------------------------------------------------------------------------
   -- Error paths
   --------------------------------------------------------------------------

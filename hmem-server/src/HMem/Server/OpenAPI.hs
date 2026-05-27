@@ -113,6 +113,38 @@ timelineNavigationOpts = opts
       other                  -> camelToSnakeField other
   }
 
+timelineBucketEntityCountsOpts :: SchemaOptions
+timelineBucketEntityCountsOpts = opts
+  { fieldLabelModifier = \case
+      "projectCounts"    -> "project"
+      "subprojectCounts" -> "subproject"
+      "taskCounts"       -> "task"
+      "subtaskCounts"    -> "subtask"
+      other              -> camelToSnakeField other
+  }
+
+timelineBucketOpts :: SchemaOptions
+timelineBucketOpts = opts
+  { fieldLabelModifier = \case
+      "timelineBucketStart"  -> "bucket_start"
+      "timelineBucketEnd"    -> "bucket_end"
+      "timelineBucketLabel"  -> "label"
+      "timelineBucketCounts" -> "counts"
+      "timelineBucketTotals" -> "totals"
+      other                  -> camelToSnakeField other
+  }
+
+timelineBucketsResponseOpts :: SchemaOptions
+timelineBucketsResponseOpts = opts
+  { fieldLabelModifier = \case
+      "timelineBucketsWorkspaceId" -> "workspace_id"
+      "timelineBucketsSince"       -> "since"
+      "timelineBucketsUntil"       -> "until"
+      "timelineBucketsBucket"      -> "bucket"
+      "timelineBucketsBuckets"     -> "buckets"
+      other                        -> camelToSnakeField other
+  }
+
 -- Primitives / pre-existing
 instance ToSchema Value where
   declareNamedSchema _ = pure $ NamedSchema (Just "JSONValue") mempty
@@ -252,6 +284,10 @@ instance ToSchema TimelineProjectContext where declareNamedSchema = genericDecla
 instance ToSchema TimelineTaskContext  where declareNamedSchema = genericDeclareNamedSchema timelineTaskContextOpts
 instance ToSchema TimelineStatusTransition where declareNamedSchema = genericDeclareNamedSchema timelineStatusTransitionOpts
 instance ToSchema TimelineNavigation   where declareNamedSchema = genericDeclareNamedSchema timelineNavigationOpts
+instance ToSchema TimelineBucketCounts where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TimelineBucketEntityCounts where declareNamedSchema = genericDeclareNamedSchema timelineBucketEntityCountsOpts
+instance ToSchema WorkspaceTimelineBucket where declareNamedSchema = genericDeclareNamedSchema timelineBucketOpts
+instance ToSchema WorkspaceTimelineBucketsResponse where declareNamedSchema = genericDeclareNamedSchema timelineBucketsResponseOpts
 instance ToSchema LinkMemory           where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema LinkDependency       where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema a => ToSchema (PaginatedResult a) where

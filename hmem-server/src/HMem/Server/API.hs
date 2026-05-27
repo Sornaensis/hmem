@@ -25,7 +25,7 @@ import Data.Pool (Pool, tryWithResource)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (UTCTime, getCurrentTime)
+import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Hasql.Connection qualified as Hasql
@@ -105,9 +105,16 @@ type WorkspaceAPI =
   :<|> Capture "workspaceId" UUID :> "memberships" :> Capture "userId" UUID
          :> Delete '[JSON] NoContent
   :<|> Capture "workspaceId" UUID :> "card-hydration" :> Get '[JSON] WorkspaceCardHydration
+  :<|> Capture "workspaceId" UUID :> "timeline" :> "buckets"
+         :> QueryParam "since" UTCTime
+         :> QueryParam "until" UTCTime
+         :> QueryParam "bucket" Text
+         :> Get '[JSON] WorkspaceTimelineBucketsResponse
   :<|> Capture "workspaceId" UUID :> "timeline"
          :> QueryParam "entity_type" Text
          :> QueryParam "event_type" Text
+         :> QueryParam "since" UTCTime
+         :> QueryParam "until" UTCTime
          :> QueryParam "limit" Int
          :> QueryParam "offset" Int
          :> Get '[JSON] (PaginatedResult WorkspaceTimelineEvent)
@@ -870,6 +877,7 @@ workspaceHandlers pool bc =
   :<|> upsertMembershipH
   :<|> deleteMembershipH
   :<|> cardHydrationH
+  :<|> timelineBucketsH
   :<|> timelineH
   where
     listWorkspacesH :: Maybe Int -> Maybe Int -> Handler (PaginatedResult Workspace)
@@ -989,13 +997,33 @@ workspaceHandlers pool bc =
               ]
           }
 
-    timelineH :: UUID -> Maybe Text -> Maybe Text -> Maybe Int -> Maybe Int -> Handler (PaginatedResult WorkspaceTimelineEvent)
-    timelineH wsId mEntityType mEventType mlimit moffset = do
+    timelineBucketsH :: UUID -> Maybe UTCTime -> Maybe UTCTime -> Maybe Text -> Handler WorkspaceTimelineBucketsResponse
+    timelineBucketsH wsId mSince mUntil mBucket = do
       requireActiveWorkspaceH pool wsId
       requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
+      since <- requireTimelineBucketParam "since" mSince
+      untilTime <- requireTimelineBucketParam "until" mUntil
+      let bucket = fromMaybe "week" mBucket
+      rejectValidationErrors (validateTimelineBucketQuery since untilTime bucket)
+      buckets <- handleDBErrors $ Timeline.listWorkspaceTimelineBuckets pool wsId since untilTime bucket
+      when (length buckets > maxTimelineBuckets) $
+        rejectValidationErrors ["timeline bucket range produces too many buckets; narrow the range or choose a larger bucket"]
+      pure WorkspaceTimelineBucketsResponse
+        { timelineBucketsWorkspaceId = wsId
+        , timelineBucketsSince = since
+        , timelineBucketsUntil = untilTime
+        , timelineBucketsBucket = bucket
+        , timelineBucketsBuckets = buckets
+        }
+
+    timelineH :: UUID -> Maybe Text -> Maybe Text -> Maybe UTCTime -> Maybe UTCTime -> Maybe Int -> Maybe Int -> Handler (PaginatedResult WorkspaceTimelineEvent)
+    timelineH wsId mEntityType mEventType mSince mUntil mlimit moffset = do
+      requireActiveWorkspaceH pool wsId
+      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
+      rejectValidationErrors (validateTimelineRangeQuery mSince mUntil)
       let lim = capLimit mlimit
           off = capOffset moffset
-      results <- handleDBErrors $ Timeline.listWorkspaceTimeline pool wsId mEntityType mEventType (Just (lim + 1)) (Just off)
+      results <- handleDBErrors $ Timeline.listWorkspaceTimeline pool wsId mEntityType mEventType mSince mUntil (Just (lim + 1)) (Just off)
       pure PaginatedResult { items = take lim results, hasMore = length results > lim }
 
     updateWorkspaceH :: UUID -> UpdateWorkspace -> Handler Workspace
@@ -2676,6 +2704,36 @@ searchHandler pool usq = do
 requireParam :: Text -> Maybe a -> Handler a
 requireParam name Nothing  = throwError $ err400 { errBody = fromString ("Missing required parameter: " <> T.unpack name) }
 requireParam _    (Just a) = pure a
+
+requireTimelineBucketParam :: Text -> Maybe a -> Handler a
+requireTimelineBucketParam name Nothing = rejectValidationErrors [name <> " is required"] >> throwError err400
+requireTimelineBucketParam _ (Just value) = pure value
+
+validateTimelineRangeQuery :: Maybe UTCTime -> Maybe UTCTime -> [Text]
+validateTimelineRangeQuery mSince mUntil = case (mSince, mUntil) of
+  (Just since, Just untilTime)
+    | since >= untilTime -> ["since must be before until"]
+  _ -> []
+
+validateTimelineBucketQuery :: UTCTime -> UTCTime -> Text -> [Text]
+validateTimelineBucketQuery since untilTime bucket = concat
+  [ if bucket `elem` validTimelineBuckets
+      then []
+      else ["bucket must be one of day, week, month, or quarter"]
+  , validateTimelineRangeQuery (Just since) (Just untilTime)
+  , if diffUTCTime untilTime since > tenYearsSeconds
+      then ["timeline bucket range must not exceed ten years"]
+      else []
+  ]
+
+validTimelineBuckets :: [Text]
+validTimelineBuckets = ["day", "week", "month", "quarter"]
+
+maxTimelineBuckets :: Int
+maxTimelineBuckets = 366
+
+tenYearsSeconds :: NominalDiffTime
+tenYearsSeconds = 10 * 366 * 24 * 60 * 60
 
 rejectValidationErrors :: [Text] -> Handler ()
 rejectValidationErrors [] = pure ()

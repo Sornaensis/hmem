@@ -105,6 +105,10 @@ module HMem.Types
   , TimelineTaskContext(..)
   , TimelineStatusTransition(..)
   , TimelineNavigation(..)
+  , TimelineBucketCounts(..)
+  , TimelineBucketEntityCounts(..)
+  , WorkspaceTimelineBucket(..)
+  , WorkspaceTimelineBucketsResponse(..)
 
     -- * Saved views
   , SavedView(..)
@@ -1720,6 +1724,93 @@ instance FromJSON TimelineNavigation where
     TimelineNavigation
       <$> o .: "entity_type"
       <*> o .: "entity_id"
+
+-- | Counts for one lifecycle action group within a timeline histogram bucket.
+data TimelineBucketCounts = TimelineBucketCounts
+  { created   :: Int
+  , completed :: Int
+  , cancelled :: Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TimelineBucketCounts where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON TimelineBucketCounts where
+  parseJSON  = genericParseJSON jsonOptions
+
+-- | Timeline histogram counts split by UI entity kind.
+data TimelineBucketEntityCounts = TimelineBucketEntityCounts
+  { projectCounts    :: TimelineBucketCounts
+  , subprojectCounts :: TimelineBucketCounts
+  , taskCounts       :: TimelineBucketCounts
+  , subtaskCounts    :: TimelineBucketCounts
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TimelineBucketEntityCounts where
+  toJSON TimelineBucketEntityCounts {..} = object
+    [ "project" .= projectCounts
+    , "subproject" .= subprojectCounts
+    , "task" .= taskCounts
+    , "subtask" .= subtaskCounts
+    ]
+instance FromJSON TimelineBucketEntityCounts where
+  parseJSON = withObject "TimelineBucketEntityCounts" $ \o ->
+    TimelineBucketEntityCounts
+      <$> o .: "project"
+      <*> o .: "subproject"
+      <*> o .: "task"
+      <*> o .: "subtask"
+
+-- | One horizontal histogram bucket for the workspace Timeline.
+data WorkspaceTimelineBucket = WorkspaceTimelineBucket
+  { timelineBucketStart  :: UTCTime
+  , timelineBucketEnd    :: UTCTime
+  , timelineBucketLabel  :: Text
+  , timelineBucketCounts :: TimelineBucketEntityCounts
+  , timelineBucketTotals :: TimelineBucketCounts
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspaceTimelineBucket where
+  toJSON WorkspaceTimelineBucket {..} = object
+    [ "bucket_start" .= timelineBucketStart
+    , "bucket_end" .= timelineBucketEnd
+    , "label" .= timelineBucketLabel
+    , "counts" .= timelineBucketCounts
+    , "totals" .= timelineBucketTotals
+    ]
+instance FromJSON WorkspaceTimelineBucket where
+  parseJSON = withObject "WorkspaceTimelineBucket" $ \o ->
+    WorkspaceTimelineBucket
+      <$> o .: "bucket_start"
+      <*> o .: "bucket_end"
+      <*> o .: "label"
+      <*> o .: "counts"
+      <*> o .: "totals"
+
+-- | Capped bucket response for the workspace Timeline histogram.
+data WorkspaceTimelineBucketsResponse = WorkspaceTimelineBucketsResponse
+  { timelineBucketsWorkspaceId :: UUID
+  , timelineBucketsSince       :: UTCTime
+  , timelineBucketsUntil       :: UTCTime
+  , timelineBucketsBucket      :: Text
+  , timelineBucketsBuckets     :: [WorkspaceTimelineBucket]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspaceTimelineBucketsResponse where
+  toJSON WorkspaceTimelineBucketsResponse {..} = object
+    [ "workspace_id" .= timelineBucketsWorkspaceId
+    , "since" .= timelineBucketsSince
+    , "until" .= timelineBucketsUntil
+    , "bucket" .= timelineBucketsBucket
+    , "buckets" .= timelineBucketsBuckets
+    ]
+instance FromJSON WorkspaceTimelineBucketsResponse where
+  parseJSON = withObject "WorkspaceTimelineBucketsResponse" $ \o ->
+    WorkspaceTimelineBucketsResponse
+      <$> o .: "workspace_id"
+      <*> o .: "since"
+      <*> o .: "until"
+      <*> o .: "bucket"
+      <*> o .: "buckets"
 
 ------------------------------------------------------------------------
 -- Saved views

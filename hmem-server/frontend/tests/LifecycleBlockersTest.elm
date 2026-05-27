@@ -265,6 +265,47 @@ suite =
                 , (Feature.Focus.clearReturnContext focusWithContext |> .returnContext) == Nothing
                 ]
                     |> Expect.equal [ True, True, True ]
+        , test "audit return filters preserve source pages for accumulated and returned windows" <|
+            \_ ->
+                case decodeAuditFixture createProjectAuditJson of
+                    Ok baseEntry ->
+                        let
+                            entryWithId n =
+                                { baseEntry | id = "entry-" ++ String.fromInt n }
+
+                            accumulatedEntries =
+                                List.range 0 59 |> List.map entryWithId
+
+                            returnedWindowEntries =
+                                List.range 150 159 |> List.map entryWithId
+
+                            filtersAtOffset offset =
+                                { Feature.AuditLog.init.filters | offset = Just offset }
+
+                            accumulatedAudit =
+                                { Feature.AuditLog.init
+                                    | entries = accumulatedEntries
+                                    , entryBaseOffset = 0
+                                    , filters = filtersAtOffset 50
+                                }
+
+                            returnedWindowAudit =
+                                { Feature.AuditLog.init
+                                    | entries = returnedWindowEntries
+                                    , entryBaseOffset = 150
+                                    , filters = filtersAtOffset 150
+                                }
+                        in
+                        [ Feature.AuditLog.nextAuditOffset accumulatedAudit
+                        , Feature.AuditLog.auditReturnFilters "entry-5" accumulatedAudit |> .offset |> Maybe.withDefault -1
+                        , Feature.AuditLog.auditReturnFilters "entry-55" accumulatedAudit |> .offset |> Maybe.withDefault -1
+                        , Feature.AuditLog.nextAuditOffset returnedWindowAudit
+                        , Feature.AuditLog.auditReturnFilters "entry-155" returnedWindowAudit |> .offset |> Maybe.withDefault -1
+                        ]
+                            |> Expect.equal [ 60, -1, 50, 160, 150 ]
+
+                    Err error ->
+                        Expect.fail (Decode.errorToString error)
         , test "workspace timeline histogram accepts only the active range request" <|
             \_ ->
                 let

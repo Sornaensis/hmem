@@ -1,4 +1,4 @@
-module Feature.AuditLog exposing (AuditFieldChange, auditActionDetailItems, auditChangedFieldItems, auditContextDetailItems, init, update, viewAuditLogPage, viewWorkspaceAuditPanel, viewEntityHistory, viewRevertConfirmModal)
+module Feature.AuditLog exposing (AuditFieldChange, auditActionDetailItems, auditChangedFieldItems, auditContextDetailItems, auditReturnFilters, init, nextAuditOffset, update, viewAuditLogPage, viewWorkspaceAuditPanel, viewEntityHistory, viewRevertConfirmModal)
 
 import Api
 import Browser.Navigation as Nav
@@ -246,7 +246,7 @@ update msg model =
                         model.auditLog.filters
 
                     filters =
-                        { oldFilters | offset = Just (model.auditLog.entryBaseOffset + List.length model.auditLog.entries) }
+                        { oldFilters | offset = Just (nextAuditOffset model.auditLog) }
                 in
                 ( updateAuditLogModel (\al -> { al | filters = filters, loading = True, loadingFilters = Just filters }) model
                 , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
@@ -1670,6 +1670,11 @@ auditReturnSource model =
 
         _ ->
             ReturnFromWorkspaceAudit
+
+
+nextAuditOffset : AuditLogModel -> Int
+nextAuditOffset auditLog =
+    auditLog.entryBaseOffset + List.length auditLog.entries
 
 
 auditReturnFilters : String -> AuditLogModel -> AuditLogFilters

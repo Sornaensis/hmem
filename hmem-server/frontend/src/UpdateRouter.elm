@@ -118,6 +118,12 @@ update msg model =
         SetTimelineHistogramBucket _ ->
             Ok (Feature.Timeline.update msg model)
 
+        SelectTimelineHistogramBucket _ _ _ ->
+            Ok (Feature.Timeline.update msg model)
+
+        ResetTimelineHistogramSelection ->
+            Ok (Feature.Timeline.update msg model)
+
         GotVisualization _ _ ->
             Ok (Feature.Graph.update msg model)
 

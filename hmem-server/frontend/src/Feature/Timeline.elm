@@ -1,4 +1,4 @@
-module Feature.Timeline exposing (ensureLoaded, filterTimelineEvents, groupTimelineEvents, init, sortTimelineEvents, timelineBucketTotal, timelineDateKey, timelineEventLabel, timelineEventToneClass, timelineHistogramAcceptsResponse, timelineStatusSummary, update, viewWorkspaceTimelinePanel)
+module Feature.Timeline exposing (ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, sortTimelineEvents, timelineBucketTotal, timelineDateKey, timelineEventLabel, timelineEventToneClass, timelineHistogramAcceptsResponse, timelineStatusSummary, update, viewWorkspaceTimelinePanel)
 
 import Api
 import Browser.Navigation as Nav
@@ -21,6 +21,8 @@ init =
     , loadingWorkspaceId = Nothing
     , error = Nothing
     , loadedWorkspaceId = Nothing
+    , eventsActiveRequest = Nothing
+    , eventsLoadedRequest = Nothing
     , entityFilter = TimelineAllEntities
     , eventFilter = TimelineAllEvents
     , histogramBuckets = []
@@ -32,6 +34,7 @@ init =
     , histogramClockWorkspaceId = Nothing
     , histogramActiveRequest = Nothing
     , histogramLoadedRequest = Nothing
+    , histogramSelectedBucket = Nothing
     }
 
 
@@ -49,20 +52,47 @@ ensureLoaded apiUrl wsId timeline =
 
 ensureEventsLoaded : String -> String -> TimelineModel -> ( TimelineModel, Cmd Msg )
 ensureEventsLoaded apiUrl wsId timeline =
-    if timeline.loadedWorkspaceId == Just wsId || timeline.loadingWorkspaceId == Just wsId then
+    let
+        request =
+            timelineEventsRequest wsId timeline
+    in
+    if timeline.eventsLoadedRequest == Just request || timeline.eventsActiveRequest == Just request then
         ( timeline, Cmd.none )
 
     else
-        ( { timeline
-            | loading = True
-            , loadingWorkspaceId = Just wsId
-            , error = Nothing
-            , events = []
-            , hasMore = False
-            , loadedWorkspaceId = Nothing
-          }
-        , Api.fetchWorkspaceTimeline apiUrl wsId (GotWorkspaceTimeline wsId)
-        )
+        startEventsFetch apiUrl request timeline
+
+
+startEventsFetch : String -> TimelineEventsRequest -> TimelineModel -> ( TimelineModel, Cmd Msg )
+startEventsFetch apiUrl request timeline =
+    ( { timeline
+        | loading = True
+        , loadingWorkspaceId = Just request.workspaceId
+        , error = Nothing
+        , events = []
+        , hasMore = False
+        , loadedWorkspaceId = Nothing
+        , eventsActiveRequest = Just request
+        , eventsLoadedRequest = Nothing
+      }
+    , Api.fetchWorkspaceTimelineRange apiUrl request.workspaceId request.since request.until (GotWorkspaceTimeline request)
+    )
+
+
+timelineEventsRequest : String -> TimelineModel -> TimelineEventsRequest
+timelineEventsRequest wsId timeline =
+    case timeline.histogramSelectedBucket of
+        Just selection ->
+            { workspaceId = wsId
+            , since = Just selection.since
+            , until = Just selection.until
+            }
+
+        Nothing ->
+            { workspaceId = wsId
+            , since = Nothing
+            , until = Nothing
+            }
 
 
 ensureHistogramLoaded : String -> String -> TimelineModel -> ( TimelineModel, Cmd Msg )
@@ -253,16 +283,22 @@ update msg model =
             ( { model | timeline = { currentTimeline | eventFilter = eventFilter } }, Cmd.none )
 
         SetTimelineHistogramSince since ->
-            updateHistogramControls model (\timeline -> { timeline | histogramSince = since })
+            updateHistogramControls model (\timeline -> { timeline | histogramSince = since, histogramSelectedBucket = Nothing })
 
         SetTimelineHistogramUntil until ->
-            updateHistogramControls model (\timeline -> { timeline | histogramUntil = until })
+            updateHistogramControls model (\timeline -> { timeline | histogramUntil = until, histogramSelectedBucket = Nothing })
 
         SetTimelineHistogramBucket bucket ->
-            updateHistogramControls model (\timeline -> { timeline | histogramBucket = bucket })
+            updateHistogramControls model (\timeline -> { timeline | histogramBucket = bucket, histogramSelectedBucket = Nothing })
 
-        GotWorkspaceTimeline wsId result ->
-            if model.selectedWorkspaceId /= Just wsId || model.timeline.loadingWorkspaceId /= Just wsId then
+        SelectTimelineHistogramBucket label since until ->
+            selectHistogramBucket model { label = label, since = since, until = until }
+
+        ResetTimelineHistogramSelection ->
+            resetHistogramSelection model
+
+        GotWorkspaceTimeline request result ->
+            if model.selectedWorkspaceId /= Just request.workspaceId || model.timeline.eventsActiveRequest /= Just request then
                 ( model, Cmd.none )
 
             else
@@ -280,7 +316,9 @@ update msg model =
                                     , loading = False
                                     , loadingWorkspaceId = Nothing
                                     , error = Nothing
-                                    , loadedWorkspaceId = Just wsId
+                                    , loadedWorkspaceId = Just request.workspaceId
+                                    , eventsActiveRequest = Nothing
+                                    , eventsLoadedRequest = Just request
                                 }
                           }
                         , Cmd.none
@@ -294,6 +332,8 @@ update msg model =
                                     , loadingWorkspaceId = Nothing
                                     , error = Just "Failed to load timeline events."
                                     , loadedWorkspaceId = Nothing
+                                    , eventsActiveRequest = Nothing
+                                    , eventsLoadedRequest = Nothing
                                 }
                           }
                         , Cmd.none
@@ -374,11 +414,78 @@ update msg model =
             ( model, Cmd.none )
 
 
+selectHistogramBucket : Model -> TimelineHistogramSelection -> ( Model, Cmd Msg )
+selectHistogramBucket model selection =
+    let
+        currentTimeline =
+            model.timeline
+
+        nextSelection =
+            if currentTimeline.histogramSelectedBucket == Just selection then
+                Nothing
+
+            else
+                Just selection
+
+        updatedTimeline =
+            { currentTimeline | histogramSelectedBucket = nextSelection }
+    in
+    fetchEventsForTimeline model updatedTimeline
+
+
+resetHistogramSelection : Model -> ( Model, Cmd Msg )
+resetHistogramSelection model =
+    let
+        updatedTimeline =
+            { model.timeline | histogramSelectedBucket = Nothing }
+    in
+    fetchEventsForTimeline model updatedTimeline
+
+
+fetchEventsForTimeline : Model -> TimelineModel -> ( Model, Cmd Msg )
+fetchEventsForTimeline model timeline =
+    case model.selectedWorkspaceId of
+        Just wsId ->
+            let
+                request =
+                    timelineEventsRequest wsId timeline
+
+                ( nextTimeline, cmd ) =
+                    startEventsFetch model.flags.apiUrl request timeline
+            in
+            ( { model | timeline = nextTimeline }, cmd )
+
+        Nothing ->
+            ( { model | timeline = timeline }, Cmd.none )
+
+
 updateHistogramControls : Model -> (TimelineModel -> TimelineModel) -> ( Model, Cmd Msg )
 updateHistogramControls model updateTimeline =
     let
         updatedTimeline =
             updateTimeline model.timeline
+
+        selectionChanged =
+            model.timeline.histogramSelectedBucket /= updatedTimeline.histogramSelectedBucket
+
+        finishWithOptionalEventRefresh nextTimeline histogramCmd =
+            if selectionChanged then
+                case model.selectedWorkspaceId of
+                    Just wsId ->
+                        let
+                            eventRequest =
+                                timelineEventsRequest wsId nextTimeline
+
+                            ( eventTimeline, eventCmd ) =
+                                startEventsFetch model.flags.apiUrl eventRequest nextTimeline
+                        in
+                        ( { model | timeline = eventTimeline }, Cmd.batch [ histogramCmd, eventCmd ] )
+
+                    Nothing ->
+                        ( { model | timeline = nextTimeline }, histogramCmd )
+
+            else
+                ( { model | timeline = nextTimeline }, histogramCmd )
     in
     case model.selectedWorkspaceId of
         Just wsId ->
@@ -388,22 +495,19 @@ updateHistogramControls model updateTimeline =
                         ( nextTimeline, cmd ) =
                             startHistogramFetch model.flags.apiUrl request updatedTimeline
                     in
-                    ( { model | timeline = nextTimeline }, cmd )
+                    finishWithOptionalEventRefresh nextTimeline cmd
 
                 Nothing ->
-                    ( { model
-                        | timeline =
-                            { updatedTimeline
-                                | histogramLoading = False
-                                , histogramClockWorkspaceId = Nothing
-                                , histogramActiveRequest = Nothing
-                                , histogramLoadedRequest = Nothing
-                                , histogramBuckets = []
-                                , histogramError = Nothing
-                            }
-                      }
-                    , Cmd.none
-                    )
+                    finishWithOptionalEventRefresh
+                        { updatedTimeline
+                            | histogramLoading = False
+                            , histogramClockWorkspaceId = Nothing
+                            , histogramActiveRequest = Nothing
+                            , histogramLoadedRequest = Nothing
+                            , histogramBuckets = []
+                            , histogramError = Nothing
+                        }
+                        Cmd.none
 
         Nothing ->
             ( { model | timeline = updatedTimeline }, Cmd.none )
@@ -529,30 +633,45 @@ viewTimelineHistogramContent timeline =
             div [ class "timeline-histogram-state" ] [ text "No histogram activity in this date range." ]
 
           else if hasBuckets then
-            viewTimelineHistogramChart timeline.histogramBuckets
+            viewTimelineHistogramChart timeline
 
           else
             text ""
         ]
 
 
-viewTimelineHistogramChart : List Api.WorkspaceTimelineBucket -> Html Msg
-viewTimelineHistogramChart buckets =
+viewTimelineHistogramChart : TimelineModel -> Html Msg
+viewTimelineHistogramChart timeline =
     let
         maxTotal =
-            buckets
+            timeline.histogramBuckets
                 |> List.map timelineBucketTotal
                 |> List.maximum
                 |> Maybe.withDefault 0
                 |> max 1
     in
     div [ class "timeline-histogram-chart", title "Timeline bucket counts by lifecycle action and entity kind" ]
-        (List.map (viewTimelineHistogramBucket maxTotal) buckets)
+        (List.map (viewTimelineHistogramBucket timeline.histogramSelectedBucket maxTotal) timeline.histogramBuckets)
 
 
-viewTimelineHistogramBucket : Int -> Api.WorkspaceTimelineBucket -> Html Msg
-viewTimelineHistogramBucket maxTotal bucket =
-    div [ class "timeline-histogram-bucket", title (timelineBucketTooltip bucket) ]
+viewTimelineHistogramBucket : Maybe TimelineHistogramSelection -> Int -> Api.WorkspaceTimelineBucket -> Html Msg
+viewTimelineHistogramBucket selectedBucket maxTotal bucket =
+    let
+        isSelected =
+            selectedBucket == Just { label = bucket.label, since = bucket.bucketStart, until = bucket.bucketEnd }
+
+        bucketClass =
+            if isSelected then
+                "timeline-histogram-bucket timeline-histogram-bucket-selected"
+
+            else
+                "timeline-histogram-bucket"
+    in
+    button
+        [ class bucketClass
+        , title (timelineBucketTooltip bucket)
+        , onClick (SelectTimelineHistogramBucket bucket.label bucket.bucketStart bucket.bucketEnd)
+        ]
         [ div [ class "timeline-histogram-bar" ]
             (timelineBucketSegments maxTotal bucket)
         , div [ class "timeline-histogram-bucket-label" ] [ text bucket.label ]
@@ -577,7 +696,7 @@ viewTimelineBody wsId timeline =
                 ]
 
         Nothing ->
-            if List.isEmpty timeline.events then
+            if List.isEmpty timeline.events && timeline.histogramSelectedBucket == Nothing then
                 div [ class "empty-state timeline-state" ]
                     [ h3 [] [ text "No timeline events yet" ]
                     , p [] [ text "Create or complete tasks and projects to populate this workspace timeline." ]
@@ -587,29 +706,68 @@ viewTimelineBody wsId timeline =
                 let
                     visibleEvents =
                         timeline.events
-                            |> filterTimelineEvents timeline.entityFilter timeline.eventFilter
+                            |> filterTimelineEventsForSelection timeline.histogramSelectedBucket timeline.entityFilter timeline.eventFilter
                             |> sortTimelineEvents
 
                     groupedEvents =
                         groupTimelineEvents visibleEvents
                 in
                 div []
-                    [ viewTimelineFilters timeline
+                    [ viewTimelineSelectionNote timeline.histogramSelectedBucket
+                    , viewTimelineFilters timeline
                     , if timeline.hasMore then
-                        p [ class "timeline-more-note" ] [ text "Showing and filtering the latest 50 timeline events." ]
+                        p [ class "timeline-more-note" ] [ text (timelineMoreNote timeline.histogramSelectedBucket) ]
 
                       else
                         text ""
                     , if List.isEmpty visibleEvents then
-                        div [ class "empty-state timeline-state" ]
-                            [ h3 [] [ text "No loaded timeline events match these filters" ]
-                            , p [] [ text "Filters apply to the latest loaded events. Adjust them to broaden this timeline view." ]
-                            ]
+                        viewEmptyTimelineSelection timeline.histogramSelectedBucket
 
                       else
                         div [ class "timeline-event-list", title ("Timeline for workspace " ++ wsId) ]
                             (List.map viewTimelineGroup groupedEvents)
                     ]
+
+
+viewTimelineSelectionNote : Maybe TimelineHistogramSelection -> Html Msg
+viewTimelineSelectionNote maybeSelection =
+    case maybeSelection of
+        Just selection ->
+            div [ class "timeline-selection-note" ]
+                [ span [] [ text ("Showing events for " ++ selection.label) ]
+                , span [ class "timeline-selection-range" ] [ text (selection.since ++ " → " ++ selection.until) ]
+                , button [ class "btn-secondary timeline-selection-reset", onClick ResetTimelineHistogramSelection ] [ text "Reset range" ]
+                ]
+
+        Nothing ->
+            text ""
+
+
+viewEmptyTimelineSelection : Maybe TimelineHistogramSelection -> Html Msg
+viewEmptyTimelineSelection maybeSelection =
+    case maybeSelection of
+        Just selection ->
+            div [ class "empty-state timeline-state" ]
+                [ h3 [] [ text "No timeline events in this bucket" ]
+                , p [] [ text ("No loaded events match " ++ selection.label ++ " after applying the current filters. Reset the range or broaden the entity/lifecycle filters.") ]
+                , button [ class "btn-secondary", onClick ResetTimelineHistogramSelection ] [ text "Reset range" ]
+                ]
+
+        Nothing ->
+            div [ class "empty-state timeline-state" ]
+                [ h3 [] [ text "No loaded timeline events match these filters" ]
+                , p [] [ text "Filters apply to the latest loaded events. Adjust them to broaden this timeline view." ]
+                ]
+
+
+timelineMoreNote : Maybe TimelineHistogramSelection -> String
+timelineMoreNote maybeSelection =
+    case maybeSelection of
+        Just _ ->
+            "Showing and filtering the latest 50 timeline events in the selected bucket."
+
+        Nothing ->
+            "Showing and filtering the latest 50 timeline events."
 
 
 viewTimelineFilters : TimelineModel -> Html Msg
@@ -726,9 +884,56 @@ timelineTieBreaker event =
 
 filterTimelineEvents : TimelineEntityFilter -> TimelineEventFilter -> List Api.WorkspaceTimelineEvent -> List Api.WorkspaceTimelineEvent
 filterTimelineEvents entityFilter eventFilter events =
+    filterTimelineEventsForSelection Nothing entityFilter eventFilter events
+
+
+filterTimelineEventsForSelection : Maybe TimelineHistogramSelection -> TimelineEntityFilter -> TimelineEventFilter -> List Api.WorkspaceTimelineEvent -> List Api.WorkspaceTimelineEvent
+filterTimelineEventsForSelection maybeSelection entityFilter eventFilter events =
     events
+        |> List.filter (eventInTimelineSelection maybeSelection)
         |> List.filter (timelineEntityMatches entityFilter)
         |> List.filter (timelineEventMatches eventFilter)
+
+
+eventInTimelineSelection : Maybe TimelineHistogramSelection -> Api.WorkspaceTimelineEvent -> Bool
+eventInTimelineSelection maybeSelection event =
+    case maybeSelection of
+        Just selection ->
+            let
+                occurredAt =
+                    comparableTimelineInstant event.occurredAt
+
+                since =
+                    comparableTimelineInstant selection.since
+
+                until =
+                    comparableTimelineInstant selection.until
+            in
+            occurredAt >= since && occurredAt < until
+
+        Nothing ->
+            True
+
+
+comparableTimelineInstant : String -> String
+comparableTimelineInstant timestamp =
+    let
+        withoutZone =
+            if String.endsWith "Z" timestamp then
+                String.dropRight 1 timestamp
+
+            else
+                timestamp
+    in
+    case String.split "." withoutZone of
+        base :: fraction :: _ ->
+            base ++ "." ++ String.padRight 6 '0' (String.left 6 fraction) ++ "Z"
+
+        base :: [] ->
+            base ++ ".000000Z"
+
+        [] ->
+            timestamp
 
 
 timelineEntityMatches : TimelineEntityFilter -> Api.WorkspaceTimelineEvent -> Bool

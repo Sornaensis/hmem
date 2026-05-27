@@ -37,7 +37,7 @@ module Api exposing
     , createMemory, updateMemory, deleteMemory, setTags
     , fetchWorkspaceGroups, createWorkspaceGroup, deleteWorkspaceGroup
     , fetchGroupMembers, addGroupMember, removeGroupMember
-    , fetchAuditLog, fetchEntityHistory, revertAuditEntry, fetchWorkspaceTimeline, fetchWorkspaceTimelineBuckets
+    , fetchAuditLog, fetchEntityHistory, revertAuditEntry, fetchWorkspaceTimeline, fetchWorkspaceTimelineRange, fetchWorkspaceTimelineBuckets
     , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder, nextTaskCandidateDecoder, workspaceCardHydrationDecoder
     , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, auditLogEntryDecoder, workspaceTimelineEventDecoder, workspaceTimelineBucketsResponseDecoder
     , memoryTypeToString, memoryTypeFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
@@ -1625,8 +1625,28 @@ fetchWorkspaceCardHydration apiUrl wsId toMsg =
 
 fetchWorkspaceTimeline : String -> String -> (Result Http.Error (PaginatedResult WorkspaceTimelineEvent) -> msg) -> Cmd msg
 fetchWorkspaceTimeline apiUrl wsId toMsg =
+    fetchWorkspaceTimelineRange apiUrl wsId Nothing Nothing toMsg
+
+
+fetchWorkspaceTimelineRange : String -> String -> Maybe String -> Maybe String -> (Result Http.Error (PaginatedResult WorkspaceTimelineEvent) -> msg) -> Cmd msg
+fetchWorkspaceTimelineRange apiUrl wsId maybeSince maybeUntil toMsg =
+    let
+        rangeParams =
+            [ Maybe.map (\since -> "since=" ++ since) maybeSince
+            , Maybe.map (\until -> "until=" ++ until) maybeUntil
+            ]
+                |> List.filterMap identity
+
+        rangeQuery =
+            case rangeParams of
+                [] ->
+                    ""
+
+                _ ->
+                    "&" ++ String.join "&" rangeParams
+    in
     Http.get
-        { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/timeline?limit=50"
+        { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/timeline?limit=50" ++ rangeQuery
         , expect = Http.expectJson toMsg (paginatedDecoder workspaceTimelineEventDecoder)
         }
 

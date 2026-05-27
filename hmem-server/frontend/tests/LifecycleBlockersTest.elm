@@ -231,6 +231,49 @@ suite =
                 , Feature.Timeline.timelineHistogramAcceptsResponse activeRequest { timeline | histogramActiveRequest = Nothing }
                 ]
                     |> Expect.equal [ True, False, False ]
+        , test "workspace timeline histogram selection uses inclusive start and exclusive end" <|
+            \_ ->
+                let
+                    selection =
+                        { label = "Jan 1"
+                        , since = "2026-01-01T00:00:00Z"
+                        , until = "2026-01-02T00:00:00Z"
+                        }
+                in
+                [ timelineEvent "before" "2025-12-31T23:59:59.999Z" "audit-before"
+                , timelineEvent "start" "2026-01-01T00:00:00Z" "audit-start"
+                , timelineEvent "start-fractional" "2026-01-01T00:00:00.123Z" "audit-start-fractional"
+                , timelineEvent "inside" "2026-01-01T12:00:00Z" "audit-inside"
+                , timelineEvent "end" "2026-01-02T00:00:00Z" "audit-end"
+                ]
+                    |> List.filter (Feature.Timeline.eventInTimelineSelection (Just selection))
+                    |> List.map .id
+                    |> Expect.equal [ "start", "start-fractional", "inside" ]
+        , test "workspace timeline selected bucket combines with entity and lifecycle filters" <|
+            \_ ->
+                let
+                    selection =
+                        { label = "Jan 1"
+                        , since = "2026-01-01T00:00:00Z"
+                        , until = "2026-01-02T00:00:00Z"
+                        }
+
+                    insideTaskCompleted =
+                        timelineEvent "inside-task" "2026-01-01T10:00:00Z" "audit-inside-task"
+                            |> (\event -> { event | entityType = "task", eventType = "task_completed" })
+
+                    insideProjectCompleted =
+                        timelineEvent "inside-project" "2026-01-01T11:00:00Z" "audit-inside-project"
+                            |> (\event -> { event | entityType = "project", eventType = "project_completed" })
+
+                    outsideTaskCompleted =
+                        timelineEvent "outside-task" "2026-01-02T10:00:00Z" "audit-outside-task"
+                            |> (\event -> { event | entityType = "task", eventType = "task_completed" })
+                in
+                [ insideTaskCompleted, insideProjectCompleted, outsideTaskCompleted ]
+                    |> Feature.Timeline.filterTimelineEventsForSelection (Just selection) TimelineTasksOnly TimelineCompletedEvents
+                    |> List.map .id
+                    |> Expect.equal [ "inside-task" ]
         , test "workspace timeline filters entity and lifecycle types" <|
             \_ ->
                 let

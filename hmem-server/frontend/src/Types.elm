@@ -231,6 +231,8 @@ type alias TimelineModel =
     , loadingWorkspaceId : Maybe String
     , error : Maybe String
     , loadedWorkspaceId : Maybe String
+    , eventsActiveRequest : Maybe TimelineEventsRequest
+    , eventsLoadedRequest : Maybe TimelineEventsRequest
     , entityFilter : TimelineEntityFilter
     , eventFilter : TimelineEventFilter
     , histogramBuckets : List Api.WorkspaceTimelineBucket
@@ -242,6 +244,14 @@ type alias TimelineModel =
     , histogramClockWorkspaceId : Maybe String
     , histogramActiveRequest : Maybe TimelineHistogramRequest
     , histogramLoadedRequest : Maybe TimelineHistogramRequest
+    , histogramSelectedBucket : Maybe TimelineHistogramSelection
+    }
+
+
+type alias TimelineEventsRequest =
+    { workspaceId : String
+    , since : Maybe String
+    , until : Maybe String
     }
 
 
@@ -250,6 +260,13 @@ type alias TimelineHistogramRequest =
     , since : String
     , until : String
     , bucket : String
+    }
+
+
+type alias TimelineHistogramSelection =
+    { label : String
+    , since : String
+    , until : String
     }
 
 
@@ -451,7 +468,7 @@ type Msg
     | GotMemories String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Memory))
     | GotSingleMemory (Result Http.Error Api.Memory)
     | GotWorkspaceCardHydration String (Maybe Int) (Result Http.Error Api.WorkspaceCardHydration)
-    | GotWorkspaceTimeline String (Result Http.Error (Api.PaginatedResult Api.WorkspaceTimelineEvent))
+    | GotWorkspaceTimeline TimelineEventsRequest (Result Http.Error (Api.PaginatedResult Api.WorkspaceTimelineEvent))
     | GotTimelineHistogramClock String Time.Posix
     | GotWorkspaceTimelineBuckets TimelineHistogramRequest (Result Http.Error Api.WorkspaceTimelineBucketsResponse)
     | GotVisualization String (Result Http.Error Api.WorkspaceVisualization)
@@ -609,6 +626,8 @@ type Msg
     | SetTimelineHistogramSince String
     | SetTimelineHistogramUntil String
     | SetTimelineHistogramBucket String
+    | SelectTimelineHistogramBucket String String String
+    | ResetTimelineHistogramSelection
     | ToggleEntityHistory String String
     | LoadMoreHistory String String
     | SetAuditFilter String String

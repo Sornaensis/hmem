@@ -2625,6 +2625,23 @@ a:hover {
   flex-direction: column;
   align-items: stretch;
   gap: 0.375rem;
+  padding: 0.375rem;
+  border: 1px solid transparent;
+  border-radius: 0.625rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.timeline-histogram-bucket:hover,
+.timeline-histogram-bucket-selected {
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.12);
+}
+
+.timeline-histogram-bucket-selected .timeline-histogram-bucket-label {
+  color: var(--accent-hover);
 }
 
 .timeline-histogram-bar {
@@ -2669,6 +2686,29 @@ a:hover {
 
 .timeline-more-note {
   margin-bottom: 0.75rem;
+}
+
+.timeline-selection-note {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: 0.75rem;
+  background: rgba(99, 102, 241, 0.12);
+  color: var(--text);
+  font-size: 0.875rem;
+}
+
+.timeline-selection-range {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.timeline-selection-reset {
+  margin-left: auto;
 }
 
 .timeline-event-list,
@@ -2892,6 +2932,15 @@ a:hover {
   .timeline-histogram-bucket {
     flex-basis: 4.75rem;
     min-width: 4.75rem;
+  }
+
+  .timeline-selection-note {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .timeline-selection-reset {
+    margin-left: 0;
   }
 }
 

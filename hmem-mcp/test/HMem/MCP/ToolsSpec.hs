@@ -176,57 +176,58 @@ spec = do
       toolDescriptionShouldContain "project_archive" "optional summary_memory_id"
 
   describe "MCP compact response contract" $ do
-    it "maps every retained slim MCP tool" $ do
-      doc <- readContractDoc
-      mapM_ (\name -> doc `shouldContain` ("| `" <> T.unpack name <> "` |")) slimToolNames
+    it "keeps the slim MCP tool map executable in tool definitions" $ do
+      toolNames `shouldBe` slimToolNames
+      mapM_ (\name -> toolDescription name `shouldSatisfy` maybe False (not . T.null)) slimToolNames
 
-    it "documents the DTO vocabulary and default omission policy" $ do
-      doc <- readContractDoc
-      mapM_ (`shouldContainText` doc)
-        [ "MutationAck"
-        , "changed_fields"
-        , "EntitySummary"
-        , "MemoryDetail"
-        , "SearchRow"
-        , "OverviewSummary"
-        , "ContextSummary"
-        , "GraphSummary"
-        , "NextTaskCandidateSummary"
-        , "DependencyEffectSummary"
-        , "DependencyMutationSummary"
-        , "TaskDependencySummary"
-        , "ConnectedMemorySummary"
-        , "LinkedMemorySummary"
-        , "WorkflowSummary"
-        , "StructuredError"
-        , "timestamps"
-        , "workspace_id"
-        , "empty `metadata`"
-        , "null fields"
-        , "full memory `content` and full project/task descriptions except detail tools"
-        , "dependency/memory counts"
-        , "not a nested `summary_memory` object"
-        , "`project_spec`, `task`, or `task_dependency`"
-        , "Summary-less `MutationAck`"
-        ]
+    it "keeps the compact DTO vocabulary and omission policy in executable fixtures" $ do
+      fixtures <- readCompactResponseFixtures
+      let regressionNames = [name | (name, _, _) <- compactResponseRegressionCases]
+      case fixtures of
+        Object root -> sort (Key.toText <$> KM.keys root) `shouldBe` sort regressionNames
+        _           -> expectationFailure "Expected compact response fixtures to be a JSON object"
+      mapM_ (\name -> fixturePayload name fixtures `shouldSatisfy` maybe False (const True)) regressionNames
+      mapM_ (\name -> fixtureMaxChars name fixtures `shouldSatisfy` maybe False (> 0)) regressionNames
+      mapM_ (\name -> fixtureMaxMcpEnvelopeChars name fixtures `shouldSatisfy` maybe False (> 0)) regressionNames
+      mapM_ (\name -> fixtureMaxJsonRpcStdioChars name fixtures `shouldSatisfy` maybe False (> 0)) regressionNames
 
-    it "documents explicit project overview description growth risk" $ do
-      doc <- readContractDoc
-      mapM_ (`shouldContainText` doc)
-        [ "`project_overview.include_descriptions=true` attaches bounded descriptions"
-        , "returned project, task, and subproject rows up to an aggregate row cap"
-        , "truncated with `description_truncated: true`"
-        , "`descriptions_omitted`"
-        , "`task_overview.include_description=true`"
-        ]
+      let Just taskAck = fixturePayload "task_create" fixtures
+      jsonField "ok" taskAck `shouldBe` Just (Bool True)
+      jsonField "entity_type" taskAck `shouldBe` Just (String "task")
+      jsonField "summary" taskAck `shouldSatisfy` hasObjectField "title"
+      jsonField "workspace_id" taskAck `shouldBe` Nothing
 
-    it "documents saved_view as unavailable on the slim MCP surface" $ do
-      doc <- readContractDoc
-      mapM_ (`shouldContainText` doc)
-        [ "does not expose `saved_view`"
-        , "cannot bypass MCP compaction"
-        , "must dispatch through the same compact shapers"
-        ]
+      let Just memoryAck = fixturePayload "memory_create" fixtures
+          memorySummary = jsonField "summary" memoryAck
+      (memorySummary >>= jsonField "content") `shouldBe` Nothing
+      (memorySummary >>= jsonField "content_preview") `shouldBe` Nothing
+      jsonField "workspace_id" memoryAck `shouldBe` Nothing
+
+      let Just searchPayload = fixturePayload "unified_search" fixtures
+      jsonField "memories" searchPayload `shouldSatisfy` arrayLength 1
+      jsonField "projects" searchPayload `shouldSatisfy` arrayLength 1
+      jsonField "tasks" searchPayload `shouldSatisfy` arrayLength 1
+      mapM_ (\name -> maybe (expectationFailure $ "Missing fixture payload for " <> T.unpack name) (shouldOmitDefaultNoise name) (fixturePayload name fixtures)) regressionNames
+
+    it "keeps project overview descriptions opt-in and bounded in executable shapers" $ do
+      toolSchemaProperties "project_overview" `shouldContain` ["include_descriptions"]
+      toolDescriptionShouldContain "project_overview" "descriptions are capped to a bounded number of rows"
+      toolDescriptionShouldContain "project_overview" "prefer task_overview"
+      toolSchemaProperties "task_overview" `shouldContain` ["include_description"]
+
+      let compactOverview = compactProjectOverview projectOverviewRegressionValue
+      (jsonField "project" compactOverview >>= jsonField "description") `shouldBe` Nothing
+      (firstArrayItem "tasks" compactOverview >>= jsonField "description") `shouldBe` Nothing
+      jsonField "descriptions_omitted" compactOverview `shouldBe` Nothing
+
+      let detailedOverview = compactProjectOverviewWithDescriptions projectOverviewRegressionValue
+      (jsonField "project" detailedOverview >>= jsonField "description") `shouldBe` Just (String "full project description")
+      (firstArrayItem "tasks" detailedOverview >>= jsonField "description") `shouldBe` Just (String "full task description")
+      jsonField "descriptions_omitted" detailedOverview `shouldBe` Nothing
+
+    it "keeps saved_view unavailable on the slim MCP surface" $ do
+      toolNames `shouldNotContain` ["saved_view"]
+      parseToolCall "saved_view" (object ["action" .= ("execute" :: Text)]) `shouldSatisfy` isUnknownTool "saved_view"
 
   describe "compact response regression fixtures" $ do
     it "matches golden default MCP payloads and stable size budgets" $ do
@@ -2004,14 +2005,6 @@ isTaskCreateBody body = body `elem`
   ]
 
 
-readContractDoc :: IO String
-readContractDoc = do
-  rootResult <- try @IOException (readFile "mcp-response-contract.md")
-  case rootResult of
-    Right doc -> pure doc
-    Left _    -> readFile "../mcp-response-contract.md"
-
-
 readCompactResponseFixtures :: IO Value
 readCompactResponseFixtures = do
   bytes <- readFirstExisting
@@ -2168,10 +2161,6 @@ defaultNoisySubstrings =
   , "full task description"
   , "linked full content should be omitted"
   ]
-
-
-shouldContainText :: String -> String -> Expectation
-shouldContainText needle haystack = haystack `shouldContain` needle
 
 
 toolDescriptionShouldContain :: Text -> Text -> Expectation

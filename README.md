@@ -2,46 +2,6 @@
 
 A PostgreSQL-backed memory and task management system for LLMs, written in Haskell.
 
-See also:
-
-- `auth.md` — canonical auth specification for local/deployed auth modes, principals, permissions, and policy rules
-- `database.md` — current database schema overview
-- `memory-compatibility.md` — migration and rollout policy for explicit memory types and creation links
-- `mcp-response-contract.md` — compact MCP response contract and DTO vocabulary
-- `timeline-contract.md` — workspace Timeline event semantics and REST/UI data contract
-
-## Architecture
-
-```
-┌──────────────┐      stdio/JSON-RPC       ┌──────────────────┐
-│   LLM / AI   │ ◄──────────────────────► │   hmem-mcp       │
-│   Model      │                           │   (per-model)    │
-└──────────────┘                           └────────┬─────────┘
-                                                    │ HTTP
-                                           ┌────────┴─────────┐
-                                           │   hmem-server    │
-                                           │   (single inst)  │
-                                           └────────┬─────────┘
-                                                    │ SQL
-                                           ┌────────┴─────────┐
-                                           │   PostgreSQL     │
-                                           └──────────────────┘
-```
-
-## Features
-
-- **Sharded Memory System** — Short-term and long-term memories scoped by workspace
-- **Full-Text Search** — PostgreSQL tsvector-based search with weighted ranking
-- **Memory Interlinking** — Typed, weighted edges between memories (related, supersedes, contradicts, elaborates, …)
-- **Hierarchical Categories** — Organize memories into nested categories
-- **Tag System** — Flexible tagging for fast filtered queries
-- **Project Management** — Workspace-scoped projects with sub-project hierarchy
-- **Task Management** — Tasks with sub-tasks, dependencies (DAG), and memory references
-- **Workspace Scoping** — Scope by `.hmem.workspace` file in the project root or GitHub owner/repo
-- **Configurable Cleanup** — Automatic expiry and pruning by age, count, and importance thresholds
-- **Soft Deletes + Purge** — Delete operations hide entities first; permanent removal is explicit via purge endpoints/tools
-- **MCP Protocol** — JSON-RPC over stdio for direct LLM integration
-
 ## Installation
 
 ### Quick Setup (recommended)

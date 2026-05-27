@@ -260,9 +260,11 @@ suite =
                     focusWithContext =
                         { Feature.Focus.init (Just ( "task", "timeline-event" )) | returnContext = Just context }
                 in
-                Feature.Focus.clearReturnContext focusWithContext
-                    |> .returnContext
-                    |> Expect.equal Nothing
+                [ Feature.Focus.shouldShowReturnContext focusWithContext
+                , Feature.Focus.focusReturnContextLabel context == "Back to Timeline event"
+                , (Feature.Focus.clearReturnContext focusWithContext |> .returnContext) == Nothing
+                ]
+                    |> Expect.equal [ True, True, True ]
         , test "workspace timeline histogram accepts only the active range request" <|
             \_ ->
                 let

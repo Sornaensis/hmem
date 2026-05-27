@@ -244,6 +244,7 @@ type alias AuditLogModel =
     , entityHistoryHasMore : Dict String Bool
     , historyExpanded : Dict String Bool
     , entries : List Api.AuditLogEntry
+    , entryBaseOffset : Int
     , hasMore : Bool
     , loading : Bool
     , loadingFilters : Maybe AuditLogFilters
@@ -621,6 +622,7 @@ type Msg
     | FocusEntityKeepForward String String
     | NavigateToAuditEntity Api.AuditLogEntry
     | NavigateToTimelineEntity Api.WorkspaceTimelineEvent
+    | ReturnToFocusSource
     | FocusBreadcrumbNav Int
     | ClearFocus
     | GlobalKeyDown Int

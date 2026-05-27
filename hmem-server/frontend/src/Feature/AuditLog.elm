@@ -21,6 +21,7 @@ init =
     , entityHistoryHasMore = Dict.empty
     , historyExpanded = Dict.empty
     , entries = []
+    , entryBaseOffset = 0
     , hasMore = False
     , loading = False
     , loadingFilters = Nothing
@@ -66,6 +67,9 @@ update msg model =
 
                 entryExpanded =
                     Dict.get auditEntry.id model.auditLog.expandedEntries |> Maybe.withDefault False
+
+                returnFilters =
+                    auditReturnFilters auditEntry.id model.auditLog
             in
             case resolvedTarget of
                 Nothing ->
@@ -89,6 +93,12 @@ update msg model =
                                 focusModel =
                                     model.focus
 
+                                currentSearch =
+                                    model.search
+
+                                updatedSearch =
+                                    { currentSearch | unifiedResults = Nothing, isSearching = False }
+
                                 newHistory =
                                     List.take (focusModel.historyIndex + 1) focusModel.history ++ [ focusEntry ]
 
@@ -102,10 +112,10 @@ update msg model =
                                         , breadcrumbAnchor = Just focusEntry
                                         , history = newHistory
                                         , historyIndex = newIndex
-                                        , returnContext = Just (Focus.auditReturnContext returnSource wsId model.auditLog.filters entryExpanded auditEntry focusEntry)
+                                        , returnContext = Just (Focus.auditReturnContext returnSource wsId returnFilters entryExpanded auditEntry focusEntry)
                                     }
                                 )
-                                { model | selectedWorkspaceId = Just wsId, activeTab = targetTab }
+                                { model | selectedWorkspaceId = Just wsId, activeTab = targetTab, search = updatedSearch }
                             , Nav.pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment targetTab (Just focusEntry))
                             )
 
@@ -119,7 +129,22 @@ update msg model =
             else
                 case result of
                     Ok paginated ->
-                        ( updateAuditLogModel (\al -> { al | entries = al.entries ++ paginated.items, hasMore = paginated.hasMore, loading = False, loadingFilters = Nothing }) model
+                        ( updateAuditLogModel
+                            (\al ->
+                                { al
+                                    | entries = al.entries ++ paginated.items
+                                    , entryBaseOffset =
+                                        if List.isEmpty al.entries then
+                                            requestedFilters.offset |> Maybe.withDefault 0
+
+                                        else
+                                            al.entryBaseOffset
+                                    , hasMore = paginated.hasMore
+                                    , loading = False
+                                    , loadingFilters = Nothing
+                                }
+                            )
+                            model
                         , Cmd.none
                         )
 
@@ -207,7 +232,7 @@ update msg model =
                 filters =
                     { oldFilters | offset = Nothing }
             in
-            ( updateAuditLogModel (\al -> { al | entries = [], hasMore = False, loading = True, loadingFilters = Just filters, filters = filters }) model
+            ( updateAuditLogModel (\al -> { al | entries = [], entryBaseOffset = filters.offset |> Maybe.withDefault 0, hasMore = False, loading = True, loadingFilters = Just filters, filters = filters }) model
             , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
             )
 
@@ -221,7 +246,7 @@ update msg model =
                         model.auditLog.filters
 
                     filters =
-                        { oldFilters | offset = Just (List.length model.auditLog.entries) }
+                        { oldFilters | offset = Just (model.auditLog.entryBaseOffset + List.length model.auditLog.entries) }
                 in
                 ( updateAuditLogModel (\al -> { al | filters = filters, loading = True, loadingFilters = Just filters }) model
                 , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
@@ -310,6 +335,14 @@ update msg model =
 
                                                 else
                                                     al.entries
+                                            , entryBaseOffset =
+                                                if clearAuditLog then
+                                                    refreshAuditFilters
+                                                        |> Maybe.andThen .offset
+                                                        |> Maybe.withDefault 0
+
+                                                else
+                                                    al.entryBaseOffset
                                             , loading =
                                                 case refreshAuditFilters of
                                                     Just _ ->
@@ -1637,6 +1670,38 @@ auditReturnSource model =
 
         _ ->
             ReturnFromWorkspaceAudit
+
+
+auditReturnFilters : String -> AuditLogModel -> AuditLogFilters
+auditReturnFilters entryId auditLog =
+    let
+        pageSize =
+            50
+
+        baseOffset =
+            auditLog.entryBaseOffset
+
+        entryIndex =
+            auditLog.entries
+                |> List.indexedMap Tuple.pair
+                |> List.filter (\( _, entry ) -> entry.id == entryId)
+                |> List.head
+                |> Maybe.map Tuple.first
+
+        pageOffset =
+            entryIndex
+                |> Maybe.map (\idx -> ((baseOffset + idx) // pageSize) * pageSize)
+                |> Maybe.withDefault baseOffset
+    in
+    { auditLog.filters
+        | offset =
+            if pageOffset <= 0 then
+                Nothing
+
+            else
+                Just pageOffset
+        , limit = Just pageSize
+    }
 
 
 updateAuditLogModel : (AuditLogModel -> AuditLogModel) -> Model -> Model

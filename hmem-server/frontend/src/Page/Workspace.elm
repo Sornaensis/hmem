@@ -9,6 +9,7 @@ import Dict
 import Feature.AuditLog
 import Feature.Cards
 import Feature.Editing
+import Feature.Focus
 import Feature.Memory
 import Feature.Search
 import Feature.Timeline
@@ -276,7 +277,10 @@ viewTabContent wsId model =
             Feature.Cards.viewProjectsTree wsId model
 
         MemoriesTab ->
-            Feature.Memory.viewMemoriesList wsId model
+            div []
+                [ Feature.Focus.viewFocusBreadcrumbBar model
+                , Feature.Memory.viewMemoriesList wsId model
+                ]
 
         TimelineTab ->
             Feature.Timeline.viewWorkspaceTimelinePanel wsId model

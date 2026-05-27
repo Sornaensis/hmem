@@ -373,17 +373,45 @@ handleUrlChange url model =
                 emptyFilters =
                     { workspaceId = Nothing, entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
 
+                returnContext =
+                    model.focus.returnContext
+
+                restoredFilters =
+                    case returnContext of
+                        Just context ->
+                            if context.source == ReturnFromGlobalAudit then
+                                context.auditFilters |> Maybe.withDefault emptyFilters
+
+                            else
+                                emptyFilters
+
+                        Nothing ->
+                            emptyFilters
+
+                restoredExpandedEntries =
+                    case returnContext of
+                        Just context ->
+                            if context.source == ReturnFromGlobalAudit then
+                                expandedEntriesForReturnContext context
+
+                            else
+                                Dict.empty
+
+                        Nothing ->
+                            Dict.empty
+
                 currentAuditLog =
                     model.auditLog
 
                 updatedAuditLog =
                     { currentAuditLog
                         | entries = []
+                        , entryBaseOffset = restoredFilters.offset |> Maybe.withDefault 0
                         , hasMore = False
                         , loading = False
                         , loadingFilters = Nothing
-                        , filters = emptyFilters
-                        , expandedEntries = Dict.empty
+                        , filters = restoredFilters
+                        , expandedEntries = restoredExpandedEntries
                         , revertConfirmation = Nothing
                         , revertInFlight = False
                     }
@@ -473,6 +501,7 @@ resetAuditLogWithFilters : AuditLogFilters -> AuditLogModel -> AuditLogModel
 resetAuditLogWithFilters filters auditLog =
     { auditLog
         | entries = []
+        , entryBaseOffset = filters.offset |> Maybe.withDefault 0
         , hasMore = False
         , loading = True
         , loadingFilters = Just filters
@@ -495,6 +524,16 @@ returnContextForFocusedRoute wsId maybeFocus focusModel =
 
         _ ->
             Nothing
+
+
+expandedEntriesForReturnContext : FocusReturnContext -> Dict.Dict String Bool
+expandedEntriesForReturnContext context =
+    case ( context.auditExpandedEntryId, context.auditEntryExpanded ) of
+        ( Just entryId, Just True ) ->
+            Dict.singleton entryId True
+
+        _ ->
+            Dict.empty
 
 
 clearRouteConfirmations : Model -> Model

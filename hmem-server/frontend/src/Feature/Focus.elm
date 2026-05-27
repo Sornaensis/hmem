@@ -1,8 +1,9 @@
-module Feature.Focus exposing (auditReturnContext, buildProjectBreadcrumb, buildTaskBreadcrumb, clearReturnContext, init, timelineReturnContext, update, viewFocusBreadcrumbBar, viewTaskBreadcrumb)
+module Feature.Focus exposing (auditReturnContext, buildProjectBreadcrumb, buildTaskBreadcrumb, clearReturnContext, focusReturnContextLabel, init, shouldShowReturnContext, timelineReturnContext, update, viewFocusBreadcrumbBar, viewTaskBreadcrumb)
 
 import Api
+import Browser.Navigation as Nav
 import Dict
-import Helpers exposing (replaceFragment)
+import Helpers exposing (buildFragment, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
@@ -87,9 +88,51 @@ clearReturnContext focusModel =
     { focusModel | returnContext = Nothing }
 
 
+shouldShowReturnContext : FocusModel -> Bool
+shouldShowReturnContext focusModel =
+    focusModel.returnContext /= Nothing
+
+
+focusReturnContextLabel : FocusReturnContext -> String
+focusReturnContextLabel context =
+    case context.source of
+        ReturnFromTimeline ->
+            "Back to Timeline event"
+
+        ReturnFromWorkspaceAudit ->
+            "Back to workspace Audit entry"
+
+        ReturnFromGlobalAudit ->
+            "Back to global Audit entry"
+
+
+clearFocusForReturn : FocusModel -> FocusModel
+clearFocusForReturn focusModel =
+    { focusModel
+        | focusedEntity = Nothing
+        , breadcrumbAnchor = Nothing
+        , history = []
+        , historyIndex = 0
+        , returnContext = Nothing
+    }
+
+
+expandedEntriesForReturn : FocusReturnContext -> Dict.Dict String Bool
+expandedEntriesForReturn context =
+    case ( context.auditExpandedEntryId, context.auditEntryExpanded ) of
+        ( Just entryId, Just True ) ->
+            Dict.singleton entryId True
+
+        _ ->
+            Dict.empty
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        ReturnToFocusSource ->
+            returnToFocusSource model
+
         FocusEntity entityType entityId ->
             let
                 entry =
@@ -177,6 +220,96 @@ update msg model =
 
         _ ->
             ( model, Cmd.none )
+
+
+returnToFocusSource : Model -> ( Model, Cmd Msg )
+returnToFocusSource model =
+    case model.focus.returnContext of
+        Nothing ->
+            ( model, Cmd.none )
+
+        Just context ->
+            case context.source of
+                ReturnFromTimeline ->
+                    returnToTimelineSource context model
+
+                ReturnFromWorkspaceAudit ->
+                    returnToWorkspaceAuditSource context model
+
+                ReturnFromGlobalAudit ->
+                    returnToGlobalAuditSource model
+
+
+returnToTimelineSource : FocusReturnContext -> Model -> ( Model, Cmd Msg )
+returnToTimelineSource context model =
+    let
+        currentTimeline =
+            model.timeline
+
+        restoredTimeline =
+            { currentTimeline
+                | entityFilter = context.timelineEntityFilter |> Maybe.withDefault currentTimeline.entityFilter
+                , eventFilter = context.timelineEventFilter |> Maybe.withDefault currentTimeline.eventFilter
+                , histogramSelectedBucket = context.timelineHistogramSelection
+                , histogramSince = context.timelineHistogramSince |> Maybe.withDefault currentTimeline.histogramSince
+                , histogramUntil = context.timelineHistogramUntil |> Maybe.withDefault currentTimeline.histogramUntil
+                , histogramBucket = context.timelineHistogramBucket |> Maybe.withDefault currentTimeline.histogramBucket
+            }
+
+        nextModel =
+            { model
+                | selectedWorkspaceId = Just context.workspaceId
+                , activeTab = TimelineTab
+                , focus = clearFocusForReturn model.focus
+                , timeline = restoredTimeline
+            }
+    in
+    ( nextModel
+    , Nav.pushUrl model.key ("/workspace/" ++ context.workspaceId ++ "#" ++ buildFragment TimelineTab Nothing)
+    )
+
+
+returnToWorkspaceAuditSource : FocusReturnContext -> Model -> ( Model, Cmd Msg )
+returnToWorkspaceAuditSource context model =
+    let
+        filters =
+            context.auditFilters |> Maybe.withDefault { workspaceId = Just context.workspaceId, entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
+
+        currentAuditLog =
+            model.auditLog
+
+        restoredAuditLog =
+            { currentAuditLog
+                | entries = []
+                , entryBaseOffset = filters.offset |> Maybe.withDefault 0
+                , hasMore = False
+                , loading = True
+                , loadingFilters = Just filters
+                , filters = filters
+                , expandedEntries = expandedEntriesForReturn context
+            }
+
+        nextModel =
+            { model
+                | selectedWorkspaceId = Just context.workspaceId
+                , activeTab = AuditTab
+                , focus = clearFocusForReturn model.focus
+                , auditLog = restoredAuditLog
+            }
+    in
+    ( nextModel
+    , Cmd.batch
+        [ Nav.pushUrl model.key ("/workspace/" ++ context.workspaceId ++ "#" ++ buildFragment AuditTab Nothing)
+        , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
+        ]
+    )
+
+
+returnToGlobalAuditSource : Model -> ( Model, Cmd Msg )
+returnToGlobalAuditSource model =
+    ( model
+    , Nav.pushUrl model.key "/audit"
+    )
 
 
 viewFocusBreadcrumbBar : Model -> Html Msg
@@ -285,11 +418,22 @@ viewFocusBreadcrumbBar model =
 
                     else
                         span [ class "focus-crumb-sep" ] [ text " › " ] :: forwardCrumbs
+
+                returnSection =
+                    case model.focus.returnContext of
+                        Just context ->
+                            [ button [ class "focus-return-btn", onClick ReturnToFocusSource, title context.label ] [ text (focusReturnContextLabel context) ]
+                            , span [ class "focus-crumb-sep" ] [ text " › " ]
+                            ]
+
+                        Nothing ->
+                            []
             in
             div [ class "focus-breadcrumb-bar" ]
-                (button [ class "focus-clear-btn", onClick ClearFocus, title "Exit focus mode" ] [ text "✕" ]
-                    :: span [ class "focus-crumb focus-crumb-link", onClick ClearFocus ] [ text "All" ]
-                    :: (if not (List.isEmpty treeCrumbLinks) then
+                ([ button [ class "focus-clear-btn", onClick ClearFocus, title "Exit focus mode" ] [ text "✕" ] ]
+                    ++ returnSection
+                    ++ [ span [ class "focus-crumb focus-crumb-link", onClick ClearFocus ] [ text "All" ] ]
+                    ++ (if not (List.isEmpty treeCrumbLinks) then
                             span [ class "focus-crumb-sep" ] [ text " › " ] :: treeCrumbLinks ++ forwardSection
 
                         else

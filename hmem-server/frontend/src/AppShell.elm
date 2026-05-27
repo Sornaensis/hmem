@@ -499,6 +499,7 @@ resetAuditLogWithFilters : AuditLogFilters -> AuditLogModel -> AuditLogModel
 resetAuditLogWithFilters filters auditLog =
     { auditLog
         | entries = []
+        , entryBaseOffset = filters.offset |> Maybe.withDefault 0
         , hasMore = False
         , loading = True
         , loadingFilters = Just filters

@@ -1190,6 +1190,22 @@ a:hover {
   color: var(--text);
 }
 
+.focus-return-btn {
+  border: 1px solid rgba(99, 102, 241, 0.45);
+  border-radius: 9999px;
+  background: rgba(99, 102, 241, 0.14);
+  color: var(--accent-hover);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  padding: 0.125rem 0.5rem;
+}
+
+.focus-return-btn:hover {
+  border-color: var(--accent-hover);
+  background: rgba(99, 102, 241, 0.22);
+}
+
 .focus-crumb {
   white-space: nowrap;
 }

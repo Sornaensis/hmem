@@ -428,6 +428,9 @@ update msg model =
         NavigateToTimelineEntity _ ->
             Ok (Feature.Timeline.update msg model)
 
+        ReturnToFocusSource ->
+            Ok (Feature.Focus.update msg model)
+
         FocusBreadcrumbNav _ ->
             Ok (Feature.Focus.update msg model)
 

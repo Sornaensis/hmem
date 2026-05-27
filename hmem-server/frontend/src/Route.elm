@@ -129,6 +129,12 @@ handleUrlChange url model =
 
                                 else
                                     model.focus.historyIndex
+                            , returnContext =
+                                if focusChangedExternally then
+                                    Nothing
+
+                                else
+                                    currentFocus.returnContext
                         }
 
                     currentEditing =
@@ -206,6 +212,7 @@ handleUrlChange url model =
                                     Nothing ->
                                         []
                             , historyIndex = 0
+                            , returnContext = returnContextForFocusedRoute wsId frag.focus currentFocus
                         }
 
                     currentEditing =
@@ -345,6 +352,7 @@ handleUrlChange url model =
                 , sessionContext = Nothing
                 , webSocket = { state = Disconnected }
                 , graph = updatedGraph
+                , focus = { model.focus | returnContext = Nothing }
               }
                 |> clearRouteConfirmations
             , Cmd.batch
@@ -388,6 +396,7 @@ handleUrlChange url model =
                 , selectedWorkspaceId = Nothing
                 , webSocket = { state = Disconnected }
                 , auditLog = updatedAuditLog
+                , focus = { model.focus | returnContext = Nothing }
               }
                 |> clearRouteConfirmations
             , Cmd.batch
@@ -406,7 +415,7 @@ handleUrlChange url model =
                     else
                         Cmd.none
             in
-            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected } }
+            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected }, focus = { model.focus | returnContext = Nothing } }
                 |> clearRouteConfirmations
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)
@@ -472,6 +481,20 @@ resetAuditLogWithFilters filters auditLog =
         , revertConfirmation = Nothing
         , revertInFlight = False
     }
+
+
+returnContextForFocusedRoute : String -> Maybe ( String, String ) -> FocusModel -> Maybe FocusReturnContext
+returnContextForFocusedRoute wsId maybeFocus focusModel =
+    case ( maybeFocus, focusModel.returnContext ) of
+        ( Just ( focusType, focusId ), Just context ) ->
+            if context.workspaceId == wsId && context.entityType == focusType && context.entityId == focusId then
+                Just context
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
 
 
 clearRouteConfirmations : Model -> Model

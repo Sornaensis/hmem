@@ -3,6 +3,7 @@ module Feature.Timeline exposing (ensureLoaded, eventInTimelineSelection, filter
 import Api
 import Browser.Navigation as Nav
 import Char
+import Feature.Focus as Focus
 import Helpers exposing (buildFragment, formatDate)
 import Html exposing (..)
 import Html.Attributes exposing (class, disabled, style, title, type_, value)
@@ -228,7 +229,7 @@ pad2 number =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        NavigateToTimelineEntity entityType entityId ->
+        NavigateToTimelineEntity event ->
             case model.selectedWorkspaceId of
                 Just wsId ->
                     let
@@ -236,7 +237,7 @@ update msg model =
                             ProjectsTab
 
                         focusEntry =
-                            ( entityType, entityId )
+                            ( event.navigation.entityType, event.navigation.entityId )
 
                         focusModel =
                             model.focus
@@ -253,6 +254,7 @@ update msg model =
                                 , breadcrumbAnchor = Just focusEntry
                                 , history = newHistory
                                 , historyIndex = newIndex
+                                , returnContext = Just (Focus.timelineReturnContext wsId model.timeline event)
                             }
 
                         currentSearch =
@@ -1032,7 +1034,7 @@ viewTimelineEvent : Api.WorkspaceTimelineEvent -> Html Msg
 viewTimelineEvent event =
     button
         [ class ("timeline-event-card " ++ timelineEventToneClass event.eventType ++ " timeline-entity-" ++ event.entityType)
-        , onClick (NavigateToTimelineEntity event.navigation.entityType event.navigation.entityId)
+        , onClick (NavigateToTimelineEntity event)
         , title ("Open " ++ String.toLower (entityTypeLabel event.entityType))
         ]
         [ div [ class "timeline-event-rail" ]

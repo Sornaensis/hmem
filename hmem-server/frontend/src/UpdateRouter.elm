@@ -425,7 +425,7 @@ update msg model =
         NavigateToAuditEntity _ ->
             Ok (Feature.AuditLog.update msg model)
 
-        NavigateToTimelineEntity _ _ ->
+        NavigateToTimelineEntity _ ->
             Ok (Feature.Timeline.update msg model)
 
         FocusBreadcrumbNav _ ->

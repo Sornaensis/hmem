@@ -3,6 +3,7 @@ module Feature.AuditLog exposing (AuditFieldChange, auditActionDetailItems, audi
 import Api
 import Browser.Navigation as Nav
 import Dict
+import Feature.Focus as Focus
 import Helpers exposing (beginTrackedMutation, buildFragment, flexibleStringDecoder, formatDate)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -59,6 +60,12 @@ update msg model =
 
                 resolvedTarget =
                     resolveAuditNavigationTarget auditEntry
+
+                returnSource =
+                    auditReturnSource model
+
+                entryExpanded =
+                    Dict.get auditEntry.id model.auditLog.expandedEntries |> Maybe.withDefault False
             in
             case resolvedTarget of
                 Nothing ->
@@ -95,6 +102,7 @@ update msg model =
                                         , breadcrumbAnchor = Just focusEntry
                                         , history = newHistory
                                         , historyIndex = newIndex
+                                        , returnContext = Just (Focus.auditReturnContext returnSource wsId model.auditLog.filters entryExpanded auditEntry focusEntry)
                                     }
                                 )
                                 { model | selectedWorkspaceId = Just wsId, activeTab = targetTab }
@@ -1616,6 +1624,19 @@ viewRevertConfirmModal model =
                         ]
                     ]
                 ]
+
+
+auditReturnSource : Model -> FocusReturnSource
+auditReturnSource model =
+    case model.page of
+        AuditLogPage ->
+            ReturnFromGlobalAudit
+
+        WorkspacePage _ ->
+            ReturnFromWorkspaceAudit
+
+        _ ->
+            ReturnFromWorkspaceAudit
 
 
 updateAuditLogModel : (AuditLogModel -> AuditLogModel) -> Model -> Model

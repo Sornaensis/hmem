@@ -1,4 +1,4 @@
-module Feature.Focus exposing (buildProjectBreadcrumb, buildTaskBreadcrumb, init, update, viewFocusBreadcrumbBar, viewTaskBreadcrumb)
+module Feature.Focus exposing (auditReturnContext, buildProjectBreadcrumb, buildTaskBreadcrumb, clearReturnContext, init, timelineReturnContext, update, viewFocusBreadcrumbBar, viewTaskBreadcrumb)
 
 import Api
 import Dict
@@ -6,6 +6,7 @@ import Helpers exposing (replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
+import String
 import Types exposing (..)
 
 
@@ -15,7 +16,75 @@ init maybeFocus =
     , breadcrumbAnchor = maybeFocus
     , history = Maybe.map List.singleton maybeFocus |> Maybe.withDefault []
     , historyIndex = 0
+    , returnContext = Nothing
     }
+
+
+timelineReturnContext : String -> TimelineModel -> Api.WorkspaceTimelineEvent -> FocusReturnContext
+timelineReturnContext workspaceId timeline event =
+    { source = ReturnFromTimeline
+    , workspaceId = workspaceId
+    , tab = TimelineTab
+    , entryId = event.id
+    , label = event.title
+    , entityType = event.navigation.entityType
+    , entityId = event.navigation.entityId
+    , timelineEventId = Just event.id
+    , timelineSourceAuditId = event.sourceAuditId
+    , timelineOccurredAt = Just event.occurredAt
+    , timelineEntityFilter = Just timeline.entityFilter
+    , timelineEventFilter = Just timeline.eventFilter
+    , timelineHistogramSelection = timeline.histogramSelectedBucket
+    , timelineHistogramSince = nonEmptyMaybe timeline.histogramSince
+    , timelineHistogramUntil = nonEmptyMaybe timeline.histogramUntil
+    , timelineHistogramBucket = nonEmptyMaybe timeline.histogramBucket
+    , auditFilters = Nothing
+    , auditExpandedEntryId = Nothing
+    , auditEntryExpanded = Nothing
+    }
+
+
+auditReturnContext : FocusReturnSource -> String -> AuditLogFilters -> Bool -> Api.AuditLogEntry -> ( String, String ) -> FocusReturnContext
+auditReturnContext source workspaceId filters entryExpanded entry ( targetType, targetId ) =
+    { source = source
+    , workspaceId = workspaceId
+    , tab = AuditTab
+    , entryId = entry.id
+    , label = entry.entityType ++ " " ++ Api.auditActionToString entry.action
+    , entityType = targetType
+    , entityId = targetId
+    , timelineEventId = Nothing
+    , timelineSourceAuditId = Nothing
+    , timelineOccurredAt = Nothing
+    , timelineEntityFilter = Nothing
+    , timelineEventFilter = Nothing
+    , timelineHistogramSelection = Nothing
+    , timelineHistogramSince = Nothing
+    , timelineHistogramUntil = Nothing
+    , timelineHistogramBucket = Nothing
+    , auditFilters = Just filters
+    , auditExpandedEntryId =
+        if entryExpanded then
+            Just entry.id
+
+        else
+            Nothing
+    , auditEntryExpanded = Just entryExpanded
+    }
+
+
+nonEmptyMaybe : String -> Maybe String
+nonEmptyMaybe value =
+    if String.isEmpty value then
+        Nothing
+
+    else
+        Just value
+
+
+clearReturnContext : FocusModel -> FocusModel
+clearReturnContext focusModel =
+    { focusModel | returnContext = Nothing }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -44,6 +113,7 @@ update msg model =
                                 , breadcrumbAnchor = Just entry
                                 , history = newHistory
                                 , historyIndex = newIndex
+                                , returnContext = Nothing
                             }
                     }
             in
@@ -59,7 +129,7 @@ update msg model =
 
                 -- Only change what's focused, don't modify history
                 newModel =
-                    { model | focus = { focusModel | focusedEntity = Just entry } }
+                    { model | focus = { focusModel | focusedEntity = Just entry, returnContext = Nothing } }
             in
             ( newModel, replaceFragment newModel )
 
@@ -80,6 +150,7 @@ update msg model =
                                 | focusedEntity = entry
                                 , breadcrumbAnchor = entry
                                 , historyIndex = idx
+                                , returnContext = Nothing
                             }
                     }
             in
@@ -98,6 +169,7 @@ update msg model =
                                 , breadcrumbAnchor = Nothing
                                 , history = []
                                 , historyIndex = 0
+                                , returnContext = Nothing
                             }
                     }
             in

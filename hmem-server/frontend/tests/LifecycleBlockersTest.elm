@@ -7,6 +7,7 @@ import Feature.AuditLog
 import Feature.Cards
 import Feature.DataLoading
 import Feature.Editing
+import Feature.Focus
 import Feature.Memory
 import Feature.Timeline
 import Helpers
@@ -15,7 +16,7 @@ import Page.Workspace
 import Permissions
 import String
 import Test exposing (..)
-import Types exposing (TimelineEntityFilter(..), TimelineEventFilter(..), WorkspaceTab(..))
+import Types exposing (FocusReturnSource(..), TimelineEntityFilter(..), TimelineEventFilter(..), WorkspaceTab(..))
 
 
 suite : Test
@@ -210,6 +211,58 @@ suite =
                 , Feature.Timeline.init.eventFilter == TimelineAllEvents
                 ]
                     |> Expect.equal [ True, True ]
+        , test "timeline and audit navigation create return context metadata" <|
+            \_ ->
+                let
+                    timelineContext =
+                        timelineEvent "timeline-event" "2026-05-25T00:00:00Z" "audit-source"
+                            |> Feature.Focus.timelineReturnContext "workspace-a" Feature.Timeline.init
+
+                    auditContextResult =
+                        decodeAuditFixture createProjectAuditJson
+                            |> Result.map
+                                (\entry ->
+                                    ( Feature.Focus.auditReturnContext ReturnFromWorkspaceAudit "workspace-a" Feature.AuditLog.init.filters False entry ( "project", "project-1" )
+                                    , Feature.Focus.auditReturnContext ReturnFromWorkspaceAudit "workspace-a" Feature.AuditLog.init.filters True entry ( "project", "project-1" )
+                                    )
+                                )
+                in
+                case auditContextResult of
+                    Ok ( auditContext, expandedAuditContext ) ->
+                        [ timelineContext.source == ReturnFromTimeline
+                        , timelineContext.tab == TimelineTab
+                        , timelineContext.entryId == "timeline-event"
+                        , timelineContext.timelineSourceAuditId == Just "audit-source"
+                        , timelineContext.timelineEntityFilter == Just TimelineAllEntities
+                        , timelineContext.entityType == "task"
+                        , timelineContext.entityId == "timeline-event"
+                        , auditContext.source == ReturnFromWorkspaceAudit
+                        , auditContext.tab == AuditTab
+                        , auditContext.entityType == "project"
+                        , auditContext.entityId == "project-1"
+                        , auditContext.auditFilters == Just Feature.AuditLog.init.filters
+                        , auditContext.auditExpandedEntryId == Nothing
+                        , auditContext.auditEntryExpanded == Just False
+                        , expandedAuditContext.auditExpandedEntryId == Just expandedAuditContext.entryId
+                        , expandedAuditContext.auditEntryExpanded == Just True
+                        ]
+                            |> Expect.equal [ True, True, True, True, True, True, True, True, True, True, True, True, True, True, True, True ]
+
+                    Err error ->
+                        Expect.fail (Decode.errorToString error)
+        , test "direct focus helpers clear source return context" <|
+            \_ ->
+                let
+                    context =
+                        timelineEvent "timeline-event" "2026-05-25T00:00:00Z" "audit-source"
+                            |> Feature.Focus.timelineReturnContext "workspace-a" Feature.Timeline.init
+
+                    focusWithContext =
+                        { Feature.Focus.init (Just ( "task", "timeline-event" )) | returnContext = Just context }
+                in
+                Feature.Focus.clearReturnContext focusWithContext
+                    |> .returnContext
+                    |> Expect.equal Nothing
         , test "workspace timeline histogram accepts only the active range request" <|
             \_ ->
                 let

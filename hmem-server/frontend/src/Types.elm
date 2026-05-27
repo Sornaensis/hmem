@@ -192,7 +192,37 @@ type alias FocusModel =
     , breadcrumbAnchor : Maybe ( String, String )
     , history : List ( String, String )
     , historyIndex : Int
+    , returnContext : Maybe FocusReturnContext
     }
+
+
+type alias FocusReturnContext =
+    { source : FocusReturnSource
+    , workspaceId : String
+    , tab : WorkspaceTab
+    , entryId : String
+    , label : String
+    , entityType : String
+    , entityId : String
+    , timelineEventId : Maybe String
+    , timelineSourceAuditId : Maybe String
+    , timelineOccurredAt : Maybe String
+    , timelineEntityFilter : Maybe TimelineEntityFilter
+    , timelineEventFilter : Maybe TimelineEventFilter
+    , timelineHistogramSelection : Maybe TimelineHistogramSelection
+    , timelineHistogramSince : Maybe String
+    , timelineHistogramUntil : Maybe String
+    , timelineHistogramBucket : Maybe String
+    , auditFilters : Maybe AuditLogFilters
+    , auditExpandedEntryId : Maybe String
+    , auditEntryExpanded : Maybe Bool
+    }
+
+
+type FocusReturnSource
+    = ReturnFromTimeline
+    | ReturnFromWorkspaceAudit
+    | ReturnFromGlobalAudit
 
 
 type alias MutationsModel =
@@ -590,7 +620,7 @@ type Msg
     | FocusEntity String String
     | FocusEntityKeepForward String String
     | NavigateToAuditEntity Api.AuditLogEntry
-    | NavigateToTimelineEntity String String
+    | NavigateToTimelineEntity Api.WorkspaceTimelineEvent
     | FocusBreadcrumbNav Int
     | ClearFocus
     | GlobalKeyDown Int

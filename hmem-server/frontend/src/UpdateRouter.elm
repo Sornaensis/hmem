@@ -97,10 +97,25 @@ update msg model =
         GotWorkspaceTimeline _ _ ->
             Ok (Feature.Timeline.update msg model)
 
+        GotTimelineHistogramClock _ _ ->
+            Ok (Feature.Timeline.update msg model)
+
+        GotWorkspaceTimelineBuckets _ _ ->
+            Ok (Feature.Timeline.update msg model)
+
         SetTimelineEntityFilter _ ->
             Ok (Feature.Timeline.update msg model)
 
         SetTimelineEventFilter _ ->
+            Ok (Feature.Timeline.update msg model)
+
+        SetTimelineHistogramSince _ ->
+            Ok (Feature.Timeline.update msg model)
+
+        SetTimelineHistogramUntil _ ->
+            Ok (Feature.Timeline.update msg model)
+
+        SetTimelineHistogramBucket _ ->
             Ok (Feature.Timeline.update msg model)
 
         GotVisualization _ _ ->

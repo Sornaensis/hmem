@@ -168,6 +168,32 @@ suite =
 
                     Err error ->
                         Expect.fail (Decode.errorToString error)
+        , test "workspace timeline bucket decoder preserves action and entity counts" <|
+            \_ ->
+                let
+                    json =
+                        """{"workspace_id":"workspace-a","since":"2026-01-01T00:00:00Z","until":"2026-02-01T00:00:00Z","bucket":"week","buckets":[{"bucket_start":"2026-01-01T00:00:00Z","bucket_end":"2026-01-08T00:00:00Z","label":"2026-01-01","counts":{"project":{"created":1,"completed":0,"cancelled":0},"subproject":{"created":1,"completed":1,"cancelled":0},"task":{"created":2,"completed":0,"cancelled":1},"subtask":{"created":1,"completed":1,"cancelled":0}},"totals":{"created":5,"completed":2,"cancelled":1}}]}"""
+                in
+                case Decode.decodeString Api.workspaceTimelineBucketsResponseDecoder json of
+                    Ok response ->
+                        case response.buckets of
+                            bucket :: [] ->
+                                [ response.workspaceId
+                                , response.bucket
+                                , bucket.label
+                                , String.fromInt (Feature.Timeline.timelineBucketTotal bucket)
+                                , String.fromInt bucket.counts.project.created
+                                , String.fromInt bucket.counts.subproject.completed
+                                , String.fromInt bucket.counts.task.cancelled
+                                , String.fromInt bucket.counts.subtask.completed
+                                ]
+                                    |> Expect.equal [ "workspace-a", "week", "2026-01-01", "8", "1", "1", "1", "1" ]
+
+                            _ ->
+                                Expect.fail "Expected one decoded bucket"
+
+                    Err error ->
+                        Expect.fail (Decode.errorToString error)
         , test "workspace timeline events sort newest first with a stable tie-breaker" <|
             \_ ->
                 [ timelineEvent "older" "2026-05-24T00:00:00Z" "audit-older"
@@ -184,6 +210,27 @@ suite =
                 , Feature.Timeline.init.eventFilter == TimelineAllEvents
                 ]
                     |> Expect.equal [ True, True ]
+        , test "workspace timeline histogram accepts only the active range request" <|
+            \_ ->
+                let
+                    activeRequest =
+                        { workspaceId = "workspace-a"
+                        , since = "2026-01-01T00:00:00Z"
+                        , until = "2026-02-01T00:00:00Z"
+                        , bucket = "week"
+                        }
+
+                    staleRequest =
+                        { activeRequest | until = "2026-03-01T00:00:00Z" }
+
+                    timeline =
+                        { Feature.Timeline.init | histogramActiveRequest = Just activeRequest }
+                in
+                [ Feature.Timeline.timelineHistogramAcceptsResponse activeRequest timeline
+                , Feature.Timeline.timelineHistogramAcceptsResponse staleRequest timeline
+                , Feature.Timeline.timelineHistogramAcceptsResponse activeRequest { timeline | histogramActiveRequest = Nothing }
+                ]
+                    |> Expect.equal [ True, False, False ]
         , test "workspace timeline filters entity and lifecycle types" <|
             \_ ->
                 let

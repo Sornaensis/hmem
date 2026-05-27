@@ -8,6 +8,7 @@ module Api exposing
     , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
     , AuditAction(..), AuditLogEntry, RevertResult
     , WorkspaceTimelineEvent, TimelineActor, TimelineProjectContext, TimelineTaskContext, TimelineStatusTransition, TimelineNavigation
+    , TimelineBucketCounts, TimelineBucketEntityCounts, WorkspaceTimelineBucket, WorkspaceTimelineBucketsResponse
     , ApiError, apiErrorToUserMessage, decodeApiErrorBody, isLifecycleConflict
     , CascadeResult
     , PaginatedResult
@@ -36,9 +37,9 @@ module Api exposing
     , createMemory, updateMemory, deleteMemory, setTags
     , fetchWorkspaceGroups, createWorkspaceGroup, deleteWorkspaceGroup
     , fetchGroupMembers, addGroupMember, removeGroupMember
-    , fetchAuditLog, fetchEntityHistory, revertAuditEntry, fetchWorkspaceTimeline
+    , fetchAuditLog, fetchEntityHistory, revertAuditEntry, fetchWorkspaceTimeline, fetchWorkspaceTimelineBuckets
     , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder, nextTaskCandidateDecoder, workspaceCardHydrationDecoder
-    , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, auditLogEntryDecoder, workspaceTimelineEventDecoder
+    , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, auditLogEntryDecoder, workspaceTimelineEventDecoder, workspaceTimelineBucketsResponseDecoder
     , memoryTypeToString, memoryTypeFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
     , auditActionToString, auditActionFromString
     , projectStatusFromString, taskStatusFromString
@@ -354,6 +355,39 @@ type alias TimelineStatusTransition =
 type alias TimelineNavigation =
     { entityType : String
     , entityId : String
+    }
+
+
+type alias TimelineBucketCounts =
+    { created : Int
+    , completed : Int
+    , cancelled : Int
+    }
+
+
+type alias TimelineBucketEntityCounts =
+    { project : TimelineBucketCounts
+    , subproject : TimelineBucketCounts
+    , task : TimelineBucketCounts
+    , subtask : TimelineBucketCounts
+    }
+
+
+type alias WorkspaceTimelineBucket =
+    { bucketStart : String
+    , bucketEnd : String
+    , label : String
+    , counts : TimelineBucketEntityCounts
+    , totals : TimelineBucketCounts
+    }
+
+
+type alias WorkspaceTimelineBucketsResponse =
+    { workspaceId : String
+    , since : String
+    , until : String
+    , bucket : String
+    , buckets : List WorkspaceTimelineBucket
     }
 
 
@@ -1202,6 +1236,43 @@ timelineNavigationDecoder =
         |> required "entity_id" D.string
 
 
+workspaceTimelineBucketsResponseDecoder : Decoder WorkspaceTimelineBucketsResponse
+workspaceTimelineBucketsResponseDecoder =
+    D.succeed WorkspaceTimelineBucketsResponse
+        |> required "workspace_id" D.string
+        |> required "since" D.string
+        |> required "until" D.string
+        |> required "bucket" D.string
+        |> required "buckets" (D.list workspaceTimelineBucketDecoder)
+
+
+workspaceTimelineBucketDecoder : Decoder WorkspaceTimelineBucket
+workspaceTimelineBucketDecoder =
+    D.succeed WorkspaceTimelineBucket
+        |> required "bucket_start" D.string
+        |> required "bucket_end" D.string
+        |> required "label" D.string
+        |> required "counts" timelineBucketEntityCountsDecoder
+        |> required "totals" timelineBucketCountsDecoder
+
+
+timelineBucketEntityCountsDecoder : Decoder TimelineBucketEntityCounts
+timelineBucketEntityCountsDecoder =
+    D.succeed TimelineBucketEntityCounts
+        |> required "project" timelineBucketCountsDecoder
+        |> required "subproject" timelineBucketCountsDecoder
+        |> required "task" timelineBucketCountsDecoder
+        |> required "subtask" timelineBucketCountsDecoder
+
+
+timelineBucketCountsDecoder : Decoder TimelineBucketCounts
+timelineBucketCountsDecoder =
+    D.succeed TimelineBucketCounts
+        |> required "created" D.int
+        |> required "completed" D.int
+        |> required "cancelled" D.int
+
+
 revertResultDecoder : Decoder RevertResult
 revertResultDecoder =
     D.succeed RevertResult
@@ -1557,6 +1628,14 @@ fetchWorkspaceTimeline apiUrl wsId toMsg =
     Http.get
         { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/timeline?limit=50"
         , expect = Http.expectJson toMsg (paginatedDecoder workspaceTimelineEventDecoder)
+        }
+
+
+fetchWorkspaceTimelineBuckets : String -> String -> String -> String -> String -> (Result Http.Error WorkspaceTimelineBucketsResponse -> msg) -> Cmd msg
+fetchWorkspaceTimelineBuckets apiUrl wsId since until bucket toMsg =
+    Http.get
+        { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/timeline/buckets?since=" ++ since ++ "&until=" ++ until ++ "&bucket=" ++ bucket
+        , expect = Http.expectJson toMsg workspaceTimelineBucketsResponseDecoder
         }
 
 

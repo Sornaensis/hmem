@@ -6,6 +6,7 @@ import Browser.Navigation as Nav
 import Dict exposing (Dict)
 import Http
 import Json.Encode as Encode
+import Time
 import Url
 
 
@@ -227,10 +228,28 @@ type alias TimelineModel =
     { events : List Api.WorkspaceTimelineEvent
     , hasMore : Bool
     , loading : Bool
+    , loadingWorkspaceId : Maybe String
     , error : Maybe String
     , loadedWorkspaceId : Maybe String
     , entityFilter : TimelineEntityFilter
     , eventFilter : TimelineEventFilter
+    , histogramBuckets : List Api.WorkspaceTimelineBucket
+    , histogramLoading : Bool
+    , histogramError : Maybe String
+    , histogramSince : String
+    , histogramUntil : String
+    , histogramBucket : String
+    , histogramClockWorkspaceId : Maybe String
+    , histogramActiveRequest : Maybe TimelineHistogramRequest
+    , histogramLoadedRequest : Maybe TimelineHistogramRequest
+    }
+
+
+type alias TimelineHistogramRequest =
+    { workspaceId : String
+    , since : String
+    , until : String
+    , bucket : String
     }
 
 
@@ -433,6 +452,8 @@ type Msg
     | GotSingleMemory (Result Http.Error Api.Memory)
     | GotWorkspaceCardHydration String (Maybe Int) (Result Http.Error Api.WorkspaceCardHydration)
     | GotWorkspaceTimeline String (Result Http.Error (Api.PaginatedResult Api.WorkspaceTimelineEvent))
+    | GotTimelineHistogramClock String Time.Posix
+    | GotWorkspaceTimelineBuckets TimelineHistogramRequest (Result Http.Error Api.WorkspaceTimelineBucketsResponse)
     | GotVisualization String (Result Http.Error Api.WorkspaceVisualization)
       -- Mutation responses
     | MutationDone String (Result Http.Error ())
@@ -585,6 +606,9 @@ type Msg
     | GotEntityHistory String (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
     | SetTimelineEntityFilter TimelineEntityFilter
     | SetTimelineEventFilter TimelineEventFilter
+    | SetTimelineHistogramSince String
+    | SetTimelineHistogramUntil String
+    | SetTimelineHistogramBucket String
     | ToggleEntityHistory String String
     | LoadMoreHistory String String
     | SetAuditFilter String String

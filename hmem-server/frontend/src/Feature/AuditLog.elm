@@ -1697,8 +1697,11 @@ auditReturnFilters entryId auditLog =
             entryIndex
                 |> Maybe.map (\idx -> ((baseOffset + idx) // pageSize) * pageSize)
                 |> Maybe.withDefault baseOffset
+
+        currentFilters =
+            auditLog.filters
     in
-    { auditLog.filters
+    { currentFilters
         | offset =
             if pageOffset <= 0 then
                 Nothing

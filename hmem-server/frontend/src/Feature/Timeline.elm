@@ -438,8 +438,11 @@ selectHistogramBucket model selection =
 resetHistogramSelection : Model -> ( Model, Cmd Msg )
 resetHistogramSelection model =
     let
+        currentTimeline =
+            model.timeline
+
         updatedTimeline =
-            { model.timeline | histogramSelectedBucket = Nothing }
+            { currentTimeline | histogramSelectedBucket = Nothing }
     in
     fetchEventsForTimeline model updatedTimeline
 

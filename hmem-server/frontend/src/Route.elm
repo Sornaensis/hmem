@@ -344,6 +344,12 @@ handleUrlChange url model =
 
                 updatedGraph =
                     { currentGraph | loaded = False, visualization = Nothing }
+
+                currentFocus =
+                    model.focus
+
+                updatedFocus =
+                    { currentFocus | returnContext = Nothing }
             in
             ( { model
                 | url = url
@@ -352,7 +358,7 @@ handleUrlChange url model =
                 , sessionContext = Nothing
                 , webSocket = { state = Disconnected }
                 , graph = updatedGraph
-                , focus = { model.focus | returnContext = Nothing }
+                , focus = updatedFocus
               }
                 |> clearRouteConfirmations
             , Cmd.batch
@@ -415,6 +421,12 @@ handleUrlChange url model =
                         , revertConfirmation = Nothing
                         , revertInFlight = False
                     }
+
+                currentFocus =
+                    model.focus
+
+                updatedFocus =
+                    { currentFocus | returnContext = Nothing }
             in
             ( { model
                 | url = url
@@ -424,7 +436,7 @@ handleUrlChange url model =
                 , selectedWorkspaceId = Nothing
                 , webSocket = { state = Disconnected }
                 , auditLog = updatedAuditLog
-                , focus = { model.focus | returnContext = Nothing }
+                , focus = updatedFocus
               }
                 |> clearRouteConfirmations
             , Cmd.batch
@@ -442,8 +454,14 @@ handleUrlChange url model =
 
                     else
                         Cmd.none
+
+                currentFocus =
+                    model.focus
+
+                updatedFocus =
+                    { currentFocus | returnContext = Nothing }
             in
-            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected }, focus = { model.focus | returnContext = Nothing } }
+            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected }, focus = updatedFocus }
                 |> clearRouteConfirmations
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)

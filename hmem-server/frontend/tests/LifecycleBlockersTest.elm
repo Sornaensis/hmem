@@ -257,8 +257,11 @@ suite =
                         timelineEvent "timeline-event" "2026-05-25T00:00:00Z" "audit-source"
                             |> Feature.Focus.timelineReturnContext "workspace-a" Feature.Timeline.init
 
+                    initialFocus =
+                        Feature.Focus.init (Just ( "task", "timeline-event" ))
+
                     focusWithContext =
-                        { Feature.Focus.init (Just ( "task", "timeline-event" )) | returnContext = Just context }
+                        { initialFocus | returnContext = Just context }
                 in
                 [ Feature.Focus.shouldShowReturnContext focusWithContext
                 , Feature.Focus.focusReturnContextLabel context == "Back to Timeline event"
@@ -279,18 +282,24 @@ suite =
                             returnedWindowEntries =
                                 List.range 150 159 |> List.map entryWithId
 
+                            initialAuditLog =
+                                Feature.AuditLog.init
+
+                            initialAuditFilters =
+                                initialAuditLog.filters
+
                             filtersAtOffset offset =
-                                { Feature.AuditLog.init.filters | offset = Just offset }
+                                { initialAuditFilters | offset = Just offset }
 
                             accumulatedAudit =
-                                { Feature.AuditLog.init
+                                { initialAuditLog
                                     | entries = accumulatedEntries
                                     , entryBaseOffset = 0
                                     , filters = filtersAtOffset 50
                                 }
 
                             returnedWindowAudit =
-                                { Feature.AuditLog.init
+                                { initialAuditLog
                                     | entries = returnedWindowEntries
                                     , entryBaseOffset = 150
                                     , filters = filtersAtOffset 150
@@ -319,8 +328,11 @@ suite =
                     staleRequest =
                         { activeRequest | until = "2026-03-01T00:00:00Z" }
 
+                    initialTimeline =
+                        Feature.Timeline.init
+
                     timeline =
-                        { Feature.Timeline.init | histogramActiveRequest = Just activeRequest }
+                        { initialTimeline | histogramActiveRequest = Just activeRequest }
                 in
                 [ Feature.Timeline.timelineHistogramAcceptsResponse activeRequest timeline
                 , Feature.Timeline.timelineHistogramAcceptsResponse staleRequest timeline

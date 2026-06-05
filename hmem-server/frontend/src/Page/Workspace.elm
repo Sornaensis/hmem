@@ -118,13 +118,21 @@ viewReadableWorkspacePage wsId model ws =
                   else if model.activeTab == AuditTab || model.activeTab == TimelineTab then
                     viewTabContent wsId model
 
+                  else if model.search.isSearching then
+                    Feature.Search.viewUnifiedSearchLoading model
+
                   else
-                    case model.search.unifiedResults of
-                        Just results ->
-                            Feature.Search.viewUnifiedSearchResults (Feature.Memory.viewMemoryCard model) model results
+                    case model.search.searchError of
+                        Just message ->
+                            Feature.Search.viewUnifiedSearchError model message
 
                         Nothing ->
-                            viewTabContent wsId model
+                            case model.search.unifiedResults of
+                                Just results ->
+                                    Feature.Search.viewUnifiedSearchResults model results
+
+                                Nothing ->
+                                    viewTabContent wsId model
                 ]
         ]
 

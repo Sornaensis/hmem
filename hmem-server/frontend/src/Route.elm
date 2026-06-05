@@ -100,6 +100,9 @@ handleUrlChange url model =
                     focusChangedExternally =
                         frag.focus /= model.focus.focusedEntity
 
+                    routeSupersedesSearch =
+                        focusChangedExternally || frag.tab /= model.activeTab
+
                     currentFocus =
                         model.focus
 
@@ -155,6 +158,22 @@ handleUrlChange url model =
                             | linkingMemoryFor = Nothing
                             , linkingEntityFor = Nothing
                         }
+
+                    currentSearch =
+                        model.search
+
+                    updatedSearch =
+                        if routeSupersedesSearch then
+                            { currentSearch
+                                | unifiedResults = Nothing
+                                , isSearching = False
+                                , searchError = Nothing
+                                , activeRequestQuery = Nothing
+                            }
+
+                        else
+                            currentSearch
+
                     updatedModel =
                         { model
                             | url = url
@@ -162,6 +181,7 @@ handleUrlChange url model =
                             , focus = updatedFocus
                             , editing = updatedEditing
                             , memory = updatedMemory
+                            , search = updatedSearch
                         }
                             |> clearRouteConfirmations
 
@@ -256,6 +276,8 @@ handleUrlChange url model =
                             | query = ""
                             , unifiedResults = Nothing
                             , isSearching = False
+                            , searchError = Nothing
+                            , activeRequestQuery = Nothing
                             , filterShowOnly = ShowAll
                             , filterPriority = AnyPriority
                             , filterProjectStatuses = []

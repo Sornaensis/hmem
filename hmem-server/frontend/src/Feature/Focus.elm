@@ -148,6 +148,17 @@ update msg model =
                 newIndex =
                     List.length newHistory - 1
 
+                currentSearch =
+                    model.search
+
+                updatedSearch =
+                    { currentSearch
+                        | unifiedResults = Nothing
+                        , isSearching = False
+                        , searchError = Nothing
+                        , activeRequestQuery = Nothing
+                    }
+
                 newModel =
                     { model
                         | focus =
@@ -158,6 +169,7 @@ update msg model =
                                 , historyIndex = newIndex
                                 , returnContext = Nothing
                             }
+                        , search = updatedSearch
                     }
             in
             ( newModel, replaceFragment newModel )
@@ -170,9 +182,23 @@ update msg model =
                 focusModel =
                     model.focus
 
+                currentSearch =
+                    model.search
+
+                updatedSearch =
+                    { currentSearch
+                        | unifiedResults = Nothing
+                        , isSearching = False
+                        , searchError = Nothing
+                        , activeRequestQuery = Nothing
+                    }
+
                 -- Only change what's focused, don't modify history
                 newModel =
-                    { model | focus = { focusModel | focusedEntity = Just entry, returnContext = Nothing } }
+                    { model
+                        | focus = { focusModel | focusedEntity = Just entry, returnContext = Nothing }
+                        , search = updatedSearch
+                    }
             in
             ( newModel, replaceFragment newModel )
 

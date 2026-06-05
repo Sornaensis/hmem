@@ -261,7 +261,12 @@ update msg model =
                             model.search
 
                         updatedSearch =
-                            { currentSearch | unifiedResults = Nothing, isSearching = False }
+                            { currentSearch
+                                | unifiedResults = Nothing
+                                , isSearching = False
+                                , searchError = Nothing
+                                , activeRequestQuery = Nothing
+                            }
                     in
                     ( { model | activeTab = targetTab, focus = updatedFocus, search = updatedSearch }
                     , Nav.pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment targetTab (Just focusEntry))

@@ -97,7 +97,12 @@ update msg model =
                                     model.search
 
                                 updatedSearch =
-                                    { currentSearch | unifiedResults = Nothing, isSearching = False }
+                                    { currentSearch
+                                        | unifiedResults = Nothing
+                                        , isSearching = False
+                                        , searchError = Nothing
+                                        , activeRequestQuery = Nothing
+                                    }
 
                                 newHistory =
                                     List.take (focusModel.historyIndex + 1) focusModel.history ++ [ focusEntry ]

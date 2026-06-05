@@ -390,6 +390,7 @@ viewMemoryCard model memory =
     in
     div
         [ class ("card" ++ Feature.DragDrop.dragOverClass model memory.id)
+        , id ("entity-" ++ memory.id)
         , draggable (if Permissions.canEditCurrentWorkspace model then "true" else "false")
         , on "dragstart" (Decode.succeed (DragStartCard "memory" memory.id))
         , preventDefaultOn "dragover" (Decode.succeed ( DragOverCard memory.id, True ))

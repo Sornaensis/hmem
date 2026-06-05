@@ -1,7 +1,20 @@
-module Feature.Search exposing (init, update, viewSearchBar, viewUnifiedSearchResults)
+module Feature.Search exposing
+    ( LinkedMemoryPresentation
+    , SearchResultBadge
+    , SearchResultPresentation
+    , clearTransientSearchState
+    , init
+    , searchResultPresentations
+    , unifiedSearchResultCount
+    , update
+    , viewSearchBar
+    , viewUnifiedSearchError
+    , viewUnifiedSearchLoading
+    , viewUnifiedSearchResults
+    )
 
 import Api
-import Helpers exposing (saveFiltersCmd, taskStatusBadgeClass, taskStatusDisplayText, taskStatusTitle)
+import Helpers exposing (replaceFragment, saveFiltersCmd, scrollToElement, taskStatusBadgeClass, taskStatusDisplayText, taskStatusTitle)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
@@ -13,6 +26,8 @@ init =
     { query = ""
     , unifiedResults = Nothing
     , isSearching = False
+    , searchError = Nothing
+    , activeRequestQuery = Nothing
     , filterShowOnly = ShowAll
     , filterPriority = AnyPriority
     , filterProjectStatuses = []
@@ -25,6 +40,34 @@ init =
     }
 
 
+type alias SearchResultBadge =
+    { label : String
+    , className : String
+    , title : String
+    }
+
+
+type alias LinkedMemoryPresentation =
+    { summary : String
+    , importance : Int
+    , tags : List String
+    }
+
+
+type alias SearchResultPresentation =
+    { entityType : String
+    , entityTypeLabel : String
+    , entityTypeClass : String
+    , entityId : String
+    , title : String
+    , summary : String
+    , badges : List SearchResultBadge
+    , tags : List String
+    , linkedMemories : List LinkedMemoryPresentation
+    , actionLabel : String
+    }
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
@@ -34,11 +77,13 @@ update msg model =
                     model.search
 
                 updatedSearch =
-                    if String.isEmpty query then
-                        { searchModel | query = query, unifiedResults = Nothing, isSearching = False }
-
-                    else
-                        { searchModel | query = query }
+                    { searchModel
+                        | query = query
+                        , unifiedResults = Nothing
+                        , isSearching = False
+                        , searchError = Nothing
+                        , activeRequestQuery = Nothing
+                    }
 
                 newModel =
                     { model | search = updatedSearch }
@@ -54,30 +99,65 @@ update msg model =
                     model.search
             in
             if String.isEmpty trimmed then
-                ( { model | search = { searchModel | unifiedResults = Nothing, isSearching = False } }, Cmd.none )
+                ( { model | search = clearUnifiedSearchState searchModel }, Cmd.none )
 
             else
-                ( { model | search = { searchModel | isSearching = True } }
-                , Api.unifiedSearch model.flags.apiUrl trimmed model.selectedWorkspaceId GotUnifiedSearchResults
+                ( { model
+                    | search =
+                        { searchModel
+                            | unifiedResults = Nothing
+                            , isSearching = True
+                            , searchError = Nothing
+                            , activeRequestQuery = Just trimmed
+                        }
+                  }
+                , Api.unifiedSearch model.flags.apiUrl trimmed model.selectedWorkspaceId (GotUnifiedSearchResults trimmed)
                 )
 
-        GotUnifiedSearchResults result ->
-            case result of
-                Ok results ->
-                    let
-                        searchModel =
-                            model.search
-                    in
-                    ( { model | search = { searchModel | unifiedResults = Just results, isSearching = False } }, Cmd.none )
+        GotUnifiedSearchResults requestedQuery result ->
+            let
+                searchModel =
+                    model.search
 
-                Err _ ->
-                    let
-                        searchModel =
-                            model.search
-                    in
-                    ( { model | search = { searchModel | isSearching = False } }
-                    , Cmd.none
-                    )
+                currentQuery =
+                    String.trim searchModel.query
+
+                responseMatchesCurrentQuery =
+                    searchModel.activeRequestQuery == Just requestedQuery && currentQuery == requestedQuery
+            in
+            if not responseMatchesCurrentQuery then
+                ( model, Cmd.none )
+
+            else
+                case result of
+                    Ok results ->
+                        ( { model
+                            | search =
+                                { searchModel
+                                    | unifiedResults = Just results
+                                    , isSearching = False
+                                    , searchError = Nothing
+                                    , activeRequestQuery = Nothing
+                                }
+                          }
+                        , Cmd.none
+                        )
+
+                    Err _ ->
+                        ( { model
+                            | search =
+                                { searchModel
+                                    | unifiedResults = Nothing
+                                    , isSearching = False
+                                    , searchError = Just "Search failed. Please try again."
+                                    , activeRequestQuery = Nothing
+                                }
+                          }
+                        , Cmd.none
+                        )
+
+        NavigateToSearchResult entityType entityId ->
+            navigateToSearchResult entityType entityId model
 
         SetFilterShowOnly show ->
             let
@@ -201,6 +281,94 @@ update msg model =
             ( model, Cmd.none )
 
 
+clearTransientSearchState : SearchModel -> SearchModel
+clearTransientSearchState searchModel =
+    { searchModel
+        | unifiedResults = Nothing
+        , isSearching = False
+        , searchError = Nothing
+        , activeRequestQuery = Nothing
+    }
+
+
+clearUnifiedSearchState : SearchModel -> SearchModel
+clearUnifiedSearchState =
+    clearTransientSearchState
+
+
+navigateToSearchResult : String -> String -> Model -> ( Model, Cmd Msg )
+navigateToSearchResult entityType entityId model =
+    let
+        baseClearedSearch =
+            clearUnifiedSearchState model.search
+
+        clearedSearch =
+            if entityType == "memory" then
+                { baseClearedSearch
+                    | query = ""
+                    , filterMemoryTypes = []
+                    , filterImportance = AnyPriority
+                    , filterMemoryPinned = Nothing
+                    , filterMemoryActiveLinked = False
+                    , filterTags = []
+                }
+
+            else
+                baseClearedSearch
+
+        isFocusableEntity =
+            entityType == "project" || entityType == "task"
+
+        focusEntry =
+            ( entityType, entityId )
+
+        currentFocus =
+            model.focus
+
+        focusedHistory =
+            List.take (currentFocus.historyIndex + 1) currentFocus.history ++ [ focusEntry ]
+
+        updatedFocus =
+            if isFocusableEntity then
+                { currentFocus
+                    | focusedEntity = Just focusEntry
+                    , breadcrumbAnchor = Just focusEntry
+                    , history = focusedHistory
+                    , historyIndex = List.length focusedHistory - 1
+                    , returnContext = Nothing
+                }
+
+            else
+                { currentFocus
+                    | focusedEntity = Nothing
+                    , breadcrumbAnchor = Nothing
+                    , history = []
+                    , historyIndex = 0
+                    , returnContext = Nothing
+                }
+
+        targetTab =
+            if entityType == "memory" then
+                MemoriesTab
+
+            else
+                ProjectsTab
+
+        nextModel =
+            { model
+                | activeTab = targetTab
+                , search = clearedSearch
+                , focus = updatedFocus
+            }
+    in
+    ( nextModel
+    , Cmd.batch
+        [ replaceFragment nextModel
+        , scrollToElement ("entity-" ++ entityId)
+        ]
+    )
+
+
 viewSearchBar : Model -> Html Msg
 viewSearchBar model =
     div [ class "search-filter-bar" ]
@@ -222,23 +390,22 @@ viewSearchBar model =
               else
                 text ""
             ]
-        , case model.search.unifiedResults of
-            Just _ ->
-                text ""
+        , if model.search.isSearching || model.search.searchError /= Nothing || model.search.unifiedResults /= Nothing then
+            text ""
 
-            Nothing ->
-                case model.activeTab of
-                    ProjectsTab ->
-                        viewFilterBar model
+          else
+            case model.activeTab of
+                ProjectsTab ->
+                    viewFilterBar model
 
-                    MemoriesTab ->
-                        viewMemoryFilterBar model
+                MemoriesTab ->
+                    viewMemoryFilterBar model
 
-                    TimelineTab ->
-                        text ""
+                TimelineTab ->
+                    text ""
 
-                    AuditTab ->
-                        text ""
+                AuditTab ->
+                    text ""
         ]
 
 
@@ -509,110 +676,324 @@ viewFilterPill label isActive msg =
         [ text label ]
 
 
-viewUnifiedSearchResults : (Api.Memory -> Html Msg) -> Model -> Api.UnifiedSearchResults -> Html Msg
-viewUnifiedSearchResults viewMemoryCardFn model results =
+unifiedSearchResultCount : Api.UnifiedSearchResults -> Int
+unifiedSearchResultCount results =
+    List.length results.memories + List.length results.projects + List.length results.tasks
+
+
+searchResultPresentations : Api.UnifiedSearchResults -> List SearchResultPresentation
+searchResultPresentations results =
+    List.map projectResultPresentation results.projects
+        ++ List.map taskResultPresentation results.tasks
+        ++ List.map memoryResultPresentation results.memories
+
+
+viewUnifiedSearchLoading : Model -> Html Msg
+viewUnifiedSearchLoading model =
+    div [ class "unified-search-results search-results-state", attribute "role" "status", attribute "aria-live" "polite" ]
+        [ div [ class "search-state-card" ]
+            [ h3 [] [ text "Searching…" ]
+            , p [] [ text ("Looking for results matching " ++ searchQueryLabel model ++ ".") ]
+            ]
+        ]
+
+
+viewUnifiedSearchError : Model -> String -> Html Msg
+viewUnifiedSearchError model message =
+    div [ class "unified-search-results search-results-state", attribute "role" "alert" ]
+        [ div [ class "search-state-card search-state-error" ]
+            [ h3 [] [ text "Search unavailable" ]
+            , p [] [ text message ]
+            , p [ class "search-state-muted" ] [ text ("Query: " ++ searchQueryLabel model) ]
+            , button [ class "btn-small search-result-action", onClick SubmitSearch ] [ text "Retry search" ]
+            ]
+        ]
+
+
+viewUnifiedSearchResults : Model -> Api.UnifiedSearchResults -> Html Msg
+viewUnifiedSearchResults model results =
     let
         totalCount =
-            List.length results.memories + List.length results.projects + List.length results.tasks
+            unifiedSearchResultCount results
     in
     div [ class "unified-search-results" ]
-        [ div [ class "search-results-header" ]
-            [ span [ class "search-results-count" ]
-                [ text (String.fromInt totalCount ++ " results") ]
+        ([ div [ class "search-results-header" ]
+            [ div []
+                [ h3 [ class "search-results-title" ] [ text ("Search results for " ++ searchQueryLabel model) ]
+                , span [ class "search-results-count" ]
+                    [ text (String.fromInt totalCount ++ " " ++ pluralize "result" totalCount) ]
+                ]
             ]
-        , if not (List.isEmpty results.projects) then
-            div [ class "search-results-section" ]
-                [ h3 [ class "search-section-title" ]
-                    [ text ("Projects (" ++ String.fromInt (List.length results.projects) ++ ")") ]
-                , div [ class "entity-list" ]
-                    (List.map (viewSearchProjectResult model) results.projects)
-                ]
+         ]
+            ++ (if totalCount == 0 then
+                    [ viewEmptySearchResults model ]
 
-          else
-            text ""
-        , if not (List.isEmpty results.tasks) then
-            div [ class "search-results-section" ]
-                [ h3 [ class "search-section-title" ]
-                    [ text ("Tasks (" ++ String.fromInt (List.length results.tasks) ++ ")") ]
-                , div [ class "entity-list" ]
-                    (List.map (viewSearchTaskResult model) results.tasks)
-                ]
+                else
+                    [ viewSearchSection "Projects" results.projects projectResultPresentation
+                    , viewSearchSection "Tasks" results.tasks taskResultPresentation
+                    , viewSearchSection "Memories" results.memories memoryResultPresentation
+                    ]
+               )
+        )
 
-          else
-            text ""
-        , if not (List.isEmpty results.memories) then
-            div [ class "search-results-section" ]
-                [ h3 [ class "search-section-title" ]
-                    [ text ("Memories (" ++ String.fromInt (List.length results.memories) ++ ")") ]
-                , div [ class "entity-list" ]
-                    (List.map viewMemoryCardFn results.memories)
-                ]
 
-          else
-            text ""
-        , if totalCount == 0 then
-            div [ class "empty-state" ] [ text "No results found." ]
+viewSearchSection : String -> List source -> (source -> SearchResultPresentation) -> Html Msg
+viewSearchSection label items toPresentation =
+    if List.isEmpty items then
+        text ""
 
-          else
-            text ""
+    else
+        div [ class "search-results-section" ]
+            [ h3 [ class "search-section-title" ]
+                [ text (label ++ " (" ++ String.fromInt (List.length items) ++ ")") ]
+            , div [ class "search-result-list" ]
+                (List.map (toPresentation >> viewSearchResultCard) items)
+            ]
+
+
+viewEmptySearchResults : Model -> Html Msg
+viewEmptySearchResults model =
+    div [ class "empty-state search-empty-state" ]
+        [ h3 [] [ text "No results found" ]
+        , p [] [ text ("No projects, tasks, or memories matched " ++ searchQueryLabel model ++ ".") ]
         ]
 
 
-viewSearchProjectResult : Model -> Api.ProjectSearchResult -> Html Msg
-viewSearchProjectResult model result =
-    div [ class "search-result-card" ]
-        [ div [ class "card-header" ]
-            [ span [ class "card-title" ] [ text result.project.name ]
-            , span [ class ("badge badge-" ++ Api.projectStatusToString result.project.status) ]
-                [ text (Api.projectStatusToString result.project.status) ]
-            , span [ class "badge badge-priority" ]
-                [ text ("P" ++ String.fromInt result.project.priority) ]
+viewSearchResultCard : SearchResultPresentation -> Html Msg
+viewSearchResultCard result =
+    div [ class ("search-result-card search-result-" ++ result.entityType), id ("search-result-" ++ result.entityId) ]
+        [ div [ class "search-result-main" ]
+            [ div [ class "search-result-topline" ]
+                ([ span [ class ("entity-type-label " ++ result.entityTypeClass), title result.entityType ] [ text result.entityTypeLabel ]
+                 , span [ class "search-result-title", title result.title ] [ text result.title ]
+                 ]
+                    ++ List.map viewSearchResultBadge result.badges
+                )
+            , div [ class "search-result-summary" ] [ text result.summary ]
+            , viewSearchResultTags result.tags
+            , viewLinkedMemorySummaries result.linkedMemories
             ]
-        , case result.project.description of
-            Just desc ->
-                div [ class "card-body" ] [ text desc ]
-
-            Nothing ->
-                text ""
-        , if not (List.isEmpty result.linkedMemories) then
-            div [ class "linked-memories-summary" ]
-                (List.map viewLinkedMemorySummary result.linkedMemories)
-
-          else
-            text ""
+        , div [ class "search-result-actions" ]
+            [ button
+                [ class "btn-small search-result-action"
+                , onClick (NavigateToSearchResult result.entityType result.entityId)
+                , title (result.actionLabel ++ " " ++ result.entityType)
+                ]
+                [ text result.actionLabel ]
+            ]
         ]
 
 
-viewSearchTaskResult : Model -> Api.TaskSearchResult -> Html Msg
-viewSearchTaskResult model result =
-    div [ class "search-result-card" ]
-        [ div [ class "card-header" ]
-            [ span [ class "card-title" ] [ text result.task.title ]
-            , span [ class (taskStatusBadgeClass result.task.status), title (taskStatusTitle result.task.status) ]
-                [ text (taskStatusDisplayText result.task.status) ]
-            , span [ class "badge badge-priority" ]
-                [ text ("P" ++ String.fromInt result.task.priority) ]
-            ]
-        , case result.task.description of
-            Just desc ->
-                div [ class "card-body" ] [ text desc ]
-
-            Nothing ->
-                text ""
-        , if not (List.isEmpty result.linkedMemories) then
-            div [ class "linked-memories-summary" ]
-                (List.map viewLinkedMemorySummary result.linkedMemories)
-
-          else
-            text ""
-        ]
+viewSearchResultBadge : SearchResultBadge -> Html Msg
+viewSearchResultBadge badge =
+    span [ class badge.className, title badge.title ] [ text badge.label ]
 
 
-viewLinkedMemorySummary : Api.LinkedMemorySummary -> Html Msg
+viewSearchResultTags : List String -> Html Msg
+viewSearchResultTags tags =
+    if List.isEmpty tags then
+        text ""
+
+    else
+        div [ class "tag-list search-result-tags" ]
+            (List.map (\tag -> span [ class "tag", title tag ] [ text tag ]) tags)
+
+
+viewLinkedMemorySummaries : List LinkedMemoryPresentation -> Html Msg
+viewLinkedMemorySummaries memories =
+    if List.isEmpty memories then
+        text ""
+
+    else
+        div [ class "linked-memories-summary search-linked-memories" ]
+            (List.map viewLinkedMemorySummary memories)
+
+
+viewLinkedMemorySummary : LinkedMemoryPresentation -> Html Msg
 viewLinkedMemorySummary mem =
     div [ class "linked-memory-chip" ]
-        [ span [ class "linked-memory-importance" ]
+        [ span [ class "linked-memory-importance", title "Linked memory importance" ]
             [ text (String.fromInt mem.importance) ]
         , span [ class "linked-memory-text" ]
-            [ text (Maybe.withDefault "(no summary)" mem.summary) ]
+            [ text mem.summary ]
+        , if List.isEmpty mem.tags then
+            text ""
+
+          else
+            span [ class "linked-memory-tags", title (String.join ", " mem.tags) ]
+                [ text (String.join ", " mem.tags) ]
         ]
+
+
+projectResultPresentation : Api.ProjectSearchResult -> SearchResultPresentation
+projectResultPresentation result =
+    { entityType = "project"
+    , entityTypeLabel = "PRJ"
+    , entityTypeClass = "entity-type-project"
+    , entityId = result.project.id
+    , title = nonBlankString result.project.name ("Project " ++ shortId result.project.id)
+    , summary = nonBlankMaybe result.project.description "No description"
+    , badges =
+        [ { label = humanizeToken (Api.projectStatusToString result.project.status)
+          , className = "badge badge-" ++ Api.projectStatusToString result.project.status
+          , title = "Project status"
+          }
+        , priorityBadge result.project.priority
+        ]
+    , tags = []
+    , linkedMemories = List.map linkedMemoryPresentation result.linkedMemories
+    , actionLabel = "Focus project"
+    }
+
+
+taskResultPresentation : Api.TaskSearchResult -> SearchResultPresentation
+taskResultPresentation result =
+    { entityType = "task"
+    , entityTypeLabel =
+        if result.task.parentId == Nothing then
+            "TSK"
+
+        else
+            "SUB"
+    , entityTypeClass =
+        if result.task.parentId == Nothing then
+            "entity-type-task"
+
+        else
+            "entity-type-subtask"
+    , entityId = result.task.id
+    , title = nonBlankString result.task.title ("Task " ++ shortId result.task.id)
+    , summary = nonBlankMaybe result.task.description "No description"
+    , badges =
+        [ { label = humanizeToken (taskStatusDisplayText result.task.status)
+          , className = taskStatusBadgeClass result.task.status
+          , title = taskStatusTitle result.task.status
+          }
+        , priorityBadge result.task.priority
+        ]
+    , tags = []
+    , linkedMemories = List.map linkedMemoryPresentation result.linkedMemories
+    , actionLabel = "Focus task"
+    }
+
+
+memoryResultPresentation : Api.Memory -> SearchResultPresentation
+memoryResultPresentation memory =
+    let
+        memoryTitle =
+            nonBlankMaybe memory.summary ("Memory " ++ shortId memory.id)
+    in
+    { entityType = "memory"
+    , entityTypeLabel = "MEM"
+    , entityTypeClass = "entity-type-memory"
+    , entityId = memory.id
+    , title = memoryTitle
+    , summary = nonBlankString memory.content "No memory content"
+    , badges =
+        [ { label = memoryTypeLabel memory.memoryType
+          , className = "badge badge-" ++ Api.memoryTypeToString memory.memoryType
+          , title = "Memory type"
+          }
+        , { label = "I" ++ String.fromInt memory.importance
+          , className = "badge badge-priority"
+          , title = "Memory importance"
+          }
+        ]
+            ++ (if memory.pinned then
+                    [ { label = "Pinned", className = "badge badge-pinned", title = "Pinned memory" } ]
+
+                else
+                    []
+               )
+    , tags = memory.tags
+    , linkedMemories = []
+    , actionLabel = "Open memory"
+    }
+
+
+linkedMemoryPresentation : Api.LinkedMemorySummary -> LinkedMemoryPresentation
+linkedMemoryPresentation mem =
+    { summary = nonBlankMaybe mem.summary "(no summary)"
+    , importance = mem.importance
+    , tags = mem.tags
+    }
+
+
+priorityBadge : Int -> SearchResultBadge
+priorityBadge priority =
+    { label = "P" ++ String.fromInt priority
+    , className = "badge badge-priority"
+    , title = "Priority"
+    }
+
+
+memoryTypeLabel : Api.MemoryType -> String
+memoryTypeLabel memoryType =
+    case memoryType of
+        Api.ShortTerm ->
+            "Short term"
+
+        Api.LongTerm ->
+            "Long term"
+
+
+searchQueryLabel : Model -> String
+searchQueryLabel model =
+    let
+        trimmed =
+            String.trim model.search.query
+    in
+    if String.isEmpty trimmed then
+        "the current query"
+
+    else
+        "“" ++ trimmed ++ "”"
+
+
+nonBlankMaybe : Maybe String -> String -> String
+nonBlankMaybe maybeValue fallback =
+    maybeValue
+        |> Maybe.map (\value -> nonBlankString value fallback)
+        |> Maybe.withDefault fallback
+
+
+nonBlankString : String -> String -> String
+nonBlankString value fallback =
+    if String.isEmpty (String.trim value) then
+        fallback
+
+    else
+        value
+
+
+shortId : String -> String
+shortId value =
+    String.left 8 value
+
+
+pluralize : String -> Int -> String
+pluralize singular count =
+    if count == 1 then
+        singular
+
+    else
+        singular ++ "s"
+
+
+humanizeToken : String -> String
+humanizeToken token =
+    token
+        |> String.replace "_" " "
+        |> String.words
+        |> List.map capitalizeWord
+        |> String.join " "
+
+
+capitalizeWord : String -> String
+capitalizeWord word =
+    case String.uncons word of
+        Nothing ->
+            ""
+
+        Just ( first, rest ) ->
+            String.fromChar first |> String.toUpper |> (\head -> head ++ rest)

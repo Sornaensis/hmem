@@ -177,7 +177,10 @@ update msg model =
         SubmitSearch ->
             Ok (Feature.Search.update msg model)
 
-        GotUnifiedSearchResults _ ->
+        GotUnifiedSearchResults _ _ ->
+            Ok (Feature.Search.update msg model)
+
+        NavigateToSearchResult _ _ ->
             Ok (Feature.Search.update msg model)
 
         SetFilterShowOnly _ ->

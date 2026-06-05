@@ -122,7 +122,12 @@ handleOwned ownedMsg model =
                     model
                         |> Feature.Editing.clearForTabSwitch
                         |> Feature.Memory.clearForTabSwitch
-                        |> (\currentModel -> { currentModel | activeTab = tab })
+                        |> (\currentModel ->
+                                { currentModel
+                                    | activeTab = tab
+                                    , search = Feature.Search.clearTransientSearchState currentModel.search
+                                }
+                           )
 
                 ( auditLog, auditCmd ) =
                     case ( tab, newModel.selectedWorkspaceId ) of

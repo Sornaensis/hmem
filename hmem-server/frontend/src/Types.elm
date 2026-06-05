@@ -103,6 +103,8 @@ type alias SearchModel =
     { query : String
     , unifiedResults : Maybe Api.UnifiedSearchResults
     , isSearching : Bool
+    , searchError : Maybe String
+    , activeRequestQuery : Maybe String
     , filterShowOnly : FilterShowOnly
     , filterPriority : FilterPriority
     , filterProjectStatuses : List String
@@ -523,7 +525,8 @@ type Msg
     | AutoDismissToast Int
     | SearchInput String
     | SubmitSearch
-    | GotUnifiedSearchResults (Result Http.Error Api.UnifiedSearchResults)
+    | GotUnifiedSearchResults String (Result Http.Error Api.UnifiedSearchResults)
+    | NavigateToSearchResult String String
     | SetFilterShowOnly FilterShowOnly
     | SetFilterPriority FilterPriority
     | ToggleFilterProjectStatus String

@@ -2328,15 +2328,8 @@ a:hover {
 }
 
 .next-task-candidate {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.5rem 0.625rem;
-  border: 1px solid var(--border);
   border-left-width: 3px;
-  border-radius: 0.375rem;
-  background: var(--bg-elevated);
+  cursor: default;
 }
 
 .next-task-ready {
@@ -2351,34 +2344,8 @@ a:hover {
   border-left-color: var(--error);
 }
 
-.next-task-main {
-  min-width: 0;
-}
-
-.next-task-title-row,
-.next-task-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-}
-
-.next-task-title {
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.next-task-priority,
-.next-task-status {
-  font-size: 0.6875rem;
-  color: var(--text-muted);
-  padding: 0.125rem 0.375rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-}
-
-.next-task-actions {
-  flex-shrink: 0;
+.next-task-rationale {
+  margin-top: 0.125rem;
 }
 
 .dep-item {

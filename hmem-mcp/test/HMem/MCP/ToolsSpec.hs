@@ -551,6 +551,7 @@ spec = do
         (firstArrayItem "items" nextTasks >>= jsonField "task" >>= jsonField "description") `shouldBe` Nothing
         show nextTasks `shouldNotContain` "workspace_id"
         show nextTasks `shouldNotContain` "full task description"
+        show nextTasks `shouldNotContain` "project-only next-task regression row"
 
     it "routes composite workflow tools through HTTP compact workflow shaping" $ do
       withMockHmemServer $ \mgr base -> do
@@ -1573,6 +1574,13 @@ nextTasksRegressionValue = toJSON
       , "completion_gated" .= False
       , "open_descendant_count" .= (0 :: Int)
       , "open_dependency_count" .= (0 :: Int)
+      ]
+  , object
+      [ "project" .= object
+          [ "id" .= parsedUUID2
+          , "name" .= ("project-only next-task regression row" :: Text)
+          , "priority" .= (10 :: Int)
+          ]
       ]
   ]
 

@@ -3923,11 +3923,11 @@ spec = around withApp $ do
       let Just ws = decode (respBody wsResp) :: Maybe Workspace
 
       projResp <- postJSON app "/api/v1/projects"
-        (object ["workspace_id" .= ws.id, "name" .= ("Next Tasks Project" :: T.Text)])
+        (object ["workspace_id" .= ws.id, "name" .= ("Next Tasks Project" :: T.Text), "priority" .= (5 :: Int)])
       let Just proj = decode (respBody projResp) :: Maybe Project
 
       childProjectResp <- postJSON app "/api/v1/projects"
-        (object ["workspace_id" .= ws.id, "parent_id" .= proj.id, "name" .= ("Next Tasks Child Project" :: T.Text)])
+        (object ["workspace_id" .= ws.id, "parent_id" .= proj.id, "name" .= ("Next Tasks Child Project" :: T.Text), "priority" .= (9 :: Int)])
       let Just childProject = decode (respBody childProjectResp) :: Maybe Project
 
       depResp <- postJSON app "/api/v1/tasks"
@@ -3957,8 +3957,15 @@ spec = around withApp $ do
       initialResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks?limit=2")
       respStatus initialResp `shouldBe` 200
       let Just initialReady = decode (respBody initialResp) :: Maybe [NextTaskCandidate]
-      map (.task.id) initialReady `shouldBe` [parentTask.id, childProjectTask.id]
-      map (.completionGated) initialReady `shouldBe` [True, False]
+      let Just (Array initialRawItems) = decode (respBody initialResp) :: Maybe Value
+      forM_ initialRawItems $ \case
+        Object item -> do
+          KM.member (Key.fromString "task") item `shouldBe` True
+          KM.member (Key.fromString "project") item `shouldBe` False
+          KM.member (Key.fromString "subproject") item `shouldBe` False
+        other -> expectationFailure $ "Expected next-task candidate object, got: " <> show other
+      map (.task.id) initialReady `shouldBe` [childProjectTask.id, parentTask.id]
+      map (.completionGated) initialReady `shouldBe` [False, True]
 
       dependencyBlockedResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks?include_blocked=true")
       respStatus dependencyBlockedResp `shouldBe` 200
@@ -3975,8 +3982,8 @@ spec = around withApp $ do
       runningResp <- get_ app (uuidPath "/api/v1/projects" proj.id <> "/next-tasks?limit=3")
       respStatus runningResp `shouldBe` 200
       let Just runningReady = decode (respBody runningResp) :: Maybe [NextTaskCandidate]
-      map (.task.id) runningReady `shouldBe` [parentTask.id, childTask.id, childProjectTask.id]
-      map (.completionGated) runningReady `shouldBe` [True, False, False]
+      map (.task.id) runningReady `shouldBe` [childProjectTask.id, parentTask.id, childTask.id]
+      map (.completionGated) runningReady `shouldBe` [False, True, False]
 
       doneDepResp <- putJSON app (uuidPath "/api/v1/tasks" depTask.id)
         (object ["status" .= ("done" :: T.Text)])

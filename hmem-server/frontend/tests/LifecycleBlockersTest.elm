@@ -16,7 +16,7 @@ import Page.Workspace
 import Permissions
 import String
 import Test exposing (..)
-import Types exposing (FocusReturnSource(..), TimelineEntityFilter(..), TimelineEventFilter(..), WorkspaceTab(..))
+import Types exposing (FocusReturnSource(..), Msg(..), TimelineEntityFilter(..), TimelineEventFilter(..), WorkspaceTab(..))
 
 
 suite : Test
@@ -116,25 +116,25 @@ suite =
                         project "active-project" Nothing
 
                     closedProject =
-                        { project "closed-project" Nothing | status = Api.ProjCompleted }
+                        projectWithStatus "closed-project" Nothing Api.ProjCompleted
 
                     openTask =
                         task "open-task" Nothing (Just "active-project")
 
                     blockedTask =
-                        { task "blocked-task" Nothing (Just "active-project") | status = Api.Blocked }
+                        taskWithStatus "blocked-task" Nothing (Just "active-project") Api.Blocked
 
                     doneTask =
-                        { task "done-task" Nothing (Just "active-project") | status = Api.Done }
+                        taskWithStatus "done-task" Nothing (Just "active-project") Api.Done
 
                     otherWorkspaceTask =
-                        { task "other-workspace-task" Nothing Nothing | workspaceId = "workspace-b" }
+                        taskWithWorkspace "other-workspace-task" Nothing Nothing "workspace-b"
 
                     workspaceMemory =
                         memory "memory-a"
 
                     otherWorkspaceMemory =
-                        { memory "memory-b" | workspaceId = "workspace-b" }
+                        memoryWithWorkspace "memory-b" "workspace-b"
                 in
                 [ Page.Workspace.workspaceSummaryParts True "workspace-a" [ activeProject ] [ openTask ] [ workspaceMemory ]
                 , Page.Workspace.workspaceSummaryParts False "workspace-a" [ activeProject, closedProject ] [ openTask, blockedTask, doneTask, otherWorkspaceTask ] [ workspaceMemory, otherWorkspaceMemory ]
@@ -465,10 +465,10 @@ suite =
                         task "parent" Nothing (Just "project-a")
 
                     matchingSubtask =
-                        { task "matching-subtask" (Just "parent") (Just "project-a") | status = Api.Done }
+                        taskWithStatus "matching-subtask" (Just "parent") (Just "project-a") Api.Done
 
                     hiddenSubtask =
-                        { task "hidden-subtask" (Just "parent") (Just "project-a") | status = Api.Todo }
+                        taskWithStatus "hidden-subtask" (Just "parent") (Just "project-a") Api.Todo
 
                     allTasks =
                         [ parent, matchingSubtask, hiddenSubtask ]
@@ -488,7 +488,7 @@ suite =
                         task "parent" Nothing (Just "project-a")
 
                     matchingSubtask =
-                        { task "matching-subtask" (Just "parent") (Just "project-a") | title = "Needle child" }
+                        taskWithTitle "matching-subtask" (Just "parent") (Just "project-a") "Needle child"
 
                     allTasks =
                         [ parent, matchingSubtask ]
@@ -507,13 +507,13 @@ suite =
                         task "parent" Nothing (Just "project-a")
 
                     searchOnlySubtask =
-                        { task "search-only" (Just "parent") (Just "project-a") | title = "Needle but todo", status = Api.Todo }
+                        taskWithTitleStatus "search-only" (Just "parent") (Just "project-a") "Needle but todo" Api.Todo
 
                     filterOnlySubtask =
-                        { task "filter-only" (Just "parent") (Just "project-a") | title = "Done without query", status = Api.Done }
+                        taskWithTitleStatus "filter-only" (Just "parent") (Just "project-a") "Done without query" Api.Done
 
                     matchingSubtask =
-                        { task "matching" (Just "parent") (Just "project-a") | title = "Needle and done", status = Api.Done }
+                        taskWithTitleStatus "matching" (Just "parent") (Just "project-a") "Needle and done" Api.Done
 
                     allTasks =
                         [ parent, searchOnlySubtask, filterOnlySubtask, matchingSubtask ]
@@ -565,7 +565,7 @@ suite =
             \_ ->
                 let
                     blockedTask =
-                        { task "blocked" Nothing (Just "project-a") | status = Api.Blocked }
+                        taskWithStatus "blocked" Nothing (Just "project-a") Api.Blocked
 
                     normalTask =
                         task "normal" Nothing (Just "project-a")
@@ -752,6 +752,29 @@ suite =
                         , "No ready tasks found. Blocked candidates are listed below with their dependency/manual-blocking rationale."
                         , "No ready tasks found. Start parent tasks, then resolve any remaining blockers, to make waiting subtasks actionable."
                         ]
+        , test "next task card actions expose only a focusing Jump action" <|
+            \_ ->
+                let
+                    candidate =
+                        { task = task "jump-task" Nothing (Just "project-a")
+                        , completionGated = False
+                        , openDescendantCount = 0
+                        , dependencyBlocked = False
+                        , openDependencyCount = 0
+                        }
+                in
+                case Feature.Cards.nextTaskCardActions candidate of
+                    [ action ] ->
+                        case action.msg of
+                            FocusEntity entityType entityId ->
+                                ( action.label, entityType, entityId )
+                                    |> Expect.equal ( "Jump", "task", "jump-task" )
+
+                            _ ->
+                                Expect.fail "Expected Jump to focus the task"
+
+                    other ->
+                        Expect.fail ("Expected only one next-task action, got " ++ String.fromInt (List.length other))
         , test "memory target options include projects and top-level tasks only" <|
             \_ ->
                 let
@@ -803,16 +826,16 @@ suite =
                         project "active-project" Nothing
 
                     archivedProject =
-                        { project "archived-project" Nothing | status = Api.ProjArchived }
+                        projectWithStatus "archived-project" Nothing Api.ProjArchived
 
                     activeTask =
                         task "active-task" Nothing (Just "project-a")
 
                     doneTask =
-                        { task "done-task" Nothing (Just "project-a") | status = Api.Done }
+                        taskWithStatus "done-task" Nothing (Just "project-a") Api.Done
 
                     cancelledTask =
-                        { task "cancelled-task" Nothing (Just "project-a") | status = Api.Cancelled }
+                        taskWithStatus "cancelled-task" Nothing (Just "project-a") Api.Cancelled
 
                     links =
                         Dict.fromList
@@ -1148,6 +1171,60 @@ memory id =
     , createdAt = "2026-01-01T00:00:00Z"
     , updatedAt = "2026-01-01T00:00:00Z"
     }
+
+
+projectWithStatus : String -> Maybe String -> Api.ProjectStatus -> Api.Project
+projectWithStatus id parentId status =
+    let
+        base =
+            project id parentId
+    in
+    { base | status = status }
+
+
+taskWithStatus : String -> Maybe String -> Maybe String -> Api.TaskStatus -> Api.Task
+taskWithStatus id parentId projectId status =
+    let
+        base =
+            task id parentId projectId
+    in
+    { base | status = status }
+
+
+taskWithWorkspace : String -> Maybe String -> Maybe String -> String -> Api.Task
+taskWithWorkspace id parentId projectId workspaceId =
+    let
+        base =
+            task id parentId projectId
+    in
+    { base | workspaceId = workspaceId }
+
+
+taskWithTitle : String -> Maybe String -> Maybe String -> String -> Api.Task
+taskWithTitle id parentId projectId title =
+    let
+        base =
+            task id parentId projectId
+    in
+    { base | title = title }
+
+
+taskWithTitleStatus : String -> Maybe String -> Maybe String -> String -> Api.TaskStatus -> Api.Task
+taskWithTitleStatus id parentId projectId title status =
+    let
+        base =
+            task id parentId projectId
+    in
+    { base | title = title, status = status }
+
+
+memoryWithWorkspace : String -> String -> Api.Memory
+memoryWithWorkspace id workspaceId =
+    let
+        base =
+            memory id
+    in
+    { base | workspaceId = workspaceId }
 
 
 sessionContext : String -> String -> String -> Bool -> Bool -> Maybe String -> Api.SessionContext

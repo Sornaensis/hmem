@@ -218,7 +218,7 @@ slimToolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
-    , mkTool "project_next_tasks" "Get the next actionable tasks for a project subtree, sorted by priority then creation time. By default returns only ready tasks; set include_blocked=true to include dependency-blocked/manual-blocked diagnostics. Open subtasks gate parent completion but are not dependency blockers." $ object
+    , mkTool "project_next_tasks" "Get the next actionable task rows for a project subtree, sorted by scoped project priority, then task priority, then stable task creation/id tie-breakers. By default returns only ready tasks; set include_blocked=true to include dependency-blocked/manual-blocked diagnostics. Open subtasks gate parent completion but are not dependency blockers." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project"
@@ -1109,7 +1109,13 @@ compactGraphEdge value = object $ catMaybes
 
 compactNextTasks :: Value -> Value
 compactNextTasks value = object
-  [ "items" .= map compactNextTaskCandidateSummary (objectArrayValue value) ]
+  [ "items" .= mapMaybe compactNextTaskCandidateSummaryIfTask (objectArrayValue value) ]
+
+
+compactNextTaskCandidateSummaryIfTask :: Value -> Maybe Value
+compactNextTaskCandidateSummaryIfTask value = case objectNonNullField "task" value of
+  Just _  -> Just $ compactNextTaskCandidateSummary value
+  Nothing -> Nothing
 
 
 compactNextTaskCandidateSummary :: Value -> Value

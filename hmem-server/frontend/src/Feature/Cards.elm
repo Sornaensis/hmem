@@ -1,9 +1,11 @@
 module Feature.Cards exposing
-    ( cascadeDeleteFailureFallback
+    ( NextTaskCardAction
+    , cascadeDeleteFailureFallback
     , cascadeDeletePreview
     , cascadeDeleteSuccessMessage
     , handleEscape
     , init
+    , nextTaskCardActions
     , nextTaskRationale
     , noReadyNextTaskMessage
     , focusClickIntervalTriggers
@@ -1430,7 +1432,7 @@ viewProjectNextTasksPanel model project =
             [ div []
                 [ div [ class "project-next-tasks-title" ] [ text "Next tasks" ]
                 , div [ class "project-next-tasks-subtitle" ]
-                    [ text "Top ready candidates first; blocked diagnostics are separated below." ]
+                    [ text "Project priority first, then task priority; blocked diagnostics are separated below." ]
                 ]
             , button
                 [ class "btn-inline-create"
@@ -1481,42 +1483,72 @@ viewProjectNextTasksPanel model project =
         ]
 
 
+type alias NextTaskCardAction =
+    { label : String
+    , title : String
+    , msg : Msg
+    }
+
+
+nextTaskCardActions : Api.NextTaskCandidate -> List NextTaskCardAction
+nextTaskCardActions candidate =
+    [ { label = "Jump"
+      , title = "Jump to task"
+      , msg = FocusEntity "task" candidate.task.id
+      }
+    ]
+
+
 viewNextTaskCandidate : Model -> Api.NextTaskCandidate -> Html Msg
 viewNextTaskCandidate model candidate =
     let
         task =
             candidate.task
 
-        disabledReason =
-            nextTaskStartDisabledReason candidate
-
-        canQuickStart =
-            Permissions.canEditCurrentWorkspace model && disabledReason == Nothing
+        crumbs =
+            Feature.Focus.buildTaskBreadcrumb model task []
+                |> List.filter (\( eid, _, _ ) -> eid /= task.id)
     in
-    div [ class ("next-task-candidate " ++ nextTaskCandidateClass candidate) ]
-        [ div [ class "next-task-main" ]
-            [ div [ class "next-task-title-row" ]
-                [ span [ class "next-task-title" ] [ text task.title ]
-                , span [ class "next-task-priority" ] [ text ("P" ++ String.fromInt task.priority) ]
-                , span [ class "next-task-status" ] [ text (Api.taskStatusToString task.status) ]
-                ]
-            , div [ class "next-task-rationale" ] [ text (nextTaskRationale candidate) ]
-            ]
-        , div [ class "next-task-actions" ]
-            [ button [ class "btn-inline-create", onClick (ScrollToEntity task.id) ] [ text "Jump" ]
-            , if Permissions.canEditCurrentWorkspace model then
-                button
-                    [ class "btn-inline-create"
-                    , disabled (not canQuickStart)
-                    , title (Maybe.withDefault "Start this task now" disabledReason)
-                    , onClick (ChangeTaskStatus task.id Api.InProgress)
-                    ]
-                    [ text "Start" ]
+    div [ class ("next-task-candidate popover-card " ++ nextTaskCandidateClass candidate) ]
+        [ div [ class "popover-card-header" ]
+            [ span [ class ("entity-type-label " ++ (if task.parentId /= Nothing then "entity-type-subtask" else "entity-type-task")) ]
+                [ text
+                    (if task.parentId /= Nothing then
+                        "SUB"
 
-              else
-                text ""
+                     else
+                        "TSK"
+                    )
+                ]
+            , span [ class "popover-card-title" ] [ text task.title ]
+            , div [ class "dep-item-actions" ]
+                (List.map viewNextTaskCardAction (nextTaskCardActions candidate))
             ]
+        , if not (List.isEmpty crumbs) then
+            div [ class "popover-card-breadcrumb" ]
+                (List.intersperse (span [] [ text " › " ])
+                    (List.map (\( _, label, _ ) -> span [] [ text label ]) crumbs)
+                )
+
+          else
+            text ""
+        , div [ class "popover-card-meta" ]
+            [ span [ class (taskPopoverStatusClass task.status), title (taskStatusTitle task.status) ]
+                [ text (taskStatusDisplayText task.status) ]
+            , span [ class "popover-card-priority" ] [ text ("P" ++ String.fromInt task.priority) ]
+            ]
+        , div [ class "next-task-rationale" ] [ text (nextTaskRationale candidate) ]
         ]
+
+
+viewNextTaskCardAction : NextTaskCardAction -> Html Msg
+viewNextTaskCardAction action =
+    button
+        [ class "btn-inline-create btn-jump"
+        , onClick action.msg
+        , title action.title
+        ]
+        [ text action.label ]
 
 
 nextTaskCandidateClass : Api.NextTaskCandidate -> String
@@ -1538,20 +1570,6 @@ isBlockedNextTaskCandidate : Api.NextTaskCandidate -> Bool
 isBlockedNextTaskCandidate candidate =
     candidate.dependencyBlocked || candidate.task.status == Api.Blocked
 
-
-nextTaskStartDisabledReason : Api.NextTaskCandidate -> Maybe String
-nextTaskStartDisabledReason candidate =
-    if candidate.dependencyBlocked then
-        Just ("Resolve " ++ countPhrase candidate.openDependencyCount "open dependency" "open dependencies" ++ " before starting.")
-
-    else if candidate.task.status == Api.Blocked then
-        Just "Unblock this task before starting it."
-
-    else if candidate.task.status == Api.InProgress then
-        Just "Already in progress."
-
-    else
-        Nothing
 
 
 nextTaskRationale : Api.NextTaskCandidate -> String

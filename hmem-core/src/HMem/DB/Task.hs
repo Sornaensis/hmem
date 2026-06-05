@@ -1342,7 +1342,8 @@ listTasksByWorkspace pool wsId mstatus mprojId mlimit moffset =
 -- tasks are included for migrated task trees.  Subtasks are only startable
 -- when their immediate parent is in_progress.  Parents with open descendants
 -- are returned with completionGated/openDescendantCount annotations rather
--- than being filtered out.
+-- than being filtered out.  Results are ordered by scoped project priority,
+-- then task priority, then stable task creation/id tie-breakers.
 listNextTasks :: Pool Hasql.Connection -> UUID -> Bool -> Int -> IO [NextTaskCandidate]
 listNextTasks pool projectId includeBlocked limitRows = do
   rows <- runSession pool $ Session.statement (projectId, includeBlocked, toInt32 sanitizedLimit) listNextTasksStatement
@@ -1366,32 +1367,35 @@ listNextTasksStatement :: Statement.Statement (UUID, Bool, Int32) [NextTaskCandi
 listNextTasksStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
-      [ "WITH RECURSIVE project_tree(id, workspace_id) AS ("
-      , "  SELECT id, workspace_id"
+      [ "WITH RECURSIVE project_tree(id, workspace_id, priority) AS ("
+      , "  SELECT id, workspace_id, priority"
       , "    FROM projects"
       , "   WHERE id = $1"
       , "     AND deleted_at IS NULL"
       , "     AND status IN ('active'::project_status_enum, 'paused'::project_status_enum)"
       , "  UNION ALL"
-      , "  SELECT child.id, child.workspace_id"
+      , "  SELECT child.id, child.workspace_id, child.priority"
       , "    FROM projects child"
       , "    JOIN project_tree pt ON child.parent_id = pt.id"
       , "   WHERE child.deleted_at IS NULL"
       , "     AND child.status IN ('active'::project_status_enum, 'paused'::project_status_enum)"
       , "     AND child.workspace_id = pt.workspace_id"
       , "),"
-      , "scoped_tasks(id, workspace_id, project_id, parent_id, title, description, status, priority, metadata, due_at, completed_at, created_at, updated_at) AS ("
+      , "scoped_tasks(id, workspace_id, project_id, parent_id, title, description, status, priority, metadata, due_at, completed_at, created_at, updated_at, scope_project_id, scope_project_priority) AS ("
       , "  SELECT t.id, t.workspace_id, t.project_id, t.parent_id, t.title, t.description,"
-      , "         t.status, t.priority, t.metadata, t.due_at, t.completed_at, t.created_at, t.updated_at"
+      , "         t.status, t.priority, t.metadata, t.due_at, t.completed_at, t.created_at, t.updated_at,"
+      , "         pt.id, pt.priority"
       , "    FROM tasks t"
       , "    JOIN project_tree pt ON t.project_id = pt.id"
       , "   WHERE t.deleted_at IS NULL"
       , "     AND t.workspace_id = pt.workspace_id"
       , "  UNION"
       , "  SELECT child.id, child.workspace_id, child.project_id, child.parent_id, child.title, child.description,"
-      , "         child.status, child.priority, child.metadata, child.due_at, child.completed_at, child.created_at, child.updated_at"
+      , "         child.status, child.priority, child.metadata, child.due_at, child.completed_at, child.created_at, child.updated_at,"
+      , "         coalesce(child_pt.id, parent.scope_project_id), coalesce(child_pt.priority, parent.scope_project_priority)"
       , "    FROM tasks child"
       , "    JOIN scoped_tasks parent ON child.parent_id = parent.id"
+      , "    LEFT JOIN project_tree child_pt ON child.project_id = child_pt.id AND child.workspace_id = child_pt.workspace_id"
       , "   WHERE child.deleted_at IS NULL"
       , "     AND child.workspace_id = parent.workspace_id"
       , "),"
@@ -1440,7 +1444,7 @@ listNextTasksStatement = Statement.Statement sql encoder decoder True
       , "  LEFT JOIN open_descendant_counts open_desc ON open_desc.id = candidate.id"
       , "  LEFT JOIN open_dependency_counts open_dep ON open_dep.id = candidate.id"
       , " WHERE ($2 OR coalesce(open_dep.open_dependency_count, 0) = 0)"
-      , " ORDER BY candidate.priority DESC, candidate.created_at ASC, candidate.id ASC"
+      , " ORDER BY candidate.scope_project_priority DESC, candidate.priority DESC, candidate.created_at ASC, candidate.id ASC"
       , " LIMIT $3"
       ]
     encoder =

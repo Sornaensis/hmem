@@ -277,6 +277,35 @@ spec = do
       show detail `shouldNotContain` "linked full content should be omitted"
       show detail `shouldNotContain` "workspace_id"
 
+    it "shapes task_detail with full target and parent project descriptions but compact context" $ do
+      let detail = compactTaskDetail taskDetailRegressionValue
+          deps = arrayFieldItems "dependencies" detail
+          memories = arrayFieldItems "connected_memories" detail
+          workspaceScopedDetail = compactTaskDetail taskDetailWorkspaceScopedValue
+      (jsonField "task" detail >>= jsonField "description") `shouldBe` Just (String taskDetailDescription)
+      (jsonField "task" detail >>= jsonField "description_truncated") `shouldBe` Nothing
+      (jsonField "task" detail >>= jsonField "status") `shouldBe` Just (String "done")
+      (jsonField "project" detail >>= jsonField "description") `shouldBe` Just (String taskDetailProjectDescription)
+      (jsonField "project" detail >>= jsonField "description_truncated") `shouldBe` Nothing
+      jsonField "description" detail `shouldBe` Nothing
+      mapMaybe (textField "name") deps `shouldBe` ["Dependency by name"]
+      mapMaybe (textField "title") deps `shouldBe` ["Dependency by title"]
+      mapM_ (\row -> jsonField "description" row `shouldBe` Nothing) deps
+      mapMaybe (textField "summary") memories `shouldBe` ["Task detail memory"]
+      mapM_ (\row -> jsonField "content" row `shouldBe` Nothing) memories
+      (jsonField "readiness_rollup" detail >>= jsonField "completion_ready") `shouldBe` Just (Bool False)
+      (jsonField "readiness_rollup" detail >>= jsonField "open_subtask_count") `shouldBe` Just (Number 2)
+      (jsonField "readiness_rollup" detail >>= jsonField "done_task_count") `shouldBe` Nothing
+      jsonField "project" workspaceScopedDetail `shouldBe` Nothing
+      (jsonField "task" workspaceScopedDetail >>= jsonField "description") `shouldBe` Just (String workspaceScopedTaskDescription)
+      show detail `shouldNotContain` "Task dependency description should be omitted"
+      show detail `shouldNotContain` "Task memory content should be omitted"
+      show detail `shouldNotContain` "workspace_id"
+      show detail `shouldNotContain` "metadata"
+      show detail `shouldNotContain` "created_at"
+      (jsonField "task" detail >>= jsonField "dependency_count") `shouldBe` Nothing
+      (jsonField "task" detail >>= jsonField "memory_link_count") `shouldBe` Nothing
+
     it "keeps saved_view unavailable on the slim MCP surface" $ do
       toolNames `shouldNotContain` ["saved_view"]
       parseToolCall "saved_view" (object ["action" .= ("execute" :: Text)]) `shouldSatisfy` isUnknownTool "saved_view"
@@ -482,8 +511,16 @@ spec = do
           , "include_description" .= True
           ]
         taskDetailWithIgnoredFlag `shouldBe` taskDetail
-        jsonField "id" taskDetail `shouldBe` Just (String testUUID)
-        jsonField "title" taskDetail `shouldBe` Just (String "Task")
+        (jsonField "task" taskDetail >>= jsonField "id") `shouldBe` Just (String testUUID)
+        (jsonField "task" taskDetail >>= jsonField "title") `shouldBe` Just (String "Task")
+        (jsonField "task" taskDetail >>= jsonField "description") `shouldBe` Just (String "full task description")
+        (jsonField "project" taskDetail >>= jsonField "id") `shouldBe` Just (String testUUID3)
+        (jsonField "project" taskDetail >>= jsonField "description") `shouldBe` Just (String taskDetailProjectDescription)
+        jsonField "dependencies" taskDetail `shouldSatisfy` arrayLength 0
+        jsonField "connected_memories" taskDetail `shouldSatisfy` arrayLength 0
+        jsonField "readiness_rollup" taskDetail `shouldSatisfy` hasObjectField "completion_ready"
+        show taskDetail `shouldNotContain` "workspace_id"
+        show taskDetail `shouldNotContain` "metadata"
 
         missingProject <- callMockToolRaw mgr base "project_detail" $ object
           [ "project_id" .= testNotesMemoryUUID ]
@@ -544,7 +581,18 @@ spec = do
           , "description" .= ("real task description" :: Text)
           , "priority" .= (6 :: Int)
           ]
-        _taskId <- expectTextField "id" taskAck
+        taskId <- expectTextField "id" taskAck
+
+        taskDetail <- callTool mgr base "task_detail" $ object
+          [ "task_id" .= taskId
+          , "include_description" .= True
+          ]
+        (jsonField "task" taskDetail >>= jsonField "description") `shouldBe` Just (String "real task description")
+        (jsonField "project" taskDetail >>= jsonField "description") `shouldBe` Just (String "real project description")
+        jsonField "dependencies" taskDetail `shouldSatisfy` arrayLength 0
+        jsonField "connected_memories" taskDetail `shouldSatisfy` arrayLength 0
+        jsonField "readiness_rollup" taskDetail `shouldSatisfy` hasObjectField "completion_ready"
+        show taskDetail `shouldNotContain` "workspace_id"
 
         overview <- callTool mgr base "project_overview" $ object
           [ "project_id" .= projectId ]
@@ -598,6 +646,17 @@ spec = do
         show mSearch `shouldNotContain` "workspace_id"
         show mSearch `shouldNotContain` "real project description"
         show mSearch `shouldNotContain` "real task description"
+
+        workspaceTaskAck <- callTool mgr base "task_create" $ object
+          [ "workspace_id" .= workspaceId
+          , "title" .= ("Real workspace task" :: Text)
+          , "description" .= ("real workspace task description" :: Text)
+          ]
+        workspaceTaskId <- expectTextField "id" workspaceTaskAck
+        workspaceTaskDetail <- callTool mgr base "task_detail" $ object
+          [ "task_id" .= workspaceTaskId ]
+        (jsonField "task" workspaceTaskDetail >>= jsonField "description") `shouldBe` Just (String "real workspace task description")
+        jsonField "project" workspaceTaskDetail `shouldBe` Nothing
 
     it "routes additional slim tools with live request body, query, and auth checks" $ do
       withMockHmemServer $ \mgr base -> do
@@ -1526,6 +1585,7 @@ compactResponseRegressionCases =
   , ("project_spec_10_tasks", compactProjectSpecSummary, projectSpecRegressionValue)
   , ("project_overview", compactProjectOverview, projectOverviewRegressionValue)
   , ("project_detail", compactProjectDetail, projectDetailRegressionValue)
+  , ("task_detail", compactTaskDetail, taskDetailRegressionValue)
   , ("context_get", compactContextInfo, contextGetRegressionValue)
   , ("task_start", compactTaskStartSuccess, taskStartRegressionValue)
   , ("unified_search", compactSearchResults, unifiedSearchRegressionValue)
@@ -1560,6 +1620,8 @@ dispatcherResponseRegressionCases =
       [ "project_id" .= testUUID ])
   , ("project_detail", "project_detail", object
       [ "project_id" .= testProjectDetailUUID ])
+  , ("task_detail", "task_detail", object
+      [ "task_id" .= testSummaryMemoryUUID ])
   , ("context_get", "context_get", object
       [ "task_id" .= testUUID
       , "detail_level" .= ("medium" :: Text)
@@ -1676,6 +1738,104 @@ projectDetailSubprojectValue projectId name status parentId = object
   , "priority" .= (5 :: Int)
   , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
   ]
+
+
+taskDetailRegressionValue :: Value
+taskDetailRegressionValue = object
+  [ "task" .= taskDetailTaskValue
+  , "project" .= taskDetailProjectValue
+  , "dependencies" .=
+      [ object
+          [ "id" .= testUUID2
+          , "name" .= ("Dependency by name" :: Text)
+          , "description" .= ("Task dependency description should be omitted" :: Text)
+          , "status" .= ("done" :: Text)
+          , "workspace_id" .= parsedUUID2
+          ]
+      , object
+          [ "id" .= testNotesMemoryUUID
+          , "title" .= ("Dependency by title" :: Text)
+          , "description" .= ("Task dependency description should be omitted" :: Text)
+          , "status" .= ("todo" :: Text)
+          , "metadata" .= object ["noise" .= True]
+          ]
+      ]
+  , "connected_memories" .=
+      [ object
+          [ "id" .= testUUID
+          , "summary" .= ("Task detail memory" :: Text)
+          , "scope" .= ("task" :: Text)
+          , "content" .= ("Task memory content should be omitted" :: Text)
+          , "metadata" .= object ["noise" .= True]
+          ]
+      ]
+  , "readiness_rollup" .= object
+      [ "completion_ready" .= False
+      , "open_subtask_count" .= (2 :: Int)
+      , "done_task_count" .= (0 :: Int)
+      , "open_dependency_count" .= (1 :: Int)
+      ]
+  ]
+
+
+taskDetailTaskValue :: Value
+taskDetailTaskValue = object
+  [ "id" .= testSummaryMemoryUUID
+  , "workspace_id" .= parsedUUID2
+  , "project_id" .= parsedUUID3
+  , "parent_id" .= testUUID2
+  , "title" .= ("Task detail done task" :: Text)
+  , "description" .= taskDetailDescription
+  , "status" .= ("done" :: Text)
+  , "priority" .= (9 :: Int)
+  , "due_at" .= ("2026-06-15T00:00:00Z" :: Text)
+  , "dependency_count" .= (2 :: Int)
+  , "memory_link_count" .= (1 :: Int)
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+  ]
+
+
+taskDetailProjectValue :: Value
+taskDetailProjectValue = object
+  [ "id" .= parsedUUID3
+  , "workspace_id" .= parsedUUID2
+  , "parent_id" .= testUUID2
+  , "name" .= ("Task detail parent project" :: Text)
+  , "description" .= taskDetailProjectDescription
+  , "status" .= ("active" :: Text)
+  , "priority" .= (8 :: Int)
+  , "metadata" .= object ["noise" .= True]
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+  ]
+
+
+taskDetailWorkspaceScopedValue :: Value
+taskDetailWorkspaceScopedValue = object
+  [ "task" .= object
+      [ "id" .= testUUID3
+      , "workspace_id" .= parsedUUID2
+      , "title" .= ("Workspace scoped detail task" :: Text)
+      , "description" .= workspaceScopedTaskDescription
+      , "status" .= ("cancelled" :: Text)
+      , "priority" .= (5 :: Int)
+      , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+      ]
+  , "dependencies" .= ([] :: [Value])
+  , "connected_memories" .= ([] :: [Value])
+  , "readiness_rollup" .= object ["completion_ready" .= True]
+  ]
+
+
+taskDetailDescription :: Text
+taskDetailDescription = "Task detail target description that should not be truncated."
+
+
+taskDetailProjectDescription :: Text
+taskDetailProjectDescription = "Task detail parent project description that should not be truncated."
+
+
+workspaceScopedTaskDescription :: Text
+workspaceScopedTaskDescription = "Workspace-scoped task detail description."
 
 
 taskOverviewRegressionValue :: Value
@@ -2020,6 +2180,8 @@ mockHmemApplication req respond = do
       | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson projectOverviewRegressionValue
     (method, "/api/v1/projects/11111111-2222-3333-4444-555555555555/overview")
       | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson typedProjectOverviewValue
+    (method, "/api/v1/projects/22222222-3333-4444-5555-666666666666")
+      | method == methodGet -> respondJson taskDetailProjectValue
     (method, "/api/v1/projects/55555555-6666-7777-8888-999999999999/overview")
       | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson projectDetailRegressionValue
     (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/next-tasks")
@@ -2027,6 +2189,8 @@ mockHmemApplication req respond = do
       | method == methodGet -> respondBad "unexpected project_next_tasks query or auth header"
     (method, "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview")
       | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson taskOverviewRegressionValue
+    (method, "/api/v1/tasks/44444444-5555-6666-7777-888888888888/overview")
+      | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson taskDetailRegressionValue
     (method, "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/context")
       | method == methodGet && Wai.rawQueryString req == "?detail_level=light" -> respondJson taskStartRegressionValue
       | method == methodGet && Wai.rawQueryString req == "?detail_level=medium" -> respondJson contextGetRegressionValue
@@ -2332,6 +2496,7 @@ shouldOmitDefaultNoise name payload =
 
 defaultNoisySubstringsFor :: Text -> [Text]
 defaultNoisySubstringsFor "project_detail" = filter (/= "\"description\"") defaultNoisySubstrings
+defaultNoisySubstringsFor "task_detail" = filter (/= "\"description\"") defaultNoisySubstrings
 defaultNoisySubstringsFor _ = defaultNoisySubstrings
 
 

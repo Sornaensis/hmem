@@ -300,7 +300,7 @@ slimToolDefinitions =
       , "required" .= [t "task_id"]
       ]
 
-    , mkTool "task_detail" "Get compact details for one task by ID. Use task_overview when dependency summaries, connected memories, or readiness_rollup are needed." $ object
+    , mkTool "task_detail" "Get compact details for one task by ID, including the full task description, optional parent project context, dependency summaries, connected memories, and readiness_rollup." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "task_id" .= prop "string" "UUID of the task"
@@ -638,7 +638,17 @@ executeToolCall mgr base mApiKey = \case
     ProjectUnlinkMem pid mid -> delJSONWith (const $ entityMemoryLinkAck "unlinked" "project" pid mid) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories/"
                                  <> uuidPath mid)
     TaskCreate ct       -> postJSONWith (compactTaskMutationAck "created") mgr base mApiKey "/api/v1/tasks" ct
-    TaskDetailCall tid -> getJSONWith compactTaskDetail mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
+    TaskDetailCall tid -> do
+      overviewResult <- rawGetJSON mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/overview" <>
+        buildQuery [("extra_context", Just "false")])
+      case rawAuthErrorToMcp overviewResult of
+        Just authErr -> pure authErr
+        Nothing -> case overviewResult of
+          Left err -> pure $ mcpErrorCodeFromRaw "TASK_DETAIL_FAILED" err
+          Right overviewVal -> do
+            mProject <- fetchTaskDetailProject mgr base mApiKey overviewVal
+            let detailInput = maybe overviewVal (\projectVal -> insertTaskDetailProject projectVal overviewVal) mProject
+            pure $ mcpResultWith compactTaskDetail (encode detailInput)
     TaskOverviewCall tid includeDescription ->
         getJSONWith (if includeDescription then compactTaskOverviewWithDescription else compactTaskOverview) mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/overview" <>
           buildQuery [("extra_context", Just "false")])
@@ -1080,7 +1090,13 @@ compactTaskSummaryWithDescription value = insertOptionalField "description" valu
 
 
 compactTaskDetail :: Value -> Value
-compactTaskDetail = compactTaskSummary
+compactTaskDetail value = object $ catMaybes
+  [ fieldWithDefault "task" compactTaskSummaryWithDescription compactTaskSummaryWithDescription value
+  , fieldWith "project" compactProjectDetailRow value
+  , mappedArrayField "dependencies" compactTaskDependencySummary value
+  , mappedArrayField "connected_memories" compactConnectedMemorySummary value
+  , fieldWith "readiness_rollup" compactReadinessRollup value
+  ]
 
 
 compactSearchResults :: Value -> Value
@@ -1924,6 +1940,28 @@ memoryTargetPairs :: MemoryTarget -> [Pair]
 memoryTargetPairs = \case
   MemoryTargetProject pid -> ["project_id" .= pid]
   MemoryTargetTask tid    -> ["task_id" .= tid]
+
+
+fetchTaskDetailProject :: Manager -> String -> Maybe Text -> Value -> IO (Maybe Value)
+fetchTaskDetailProject mgr base mApiKey overviewVal = case taskDetailProjectId overviewVal of
+  Nothing -> pure Nothing
+  Just projectId -> do
+    projectResult <- rawGetJSON mgr base mApiKey ("/api/v1/projects/" <> uuidPath projectId)
+    case projectResult of
+      Right projectVal -> pure (Just projectVal)
+      Left _           -> pure Nothing
+
+
+taskDetailProjectId :: Value -> Maybe UUID
+taskDetailProjectId overviewVal = objectNonNullField "task" overviewVal >>= taskProjectId
+
+
+insertTaskDetailProject :: Value -> Value -> Value
+insertTaskDetailProject projectVal (Object overviewObj) = Object $ KM.insert "project" projectVal overviewObj
+insertTaskDetailProject projectVal overviewVal = object
+  [ "task" .= overviewVal
+  , "project" .= projectVal
+  ]
 
 
 taskIdValue :: Value -> Maybe UUID

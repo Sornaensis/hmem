@@ -222,6 +222,55 @@
       }
     }
   },
+  "task_detail": {
+    "max_chars": 1300,
+    "max_mcp_envelope_chars": 2000,
+    "max_jsonrpc_stdio_chars": 2000,
+    "payload": {
+      "task": {
+        "id": "44444444-5555-6666-7777-888888888888",
+        "title": "Task detail done task",
+        "status": "done",
+        "priority": 9,
+        "project_id": "22222222-3333-4444-5555-666666666666",
+        "parent_id": "11111111-2222-3333-4444-555555555555",
+        "due_at": "2026-06-15T00:00:00Z",
+        "description": "Task detail target description that should not be truncated."
+      },
+      "project": {
+        "id": "22222222-3333-4444-5555-666666666666",
+        "name": "Task detail parent project",
+        "status": "active",
+        "priority": 8,
+        "parent_id": "11111111-2222-3333-4444-555555555555",
+        "description": "Task detail parent project description that should not be truncated."
+      },
+      "dependencies": [
+        {
+          "id": "11111111-2222-3333-4444-555555555555",
+          "name": "Dependency by name",
+          "status": "done"
+        },
+        {
+          "id": "33333333-4444-5555-6666-777777777777",
+          "title": "Dependency by title",
+          "status": "todo"
+        }
+      ],
+      "connected_memories": [
+        {
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "summary": "Task detail memory",
+          "scope": "task"
+        }
+      ],
+      "readiness_rollup": {
+        "completion_ready": false,
+        "open_dependency_count": 1,
+        "open_subtask_count": 2
+      }
+    }
+  },
   "context_get": {
     "max_chars": 680,
     "max_mcp_envelope_chars": 1000,

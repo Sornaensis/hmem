@@ -8,7 +8,9 @@ module HMem.MCP.Tools
   , compactMemorySummary
   , compactMemoryDetail
   , compactProjectSummary
+  , compactProjectDetail
   , compactTaskSummary
+  , compactTaskDetail
   , compactSearchResults
   , compactProjectOverview
   , compactProjectOverviewWithDescriptions
@@ -209,6 +211,14 @@ slimToolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
+    , mkTool "project_detail" "Get compact details for one project by ID. Use project_overview when tasks, subprojects, linked memories, or readiness_rollup are needed." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "project_id" .= prop "string" "UUID of the project"
+          ]
+      , "required" .= [t "project_id"]
+      ]
+
     , mkTool "project_overview" "Get a compact project overview with tasks, subprojects, linked memories, and readiness_rollup. Set include_descriptions=true only when descriptions for returned project/task/subproject rows are needed; descriptions are capped to a bounded number of rows and truncated per row, so prefer task_overview for one task description." $ object
       [ "type" .= t "object"
       , "properties" .= object
@@ -290,6 +300,14 @@ slimToolDefinitions =
       , "required" .= [t "task_id"]
       ]
 
+    , mkTool "task_detail" "Get compact details for one task by ID. Use task_overview when dependency summaries, connected memories, or readiness_rollup are needed." $ object
+      [ "type" .= t "object"
+      , "properties" .= object
+          [ "task_id" .= prop "string" "UUID of the task"
+          ]
+      , "required" .= [t "task_id"]
+      ]
+
     , mkTool "task_overview" "Get a compact task overview with dependency summaries, connected memories, and readiness_rollup. Set include_description=true only when the task description is needed." $ object
       [ "type" .= t "object"
       , "properties" .= object
@@ -351,9 +369,11 @@ data ToolCall
   | MemoryUnlink    UUID UUID RelationType -- source_id, target_id, relation_type
   | ProjectCreate  CreateProject
   | ProjectUpdate  UUID UpdateProject
+  | ProjectDetailCall UUID
   | ProjectLinkMem UUID UUID               -- project_id, memory_id
   | ProjectUnlinkMem UUID UUID             -- project_id, memory_id
   | TaskCreate     CreateTask
+  | TaskDetailCall UUID
   | TaskOverviewCall UUID Bool
   | ContextGetCall UUID ContextDetailLevel
   | TaskUpdate     UUID UpdateTask
@@ -403,6 +423,7 @@ parseToolCall name args = case name of
             _        -> Left "memory_link: action must be 'create', 'remove', or 'list'"
     "project_create"           -> ProjectCreate <$> parse args
     "project_update"           -> ProjectUpdate <$> need "project_id" <*> parse args
+    "project_detail"           -> ProjectDetailCall <$> need "project_id"
     "link_memory"              -> do
         entityType <- need "entity_type" :: Either String Text
         eid <- need "entity_id"
@@ -415,6 +436,7 @@ parseToolCall name args = case name of
             ("task",     "unlink") -> Right $ TaskUnlinkMem eid mid
             _ -> Left $ "link_memory: invalid entity_type/action: " <> T.unpack entityType <> "/" <> T.unpack action
     "task_create"              -> TaskCreate <$> parse args
+    "task_detail"              -> TaskDetailCall <$> need "task_id"
     "task_overview"            -> TaskOverviewCall <$> need "task_id" <*> (fromMaybe False <$> opt "include_description")
     "context_get"              -> ContextGetCall <$> need "task_id" <*> (maybe ContextMedium id <$> opt "detail_level")
     "task_update"              -> TaskUpdate <$> need "task_id" <*> parse args
@@ -506,7 +528,9 @@ validateToolCall = \case
         in MemoryUpdate mid um' tags <$ firstValidationError (validateUpdateMemoryInput um')
     ProjectCreate cp -> ProjectCreate cp <$ firstValidationError (validateCreateProjectInput cp)
     ProjectUpdate pid up -> ProjectUpdate pid up <$ firstValidationError (validateUpdateProjectInput up)
+    ProjectDetailCall pid -> Right $ ProjectDetailCall pid
     TaskCreate ct -> TaskCreate ct <$ firstValidationError (validateCreateTaskInput ct)
+    TaskDetailCall tid -> Right $ TaskDetailCall tid
     TaskOverviewCall tid includeDescription -> Right $ TaskOverviewCall tid includeDescription
     ContextGetCall tid level -> Right $ ContextGetCall tid level
     TaskUpdate tid ut -> TaskUpdate tid ut <$ firstValidationError (validateUpdateTaskInput ut)
@@ -606,11 +630,13 @@ executeToolCall mgr base mApiKey = \case
                                <> uuidPath tid <> "/" <> T.unpack (relationTypeToText rt))
     ProjectCreate cp    -> postJSONWith (compactProjectMutationAck "created") mgr base mApiKey "/api/v1/projects" cp
     ProjectUpdate pid up -> putJSONWith (addChangedFields (projectUpdateChangedFields up) . compactProjectMutationAck "updated") mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid) up
+    ProjectDetailCall pid -> getJSONWith compactProjectDetail mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
     ProjectLinkMem pid mid -> postJSONWith (const $ entityMemoryLinkAck "linked" "project" pid mid) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
                                (object ["memory_id" .= mid])
     ProjectUnlinkMem pid mid -> delJSONWith (const $ entityMemoryLinkAck "unlinked" "project" pid mid) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories/"
                                  <> uuidPath mid)
     TaskCreate ct       -> postJSONWith (compactTaskMutationAck "created") mgr base mApiKey "/api/v1/tasks" ct
+    TaskDetailCall tid -> getJSONWith compactTaskDetail mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid)
     TaskOverviewCall tid includeDescription ->
         getJSONWith (if includeDescription then compactTaskOverviewWithDescription else compactTaskOverview) mgr base mApiKey ("/api/v1/tasks/" <> uuidPath tid <> "/overview" <>
           buildQuery [("extra_context", Just "false")])
@@ -954,6 +980,10 @@ compactProjectSummary value = object $ catMaybes
   ]
 
 
+compactProjectDetail :: Value -> Value
+compactProjectDetail = compactProjectSummary
+
+
 maxProjectOverviewDescriptionChars :: Int
 maxProjectOverviewDescriptionChars = 600
 
@@ -976,6 +1006,10 @@ compactTaskSummary value = object $ catMaybes
 
 compactTaskSummaryWithDescription :: Value -> Value
 compactTaskSummaryWithDescription value = insertOptionalField "description" value (compactTaskSummary value)
+
+
+compactTaskDetail :: Value -> Value
+compactTaskDetail = compactTaskSummary
 
 
 compactSearchResults :: Value -> Value

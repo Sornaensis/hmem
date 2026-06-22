@@ -71,12 +71,14 @@ slimToolNames =
   , "link_memory"
   , "project_create"
   , "project_update"
+  , "project_detail"
   , "project_overview"
   , "project_next_tasks"
   , "project_spec"
   , "project_archive"
   , "task_create"
   , "task_update"
+  , "task_detail"
   , "task_overview"
   , "context_get"
   , "task_dependency"
@@ -119,6 +121,15 @@ toolSchemaProperties name = case [schema | Object tool <- toolDefinitions
     _ -> []
   _ -> []
 
+toolSchemaRequired :: Text -> [Text]
+toolSchemaRequired name = case [schema | Object tool <- toolDefinitions
+                                       , KM.lookup (Key.fromText "name") tool == Just (String name)
+                                       , Just schema <- [KM.lookup (Key.fromText "inputSchema") tool]] of
+  Object schema : _ -> case KM.lookup (Key.fromText "required") schema of
+    Just (Array fields) -> [field | String field <- toList fields]
+    _ -> []
+  _ -> []
+
 toolDescription :: Text -> Maybe Text
 toolDescription name = listToMaybe
   [ desc | Object tool <- toolDefinitions
@@ -157,16 +168,24 @@ spec = do
       toolSchemaProperties "memory_update" `shouldNotContain` ["metadata", "items", "source", "confidence", "expires_at"]
       toolSchemaProperties "project_create" `shouldNotContain` ["workspace_id", "metadata"]
       toolSchemaProperties "project_update" `shouldNotContain` ["metadata", "items"]
+      toolSchemaProperties "project_detail" `shouldBe` ["project_id"]
+      toolSchemaRequired "project_detail" `shouldBe` ["project_id"]
       toolSchemaProperties "task_create" `shouldNotContain` ["workspace_id", "metadata"]
       toolSchemaProperties "task_update" `shouldNotContain` ["metadata", "items"]
+      toolSchemaProperties "task_detail" `shouldBe` ["task_id"]
+      toolSchemaRequired "task_detail" `shouldBe` ["task_id"]
       toolSchemaProperties "project_overview" `shouldContain` ["include_descriptions"]
       toolSchemaProperties "task_overview" `shouldContain` ["include_description"]
+      toolSchemaProperties "project_detail" `shouldNotContain` ["include_descriptions", "include_description"]
+      toolSchemaProperties "task_detail" `shouldNotContain` ["include_descriptions", "include_description"]
       toolSchemaProperties "search" `shouldNotContain` ["workspace_id", "search_language", "offset", "min_access_count", "min_importance", "category_id", "pinned_only", "task_priority"]
 
     it "describes compact defaults and available detail paths" $ do
       toolDescriptionShouldContain "search" "Returns compact summaries"
       toolDescriptionShouldContain "search" "memory content/previews are omitted"
       toolDescriptionShouldContain "memory_get" "detail path for compact memory summaries"
+      toolDescriptionShouldContain "project_detail" "Get compact details for one project"
+      toolDescriptionShouldContain "task_detail" "Get compact details for one task"
       toolDescriptionShouldContain "project_overview" "capped to a bounded number of rows"
       toolDescriptionShouldContain "project_overview" "truncated per row"
       toolDescriptionShouldContain "project_overview" "prefer task_overview"
@@ -411,6 +430,36 @@ spec = do
         show memoryLinks `shouldContain` "source_id"
         show memoryLinks `shouldNotContain` "source_memory"
         show memoryLinks `shouldNotContain` "full memory content"
+
+        projectDetail <- callMockTool mgr base "project_detail" $ object
+          [ "project_id" .= testUUID ]
+        projectDetailWithIgnoredFlag <- callMockTool mgr base "project_detail" $ object
+          [ "project_id" .= testUUID
+          , "include_descriptions" .= True
+          ]
+        projectDetailWithIgnoredFlag `shouldBe` projectDetail
+        jsonField "id" projectDetail `shouldBe` Just (String testUUID)
+        jsonField "name" projectDetail `shouldBe` Just (String "Project")
+
+        taskDetail <- callMockTool mgr base "task_detail" $ object
+          [ "task_id" .= testUUID ]
+        taskDetailWithIgnoredFlag <- callMockTool mgr base "task_detail" $ object
+          [ "task_id" .= testUUID
+          , "include_description" .= True
+          ]
+        taskDetailWithIgnoredFlag `shouldBe` taskDetail
+        jsonField "id" taskDetail `shouldBe` Just (String testUUID)
+        jsonField "title" taskDetail `shouldBe` Just (String "Task")
+
+        missingProject <- callMockToolRaw mgr base "project_detail" $ object
+          [ "project_id" .= testNotesMemoryUUID ]
+        jsonField "isError" missingProject `shouldBe` Just (Bool True)
+        mcpTextContent missingProject `shouldSatisfy` maybe False ("[NOT_FOUND]" `T.isInfixOf`)
+
+        missingTask <- callMockToolRaw mgr base "task_detail" $ object
+          [ "task_id" .= testNotesMemoryUUID ]
+        jsonField "isError" missingTask `shouldBe` Just (Bool True)
+        mcpTextContent missingTask `shouldSatisfy` maybe False ("[NOT_FOUND]" `T.isInfixOf`)
 
         overview <- callMockTool mgr base "project_overview" $ object
           [ "project_id" .= testUUID ]
@@ -1109,9 +1158,17 @@ spec = do
             ]
       parseToolCall "link_memory" args `shouldBe` Right (ProjectLinkMem parsedUUID parsedUUID2)
 
-    it "parses overview and finish tools with optional description detail flags" $ do
+    it "parses detail, overview, and finish tools with expected description flag behavior" $ do
+      parseToolCall "project_detail" (object ["project_id" .= testUUID]) `shouldBe` Right (ProjectDetailCall parsedUUID)
+      parseToolCall "project_detail" (object ["project_id" .= testUUID, "include_descriptions" .= True]) `shouldBe` Right (ProjectDetailCall parsedUUID)
+      parseToolCall "project_detail" (object []) `shouldSatisfy` isLeft
+      parseToolCall "project_detail" (object ["project_id" .= ("not-a-uuid" :: Text)]) `shouldSatisfy` isLeft
       parseToolCall "project_overview" (object ["project_id" .= testUUID]) `shouldBe` Right (ProjectOverviewCall parsedUUID False)
       parseToolCall "project_overview" (object ["project_id" .= testUUID, "include_descriptions" .= True]) `shouldBe` Right (ProjectOverviewCall parsedUUID True)
+      parseToolCall "task_detail" (object ["task_id" .= testUUID]) `shouldBe` Right (TaskDetailCall parsedUUID)
+      parseToolCall "task_detail" (object ["task_id" .= testUUID, "include_description" .= True]) `shouldBe` Right (TaskDetailCall parsedUUID)
+      parseToolCall "task_detail" (object []) `shouldSatisfy` isLeft
+      parseToolCall "task_detail" (object ["task_id" .= ("not-a-uuid" :: Text)]) `shouldSatisfy` isLeft
       parseToolCall "task_overview" (object ["task_id" .= testUUID]) `shouldBe` Right (TaskOverviewCall parsedUUID False)
       parseToolCall "task_overview" (object ["task_id" .= testUUID, "include_description" .= True]) `shouldBe` Right (TaskOverviewCall parsedUUID True)
       parseToolCall "task_finish" (object ["task_id" .= testUUID, "status" .= ("done" :: Text), "notes" .= ("done" :: Text)])
@@ -1273,6 +1330,10 @@ spec = do
   where
     isUnknownTool expected result = case result of
       Left msg -> msg == "Unknown tool: " <> T.unpack expected
+      Right _ -> False
+
+    isLeft = \case
+      Left _ -> True
       Right _ -> False
 
 

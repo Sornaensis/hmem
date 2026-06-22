@@ -133,6 +133,16 @@ toolSchemaRequired name = case [schema | Object tool <- toolDefinitions
     _ -> []
   _ -> []
 
+
+toolSchemaProperty :: Text -> Text -> Maybe Value
+toolSchemaProperty name property = case [schema | Object tool <- toolDefinitions
+                                                , KM.lookup (Key.fromText "name") tool == Just (String name)
+                                                , Just schema <- [KM.lookup (Key.fromText "inputSchema") tool]] of
+  Object schema : _ -> do
+    Object props <- KM.lookup (Key.fromText "properties") schema
+    KM.lookup (Key.fromText property) props
+  _ -> Nothing
+
 toolDescription :: Text -> Maybe Text
 toolDescription name = listToMaybe
   [ desc | Object tool <- toolDefinitions
@@ -182,6 +192,19 @@ spec = do
       toolSchemaProperties "project_detail" `shouldNotContain` ["include_descriptions", "include_description"]
       toolSchemaProperties "task_detail" `shouldNotContain` ["include_descriptions", "include_description"]
       toolSchemaProperties "search" `shouldNotContain` ["workspace_id", "search_language", "offset", "min_access_count", "min_importance", "category_id", "pinned_only", "task_priority"]
+
+    it "advertises detail tools with exactly one required UUID string argument" $ do
+      toolSchemaProperties "project_detail" `shouldBe` ["project_id"]
+      toolSchemaRequired "project_detail" `shouldBe` ["project_id"]
+      (toolSchemaProperty "project_detail" "project_id" >>= jsonField "type") `shouldBe` Just (String "string")
+      (toolSchemaProperty "project_detail" "project_id" >>= jsonField "description") `shouldSatisfy` maybe False (\case String desc -> "uuid" `T.isInfixOf` T.toCaseFold desc; _ -> False)
+      toolSchemaProperties "project_detail" `shouldNotContain` ["include_descriptions", "include_description"]
+
+      toolSchemaProperties "task_detail" `shouldBe` ["task_id"]
+      toolSchemaRequired "task_detail" `shouldBe` ["task_id"]
+      (toolSchemaProperty "task_detail" "task_id" >>= jsonField "type") `shouldBe` Just (String "string")
+      (toolSchemaProperty "task_detail" "task_id" >>= jsonField "description") `shouldSatisfy` maybe False (\case String desc -> "uuid" `T.isInfixOf` T.toCaseFold desc; _ -> False)
+      toolSchemaProperties "task_detail" `shouldNotContain` ["include_descriptions", "include_description"]
 
     it "describes compact defaults and available detail paths" $ do
       toolDescriptionShouldContain "search" "Returns compact summaries"
@@ -265,6 +288,12 @@ spec = do
       (blockedSummary >>= jsonField "subtree_blocked_task_count") `shouldBe` Just (Number 3)
       (blockedSummary >>= jsonField "subtree_dependency_blocked_task_count") `shouldBe` Just (Number 2)
       (blockedSummary >>= jsonField "subtree_open_dependency_count") `shouldBe` Just (Number 5)
+      (jsonField "readiness_rollup" detail >>= jsonField "open_task_count") `shouldBe` Just (Number 4)
+      (jsonField "readiness_rollup" detail >>= jsonField "done_task_count") `shouldBe` Just (Number 1)
+      (jsonField "readiness_rollup" detail >>= jsonField "cancelled_task_count") `shouldBe` Just (Number 1)
+      jsonField "has_more" detail `shouldBe` Nothing
+      jsonField "description_limit" detail `shouldBe` Nothing
+      jsonField "descriptions_omitted" detail `shouldBe` Nothing
       mapMaybe (textField "name") subprojectRows `shouldBe` ["Active child", "Archived child"]
       mapM_ (\row -> jsonField "description" row `shouldBe` Nothing) subprojectRows
       jsonField "linked_memories" detail `shouldSatisfy` arrayLength 1
@@ -276,6 +305,51 @@ spec = do
       show detail `shouldNotContain` "full task description"
       show detail `shouldNotContain` "linked full content should be omitted"
       show detail `shouldNotContain` "workspace_id"
+
+    it "keeps project_detail descriptions full when set and omitted when unset" $ do
+      let longDescription = T.replicate (maxProjectOverviewDescriptionChars + 25) "p"
+          detailWithLongDescription = compactProjectDetail $ object
+            [ "project" .= object
+                [ "id" .= testProjectDetailUUID
+                , "name" .= ("Long detail project" :: Text)
+                , "description" .= longDescription
+                , "status" .= ("active" :: Text)
+                , "priority" .= (4 :: Int)
+                , "workspace_id" .= parsedUUID2
+                , "parent_id" .= Null
+                , "metadata" .= object ["noise" .= True]
+                , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+                , "updated_at" .= ("2026-05-21T00:00:00Z" :: Text)
+                ]
+            , "tasks" .= ([] :: [Value])
+            , "subprojects" .= ([] :: [Value])
+            , "readiness_rollup" .= object ["completion_ready" .= True]
+            ]
+          detailWithoutDescription = compactProjectDetail $ object
+            [ "project" .= object
+                [ "id" .= testProjectDetailUUID
+                , "name" .= ("Undescribed detail project" :: Text)
+                , "description" .= Null
+                , "status" .= ("active" :: Text)
+                , "priority" .= (4 :: Int)
+                ]
+            , "tasks" .= ([] :: [Value])
+            , "subprojects" .= ([] :: [Value])
+            , "readiness_rollup" .= object ["completion_ready" .= True]
+            ]
+      (jsonField "project" detailWithLongDescription >>= jsonField "description") `shouldBe` Just (String longDescription)
+      (jsonField "project" detailWithLongDescription >>= jsonField "description_truncated") `shouldBe` Nothing
+      (jsonField "project" detailWithLongDescription >>= jsonField "parent_id") `shouldBe` Nothing
+      (jsonField "project" detailWithoutDescription >>= jsonField "description") `shouldBe` Nothing
+      jsonField "blocked_tasks" detailWithoutDescription `shouldSatisfy` hasObjectField "items"
+      (jsonField "blocked_tasks" detailWithoutDescription >>= jsonField "returned_count") `shouldBe` Just (Number 0)
+      (jsonField "blocked_tasks" detailWithoutDescription >>= jsonField "subtree_blocked_task_count") `shouldBe` Just (Number 0)
+      (jsonField "blocked_tasks" detailWithoutDescription >>= jsonField "subtree_dependency_blocked_task_count") `shouldBe` Just (Number 0)
+      (jsonField "blocked_tasks" detailWithoutDescription >>= jsonField "subtree_open_dependency_count") `shouldBe` Just (Number 0)
+      show detailWithLongDescription `shouldNotContain` "workspace_id"
+      show detailWithLongDescription `shouldNotContain` "metadata"
+      show detailWithLongDescription `shouldNotContain` "created_at"
+      show detailWithLongDescription `shouldNotContain` "updated_at"
 
     it "shapes task_detail with full target and parent project descriptions but compact context" $ do
       let detail = compactTaskDetail taskDetailRegressionValue
@@ -305,6 +379,86 @@ spec = do
       show detail `shouldNotContain` "created_at"
       (jsonField "task" detail >>= jsonField "dependency_count") `shouldBe` Nothing
       (jsonField "task" detail >>= jsonField "memory_link_count") `shouldBe` Nothing
+
+    it "keeps task_detail descriptions full and omits nullable/noisy compact fields" $ do
+      let longTaskDescription = T.replicate (maxProjectOverviewDescriptionChars + 25) "t"
+          longProjectDescription = T.replicate (maxProjectOverviewDescriptionChars + 25) "p"
+          detail = compactTaskDetail $ object
+            [ "task" .= object
+                [ "id" .= testSummaryMemoryUUID
+                , "workspace_id" .= parsedUUID2
+                , "project_id" .= parsedUUID3
+                , "parent_id" .= Null
+                , "title" .= ("Long described cancelled task" :: Text)
+                , "description" .= longTaskDescription
+                , "status" .= ("cancelled" :: Text)
+                , "priority" .= (3 :: Int)
+                , "due_at" .= Null
+                , "dependency_count" .= (2 :: Int)
+                , "memory_link_count" .= (1 :: Int)
+                , "metadata" .= object ["noise" .= True]
+                , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+                , "updated_at" .= ("2026-05-21T00:00:00Z" :: Text)
+                , "deleted_at" .= ("2026-05-22T00:00:00Z" :: Text)
+                ]
+            , "project" .= object
+                [ "id" .= parsedUUID3
+                , "workspace_id" .= parsedUUID2
+                , "parent_id" .= Null
+                , "name" .= ("Long described parent project" :: Text)
+                , "description" .= longProjectDescription
+                , "status" .= ("active" :: Text)
+                , "priority" .= (8 :: Int)
+                , "metadata" .= object ["noise" .= True]
+                , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+                ]
+            , "dependencies" .=
+                [ object
+                    [ "id" .= testUUID2
+                    , "title" .= ("Dependency summary only" :: Text)
+                    , "description" .= ("dependency full description omitted" :: Text)
+                    , "status" .= ("todo" :: Text)
+                    , "dependency_count" .= (8 :: Int)
+                    ]
+                ]
+            , "connected_memories" .=
+                [ object
+                    [ "id" .= testUUID
+                    , "summary" .= ("Memory summary only" :: Text)
+                    , "scope" .= ("task" :: Text)
+                    , "content" .= ("memory full content omitted" :: Text)
+                    , "link_id" .= testUUID2
+                    ]
+                ]
+            , "readiness_rollup" .= object
+                [ "completion_ready" .= True
+                , "open_subtask_count" .= (0 :: Int)
+                , "done_task_count" .= (0 :: Int)
+                ]
+            ]
+      (jsonField "task" detail >>= jsonField "description") `shouldBe` Just (String longTaskDescription)
+      (jsonField "task" detail >>= jsonField "description_truncated") `shouldBe` Nothing
+      (jsonField "task" detail >>= jsonField "status") `shouldBe` Just (String "cancelled")
+      (jsonField "task" detail >>= jsonField "parent_id") `shouldBe` Nothing
+      (jsonField "task" detail >>= jsonField "due_at") `shouldBe` Nothing
+      (jsonField "project" detail >>= jsonField "description") `shouldBe` Just (String longProjectDescription)
+      (jsonField "project" detail >>= jsonField "description_truncated") `shouldBe` Nothing
+      (jsonField "project" detail >>= jsonField "parent_id") `shouldBe` Nothing
+      (jsonField "readiness_rollup" detail >>= jsonField "completion_ready") `shouldBe` Just (Bool True)
+      (jsonField "readiness_rollup" detail >>= jsonField "open_subtask_count") `shouldBe` Nothing
+      (jsonField "readiness_rollup" detail >>= jsonField "done_task_count") `shouldBe` Nothing
+      mapM_ (\row -> jsonField "description" row `shouldBe` Nothing) (arrayFieldItems "dependencies" detail)
+      mapM_ (\row -> jsonField "content" row `shouldBe` Nothing) (arrayFieldItems "connected_memories" detail)
+      show detail `shouldNotContain` "workspace_id"
+      show detail `shouldNotContain` "metadata"
+      show detail `shouldNotContain` "created_at"
+      show detail `shouldNotContain` "updated_at"
+      show detail `shouldNotContain` "deleted_at"
+      show detail `shouldNotContain` "dependency_count"
+      show detail `shouldNotContain` "memory_link_count"
+      show detail `shouldNotContain` "link_id"
+      show detail `shouldNotContain` "dependency full description omitted"
+      show detail `shouldNotContain` "memory full content omitted"
 
     it "keeps saved_view unavailable on the slim MCP surface" $ do
       toolNames `shouldNotContain` ["saved_view"]
@@ -457,6 +611,77 @@ spec = do
         (mOverview >>= firstArrayItem "tasks" >>= jsonField "description") `shouldBe` Just (String "full task description")
         (mOverview >>= jsonField "descriptions_omitted") `shouldBe` Nothing
 
+    it "routes detail tools through stdio line handling and ignores unadvertised include flags" $ do
+      fixtures <- readCompactResponseFixtures
+      withMockHmemServer $ \mgr base -> do
+        initialized <- newTVarIO False
+        wsContext <- newTVarIO Nothing
+        _ <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("init" :: Text)
+          , "method" .= ("initialize" :: Text)
+          ]
+
+        projectResponse <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("project-detail-stdio" :: Text)
+          , "method" .= ("tools/call" :: Text)
+          , "params" .= object
+              [ "name" .= ("project_detail" :: Text)
+              , "arguments" .= object ["project_id" .= testProjectDetailUUID]
+              ]
+          ]
+        projectResponseWithIgnoredFlag <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("project-detail-ignored-stdio" :: Text)
+          , "method" .= ("tools/call" :: Text)
+          , "params" .= object
+              [ "name" .= ("project_detail" :: Text)
+              , "arguments" .= object
+                  [ "project_id" .= testProjectDetailUUID
+                  , "include_descriptions" .= True
+                  ]
+              ]
+          ]
+        case (fixturePayload "project_detail" fixtures, projectResponse >>= jsonField "result" >>= mcpTextValue, projectResponseWithIgnoredFlag >>= jsonField "result" >>= mcpTextValue) of
+          (Just expected, Just actual, Just actualWithIgnoredFlag) -> do
+            actual `shouldBe` expected
+            actualWithIgnoredFlag `shouldBe` actual
+            shouldOmitDefaultNoise "project_detail" actual
+          (Nothing, _, _) -> expectationFailure "Missing fixture payload for project_detail"
+          (_, Nothing, _) -> expectationFailure $ "Expected stdio project_detail payload, got: " <> show projectResponse
+          (_, _, Nothing) -> expectationFailure $ "Expected stdio project_detail ignored-flag payload, got: " <> show projectResponseWithIgnoredFlag
+
+        taskResponse <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("task-detail-stdio" :: Text)
+          , "method" .= ("tools/call" :: Text)
+          , "params" .= object
+              [ "name" .= ("task_detail" :: Text)
+              , "arguments" .= object ["task_id" .= testSummaryMemoryUUID]
+              ]
+          ]
+        taskResponseWithIgnoredFlag <- handleStdioLine mgr base Nothing initialized wsContext $ jsonLine $ object
+          [ "jsonrpc" .= ("2.0" :: Text)
+          , "id" .= ("task-detail-ignored-stdio" :: Text)
+          , "method" .= ("tools/call" :: Text)
+          , "params" .= object
+              [ "name" .= ("task_detail" :: Text)
+              , "arguments" .= object
+                  [ "task_id" .= testSummaryMemoryUUID
+                  , "include_description" .= True
+                  ]
+              ]
+          ]
+        case (fixturePayload "task_detail" fixtures, taskResponse >>= jsonField "result" >>= mcpTextValue, taskResponseWithIgnoredFlag >>= jsonField "result" >>= mcpTextValue) of
+          (Just expected, Just actual, Just actualWithIgnoredFlag) -> do
+            actual `shouldBe` expected
+            actualWithIgnoredFlag `shouldBe` actual
+            shouldOmitDefaultNoise "task_detail" actual
+          (Nothing, _, _) -> expectationFailure "Missing fixture payload for task_detail"
+          (_, Nothing, _) -> expectationFailure $ "Expected stdio task_detail payload, got: " <> show taskResponse
+          (_, _, Nothing) -> expectationFailure $ "Expected stdio task_detail ignored-flag payload, got: " <> show taskResponseWithIgnoredFlag
+
   describe "live HTTP tool dispatch" $ do
     it "routes representative slim MCP tools through HTTP compact shapers" $ do
       withMockHmemServer $ \mgr base -> do
@@ -525,11 +750,13 @@ spec = do
         missingProject <- callMockToolRaw mgr base "project_detail" $ object
           [ "project_id" .= testNotesMemoryUUID ]
         jsonField "isError" missingProject `shouldBe` Just (Bool True)
+        mcpTextValue missingProject `shouldBe` Nothing
         mcpTextContent missingProject `shouldSatisfy` maybe False ("[NOT_FOUND]" `T.isInfixOf`)
 
         missingTask <- callMockToolRaw mgr base "task_detail" $ object
           [ "task_id" .= testNotesMemoryUUID ]
         jsonField "isError" missingTask `shouldBe` Just (Bool True)
+        mcpTextValue missingTask `shouldBe` Nothing
         mcpTextContent missingTask `shouldSatisfy` maybe False ("[NOT_FOUND]" `T.isInfixOf`)
 
         overview <- callMockTool mgr base "project_overview" $ object
@@ -582,6 +809,21 @@ spec = do
           , "priority" .= (6 :: Int)
           ]
         taskId <- expectTextField "id" taskAck
+
+        projectDetail <- callTool mgr base "project_detail" $ object
+          [ "project_id" .= projectId ]
+        projectDetailWithIgnoredFlag <- callTool mgr base "project_detail" $ object
+          [ "project_id" .= projectId
+          , "include_descriptions" .= True
+          ]
+        projectDetailWithIgnoredFlag `shouldBe` projectDetail
+        (jsonField "project" projectDetail >>= jsonField "description") `shouldBe` Just (String "real project description")
+        (firstArrayItem "tasks" projectDetail >>= jsonField "title") `shouldBe` Just (String "Real DTO task")
+        (firstArrayItem "tasks" projectDetail >>= jsonField "description") `shouldBe` Nothing
+        jsonField "blocked_tasks" projectDetail `shouldSatisfy` hasObjectField "items"
+        jsonField "readiness_rollup" projectDetail `shouldSatisfy` hasObjectField "completion_ready"
+        show projectDetail `shouldNotContain` "workspace_id"
+        show projectDetail `shouldNotContain` "real task description"
 
         taskDetail <- callTool mgr base "task_detail" $ object
           [ "task_id" .= taskId
@@ -1254,14 +1496,20 @@ spec = do
     it "parses detail, overview, and finish tools with expected description flag behavior" $ do
       parseToolCall "project_detail" (object ["project_id" .= testUUID]) `shouldBe` Right (ProjectDetailCall parsedUUID)
       parseToolCall "project_detail" (object ["project_id" .= testUUID, "include_descriptions" .= True]) `shouldBe` Right (ProjectDetailCall parsedUUID)
+      parseToolCall "project_detail" (object ["project_id" .= testUUID, "include_description" .= True, "unknown" .= True]) `shouldBe` Right (ProjectDetailCall parsedUUID)
       parseToolCall "project_detail" (object []) `shouldSatisfy` isLeft
+      parseToolCall "project_detail" (object []) `shouldBe` parseToolCall "project_overview" (object [])
       parseToolCall "project_detail" (object ["project_id" .= ("not-a-uuid" :: Text)]) `shouldSatisfy` isLeft
+      parseToolCall "project_detail" (object ["project_id" .= ("not-a-uuid" :: Text)]) `shouldBe` parseToolCall "project_overview" (object ["project_id" .= ("not-a-uuid" :: Text)])
       parseToolCall "project_overview" (object ["project_id" .= testUUID]) `shouldBe` Right (ProjectOverviewCall parsedUUID False)
       parseToolCall "project_overview" (object ["project_id" .= testUUID, "include_descriptions" .= True]) `shouldBe` Right (ProjectOverviewCall parsedUUID True)
       parseToolCall "task_detail" (object ["task_id" .= testUUID]) `shouldBe` Right (TaskDetailCall parsedUUID)
       parseToolCall "task_detail" (object ["task_id" .= testUUID, "include_description" .= True]) `shouldBe` Right (TaskDetailCall parsedUUID)
+      parseToolCall "task_detail" (object ["task_id" .= testUUID, "include_descriptions" .= True, "unknown" .= True]) `shouldBe` Right (TaskDetailCall parsedUUID)
       parseToolCall "task_detail" (object []) `shouldSatisfy` isLeft
+      parseToolCall "task_detail" (object []) `shouldBe` parseToolCall "task_overview" (object [])
       parseToolCall "task_detail" (object ["task_id" .= ("not-a-uuid" :: Text)]) `shouldSatisfy` isLeft
+      parseToolCall "task_detail" (object ["task_id" .= ("not-a-uuid" :: Text)]) `shouldBe` parseToolCall "task_overview" (object ["task_id" .= ("not-a-uuid" :: Text)])
       parseToolCall "task_overview" (object ["task_id" .= testUUID]) `shouldBe` Right (TaskOverviewCall parsedUUID False)
       parseToolCall "task_overview" (object ["task_id" .= testUUID, "include_description" .= True]) `shouldBe` Right (TaskOverviewCall parsedUUID True)
       parseToolCall "task_finish" (object ["task_id" .= testUUID, "status" .= ("done" :: Text), "notes" .= ("done" :: Text)])

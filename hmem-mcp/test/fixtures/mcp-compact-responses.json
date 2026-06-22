@@ -124,6 +124,104 @@
       }
     }
   },
+  "project_detail": {
+    "max_chars": 2200,
+    "max_mcp_envelope_chars": 3300,
+    "max_jsonrpc_stdio_chars": 3300,
+    "payload": {
+      "project": {
+        "id": "55555555-6666-7777-8888-999999999999",
+        "name": "Detail project",
+        "status": "active",
+        "priority": 6,
+        "parent_id": "11111111-2222-3333-4444-555555555555",
+        "description": "Full project detail description that should not be truncated or copied to child rows."
+      },
+      "tasks": [
+        {
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "title": "Todo direct",
+          "status": "todo",
+          "priority": 7,
+          "project_id": "55555555-6666-7777-8888-999999999999",
+          "due_at": "2026-06-01T00:00:00Z"
+        },
+        {
+          "id": "11111111-2222-3333-4444-555555555555",
+          "title": "Blocked direct",
+          "status": "blocked",
+          "priority": 7,
+          "project_id": "55555555-6666-7777-8888-999999999999",
+          "parent_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        },
+        {
+          "id": "22222222-3333-4444-5555-666666666666",
+          "title": "In progress direct",
+          "status": "in_progress",
+          "priority": 7,
+          "project_id": "55555555-6666-7777-8888-999999999999"
+        }
+      ],
+      "blocked_tasks": {
+        "items": [
+          {
+            "id": "11111111-2222-3333-4444-555555555555",
+            "title": "Blocked direct",
+            "status": "blocked",
+            "priority": 7,
+            "project_id": "55555555-6666-7777-8888-999999999999",
+            "parent_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+          }
+        ],
+        "returned_count": 1,
+        "subtree_blocked_task_count": 3,
+        "subtree_dependency_blocked_task_count": 2,
+        "subtree_open_dependency_count": 5
+      },
+      "subprojects": [
+        {
+          "id": "11111111-2222-3333-4444-555555555555",
+          "name": "Active child",
+          "status": "active",
+          "priority": 5,
+          "parent_id": "55555555-6666-7777-8888-999999999999"
+        },
+        {
+          "id": "22222222-3333-4444-5555-666666666666",
+          "name": "Archived child",
+          "status": "archived",
+          "priority": 5,
+          "parent_id": "55555555-6666-7777-8888-999999999999"
+        }
+      ],
+      "linked_memories": [
+        {
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "summary": "Linked memory",
+          "memory_type": "long_term",
+          "importance": 5,
+          "tags": ["linked"]
+        }
+      ],
+      "connected_memories": [
+        {
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "summary": "Direct project memory",
+          "scope": "project"
+        }
+      ],
+      "readiness_rollup": {
+        "completion_ready": false,
+        "closed_project_count": 1,
+        "open_task_count": 4,
+        "done_task_count": 1,
+        "cancelled_task_count": 1,
+        "blocked_task_count": 3,
+        "dependency_blocked_task_count": 2,
+        "open_dependency_count": 5
+      }
+    }
+  },
   "context_get": {
     "max_chars": 680,
     "max_mcp_envelope_chars": 1000,

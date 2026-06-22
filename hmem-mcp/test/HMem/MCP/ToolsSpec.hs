@@ -48,6 +48,9 @@ testNotesMemoryUUID = "33333333-4444-5555-6666-777777777777"
 testSummaryMemoryUUID :: Text
 testSummaryMemoryUUID = "44444444-5555-6666-7777-888888888888"
 
+testProjectDetailUUID :: Text
+testProjectDetailUUID = "55555555-6666-7777-8888-999999999999"
+
 parsedUUID :: UUID.UUID
 parsedUUID = read "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
@@ -244,6 +247,36 @@ spec = do
       (firstArrayItem "tasks" detailedOverview >>= jsonField "description") `shouldBe` Just (String "full task description")
       jsonField "descriptions_omitted" detailedOverview `shouldBe` Nothing
 
+    it "shapes project_detail as compact detail context with blocker diagnostics" $ do
+      let detail = compactProjectDetail projectDetailRegressionValue
+          taskRows = arrayFieldItems "tasks" detail
+          blockedSummary = jsonField "blocked_tasks" detail
+          blockedRows = maybe [] (arrayFieldItems "items") blockedSummary
+          subprojectRows = arrayFieldItems "subprojects" detail
+      (jsonField "project" detail >>= jsonField "description") `shouldBe` Just (String projectDetailDescription)
+      (jsonField "project" detail >>= jsonField "description_truncated") `shouldBe` Nothing
+      mapMaybe (textField "title") taskRows `shouldBe` ["Todo direct", "Blocked direct", "In progress direct"]
+      mapMaybe (textField "status") taskRows `shouldBe` ["todo", "blocked", "in_progress"]
+      mapM_ (\row -> jsonField "description" row `shouldBe` Nothing) taskRows
+      length blockedRows `shouldBe` 1
+      mapMaybe (textField "title") blockedRows `shouldBe` ["Blocked direct"]
+      mapM_ (\row -> jsonField "description" row `shouldBe` Nothing) blockedRows
+      (blockedSummary >>= jsonField "returned_count") `shouldBe` Just (Number 1)
+      (blockedSummary >>= jsonField "subtree_blocked_task_count") `shouldBe` Just (Number 3)
+      (blockedSummary >>= jsonField "subtree_dependency_blocked_task_count") `shouldBe` Just (Number 2)
+      (blockedSummary >>= jsonField "subtree_open_dependency_count") `shouldBe` Just (Number 5)
+      mapMaybe (textField "name") subprojectRows `shouldBe` ["Active child", "Archived child"]
+      mapM_ (\row -> jsonField "description" row `shouldBe` Nothing) subprojectRows
+      jsonField "linked_memories" detail `shouldSatisfy` arrayLength 1
+      jsonField "connected_memories" detail `shouldSatisfy` arrayLength 1
+      show detail `shouldNotContain` "Done direct"
+      show detail `shouldNotContain` "Cancelled direct"
+      show detail `shouldNotContain` "Other project blocked"
+      show detail `shouldNotContain` "Grandchild"
+      show detail `shouldNotContain` "full task description"
+      show detail `shouldNotContain` "linked full content should be omitted"
+      show detail `shouldNotContain` "workspace_id"
+
     it "keeps saved_view unavailable on the slim MCP surface" $ do
       toolNames `shouldNotContain` ["saved_view"]
       parseToolCall "saved_view" (object ["action" .= ("execute" :: Text)]) `shouldSatisfy` isUnknownTool "saved_view"
@@ -432,14 +465,15 @@ spec = do
         show memoryLinks `shouldNotContain` "full memory content"
 
         projectDetail <- callMockTool mgr base "project_detail" $ object
-          [ "project_id" .= testUUID ]
+          [ "project_id" .= testProjectDetailUUID ]
         projectDetailWithIgnoredFlag <- callMockTool mgr base "project_detail" $ object
-          [ "project_id" .= testUUID
+          [ "project_id" .= testProjectDetailUUID
           , "include_descriptions" .= True
           ]
         projectDetailWithIgnoredFlag `shouldBe` projectDetail
-        jsonField "id" projectDetail `shouldBe` Just (String testUUID)
-        jsonField "name" projectDetail `shouldBe` Just (String "Project")
+        (jsonField "project" projectDetail >>= jsonField "id") `shouldBe` Just (String testProjectDetailUUID)
+        (jsonField "project" projectDetail >>= jsonField "name") `shouldBe` Just (String "Detail project")
+        jsonField "blocked_tasks" projectDetail `shouldSatisfy` hasObjectField "returned_count"
 
         taskDetail <- callMockTool mgr base "task_detail" $ object
           [ "task_id" .= testUUID ]
@@ -1491,6 +1525,7 @@ compactResponseRegressionCases =
   , ("memory_create", compactMemoryMutationAckWithTargets "created" (Just parsedUUID2) (Just parsedUUID3), fullMemoryValue)
   , ("project_spec_10_tasks", compactProjectSpecSummary, projectSpecRegressionValue)
   , ("project_overview", compactProjectOverview, projectOverviewRegressionValue)
+  , ("project_detail", compactProjectDetail, projectDetailRegressionValue)
   , ("context_get", compactContextInfo, contextGetRegressionValue)
   , ("task_start", compactTaskStartSuccess, taskStartRegressionValue)
   , ("unified_search", compactSearchResults, unifiedSearchRegressionValue)
@@ -1523,6 +1558,8 @@ dispatcherResponseRegressionCases =
       ])
   , ("project_overview", "project_overview", object
       [ "project_id" .= testUUID ])
+  , ("project_detail", "project_detail", object
+      [ "project_id" .= testProjectDetailUUID ])
   , ("context_get", "context_get", object
       [ "task_id" .= testUUID
       , "detail_level" .= ("medium" :: Text)
@@ -1563,6 +1600,81 @@ projectOverviewRegressionValue = object
       , "blocked_task_count" .= (1 :: Int)
       , "done_task_count" .= (0 :: Int)
       ]
+  ]
+
+
+projectDetailRegressionValue :: Value
+projectDetailRegressionValue = object
+  [ "project" .= object
+      [ "id" .= testProjectDetailUUID
+      , "workspace_id" .= parsedUUID2
+      , "parent_id" .= testUUID2
+      , "name" .= ("Detail project" :: Text)
+      , "description" .= projectDetailDescription
+      , "status" .= ("active" :: Text)
+      , "priority" .= (6 :: Int)
+      , "metadata" .= object ([] :: [Pair])
+      , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+      ]
+  , "tasks" .=
+      [ projectDetailTaskValue testUUID "Todo direct" "todo" testProjectDetailUUID Nothing (Just "2026-06-01T00:00:00Z")
+      , projectDetailTaskValue testUUID2 "Blocked direct" "blocked" testProjectDetailUUID (Just testUUID) Nothing
+      , projectDetailTaskValue testUUID3 "In progress direct" "in_progress" testProjectDetailUUID Nothing Nothing
+      , projectDetailTaskValue testNotesMemoryUUID "Done direct" "done" testProjectDetailUUID Nothing Nothing
+      , projectDetailTaskValue testSummaryMemoryUUID "Cancelled direct" "cancelled" testProjectDetailUUID Nothing Nothing
+      , projectDetailTaskValue testUUID "Other project blocked" "blocked" testUUID2 Nothing Nothing
+      ]
+  , "subprojects" .=
+      [ projectDetailSubprojectValue testUUID2 "Active child" "active" testProjectDetailUUID
+      , projectDetailSubprojectValue testUUID3 "Archived child" "archived" testProjectDetailUUID
+      , projectDetailSubprojectValue testNotesMemoryUUID "Grandchild" "active" testUUID2
+      ]
+  , "linked_memories" .= [linkedMemoryValue]
+  , "connected_memories" .= [connectedMemoryValue parsedUUID "Direct project memory" "project"]
+  , "readiness_rollup" .= object
+      [ "completion_ready" .= False
+      , "closed_project_count" .= (1 :: Int)
+      , "open_task_count" .= (4 :: Int)
+      , "done_task_count" .= (1 :: Int)
+      , "cancelled_task_count" .= (1 :: Int)
+      , "blocked_task_count" .= (3 :: Int)
+      , "dependency_blocked_task_count" .= (2 :: Int)
+      , "open_dependency_count" .= (5 :: Int)
+      ]
+  ]
+
+
+projectDetailDescription :: Text
+projectDetailDescription = "Full project detail description that should not be truncated or copied to child rows."
+
+
+projectDetailTaskValue :: Text -> Text -> Text -> Text -> Maybe Text -> Maybe Text -> Value
+projectDetailTaskValue taskId title status projectId parentId dueAt = object
+  [ "id" .= taskId
+  , "workspace_id" .= parsedUUID2
+  , "project_id" .= projectId
+  , "parent_id" .= parentId
+  , "title" .= title
+  , "description" .= ("full task description" :: Text)
+  , "status" .= status
+  , "priority" .= (7 :: Int)
+  , "due_at" .= dueAt
+  , "dependency_count" .= (4 :: Int)
+  , "memory_link_count" .= (3 :: Int)
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
+  ]
+
+
+projectDetailSubprojectValue :: Text -> Text -> Text -> Text -> Value
+projectDetailSubprojectValue projectId name status parentId = object
+  [ "id" .= projectId
+  , "workspace_id" .= parsedUUID2
+  , "parent_id" .= parentId
+  , "name" .= name
+  , "description" .= ("Child description should be omitted" :: Text)
+  , "status" .= status
+  , "priority" .= (5 :: Int)
+  , "created_at" .= ("2026-05-20T00:00:00Z" :: Text)
   ]
 
 
@@ -1908,6 +2020,8 @@ mockHmemApplication req respond = do
       | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson projectOverviewRegressionValue
     (method, "/api/v1/projects/11111111-2222-3333-4444-555555555555/overview")
       | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson typedProjectOverviewValue
+    (method, "/api/v1/projects/55555555-6666-7777-8888-999999999999/overview")
+      | method == methodGet && Wai.rawQueryString req == "?extra_context=false" -> respondJson projectDetailRegressionValue
     (method, "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/next-tasks")
       | method == methodGet && queryMatches [("limit", Just "3"), ("include_blocked", Just "true")] req && hasBearer "request-shape-token" -> respondJson nextTasksRegressionValue
       | method == methodGet -> respondBad "unexpected project_next_tasks query or auth header"
@@ -2207,13 +2321,18 @@ encodedLineCharCount = fromIntegral . BL.length . encodeStdioResponse
 
 shouldOmitDefaultNoise :: Text -> Value -> Expectation
 shouldOmitDefaultNoise name payload =
-  mapM_ assertAbsent defaultNoisySubstrings
+  mapM_ assertAbsent (defaultNoisySubstringsFor name)
   where
     rendered = TE.decodeUtf8 $ BL.toStrict $ encode payload
     assertAbsent needle =
       if needle `T.isInfixOf` rendered
         then expectationFailure $ "Unexpected default-noise substring " <> T.unpack needle <> " in fixture " <> T.unpack name
         else pure ()
+
+
+defaultNoisySubstringsFor :: Text -> [Text]
+defaultNoisySubstringsFor "project_detail" = filter (/= "\"description\"") defaultNoisySubstrings
+defaultNoisySubstringsFor _ = defaultNoisySubstrings
 
 
 defaultNoisySubstrings :: [Text]

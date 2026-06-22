@@ -211,7 +211,7 @@ slimToolDefinitions =
       , "required" .= [t "project_id"]
       ]
 
-    , mkTool "project_detail" "Get compact details for one project by ID. Use project_overview when tasks, subprojects, linked memories, or readiness_rollup are needed." $ object
+    , mkTool "project_detail" "Get compact details for one project by ID, including bounded open task context, blocker diagnostics, direct subprojects, linked/connected memories, and readiness rollup." $ object
       [ "type" .= t "object"
       , "properties" .= object
           [ "project_id" .= prop "string" "UUID of the project"
@@ -630,7 +630,9 @@ executeToolCall mgr base mApiKey = \case
                                <> uuidPath tid <> "/" <> T.unpack (relationTypeToText rt))
     ProjectCreate cp    -> postJSONWith (compactProjectMutationAck "created") mgr base mApiKey "/api/v1/projects" cp
     ProjectUpdate pid up -> putJSONWith (addChangedFields (projectUpdateChangedFields up) . compactProjectMutationAck "updated") mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid) up
-    ProjectDetailCall pid -> getJSONWith compactProjectDetail mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid)
+    ProjectDetailCall pid ->
+        getJSONWith (compactProjectDetailFor pid) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/overview" <>
+          buildQuery [("extra_context", Just "false")])
     ProjectLinkMem pid mid -> postJSONWith (const $ entityMemoryLinkAck "linked" "project" pid mid) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories")
                                (object ["memory_id" .= mid])
     ProjectUnlinkMem pid mid -> delJSONWith (const $ entityMemoryLinkAck "unlinked" "project" pid mid) mgr base mApiKey ("/api/v1/projects/" <> uuidPath pid <> "/memories/"
@@ -981,7 +983,76 @@ compactProjectSummary value = object $ catMaybes
 
 
 compactProjectDetail :: Value -> Value
-compactProjectDetail = compactProjectSummary
+compactProjectDetail value = compactProjectDetailWithProjectId inferredProjectId value
+  where
+    inferredProjectId = objectNonNullField "project" value >>= objectNonNullField "id"
+
+
+compactProjectDetailFor :: UUID -> Value -> Value
+compactProjectDetailFor projectId = compactProjectDetailWithProjectId (Just (toJSON projectId))
+
+
+compactProjectDetailWithProjectId :: Maybe Value -> Value -> Value
+compactProjectDetailWithProjectId mProjectId value = object $ catMaybes
+  [ fieldWith "project" compactProjectDetailRow value
+  , Just $ "tasks" .= taskRows
+  , Just $ "blocked_tasks" .= compactProjectBlockedTasks blockedRows value
+  , Just $ "subprojects" .= projectDetailSubprojectRows mProjectId value
+  , nonEmptyMappedArrayField "linked_memories" compactMemorySummary value
+  , Just $ "connected_memories" .= mapArrayFieldOrEmpty "connected_memories" compactConnectedMemorySummary value
+  , fieldWith "readiness_rollup" compactReadinessRollup value
+  ]
+  where
+    taskRows = projectDetailTaskRows mProjectId value
+    blockedRows = filter projectDetailBlockedTaskRow taskRows
+
+
+compactProjectDetailRow :: Value -> Value
+compactProjectDetailRow value = insertOptionalField "description" value (compactProjectSummary value)
+
+
+projectDetailTaskRows :: Maybe Value -> Value -> [Value]
+projectDetailTaskRows Nothing _ = []
+projectDetailTaskRows (Just projectId) value =
+  [ compactTaskSummary taskValue
+  | taskValue <- objectArrayField "tasks" value
+  , objectNonNullField "project_id" taskValue == Just projectId
+  , projectDetailOpenTask taskValue
+  ]
+
+
+projectDetailSubprojectRows :: Maybe Value -> Value -> [Value]
+projectDetailSubprojectRows Nothing _ = []
+projectDetailSubprojectRows (Just projectId) value =
+  [ compactProjectSummary projectValue
+  | projectValue <- objectArrayField "subprojects" value
+  , objectNonNullField "parent_id" projectValue == Just projectId
+  ]
+
+
+projectDetailOpenTask :: Value -> Bool
+projectDetailOpenTask value = case objectNonNullField "status" value of
+  Just (String status) -> status `elem` ["todo", "in_progress", "blocked"]
+  _                    -> False
+
+
+projectDetailBlockedTaskRow :: Value -> Bool
+projectDetailBlockedTaskRow value = objectNonNullField "status" value == Just (String "blocked")
+
+
+compactProjectBlockedTasks :: [Value] -> Value -> Value
+compactProjectBlockedTasks blockedRows value = object
+  [ "items" .= blockedRows
+  , "returned_count" .= length blockedRows
+  , "subtree_blocked_task_count" .= rollupCount "blocked_task_count"
+  , "subtree_dependency_blocked_task_count" .= rollupCount "dependency_blocked_task_count"
+  , "subtree_open_dependency_count" .= rollupCount "open_dependency_count"
+  ]
+  where
+    readinessRollup = fromMaybe Null (objectNonNullField "readiness_rollup" value)
+    rollupCount key = case objectNonNullField key readinessRollup of
+      Just numberValue@(Number _) -> numberValue
+      _                           -> toJSON (0 :: Int)
 
 
 maxProjectOverviewDescriptionChars :: Int

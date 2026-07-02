@@ -4,6 +4,7 @@
 --   @hmem-ctl init@          – create ~/.hmem/, PostgreSQL data dir, database, schema
 --   @hmem-ctl install@       – register auto-run services (requires init first)
 --   @hmem-ctl start@         – start PostgreSQL, apply pending migrations, then start hmem-server
+--   @hmem-ctl migrate@       – apply pending migrations to an already-running PostgreSQL database
 --   @hmem-ctl stop@          – stop hmem-server + PostgreSQL
 --   @hmem-ctl status@        – show service status
 --   @hmem-ctl uninstall@     – stop services, remove auto-run, delete ~/.hmem/
@@ -15,7 +16,7 @@
 --   @hmem-ctl auth users upsert@ – create/update deployed users and global grants
 --   @hmem-ctl auth tokens issue@ – create a display-once service/PAT token
 --
---   Requires: initdb, pg_ctl, createdb, psql on PATH (ships with PostgreSQL).
+--   Local PostgreSQL management commands require: initdb, pg_ctl, createdb, psql on PATH.
 
 module Main where
 
@@ -62,6 +63,7 @@ import HMem.DB.Pool qualified as Pool
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.AuthUsers qualified as AuthUsers
+import HMem.Server.CtlMigrate qualified as CtlMigrate
 import HMem.Server.CtlPaths
 import HMem.Types
 import Paths_hmem_server qualified as Paths
@@ -75,6 +77,7 @@ data Command
   | CmdInit
   | CmdInstall
   | CmdStart
+  | CmdMigrate MigrateOpts
   | CmdStop
   | CmdStatus
   | CmdUninstall
@@ -143,6 +146,10 @@ data ProjectsOpts = ProjectsOpts
   , projStatus    :: Maybe String
   }
 
+data MigrateOpts = MigrateOpts
+  { migrateMigrationsDir :: FilePath
+  }
+
 commandParser :: Parser Command
 commandParser = subparser
   (  command "init"      (info (pure CmdInit)
@@ -151,6 +158,8 @@ commandParser = subparser
     (progDesc "Set up auto-run services (requires init first)"))
   <> command "start"     (info (pure CmdStart)
     (progDesc "Start PostgreSQL, apply pending migrations, and start hmem-server"))
+  <> command "migrate"   (info (CmdMigrate <$> migrateParser)
+    (progDesc "Apply pending migrations to an already-running PostgreSQL database"))
   <> command "stop"      (info (pure CmdStop)
       (progDesc "Stop hmem-server and PostgreSQL"))
   <> command "status"    (info (pure CmdStatus)
@@ -320,6 +329,16 @@ projectsParser = ProjectsOpts
   <*> optional (strOption (long "workspace" <> short 'w' <> metavar "NAME" <> help "Filter by workspace name (case-insensitive substring)"))
   <*> optional (strOption (long "status" <> short 's' <> metavar "STATUS" <> help "Filter by status (active, paused, completed, archived)"))
 
+migrateParser :: Parser MigrateOpts
+migrateParser = MigrateOpts
+  <$> strOption
+      ( long "migrations-dir"
+     <> metavar "DIR"
+     <> value CtlMigrate.defaultContainerMigrationsDir
+     <> showDefault
+     <> help "Directory containing SQL migrations to apply"
+      )
+
 main :: IO ()
 main = do
   cmd <- execParser $ info (commandParser <**> helper)
@@ -332,6 +351,7 @@ main = do
     CmdInit      -> doInit
     CmdInstall   -> doInstall
     CmdStart     -> doStart
+    CmdMigrate opts -> doMigrate opts
     CmdStop      -> doStop
     CmdStatus    -> doStatus
     CmdUninstall -> doUninstall
@@ -340,6 +360,28 @@ main = do
     CmdProjects opts   -> doProjects opts
     CmdWorkspace       -> doWorkspace
     CmdAuth authCmd    -> doAuth authCmd
+
+------------------------------------------------------------------------
+-- Migrate-only command for externally managed PostgreSQL
+------------------------------------------------------------------------
+
+doMigrate :: MigrateOpts -> IO ()
+doMigrate opts = do
+  putStrLn "=== hmem-ctl migrate ==="
+  putStrLn ""
+  putStrLn $ "Migrations directory: " <> opts.migrateMigrationsDir
+  result <- CtlMigrate.runMigrate (CtlMigrate.MigrateOptions opts.migrateMigrationsDir)
+  case result of
+    Left err -> do
+      hPutStrLn stderr $ "Error: " <> CtlMigrate.renderMigrateError err
+      exitFailure
+    Right (CtlMigrate.MigrateReport appliedMigs _) -> do
+      case appliedMigs of
+        [] -> putStrLn "No pending migrations."
+        ms -> do
+          mapM_ (\m -> putStrLn $ "Applied: " <> m) ms
+          putStrLn $ show (length ms) <> " migration(s) applied."
+      putStrLn "Migrations complete."
 
 ------------------------------------------------------------------------
 -- Init

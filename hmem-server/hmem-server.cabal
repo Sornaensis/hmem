@@ -42,6 +42,7 @@ library
       HMem.Server.AuthBootstrap
       HMem.Server.AuthTokens
       HMem.Server.AuthUsers
+      HMem.Server.CtlMigrate
       HMem.Server.CtlPaths
       HMem.Server.Event
       HMem.Server.Logging
@@ -382,6 +383,7 @@ test-suite hmem-server-test
       HMem.Server.AuthBootstrapSpec
       HMem.Server.AuthTokensSpec
       HMem.Server.AuthUsersSpec
+      HMem.Server.CtlMigrateSpec
       HMem.Server.CtlPathsSpec
       HMem.Server.DeployedSandboxSpec
       HMem.Server.KeycloakHarness

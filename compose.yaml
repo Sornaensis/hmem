@@ -1,0 +1,118 @@
+# hmem Docker Compose stack.
+#
+# Quick start:
+#   1. Copy .env.example to .env and set POSTGRES_PASSWORD/port/image values.
+#   2. Copy config/compose.env.example to config/compose.env for hmem runtime env.
+#   3. Run: docker compose up --build
+#
+# Official postgres is the default. To enable pgvector-backed embedding similarity,
+# set POSTGRES_IMAGE=pgvector/pgvector:pg17 in .env. With the default official
+# postgres image, migrations skip the optional vector extension and hmem remains
+# usable with similarity search disabled.
+#
+# One-shot admin examples:
+#   docker compose run --rm migrate
+#   docker compose run --rm hmem hmem-ctl migrate
+#   docker compose run --rm hmem hmem-ctl auth bootstrap-superadmin --help
+# Shared/deployed auth should use HMEM_AUTH_MODE=deployed plus the operator
+# bootstrap workflow above; do not enable local bootstrap for deployments.
+
+name: hmem
+
+x-hmem-image: &hmem-image
+  image: ${HMEM_IMAGE:-hmem:local}
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+x-hmem-env-file: &hmem-env-file
+  - path: ${HMEM_ENV_FILE:-./config/compose.env}
+    required: false
+
+x-hmem-db-env: &hmem-db-env
+  HMEM_DB_HOST: postgres
+  HMEM_DB_PORT: "5432"
+  HMEM_DB_NAME: ${POSTGRES_DB:-hmem}
+  HMEM_DB_USER: ${POSTGRES_USER:-hmem}
+  # Empty by default so the stack fails closed until POSTGRES_PASSWORD or
+  # HMEM_DB_PASSWORD_FILE is supplied by the operator.
+  HMEM_DB_PASSWORD: ${POSTGRES_PASSWORD:-}
+  HMEM_DB_SSLMODE: ${HMEM_DB_SSLMODE:-disable}
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-bookworm}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hmem}
+      POSTGRES_USER: ${POSTGRES_USER:-hmem}
+      # No committed default password. Set POSTGRES_PASSWORD in .env or your
+      # shell before starting; official postgres refuses an empty password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  hmem:
+    <<: *hmem-image
+    restart: unless-stopped
+    env_file: *hmem-env-file
+    environment:
+      <<: *hmem-db-env
+      HMEM_SERVER_HOST: 0.0.0.0
+      HMEM_SERVER_PORT: "8420"
+    volumes:
+      - hmem-data:/var/lib/hmem
+    ports:
+      - "${HMEM_HTTP_BIND:-127.0.0.1}:${HMEM_HTTP_PORT:-8420}:8420"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/hmem-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # Optional one-shot migration helper. The hmem service also runs migrations
+  # before startup; this profile is useful for admin/change windows.
+  migrate:
+    <<: *hmem-image
+    profiles: ["admin"]
+    restart: "no"
+    env_file: *hmem-env-file
+    environment: *hmem-db-env
+    volumes:
+      - hmem-data:/var/lib/hmem
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["migrate"]
+
+  # Optional MCP sidecar/profile. It uses the image entrypoint command dispatch
+  # and reaches the app over the Compose service network.
+  mcp:
+    <<: *hmem-image
+    profiles: ["mcp"]
+    restart: unless-stopped
+    env_file: *hmem-env-file
+    environment:
+      HMEM_SERVER_URL: http://hmem:8420
+      # Set HMEM_MCP_AUTH_TOKEN[_FILE] or HMEM_AUTH_TOKEN[_FILE] in the env_file.
+    depends_on:
+      hmem:
+        condition: service_healthy
+    command: ["hmem-mcp"]
+
+# Named volumes preserve database state and /var/lib/hmem logs/config across
+# docker compose down/up. Data is removed only when volumes are explicitly deleted
+# (for example, docker compose down -v).
+volumes:
+  postgres-data:
+  hmem-data:

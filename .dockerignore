@@ -1,0 +1,156 @@
+# Keep Docker build contexts small, reproducible, and free of host-only data.
+# Required build inputs intentionally remain available: stack.yaml,
+# stack.yaml.lock, package.yaml/*.cabal files, Haskell src/app/test trees,
+# hmem-server/frontend package manifests + Elm/Vite source, and migrations.
+# Future Dockerfiles should COPY dependency manifests first (Stack package
+# manifests, frontend package.json/package-lock.json/elm.json) and source,
+# static source assets, tests, and migrations after dependency layers. Use
+# npm ci so package-lock.json is the deterministic frontend input.
+
+# VCS and local workspace metadata
+.git/
+.gitignore
+.hmem.workspace
+
+# Stack and Cabal build outputs
+.stack-work*/
+**/.stack-work*/
+dist/
+dist-newstyle/
+**/dist/
+**/dist-newstyle/
+cabal-dev/
+**/cabal-dev/
+.cabal-sandbox/
+**/.cabal-sandbox/
+cabal.sandbox.config
+**/cabal.sandbox.config
+cabal.project.local
+cabal.project.local~
+**/cabal.project.local
+**/cabal.project.local~
+*.cabal.bak
+**/*.cabal.bak
+
+# Haskell compiler/test artifacts
+*.o
+*.hi
+*.dyn_o
+*.dyn_hi
+*.chi
+*.chs.h
+*.hp
+*.prof
+*.aux
+*.eventlog
+*.tix
+.hpc/
+**/.hpc/
+.hsenv/
+**/.hsenv/
+.ghc.environment.*
+**/.ghc.environment.*
+.coverage/
+**/.coverage/
+test-results/
+**/test-results/
+
+# Frontend dependency and build outputs
+node_modules/
+**/node_modules/
+elm-stuff/
+**/elm-stuff/
+hmem-server/static/
+**/.vite/
+coverage/
+**/coverage/
+*.tsbuildinfo
+
+# Local environment, secrets, and credentials
+**/.env
+**/.env.local
+**/.env.*.local
+.envrc
+**/.envrc
+secrets/
+**/secrets/
+*.secret
+*.secrets
+**/*.secret
+**/*.secrets
+**/*-secret.*
+**/*_secret.*
+**/*-secrets.*
+**/*_secrets.*
+*.pem
+*.key
+*.p12
+*.pfx
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
+# Local database data and dumps
+data/
+db/
+postgres-data/
+pgdata/
+**/postgres-data/
+**/pgdata/
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.dump
+*.sql.bak
+*.sql.gz
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.dump
+**/*.sql.bak
+**/*.sql.gz
+
+# Logs and temporary files
+*.log
+**/*.log
+logs/
+**/logs/
+tmp/
+temp/
+**/tmp/
+**/temp/
+*.tmp
+*.temp
+*.bak
+
+# Editor, IDE, OS, and tool caches
+.vscode/
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+.hie/
+**/.hie/
+.cache/
+**/.cache/
+.npm/
+**/.npm/
+.yarn/
+**/.yarn/
+.pnpm-store/
+**/.pnpm-store/
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+*.swp
+*.swo
+*~
+tags
+TAGS

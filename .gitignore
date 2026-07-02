@@ -1,7 +1,8 @@
 # Stack
 .stack-work/
-stack.yaml.lock
-stack*.yaml.lock
+# Commit the root lock file so Docker/CI builds use pinned snapshots and extra-deps.
+!/stack.yaml.lock
+/stack-*.yaml.lock
 
 # Cabal
 dist/

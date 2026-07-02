@@ -1,7 +1,7 @@
 -- | Build the Elm/Vite frontend, outputting to hmem-server\/static\/.
 --
 -- Usage:
---   stack run build-frontend              -- install deps + build
+--   stack run build-frontend              -- install locked deps + build
 --   stack run build-frontend -- --clean    -- remove node_modules & elm-stuff first
 --   stack run build-frontend -- --install  -- build + copy to ~/.hmem/static/
 --
@@ -56,10 +56,10 @@ main = do
             removeIfExists (frontendDir </> "elm-stuff")
             removeIfExists (cwd </> "hmem-server" </> "static")
 
-          -- Always run npm install to ensure dependencies are up to date
-          putStrLn "Installing frontend dependencies..."
+          -- Always run npm ci so package-lock.json is the deterministic input.
+          putStrLn "Installing frontend dependencies from package-lock.json..."
           hFlush stdout
-          runInDir frontendDir "npm" ["install"]
+          runInDir frontendDir "npm" ["ci"]
 
           -- Build
           putStrLn "Building frontend..."

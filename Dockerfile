@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG NODE_IMAGE=node:20-bookworm-slim
-ARG HASKELL_IMAGE=haskell:9.10.2-slim
+ARG HASKELL_BUILDER_IMAGE=debian:12-slim
 ARG RUNTIME_IMAGE=debian:12-slim
 
 FROM ${NODE_IMAGE} AS frontend-builder
@@ -14,7 +14,7 @@ COPY hmem-server/frontend/index.html hmem-server/frontend/vite.config.js ./
 COPY hmem-server/frontend/src ./src
 RUN npm run build
 
-FROM ${HASKELL_IMAGE} AS haskell-builder
+FROM ${HASKELL_BUILDER_IMAGE} AS haskell-builder
 WORKDIR /workspace
 ENV STACK_ROOT=/root/.stack
 
@@ -23,13 +23,19 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
       build-essential \
       ca-certificates \
+      curl \
       libffi-dev \
       libgmp-dev \
+      libnuma-dev \
       libpq-dev \
       libtinfo-dev \
       pkg-config \
       xz-utils \
       zlib1g-dev; \
+    curl -fsSL https://get.haskellstack.org/ -o /tmp/install-stack.sh; \
+    sh /tmp/install-stack.sh; \
+    rm /tmp/install-stack.sh; \
+    stack --version; \
     rm -rf /var/lib/apt/lists/*
 
 COPY stack.yaml stack.yaml.lock ./
@@ -37,8 +43,9 @@ COPY hmem-core/package.yaml hmem-core/hmem-core.cabal hmem-core/
 COPY hmem-server/package.yaml hmem-server/hmem-server.cabal hmem-server/
 COPY hmem-mcp/package.yaml hmem-mcp/hmem-mcp.cabal hmem-mcp/
 
-RUN stack --version; \
-    stack --system-ghc --no-install-ghc build --only-dependencies \
+RUN set -eux; \
+    stack --no-terminal setup; \
+    stack --no-terminal build --only-dependencies \
       hmem-server:exe:hmem-server \
       hmem-server:exe:hmem-ctl \
       hmem-mcp:exe:hmem-mcp
@@ -54,7 +61,7 @@ COPY hmem-mcp/app hmem-mcp/app
 
 RUN set -eux; \
     mkdir -p /opt/hmem/bin; \
-    stack --system-ghc --no-install-ghc install \
+    stack --no-terminal install \
       --local-bin-path /opt/hmem/bin \
       hmem-server:exe:hmem-server \
       hmem-server:exe:hmem-ctl \

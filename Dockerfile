@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG NODE_IMAGE=node:20-bookworm-slim
-ARG HASKELL_IMAGE=haskell:9.10.2-slim-bookworm
+ARG HASKELL_IMAGE=haskell:9.10.2-slim
 ARG RUNTIME_IMAGE=debian:12-slim
 
 FROM ${NODE_IMAGE} AS frontend-builder

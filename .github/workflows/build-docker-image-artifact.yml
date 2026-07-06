@@ -1,0 +1,101 @@
+name: Build Docker image artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Optional image tag to build, for example hmem:local-handoff"
+        required: false
+        type: string
+      artifact_name:
+        description: "Name for the uploaded image artifact"
+        required: false
+        default: hmem-docker-image
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-image:
+    name: Build local Docker image and upload artifact
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILDKIT: "1"
+      IMAGE_ARCHIVE: hmem-image.tar.gz
+      IMAGE_INSPECT: hmem-image-inspect.json
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve image and artifact names
+        id: vars
+        shell: bash
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+          INPUT_ARTIFACT_NAME: ${{ inputs.artifact_name }}
+        run: |
+          set -euo pipefail
+
+          image_tag="${INPUT_IMAGE_TAG:-hmem:${GITHUB_SHA::12}}"
+          artifact_name="${INPUT_ARTIFACT_NAME:-hmem-docker-image}"
+
+          echo "image_tag=${image_tag}" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build Docker image
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          docker build --tag "${IMAGE_TAG}" .
+
+      - name: Inspect built image metadata
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          docker image inspect "${IMAGE_TAG}" | tee "${IMAGE_INSPECT}"
+
+      - name: Save compressed image archive
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          docker save "${IMAGE_TAG}" | gzip -c > "${IMAGE_ARCHIVE}"
+          test -s "${IMAGE_ARCHIVE}"
+          ls -lh "${IMAGE_ARCHIVE}" "${IMAGE_INSPECT}"
+
+      - name: Summarize artifact usage
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Docker image artifact"
+            echo
+            echo "Image tag: \`${IMAGE_TAG}\`"
+            echo
+            echo "After downloading and extracting the workflow artifact, load the image with:"
+            echo
+            echo "\`\`\`sh"
+            echo "gzip -dc ${IMAGE_ARCHIVE} | docker load"
+            echo "\`\`\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      # Download the artifact, then load the saved image with:
+      #   gzip -dc hmem-image.tar.gz | docker load
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.vars.outputs.artifact_name }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ env.IMAGE_ARCHIVE }}
+            ${{ env.IMAGE_INSPECT }}

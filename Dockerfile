@@ -7,6 +7,14 @@ ARG RUNTIME_IMAGE=debian:12-slim
 FROM ${NODE_IMAGE} AS frontend-builder
 WORKDIR /workspace/hmem-server/frontend
 
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates; \
+    update-ca-certificates; \
+    rm -rf /var/lib/apt/lists/*
+
 COPY hmem-server/frontend/package.json hmem-server/frontend/package-lock.json hmem-server/frontend/elm.json ./
 RUN npm ci
 

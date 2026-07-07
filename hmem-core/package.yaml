@@ -35,15 +35,6 @@ ghc-options:
   - -Wincomplete-uni-patterns
   - -Wredundant-constraints
 
-executables:
-  run-integration-tests:
-    main: RunIntegrationTests.hs
-    source-dirs: app
-    dependencies:
-      - process
-    ghc-options:
-      - -threaded
-
 library:
   source-dirs: src
 

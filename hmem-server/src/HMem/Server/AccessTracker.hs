@@ -17,10 +17,9 @@ import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
 import System.IO (hPutStrLn, stderr)
 
-import HMem.DB.Memory (touchMemoryBatch)
+-- | Legacy-compatible in-process buffer.  Observations deliberately have no
+-- access-count column, so flushing only drains this diagnostic buffer.
 
--- | Buffers memory access events and flushes them periodically
--- in a single batched UPDATE to reduce write amplification.
 data AccessTracker = AccessTracker
   { atBuffer  :: !(IORef (Map UUID Int))
   , atDropped :: !(IORef Int)
@@ -71,21 +70,7 @@ flush pool tracker = do
   accesses <- atomicModifyIORef' tracker.atBuffer $ \m -> (Map.empty, m)
   case Map.toList accesses of
     [] -> pure ()
-    xs -> touchMemoryBatch pool xs `catch` \(_ :: SomeException) -> do
-            -- Re-merge failed counts back into the buffer for retry
-            -- on the next flush cycle instead of silently dropping them.
-            -- Truncate to maxBufferSize to prevent unbounded growth.
-            let truncated = Map.take maxBufferSize accesses
-                droppedN  = Map.size accesses - Map.size truncated
-            atomicModifyIORef' tracker.atBuffer $ \m ->
-              let merged = Map.unionWith (+) truncated m
-              in (Map.take maxBufferSize merged, ())
-            if droppedN > 0
-              then do
-                atomicModifyIORef' tracker.atDropped $ \n -> (n + droppedN, ())
-                hPutStrLn stderr $ "Warning: AccessTracker flush failed, dropped "
-                  <> show droppedN <> " entries on truncation"
-              else pure ()
+    _ -> pure ()
 
 -- | Force an immediate flush of buffered access counts to the
 -- database.  Intended for use during graceful shutdown.

@@ -1,13 +1,13 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.38.1.
+-- This file has been generated from package.yaml by hpack version 0.39.6.
 --
 -- see: https://github.com/sol/hpack
 
 name:           hmem-core
 version:        0.1.0.0
 synopsis:       Core types and database operations for hmem
-description:    Shared library for the hmem LLM memory and task management system.
+description:    Shared library for hmem observations, workspaces, projects, and tasks.
 category:       Database
 author:         hmem contributors
 maintainer:     hmem contributors
@@ -19,10 +19,8 @@ library
       HMem.Config
       HMem.DB.Audit
       HMem.DB.Auth
-      HMem.DB.Category
-      HMem.DB.Cleanup
-      HMem.DB.Memory
       HMem.DB.Migration
+      HMem.DB.Observation
       HMem.DB.Overview
       HMem.DB.Pool
       HMem.DB.Project
@@ -88,9 +86,10 @@ test-suite hmem-core-test
       HMem.ConfigSpec
       HMem.DB.AuditSpec
       HMem.DB.AuthSpec
-      HMem.DB.CleanupSpec
-      HMem.DB.MemorySpec
+      HMem.DB.ObservationSpec
+      HMem.DB.OverviewSpec
       HMem.DB.ProjectSpec
+      HMem.DB.SearchSpec
       HMem.DB.TaskSpec
       HMem.DB.TestHarnessSpec
       HMem.TypesSpec

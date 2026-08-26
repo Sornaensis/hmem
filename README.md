@@ -1,6 +1,6 @@
 # hmem
 
-A PostgreSQL-backed memory and task management system for LLMs, written in Haskell.
+A PostgreSQL-backed observation, project, and task management system for LLMs, written in Haskell.
 
 ## Installation
 

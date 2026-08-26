@@ -1,8 +1,10 @@
 module HMem.DB.TestHarnessSpec (spec) where
 
 import Control.Exception (SomeException, bracket, try)
+import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as B8
 import Data.Functor.Contravariant (contramap)
-import Data.List (sort)
+import Data.List (isInfixOf, sort)
 import Data.Pool (destroyAllResources)
 import Data.Text (Text)
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -155,8 +157,8 @@ spec = do
                 Session.statement (wsId, "new unlinked memory" :: Text) insertUnlinkedMemoryDirectStatement)
                 :: IO (Either DBException UUID)
               case newUnlinked of
-                Left (DBWorkflowViolation code _ _ _) -> code `shouldBe` "MEMORY_LINK_REQUIRED"
-                Left other -> expectationFailure $ "Expected MEMORY_LINK_REQUIRED, got: " <> show other
+                Left (DBOtherError _) -> pure ()
+                Left other -> expectationFailure $ "Expected historical V013 rejection, got: " <> show other
                 Right _ -> expectationFailure "Expected new unlinked memory insert to fail after V013"
 
     it "autoBlockMigration backfills existing task blockers and preserves manual blocked tasks" $
@@ -299,8 +301,8 @@ spec = do
                 pure mid)
                 :: IO (Either DBException UUID)
               case newMissingType of
-                Left (DBWorkflowViolation code _ _ _) -> code `shouldBe` "MEMORY_TYPE_REQUIRED"
-                Left other -> expectationFailure $ "Expected MEMORY_TYPE_REQUIRED, got: " <> show other
+                Left (DBOtherError _) -> pure ()
+                Left other -> expectationFailure $ "Expected historical V015 rejection, got: " <> show other
                 Right _ -> expectationFailure "Expected new missing-type memory insert to fail after V015"
 
     it "flatSubtaskMigration flattens nested tasks, preserves safe dependency edges, and repairs legacy orphans" $
@@ -482,11 +484,164 @@ spec = do
               runSession pool (Session.statement activeChildProjectId activeChildProjectCascadeReportCountStatement) `shouldReturn` 1
               runSession pool (Session.statement activeProjectTaskId projectTaskCascadeReportCountStatement) `shouldReturn` 1
 
+    it "observationMigration destructively replaces legacy memories without affecting projects or tasks" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              preV20Dir <- copyMigrationSubset sandbox migrations "pre-v020" (\name -> name < "V020")
+              v20OnlyDir <- copyMigrationSubset sandbox migrations "v020-only" (== "V020__replace_memories_with_observations.sql")
+
+              preResult <- Migration.runMigrations pool preV20Dir
+              preResult.failed `shouldBe` Nothing
+              runTransaction pool $ Session.sql $ B8.unlines
+                [ "INSERT INTO workspaces (name) VALUES ('observation migration workspace');"
+                , "INSERT INTO projects (workspace_id, name) SELECT id, 'preserved project' FROM workspaces WHERE name = 'observation migration workspace';"
+                , "INSERT INTO projects (workspace_id, name) SELECT id, 'unrelated project' FROM workspaces WHERE name = 'observation migration workspace';"
+                , "INSERT INTO tasks (workspace_id, project_id, title) SELECT w.id, p.id, 'preserved task' FROM workspaces w JOIN projects p ON p.workspace_id = w.id WHERE w.name = 'observation migration workspace' AND p.name = 'preserved project';"
+                , "INSERT INTO tasks (workspace_id, project_id, title) SELECT w.id, p.id, 'unrelated task' FROM workspaces w JOIN projects p ON p.workspace_id = w.id WHERE w.name = 'observation migration workspace' AND p.name = 'unrelated project';"
+                , "INSERT INTO memories (workspace_id, content, memory_type) SELECT id, 'legacy secret content', 'short_term' FROM workspaces WHERE name = 'observation migration workspace';"
+                , "INSERT INTO memories (workspace_id, content, memory_type) SELECT id, 'another legacy secret', 'long_term' FROM workspaces WHERE name = 'observation migration workspace';"
+                , "INSERT INTO project_memory_links (project_id, memory_id) SELECT p.id, m.id FROM projects p JOIN memories m ON m.workspace_id = p.workspace_id WHERE p.name = 'preserved project';"
+                , "INSERT INTO task_memory_links (task_id, memory_id) SELECT t.id, m.id FROM tasks t JOIN memories m ON m.workspace_id = t.workspace_id WHERE t.title = 'preserved task' LIMIT 1;"
+                , "INSERT INTO memory_categories (workspace_id, name) SELECT id, 'legacy category' FROM workspaces WHERE name = 'observation migration workspace';"
+                , "INSERT INTO memory_category_links (memory_id, category_id) SELECT m.id, c.id FROM memories m CROSS JOIN memory_categories c LIMIT 1;"
+                , "INSERT INTO memory_tags (memory_id, tag) SELECT id, 'legacy' FROM memories;"
+                , "INSERT INTO memory_links (source_id, target_id, relation_type) SELECT source.id, target.id, 'related' FROM memories source JOIN memories target ON target.id <> source.id LIMIT 1;"
+                , "INSERT INTO cleanup_policies (workspace_id, memory_type) SELECT id, 'short_term' FROM workspaces WHERE name = 'observation migration workspace';"
+                , "INSERT INTO saved_views (workspace_id, name, entity_type) SELECT id, 'legacy memories', 'memory_search' FROM workspaces WHERE name = 'observation migration workspace';"
+                , "INSERT INTO saved_views (workspace_id, name, entity_type) SELECT id, 'activity', 'activity' FROM workspaces WHERE name = 'observation migration workspace';"
+                , "INSERT INTO workspace_groups (name, description) VALUES ('unrelated catalog', 'must survive');"
+                , "INSERT INTO audit_log (entity_type, entity_id, action, old_values) VALUES ('project', 'unrelated-content-audit', 'update', '{\"content\": \"unrelated audit payload\"}'::jsonb);"
+                ]
+
+              -- A failure after destructive statements must roll back the whole
+              -- V020 transaction, leave its ledger entry absent, and permit a
+              -- retry on the same pool after the conflicting fixture is removed.
+              runSession pool $ Session.sql "CREATE TABLE observations (id UUID)"
+              failedV20 <- Migration.runMigrations pool v20OnlyDir
+              failedV20.failed `shouldSatisfy` maybe False (const True)
+              runSession pool (queryBool "SELECT to_regclass('public.memories') IS NOT NULL AND EXISTS (SELECT 1 FROM memories WHERE content = 'legacy secret content') AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 20)") `shouldReturn` True
+              runSession pool $ Session.sql "DROP TABLE observations"
+
+              v20Result <- Migration.runMigrations pool v20OnlyDir
+              v20Result.failed `shouldBe` Nothing
+              rerunV20 <- Migration.runMigrations pool v20OnlyDir
+              rerunV20.applied `shouldBe` []
+              rerunV20.skipped `shouldBe` ["V020__replace_memories_with_observations.sql"]
+
+              runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname = ANY (ARRAY['memories', 'memory_categories', 'memory_tags', 'memory_category_links', 'memory_links', 'project_memory_links', 'task_memory_links', 'cleanup_policies']))") `shouldReturn` True
+              runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = ANY (ARRAY['hmem_validate_memory_creation_link', 'hmem_check_memory_creation_link_from_memory', 'hmem_check_memory_creation_link_from_project_link', 'hmem_check_memory_creation_link_from_task_link', 'hmem_check_memory_creation_link_from_project_target', 'hmem_check_memory_creation_link_from_task_target', 'hmem_require_explicit_memory_type', 'hmem_memories_search_vector', 'hmem_memory_tags_reindex', 'hmem_check_category_cycle', 'hmem_soft_delete_memories_for_deleted_links'])) AND NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = ANY (ARRAY['memory_type_enum', 'relation_type_enum'])) AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname = ANY (ARRAY['uq_global_category_name', 'idx_memories_workspace', 'idx_memories_workspace_type', 'idx_memories_workspace_importance', 'idx_memories_expires', 'idx_memories_last_accessed', 'idx_memories_created', 'idx_memories_metadata', 'idx_memories_search', 'idx_memories_pinned', 'idx_memories_workspace_id', 'idx_memories_embedding', 'idx_memory_tags_tag', 'idx_memory_tags_covering', 'idx_memory_categories_ws', 'idx_memory_categories_parent', 'idx_memory_links_target', 'idx_memory_links_source_relation', 'idx_project_mem_links_memory', 'idx_task_mem_links_memory', 'idx_project_memory_links_memory', 'idx_task_memory_links_memory', 'idx_memories_workspace_pinned'])) AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE NOT tgisinternal AND tgname = ANY (ARRAY['trg_memories_search_vector', 'trg_memory_tags_reindex', 'trg_memories_updated_at', 'trg_memory_creation_link_required', 'trg_memory_type_required', 'trg_memories_audit', 'trg_memory_categories_audit', 'trg_memory_tags_audit', 'trg_memory_category_links_audit', 'trg_memory_links_audit', 'trg_project_memory_links_audit', 'trg_task_memory_links_audit', 'trg_cleanup_policies_audit', 'trg_project_memory_target_valid', 'trg_task_memory_target_valid'])) AND position('memories' IN pg_get_functiondef('hmem_audit_change'::regproc)) = 0 AND position('memories' IN pg_get_functiondef('hmem_cascade_task_soft_delete'::regproc)) = 0 AND position('memories' IN pg_get_functiondef('hmem_cascade_project_soft_delete'::regproc)) = 0") `shouldReturn` True
+              runSession pool (queryBool "SELECT count(*) = 2 FROM projects WHERE name IN ('preserved project', 'unrelated project')") `shouldReturn` True
+              runSession pool (queryBool "SELECT count(*) = 2 FROM tasks WHERE title IN ('preserved task', 'unrelated task')") `shouldReturn` True
+              runSession pool (queryBool "SELECT count(*) = 1 FROM workspaces WHERE name = 'observation migration workspace'") `shouldReturn` True
+              runSession pool (queryBool "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 20 AND name = 'V020__replace_memories_with_observations.sql')") `shouldReturn` True
+              runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM audit_log WHERE entity_type IN ('memory', 'memory_tag', 'memory_category', 'memory_category_link', 'memory_link', 'project_memory_link', 'task_memory_link', 'cleanup_policy')) AND EXISTS (SELECT 1 FROM audit_log WHERE entity_id = 'unrelated-content-audit' AND old_values ->> 'content' = 'unrelated audit payload')") `shouldReturn` True
+              runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM saved_views WHERE entity_type IN ('memory_search', 'memory_list')) AND EXISTS (SELECT 1 FROM saved_views WHERE entity_type = 'activity') AND EXISTS (SELECT 1 FROM workspace_groups WHERE name = 'unrelated catalog')") `shouldReturn` True
+              runSession pool (queryBool "SELECT pg_get_constraintdef(oid) = 'CHECK ((entity_type = ANY (ARRAY[''observation_search''::text, ''observation_list''::text, ''project_list''::text, ''task_list''::text, ''activity''::text])))' FROM pg_constraint WHERE conrelid = 'saved_views'::regclass AND conname = 'chk_saved_views_entity_type'") `shouldReturn` True
+              runSession pool (queryBool "SELECT position('octet_length(subject) >= 1' IN pg_get_constraintdef(oid)) > 0 AND position('octet_length(subject) <= 4096' IN pg_get_constraintdef(oid)) > 0 FROM pg_constraint WHERE conrelid = 'observations'::regclass AND conname = 'chk_observations_subject_octet_length'") `shouldReturn` True
+              runSession pool (queryBool "SELECT position('octet_length(content) >= 1' IN pg_get_constraintdef(oid)) > 0 AND position('octet_length(content) <= 524288' IN pg_get_constraintdef(oid)) > 0 FROM pg_constraint WHERE conrelid = 'observations'::regclass AND conname = 'chk_observations_content_octet_length'") `shouldReturn` True
+
+              runSession pool $ Session.sql "INSERT INTO observations (workspace_id, subject_kind, subject, git_sha, content) SELECT id, 'file', 'src/Main.hs', '0123456789abcdef0123456789abcdef01234567', 'first needle' FROM workspaces WHERE name = 'observation migration workspace'"
+              runSession pool (queryBool "SELECT search_vector @@ plainto_tsquery('simple', 'needle') FROM observations WHERE subject = 'src/Main.hs'") `shouldReturn` True
+              runSession pool (queryBool "SELECT (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'observations'::regclass AND NOT tgisinternal AND tgname IN ('trg_observations_search_vector', 'trg_observations_provenance_immutable', 'trg_observations_updated_at', 'trg_observations_audit')) = 4") `shouldReturn` True
+              runSession pool (queryBool "SELECT EXISTS (SELECT 1 FROM audit_log WHERE entity_type = 'observation')") `shouldReturn` True
+              runSession pool (queryBool "SELECT (SELECT count(*) FROM pg_indexes WHERE tablename = 'observations' AND indexname IN ('idx_observations_workspace_git_sha', 'idx_observations_workspace_subject_kind_subject', 'idx_observations_workspace_git_sha_subject', 'idx_observations_search')) = 4") `shouldReturn` True
+              runSession pool (queryBool "SELECT pg_get_indexdef('idx_observations_workspace_git_sha'::regclass) LIKE '%(workspace_id, git_sha)%' AND pg_get_indexdef('idx_observations_workspace_subject_kind_subject'::regclass) LIKE '%(workspace_id, subject_kind, subject)%' AND pg_get_indexdef('idx_observations_workspace_git_sha_subject'::regclass) LIKE '%(workspace_id, git_sha, subject_kind, subject)%'") `shouldReturn` True
+              runSession pool (queryBool "SELECT (SELECT count(*) FROM information_schema.columns WHERE table_name = 'observations') = 9 + CASE WHEN EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN 1 ELSE 0 END") `shouldReturn` True
+              runSession pool (queryBool "SELECT (EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')) = EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'observations' AND column_name = 'embedding') AND (NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') OR to_regclass('public.idx_observations_embedding') IS NOT NULL)") `shouldReturn` True
+
+              badSha <- try (runSession pool $ Session.sql "INSERT INTO observations (workspace_id, subject_kind, subject, git_sha, content) SELECT id, 'glob', '*.hs', 'ABCDEF', 'bad SHA' FROM workspaces LIMIT 1") :: IO (Either DBException ())
+              badSha `shouldSatisfy` either (const True) (const False)
+              emptySubject <- try (runSession pool $ Session.sql "INSERT INTO observations (workspace_id, subject_kind, subject, git_sha, content) SELECT id, 'glob', '', '0123456789abcdef0123456789abcdef01234567', 'empty subject' FROM workspaces LIMIT 1") :: IO (Either DBException ())
+              emptySubject `shouldSatisfy` either (const True) (const False)
+              emptyContent <- try (runSession pool $ Session.sql "INSERT INTO observations (workspace_id, subject_kind, subject, git_sha, content) SELECT id, 'glob', '*.hs', '0123456789abcdef0123456789abcdef01234567', '' FROM workspaces LIMIT 1") :: IO (Either DBException ())
+              emptyContent `shouldSatisfy` either (const True) (const False)
+              longSubject <- try (runSession pool $ Session.sql $ B8.concat ["INSERT INTO observations (workspace_id, subject_kind, subject, git_sha, content) SELECT id, 'file', '", B8.replicate 4097 's', "', '0123456789abcdef0123456789abcdef01234567', 'long subject' FROM workspaces LIMIT 1"]) :: IO (Either DBException ())
+              longSubject `shouldSatisfy` either (const True) (const False)
+              longContent <- try (runSession pool $ Session.sql $ B8.concat ["INSERT INTO observations (workspace_id, subject_kind, subject, git_sha, content) SELECT id, 'file', 'long-content', '0123456789abcdef0123456789abcdef01234567', '", B8.replicate 524289 'c', "' FROM workspaces LIMIT 1"]) :: IO (Either DBException ())
+              longContent `shouldSatisfy` either (const True) (const False)
+              runSession pool $ Session.sql "INSERT INTO workspaces (name) VALUES ('other observation workspace')"
+              changedWorkspace <- try (runSession pool $ Session.sql "UPDATE observations SET workspace_id = (SELECT id FROM workspaces WHERE name = 'other observation workspace') WHERE subject = 'src/Main.hs'") :: IO (Either DBException ())
+              changedWorkspace `shouldSatisfy` either (const True) (const False)
+              changedSubjectKind <- try (runSession pool $ Session.sql "UPDATE observations SET subject_kind = 'glob' WHERE subject = 'src/Main.hs'") :: IO (Either DBException ())
+              changedSubjectKind `shouldSatisfy` either (const True) (const False)
+              changedSubject <- try (runSession pool $ Session.sql "UPDATE observations SET subject = 'src/Other.hs' WHERE subject = 'src/Main.hs'") :: IO (Either DBException ())
+              changedSubject `shouldSatisfy` either (const True) (const False)
+              changedProvenance <- try (runSession pool $ Session.sql "UPDATE observations SET git_sha = 'fedcba9876543210fedcba9876543210fedcba98' WHERE subject = 'src/Main.hs'") :: IO (Either DBException ())
+              changedProvenance `shouldSatisfy` either (const True) (const False)
+              runSession pool $ Session.sql "UPDATE observations SET content = 'second needle' WHERE subject = 'src/Main.hs'"
+              runSession pool (queryBool "SELECT search_vector @@ plainto_tsquery('simple', 'second') FROM observations WHERE subject = 'src/Main.hs'") `shouldReturn` True
+
+    it "observationMigration fresh chain omits pgvector artifacts when vector is not installed" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              preV20Dir <- copyMigrationSubset sandbox migrations "pre-v020-without-vector" (\name -> name < "V020")
+              v20OnlyDir <- copyMigrationSubset sandbox migrations "v020-only-without-vector" (== "V020__replace_memories_with_observations.sql")
+              preResult <- Migration.runMigrations pool preV20Dir
+              preResult.failed `shouldBe` Nothing
+              -- A version entry with a different filename is a ledger error,
+              -- not an idempotent skip; no destructive SQL may run in that case.
+              runSession pool $ Session.sql "INSERT INTO schema_migrations (version, name) VALUES (20, 'V020__wrong_name.sql')"
+              wrongLedger <- Migration.runMigrations pool v20OnlyDir
+              case wrongLedger.failed of
+                Just (file, message) -> do
+                  file `shouldBe` "V020__replace_memories_with_observations.sql"
+                  message `shouldSatisfy` isInfixOf "V020__wrong_name.sql"
+                Nothing -> expectationFailure "Expected conflicting V020 migration ledger entry to fail"
+              runSession pool (queryBool "SELECT to_regclass('public.memories') IS NOT NULL") `shouldReturn` True
+              runSession pool $ Session.sql "DELETE FROM schema_migrations WHERE version = 20"
+              runSession pool $ Session.sql "DROP INDEX IF EXISTS idx_memories_embedding; ALTER TABLE memories DROP COLUMN IF EXISTS embedding; DROP EXTENSION IF EXISTS vector"
+              v20Result <- Migration.runMigrations pool v20OnlyDir
+              v20Result.failed `shouldBe` Nothing
+              runSession pool (queryBool "SELECT to_regclass('public.observations') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_type WHERE typname = 'observation_subject_kind') AND NOT EXISTS (SELECT 1 FROM pg_type WHERE typname IN ('memory_type_enum', 'relation_type_enum'))") `shouldReturn` True
+              runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'observations' AND column_name = 'embedding') AND to_regclass('public.idx_observations_embedding') IS NULL") `shouldReturn` True
+
+    it "observationMigration fresh chain creates pgvector artifacts when vector is available" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              available <- runSession pool (queryBool "SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'vector')")
+              if not available
+                then do
+                  -- CI images without pgvector still verify the exact present
+                  -- branch; pgvector-enabled images exercise it end-to-end.
+                  migrationSql <- readFile (migrations </> "V020__replace_memories_with_observations.sql")
+                  migrationSql `shouldSatisfy` isInfixOf "ALTER TABLE observations ADD COLUMN embedding vector(1536);"
+                  migrationSql `shouldSatisfy` isInfixOf "ON observations USING hnsw (embedding vector_cosine_ops);"
+                else do
+                  result <- Migration.runMigrations pool migrations
+                  result.failed `shouldBe` Nothing
+                  runSession pool (queryBool "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'observations' AND column_name = 'embedding')") `shouldReturn` True
+                  runSession pool (queryBool "SELECT format_type(a.atttypid, a.atttypmod) = 'vector(1536)' FROM pg_attribute a WHERE a.attrelid = 'observations'::regclass AND a.attname = 'embedding' AND NOT a.attisdropped") `shouldReturn` True
+                  runSession pool (queryBool "SELECT pg_get_indexdef('idx_observations_embedding'::regclass) = 'CREATE INDEX idx_observations_embedding ON public.observations USING hnsw (embedding vector_cosine_ops)'") `shouldReturn` True
+
+    it "cleanDB truncates migration reports after the Observation schema reset" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              result <- Migration.runMigrations pool migrations
+              result.failed `shouldBe` Nothing
+              runSession pool $ Session.sql "INSERT INTO delete_cascade_migration_report (entity_type, entity_id, issue) VALUES ('task', gen_random_uuid(), 'reset-fixture')"
+              cleanDB TestEnv { pool = pool, testSandbox = sandbox, testDb = db }
+              runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM delete_cascade_migration_report)") `shouldReturn` True
+
     it "resolves the repository root from a non-repo cwd" $
       withTestSandbox $ \sandbox ->
         withCurrentDirectory sandbox.sandboxTmpDir $ do
           repoRoot <- resolveRepoRoot
           repoRoot `shouldBe` sandbox.sandboxRepoRoot
+
+queryBool :: BS.ByteString -> Session.Session Bool
+queryBool sql = Session.statement () $ Statement.Statement sql E.noParams (D.singleRow (D.column (D.nonNullable D.bool))) True
 
 withEnvVar :: String -> Maybe String -> IO a -> IO a
 withEnvVar name value = bracket setup restore . const

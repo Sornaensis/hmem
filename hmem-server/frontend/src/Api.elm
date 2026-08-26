@@ -1,11 +1,10 @@
 module Api exposing
-    ( Workspace, Project, Task, NextTaskCandidate, Memory, MemoryLink
+    ( Workspace, Project, Task, NextTaskCandidate, Memory, MemoryLink, Observation, ObservationListQuery
     , WorkspaceGroup, WorkspaceMembership
-    , WorkspaceCardHydration, WorkspaceProjectMemoryLink, WorkspaceTaskMemoryLink, WorkspaceTaskDependencyLink
+    , WorkspaceProjectMemoryLink, WorkspaceTaskMemoryLink, WorkspaceTaskDependencyLink
     , TaskDependencySummary, TaskDependencyStatusChange, TaskReadinessRollup, DependencyMutationResult, TaskMutationResult, TaskOverview
     , ProjectReadinessRollup, ProjectOverview
-    , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, UnifiedSearchResults
-    , WorkspaceVisualization, VisualizationMemory, VisualizationProjectMemoryLink, VisualizationTaskMemoryLink, VisualizationTaskDependency
+    , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, ObservationSearchHit, UnifiedSearchResults
     , AuditAction(..), AuditLogEntry, RevertResult
     , WorkspaceTimelineEvent, TimelineActor, TimelineProjectContext, TimelineTaskContext, TimelineStatusTransition, TimelineNavigation
     , TimelineBucketCounts, TimelineBucketEntityCounts, WorkspaceTimelineBucket, WorkspaceTimelineBucketsResponse
@@ -13,21 +12,20 @@ module Api exposing
     , CascadeResult
     , PaginatedResult
     , SessionContext, SessionPrincipal, SessionGlobalPermissions, SessionWorkspaceContext
-    , MemoryType(..), ProjectStatus(..), TaskStatus(..), WorkspaceType(..)
+    , MemoryType(..), SubjectKind(..), ProjectStatus(..), TaskStatus(..), WorkspaceType(..)
     , ChangeEvent, ChangeType(..), EntityType(..)
     , fetchSessionContext, fetchWorkspaces, fetchWorkspace, createWorkspace, updateWorkspace, deleteWorkspace, purgeWorkspace
     , fetchWorkspaceMemberships, upsertWorkspaceMembership, deleteWorkspaceMembership
     , fetchProjects, fetchProjectsPage, fetchProject
     , fetchTasks, fetchTasksPage, fetchTask
     , fetchMemories, fetchMemoriesPage, fetchMemory
-    , fetchWorkspaceCardHydration
+    , fetchObservations, fetchObservationsPage, fetchObservation, observationListUrl
     , fetchMemoryLinks
     , fetchWorkspaceLinks
     , fetchProjectMemories, fetchTaskMemories
     , linkProjectMemory, unlinkProjectMemory
     , linkTaskMemory, unlinkTaskMemory
     , fetchTaskOverview, fetchProjectOverview, fetchProjectNextTasks
-    , fetchVisualization
     , addTaskDependency, removeTaskDependency
     , searchMemories, unifiedSearch
     , createProject, createProjectWithParent
@@ -38,9 +36,9 @@ module Api exposing
     , fetchWorkspaceGroups, createWorkspaceGroup, deleteWorkspaceGroup
     , fetchGroupMembers, addGroupMember, removeGroupMember
     , fetchAuditLog, fetchEntityHistory, revertAuditEntry, fetchWorkspaceTimeline, fetchWorkspaceTimelineRange, fetchWorkspaceTimelineBuckets
-    , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder, nextTaskCandidateDecoder, workspaceCardHydrationDecoder
-    , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, auditLogEntryDecoder, workspaceTimelineEventDecoder, workspaceTimelineBucketsResponseDecoder
-    , memoryTypeToString, memoryTypeFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
+    , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder, nextTaskCandidateDecoder
+    , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, observationDecoder, paginatedDecoder, cascadeResultDecoder, auditLogEntryDecoder, workspaceTimelineEventDecoder, workspaceTimelineBucketsResponseDecoder
+    , memoryTypeToString, memoryTypeFromString, subjectKindToString, subjectKindFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
     , auditActionToString, auditActionFromString
     , projectStatusFromString, taskStatusFromString
     , projectStatusOrder, taskStatusOrder
@@ -52,6 +50,7 @@ import Json.Decode as D exposing (Decoder)
 import Json.Decode.Pipeline exposing (required, optional)
 import Json.Encode as E
 import Time
+import Url
 
 
 
@@ -149,6 +148,29 @@ type alias Memory =
     }
 
 
+type alias Observation =
+    { id : String
+    , workspaceId : String
+    , subjectKind : SubjectKind
+    , subject : String
+    , gitSha : String
+    , content : String
+    , createdAt : String
+    , updatedAt : String
+    }
+
+
+type alias ObservationListQuery =
+    { workspaceId : String
+    , subjectKind : Maybe SubjectKind
+    , subject : Maybe String
+    , gitSha : Maybe String
+    , query : Maybe String
+    , limit : Int
+    , offset : Int
+    }
+
+
 type alias WorkspaceGroup =
     { id : String
     , name : String
@@ -183,13 +205,6 @@ type alias WorkspaceTaskMemoryLink =
 type alias WorkspaceTaskDependencyLink =
     { taskId : String
     , dependsOnId : String
-    }
-
-
-type alias WorkspaceCardHydration =
-    { projectMemoryLinks : List WorkspaceProjectMemoryLink
-    , taskMemoryLinks : List WorkspaceTaskMemoryLink
-    , taskDependencies : List WorkspaceTaskDependencyLink
     }
 
 
@@ -266,10 +281,21 @@ type alias TaskSearchResult =
     }
 
 
+type alias ObservationSearchHit =
+    { id : String
+    , workspaceId : String
+    , subjectKind : SubjectKind
+    , subject : String
+    , gitSha : String
+    , contentPreview : String
+    , updatedAt : String
+    }
+
+
 type alias UnifiedSearchResults =
-    { memories : List Memory
-    , projects : List ProjectSearchResult
-    , tasks : List TaskSearchResult
+    { observations : List ObservationSearchHit
+    , projects : List Project
+    , tasks : List Task
     }
 
 
@@ -283,8 +309,7 @@ type alias CascadeResult =
     { affected : Int
     , projectCount : Int
     , taskCount : Int
-    , memoryCount : Int
-    , dependencyCount : Int
+    , dependencyLinkCount : Int
     }
 
 
@@ -653,6 +678,11 @@ type MemoryType
     | LongTerm
 
 
+type SubjectKind
+    = SubjectFile
+    | SubjectGlob
+
+
 type ProjectStatus
     = ProjActive
     | ProjPaused
@@ -677,6 +707,29 @@ type WorkspaceType
 
 
 -- ENUM HELPERS
+
+
+subjectKindToString : SubjectKind -> String
+subjectKindToString kind =
+    case kind of
+        SubjectFile ->
+            "file"
+
+        SubjectGlob ->
+            "glob"
+
+
+subjectKindFromString : String -> Maybe SubjectKind
+subjectKindFromString value =
+    case value of
+        "file" ->
+            Just SubjectFile
+
+        "glob" ->
+            Just SubjectGlob
+
+        _ ->
+            Nothing
 
 
 memoryTypeToString : MemoryType -> String
@@ -964,8 +1017,7 @@ cascadeResultDecoder =
         |> required "affected" D.int
         |> required "project_count" D.int
         |> required "task_count" D.int
-        |> required "memory_count" D.int
-        |> required "dependency_count" D.int
+        |> required "dependency_link_count" D.int
 
 
 memoryDecoder : Decoder Memory
@@ -979,6 +1031,19 @@ memoryDecoder =
         |> required "importance" D.int
         |> required "pinned" D.bool
         |> required "tags" (D.list D.string)
+        |> required "created_at" D.string
+        |> required "updated_at" D.string
+
+
+observationDecoder : Decoder Observation
+observationDecoder =
+    D.succeed Observation
+        |> required "id" D.string
+        |> required "workspace_id" D.string
+        |> required "subject_kind" subjectKindDecoder
+        |> required "subject" D.string
+        |> required "git_sha" D.string
+        |> required "content" D.string
         |> required "created_at" D.string
         |> required "updated_at" D.string
 
@@ -1056,6 +1121,17 @@ sessionWorkspaceContextDecoder =
         |> required "can_admin" D.bool
 
 
+subjectKindDecoder : Decoder SubjectKind
+subjectKindDecoder =
+    D.string
+        |> D.andThen
+            (\value ->
+                subjectKindFromString value
+                    |> Maybe.map D.succeed
+                    |> Maybe.withDefault (D.fail ("Unknown observation subject kind: " ++ value))
+            )
+
+
 memoryTypeDecoder : Decoder MemoryType
 memoryTypeDecoder =
     D.string
@@ -1114,12 +1190,24 @@ taskSearchResultDecoder =
         |> optional "linked_memories" (D.list linkedMemorySummaryDecoder) []
 
 
+observationSearchHitDecoder : Decoder ObservationSearchHit
+observationSearchHitDecoder =
+    D.succeed ObservationSearchHit
+        |> required "id" D.string
+        |> required "workspace_id" D.string
+        |> required "subject_kind" subjectKindDecoder
+        |> required "subject" D.string
+        |> required "git_sha" D.string
+        |> required "content_preview" D.string
+        |> required "updated_at" D.string
+
+
 unifiedSearchResultsDecoder : Decoder UnifiedSearchResults
 unifiedSearchResultsDecoder =
     D.succeed UnifiedSearchResults
-        |> optional "memories" (D.list memoryDecoder) []
-        |> optional "projects" (D.list projectSearchResultDecoder) []
-        |> optional "tasks" (D.list taskSearchResultDecoder) []
+        |> optional "observations" (D.list observationSearchHitDecoder) []
+        |> optional "projects" (D.list projectDecoder) []
+        |> optional "tasks" (D.list taskDecoder) []
 
 
 workspaceTypeDecoder : Decoder WorkspaceType
@@ -1309,6 +1397,7 @@ type EntityType
     | EProject
     | ETask
     | EMemory
+    | EObservation
     | EMemoryLink
     | ECategory
     | EWorkspaceGroup
@@ -1377,6 +1466,9 @@ entityTypeDecoder =
 
                     "memory" ->
                         D.succeed EMemory
+
+                    "observation" ->
+                        D.succeed EObservation
 
                     "memory_link" ->
                         D.succeed EMemoryLink
@@ -1615,11 +1707,44 @@ fetchMemory apiUrl memId toMsg =
         }
 
 
-fetchWorkspaceCardHydration : String -> String -> (Result Http.Error WorkspaceCardHydration -> msg) -> Cmd msg
-fetchWorkspaceCardHydration apiUrl wsId toMsg =
+observationListUrl : String -> ObservationListQuery -> String
+observationListUrl apiUrl listQuery =
+    let
+        optional name maybeValue =
+            maybeValue |> Maybe.map (\value -> name ++ "=" ++ Url.percentEncode value)
+
+        params =
+            [ Just ("workspace_id=" ++ Url.percentEncode listQuery.workspaceId)
+            , optional "subject_kind" (Maybe.map subjectKindToString listQuery.subjectKind)
+            , optional "subject" listQuery.subject
+            , optional "git_sha" listQuery.gitSha
+            , optional "query" listQuery.query
+            , Just ("limit=" ++ String.fromInt listQuery.limit)
+            , Just ("offset=" ++ String.fromInt listQuery.offset)
+            ]
+                |> List.filterMap identity
+    in
+    apiUrl ++ "/api/v1/observations?" ++ String.join "&" params
+
+
+fetchObservations : String -> ObservationListQuery -> (Result Http.Error (PaginatedResult Observation) -> msg) -> Cmd msg
+fetchObservations apiUrl listQuery toMsg =
+    fetchObservationsPage apiUrl listQuery toMsg
+
+
+fetchObservationsPage : String -> ObservationListQuery -> (Result Http.Error (PaginatedResult Observation) -> msg) -> Cmd msg
+fetchObservationsPage apiUrl listQuery toMsg =
     Http.get
-        { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/card-hydration"
-        , expect = Http.expectJson toMsg workspaceCardHydrationDecoder
+        { url = observationListUrl apiUrl listQuery
+        , expect = Http.expectJson toMsg (paginatedDecoder observationDecoder)
+        }
+
+
+fetchObservation : String -> String -> (Result Http.Error Observation -> msg) -> Cmd msg
+fetchObservation apiUrl observationId toMsg =
+    Http.get
+        { url = apiUrl ++ "/api/v1/observations/" ++ Url.percentEncode observationId
+        , expect = Http.expectJson toMsg observationDecoder
         }
 
 
@@ -1697,20 +1822,15 @@ searchMemories apiUrl query mWorkspaceId toMsg =
         }
 
 
-unifiedSearch : String -> String -> Maybe String -> (Result Http.Error UnifiedSearchResults -> msg) -> Cmd msg
-unifiedSearch apiUrl query mWorkspaceId toMsg =
+unifiedSearch : String -> String -> String -> List String -> (Result Http.Error UnifiedSearchResults -> msg) -> Cmd msg
+unifiedSearch apiUrl query workspaceId entityTypes toMsg =
     let
         body =
             E.object
-                ([ ( "query", E.string query ) ]
-                    ++ (case mWorkspaceId of
-                            Just wsId ->
-                                [ ( "workspace_id", E.string wsId ) ]
-
-                            Nothing ->
-                                []
-                       )
-                )
+                [ ( "query", E.string query )
+                , ( "workspace_id", E.string workspaceId )
+                , ( "entity_types", E.list E.string entityTypes )
+                ]
     in
     Http.post
         { url = apiUrl ++ "/api/v1/search"
@@ -2116,14 +2236,6 @@ workspaceTaskDependencyLinkDecoder =
         |> required "depends_on_id" D.string
 
 
-workspaceCardHydrationDecoder : Decoder WorkspaceCardHydration
-workspaceCardHydrationDecoder =
-    D.succeed WorkspaceCardHydration
-        |> required "project_memory_links" (D.list workspaceProjectMemoryLinkDecoder)
-        |> required "task_memory_links" (D.list workspaceTaskMemoryLinkDecoder)
-        |> required "task_dependencies" (D.list workspaceTaskDependencyLinkDecoder)
-
-
 taskReadinessRollupDecoder : Decoder TaskReadinessRollup
 taskReadinessRollupDecoder =
     D.succeed TaskReadinessRollup
@@ -2191,104 +2303,6 @@ projectOverviewDecoder =
         |> required "tasks" (D.list taskDecoder)
         |> required "subprojects" (D.list projectDecoder)
         |> optional "readiness_rollup" projectReadinessRollupDecoder defaultProjectReadinessRollup
-
-
-
--- WORKSPACE VISUALIZATION
-
-
-type alias VisualizationMemory =
-    { id : String
-    , summary : String
-    , memoryType : MemoryType
-    , importance : Int
-    , pinned : Bool
-    }
-
-
-type alias VisualizationProjectMemoryLink =
-    { projectId : String
-    , memoryId : String
-    }
-
-
-type alias VisualizationTaskMemoryLink =
-    { taskId : String
-    , memoryId : String
-    }
-
-
-type alias VisualizationTaskDependency =
-    { taskId : String
-    , dependsOnId : String
-    }
-
-
-type alias WorkspaceVisualization =
-    { projects : List Project
-    , tasks : List Task
-    , memories : List VisualizationMemory
-    , projectMemoryLinks : List VisualizationProjectMemoryLink
-    , taskMemoryLinks : List VisualizationTaskMemoryLink
-    , taskDependencies : List VisualizationTaskDependency
-    , memoryLinks : List MemoryLink
-    }
-
-
-visualizationMemoryDecoder : Decoder VisualizationMemory
-visualizationMemoryDecoder =
-    D.succeed VisualizationMemory
-        |> required "id" D.string
-        |> required "summary" D.string
-        |> required "memory_type" memoryTypeDecoder
-        |> required "importance" D.int
-        |> required "pinned" D.bool
-
-
-visualizationProjectMemoryLinkDecoder : Decoder VisualizationProjectMemoryLink
-visualizationProjectMemoryLinkDecoder =
-    D.succeed VisualizationProjectMemoryLink
-        |> required "project_id" D.string
-        |> required "memory_id" D.string
-
-
-visualizationTaskMemoryLinkDecoder : Decoder VisualizationTaskMemoryLink
-visualizationTaskMemoryLinkDecoder =
-    D.succeed VisualizationTaskMemoryLink
-        |> required "task_id" D.string
-        |> required "memory_id" D.string
-
-
-visualizationTaskDependencyDecoder : Decoder VisualizationTaskDependency
-visualizationTaskDependencyDecoder =
-    D.succeed VisualizationTaskDependency
-        |> required "task_id" D.string
-        |> required "depends_on_id" D.string
-
-
-workspaceVisualizationDecoder : Decoder WorkspaceVisualization
-workspaceVisualizationDecoder =
-    D.succeed WorkspaceVisualization
-        |> required "projects" (D.list projectDecoder)
-        |> required "tasks" (D.list taskDecoder)
-        |> required "memories" (D.list visualizationMemoryDecoder)
-        |> required "project_memory_links" (D.list visualizationProjectMemoryLinkDecoder)
-        |> required "task_memory_links" (D.list visualizationTaskMemoryLinkDecoder)
-        |> required "task_dependencies" (D.list visualizationTaskDependencyDecoder)
-        |> required "memory_links" (D.list memoryLinkDecoder)
-
-
-fetchVisualization : String -> String -> (Result Http.Error WorkspaceVisualization -> msg) -> Cmd msg
-fetchVisualization apiUrl wsId toMsg =
-    Http.request
-        { method = "POST"
-        , headers = [ Http.header "Accept" "application/json" ]
-        , url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/visualization"
-        , body = Http.jsonBody (E.object [])
-        , expect = Http.expectJson toMsg workspaceVisualizationDecoder
-        , timeout = Nothing
-        , tracker = Nothing
-        }
 
 
 

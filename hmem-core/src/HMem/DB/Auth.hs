@@ -43,6 +43,7 @@ module HMem.DB.Auth
   , EntityScope(..)
   , resolveEntityScope
   , resolveEntityScopeRequired
+  , resolveEntityScopeIncludingDeleted
   ) where
 
 import Data.Aeson (FromJSON(..), ToJSON(..), Value(String), object, withObject, withText, (.:), (.=))
@@ -558,24 +559,13 @@ deleteWorkspaceMembershipStatement = Statement.Statement sql encoder decoder Tru
 
 data EntityKind
   = EntityWorkspace
-  | EntityMemory
+  | EntityObservation
   | EntityProject
   | EntityTask
-  | EntityCategory
   | EntitySavedView
-  | EntityCleanupPolicy
   deriving stock (Show, Eq)
 
--- | Scope returned for an entity lookup. Most hmem resources are workspace
--- scoped. Categories may be global (@memory_categories.workspace_id IS NULL@),
--- and the default policy treats global entity scopes as superadmin-only because
--- the public v1 permission model has no separate global read/edit role.
---
--- Relationship operations (memory links, project/task memory links, task
--- dependencies, category links) should authorize through their participating
--- owner entities before mutation. For example, task dependency writes should
--- resolve the owning task, and memory-link writes should resolve the source
--- memory and validate any peer-resource policy required by the endpoint.
+-- | Core entities are workspace scoped.
 
 data EntityScope
   = EntityWorkspaceScope !UUID
@@ -590,25 +580,31 @@ resolveEntityScopeRequired pool kind entityId = do
   mScope <- resolveEntityScope pool kind entityId
   pure $ maybe (Left $ EntityScopeNotFound kind entityId) Right mScope
 
+-- | Audit restoration is the sole caller permitted to resolve a soft-deleted
+-- project or task.  Its workspace must still be active; public entity access
+-- always uses the stricter resolver above.
+resolveEntityScopeIncludingDeleted :: Pool Hasql.Connection -> EntityKind -> UUID -> IO (Maybe EntityScope)
+resolveEntityScopeIncludingDeleted pool kind entityId =
+  runSession pool $ Session.statement entityId (entityScopeIncludingDeletedStatement kind)
+
+entityScopeIncludingDeletedStatement :: EntityKind -> Statement.Statement UUID (Maybe EntityScope)
+entityScopeIncludingDeletedStatement EntityProject = nonNullScopeStatement "SELECT p.workspace_id FROM projects p JOIN workspaces w ON w.id = p.workspace_id WHERE p.id = $1 AND w.deleted_at IS NULL"
+entityScopeIncludingDeletedStatement EntityTask = nonNullScopeStatement "SELECT t.workspace_id FROM tasks t JOIN workspaces w ON w.id = t.workspace_id WHERE t.id = $1 AND w.deleted_at IS NULL"
+entityScopeIncludingDeletedStatement kind = entityScopeStatement kind
+
 entityScopeStatement :: EntityKind -> Statement.Statement UUID (Maybe EntityScope)
-entityScopeStatement EntityWorkspace     = nonNullScopeStatement "SELECT id FROM workspaces WHERE id = $1"
-entityScopeStatement EntityMemory        = nonNullScopeStatement "SELECT workspace_id FROM memories WHERE id = $1"
-entityScopeStatement EntityProject       = nonNullScopeStatement "SELECT workspace_id FROM projects WHERE id = $1"
-entityScopeStatement EntityTask          = nonNullScopeStatement "SELECT workspace_id FROM tasks WHERE id = $1"
-entityScopeStatement EntitySavedView     = nonNullScopeStatement "SELECT workspace_id FROM saved_views WHERE id = $1"
-entityScopeStatement EntityCleanupPolicy = nonNullScopeStatement "SELECT workspace_id FROM cleanup_policies WHERE id = $1"
-entityScopeStatement EntityCategory      = nullableScopeStatement "SELECT workspace_id FROM memory_categories WHERE id = $1"
+entityScopeStatement EntityWorkspace   = nonNullScopeStatement "SELECT id FROM workspaces WHERE id = $1"
+-- Observation entity access is fail-closed: provenance-bound data only exists
+-- in active repository workspaces, including for ID-addressed operations.
+entityScopeStatement EntityObservation = nonNullScopeStatement "SELECT o.workspace_id FROM observations o JOIN workspaces w ON w.id = o.workspace_id WHERE o.id = $1 AND w.deleted_at IS NULL AND w.workspace_type = 'repository'"
+-- Normal entity authorization is fail-closed: deleted entities and entities
+-- owned by deleted workspaces are never addressable through public handlers.
+entityScopeStatement EntityProject     = nonNullScopeStatement "SELECT p.workspace_id FROM projects p JOIN workspaces w ON w.id = p.workspace_id WHERE p.id = $1 AND p.deleted_at IS NULL AND w.deleted_at IS NULL"
+entityScopeStatement EntityTask        = nonNullScopeStatement "SELECT t.workspace_id FROM tasks t JOIN workspaces w ON w.id = t.workspace_id WHERE t.id = $1 AND t.deleted_at IS NULL AND w.deleted_at IS NULL"
+entityScopeStatement EntitySavedView   = nonNullScopeStatement "SELECT workspace_id FROM saved_views WHERE id = $1"
 
 nonNullScopeStatement :: ByteString -> Statement.Statement UUID (Maybe EntityScope)
 nonNullScopeStatement sql = Statement.Statement sql encoder decoder True
   where
     encoder = Enc.param (Enc.nonNullable Enc.uuid)
     decoder = Dec.rowMaybe (EntityWorkspaceScope <$> Dec.column (Dec.nonNullable Dec.uuid))
-
-nullableScopeStatement :: ByteString -> Statement.Statement UUID (Maybe EntityScope)
-nullableScopeStatement sql = Statement.Statement sql encoder decoder True
-  where
-    encoder = Enc.param (Enc.nonNullable Enc.uuid)
-    decoder = Dec.rowMaybe $ do
-      mWorkspaceId <- Dec.column (Dec.nullable Dec.uuid)
-      pure $ maybe EntityGlobalScope EntityWorkspaceScope mWorkspaceId

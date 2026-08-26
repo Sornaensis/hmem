@@ -24,14 +24,10 @@ data EntityType
   = ETWorkspace
   | ETProject
   | ETTask
-  | ETMemory
-  | ETMemoryLink
-  | ETCategory
+  | ETObservation
   | ETWorkspaceGroup
   | ETSavedView
   | ETTaskDependency
-  | ETCategoryLink
-  | ETTag
   deriving (Show, Eq, Generic)
 
 -- | Whether the entity was created, updated, or deleted.
@@ -60,14 +56,10 @@ entityTypeToText = \case
   ETWorkspace      -> "workspace"
   ETProject        -> "project"
   ETTask           -> "task"
-  ETMemory         -> "memory"
-  ETMemoryLink     -> "memory_link"
-  ETCategory       -> "category"
+  ETObservation    -> "observation"
   ETWorkspaceGroup -> "workspace_group"
   ETSavedView      -> "saved_view"
   ETTaskDependency -> "task_dependency"
-  ETCategoryLink   -> "category_link"
-  ETTag            -> "tag"
 
 changeTypeToText :: ChangeType -> Text
 changeTypeToText = \case

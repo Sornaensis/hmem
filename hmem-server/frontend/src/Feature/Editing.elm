@@ -393,90 +393,21 @@ update msg model =
                 ]
             )
 
-        ChangeMemoryImportance memId newImp ->
-            let
-                ( trackedModel, requestId, clearCmd ) =
-                    beginTrackedMutation [ memId ] model
-            in
-            ( trackedModel
-            , Cmd.batch
-                [ clearCmd
-                , Api.updateMemory model.flags.apiUrl
-                    memId
-                    [ ( "importance", Encode.int newImp ), ( "request_id", Encode.string requestId ) ]
-                    MemoryUpdated
-                ]
-            )
+        ChangeMemoryImportance _ _ ->
+            ( model, Cmd.none )
 
-        ToggleMemoryPin memId newPinned ->
-            let
-                ( trackedModel, requestId, clearCmd ) =
-                    beginTrackedMutation [ memId ] model
-            in
-            ( trackedModel
-            , Cmd.batch
-                [ clearCmd
-                , Api.updateMemory model.flags.apiUrl
-                    memId
-                    [ ( "pinned", Encode.bool newPinned ), ( "request_id", Encode.string requestId ) ]
-                    MemoryUpdated
-                ]
-            )
+        ToggleMemoryPin _ _ ->
+            ( model, Cmd.none )
 
-        ChangeMemoryType memId newType ->
-            let
-                ( trackedModel, requestId, clearCmd ) =
-                    beginTrackedMutation [ memId ] model
-            in
-            ( trackedModel
-            , Cmd.batch
-                [ clearCmd
-                , Api.updateMemory model.flags.apiUrl
-                    memId
-                    [ ( "memory_type", Encode.string (Api.memoryTypeToString newType) ), ( "request_id", Encode.string requestId ) ]
-                    MemoryUpdated
-                ]
-            )
+        ChangeMemoryType _ _ ->
+            ( model, Cmd.none )
 
-        -- Tags
-        RemoveTag memId tagToRemove ->
-            case Dict.get memId model.memories of
-                Just mem ->
-                    let
-                        newTags =
-                            List.filter (\t -> t /= tagToRemove) mem.tags
+        -- Legacy memory/tag messages are inert in the Observation-only UI.
+        RemoveTag _ _ ->
+            ( model, Cmd.none )
 
-                        ( trackedModel, requestId, clearCmd ) =
-                            beginTrackedMutation [ memId ] model
-                    in
-                    ( trackedModel, Cmd.batch [ clearCmd, Api.setTags model.flags.apiUrl memId newTags requestId (MutationDone "tags") ] )
-
-                Nothing ->
-                    ( model, Cmd.none )
-
-        AddTag memId newTag ->
-            case Dict.get memId model.memories of
-                Just mem ->
-                    if String.isEmpty (String.trim newTag) then
-                        ( model, Cmd.none )
-
-                    else
-                        let
-                            newTags =
-                                mem.tags ++ [ String.trim newTag ]
-
-                            trackedModel =
-                                updateEditingModel (\ed -> { ed | editState = Nothing }) model
-
-                            ( trackedModel2, requestId, clearCmd ) =
-                                beginTrackedMutation [ memId ] trackedModel
-                        in
-                        ( trackedModel2
-                        , Cmd.batch [ clearCmd, Api.setTags model.flags.apiUrl memId newTags requestId (MutationDone "tags") ]
-                        )
-
-                Nothing ->
-                    ( model, Cmd.none )
+        AddTag _ _ ->
+            ( model, Cmd.none )
 
         -- Create forms
         ShowCreateForm form ->
@@ -554,27 +485,8 @@ update msg model =
                                 in
                                 ( trackedModel, Cmd.batch [ clearCmd, Api.createProject model.flags.apiUrl wsId f.name requestId ProjectCreated ] )
 
-                        ( Just (CreateMemoryForm f), Just wsId ) ->
-                            if not (Permissions.canEditCurrentWorkspace model) then
-                                addToast Warning "Workspace edit permission is required to create memories" model
-
-                            else if String.isEmpty (String.trim f.content) then
-                                ( model, Cmd.none )
-
-                            else
-                                case ( memoryCreateTargetIds model f.target, f.memoryType ) of
-                                    ( Just ( projectId, taskId ), Just memoryType ) ->
-                                        let
-                                            ( trackedModel, requestId, clearCmd ) =
-                                                beginTrackedMutation [] model
-                                        in
-                                        ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId projectId taskId f.content memoryType requestId MemoryCreated ] )
-
-                                    ( Nothing, _ ) ->
-                                        addToast Warning "Select a project or top-level task for this memory" model
-
-                                    ( _, Nothing ) ->
-                                        addToast Warning "Select short-term or long-term for this memory" model
+                        ( Just (CreateMemoryForm _), Just _ ) ->
+                            ( model, Cmd.none )
 
                         _ ->
                             ( model, Cmd.none )
@@ -635,24 +547,8 @@ update msg model =
                                     in
                                     ( trackedModel, Cmd.batch [ clearCmd, Api.createTask model.flags.apiUrl wsId projectId title requestId TaskCreated ] )
 
-                    ( Just (InlineCreateMemory { content, target, memoryType }), Just wsId ) ->
-                        if String.isEmpty (String.trim content) then
-                            ( model, Cmd.none )
-
-                        else
-                            case ( memoryCreateTargetIds model target, memoryType ) of
-                                ( Just ( projectId, taskId ), Just selectedType ) ->
-                                    let
-                                        ( trackedModel, requestId, clearCmd ) =
-                                            beginTrackedMutation [] model
-                                    in
-                                    ( trackedModel, Cmd.batch [ clearCmd, Api.createMemory model.flags.apiUrl wsId projectId taskId content selectedType requestId MemoryCreated ] )
-
-                                ( Nothing, _ ) ->
-                                    addToast Warning "Select a project or top-level task for this memory" model
-
-                                ( _, Nothing ) ->
-                                    addToast Warning "Select short-term or long-term for this memory" model
+                    ( Just (InlineCreateMemory _), Just _ ) ->
+                        ( model, Cmd.none )
 
                     _ ->
                         ( model, Cmd.none )
@@ -678,20 +574,6 @@ update msg model =
 
                         Nothing ->
                             ( model, Cmd.none )
-
-                fetchMemCmd =
-                    if not (Dict.member cardId model.memory.entityMemories) then
-                        if Dict.member cardId model.projects then
-                            Api.fetchProjectMemories model.flags.apiUrl cardId (GotEntityMemories cardId)
-
-                        else if Dict.member cardId model.tasks then
-                            Api.fetchTaskMemories model.flags.apiUrl cardId (GotEntityMemories cardId)
-
-                        else
-                            Cmd.none
-
-                    else
-                        Cmd.none
 
                 fetchDepCmd =
                     if Dict.member cardId model.tasks && not (Dict.member cardId model.dependencies.taskDependencies) then
@@ -731,7 +613,7 @@ update msg model =
                                     )
                         }
                     )
-            , Cmd.batch [ saveCmd, focusElement (editElementId entityId field), fetchMemCmd, fetchDepCmd, fetchProjectOverviewCmd ]
+            , Cmd.batch [ saveCmd, focusElement (editElementId entityId field), fetchDepCmd, fetchProjectOverviewCmd ]
             )
 
         _ ->
@@ -809,10 +691,7 @@ saveEditCmd apiUrl maybeRequestId state =
                 TaskUpdated
 
         "memory" ->
-            Api.updateMemory apiUrl
-                state.entityId
-                fields
-                MemoryUpdated
+            Cmd.none
 
         _ ->
             Cmd.none

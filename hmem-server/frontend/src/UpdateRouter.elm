@@ -9,10 +9,9 @@ import Feature.Dependencies
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
-import Feature.Graph
 import Feature.Groups
-import Feature.Memory
 import Feature.Mutations
+import Feature.Observation
 import Feature.Search
 import Feature.Timeline
 import Feature.WebSocket
@@ -62,22 +61,15 @@ update msg model =
         LogoutRequested ->
             Err (HandleInAppShell AppShell.LogoutRequestedMsg)
 
-        -- Cytoscape
-        CytoscapeNodeClicked _ ->
-            Ok (Feature.Graph.update msg model)
-
-        CytoscapeEdgeClicked _ ->
-            Ok (Feature.Graph.update msg model)
-
         -- HTTP responses
         GotWorkspaces _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
-        GotWorkspace _ _ ->
+        GotWorkspace _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
-        GotSessionContext expectedWorkspace result ->
-            Err (HandleInAppShell (AppShell.SessionContextLoadedMsg expectedWorkspace result))
+        GotSessionContext epoch expectedWorkspace result ->
+            Err (HandleInAppShell (AppShell.SessionContextLoadedMsg epoch expectedWorkspace result))
 
         GotProjects _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
@@ -85,13 +77,21 @@ update msg model =
         GotTasks _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
-        GotMemories _ _ _ _ ->
+        GotObservations _ _ _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
+
+        GotMemories _ _ _ _ ->
+            Ok ( model, Cmd.none )
 
         GotSingleMemory _ ->
+            Ok ( model, Cmd.none )
+        GotObservationDetail _ _ _ _ ->
+            Ok (Feature.Observation.update msg model)
+
+        GotInitialTaskOverview _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
-        GotWorkspaceCardHydration _ _ _ ->
+        GotInitialProjectOverview _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
         GotWorkspaceTimeline _ _ ->
@@ -123,9 +123,6 @@ update msg model =
 
         ResetTimelineHistogramSelection ->
             Ok (Feature.Timeline.update msg model)
-
-        GotVisualization _ _ ->
-            Ok (Feature.Graph.update msg model)
 
         -- Mutation responses
         MutationDone _ _ ->
@@ -177,7 +174,7 @@ update msg model =
         SubmitSearch ->
             Ok (Feature.Search.update msg model)
 
-        GotUnifiedSearchResults _ _ ->
+        GotUnifiedSearchResults _ _ _ _ ->
             Ok (Feature.Search.update msg model)
 
         NavigateToSearchResult _ _ ->
@@ -209,6 +206,27 @@ update msg model =
 
         ToggleFilterTag _ ->
             Ok (Feature.Search.update msg model)
+
+        SetObservationQuery _ ->
+            Ok (Feature.Observation.update msg model)
+
+        SetObservationSubjectKind _ ->
+            Ok (Feature.Observation.update msg model)
+
+        SetObservationSubject _ ->
+            Ok (Feature.Observation.update msg model)
+
+        SetObservationGitSha _ ->
+            Ok (Feature.Observation.update msg model)
+
+        ApplyObservationFilters ->
+            Ok (Feature.Observation.update msg model)
+
+        LoadMoreObservations ->
+            Ok (Feature.Observation.update msg model)
+
+        SelectObservation _ ->
+            Ok (Feature.Observation.update msg model)
 
         -- Inline editing
         StartEdit _ _ _ _ ->
@@ -298,9 +316,6 @@ update msg model =
         CopyId _ ->
             Ok (Feature.Cards.update msg model)
 
-        LoadGraphForWorkspace _ ->
-            Ok (Feature.Graph.update msg model)
-
         ExpandAndEdit _ _ _ _ _ ->
             Ok (Feature.Editing.update msg model)
 
@@ -344,43 +359,43 @@ update msg model =
         CancelInlineCreate ->
             Ok (Feature.Editing.update msg model)
 
-        -- Memory linking
+        -- Legacy memory/link messages are intentionally inert: the Observation-only UI
+        -- has no production source that can issue removed memory/link routes.
         StartLinkMemory _ _ ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
         LinkMemorySearch _ ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
         CancelLinkMemory ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
         PerformLinkMemory _ _ _ ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
         PerformUnlinkMemory _ _ _ ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
         MemoryLinkDone _ _ ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
         GotEntityMemories _ _ ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
-        -- Entity linking from memory cards
         StartLinkEntity _ ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
         LinkEntitySearch _ ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
         CancelLinkEntity ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
         PerformLinkEntity _ _ _ ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
         PerformUnlinkEntity _ _ _ ->
-            Ok (Feature.Memory.update msg model)
+            Ok ( model, Cmd.none )
 
         -- Task dependencies
         GotTaskDependencies _ _ ->

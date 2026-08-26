@@ -83,7 +83,7 @@ main = do
   hSetBuffering stderr LineBuffering
   opts <- execParser $ info (optsParser <**> helper)
     ( fullDesc
-   <> progDesc "hmem - LLM memory & task management server"
+   <> progDesc "hmem - Observation, project & task management server"
    <> header "hmem-server"
     )
 
@@ -174,19 +174,12 @@ seedDevData pool = do
           \     ) AS p(name, description, status) \
           \WHERE w.name = 'Demo Workspace'; \
           \\
-          \INSERT INTO projects (workspace_id, name, description, status, parent_id) \
-          \SELECT w.id, 'Graph Visualization', 'Cytoscape.js knowledge graph component', 'active', p.id \
-          \FROM workspaces w \
-          \JOIN projects p ON p.workspace_id = w.id AND p.name = 'Web Frontend' \
-          \WHERE w.name = 'Demo Workspace'; \
-          \\
           \INSERT INTO tasks (workspace_id, project_id, title, description, status, priority) \
           \SELECT w.id, p.id, t.title, t.description, t.status::task_status_enum, t.priority \
           \FROM workspaces w \
           \JOIN projects p ON p.workspace_id = w.id AND p.name = 'Web Frontend', \
           \     (VALUES ('Set up Elm scaffold', 'Create Main.elm and ports', 'done', 8), \
           \            ('Implement WebSocket client', 'Connect to /api/v1/ws for real-time updates', 'in_progress', 7), \
-          \            ('Build graph view', 'Cytoscape.js integration for memory visualization', 'todo', 6), \
           \            ('Add drag-and-drop', 'Entity reordering in sidebar via HTML5 drag API', 'todo', 5), \
           \            ('Style status badges', 'Color-code project and task status indicators', 'blocked', 4) \
           \     ) AS t(title, description, status, priority) \
@@ -210,11 +203,6 @@ seedDevData pool = do
           \INSERT INTO task_dependencies (task_id, depends_on_id) \
           \SELECT t1.id, t2.id \
           \FROM tasks t1, tasks t2 \
-          \WHERE t1.title = 'Build graph view' AND t2.title = 'Set up Elm scaffold'; \
-          \\
-          \INSERT INTO task_dependencies (task_id, depends_on_id) \
-          \SELECT t1.id, t2.id \
-          \FROM tasks t1, tasks t2 \
           \WHERE t1.title = 'Style status badges' AND t2.title = 'Set up Elm scaffold'; \
           \\
           \INSERT INTO task_dependencies (task_id, depends_on_id) \
@@ -222,49 +210,17 @@ seedDevData pool = do
           \FROM tasks t1, tasks t2 \
           \WHERE t1.title = 'Add drag-and-drop' AND t2.title = 'Build graph view'; \
           \\
-          \INSERT INTO memories (workspace_id, content, summary, memory_type, importance) \
-          \SELECT w.id, m.content, m.summary, m.mtype::memory_type_enum, m.importance \
+          \INSERT INTO observations (workspace_id, subject_kind, subject, git_sha, content) \
+          \SELECT w.id, o.subject_kind::observation_subject_kind, o.subject, o.git_sha, o.content \
           \FROM workspaces w, \
-          \     (VALUES ('The hmem server uses Servant for its REST API and Rel8 for database queries. The API follows RESTful conventions with JSON request/response bodies.', 'Server Architecture', 'long_term', 8), \
-          \            ('Always run migrations before starting the server in a new environment. Use the setup executable or --dev flag for automatic schema management.', 'Migration Workflow', 'long_term', 7), \
-          \            ('WebSocket events use the format: {type, entity_type, entity_id, timestamp, data}. Clients should reconnect with exponential backoff on disconnect.', 'WebSocket Protocol', 'long_term', 6), \
-          \            ('Elm ports are used for JavaScript interop with Cytoscape.js and WebSocket. Port subscriptions are defined in main.js.', 'Elm Ports Pattern', 'short_term', 5), \
-          \            ('The frontend dev server (Vite) proxies /api to localhost:8420. Use npm run dev for hot-reload during development.', 'Vite Dev Setup', 'short_term', 4) \
-          \     ) AS m(content, summary, mtype, importance) \
-          \WHERE w.name = 'Demo Workspace'; \
-          \\
-          \INSERT INTO project_memory_links (project_id, memory_id) \
-          \SELECT p.id, m.id \
-          \FROM projects p, memories m \
-          \WHERE p.name = 'Web Frontend' AND m.summary = 'Server Architecture'; \
-          \\
-          \INSERT INTO project_memory_links (project_id, memory_id) \
-          \SELECT p.id, m.id \
-          \FROM projects p, memories m \
-          \WHERE p.name = 'Web Frontend' AND m.summary = 'Elm Ports Pattern'; \
-          \\
-          \INSERT INTO project_memory_links (project_id, memory_id) \
-          \SELECT p.id, m.id \
-          \FROM projects p, memories m \
-          \WHERE p.name = 'API Improvements' AND m.summary = 'Server Architecture'; \
-          \\
-          \INSERT INTO task_memory_links (task_id, memory_id) \
-          \SELECT t.id, m.id \
-          \FROM tasks t, memories m \
-          \WHERE t.title = 'Implement WebSocket client' AND m.summary = 'WebSocket Protocol'; \
-          \\
-          \INSERT INTO task_memory_links (task_id, memory_id) \
-          \SELECT t.id, m.id \
-          \FROM tasks t, memories m \
-          \WHERE t.title = 'Build graph view' AND m.summary = 'Elm Ports Pattern'; \
-          \\
-          \INSERT INTO task_memory_links (task_id, memory_id) \
-          \SELECT t.id, m.id \
-          \FROM tasks t, memories m \
-          \WHERE t.title = 'Set up Elm scaffold' AND m.summary = 'Vite Dev Setup';"
+          \     (VALUES ('file', 'src/HMem/Server/API.hs', '0123456789abcdef0123456789abcdef01234567', 'The server exposes repository-scoped Observations through a Servant REST API.'), \
+          \            ('file', 'hmem-server/migrations/V020__replace_memories_with_observations.sql', '0123456789abcdef0123456789abcdef01234567', 'V020 replaces the historical memory graph with provenance-bound observations.'), \
+          \            ('glob', 'hmem-server/src/**/*.hs', '0123456789abcdef0123456789abcdef01234567', 'WebSocket events identify observation changes with entity_type observation.')) \
+          \     AS o(subject_kind, subject, git_sha, content) \
+          \WHERE w.name = 'Demo Workspace';"
     result <- Session.run (Session.sql seedSql) conn
     case result of
-      Left err -> hPutStrLn stderr $ "[dev] seed warning: " ++ show err
+      Left err -> fail $ "[dev] demo seed failed: " ++ show err
       Right _  -> hPutStrLn stderr "[dev] Demo data seeded."
 
 -- | Normal production mode.

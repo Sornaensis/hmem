@@ -4,10 +4,11 @@ import Api
 import Browser
 import Browser.Navigation as Nav
 import Dict
-import Helpers exposing (localStorageKey, parseFragment)
+import Feature.Observation
+import Helpers exposing (localStorageKey, parseFragment, pushUrl)
 import Feature.Timeline
 import Permissions
-import Ports exposing (destroyCytoscape, disconnectWebSocket, requestLocalStorage)
+import Ports exposing (disconnectWebSocket, requestLocalStorage)
 import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
@@ -17,22 +18,11 @@ import Url.Parser as Parser exposing ((</>), Parser)
 -- ROUTING
 
 
-loadWorkspaceData : String -> String -> Maybe Int -> Cmd Msg
-loadWorkspaceData apiUrl wsId maybeLoadToken =
-    Cmd.batch
-        [ Api.fetchProjects apiUrl wsId (GotProjects wsId maybeLoadToken 0)
-        , Api.fetchTasks apiUrl wsId (GotTasks wsId maybeLoadToken 0)
-        , Api.fetchMemories apiUrl wsId (GotMemories wsId maybeLoadToken 0)
-        , Api.fetchWorkspaceCardHydration apiUrl wsId (GotWorkspaceCardHydration wsId maybeLoadToken)
-        ]
-
-
 routeParser : Parser (Route -> a) a
 routeParser =
     Parser.oneOf
         [ Parser.map HomeRoute Parser.top
         , Parser.map WorkspaceRoute (Parser.s "workspace" </> Parser.string)
-        , Parser.map MemoryGraphRoute (Parser.s "memory-graph")
         , Parser.map AuditLogRoute (Parser.s "audit")
         ]
 
@@ -45,9 +35,6 @@ urlToPage url =
 
         Just (WorkspaceRoute wsId) ->
             WorkspacePage wsId
-
-        Just MemoryGraphRoute ->
-            MemoryGraphPage
 
         Just AuditLogRoute ->
             AuditLogPage
@@ -64,7 +51,7 @@ handleUrlRequest : Browser.UrlRequest -> Model -> ( Model, Cmd Msg )
 handleUrlRequest urlRequest model =
     case urlRequest of
         Browser.Internal url ->
-            ( model, Nav.pushUrl model.key (Url.toString url) )
+            ( model, pushUrl model.key (Url.toString url) )
 
         Browser.External href ->
             ( model, Nav.load href )
@@ -169,6 +156,7 @@ handleUrlChange url model =
                                 , isSearching = False
                                 , searchError = Nothing
                                 , activeRequestQuery = Nothing
+                                , activeRequest = Nothing
                             }
 
                         else
@@ -185,25 +173,41 @@ handleUrlChange url model =
                         }
                             |> clearRouteConfirmations
 
+                    ( observationModel, observationCmd ) =
+                        if frag.tab == ObservationsTab then
+                            if frag.observationId /= model.observations.selectedId then
+                                case frag.observationId of
+                                    Just observationId ->
+                                        Feature.Observation.selectObservation observationId updatedModel
+
+                                    Nothing ->
+                                        ( { updatedModel | observations = Feature.Observation.clearSelection updatedModel.observations }, Cmd.none )
+
+                            else
+                                ( updatedModel, Cmd.none )
+
+                        else
+                            ( { updatedModel | observations = reconcileSameWorkspaceObservationRoute frag.tab updatedModel.observations }, Cmd.none )
+
                     ( auditModel, auditCmd ) =
-                        prepareWorkspaceAuditFromRoute wsId frag.tab updatedModel
+                        prepareWorkspaceAuditFromRoute wsId frag.tab observationModel
 
                     ( finalModel, timelineCmd ) =
                         prepareWorkspaceTimelineFromRoute wsId frag.tab auditModel
                 in
-                ( finalModel, Cmd.batch [ auditCmd, timelineCmd ] )
+                ( finalModel, Cmd.batch [ observationCmd, auditCmd, timelineCmd ] )
 
             else
                 let
                     frag =
                         parseFragment url.fragment
 
-                    destroyCmd =
-                        if model.page == MemoryGraphPage then
-                            destroyCytoscape ()
-
-                        else
-                            Cmd.none
+                    initialObservations =
+                        let
+                            observations =
+                                Feature.Observation.init
+                        in
+                        { observations | selectedId = frag.observationId }
 
                     currentDataLoading =
                         model.dataLoading
@@ -211,7 +215,7 @@ handleUrlChange url model =
                     updatedDataLoading =
                         { currentDataLoading
                             | loadingWorkspaceData = True
-                            , pendingWorkspaceLoads = 4
+                            , pendingWorkspaceLoads = 0
                             , activeWorkspaceLoadToken = Just currentDataLoading.nextWorkspaceLoadToken
                             , nextWorkspaceLoadToken = currentDataLoading.nextWorkspaceLoadToken + 1
                             , cardHydrationLoaded = False
@@ -278,6 +282,7 @@ handleUrlChange url model =
                             , isSearching = False
                             , searchError = Nothing
                             , activeRequestQuery = Nothing
+                            , activeRequest = Nothing
                             , filterShowOnly = ShowAll
                             , filterPriority = AnyPriority
                             , filterProjectStatuses = []
@@ -305,15 +310,6 @@ handleUrlChange url model =
                             , projectNextTaskDiagnosticsErrors = Dict.empty
                         }
 
-                    currentGraph =
-                        model.graph
-
-                    updatedGraph =
-                        { currentGraph
-                            | loaded = False
-                            , visualization = Nothing
-                        }
-
                     currentAuditLog =
                         model.auditLog
 
@@ -332,12 +328,14 @@ handleUrlChange url model =
                     , page = page
                     , auth = { status = AuthBooting, mode = model.auth.mode }
                     , sessionContext = Nothing
+                    , sessionRequestEpoch = model.sessionRequestEpoch + 1
                     , webSocket = { state = Disconnected }
                     , selectedWorkspaceId = Just wsId
                     , activeTab = frag.tab
                     , projects = Dict.empty
                     , tasks = Dict.empty
                     , memories = Dict.empty
+                    , observations = initialObservations
                     , mainContentScrollY = 0
                     , dataLoading = updatedDataLoading
                     , focus = updatedFocus
@@ -346,58 +344,19 @@ handleUrlChange url model =
                     , dependencies = updatedDependencies
                     , search = updatedSearch
                     , cards = updatedCards
-                    , graph = updatedGraph
                     , auditLog = updatedAuditLog
                     , timeline = updatedTimeline
                   }
                     |> clearRouteConfirmations
                 , Cmd.batch
-                    [ Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (Just wsId))
+                    [ Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (model.sessionRequestEpoch + 1) (Just wsId))
                     , requestLocalStorage (localStorageKey wsId)
                     , disconnectWebSocket ()
-                    , destroyCmd
                     ]
                 )
 
-        MemoryGraphPage ->
-            let
-                currentGraph =
-                    model.graph
-
-                updatedGraph =
-                    { currentGraph | loaded = False, visualization = Nothing }
-
-                currentFocus =
-                    model.focus
-
-                updatedFocus =
-                    { currentFocus | returnContext = Nothing }
-            in
-            ( { model
-                | url = url
-                , page = page
-                , auth = { status = AuthBooting, mode = model.auth.mode }
-                , sessionContext = Nothing
-                , webSocket = { state = Disconnected }
-                , graph = updatedGraph
-                , focus = updatedFocus
-              }
-                |> clearRouteConfirmations
-            , Cmd.batch
-                [ Api.fetchSessionContext model.flags.apiUrl model.selectedWorkspaceId (GotSessionContext model.selectedWorkspaceId)
-                , disconnectWebSocket ()
-                ]
-            )
-
         AuditLogPage ->
             let
-                destroyCmd =
-                    if model.page == MemoryGraphPage then
-                        destroyCytoscape ()
-
-                    else
-                        Cmd.none
-
                 emptyFilters =
                     { workspaceId = Nothing, entityType = Nothing, entityId = Nothing, action = Nothing, since = Nothing, until = Nothing, limit = Just 50, offset = Nothing }
 
@@ -455,6 +414,7 @@ handleUrlChange url model =
                 , page = page
                 , auth = { status = AuthBooting, mode = model.auth.mode }
                 , sessionContext = Nothing
+                , sessionRequestEpoch = model.sessionRequestEpoch + 1
                 , selectedWorkspaceId = Nothing
                 , webSocket = { state = Disconnected }
                 , auditLog = updatedAuditLog
@@ -462,33 +422,24 @@ handleUrlChange url model =
               }
                 |> clearRouteConfirmations
             , Cmd.batch
-                [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)
+                [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext (model.sessionRequestEpoch + 1) Nothing)
                 , disconnectWebSocket ()
-                , destroyCmd
                 ]
             )
 
         _ ->
             let
-                destroyCmd =
-                    if model.page == MemoryGraphPage then
-                        destroyCytoscape ()
-
-                    else
-                        Cmd.none
-
                 currentFocus =
                     model.focus
 
                 updatedFocus =
                     { currentFocus | returnContext = Nothing }
             in
-            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected }, focus = updatedFocus }
+            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected }, focus = updatedFocus }
                 |> clearRouteConfirmations
             , Cmd.batch
-                [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext Nothing)
+                [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext (model.sessionRequestEpoch + 1) Nothing)
                 , disconnectWebSocket ()
-                , destroyCmd
                 ]
             )
 
@@ -522,6 +473,18 @@ prepareWorkspaceTimelineFromRoute wsId tab model =
 
     else
         ( model, Cmd.none )
+
+
+{-| Reconcile observation state for the same-workspace route path. Non-observation
+workspace tabs must invalidate the detail request as well as the visible selection.
+-}
+reconcileSameWorkspaceObservationRoute : WorkspaceTab -> ObservationModel -> ObservationModel
+reconcileSameWorkspaceObservationRoute tab observations =
+    if tab == ObservationsTab then
+        observations
+
+    else
+        Feature.Observation.clearSelection observations
 
 
 workspaceAuditFilters : String -> AuditLogFilters

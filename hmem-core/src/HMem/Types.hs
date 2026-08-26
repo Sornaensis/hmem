@@ -1,214 +1,34 @@
 module HMem.Types
-  ( -- * JSON helpers
-    jsonOptions
-  , camelToSnake
-
-    -- * Memory types
-    , MemoryType(..)
-    , MemorySortBy(..)
-    , Memory(..)
-    , compactMemory
-    , CreateMemory(..)
-    , UpdateMemory(..)
-    , SearchQuery(..)
-    , MemoryListQuery(..)
-    , LinkedMemoryListQuery(..)
-    , validateSearchQuery
-    , validateLinkedMemoryListQuery
-    , MemoryLink(..)
-    , CreateMemoryLink(..)
-
-    -- * Workspace types
-  , WorkspaceType(..)
-  , Workspace(..)
-  , CreateWorkspace(..)
-  , UpdateWorkspace(..)
-  , WorkspaceCardHydration(..)
-  , WorkspaceProjectMemoryLink(..)
-  , WorkspaceTaskMemoryLink(..)
-  , WorkspaceTaskDependencyLink(..)
-
-    -- * Workspace groups
-  , WorkspaceGroup(..)
-  , CreateWorkspaceGroup(..)
-
-    -- * Project types
-  , ProjectStatus(..)
-  , Project(..)
-  , CreateProject(..)
-  , UpdateProject(..)
-  , ProjectListQuery(..)
-  , ProjectOverview(..)
-  , ProjectReadinessRollup(..)
-  , TaskDependencySummary(..)
-  , ContextMemoryScope(..)
-  , ConnectedMemorySummary(..)
-  , TaskOverview(..)
-  , TaskReadinessRollup(..)
-  , ContextDetailLevel(..)
-  , contextDetailLimit
-  , ContextInfo(..)
-
-    -- * Task types
-  , TaskStatus(..)
-  , Task(..)
-  , NextTaskCandidate(..)
-  , TaskDependencyAutoBlockSnapshot(..)
-  , TaskDependencyStatusChange(..)
-  , DependencyMutationResult(..)
-  , TaskMutationResult(..)
-  , CreateTask(..)
-  , UpdateTask(..)
-  , TaskListQuery(..)
-
-    -- * Unified search types
-  , EntitySearchType(..)
-  , UnifiedSearchQuery(..)
-  , LinkedMemorySummary(..)
-  , ProjectSearchResult(..)
-  , TaskSearchResult(..)
-  , UnifiedSearchResults(..)
-  , validateUnifiedSearchQuery
-
-    -- * Cleanup types
-  , CleanupPolicy(..)
-  , UpsertCleanupPolicy(..)
-  , CleanupResult(..)
-
-    -- * Category types
-  , MemoryCategory(..)
-  , CreateMemoryCategory(..)
-  , UpdateMemoryCategory(..)
-
-    -- * Relation types
-  , RelationType(..)
-  , relationTypeToText
-  , relationTypeFromText
-
-    -- * Cross-entity linking
-  , LinkMemory(..)
-  , LinkDependency(..)
-
-    -- * Graph types
-  , MemoryGraph(..)
-  , AdjustImportance(..)
-
-    -- * Embedding / similarity
-  , SimilarQuery(..)
-  , SimilarMemory(..)
-
-    -- * Activity timeline
-  , ActivityEvent(..)
-  , WorkspaceTimelineEvent(..)
-  , TimelineActor(..)
-  , TimelineProjectContext(..)
-  , TimelineTaskContext(..)
-  , TimelineStatusTransition(..)
-  , TimelineNavigation(..)
-  , TimelineBucketCounts(..)
-  , TimelineBucketEntityCounts(..)
-  , WorkspaceTimelineBucket(..)
-  , WorkspaceTimelineBucketsResponse(..)
-
-    -- * Saved views
-  , SavedView(..)
-  , CreateSavedView(..)
-  , UpdateSavedView(..)
-  , SavedViewListQuery(..)
-
-    -- * Audit log
-  , AuditAction(..)
-  , AuditLogEntry(..)
-  , AuditLogQuery(..)
-  , RevertResult(..)
-  , auditActionToText
-  , auditActionFromText
-
-    -- * WebSocket auth
-  , WebSocketTicketRequest(..)
-  , WebSocketTicketResponse(..)
-
-    -- * Session context
-  , SessionContext(..)
-  , SessionPrincipal(..)
-  , SessionGlobalPermissions(..)
-  , SessionWorkspaceContext(..)
-
-    -- * Pagination
-  , PaginatedResult(..)
-
-    -- * Batch operations
-  , BatchDeleteRequest(..)
-  , BatchMoveTasksRequest(..)
-  , BatchMemoryLinkRequest(..)
-  , BatchSetTagsItem(..)
-  , BatchSetTagsRequest(..)
-  , BatchResult(..)
-  , CascadeResult(..)
-  , BatchUpdateMemoryItem(..)
-  , BatchUpdateMemoryRequest(..)
-  , BatchUpdateProjectItem(..)
-  , BatchUpdateProjectRequest(..)
-  , BatchUpdateTaskItem(..)
-  , BatchUpdateTaskRequest(..)
-  , validateBatchDeleteRequest
-  , validateBatchMoveTasksRequest
-  , validateBatchMemoryLinkRequest
-  , validateBatchSetTagsRequest
-  , validateBatchUpdateMemoryRequest
-  , validateBatchUpdateProjectRequest
-  , validateBatchUpdateTaskRequest
-
-    -- * Enum text conversion helpers
-  , memoryTypeToText
-  , memoryTypeFromText
-  , projectStatusToText
-  , projectStatusFromText
-  , taskStatusToText
-  , taskStatusFromText
-  , workspaceTypeToText
-  , workspaceTypeFromText
-
-    -- * Field update (three-state nullable)
-  , FieldUpdate(..)
-  , parseFieldUpdate
-  , fieldUpdatePair
-  , applyNullableUpdate
-
-    -- * Input validation
-  , maxMemoryContentBytes
-  , maxMemorySummaryBytes
-  , maxNameBytes
-  , maxDescriptionBytes
-  , validFtsLanguage
-  , maxPaginationOffset
-  , maxPaginationLimit
-  , capPagination
-  , capPaginationOverfetch
-  , validateCreateWorkspaceInput
-  , validateUpdateWorkspaceInput
-  , validateCreateMemoryInput
-  , validateUpdateMemoryInput
-  , validateCreateMemoryBatchInput
-  , validateMemoryListQuery
-  , validateCreateProjectInput
-  , validateUpdateProjectInput
-  , validateProjectListQuery
-  , validateCreateTaskInput
-  , validateUpdateTaskInput
-  , validateTaskListQuery
-  , validateCreateMemoryCategoryInput
-  , validateUpdateMemoryCategoryInput
-  , validateCreateWorkspaceGroupInput
-  , validateCreateSavedViewInput
-  , validateUpdateSavedViewInput
+  ( jsonOptions, camelToSnake
+  , SubjectKind(..), subjectKindToText, subjectKindFromText
+  , Observation(..), CreateObservation(..), UpdateObservation(..), ObservationQuery(..), SimilarObservationQuery(..), SimilarObservation(..)
+  , maxObservationSubjectBytes, maxObservationContentBytes, observationEmbeddingDimensions
+  , ObservationEmbedding(..)
+  , validateCreateObservationInput, validateUpdateObservationInput, validateObservationQuery, validateSimilarObservationQuery
+  , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
+  , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
+  , ProjectStatus(..), Project(..), CreateProject(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..)
+  , TaskDependencySummary(..), TaskOverview(..), TaskReadinessRollup(..)
+  , TaskStatus(..), Task(..), NextTaskCandidate(..), TaskDependencyAutoBlockSnapshot(..), TaskDependencyStatusChange(..), DependencyMutationResult(..), TaskMutationResult(..), CreateTask(..), UpdateTask(..), TaskListQuery(..)
+  , EntitySearchType(..), ObservationSearchHit(..), UnifiedSearchQuery(..), UnifiedSearchResults(..), validateUnifiedSearchQuery
+  , ActivityEvent(..), WorkspaceTimelineEvent(..), TimelineActor(..), TimelineProjectContext(..), TimelineTaskContext(..), TimelineStatusTransition(..), TimelineNavigation(..), TimelineBucketCounts(..), TimelineBucketEntityCounts(..), WorkspaceTimelineBucket(..), WorkspaceTimelineBucketsResponse(..)
+  , SavedView(..), CreateSavedView(..), UpdateSavedView(..), SavedViewListQuery(..)
+  , AuditAction(..), AuditLogEntry(..), AuditLogQuery(..), RevertResult(..), auditActionToText, auditActionFromText
+  , WebSocketTicketRequest(..), WebSocketTicketResponse(..), SessionContext(..), SessionPrincipal(..), SessionGlobalPermissions(..), SessionWorkspaceContext(..), PaginatedResult(..)
+  , BatchDeleteRequest(..), BatchMoveTasksRequest(..), BatchResult(..), CascadeResult(..), BatchUpdateProjectItem(..), BatchUpdateProjectRequest(..), BatchUpdateTaskItem(..), BatchUpdateTaskRequest(..)
+  , validateBatchDeleteRequest, validateBatchMoveTasksRequest, validateBatchUpdateProjectRequest, validateBatchUpdateTaskRequest
+  , projectStatusToText, projectStatusFromText, taskStatusToText, taskStatusFromText, workspaceTypeToText, workspaceTypeFromText
+  , FieldUpdate(..), parseFieldUpdate, fieldUpdatePair, applyNullableUpdate
+  , maxNameBytes, maxDescriptionBytes, validFtsLanguage, maxPaginationOffset, maxPaginationLimit, capPagination, capPaginationOverfetch
+  , validateCreateWorkspaceInput, validateUpdateWorkspaceInput, validateCreateProjectInput, validateUpdateProjectInput, validateProjectListQuery, validateCreateTaskInput, validateUpdateTaskInput, validateTaskListQuery, validateCreateWorkspaceGroupInput, validateCreateSavedViewInput, validateUpdateSavedViewInput
   ) where
 
 import Data.Aeson
+import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, Pair)
 import Data.ByteString qualified as BS
-import Data.Char (isLower, isUpper, toLower)
+import Data.Char (isAlpha, isHexDigit, isLower, isUpper, toLower)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -285,12 +105,6 @@ applyNullableUpdate _   (SetTo val) = lit (Just val)
 -- Input validation
 ------------------------------------------------------------------------
 
-maxMemoryContentBytes :: Int
-maxMemoryContentBytes = 512 * 1024
-
-maxMemorySummaryBytes :: Int
-maxMemorySummaryBytes = 10 * 1024
-
 maxNameBytes :: Int
 maxNameBytes = 1024
 
@@ -347,38 +161,6 @@ validateUpdateWorkspaceInput :: UpdateWorkspace -> [Text]
 validateUpdateWorkspaceInput uw =
   maybe [] (validateRequiredText "name" maxNameBytes) uw.name
 
-validateCreateMemoryInput :: CreateMemory -> [Text]
-validateCreateMemoryInput cm =
-  validateRequiredText "content" maxMemoryContentBytes cm.content
-  <> validateOptionalText "summary" maxMemorySummaryBytes cm.summary
-  <> ["at least one of project_id or task_id is required" | cm.projectId == Nothing && cm.taskId == Nothing]
-
-validateUpdateMemoryInput :: UpdateMemory -> [Text]
-validateUpdateMemoryInput um =
-  maybe [] (validateRequiredText "content" maxMemoryContentBytes) um.content
-  <> validateOptionalFieldText "summary" maxMemorySummaryBytes um.summary
-
-validateCreateMemoryBatchInput :: [CreateMemory] -> [Text]
-validateCreateMemoryBatchInput cms =
-  ["memories must contain at least one item" | null cms]
-  <> ["memories must contain at most 100 items" | length cms > 100]
-  <> concat
-      [ prefixIssues ("memories[" <> T.pack (show idx) <> "].") (validateCreateMemoryInput cm)
-      | (idx, cm) <- zip [(0 :: Int) ..] cms
-      ]
-
-validateMemoryListQuery :: MemoryListQuery -> [Text]
-validateMemoryListQuery mq =
-  validateTimeRange "created_after" mq.createdAfter "created_before" mq.createdBefore
-  <> validateTimeRange "updated_after" mq.updatedAfter "updated_before" mq.updatedBefore
-  <> case mq.minAccessCount of
-       Just n | n < 0 -> ["min_access_count must be >= 0"]
-       _              -> []
-
-validateSearchQuery :: SearchQuery -> [Text]
-validateSearchQuery sq =
-  ["min_access_count must be >= 0" | maybe False (< 0) sq.minAccessCount]
-
 validateCreateProjectInput :: CreateProject -> [Text]
 validateCreateProjectInput cp =
   validateRequiredText "name" maxNameBytes cp.name
@@ -413,20 +195,13 @@ validateTaskListQuery tq =
   <> validateTimeRange "updated_after" tq.updatedAfter "updated_before" tq.updatedBefore
   <> ["Invalid search_language" | not (validFtsLanguage tq.searchLanguage)]
 
-validateCreateMemoryCategoryInput :: CreateMemoryCategory -> [Text]
-validateCreateMemoryCategoryInput cc =
-  validateRequiredText "name" maxNameBytes cc.name
-
-validateUpdateMemoryCategoryInput :: UpdateMemoryCategory -> [Text]
-validateUpdateMemoryCategoryInput uc =
-  maybe [] (validateRequiredText "name" maxNameBytes) uc.name
-
 validateCreateWorkspaceGroupInput :: CreateWorkspaceGroup -> [Text]
 validateCreateWorkspaceGroupInput cg =
   validateRequiredText "name" maxNameBytes cg.name
+  <> validateOptionalText "description" maxDescriptionBytes cg.description
 
 validSavedViewEntityTypes :: [Text]
-validSavedViewEntityTypes = ["memory_search", "memory_list", "project_list", "task_list", "activity"]
+validSavedViewEntityTypes = ["observation_search", "observation_list", "project_list", "task_list", "activity"]
 
 validateCreateSavedViewInput :: CreateSavedView -> [Text]
 validateCreateSavedViewInput csv =
@@ -479,39 +254,199 @@ prefixIssues :: Text -> [Text] -> [Text]
 prefixIssues prefix = map (prefix <>)
 
 ------------------------------------------------------------------------
--- MemoryType
+-- Observations
 ------------------------------------------------------------------------
 
-data MemoryType = ShortTerm | LongTerm
+-- | The kind of repository-relative subject captured by an observation.
+data SubjectKind = SubjectFile | SubjectGlob
   deriving (Show, Eq, Ord, Bounded, Enum, Generic)
 
-instance ToJSON MemoryType where
-  toJSON ShortTerm = String "short_term"
-  toJSON LongTerm  = String "long_term"
+instance ToJSON SubjectKind where
+  toJSON SubjectFile = String "file"
+  toJSON SubjectGlob = String "glob"
 
-instance FromJSON MemoryType where
-  parseJSON = withText "MemoryType" $ \case
-    "short_term" -> pure ShortTerm
-    "long_term"  -> pure LongTerm
-    _            -> fail "Invalid memory type: expected short_term or long_term"
+instance FromJSON SubjectKind where
+  parseJSON = withText "SubjectKind" $ \case
+    "file" -> pure SubjectFile
+    "glob" -> pure SubjectGlob
+    _      -> fail "Invalid subject kind: expected file or glob"
 
-memoryTypeToText :: MemoryType -> Text
-memoryTypeToText ShortTerm = "short_term"
-memoryTypeToText LongTerm  = "long_term"
+subjectKindToText :: SubjectKind -> Text
+subjectKindToText SubjectFile = "file"
+subjectKindToText SubjectGlob = "glob"
 
-memoryTypeFromText :: Text -> Maybe MemoryType
-memoryTypeFromText "short_term" = Just ShortTerm
-memoryTypeFromText "long_term"  = Just LongTerm
-memoryTypeFromText _            = Nothing
+subjectKindFromText :: Text -> Maybe SubjectKind
+subjectKindFromText "file" = Just SubjectFile
+subjectKindFromText "glob" = Just SubjectGlob
+subjectKindFromText _      = Nothing
 
-instance DBType MemoryType where
-  typeInformation = case parseTypeInformation parse memoryTypeToText typeInformation of
+instance DBType SubjectKind where
+  typeInformation = case parseTypeInformation parse subjectKindToText typeInformation of
     TypeInformation enc dec delim _ ->
-      TypeInformation enc dec delim (TypeName (QualifiedName "memory_type_enum" Nothing) [] 0)
+      TypeInformation enc dec delim (TypeName (QualifiedName "observation_subject_kind" Nothing) [] 0)
     where
-      parse t = maybe (Left $ "Invalid memory_type: " <> T.unpack t) Right (memoryTypeFromText t)
+      parse t = maybe (Left $ "Invalid observation_subject_kind: " <> T.unpack t) Right (subjectKindFromText t)
 
-instance DBEq MemoryType
+instance DBEq SubjectKind
+
+maxObservationSubjectBytes :: Int
+maxObservationSubjectBytes = 4096
+
+maxObservationContentBytes :: Int
+maxObservationContentBytes = 512 * 1024
+
+observationEmbeddingDimensions :: Int
+observationEmbeddingDimensions = 1536
+
+-- | Transparent JSON wrapper used where the HTTP contract accepts a raw
+-- embedding array while its schema must still state the fixed dimension.
+newtype ObservationEmbedding = ObservationEmbedding { unObservationEmbedding :: [Double] }
+  deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationEmbedding where
+  toJSON (ObservationEmbedding values) = toJSON values
+instance FromJSON ObservationEmbedding where
+  parseJSON value = ObservationEmbedding <$> parseJSON value
+
+data Observation = Observation
+  { id          :: UUID
+  , workspaceId :: UUID
+  , subjectKind :: SubjectKind
+  , subject     :: Text
+  , gitSha      :: Text
+  , content     :: Text
+  , createdAt   :: UTCTime
+  , updatedAt   :: UTCTime
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON Observation where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON Observation where
+  parseJSON = genericParseJSON jsonOptions
+
+-- | Provenance is supplied once, on creation, and is immutable thereafter.
+data CreateObservation = CreateObservation
+  { workspaceId :: UUID
+  , subjectKind :: SubjectKind
+  , subject     :: Text
+  , gitSha      :: Text
+  , content     :: Text
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON CreateObservation where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON CreateObservation where
+  parseJSON = genericParseJSON jsonOptions
+
+-- | Observation updates deliberately expose only mutable content.
+newtype UpdateObservation = UpdateObservation { content :: Text }
+  deriving (Show, Eq, Generic)
+
+instance ToJSON UpdateObservation where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON UpdateObservation where
+  parseJSON = withObject "UpdateObservation" $ \updateObject -> do
+    let unknownKeys = filter (`notElem` ["content"]) (map Key.toText (KM.keys updateObject))
+    if null unknownKeys
+      then UpdateObservation <$> updateObject .: "content"
+      else fail $ "UpdateObservation accepts only content; unexpected fields: " <> show unknownKeys
+
+-- | Exact provenance filters compose with optional full-text search.
+data ObservationQuery = ObservationQuery
+  { workspaceId :: UUID
+  , subjectKind :: Maybe SubjectKind
+  , subject     :: Maybe Text
+  , gitSha      :: Maybe Text
+  , query       :: Maybe Text
+  , limit       :: Maybe Int
+  , offset      :: Maybe Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationQuery where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationQuery where
+  parseJSON = genericParseJSON jsonOptions
+
+-- | Vector search has the same composable exact filters as text search.
+data SimilarObservationQuery = SimilarObservationQuery
+  { workspaceId    :: UUID
+  , subjectKind    :: Maybe SubjectKind
+  , subject        :: Maybe Text
+  , gitSha         :: Maybe Text
+  , embedding      :: [Double]
+  , minSimilarity  :: Maybe Double
+  , limit          :: Maybe Int
+  , offset         :: Maybe Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON SimilarObservationQuery where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON SimilarObservationQuery where
+  parseJSON = genericParseJSON jsonOptions
+
+data SimilarObservation = SimilarObservation
+  { observation :: Observation
+  , similarity  :: Double
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON SimilarObservation where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON SimilarObservation where
+  parseJSON = genericParseJSON jsonOptions
+
+validateCreateObservationInput :: CreateObservation -> [Text]
+validateCreateObservationInput co =
+  validateObservationSubject co.subject
+  <> ["git_sha must be a lowercase 40-character hexadecimal Git SHA" | not (validGitSha co.gitSha)]
+  <> validateRequiredText "content" maxObservationContentBytes co.content
+
+validateUpdateObservationInput :: UpdateObservation -> [Text]
+validateUpdateObservationInput (UpdateObservation value) =
+  validateRequiredText "content" maxObservationContentBytes value
+
+validateObservationQuery :: ObservationQuery -> [Text]
+validateObservationQuery oq =
+  validateObservationPagination oq.limit oq.offset
+  <> maybe [] validateObservationSubject oq.subject
+  <> maybe [] validateGitSha oq.gitSha
+
+validateSimilarObservationQuery :: SimilarObservationQuery -> [Text]
+validateSimilarObservationQuery soq =
+  validateObservationPagination soq.limit soq.offset
+  <> maybe [] validateObservationSubject soq.subject
+  <> maybe [] validateGitSha soq.gitSha
+  <> ["embedding must contain exactly 1536 finite dimensions"
+     | length soq.embedding /= observationEmbeddingDimensions
+       || any (\x -> isNaN x || isInfinite x) soq.embedding]
+  <> ["min_similarity must be between 0 and 1"
+     | maybe False (\x -> x < 0 || x > 1 || isNaN x || isInfinite x) soq.minSimilarity]
+
+validateObservationSubject :: Text -> [Text]
+validateObservationSubject value =
+  ["subject must be a canonical repository-relative forward-slash path or glob"
+  | T.null value || T.isPrefixOf "/" value || T.isPrefixOf "./" value
+    || T.any (== '\\') value || isWindowsAbsolute value
+    || any (`elem` ["", ".", ".."]) (T.splitOn "/" value)]
+  <> validateByteLength "subject" maxObservationSubjectBytes value
+
+isWindowsAbsolute :: Text -> Bool
+isWindowsAbsolute value = case T.unpack (T.take 3 value) of
+  (drive:':':'/':_) -> isAlpha drive
+  _                 -> False
+
+validateGitSha :: Text -> [Text]
+validateGitSha value =
+  ["git_sha must be a lowercase 40-character hexadecimal Git SHA" | not (validGitSha value)]
+
+validGitSha :: Text -> Bool
+validGitSha value = T.length value == 40 && T.all (\c -> isHexDigit c && (c < 'A' || c > 'F')) value
+
+validateObservationPagination :: Maybe Int -> Maybe Int -> [Text]
+validateObservationPagination mLimit mOffset =
+  ["limit must be between 1 and " <> T.pack (show maxPaginationLimit)
+  | maybe False (\n -> n < 1 || n > maxPaginationLimit) mLimit]
+  <> ["offset must be between 0 and " <> T.pack (show maxPaginationOffset)
+     | maybe False (\n -> n < 0 || n > maxPaginationOffset) mOffset]
 
 ------------------------------------------------------------------------
 -- ProjectStatus
@@ -602,66 +537,6 @@ instance DBType TaskStatus where
       parse t = maybe (Left $ "Invalid task status: " <> T.unpack t) Right (taskStatusFromText t)
 
 instance DBEq TaskStatus
-
-------------------------------------------------------------------------
--- RelationType
-------------------------------------------------------------------------
-
-data RelationType = Related | Supersedes | Contradicts | Elaborates
-  | Inspires | DependsOn | DerivedFrom | AlternativeTo
-  deriving (Show, Eq, Ord, Bounded, Enum, Generic)
-
-instance ToJSON RelationType where
-  toJSON Related       = String "related"
-  toJSON Supersedes    = String "supersedes"
-  toJSON Contradicts   = String "contradicts"
-  toJSON Elaborates    = String "elaborates"
-  toJSON Inspires      = String "inspires"
-  toJSON DependsOn     = String "depends_on"
-  toJSON DerivedFrom   = String "derived_from"
-  toJSON AlternativeTo = String "alternative_to"
-
-instance FromJSON RelationType where
-  parseJSON = withText "RelationType" $ \case
-    "related"        -> pure Related
-    "supersedes"     -> pure Supersedes
-    "contradicts"    -> pure Contradicts
-    "elaborates"     -> pure Elaborates
-    "inspires"       -> pure Inspires
-    "depends_on"     -> pure DependsOn
-    "derived_from"   -> pure DerivedFrom
-    "alternative_to" -> pure AlternativeTo
-    _                -> fail "Invalid relation type"
-
-relationTypeToText :: RelationType -> Text
-relationTypeToText Related       = "related"
-relationTypeToText Supersedes    = "supersedes"
-relationTypeToText Contradicts   = "contradicts"
-relationTypeToText Elaborates    = "elaborates"
-relationTypeToText Inspires      = "inspires"
-relationTypeToText DependsOn     = "depends_on"
-relationTypeToText DerivedFrom   = "derived_from"
-relationTypeToText AlternativeTo = "alternative_to"
-
-relationTypeFromText :: Text -> Maybe RelationType
-relationTypeFromText "related"        = Just Related
-relationTypeFromText "supersedes"     = Just Supersedes
-relationTypeFromText "contradicts"    = Just Contradicts
-relationTypeFromText "elaborates"     = Just Elaborates
-relationTypeFromText "inspires"       = Just Inspires
-relationTypeFromText "depends_on"     = Just DependsOn
-relationTypeFromText "derived_from"   = Just DerivedFrom
-relationTypeFromText "alternative_to" = Just AlternativeTo
-relationTypeFromText _                = Nothing
-
-instance DBType RelationType where
-  typeInformation = case parseTypeInformation parse relationTypeToText typeInformation of
-    TypeInformation enc dec delim _ ->
-      TypeInformation enc dec delim (TypeName (QualifiedName "relation_type_enum" Nothing) [] 0)
-    where
-      parse t = maybe (Left $ "Invalid relation_type: " <> T.unpack t) Right (relationTypeFromText t)
-
-instance DBEq RelationType
 
 ------------------------------------------------------------------------
 -- WorkspaceType
@@ -758,493 +633,15 @@ instance FromJSON UpdateWorkspace where
     <*> parseFieldUpdate o "gh_owner"
     <*> parseFieldUpdate o "gh_repo"
 
-------------------------------------------------------------------------
--- Memory
-------------------------------------------------------------------------
-
-data Memory = Memory
-  { id             :: UUID
-  , workspaceId    :: UUID
-  , content        :: Text
-  , summary        :: Maybe Text
-  , memoryType     :: MemoryType
-  , importance     :: Int
-  , metadata       :: Value
-  , expiresAt      :: Maybe UTCTime
-  , source         :: Maybe Text
-  , confidence     :: Double
-  , pinned         :: Bool
-  , lastAccessedAt :: UTCTime
-  , accessCount    :: Int
-  , ftsLanguage    :: Text
-  , tags           :: [Text]
-  , createdAt      :: UTCTime
-  , updatedAt      :: UTCTime
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON Memory where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON Memory where
-  parseJSON  = genericParseJSON jsonOptions
-
--- | Truncate content and clear metadata for list/search responses.
-compactMemory :: Memory -> Memory
-compactMemory m = Memory
-  { id             = m.id
-  , workspaceId    = m.workspaceId
-  , content        = let c = m.content in if T.length c > 200 then T.take 200 c <> "..." else c
-  , summary        = m.summary
-  , memoryType     = m.memoryType
-  , importance     = m.importance
-  , metadata       = toJSON (mempty :: Object)
-  , expiresAt      = m.expiresAt
-  , source         = m.source
-  , confidence     = m.confidence
-  , pinned         = m.pinned
-  , lastAccessedAt = m.lastAccessedAt
-  , accessCount    = m.accessCount
-  , ftsLanguage    = m.ftsLanguage
-  , tags           = m.tags
-  , createdAt      = m.createdAt
-  , updatedAt      = m.updatedAt
-  }
-
-data CreateMemory = CreateMemory
-  { workspaceId  :: UUID
-  , projectId    :: Maybe UUID
-  , taskId       :: Maybe UUID
-  , content      :: Text
-  , summary      :: Maybe Text
-  , memoryType   :: MemoryType
-  , importance   :: Maybe Int
-  , metadata     :: Maybe Value
-  , expiresAt    :: Maybe UTCTime
-  , source       :: Maybe Text
-  , confidence   :: Maybe Double
-  , pinned       :: Maybe Bool
-  , tags         :: Maybe [Text]
-  , ftsLanguage  :: Maybe Text
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON CreateMemory where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON CreateMemory where
-  parseJSON  = genericParseJSON jsonOptions
-
-data UpdateMemory = UpdateMemory
-  { content    :: Maybe Text
-  , summary    :: FieldUpdate Text
-  , memoryType :: Maybe MemoryType
-  , importance :: Maybe Int
-  , metadata   :: Maybe Value
-  , expiresAt  :: FieldUpdate UTCTime
-  , source     :: FieldUpdate Text
-  , confidence :: Maybe Double
-  , pinned     :: Maybe Bool
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON UpdateMemory where
-  toJSON um = object $ catMaybes
-    [ ("content" .=)     <$> um.content
-    , fieldUpdatePair "summary" um.summary
-    , ("memory_type" .=) <$> um.memoryType
-    , ("importance" .=)  <$> um.importance
-    , ("metadata" .=)    <$> um.metadata
-    , fieldUpdatePair "expires_at" um.expiresAt
-    , fieldUpdatePair "source" um.source
-    , ("confidence" .=)  <$> um.confidence
-    , ("pinned" .=)      <$> um.pinned
-    ]
-instance FromJSON UpdateMemory where
-  parseJSON = withObject "UpdateMemory" $ \o -> UpdateMemory
-    <$> o .:? "content"
-    <*> parseFieldUpdate o "summary"
-    <*> o .:? "memory_type"
-    <*> o .:? "importance"
-    <*> o .:? "metadata"
-    <*> parseFieldUpdate o "expires_at"
-    <*> parseFieldUpdate o "source"
-    <*> o .:? "confidence"
-    <*> o .:? "pinned"
-
-data MemorySortBy = SortRecent | SortImportance | SortAccessCount
-  deriving (Show, Eq, Generic)
-
-instance ToJSON MemorySortBy where
-  toJSON SortRecent      = String "recent"
-  toJSON SortImportance  = String "importance"
-  toJSON SortAccessCount = String "access_count"
-
-instance FromJSON MemorySortBy where
-  parseJSON = withText "MemorySortBy" $ \case
-    "recent"       -> pure SortRecent
-    "importance"   -> pure SortImportance
-    "access_count" -> pure SortAccessCount
-    _               -> fail "Invalid memory sort (expected recent, importance, or access_count)"
-
-data SearchQuery = SearchQuery
-  { workspaceId    :: Maybe UUID
-  , query          :: Maybe Text
-  , memoryType     :: Maybe MemoryType
-  , tags           :: Maybe [Text]
-  , minImportance  :: Maybe Int
-  , minAccessCount :: Maybe Int
-  , sortBy         :: Maybe MemorySortBy
-  , categoryId     :: Maybe UUID
-  , pinnedOnly     :: Maybe Bool
-  , searchLanguage :: Maybe Text    -- ^ regconfig for plainto_tsquery (default 'english')
-  , limit          :: Maybe Int
-  , offset         :: Maybe Int
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON SearchQuery where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON SearchQuery where
-  parseJSON  = genericParseJSON jsonOptions
-
-data MemoryListQuery = MemoryListQuery
-  { workspaceId   :: Maybe UUID
-  , memoryType    :: Maybe MemoryType
-  , minAccessCount :: Maybe Int
-  , sortBy        :: Maybe MemorySortBy
-  , createdAfter  :: Maybe UTCTime
-  , createdBefore :: Maybe UTCTime
-  , updatedAfter  :: Maybe UTCTime
-  , updatedBefore :: Maybe UTCTime
-  , limit         :: Maybe Int
-  , offset        :: Maybe Int
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON MemoryListQuery where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON MemoryListQuery where
-  parseJSON  = genericParseJSON jsonOptions
-
-data LinkedMemoryListQuery = LinkedMemoryListQuery
-  { query          :: Maybe Text
-  , tags           :: Maybe [Text]
-  , minImportance  :: Maybe Int
-  , memoryType     :: Maybe MemoryType
-  , minAccessCount :: Maybe Int
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON LinkedMemoryListQuery where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON LinkedMemoryListQuery where
-  parseJSON  = genericParseJSON jsonOptions
-
-validateLinkedMemoryListQuery :: LinkedMemoryListQuery -> [Text]
-validateLinkedMemoryListQuery lq = concat
-  [ case lq.minImportance of
-      Just n | n < 1 || n > 10 -> ["minImportance must be between 1 and 10"]
-      _                        -> []
-  , case lq.minAccessCount of
-      Just n | n < 0 -> ["minAccessCount must be >= 0"]
-      _              -> []
-  ]
-
-data ProjectListQuery = ProjectListQuery
-  { workspaceId     :: Maybe UUID
-  , status          :: Maybe ProjectStatus
-  , query           :: Maybe Text
-  , searchLanguage  :: Maybe Text
-  , createdAfter    :: Maybe UTCTime
-  , createdBefore   :: Maybe UTCTime
-  , updatedAfter    :: Maybe UTCTime
-  , updatedBefore   :: Maybe UTCTime
-  , limit           :: Maybe Int
-  , offset          :: Maybe Int
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON ProjectListQuery where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON ProjectListQuery where
-  parseJSON  = genericParseJSON jsonOptions
-
--- | Compact workspace-scoped relation data used to hydrate task/project cards
--- without issuing one overview or linked-memory request per card.
-data WorkspaceProjectMemoryLink = WorkspaceProjectMemoryLink
-  { projectId :: UUID
-  , memoryId  :: UUID
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON WorkspaceProjectMemoryLink where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON WorkspaceProjectMemoryLink where
-  parseJSON  = genericParseJSON jsonOptions
-
-data WorkspaceTaskMemoryLink = WorkspaceTaskMemoryLink
-  { taskId   :: UUID
-  , memoryId :: UUID
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON WorkspaceTaskMemoryLink where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON WorkspaceTaskMemoryLink where
-  parseJSON  = genericParseJSON jsonOptions
-
 data WorkspaceTaskDependencyLink = WorkspaceTaskDependencyLink
-  { taskId      :: UUID
-  , dependsOnId :: UUID
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON WorkspaceTaskDependencyLink where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON WorkspaceTaskDependencyLink where
-  parseJSON  = genericParseJSON jsonOptions
+  { taskId :: UUID, dependsOnId :: UUID } deriving (Show, Eq, Generic)
+instance ToJSON WorkspaceTaskDependencyLink where toJSON = genericToJSON jsonOptions
+instance FromJSON WorkspaceTaskDependencyLink where parseJSON = genericParseJSON jsonOptions
 
 data WorkspaceCardHydration = WorkspaceCardHydration
-  { projectMemoryLinks :: [WorkspaceProjectMemoryLink]
-  , taskMemoryLinks    :: [WorkspaceTaskMemoryLink]
-  , taskDependencies   :: [WorkspaceTaskDependencyLink]
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON WorkspaceCardHydration where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON WorkspaceCardHydration where
-  parseJSON  = genericParseJSON jsonOptions
-
--- | Aggregated view of a project for planning workflows.
-data ProjectOverview = ProjectOverview
-  { project        :: Project
-  , tasks          :: [Task]
-  , subprojects    :: [Project]
-  , linkedMemories :: [Memory]
-  , connectedMemories :: [ConnectedMemorySummary]
-  , readinessRollup :: ProjectReadinessRollup
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON ProjectOverview where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON ProjectOverview where
-  parseJSON  = genericParseJSON jsonOptions
-
-data ProjectReadinessRollup = ProjectReadinessRollup
-  { openProjectCount             :: Int
-  , closedProjectCount           :: Int
-  , openTaskCount                :: Int
-  , doneTaskCount                :: Int
-  , cancelledTaskCount           :: Int
-  , blockedTaskCount             :: Int
-  , dependencyBlockedTaskCount   :: Int
-  , openDependencyCount          :: Int
-  , completionReady              :: Bool
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON ProjectReadinessRollup where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON ProjectReadinessRollup where
-  parseJSON  = genericParseJSON jsonOptions
-
-data TaskListQuery = TaskListQuery
-  { workspaceId     :: Maybe UUID
-  , projectId       :: Maybe UUID
-  , status          :: Maybe TaskStatus
-  , priority        :: Maybe Int
-  , query           :: Maybe Text
-  , searchLanguage  :: Maybe Text
-  , createdAfter    :: Maybe UTCTime
-  , createdBefore   :: Maybe UTCTime
-  , updatedAfter    :: Maybe UTCTime
-  , updatedBefore   :: Maybe UTCTime
-  , limit           :: Maybe Int
-  , offset          :: Maybe Int
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON TaskListQuery where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON TaskListQuery where
-  parseJSON  = genericParseJSON jsonOptions
-
-------------------------------------------------------------------------
--- Task overview
-------------------------------------------------------------------------
-
-data TaskDependencySummary = TaskDependencySummary
-  { id   :: UUID
-  , name :: Text
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON TaskDependencySummary where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON TaskDependencySummary where
-  parseJSON  = genericParseJSON jsonOptions
-
-data ContextMemoryScope = ScopeTask | ScopeProject | ScopeWorkspace
-  deriving (Show, Eq, Ord, Bounded, Enum, Generic)
-
-instance ToJSON ContextMemoryScope where
-  toJSON ScopeTask      = String "task"
-  toJSON ScopeProject   = String "project"
-  toJSON ScopeWorkspace = String "workspace"
-
-instance FromJSON ContextMemoryScope where
-  parseJSON = withText "ContextMemoryScope" $ \case
-    "task"      -> pure ScopeTask
-    "project"   -> pure ScopeProject
-    "workspace" -> pure ScopeWorkspace
-    _            -> fail "Invalid context memory scope"
-
-data ConnectedMemorySummary = ConnectedMemorySummary
-  { id      :: UUID
-  , summary :: Text
-  , scope   :: ContextMemoryScope
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON ConnectedMemorySummary where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON ConnectedMemorySummary where
-  parseJSON  = genericParseJSON jsonOptions
-
-data TaskOverview = TaskOverview
-  { task              :: Task
-  , dependencies      :: [TaskDependencySummary]
-  , connectedMemories :: [ConnectedMemorySummary]
-  , readinessRollup   :: TaskReadinessRollup
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON TaskOverview where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON TaskOverview where
-  parseJSON  = genericParseJSON jsonOptions
-
-data TaskReadinessRollup = TaskReadinessRollup
-  { openSubtaskCount            :: Int
-  , doneSubtaskCount            :: Int
-  , cancelledSubtaskCount       :: Int
-  , blockedSubtaskCount         :: Int
-  , dependencyBlockedTaskCount  :: Int
-  , openDependencyCount         :: Int
-  , completionReady             :: Bool
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON TaskReadinessRollup where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON TaskReadinessRollup where
-  parseJSON  = genericParseJSON jsonOptions
-
-------------------------------------------------------------------------
--- Context info (light / medium / heavy memory retrieval)
-------------------------------------------------------------------------
-
--- | Detail level controlling how many memories per scope are returned.
-data ContextDetailLevel = ContextLight | ContextMedium | ContextHeavy
-  deriving (Show, Eq, Ord, Bounded, Enum, Generic)
-
-instance ToJSON ContextDetailLevel where
-  toJSON ContextLight  = String "light"
-  toJSON ContextMedium = String "medium"
-  toJSON ContextHeavy  = String "heavy"
-
-instance FromJSON ContextDetailLevel where
-  parseJSON = withText "ContextDetailLevel" $ \case
-    "light"  -> pure ContextLight
-    "medium" -> pure ContextMedium
-    "heavy"  -> pure ContextHeavy
-    _        -> fail "Invalid context detail level (expected light, medium, or heavy)"
-
--- | How many memories per scope for each detail level.
-contextDetailLimit :: ContextDetailLevel -> Int
-contextDetailLimit ContextLight  = 2
-contextDetailLimit ContextMedium = 5
-contextDetailLimit ContextHeavy  = 10
-
--- | Aggregated context information for a task, with memories grouped
--- by scope and limited according to the detail level.
-data ContextInfo = ContextInfo
-  { task              :: Task
-  , detailLevel       :: ContextDetailLevel
-  , taskMemories      :: [ConnectedMemorySummary]
-  , projectMemories   :: [ConnectedMemorySummary]  -- from all ancestor projects
-  , workspaceMemories :: [ConnectedMemorySummary]
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON ContextInfo where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON ContextInfo where
-  parseJSON  = genericParseJSON jsonOptions
-
-------------------------------------------------------------------------
--- Memory links
-------------------------------------------------------------------------
-
-data MemoryLink = MemoryLink
-  { sourceId     :: UUID
-  , targetId     :: UUID
-  , relationType :: RelationType
-  , strength     :: Double
-  , createdAt    :: UTCTime
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON MemoryLink where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON MemoryLink where
-  parseJSON  = genericParseJSON jsonOptions
-
-data CreateMemoryLink = CreateMemoryLink
-  { targetId     :: UUID
-  , relationType :: RelationType
-  , strength     :: Maybe Double
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON CreateMemoryLink where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON CreateMemoryLink where
-  parseJSON  = genericParseJSON jsonOptions
-
-------------------------------------------------------------------------
--- Memory graph
-------------------------------------------------------------------------
-
-data MemoryGraph = MemoryGraph
-  { memories :: [Memory]
-  , links    :: [MemoryLink]
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON MemoryGraph where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON MemoryGraph where
-  parseJSON  = genericParseJSON jsonOptions
-
-------------------------------------------------------------------------
--- Importance adjustment
-------------------------------------------------------------------------
-
-newtype AdjustImportance = AdjustImportance { importance :: Int }
-  deriving (Show, Eq, Generic)
-
-instance ToJSON AdjustImportance where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON AdjustImportance where
-  parseJSON  = genericParseJSON jsonOptions
-
-------------------------------------------------------------------------
--- Embedding / vector similarity
-------------------------------------------------------------------------
-
--- | Query for finding memories similar to a given embedding vector.
-data SimilarQuery = SimilarQuery
-  { workspaceId    :: UUID
-  , embedding      :: [Double]   -- ^ The query vector (must match column dimension, e.g. 1536)
-  , limit          :: Maybe Int
-  , minSimilarity  :: Maybe Double  -- ^ Cosine similarity threshold (0.0–1.0, default 0.0)
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON SimilarQuery where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON SimilarQuery where
-  parseJSON  = genericParseJSON jsonOptions
-
--- | A memory together with its cosine similarity score.
-data SimilarMemory = SimilarMemory
-  { memory     :: Memory
-  , similarity :: Double
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON SimilarMemory where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON SimilarMemory where
-  parseJSON  = genericParseJSON jsonOptions
+  { taskDependencies :: [WorkspaceTaskDependencyLink] } deriving (Show, Eq, Generic)
+instance ToJSON WorkspaceCardHydration where toJSON = genericToJSON jsonOptions
+instance FromJSON WorkspaceCardHydration where parseJSON = genericParseJSON jsonOptions
 
 ------------------------------------------------------------------------
 -- Project
@@ -1291,6 +688,28 @@ data UpdateProject = UpdateProject
   , metadata    :: Maybe Value
   } deriving (Show, Eq, Generic)
 
+data ProjectListQuery = ProjectListQuery
+  { workspaceId :: Maybe UUID, status :: Maybe ProjectStatus, query :: Maybe Text, searchLanguage :: Maybe Text
+  , createdAfter :: Maybe UTCTime, createdBefore :: Maybe UTCTime, updatedAfter :: Maybe UTCTime, updatedBefore :: Maybe UTCTime
+  , limit :: Maybe Int, offset :: Maybe Int
+  } deriving (Show, Eq, Generic)
+instance ToJSON ProjectListQuery where toJSON = genericToJSON jsonOptions
+instance FromJSON ProjectListQuery where parseJSON = genericParseJSON jsonOptions
+
+data ProjectOverview = ProjectOverview
+  { project :: Project, tasks :: [Task], subprojects :: [Project], readinessRollup :: ProjectReadinessRollup }
+  deriving (Show, Eq, Generic)
+instance ToJSON ProjectOverview where toJSON = genericToJSON jsonOptions
+instance FromJSON ProjectOverview where parseJSON = genericParseJSON jsonOptions
+
+data ProjectReadinessRollup = ProjectReadinessRollup
+  { openProjectCount :: Int, closedProjectCount :: Int, openTaskCount :: Int, doneTaskCount :: Int
+  , cancelledTaskCount :: Int, blockedTaskCount :: Int, dependencyBlockedTaskCount :: Int
+  , openDependencyCount :: Int, completionReady :: Bool }
+  deriving (Show, Eq, Generic)
+instance ToJSON ProjectReadinessRollup where toJSON = genericToJSON jsonOptions
+instance FromJSON ProjectReadinessRollup where parseJSON = genericParseJSON jsonOptions
+
 instance ToJSON UpdateProject where
   toJSON up = object $ catMaybes
     [ ("name" .=)     <$> up.name
@@ -1326,7 +745,6 @@ data Task = Task
   , dueAt           :: Maybe UTCTime
   , completedAt     :: Maybe UTCTime
   , dependencyCount :: Int
-  , memoryLinkCount :: Int
   , createdAt       :: UTCTime
   , updatedAt       :: UTCTime
   } deriving (Show, Eq, Generic)
@@ -1437,6 +855,31 @@ data UpdateTask = UpdateTask
   , dueAt       :: FieldUpdate UTCTime
   } deriving (Show, Eq, Generic)
 
+data TaskListQuery = TaskListQuery
+  { workspaceId :: Maybe UUID, projectId :: Maybe UUID, status :: Maybe TaskStatus, priority :: Maybe Int
+  , query :: Maybe Text, searchLanguage :: Maybe Text, createdAfter :: Maybe UTCTime, createdBefore :: Maybe UTCTime
+  , updatedAfter :: Maybe UTCTime, updatedBefore :: Maybe UTCTime, limit :: Maybe Int, offset :: Maybe Int
+  } deriving (Show, Eq, Generic)
+instance ToJSON TaskListQuery where toJSON = genericToJSON jsonOptions
+instance FromJSON TaskListQuery where parseJSON = genericParseJSON jsonOptions
+
+data TaskDependencySummary = TaskDependencySummary { id :: UUID, name :: Text } deriving (Show, Eq, Generic)
+instance ToJSON TaskDependencySummary where toJSON = genericToJSON jsonOptions
+instance FromJSON TaskDependencySummary where parseJSON = genericParseJSON jsonOptions
+
+data TaskReadinessRollup = TaskReadinessRollup
+  { openSubtaskCount :: Int, doneSubtaskCount :: Int, cancelledSubtaskCount :: Int, blockedSubtaskCount :: Int
+  , dependencyBlockedTaskCount :: Int, openDependencyCount :: Int, completionReady :: Bool }
+  deriving (Show, Eq, Generic)
+instance ToJSON TaskReadinessRollup where toJSON = genericToJSON jsonOptions
+instance FromJSON TaskReadinessRollup where parseJSON = genericParseJSON jsonOptions
+
+data TaskOverview = TaskOverview
+  { task :: Task, dependencies :: [TaskDependencySummary], readinessRollup :: TaskReadinessRollup }
+  deriving (Show, Eq, Generic)
+instance ToJSON TaskOverview where toJSON = genericToJSON jsonOptions
+instance FromJSON TaskOverview where parseJSON = genericParseJSON jsonOptions
+
 instance ToJSON UpdateTask where
   toJSON ut = object $ catMaybes
     [ ("title" .=)    <$> ut.title
@@ -1458,121 +901,6 @@ instance FromJSON UpdateTask where
     <*> o .:? "priority"
     <*> o .:? "metadata"
     <*> parseFieldUpdate o "due_at"
-
-------------------------------------------------------------------------
--- Cleanup
-------------------------------------------------------------------------
-
-data CleanupPolicy = CleanupPolicy
-  { id            :: UUID
-  , workspaceId   :: UUID
-  , memoryType    :: MemoryType
-  , maxAgeHours   :: Maybe Int
-  , maxCount      :: Maybe Int
-  , minImportance :: Int
-  , enabled       :: Bool
-  , createdAt     :: UTCTime
-  , updatedAt     :: UTCTime
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON CleanupPolicy where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON CleanupPolicy where
-  parseJSON  = genericParseJSON jsonOptions
-
--- | Input type for creating/upserting a cleanup policy.
--- The server auto-generates @id@, @created_at@, and @updated_at@.
-data UpsertCleanupPolicy = UpsertCleanupPolicy
-  { workspaceId   :: UUID
-  , memoryType    :: MemoryType
-  , maxAgeHours   :: Maybe Int
-  , maxCount      :: Maybe Int
-  , minImportance :: Int
-  , enabled       :: Bool
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON UpsertCleanupPolicy where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON UpsertCleanupPolicy where
-  parseJSON  = genericParseJSON jsonOptions
-
-data CleanupResult = CleanupResult
-  { deletedCount :: Int
-  , workspaceId  :: UUID
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON CleanupResult where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON CleanupResult where
-  parseJSON  = genericParseJSON jsonOptions
-
-------------------------------------------------------------------------
--- Cross-entity linking request types
-------------------------------------------------------------------------
-
-newtype LinkMemory = LinkMemory { memoryId :: UUID }
-  deriving (Show, Eq, Generic)
-
-instance ToJSON LinkMemory where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON LinkMemory where
-  parseJSON  = genericParseJSON jsonOptions
-
-newtype LinkDependency = LinkDependency { dependsOnId :: UUID }
-  deriving (Show, Eq, Generic)
-
-instance ToJSON LinkDependency where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON LinkDependency where
-  parseJSON  = genericParseJSON jsonOptions
-
-------------------------------------------------------------------------
--- Memory categories
-------------------------------------------------------------------------
-
-data MemoryCategory = MemoryCategory
-  { id          :: UUID
-  , workspaceId :: Maybe UUID
-  , name        :: Text
-  , description :: Maybe Text
-  , parentId    :: Maybe UUID
-  , createdAt   :: UTCTime
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON MemoryCategory where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON MemoryCategory where
-  parseJSON  = genericParseJSON jsonOptions
-
-data CreateMemoryCategory = CreateMemoryCategory
-  { workspaceId :: Maybe UUID
-  , name        :: Text
-  , description :: Maybe Text
-  , parentId    :: Maybe UUID
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON CreateMemoryCategory where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON CreateMemoryCategory where
-  parseJSON  = genericParseJSON jsonOptions
-
-data UpdateMemoryCategory = UpdateMemoryCategory
-  { name        :: Maybe Text
-  , description :: FieldUpdate Text
-  , parentId    :: FieldUpdate UUID
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON UpdateMemoryCategory where
-  toJSON uc = object $ catMaybes
-    [ ("name" .=) <$> uc.name
-    , fieldUpdatePair "description" uc.description
-    , fieldUpdatePair "parent_id" uc.parentId
-    ]
-instance FromJSON UpdateMemoryCategory where
-  parseJSON = withObject "UpdateMemoryCategory" $ \o -> UpdateMemoryCategory
-    <$> o .:? "name"
-    <*> parseFieldUpdate o "description"
-    <*> parseFieldUpdate o "parent_id"
 
 ------------------------------------------------------------------------
 -- Workspace groups
@@ -1601,13 +929,23 @@ instance ToJSON CreateWorkspaceGroup where
 instance FromJSON CreateWorkspaceGroup where
   parseJSON  = genericParseJSON jsonOptions
 
+-- | Request body for adding an active workspace to a workspace group.
+newtype WorkspaceGroupMemberInput = WorkspaceGroupMemberInput
+  { workspaceId :: UUID
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON WorkspaceGroupMemberInput where
+  toJSON     = genericToJSON jsonOptions
+instance FromJSON WorkspaceGroupMemberInput where
+  parseJSON  = genericParseJSON jsonOptions
+
 ------------------------------------------------------------------------
 -- Activity timeline
 ------------------------------------------------------------------------
 
 data ActivityEvent = ActivityEvent
   { eventType   :: Text      -- "created", "updated", "deleted"
-  , entityType  :: Text      -- "memory", "project", "task"
+  , entityType  :: Text      -- "observation", "project", "task"
   , entityId    :: UUID
   , workspaceId :: UUID
   , summary     :: Text
@@ -2063,101 +1401,25 @@ instance ToJSON BatchMoveTasksRequest where
 instance FromJSON BatchMoveTasksRequest where
   parseJSON  = genericParseJSON jsonOptions
 
-newtype BatchMemoryLinkRequest = BatchMemoryLinkRequest
-  { memoryIds :: [UUID]
-  } deriving (Show, Eq, Generic)
+newtype BatchResult = BatchResult { affected :: Int } deriving (Show, Eq, Generic)
+instance ToJSON BatchResult where toJSON = genericToJSON jsonOptions
+instance FromJSON BatchResult where parseJSON = genericParseJSON jsonOptions
 
-instance ToJSON BatchMemoryLinkRequest where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON BatchMemoryLinkRequest where
-  parseJSON  = genericParseJSON jsonOptions
-
-data BatchSetTagsItem = BatchSetTagsItem
-  { memoryId :: UUID
-  , tags     :: [Text]
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON BatchSetTagsItem where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON BatchSetTagsItem where
-  parseJSON  = genericParseJSON jsonOptions
-
-newtype BatchSetTagsRequest = BatchSetTagsRequest
-  { items :: [BatchSetTagsItem]
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON BatchSetTagsRequest where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON BatchSetTagsRequest where
-  parseJSON  = genericParseJSON jsonOptions
-
-newtype BatchResult = BatchResult
-  { affected :: Int
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON BatchResult where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON BatchResult where
-  parseJSON  = genericParseJSON jsonOptions
-
--- | Summary of lifecycle operations that can cascade across entity trees.
--- Counts intentionally avoid returning large ID lists by default while still
--- making API/MCP deletion effects visible to callers.
 data CascadeResult = CascadeResult
-  { affected        :: Int
-  , projectCount    :: Int
-  , taskCount       :: Int
-  , memoryCount     :: Int
-  , dependencyCount :: Int
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON CascadeResult where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON CascadeResult where
-  parseJSON  = genericParseJSON jsonOptions
+  { affected :: Int, projectCount :: Int, taskCount :: Int, dependencyLinkCount :: Int }
+  deriving (Show, Eq, Generic)
+instance ToJSON CascadeResult where toJSON = genericToJSON jsonOptions
+instance FromJSON CascadeResult where parseJSON = genericParseJSON jsonOptions
 
 validateBatchDeleteRequest :: BatchDeleteRequest -> [Text]
-validateBatchDeleteRequest br =
-  ["ids must contain at least one item" | null br.ids]
-  <> ["ids must contain at most 100 items" | length br.ids > 100]
+validateBatchDeleteRequest request =
+  ["ids must contain at least one item" | null request.ids]
+  <> ["ids must contain at most 100 items" | length request.ids > 100]
 
 validateBatchMoveTasksRequest :: BatchMoveTasksRequest -> [Text]
-validateBatchMoveTasksRequest bm =
-  ["task_ids must contain at least one item" | null bm.taskIds]
-  <> ["task_ids must contain at most 100 items" | length bm.taskIds > 100]
-
-validateBatchMemoryLinkRequest :: BatchMemoryLinkRequest -> [Text]
-validateBatchMemoryLinkRequest bl =
-  ["memory_ids must contain at least one item" | null bl.memoryIds]
-  <> ["memory_ids must contain at most 100 items" | length bl.memoryIds > 100]
-
-validateBatchSetTagsRequest :: BatchSetTagsRequest -> [Text]
-validateBatchSetTagsRequest bs =
-  ["items must contain at least one item" | null bs.items]
-  <> ["items must contain at most 100 items" | length bs.items > 100]
-
-data BatchUpdateMemoryItem = BatchUpdateMemoryItem
-  { id     :: UUID
-  , update :: UpdateMemory
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON BatchUpdateMemoryItem where
-  toJSON item = case toJSON item.update of
-    Object o -> Object (KM.insert "id" (toJSON item.id) o)
-    v        -> v
-
-instance FromJSON BatchUpdateMemoryItem where
-  parseJSON = withObject "BatchUpdateMemoryItem" $ \o ->
-    BatchUpdateMemoryItem <$> o .: "id" <*> parseJSON (Object o)
-
-newtype BatchUpdateMemoryRequest = BatchUpdateMemoryRequest
-  { items :: [BatchUpdateMemoryItem]
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON BatchUpdateMemoryRequest where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON BatchUpdateMemoryRequest where
-  parseJSON  = genericParseJSON jsonOptions
+validateBatchMoveTasksRequest request =
+  ["task_ids must contain at least one item" | null request.taskIds]
+  <> ["task_ids must contain at most 100 items" | length request.taskIds > 100]
 
 data BatchUpdateProjectItem = BatchUpdateProjectItem
   { id     :: UUID
@@ -2205,16 +1467,6 @@ instance ToJSON BatchUpdateTaskRequest where
 instance FromJSON BatchUpdateTaskRequest where
   parseJSON  = genericParseJSON jsonOptions
 
-validateBatchUpdateMemoryRequest :: BatchUpdateMemoryRequest -> [Text]
-validateBatchUpdateMemoryRequest br =
-  ["items must contain at least one item" | null br.items]
-  <> ["items must contain at most 100 items" | length br.items > 100]
-  <> concat
-      [ prefixIssues ("items[" <> T.pack (show idx) <> "].")
-                     (validateUpdateMemoryInput item.update)
-      | (idx, item) <- zip [(0 :: Int) ..] br.items
-      ]
-
 validateBatchUpdateProjectRequest :: BatchUpdateProjectRequest -> [Text]
 validateBatchUpdateProjectRequest br =
   ["items must contain at least one item" | null br.items]
@@ -2239,96 +1491,48 @@ validateBatchUpdateTaskRequest br =
 -- Unified search
 ------------------------------------------------------------------------
 
-data EntitySearchType = SearchMemory | SearchProject | SearchTask
+data EntitySearchType = SearchObservation | SearchProject | SearchTask
   deriving (Show, Eq, Ord, Bounded, Enum, Generic)
-
 instance ToJSON EntitySearchType where
-  toJSON SearchMemory  = String "memory"
+  toJSON SearchObservation = String "observation"
   toJSON SearchProject = String "project"
-  toJSON SearchTask    = String "task"
-
+  toJSON SearchTask = String "task"
 instance FromJSON EntitySearchType where
   parseJSON = withText "EntitySearchType" $ \case
-    "memory"  -> pure SearchMemory
+    "observation" -> pure SearchObservation
     "project" -> pure SearchProject
-    "task"    -> pure SearchTask
-    other     -> fail $ "Invalid entity search type: " <> T.unpack other
+    "task" -> pure SearchTask
+    other -> fail $ "Invalid entity search type: " <> T.unpack other
 
 data UnifiedSearchQuery = UnifiedSearchQuery
-  { workspaceId    :: Maybe UUID
-  , query          :: Maybe Text
-  , entityTypes    :: Maybe [EntitySearchType]
-  , searchLanguage :: Maybe Text
-  , limit          :: Maybe Int
-  , offset         :: Maybe Int
-  -- Memory-specific filters
-  , memoryType     :: Maybe MemoryType
-  , tags           :: Maybe [Text]
-  , minImportance  :: Maybe Int
-  , categoryId     :: Maybe UUID
-  , pinnedOnly     :: Maybe Bool
-  -- Project-specific filters
-  , projectStatus  :: Maybe ProjectStatus
-  -- Task-specific filters
-  , taskStatus     :: Maybe TaskStatus
-  , taskPriority   :: Maybe Int
-  , projectId      :: Maybe UUID
+  { workspaceId :: Maybe UUID, query :: Maybe Text, entityTypes :: Maybe [EntitySearchType]
+  , searchLanguage :: Maybe Text, limit :: Maybe Int, offset :: Maybe Int
+  , subjectKind :: Maybe SubjectKind, subject :: Maybe Text, gitSha :: Maybe Text
+  , projectStatus :: Maybe ProjectStatus, taskStatus :: Maybe TaskStatus
+  , taskPriority :: Maybe Int, projectId :: Maybe UUID
   } deriving (Show, Eq, Generic)
+instance ToJSON UnifiedSearchQuery where toJSON = genericToJSON jsonOptions
+instance FromJSON UnifiedSearchQuery where parseJSON = genericParseJSON jsonOptions
 
-instance ToJSON UnifiedSearchQuery where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON UnifiedSearchQuery where
-  parseJSON  = genericParseJSON jsonOptions
+-- | Search results deliberately expose a compact derived preview instead of
+-- the full, potentially large Observation content body.
+data ObservationSearchHit = ObservationSearchHit
+  { id :: UUID, workspaceId :: UUID, subjectKind :: SubjectKind, subject :: Text
+  , gitSha :: Text, contentPreview :: Text, updatedAt :: UTCTime }
+  deriving (Show, Eq, Generic)
+instance ToJSON ObservationSearchHit where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationSearchHit where parseJSON = genericParseJSON jsonOptions
 
--- | Compact summary of a linked memory included in project/task search results.
-data LinkedMemorySummary = LinkedMemorySummary
-  { id         :: UUID
-  , summary    :: Maybe Text
-  , tags       :: [Text]
-  , importance :: Int
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON LinkedMemorySummary where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON LinkedMemorySummary where
-  parseJSON  = genericParseJSON jsonOptions
-
--- | A project search result with its linked memories.
-data ProjectSearchResult = ProjectSearchResult
-  { project        :: Project
-  , linkedMemories :: [LinkedMemorySummary]
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON ProjectSearchResult where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON ProjectSearchResult where
-  parseJSON  = genericParseJSON jsonOptions
-
--- | A task search result with its linked memories.
-data TaskSearchResult = TaskSearchResult
-  { task           :: Task
-  , linkedMemories :: [LinkedMemorySummary]
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON TaskSearchResult where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON TaskSearchResult where
-  parseJSON  = genericParseJSON jsonOptions
-
--- | Results from a unified search across entity types.
 data UnifiedSearchResults = UnifiedSearchResults
-  { memories :: [Memory]
-  , projects :: [ProjectSearchResult]
-  , tasks    :: [TaskSearchResult]
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON UnifiedSearchResults where
-  toJSON     = genericToJSON jsonOptions
-instance FromJSON UnifiedSearchResults where
-  parseJSON  = genericParseJSON jsonOptions
+  { observations :: [ObservationSearchHit], projects :: [Project], tasks :: [Task] }
+  deriving (Show, Eq, Generic)
+instance ToJSON UnifiedSearchResults where toJSON = genericToJSON jsonOptions
+instance FromJSON UnifiedSearchResults where parseJSON = genericParseJSON jsonOptions
 
 validateUnifiedSearchQuery :: UnifiedSearchQuery -> [Text]
 validateUnifiedSearchQuery usq =
   ["query must not be empty" | maybe False (T.null . T.strip) usq.query]
-  <> validateOptionalIntRange "min_importance" 1 10 usq.minImportance
+  <> ["workspace_id is required for unified search" | usq.workspaceId == Nothing]
+  <> ["invalid search_language" | not (validFtsLanguage usq.searchLanguage)]
+  <> validateObservationPagination usq.limit usq.offset
   <> validateOptionalIntRange "task_priority" 1 10 usq.taskPriority

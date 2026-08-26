@@ -21,9 +21,6 @@ module HMem.DB.Task
   , removeDependencyWithSnapshots
   , addDependency
   , removeDependency
-  , linkTaskMemory
-  , unlinkTaskMemory
-  , linkTaskMemoryBatch
   ) where
 
 import Control.Exception (throwIO)
@@ -74,7 +71,6 @@ rowToTask r = Task
   , dueAt           = r.taskDueAt
   , completedAt     = r.taskCompletedAt
   , dependencyCount = 0
-  , memoryLinkCount = 0
   , createdAt       = r.taskCreatedAt
   , updatedAt       = r.taskUpdatedAt
   }
@@ -110,22 +106,20 @@ rawTaskRowDecoder = do
     , dueAt = taskDueAt
     , completedAt = taskCompletedAt
     , dependencyCount = 0
-    , memoryLinkCount = 0
-    , createdAt = taskCreatedAt
+      , createdAt = taskCreatedAt
     , updatedAt = taskUpdatedAt
     }
 
--- | Enrich a list of tasks with dependency and memory-link counts.
--- Uses two GROUP BY queries across all task IDs in a single round-trip each.
+-- | Enrich a list of tasks with dependency counts.
 enrichTaskCounts :: Pool Hasql.Connection -> [Task] -> IO [Task]
 enrichTaskCounts _ [] = pure []
 enrichTaskCounts pool tasks = do
   let taskIds = map (.id) tasks
   depCounts <- getCountMap pool depCountStatement taskIds
-  memCounts <- getCountMap pool memLinkCountStatement taskIds
-  pure $ map (\t -> t { dependencyCount = Map.findWithDefault 0 t.id depCounts
-                      , memoryLinkCount = Map.findWithDefault 0 t.id memCounts
-                      }) tasks
+  pure $ map (setDependencyCount depCounts) tasks
+
+setDependencyCount :: Map.Map UUID Int -> Task -> Task
+setDependencyCount counts task = task { dependencyCount = Map.findWithDefault 0 task.id counts }
 
 getCountMap :: Pool Hasql.Connection -> Statement.Statement [UUID] [(UUID, Int64)] -> [UUID] -> IO (Map.Map UUID Int)
 getCountMap pool stmt uuids = do
@@ -146,20 +140,6 @@ depCountStatement = Statement.Statement sql encoder decoder True
       (,) <$> Dec.column (Dec.nonNullable Dec.uuid)
           <*> Dec.column (Dec.nonNullable Dec.int8)
 
-memLinkCountStatement :: Statement.Statement [UUID] [(UUID, Int64)]
-memLinkCountStatement = Statement.Statement sql encoder decoder True
-  where
-    sql = BS8.pack $ unlines
-      [ "SELECT tml.task_id, COUNT(*)"
-      , "FROM task_memory_links tml"
-      , "JOIN memories m ON m.id = tml.memory_id AND m.deleted_at IS NULL"
-      , "WHERE tml.task_id = ANY($1)"
-      , "GROUP BY tml.task_id"
-      ]
-    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
-    decoder = Dec.rowList $
-      (,) <$> Dec.column (Dec.nonNullable Dec.uuid)
-          <*> Dec.column (Dec.nonNullable Dec.int8)
 
 taskSubtreeIdsStatement :: Statement.Statement UUID [UUID]
 taskSubtreeIdsStatement = Statement.Statement sql encoder decoder True
@@ -316,6 +296,10 @@ deleteTaskDependenciesStatement = Statement.Statement sql encoder decoder True
       ]
     encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
     decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
+
+deleteTaskDependenciesS :: [UUID] -> Session.Session Int
+deleteTaskDependenciesS [] = pure 0
+deleteTaskDependenciesS ids = Session.statement ids deleteTaskDependenciesStatement
 
 purgeTasksStatement :: Statement.Statement [UUID] Int
 purgeTasksStatement = Statement.Statement sql encoder decoder True
@@ -1009,15 +993,13 @@ deleteTaskBatch pool ids = do
 deleteTaskIdsCascadeS :: [UUID] -> Session.Session (Maybe CascadeResult)
 deleteTaskIdsCascadeS [] = pure Nothing
 deleteTaskIdsCascadeS ids = do
-  memoryCount <- softDeleteTaskMemoriesS ids
   dependencyCount <- deleteTaskDependenciesS ids
   taskCount <- Session.statement ids softDeleteTasksStatement
   pure . Just $ CascadeResult
     { affected = taskCount
     , projectCount = 0
     , taskCount = taskCount
-    , memoryCount = memoryCount
-    , dependencyCount = dependencyCount
+    , dependencyLinkCount = dependencyCount
     }
 
 -- | Restore a soft-deleted task by clearing its deleted_at timestamp.
@@ -1042,7 +1024,6 @@ restoreTask pool tid = do
                 , updateWhere = \_ task -> in_ task.taskId (map lit ids) &&. not_ (isNull task.taskDeletedAt)
                 , returning = NoReturning
                 }
-            restoreTaskMemoriesS ids deletedAt
             pure (n > 0)
         | otherwise -> pure False
 
@@ -1069,113 +1050,8 @@ purgeTaskCascade pool tid =
             { affected = taskCount
             , projectCount = 0
             , taskCount = taskCount
-            , memoryCount = 0
-            , dependencyCount = dependencyCount
+            , dependencyLinkCount = dependencyCount
             }
-
-softDeleteTaskMemoriesS :: [UUID] -> Session.Session Int
-softDeleteTaskMemoriesS [] = pure 0
-softDeleteTaskMemoriesS ids =
-  Session.statement ids softDeleteTaskMemoriesStatement
-
-softDeleteTaskMemoriesStatement :: Statement.Statement [UUID] Int
-softDeleteTaskMemoriesStatement = Statement.Statement sql encoder decoder True
-  where
-    sql = BS8.pack $ unlines
-      [ "WITH updated AS ("
-      , "  UPDATE memories m"
-      , "  SET deleted_at = now()"
-      , "  WHERE m.deleted_at IS NULL"
-      , "    AND EXISTS ("
-      , "    SELECT 1 FROM task_memory_links tml"
-      , "    WHERE tml.memory_id = m.id"
-      , "      AND tml.task_id = ANY($1)"
-      , "    )"
-      , "    AND NOT EXISTS ("
-      , "    SELECT 1"
-      , "    FROM task_memory_links tml"
-      , "    JOIN tasks t ON t.id = tml.task_id"
-      , "    WHERE tml.memory_id = m.id"
-      , "      AND t.deleted_at IS NULL"
-      , "      AND t.workspace_id = m.workspace_id"
-      , "      AND t.id <> ALL($1)"
-      , "    )"
-      , "    AND NOT EXISTS ("
-      , "    SELECT 1"
-      , "    FROM project_memory_links pml"
-      , "    JOIN projects p ON p.id = pml.project_id"
-      , "    WHERE pml.memory_id = m.id"
-      , "      AND p.deleted_at IS NULL"
-      , "      AND p.workspace_id = m.workspace_id"
-      , "    )"
-      , "  RETURNING m.id"
-      , ")"
-      , "SELECT count(*)::int FROM updated"
-      ]
-    encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
-    decoder = Dec.singleRow (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
-
-deleteTaskDependenciesS :: [UUID] -> Session.Session Int
-deleteTaskDependenciesS [] = pure 0
-deleteTaskDependenciesS ids = Session.statement ids deleteTaskDependenciesStatement
-
-restoreTaskMemoriesS :: [UUID] -> UTCTime -> Session.Session ()
-restoreTaskMemoriesS [] _ = pure ()
-restoreTaskMemoriesS ids deletedAt =
-  Session.statement (ids, deletedAt) restoreTaskMemoriesStatement
-
-restoreTaskMemoriesStatement :: Statement.Statement ([UUID], UTCTime) ()
-restoreTaskMemoriesStatement = Statement.Statement sql encoder Dec.noResult True
-  where
-    sql = BS8.pack $ unlines
-      [ "UPDATE memories m"
-      , "SET deleted_at = NULL"
-      , "WHERE m.deleted_at IS NOT NULL"
-      , "  AND EXISTS ("
-      , "    SELECT 1 FROM task_memory_links tml"
-      , "    WHERE tml.memory_id = m.id"
-      , "      AND tml.task_id = ANY($1)"
-      , "  )"
-      , "  AND ("
-      , "    m.deleted_at = $2"
-      , "    OR EXISTS ("
-      , "      SELECT 1"
-      , "      FROM task_memory_links tml_deleted"
-      , "      JOIN tasks t_deleted ON t_deleted.id = tml_deleted.task_id"
-      , "      WHERE tml_deleted.memory_id = m.id"
-      , "        AND t_deleted.deleted_at = m.deleted_at"
-      , "    )"
-      , "    OR EXISTS ("
-      , "      SELECT 1"
-      , "      FROM project_memory_links pml_deleted"
-      , "      JOIN projects p_deleted ON p_deleted.id = pml_deleted.project_id"
-      , "      WHERE pml_deleted.memory_id = m.id"
-      , "        AND p_deleted.deleted_at = m.deleted_at"
-      , "    )"
-      , "  )"
-      , "  AND ("
-      , "    EXISTS ("
-      , "      SELECT 1"
-      , "      FROM task_memory_links tml_active"
-      , "      JOIN tasks t_active ON t_active.id = tml_active.task_id"
-      , "      WHERE tml_active.memory_id = m.id"
-      , "        AND t_active.deleted_at IS NULL"
-      , "        AND t_active.workspace_id = m.workspace_id"
-      , "    )"
-      , "    OR EXISTS ("
-      , "      SELECT 1"
-      , "      FROM project_memory_links pml_active"
-      , "      JOIN projects p_active ON p_active.id = pml_active.project_id"
-      , "      WHERE pml_active.memory_id = m.id"
-      , "        AND p_active.deleted_at IS NULL"
-      , "        AND p_active.workspace_id = m.workspace_id"
-      , "    )"
-      , "  )"
-      ]
-    uuidArrayEncoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))
-    encoder =
-      contramap fst uuidArrayEncoder <>
-      contramap snd (Enc.param (Enc.nonNullable Enc.timestamptz))
 
 -- | Move multiple tasks to a new project (or detach from all projects
 -- when projectId is Nothing). Returns the number of tasks actually moved.
@@ -1618,51 +1494,3 @@ removeDependencyS tid depId =
       , deleteWhere = \_ row -> row.tdTaskId ==. lit tid &&. row.tdDependsOnId ==. lit depId
       , returning = NoReturning
       }
-
-------------------------------------------------------------------------
--- Memory links
-------------------------------------------------------------------------
-
-linkTaskMemory :: Pool Hasql.Connection -> UUID -> UUID -> IO ()
-linkTaskMemory pool tid mid =
-  runSession pool $ Session.statement () $ run_ $
-    insert Insert
-      { into = taskMemoryLinkSchema
-      , rows = values
-          [ TaskMemoryLinkT
-              { tmlTaskId   = lit tid
-              , tmlMemoryId = lit mid
-              }
-          ]
-      , onConflict = DoNothing
-      , returning = NoReturning
-      }
-
-unlinkTaskMemory :: Pool Hasql.Connection -> UUID -> UUID -> IO ()
-unlinkTaskMemory pool tid mid =
-  runSession pool $ Session.statement () $ run_ $
-    delete Delete
-      { from = taskMemoryLinkSchema
-      , using = pure ()
-      , deleteWhere = \_ row -> row.tmlTaskId ==. lit tid &&. row.tmlMemoryId ==. lit mid
-      , returning = NoReturning
-      }
-
--- | Link multiple memories to a task in a single insert.
--- Idempotent: already-linked pairs are silently skipped.
--- Returns the number of memory IDs submitted.
-linkTaskMemoryBatch :: Pool Hasql.Connection -> UUID -> [UUID] -> IO Int
-linkTaskMemoryBatch _pool _ [] = pure 0
-linkTaskMemoryBatch pool tid mids =
-  runSession pool $ do
-    Session.statement () $ run_ $
-      insert Insert
-        { into = taskMemoryLinkSchema
-        , rows = values
-            [ TaskMemoryLinkT { tmlTaskId = lit tid, tmlMemoryId = lit mid }
-            | mid <- mids
-            ]
-        , onConflict = DoNothing
-        , returning = NoReturning
-        }
-    pure (length mids)

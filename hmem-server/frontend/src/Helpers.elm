@@ -17,11 +17,11 @@ import Types exposing (..)
 -- FRAGMENT / URL
 
 
-parseFragment : Maybe String -> { tab : WorkspaceTab, focus : Maybe ( String, String ) }
+parseFragment : Maybe String -> { tab : WorkspaceTab, focus : Maybe ( String, String ), observationId : Maybe String }
 parseFragment fragment =
     case fragment of
         Nothing ->
-            { tab = ProjectsTab, focus = Nothing }
+            { tab = ProjectsTab, focus = Nothing, observationId = Nothing }
 
         Just frag ->
             let
@@ -51,8 +51,8 @@ parseFragment fragment =
 
                 tab =
                     case tabVal of
-                        "memories" ->
-                            MemoriesTab
+                        "observations" ->
+                            ObservationsTab
 
                         "timeline" ->
                             TimelineTab
@@ -86,20 +86,32 @@ parseFragment fragment =
                                     _ ->
                                         Nothing
                             )
+
+                observationId =
+                    List.foldl
+                        (\( key, value ) current ->
+                            if key == "observation" && not (String.isEmpty value) then
+                                Just value
+
+                            else
+                                current
+                        )
+                        Nothing
+                        pairs
             in
-            { tab = tab, focus = focus }
+            { tab = if observationId /= Nothing then ObservationsTab else tab, focus = focus, observationId = observationId }
 
 
-buildFragment : WorkspaceTab -> Maybe ( String, String ) -> String
-buildFragment tab focus =
+buildFragment : WorkspaceTab -> Maybe ( String, String ) -> Maybe String -> String
+buildFragment tab focus observationId =
     let
         tabPart =
             case tab of
                 ProjectsTab ->
                     "tab=projects"
 
-                MemoriesTab ->
-                    "tab=memories"
+                ObservationsTab ->
+                    "tab=observations"
 
                 TimelineTab ->
                     "tab=timeline"
@@ -114,17 +126,35 @@ buildFragment tab focus =
 
                 Nothing ->
                     ""
+
+        observationPart =
+            case observationId of
+                Just selectedId ->
+                    "&observation=" ++ selectedId
+
+                Nothing ->
+                    ""
     in
-    tabPart ++ focusPart
+    tabPart ++ focusPart ++ observationPart
+
+
+pushUrl : Maybe Nav.Key -> String -> Cmd msg
+pushUrl maybeKey url =
+    case maybeKey of
+        Just key ->
+            Nav.pushUrl key url
+
+        Nothing ->
+            Cmd.none
 
 
 replaceFragment : Model -> Cmd Msg
 replaceFragment model =
-    case model.selectedWorkspaceId of
-        Just wsId ->
-            Nav.replaceUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment model.activeTab model.focus.focusedEntity)
+    case ( model.selectedWorkspaceId, model.key ) of
+        ( Just wsId, Just key ) ->
+            Nav.replaceUrl key ("/workspace/" ++ wsId ++ "#" ++ buildFragment model.activeTab model.focus.focusedEntity model.observations.selectedId)
 
-        Nothing ->
+        _ ->
             Cmd.none
 
 
@@ -331,27 +361,109 @@ beginWorkspaceDataReload showLoading model =
                 token =
                     currentDataLoading.nextWorkspaceLoadToken
 
+                repositoryWorkspace =
+                    Dict.get wsId model.workspaces
+                        |> Maybe.map (\workspace -> workspace.workspaceType == Api.Repository)
+                        |> Maybe.withDefault False
+
+                currentObservations =
+                    model.observations
+
+                observations =
+                    if repositoryWorkspace then
+                        beginObservationReload wsId currentObservations
+
+                    else
+                        { currentObservations
+                            | items = Dict.empty
+                            , orderedIds = []
+                            , hasMore = False
+                            , loading = False
+                            , error = Nothing
+                            , expectedOffset = Nothing
+                            , nextOffset = 0
+                        }
+
                 updatedDataLoading =
                     { currentDataLoading
                         | activeWorkspaceLoadToken = Just token
                         , nextWorkspaceLoadToken = token + 1
                         , loadingWorkspaceData = if showLoading then True else currentDataLoading.loadingWorkspaceData
-                        , pendingWorkspaceLoads = 4
+                        , pendingWorkspaceLoads = if repositoryWorkspace then 3 else 2
                         , cardHydrationLoaded = False
                     }
+
+                observationCmds =
+                    if repositoryWorkspace then
+                        [ Api.fetchObservations model.flags.apiUrl (observationListQuery wsId 0 observations)
+                            (GotObservations wsId (Just token) observations.requestGeneration observations.queryFingerprint 0)
+                        ]
+
+                    else
+                        []
             in
-            ( { model | dataLoading = updatedDataLoading }
+            ( { model | dataLoading = updatedDataLoading, observations = observations }
             , Cmd.batch
-                [ Api.fetchProjects model.flags.apiUrl wsId (GotProjects wsId (Just token) 0)
-                , Api.fetchTasks model.flags.apiUrl wsId (GotTasks wsId (Just token) 0)
-                , Api.fetchMemories model.flags.apiUrl wsId (GotMemories wsId (Just token) 0)
-                , Api.fetchWorkspaceCardHydration model.flags.apiUrl wsId (GotWorkspaceCardHydration wsId (Just token))
-                ]
+                ([ Api.fetchProjects model.flags.apiUrl wsId (GotProjects wsId (Just token) 0)
+                 , Api.fetchTasks model.flags.apiUrl wsId (GotTasks wsId (Just token) 0)
+                 ]
+                    ++ observationCmds
+                )
             )
 
         Nothing ->
             ( model, Cmd.none )
 
+
+beginObservationReload : String -> ObservationModel -> ObservationModel
+beginObservationReload workspaceId observations =
+    let
+        fingerprint =
+            observationQueryFingerprint (observationListQuery workspaceId 0 observations)
+    in
+    { observations
+        | items = Dict.empty
+        , orderedIds = []
+        , hasMore = False
+        , loading = True
+        , error = Nothing
+        , requestGeneration = observations.requestGeneration + 1
+        , queryFingerprint = fingerprint
+        , expectedOffset = Just 0
+        , nextOffset = 0
+    }
+
+
+observationListQuery : String -> Int -> ObservationModel -> Api.ObservationListQuery
+observationListQuery workspaceId offset observations =
+    { workspaceId = workspaceId
+    , subjectKind = observations.subjectKind
+    , subject = observationFilterValue observations.subject
+    , gitSha = observationFilterValue observations.gitSha
+    , query = observationFilterValue observations.query
+    , limit = 50
+    , offset = offset
+    }
+
+
+observationQueryFingerprint : Api.ObservationListQuery -> String
+observationQueryFingerprint query =
+    String.join "\u{001F}"
+        [ query.workspaceId
+        , query.subjectKind |> Maybe.map Api.subjectKindToString |> Maybe.withDefault ""
+        , query.subject |> Maybe.withDefault ""
+        , query.gitSha |> Maybe.withDefault ""
+        , query.query |> Maybe.withDefault ""
+        , String.fromInt query.limit
+        ]
+
+
+observationFilterValue : String -> Maybe String
+observationFilterValue value =
+    let
+        trimmed = String.trim value
+    in
+    if String.isEmpty trimmed then Nothing else Just trimmed
 
 
 -- MUTATION TRACKING
@@ -825,11 +937,6 @@ computeDropPriority abovePri belowPri =
 
         ( Nothing, Nothing ) ->
             5
-
-
-graphPositionsKey : String -> String
-graphPositionsKey wsId =
-    "hmem-graph-positions-" ++ wsId
 
 
 isExpanded : Model -> String -> Bool

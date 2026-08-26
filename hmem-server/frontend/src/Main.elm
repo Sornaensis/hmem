@@ -87,10 +87,10 @@ init rawFlags url key =
             parseFragment url.fragment
 
         model =
-            AppShell.initModel key url page flags decoded.storedFilters frag
+            AppShell.initModel (Just key) url page flags decoded.storedFilters frag
 
         cmds =
-            [ Api.fetchSessionContext flags.apiUrl (sessionWorkspace page) (GotSessionContext (sessionWorkspace page))
+            [ Api.fetchSessionContext flags.apiUrl (sessionWorkspace page) (GotSessionContext 1 (sessionWorkspace page))
             ]
 
     in

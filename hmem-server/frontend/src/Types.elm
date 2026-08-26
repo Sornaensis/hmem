@@ -31,12 +31,13 @@ type alias Flags =
 
 
 type alias Model =
-    { key : Nav.Key
+    { key : Maybe Nav.Key
     , url : Url.Url
     , page : Page
     , flags : Flags
     , auth : AuthModel
     , sessionContext : Maybe Api.SessionContext
+    , sessionRequestEpoch : Int
     , selectedWorkspaceId : Maybe String
     , activeTab : WorkspaceTab
     , mainContentScrollY : Float
@@ -44,6 +45,7 @@ type alias Model =
     , projects : Dict String Api.Project
     , tasks : Dict String Api.Task
     , memories : Dict String Api.Memory
+    , observations : ObservationModel
     , toast : ToastModel
     , webSocket : WebSocketModel
     , dataLoading : DataLoadingModel
@@ -52,7 +54,6 @@ type alias Model =
     , memory : MemoryModel
     , dependencies : DependenciesModel
     , cards : CardsModel
-    , graph : GraphModel
     , dragDrop : DragDropModel
     , focus : FocusModel
     , mutations : MutationsModel
@@ -99,12 +100,21 @@ type alias DataLoadingModel =
     }
 
 
+type alias SearchRequest =
+    { workspaceId : String
+    , token : Int
+    , query : String
+    }
+
+
 type alias SearchModel =
     { query : String
     , unifiedResults : Maybe Api.UnifiedSearchResults
     , isSearching : Bool
     , searchError : Maybe String
     , activeRequestQuery : Maybe String
+    , activeRequest : Maybe SearchRequest
+    , nextRequestToken : Int
     , filterShowOnly : FilterShowOnly
     , filterPriority : FilterPriority
     , filterProjectStatuses : List String
@@ -121,6 +131,36 @@ type alias EditingModel =
     { editState : Maybe EditState
     , createForm : Maybe CreateForm
     , inlineCreate : Maybe InlineCreate
+    }
+
+
+type alias ObservationDetailRequest =
+    { workspaceId : String
+    , observationId : String
+    , token : Int
+    }
+
+
+type alias ObservationModel =
+    { items : Dict String Api.Observation
+    , orderedIds : List String
+    , hasMore : Bool
+    , loading : Bool
+    , error : Maybe String
+    , query : String
+    , subjectKind : Maybe Api.SubjectKind
+    , subject : String
+    , gitSha : String
+    , requestGeneration : Int
+    , queryFingerprint : String
+    , expectedOffset : Maybe Int
+    , nextOffset : Int
+    , selectedId : Maybe String
+    , selectedDetail : Maybe Api.Observation
+    , detailLoading : Bool
+    , detailError : Maybe String
+    , activeDetailRequest : Maybe ObservationDetailRequest
+    , nextDetailRequestToken : Int
     }
 
 
@@ -173,12 +213,6 @@ type alias FocusClick =
     { entityType : String
     , entityId : String
     , timeStampMs : Float
-    }
-
-
-type alias GraphModel =
-    { visualization : Maybe Api.WorkspaceVisualization
-    , loaded : Bool
     }
 
 
@@ -368,7 +402,6 @@ type alias DropZoneInfo =
 type Page
     = HomePage
     | WorkspacePage String
-    | MemoryGraphPage
     | AuditLogPage
     | NotFound
 
@@ -396,7 +429,7 @@ type ToastLevel
 
 type WorkspaceTab
     = ProjectsTab
-    | MemoriesTab
+    | ObservationsTab
     | TimelineTab
     | AuditTab
 
@@ -467,7 +500,6 @@ type alias ManagingGroupState =
 type Route
     = HomeRoute
     | WorkspaceRoute String
-    | MemoryGraphRoute
     | AuditLogRoute
 
 
@@ -489,22 +521,21 @@ type Msg
     | AuthSessionError String
     | LoginRequested
     | LogoutRequested
-      -- Cytoscape
-    | CytoscapeNodeClicked String
-    | CytoscapeEdgeClicked String
       -- HTTP responses
     | GotWorkspaces Int (Result Http.Error (Api.PaginatedResult Api.Workspace))
-    | GotWorkspace String (Result Http.Error Api.Workspace)
-    | GotSessionContext (Maybe String) (Result Http.Error Api.SessionContext)
+    | GotWorkspace String Int (Result Http.Error Api.Workspace)
+    | GotSessionContext Int (Maybe String) (Result Http.Error Api.SessionContext)
     | GotProjects String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Project))
     | GotTasks String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Task))
     | GotMemories String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Memory))
     | GotSingleMemory (Result Http.Error Api.Memory)
-    | GotWorkspaceCardHydration String (Maybe Int) (Result Http.Error Api.WorkspaceCardHydration)
+    | GotObservations String (Maybe Int) Int String Int (Result Http.Error (Api.PaginatedResult Api.Observation))
+    | GotObservationDetail String String Int (Result Http.Error Api.Observation)
+    | GotInitialTaskOverview String Int String (Result Http.Error Api.TaskOverview)
+    | GotInitialProjectOverview String Int String (Result Http.Error Api.ProjectOverview)
     | GotWorkspaceTimeline TimelineEventsRequest (Result Http.Error (Api.PaginatedResult Api.WorkspaceTimelineEvent))
     | GotTimelineHistogramClock String Time.Posix
     | GotWorkspaceTimelineBuckets TimelineHistogramRequest (Result Http.Error Api.WorkspaceTimelineBucketsResponse)
-    | GotVisualization String (Result Http.Error Api.WorkspaceVisualization)
       -- Mutation responses
     | MutationDone String (Result Http.Error ())
     | ProjectCreated (Result Api.ApiError Api.Project)
@@ -525,7 +556,7 @@ type Msg
     | AutoDismissToast Int
     | SearchInput String
     | SubmitSearch
-    | GotUnifiedSearchResults String (Result Http.Error Api.UnifiedSearchResults)
+    | GotUnifiedSearchResults String Int String (Result Http.Error Api.UnifiedSearchResults)
     | NavigateToSearchResult String String
     | SetFilterShowOnly FilterShowOnly
     | SetFilterPriority FilterPriority
@@ -536,6 +567,13 @@ type Msg
     | SetFilterMemoryPinned (Maybe Bool)
     | ToggleFilterMemoryActiveLinked Bool
     | ToggleFilterTag String
+    | SetObservationQuery String
+    | SetObservationSubjectKind String
+    | SetObservationSubject String
+    | SetObservationGitSha String
+    | ApplyObservationFilters
+    | LoadMoreObservations
+    | SelectObservation String
       -- Inline editing
     | StartEdit String String String String
     | EditInput String
@@ -618,8 +656,6 @@ type Msg
     | CopyId String
       -- Local storage
     | LocalStorageLoaded Encode.Value
-      -- Graph workspace
-    | LoadGraphForWorkspace String
       -- Focus mode
     | FocusEntity String String
     | FocusEntityKeepForward String String

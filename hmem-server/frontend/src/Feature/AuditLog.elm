@@ -1,10 +1,9 @@
 module Feature.AuditLog exposing (AuditFieldChange, auditActionDetailItems, auditChangedFieldItems, auditContextDetailItems, auditReturnFilters, init, nextAuditOffset, update, viewAuditLogPage, viewWorkspaceAuditPanel, viewEntityHistory, viewRevertConfirmModal)
 
 import Api
-import Browser.Navigation as Nav
 import Dict
 import Feature.Focus as Focus
-import Helpers exposing (beginTrackedMutation, buildFragment, flexibleStringDecoder, formatDate)
+import Helpers exposing (beginTrackedMutation, buildFragment, flexibleStringDecoder, formatDate, pushUrl)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
@@ -81,8 +80,8 @@ update msg model =
                             let
                                 targetTab =
                                     case targetType of
-                                        "memory" ->
-                                            MemoriesTab
+                                        "observation" ->
+                                            ObservationsTab
 
                                         _ ->
                                             ProjectsTab
@@ -102,6 +101,7 @@ update msg model =
                                         , isSearching = False
                                         , searchError = Nothing
                                         , activeRequestQuery = Nothing
+                                        , activeRequest = Nothing
                                     }
 
                                 newHistory =
@@ -121,7 +121,7 @@ update msg model =
                                     }
                                 )
                                 { model | selectedWorkspaceId = Just wsId, activeTab = targetTab, search = updatedSearch }
-                            , Nav.pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment targetTab (Just focusEntry))
+                            , pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment targetTab (Just focusEntry) Nothing)
                             )
 
                         Nothing ->

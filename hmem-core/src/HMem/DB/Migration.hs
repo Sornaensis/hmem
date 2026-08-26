@@ -57,10 +57,15 @@ runMigrations pool migrationsDir = do
       case ver of
         Nothing -> go fs acc (f : skAcc)
         Just v  -> do
-          alreadyApplied <- checkApplied pool v
-          if alreadyApplied
-            then go fs acc (f : skAcc)
-            else do
+          appliedStatus <- checkApplied pool v name
+          case appliedStatus of
+            Left err -> pure MigrationResult
+              { applied = reverse acc
+              , skipped = reverse skAcc
+              , failed = Just (f, err)
+              }
+            Right True -> go fs acc (f : skAcc)
+            Right False -> do
               result <- applyMigration pool path v name
               case result of
                 Left err -> pure MigrationResult
@@ -79,18 +84,23 @@ parseVersion ('V':rest) =
 parseVersion _ = Nothing
 
 -- | Check whether a migration version has already been applied.
-checkApplied :: Pool Hasql.Connection -> Int -> IO Bool
-checkApplied pool ver = withConn pool $ \conn -> do
+checkApplied :: Pool Hasql.Connection -> Int -> String -> IO (Either String Bool)
+checkApplied pool ver expectedName = withConn pool $ \conn -> do
   tableResult <- Session.run (Session.statement () schemaMigrationsExistsStatement) conn
   case tableResult of
-    Left _ -> pure True
-    Right False -> pure False
+    Left err -> pure $ Left $ "Could not inspect schema_migrations: " <> show err
+    Right False -> pure $ Right False
     Right True -> do
       let version = fromIntegral ver :: Int32
-      result <- Session.run (Session.statement version schemaMigrationAppliedStatement) conn
-      case result of
-        Left _        -> pure True
-        Right applied -> pure applied
+      result <- Session.run (Session.statement version schemaMigrationNameStatement) conn
+      pure $ case result of
+        Left err -> Left $ "Could not read schema_migrations: " <> show err
+        Right Nothing -> Right False
+        Right (Just recordedName)
+          | recordedName == T.pack expectedName -> Right True
+          | otherwise -> Left $
+              "Migration version " <> show ver <> " is already recorded as "
+                <> show recordedName <> ", not " <> show expectedName
 
 -- | Apply a single migration file, then record it in @schema_migrations@.
 -- Hasql wraps each 'Session.run' in its own transaction, so we combine the
@@ -105,8 +115,8 @@ applyMigration pool path ver name = withConn pool $ \conn -> do
         Session.statement (version, T.pack name) registerMigrationStatement
   result <- try (Session.run txn conn) :: IO (Either SomeException (Either Session.SessionError ()))
   case result of
-    Left ex          -> pure $ Left (show ex)
-    Right (Left err) -> pure $ Left (show err)
+    Left ex          -> rollbackAbortedTransaction conn >> pure (Left (show ex))
+    Right (Left err) -> rollbackAbortedTransaction conn >> pure (Left (show err))
     Right (Right ()) -> pure $ Right ()
 
 -- | Roll back a single migration version by running its rollback script
@@ -138,8 +148,8 @@ rollbackMigration pool rollbacksDir ver = do
                   Session.statement version deregisterMigrationStatement
             result <- try (Session.run txn conn) :: IO (Either SomeException (Either Session.SessionError ()))
             case result of
-              Left ex          -> pure $ Left (show ex)
-              Right (Left err) -> pure $ Left (show err)
+              Left ex          -> rollbackAbortedTransaction conn >> pure (Left (show ex))
+              Right (Left err) -> rollbackAbortedTransaction conn >> pure (Left (show err))
               Right (Right ()) -> pure $ Right ()
   where
     isSuffix suffix s = drop (length s - length suffix) s == suffix
@@ -155,16 +165,25 @@ schemaMigrationsExistsStatement = Statement.Statement
   (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool)))
   True
 
-schemaMigrationAppliedStatement :: Statement.Statement Int32 Bool
-schemaMigrationAppliedStatement = Statement.Statement
-  "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)"
+schemaMigrationNameStatement :: Statement.Statement Int32 (Maybe T.Text)
+schemaMigrationNameStatement = Statement.Statement
+  "SELECT name FROM schema_migrations WHERE version = $1"
   (Enc.param (Enc.nonNullable Enc.int4))
-  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool)))
+  (Dec.rowMaybe (Dec.column (Dec.nonNullable Dec.text)))
   True
+
+-- | A migration file may start an explicit transaction.  When it fails,
+-- PostgreSQL leaves that transaction aborted, so clear it before returning
+-- the connection to the pool; otherwise a corrected migration cannot retry.
+rollbackAbortedTransaction :: Hasql.Connection -> IO ()
+rollbackAbortedTransaction conn = do
+  _ <- try (Session.run (Session.sql "ROLLBACK") conn)
+    :: IO (Either SomeException (Either Session.SessionError ()))
+  pure ()
 
 registerMigrationStatement :: Statement.Statement (Int32, T.Text) ()
 registerMigrationStatement = Statement.Statement
-  "INSERT INTO schema_migrations (version, name) VALUES ($1, $2)"
+  "INSERT INTO schema_migrations (version, name) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING"
   encoder
   Dec.noResult
   True

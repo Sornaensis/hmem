@@ -8,9 +8,8 @@ module Feature.WorkspaceAdmin exposing
     )
 
 import Api
-import Browser.Navigation as Nav
 import Dict
-import Helpers exposing (beginTrackedMutation, formatDate, trackLocalMutation)
+import Helpers exposing (beginTrackedMutation, formatDate, pushUrl, trackLocalMutation)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
@@ -112,7 +111,9 @@ update msg model =
                         ( toastedModel, toastCmd ) =
                             addToast Success "Workspace membership saved" trackedModel
                     in
-                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd, Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (Just wsId)) ] )
+                    ( { toastedModel | sessionRequestEpoch = toastedModel.sessionRequestEpoch + 1 }
+                    , Cmd.batch [ trackCmd, toastCmd, Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (toastedModel.sessionRequestEpoch + 1) (Just wsId)) ]
+                    )
 
                 Err _ ->
                     addToast Error "Failed to save workspace membership" model
@@ -146,7 +147,9 @@ update msg model =
                         ( toastedModel, toastCmd ) =
                             addToast Success "Workspace membership removed" (updateWorkspaceAdmin updatedAdmin model)
                     in
-                    ( toastedModel, Cmd.batch [ toastCmd, Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (Just wsId)) ] )
+                    ( { toastedModel | sessionRequestEpoch = toastedModel.sessionRequestEpoch + 1 }
+                    , Cmd.batch [ toastCmd, Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (toastedModel.sessionRequestEpoch + 1) (Just wsId)) ]
+                    )
 
                 Err _ ->
                     addToast Error "Failed to remove workspace membership" model
@@ -208,7 +211,7 @@ update msg model =
                         ( toastedModel, toastCmd ) =
                             addToast Success "Workspace deleted" { model | workspaces = Dict.remove wsId model.workspaces, selectedWorkspaceId = Nothing }
                     in
-                    ( toastedModel, Cmd.batch [ toastCmd, Nav.pushUrl model.key "/" ] )
+                    ( toastedModel, Cmd.batch [ toastCmd, pushUrl model.key "/" ] )
 
                 Err _ ->
                     addToast Error "Failed to delete workspace" model
@@ -221,7 +224,7 @@ update msg model =
                             addToast Success "Workspace purged" { model | workspaces = Dict.remove wsId model.workspaces, selectedWorkspaceId = Nothing }
                     in
                     ( updateWorkspaceAdmin (\admin -> { admin | purgeConfirmation = Nothing }) toastedModel
-                    , Cmd.batch [ toastCmd, Nav.pushUrl model.key "/" ]
+                    , Cmd.batch [ toastCmd, pushUrl model.key "/" ]
                     )
 
                 Err _ ->
@@ -231,7 +234,7 @@ update msg model =
                                 { model | workspaces = Dict.remove wsId model.workspaces, selectedWorkspaceId = Nothing }
                     in
                     ( updateWorkspaceAdmin (\admin -> { admin | purgeConfirmation = Nothing }) toastedModel
-                    , Cmd.batch [ toastCmd, Nav.pushUrl model.key "/" ]
+                    , Cmd.batch [ toastCmd, pushUrl model.key "/" ]
                     )
 
         _ ->

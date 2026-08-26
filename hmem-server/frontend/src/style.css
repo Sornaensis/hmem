@@ -202,6 +202,7 @@ a:hover {
 
 .main-content {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
 }
 
@@ -780,6 +781,32 @@ a:hover {
   font-size: 0.75rem;
   color: var(--text-muted);
   white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .app {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+    max-height: 16rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .main-content {
+    width: 100%;
+    min-height: 0;
+  }
+
+  .page {
+    padding: 1rem;
+  }
+
+  .sticky-workspace-bar {
+    margin: -1rem -1rem 0;
+  }
 }
 
 /* Buttons */
@@ -1873,6 +1900,292 @@ a:hover {
 
 .filter-priority-input:focus {
   border-color: var(--accent);
+}
+
+/* Observation browser */
+
+.observations-panel,
+.observation-list,
+.observation-list-rows {
+  min-width: 0;
+}
+
+.observations-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.observation-filters {
+  align-items: flex-end;
+  padding: 0.75rem;
+  background: var(--bg-surface);
+  border-radius: 0.5rem;
+}
+
+.observation-filters .observation-filter-group {
+  flex: 1 1 11rem;
+  min-width: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.25rem;
+}
+
+.observation-filters .observation-filter-kind {
+  flex: 0 1 9rem;
+}
+
+.observation-filters .filter-label {
+  line-height: 1.35;
+}
+
+.observation-filter-input,
+.observation-filter-select {
+  width: 100%;
+  min-width: 0;
+  height: 2.25rem;
+  background: var(--bg);
+  border-radius: 0.375rem;
+  font-family: inherit;
+  font-size: 0.8125rem;
+}
+
+.observation-filter-select {
+  padding: 0.5rem 0.75rem;
+}
+
+.observation-filter-sha,
+.observation-sha,
+.observation-detail-sha {
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.observation-filter-apply {
+  flex: 0 0 auto;
+  min-height: 2.25rem;
+}
+
+.observation-filter-input:focus-visible,
+.observation-filter-select:focus-visible,
+.observation-filter-apply:focus-visible,
+.observation-load-more:focus-visible,
+.observation-card:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+}
+
+.observation-filter-apply:disabled,
+.observation-load-more:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.observation-filter-apply:disabled:hover {
+  background: var(--accent);
+}
+
+.observation-load-more:disabled:hover {
+  background: var(--bg-elevated);
+}
+
+.observation-layout {
+  min-width: 0;
+}
+
+.observation-layout-with-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(18rem, 2fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+.observation-list-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+button.observation-card {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+button.observation-card:hover {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+button.observation-card.observation-card-selected {
+  background: rgba(99, 102, 241, 0.14);
+  border-color: var(--accent-hover);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.observation-card-header {
+  justify-content: flex-start;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.observation-kind {
+  background: #1e3a5f;
+  color: #93c5fd;
+  border: 1px solid #2563eb;
+}
+
+.observation-subject {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.875rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.observation-summary,
+.observation-detail-content {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.observation-card-meta .card-meta-row {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.observation-card-meta .card-meta {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.observation-pagination {
+  display: flex;
+  justify-content: center;
+  padding-top: 0.25rem;
+}
+
+.observation-load-more {
+  min-width: 9rem;
+}
+
+.observation-state {
+  width: 100%;
+  padding: 1.5rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.observation-state h3 {
+  margin: 0 0 0.375rem;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.observation-state p {
+  margin: 0;
+}
+
+.observation-state-error {
+  background: rgba(127, 29, 29, 0.25);
+  border-color: rgba(239, 68, 68, 0.7);
+}
+
+.observation-detail {
+  min-width: 0;
+}
+
+.observation-detail-heading {
+  margin: 0 0 0.5rem;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.observation-detail-card {
+  min-width: 0;
+}
+
+.observation-detail-content {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.observation-detail-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 1rem 0 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.observation-detail-meta-row {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, max-content) minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+  font-size: 0.75rem;
+}
+
+.observation-detail-meta-label {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.observation-detail-meta-value {
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.observation-detail-state {
+  padding: 1rem;
+}
+
+@media (max-width: 800px) {
+  .observation-layout-with-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .observation-filters .observation-filter-group,
+  .observation-filters .observation-filter-kind,
+  .observation-filter-apply {
+    flex-basis: 100%;
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .observation-card-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .observation-detail-meta-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.125rem;
+  }
+
+  .observation-load-more {
+    width: 100%;
+  }
 }
 
 /* Tree toolbar */

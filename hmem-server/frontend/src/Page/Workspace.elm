@@ -10,7 +10,7 @@ import Feature.AuditLog
 import Feature.Cards
 import Feature.Editing
 import Feature.Focus
-import Feature.Memory
+import Feature.Observation
 import Feature.Search
 import Feature.Timeline
 import Feature.WorkspaceAdmin
@@ -46,7 +46,8 @@ viewReadableWorkspacePage wsId model ws =
                 wsId
                 (Dict.values model.projects)
                 (Dict.values model.tasks)
-                (Dict.values model.memories)
+                (Dict.values model.observations.items)
+                model.observations.hasMore
     in
     div [ class "page" ]
         [ viewStickyWorkspaceBar model ws summaryParts
@@ -137,8 +138,8 @@ viewReadableWorkspacePage wsId model ws =
         ]
 
 
-workspaceSummaryParts : Bool -> String -> List Api.Project -> List Api.Task -> List Api.Memory -> List String
-workspaceSummaryParts workspaceDataLoadActive wsId projects tasks memories =
+workspaceSummaryParts : Bool -> String -> List Api.Project -> List Api.Task -> List Api.Observation -> Bool -> List String
+workspaceSummaryParts workspaceDataLoadActive wsId projects tasks observations observationsHaveMore =
     if workspaceDataLoadActive then
         []
 
@@ -150,8 +151,8 @@ workspaceSummaryParts workspaceDataLoadActive wsId projects tasks memories =
             wsTasks =
                 tasks |> List.filter (\t -> t.workspaceId == wsId)
 
-            wsMemories =
-                memories |> List.filter (\m -> m.workspaceId == wsId)
+            wsObservations =
+                observations |> List.filter (\observation -> observation.workspaceId == wsId)
 
             activeProjects =
                 wsProjects |> List.filter (\p -> p.status == Api.ProjActive || p.status == Api.ProjPaused) |> List.length
@@ -159,8 +160,8 @@ workspaceSummaryParts workspaceDataLoadActive wsId projects tasks memories =
             activeTasks =
                 wsTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length
 
-            memoryCount =
-                List.length wsMemories
+            observationCount =
+                List.length wsObservations
         in
         List.filterMap identity
             [ if activeProjects > 0 then
@@ -173,8 +174,8 @@ workspaceSummaryParts workspaceDataLoadActive wsId projects tasks memories =
 
               else
                 Nothing
-            , if memoryCount > 0 then
-                Just (String.fromInt memoryCount ++ " memor" ++ (if memoryCount > 1 then "ies" else "y"))
+            , if observationCount > 0 && not observationsHaveMore then
+                Just (String.fromInt observationCount ++ " observation" ++ (if observationCount > 1 then "s" else ""))
 
               else
                 Nothing
@@ -236,7 +237,7 @@ viewTabs model =
     div [ class "tabs" ]
         (List.filterMap identity
             [ Just (viewTab ProjectsTab model.activeTab (workspaceTabLabel ProjectsTab))
-            , Just (viewTab MemoriesTab model.activeTab (workspaceTabLabel MemoriesTab))
+            , Just (viewTab ObservationsTab model.activeTab (workspaceTabLabel ObservationsTab))
             , Just (viewTab TimelineTab model.activeTab (workspaceTabLabel TimelineTab))
             , if Permissions.canViewCurrentWorkspaceAudit model then
                 Just (viewTab AuditTab model.activeTab (workspaceTabLabel AuditTab))
@@ -253,8 +254,8 @@ workspaceTabLabel tab =
         ProjectsTab ->
             "Projects"
 
-        MemoriesTab ->
-            "Memories"
+        ObservationsTab ->
+            "Observations"
 
         TimelineTab ->
             "Timeline"
@@ -284,11 +285,13 @@ viewTabContent wsId model =
         ProjectsTab ->
             Feature.Cards.viewProjectsTree wsId model
 
-        MemoriesTab ->
-            div []
-                [ Feature.Focus.viewFocusBreadcrumbBar model
-                , Feature.Memory.viewMemoriesList wsId model
-                ]
+        ObservationsTab ->
+            case Dict.get wsId model.workspaces of
+                Just workspace ->
+                    Feature.Observation.viewObservations workspace model
+
+                Nothing ->
+                    div [ class "loading-indicator" ] [ text "Loading observations..." ]
 
         TimelineTab ->
             Feature.Timeline.viewWorkspaceTimelinePanel wsId model

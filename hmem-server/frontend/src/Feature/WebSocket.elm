@@ -86,14 +86,21 @@ update msg model =
         WsConnectionFailed reason ->
             if model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model then
                 let
-                    nextModel =
+                    failedModel =
                         { model | webSocket = { state = ConnectionFailed reason } }
-                in
-                if String.startsWith "ws-auth:" reason then
-                    addToast Warning "WebSocket authentication or workspace access failed; session refresh may be required" nextModel
 
-                else
-                    addToast Warning ("WebSocket connection failed: " ++ reason) nextModel
+                    ( reloadModel, reloadCmd ) =
+                        beginWorkspaceDataReload False failedModel
+
+                    message =
+                        if String.startsWith "ws-auth:" reason then
+                            "WebSocket authentication or workspace access failed; refreshing workspace data"
+
+                        else
+                            "WebSocket connection failed; refreshing workspace data"
+                in
+                addToast Warning message reloadModel
+                    |> Tuple.mapSecond (\toastCmd -> Cmd.batch [ reloadCmd, toastCmd ])
 
             else
                 ( { model | webSocket = { state = Disconnected } }, Cmd.none )
@@ -189,6 +196,38 @@ eventTouchesPendingMutation event _ pendingRequestIds =
 {-| Try to apply the change event payload directly into the model.
 Falls back to a full re-fetch when the payload is missing or cannot be decoded.
 -}
+reloadAfterCascadeDelete : Model -> ( Model, Cmd Msg )
+reloadAfterCascadeDelete model =
+    let
+        dependencies =
+            model.dependencies
+
+        cards =
+            model.cards
+
+        cacheCleared =
+            { model
+                | dependencies =
+                    { dependencies
+                        | taskDependencies = Dict.empty
+                        , taskDependencyLinks = []
+                        , taskReadinessRollups = Dict.empty
+                        , projectReadinessRollups = Dict.empty
+                    }
+                , cards =
+                    { cards
+                        | projectNextTasks = Dict.empty
+                        , projectNextTaskDiagnostics = Dict.empty
+                        , projectNextTasksLoading = Dict.empty
+                        , projectNextTaskDiagnosticsLoading = Dict.empty
+                        , projectNextTasksErrors = Dict.empty
+                        , projectNextTaskDiagnosticsErrors = Dict.empty
+                    }
+            }
+    in
+    beginWorkspaceDataReload False cacheCleared
+
+
 applyChangeEvent : Api.ChangeEvent -> Model -> ( Model, Cmd Msg )
 applyChangeEvent event model =
     case event.entityType of
@@ -205,40 +244,23 @@ applyChangeEvent event model =
                             }
                     in
                     ( { model | workspaces = Dict.remove event.entityId model.workspaces, groups = updatedGroups }
-                    , maybeGraphRefresh model
+                    , Cmd.none
                     )
 
                 _ ->
                     case Maybe.andThen (tryDecode Api.workspaceDecoder) event.payload of
                         Just ws ->
                             ( { model | workspaces = Dict.insert ws.id ws model.workspaces }
-                            , maybeGraphRefresh model
+                            , Cmd.none
                             )
 
                         Nothing ->
-                            ( model
-                            , Api.fetchWorkspace model.flags.apiUrl event.entityId (GotWorkspace event.entityId)
-                            )
+                            beginWorkspaceDataReload False model
 
         Api.EProject ->
             case event.changeType of
                 Api.Deleted ->
-                    let
-                        currentDependencies =
-                            model.dependencies
-
-                        updatedModel =
-                            { model
-                                | projects = Dict.remove event.entityId model.projects
-                                , dependencies =
-                                    { currentDependencies
-                                        | projectReadinessRollups = Dict.remove event.entityId currentDependencies.projectReadinessRollups
-                                    }
-                            }
-                    in
-                    ( updatedModel
-                    , Cmd.batch [ maybeGraphRefresh updatedModel, refreshReadinessCaches updatedModel ]
-                    )
+                    reloadAfterCascadeDelete model
 
                 _ ->
                     case Maybe.andThen (tryDecode Api.projectDecoder) event.payload of
@@ -248,44 +270,20 @@ applyChangeEvent event model =
                                     { model | projects = Dict.insert proj.id proj model.projects }
                             in
                             ( updatedModel
-                            , Cmd.batch [ maybeGraphRefresh updatedModel, refreshReadinessCaches updatedModel ]
+                            , refreshReadinessCaches updatedModel
                             )
 
                         Nothing ->
-                            if payloadField "linked_memory" event.payload /= Nothing || payloadField "unlinked_memory" event.payload /= Nothing then
-                                ( model
-                                , Cmd.batch
-                                    [ Api.fetchProjectMemories model.flags.apiUrl event.entityId (GotEntityMemories event.entityId)
-                                    , maybeGraphRefresh model
-                                    ]
-                                )
-
-                            else
-                                let
-                                    ( _, reloadCmd ) =
-                                        beginWorkspaceDataReload False model
-                                in
-                                ( model, Cmd.batch [ reloadCmd, refreshCachedEntityData model, maybeGraphRefresh model ] )
+                            let
+                                ( reloadModel, reloadCmd ) =
+                                    beginWorkspaceDataReload False model
+                            in
+                            ( reloadModel, Cmd.batch [ reloadCmd, refreshCachedEntityData reloadModel ] )
 
         Api.ETask ->
             case event.changeType of
                 Api.Deleted ->
-                    let
-                        currentDependencies =
-                            model.dependencies
-
-                        updatedDependencies =
-                            { currentDependencies
-                                | taskDependencies = Dict.remove event.entityId model.dependencies.taskDependencies
-                                , taskReadinessRollups = Dict.remove event.entityId model.dependencies.taskReadinessRollups
-                            }
-
-                        updatedModel =
-                            { model | tasks = Dict.remove event.entityId model.tasks, dependencies = updatedDependencies }
-                    in
-                    ( updatedModel
-                    , Cmd.batch [ maybeGraphRefresh updatedModel, refreshReadinessCaches updatedModel ]
-                    )
+                    reloadAfterCascadeDelete model
 
                 _ ->
                     case Maybe.andThen (tryDecode Api.taskDecoder) event.payload of
@@ -295,73 +293,24 @@ applyChangeEvent event model =
                                     { model | tasks = Dict.insert task.id task model.tasks }
                             in
                             ( updatedModel
-                            , Cmd.batch [ maybeGraphRefresh updatedModel, refreshReadinessCaches updatedModel ]
+                            , refreshReadinessCaches updatedModel
                             )
 
                         Nothing ->
-                            if payloadField "linked_memory" event.payload /= Nothing || payloadField "unlinked_memory" event.payload /= Nothing then
-                                let
-                                    ( _, reloadCmd ) =
-                                        beginWorkspaceDataReload False model
-                                in
-                                ( model
-                                , Cmd.batch
-                                    [ reloadCmd
-                                    , Api.fetchTaskMemories model.flags.apiUrl event.entityId (GotEntityMemories event.entityId)
-                                    , maybeGraphRefresh model
-                                    ]
-                                )
-
-                            else
-                                let
-                                    ( _, reloadCmd ) =
-                                        beginWorkspaceDataReload False model
-                                in
-                                ( model, Cmd.batch [ reloadCmd, refreshCachedEntityData model, maybeGraphRefresh model ] )
+                            let
+                                ( reloadModel, reloadCmd ) =
+                                    beginWorkspaceDataReload False model
+                            in
+                            ( reloadModel, Cmd.batch [ reloadCmd, refreshCachedEntityData reloadModel ] )
 
         Api.EMemory ->
-            case event.changeType of
-                Api.Deleted ->
-                    ( { model | memories = Dict.remove event.entityId model.memories }
-                    , Cmd.batch [ maybeGraphRefresh model, refreshLinkedMemoryCachesFor event.entityId model, refreshWorkspaceCardHydration model ]
-                    )
+            beginWorkspaceDataReload False model
 
-                _ ->
-                    case Maybe.andThen (tryDecode Api.memoryDecoder) event.payload of
-                        Just mem ->
-                            ( { model | memories = Dict.insert mem.id mem model.memories }
-                            , Cmd.batch [ maybeGraphRefresh model, refreshLinkedMemoryCachesFor mem.id model, refreshWorkspaceCardHydration model ]
-                            )
-
-                        Nothing ->
-                            beginWorkspaceDataReload False model
+        Api.EObservation ->
+            beginWorkspaceDataReload False model
 
         Api.EMemoryLink ->
-            let
-                ( _, reloadCmd ) =
-                    beginWorkspaceDataReload False model
-
-                projectId =
-                    payloadField "project_id" event.payload
-
-                taskId =
-                    payloadField "task_id" event.payload
-
-                graphCmd =
-                    case ( model.page, model.selectedWorkspaceId ) of
-                        ( MemoryGraphPage, Just wsId ) ->
-                            Api.fetchVisualization model.flags.apiUrl wsId (GotVisualization wsId)
-
-                        _ ->
-                            Cmd.none
-
-                memoryCacheCmds =
-                    [ projectId |> Maybe.map (\pid -> Api.fetchProjectMemories model.flags.apiUrl pid (GotEntityMemories pid))
-                    , taskId |> Maybe.map (\tid -> Api.fetchTaskMemories model.flags.apiUrl tid (GotEntityMemories tid))
-                    ]
-                        |> List.filterMap identity
-            in
-            ( model, Cmd.batch (reloadCmd :: graphCmd :: memoryCacheCmds) )
+            beginWorkspaceDataReload False model
 
         Api.ECategory ->
             beginWorkspaceDataReload False model
@@ -375,14 +324,6 @@ applyChangeEvent event model =
                     mutationResult
                         |> Maybe.map .taskId
                         |> Maybe.withDefault (payloadField "task_id" event.payload |> Maybe.withDefault event.entityId)
-
-                graphCmd =
-                    case ( model.page, model.selectedWorkspaceId ) of
-                        ( MemoryGraphPage, Just wsId ) ->
-                            Api.fetchVisualization model.flags.apiUrl wsId (GotVisualization wsId)
-
-                        _ ->
-                            Cmd.none
 
                 ( patchedModel, reloadCmd ) =
                     case mutationResult of
@@ -408,7 +349,6 @@ applyChangeEvent event model =
                 , refreshTaskReadinessCaches patchedModel
                 , refreshProjectReadinessCaches patchedModel
                 , reloadCmd
-                , graphCmd
                 ]
             )
 
@@ -416,16 +356,7 @@ applyChangeEvent event model =
             beginWorkspaceDataReload False model
 
         Api.ETag ->
-            let
-                memoryId =
-                    payloadField "memory_id" event.payload |> Maybe.withDefault event.entityId
-            in
-            ( model
-            , Cmd.batch
-                [ Api.fetchMemory model.flags.apiUrl memoryId GotSingleMemory
-                , refreshLinkedMemoryCachesFor memoryId model
-                ]
-            )
+            ( model, Cmd.none )
 
         Api.EWorkspaceGroup ->
             let
@@ -505,7 +436,7 @@ requiresSelfRefresh event =
             True
 
         Api.EMemory ->
-            event.changeType == Api.Deleted
+            True
 
         Api.EProject ->
             event.changeType == Api.Deleted || payloadField "linked_memory" event.payload /= Nothing || payloadField "unlinked_memory" event.payload /= Nothing
@@ -517,66 +448,9 @@ requiresSelfRefresh event =
             False
 
 
-refreshWorkspaceCardHydration : Model -> Cmd Msg
-refreshWorkspaceCardHydration model =
-    case model.selectedWorkspaceId of
-        Just wsId ->
-            Api.fetchWorkspaceCardHydration model.flags.apiUrl wsId (GotWorkspaceCardHydration wsId Nothing)
-
-        Nothing ->
-            Cmd.none
-
-
-maybeGraphRefresh : Model -> Cmd Msg
-maybeGraphRefresh model =
-    case ( model.page, model.selectedWorkspaceId ) of
-        ( MemoryGraphPage, Just wsId ) ->
-            Api.fetchVisualization model.flags.apiUrl wsId (GotVisualization wsId)
-
-        _ ->
-            Cmd.none
-
-
-refreshLinkedMemoryCachesFor : String -> Model -> Cmd Msg
-refreshLinkedMemoryCachesFor memoryId model =
-    model.memory.entityMemories
-        |> Dict.toList
-        |> List.filterMap
-            (\( entityId, mems ) ->
-                if List.any (\mem -> mem.id == memoryId) mems then
-                    if Dict.member entityId model.projects then
-                        Just (Api.fetchProjectMemories model.flags.apiUrl entityId (GotEntityMemories entityId))
-
-                    else if Dict.member entityId model.tasks then
-                        Just (Api.fetchTaskMemories model.flags.apiUrl entityId (GotEntityMemories entityId))
-
-                    else
-                        Nothing
-
-                else
-                    Nothing
-            )
-        |> Cmd.batch
-
-
 refreshCachedEntityData : Model -> Cmd Msg
 refreshCachedEntityData model =
     let
-        entityMemoryCmds =
-            model.memory.entityMemories
-                |> Dict.keys
-                |> List.filterMap
-                    (\entityId ->
-                        if Dict.member entityId model.projects then
-                            Just (Api.fetchProjectMemories model.flags.apiUrl entityId (GotEntityMemories entityId))
-
-                        else if Dict.member entityId model.tasks then
-                            Just (Api.fetchTaskMemories model.flags.apiUrl entityId (GotEntityMemories entityId))
-
-                        else
-                            Nothing
-                    )
-
         dependencyCmds =
             model.dependencies.taskDependencies
                 |> Dict.keys
@@ -592,7 +466,7 @@ refreshCachedEntityData model =
                 |> Dict.keys
                 |> List.map (refreshProjectNextTaskCache model)
     in
-    Cmd.batch (entityMemoryCmds ++ dependencyCmds ++ projectReadinessCmds ++ projectNextTaskCmds)
+    Cmd.batch (dependencyCmds ++ projectReadinessCmds ++ projectNextTaskCmds)
 
 
 refreshReadinessCaches : Model -> Cmd Msg
@@ -663,6 +537,9 @@ changeEventDescription event =
 
                 Api.EMemory ->
                     "Memory"
+
+                Api.EObservation ->
+                    "Observation"
 
                 Api.EMemoryLink ->
                     "Memory link"

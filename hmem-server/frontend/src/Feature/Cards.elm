@@ -30,7 +30,6 @@ import Feature.Dependencies
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
-import Feature.Memory
 import Permissions
 import Helpers exposing (..)
 import Html exposing (..)
@@ -109,20 +108,6 @@ update msg model =
                 newExpanded =
                     not current
 
-                fetchMemCmd =
-                    if newExpanded && not (hasLinkedMemoryData model cardId) then
-                        if Dict.member cardId model.projects then
-                            Api.fetchProjectMemories model.flags.apiUrl cardId (GotEntityMemories cardId)
-
-                        else if Dict.member cardId model.tasks then
-                            Api.fetchTaskMemories model.flags.apiUrl cardId (GotEntityMemories cardId)
-
-                        else
-                            Cmd.none
-
-                    else
-                        Cmd.none
-
                 fetchDepCmd =
                     if newExpanded && Dict.member cardId model.tasks && not (hasTaskDependencyData model cardId) then
                         Api.fetchTaskOverview model.flags.apiUrl cardId (GotTaskDependencies cardId)
@@ -192,7 +177,7 @@ update msg model =
                 | cards = updatedCards
                 , editing = updatedEditing
               }
-            , Cmd.batch [ fetchMemCmd, fetchDepCmd, fetchProjectOverviewCmd, fetchProjectNextTasksCmd ]
+            , Cmd.batch [ fetchDepCmd, fetchProjectOverviewCmd, fetchProjectNextTasksCmd ]
             )
 
         RefreshProjectNextTasks projectId ->
@@ -361,9 +346,6 @@ update msg model =
 
                                     "task" ->
                                         Api.deleteTask model.flags.apiUrl entityId requestId (CascadeDeleteDone confirmation)
-
-                                    "memory" ->
-                                        Api.deleteMemory model.flags.apiUrl entityId requestId (MutationDone "memory")
 
                                     "workspace" ->
                                         Api.deleteWorkspace model.flags.apiUrl entityId requestId (WorkspaceDeleted entityId)
@@ -695,13 +677,8 @@ cascadeCleanupSuffix result =
     let
         cleanupParts =
             List.filterMap identity
-                [ if result.memoryCount > 0 then
-                    Just (countPhrase result.memoryCount "linked memory" "linked memories")
-
-                  else
-                    Nothing
-                , if result.dependencyCount > 0 then
-                    Just (countPhrase result.dependencyCount "task dependency" "task dependencies")
+                [ if result.dependencyLinkCount > 0 then
+                    Just (countPhrase result.dependencyLinkCount "task dependency" "task dependencies")
 
                   else
                     Nothing
@@ -1143,9 +1120,6 @@ viewProjectNode allProjects model depth project hasSearch query =
                         identity
                    )
 
-        linkedMems =
-            linkedMemoriesForEntity model project.id
-
         maybeProjectRollup =
             projectReadinessRollupForProject model project.id
 
@@ -1286,9 +1260,6 @@ viewProjectNode allProjects model depth project hasSearch query =
                         |> Maybe.map .openDependencyCount
                         |> Maybe.withDefault 0
 
-                memCount =
-                    List.length linkedMems
-
                 summaryParts =
                     List.filterMap identity
                         [ countLabel remainingSubprojects completedSubprojects "subproject" "subprojects"
@@ -1300,11 +1271,6 @@ viewProjectNode allProjects model depth project hasSearch query =
                             Nothing
                         , if openDependencyCount > 0 then
                             Just (countPhrase openDependencyCount "open dependency" "open dependencies")
-
-                          else
-                            Nothing
-                        , if memCount > 0 then
-                            Just (String.fromInt memCount ++ " memor" ++ (if memCount > 1 then "ies" else "y"))
 
                           else
                             Nothing
@@ -1331,7 +1297,6 @@ viewProjectNode allProjects model depth project hasSearch query =
                 , if isExpanded model project.id then
                     div [ class "card-extras" ]
                         [ viewProjectNextTasksPanel model project
-                        , Feature.Memory.viewLinkedMemories model "project" project.id linkedMems
                         , Feature.AuditLog.viewEntityHistory model "project" project.id
                         ]
 
@@ -1739,9 +1704,6 @@ viewTaskCard showProject model task =
             else
                 "card-task"
 
-        linkedMems =
-            linkedMemoriesForEntity model task.id
-
         allTasks =
             Dict.values model.tasks
 
@@ -1874,13 +1836,6 @@ viewTaskCard showProject model task =
             depCount =
                 task.dependencyCount
 
-            memCount =
-                if model.dataLoading.cardHydrationLoaded then
-                    List.length linkedMems
-
-                else
-                    task.memoryLinkCount
-
             subtaskLabel =
                 let
                     total =
@@ -1906,11 +1861,6 @@ viewTaskCard showProject model task =
 
                       else if depCount > 0 then
                         Just (String.fromInt depCount ++ " dep" ++ (if depCount > 1 then "s" else ""))
-
-                      else
-                        Nothing
-                    , if memCount > 0 then
-                        Just (String.fromInt memCount ++ " memor" ++ (if memCount > 1 then "ies" else "y"))
 
                       else
                         Nothing
@@ -1959,7 +1909,6 @@ viewTaskCard showProject model task =
                       else
                         text ""
                     , Feature.Dependencies.viewTaskDependencies model task.id deps
-                    , Feature.Memory.viewLinkedMemories model "task" task.id linkedMems
                     , Feature.AuditLog.viewEntityHistory model "task" task.id
                     ]
 

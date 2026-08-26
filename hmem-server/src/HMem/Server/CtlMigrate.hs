@@ -100,20 +100,31 @@ runMigrateWithConfig cfg opts = do
         cfg.pool.size
         cfg.pool.idleTimeout
         cfg.pool.statementTimeoutMs
-      result <- try (Migration.runMigrations pool opts.migrationsDir)
-        :: IO (Either SomeException Migration.MigrationResult)
-      finalResult <- case result of
-        Left err -> pure $ Left $ DatabaseUnavailable (show err)
-        Right migrationResult -> case migrationResult.failed of
-          Just (file, err) -> pure $ Left $ MigrationFailed file err
-          Nothing -> do
-            schemaOk <- verifySchemaMigrationsReadable pool
-            pure $ case schemaOk of
-              Left err -> Left err
-              Right () -> Right MigrateReport
-                { appliedMigrations = migrationResult.applied
-                , skippedMigrations = migrationResult.skipped
-                }
+      -- If a migration ledger already exists, fail with the explicit ledger
+      -- diagnostic before attempting its first version lookup.  A fresh
+      -- database has no ledger yet and is allowed to create one in V001.
+      existingLedger <- runSchemaStatement pool schemaMigrationsExistsStatement
+      preflight <- case existingLedger of
+        Left err -> pure (Left err)
+        Right False -> pure (Right ())
+        Right True -> verifySchemaMigrationsReadable pool
+      finalResult <- case preflight of
+        Left err -> pure (Left err)
+        Right () -> do
+          result <- try (Migration.runMigrations pool opts.migrationsDir)
+            :: IO (Either SomeException Migration.MigrationResult)
+          case result of
+            Left err -> pure $ Left $ DatabaseUnavailable (show err)
+            Right migrationResult -> case migrationResult.failed of
+              Just (file, err) -> pure $ Left $ MigrationFailed file err
+              Nothing -> do
+                schemaOk <- verifySchemaMigrationsReadable pool
+                pure $ case schemaOk of
+                  Left err -> Left err
+                  Right () -> Right MigrateReport
+                    { appliedMigrations = migrationResult.applied
+                    , skippedMigrations = migrationResult.skipped
+                    }
       destroyAllResources pool
       pure finalResult
 
@@ -139,6 +150,13 @@ runSchemaStatement pool stmt = do
     Left err -> Left $ DatabaseUnavailable (show err)
     Right (Left err) -> Left $ SchemaMigrationsUnreadable (show err)
     Right (Right value) -> Right value
+
+schemaMigrationsExistsStatement :: Statement.Statement () Bool
+schemaMigrationsExistsStatement = Statement.Statement
+  "SELECT to_regclass('schema_migrations') IS NOT NULL"
+  Enc.noParams
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool)))
+  True
 
 schemaMigrationsShapeStatement :: Statement.Statement () Bool
 schemaMigrationsShapeStatement = Statement.Statement

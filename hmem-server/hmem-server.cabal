@@ -6,8 +6,8 @@ cabal-version: 1.12
 
 name:           hmem-server
 version:        0.1.0.0
-synopsis:       HTTP server for the hmem memory system
-description:    Single-instance HTTP server for the hmem LLM memory and task management system.
+synopsis:       HTTP server for hmem observations, projects, and tasks
+description:    Single-instance HTTP server for hmem's Observation, project, and task management system.
 category:       Web
 author:         hmem contributors
 maintainer:     hmem contributors
@@ -33,6 +33,7 @@ data-files:
     migrations/V017__flat_subtask_lifecycle_rules.sql
     migrations/V018__flatten_nested_subtasks.sql
     migrations/V019__cascade_delete_task_project_subtrees.sql
+    migrations/V020__replace_memories_with_observations.sql
 
 library
   exposed-modules:

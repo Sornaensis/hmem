@@ -226,17 +226,11 @@ cleanDB env = withConn env.pool $ \conn -> do
              \  users, \
              \  workspace_group_members, \
              \  workspace_groups, \
-            \  task_memory_links, \
-            \  project_memory_links, \
+            \  delete_cascade_migration_report, \
             \  task_dependencies, \
-            \  memory_links, \
-            \  memory_tags, \
-            \  memory_category_links, \
             \  tasks, \
             \  projects, \
-            \  cleanup_policies, \
-            \  memories, \
-            \  memory_categories, \
+            \  observations, \
             \  workspaces \
             \CASCADE"
   result <- Session.run (Session.statement () stmt) conn
@@ -450,7 +444,6 @@ startEphemeralPgInSandbox sandbox = do
   let dbName = "hmem_test_" <> suffix
       dataDir = sandbox.sandboxRoot </> "postgres" </> "data"
       logFile = sandbox.sandboxLogDir </> "postgresql.log"
-      connStr = "host=localhost port=" <> T.pack (show port) <> " dbname=" <> dbName
 
   hPutStrLn stderr $ "[test-pg] sandbox : " ++ sandbox.sandboxRoot
   hPutStrLn stderr $ "[test-pg] port    : " ++ show port
@@ -470,32 +463,47 @@ startEphemeralPgInSandbox sandbox = do
     , "listen_addresses = 'localhost'"
     ]
 
+  startedPort <- startPostgresWithRetries dataDir logFile port 5
   let pg = EphemeralPg
         { epTmpDir  = sandbox.sandboxRoot
         , epDataDir = dataDir
-        , epPort    = port
-        , epConnStr = connStr
+        , epPort    = startedPort
+        , epConnStr = "host=localhost port=" <> T.pack (show startedPort) <> " dbname=" <> dbName
         , epLogFile = logFile
         , epDbName  = dbName
         }
 
   bracketOnError
-    (do
-      callProcess "pg_ctl"
-        [ "start", "-D", dataDir, "-l", logFile, "-w", "-t", "30" ]
-      pure pg)
+    (pure pg)
     stopEphemeralPgServer
     (\started -> do
       threadDelay 500000
 
       -- Create the test database
       callProcess "createdb"
-        [ "-h", "localhost", "-p", show port, T.unpack dbName ]
+        [ "-h", "localhost", "-p", show startedPort, T.unpack dbName ]
 
       hPutStrLn stderr "[test-pg] PostgreSQL ready."
       hFlush stderr
 
       pure started)
+
+-- | Retry a random port when another process wins the race between port
+-- selection and PostgreSQL binding. Windows frequently leaves just-closed
+-- loopback ports unavailable briefly during the migration-heavy test suite.
+startPostgresWithRetries :: FilePath -> FilePath -> Int -> Int -> IO Int
+startPostgresWithRetries dataDir logFile port attempts = do
+  started <- try (callProcess "pg_ctl"
+    [ "start", "-D", dataDir, "-l", logFile, "-w", "-t", "30" ]) :: IO (Either SomeException ())
+  case started of
+    Right () -> pure port
+    Left err
+      | attempts <= 1 -> throwIO err
+      | otherwise -> do
+          nextPort <- randomRIO (49152, 65535) :: IO Int
+          hPutStrLn stderr $ "[test-pg] retrying port: " ++ show nextPort
+          appendFile (dataDir </> "postgresql.conf") $ "port = " ++ show nextPort ++ "\n"
+          startPostgresWithRetries dataDir logFile nextPort (attempts - 1)
 
 -- | Stop the ephemeral PostgreSQL cluster and remove its temp
 -- directory.  Ignores errors so teardown always completes.

@@ -1,7 +1,7 @@
 name:                hmem-server
 version:             0.1.0.0
-synopsis:            HTTP server for the hmem memory system
-description:         Single-instance HTTP server for the hmem LLM memory and task management system.
+synopsis:            HTTP server for hmem observations, projects, and tasks
+description:         Single-instance HTTP server for hmem's Observation, project, and task management system.
 license:             MPL-2.0
 author:              hmem contributors
 category:            Web

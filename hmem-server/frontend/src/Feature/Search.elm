@@ -5,6 +5,8 @@ module Feature.Search exposing
     , clearTransientSearchState
     , init
     , searchResultPresentations
+    , unifiedSearchEntityTypes
+    , unifiedSearchResponseMatches
     , unifiedSearchResultCount
     , update
     , viewSearchBar
@@ -14,6 +16,8 @@ module Feature.Search exposing
     )
 
 import Api
+import Feature.Observation
+import Dict
 import Helpers exposing (replaceFragment, saveFiltersCmd, scrollToElement, taskStatusBadgeClass, taskStatusDisplayText, taskStatusTitle)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -28,6 +32,8 @@ init =
     , isSearching = False
     , searchError = Nothing
     , activeRequestQuery = Nothing
+    , activeRequest = Nothing
+    , nextRequestToken = 1
     , filterShowOnly = ShowAll
     , filterPriority = AnyPriority
     , filterProjectStatuses = []
@@ -83,6 +89,7 @@ update msg model =
                         , isSearching = False
                         , searchError = Nothing
                         , activeRequestQuery = Nothing
+                        , activeRequest = Nothing
                     }
 
                 newModel =
@@ -102,30 +109,55 @@ update msg model =
                 ( { model | search = clearUnifiedSearchState searchModel }, Cmd.none )
 
             else
-                ( { model
-                    | search =
-                        { searchModel
-                            | unifiedResults = Nothing
-                            , isSearching = True
-                            , searchError = Nothing
-                            , activeRequestQuery = Just trimmed
-                        }
-                  }
-                , Api.unifiedSearch model.flags.apiUrl trimmed model.selectedWorkspaceId (GotUnifiedSearchResults trimmed)
-                )
+                case model.selectedWorkspaceId of
+                    Nothing ->
+                        ( { model
+                            | search =
+                                { searchModel
+                                    | unifiedResults = Nothing
+                                    , isSearching = False
+                                    , searchError = Just "Select a workspace before searching."
+                                    , activeRequestQuery = Nothing
+                                    , activeRequest = Nothing
+                                }
+                          }
+                        , Cmd.none
+                        )
 
-        GotUnifiedSearchResults requestedQuery result ->
+                    Just workspaceId ->
+                        let
+                            entityTypes =
+                                workspaceEntityTypes workspaceId model
+
+                            token =
+                                searchModel.nextRequestToken
+
+                            request =
+                                { workspaceId = workspaceId, token = token, query = trimmed }
+                        in
+                        ( { model
+                            | search =
+                                { searchModel
+                                    | unifiedResults = Nothing
+                                    , isSearching = True
+                                    , searchError = Nothing
+                                    , activeRequestQuery = Just trimmed
+                                    , activeRequest = Just request
+                                    , nextRequestToken = token + 1
+                                }
+                          }
+                        , Api.unifiedSearch model.flags.apiUrl trimmed workspaceId entityTypes (GotUnifiedSearchResults workspaceId token trimmed)
+                        )
+
+        GotUnifiedSearchResults workspaceId token requestedQuery result ->
             let
                 searchModel =
                     model.search
 
                 currentQuery =
                     String.trim searchModel.query
-
-                responseMatchesCurrentQuery =
-                    searchModel.activeRequestQuery == Just requestedQuery && currentQuery == requestedQuery
             in
-            if not responseMatchesCurrentQuery then
+            if not (unifiedSearchResponseMatches workspaceId token requestedQuery model.selectedWorkspaceId searchModel) || currentQuery /= requestedQuery then
                 ( model, Cmd.none )
 
             else
@@ -138,6 +170,7 @@ update msg model =
                                     , isSearching = False
                                     , searchError = Nothing
                                     , activeRequestQuery = Nothing
+                                    , activeRequest = Nothing
                                 }
                           }
                         , Cmd.none
@@ -151,6 +184,7 @@ update msg model =
                                     , isSearching = False
                                     , searchError = Just "Search failed. Please try again."
                                     , activeRequestQuery = Nothing
+                                    , activeRequest = Nothing
                                 }
                           }
                         , Cmd.none
@@ -281,6 +315,29 @@ update msg model =
             ( model, Cmd.none )
 
 
+unifiedSearchResponseMatches : String -> Int -> String -> Maybe String -> SearchModel -> Bool
+unifiedSearchResponseMatches workspaceId token query selectedWorkspaceId searchModel =
+    selectedWorkspaceId == Just workspaceId
+        && searchModel.activeRequest == Just { workspaceId = workspaceId, token = token, query = query }
+
+
+workspaceEntityTypes : String -> Model -> List String
+workspaceEntityTypes workspaceId model =
+    Dict.get workspaceId model.workspaces
+        |> Maybe.map .workspaceType
+        |> Maybe.map unifiedSearchEntityTypes
+        |> Maybe.withDefault [ "project", "task" ]
+
+
+unifiedSearchEntityTypes : Api.WorkspaceType -> List String
+unifiedSearchEntityTypes workspaceType =
+    if workspaceType == Api.Repository then
+        [ "project", "task", "observation" ]
+
+    else
+        [ "project", "task" ]
+
+
 clearTransientSearchState : SearchModel -> SearchModel
 clearTransientSearchState searchModel =
     { searchModel
@@ -288,6 +345,7 @@ clearTransientSearchState searchModel =
         , isSearching = False
         , searchError = Nothing
         , activeRequestQuery = Nothing
+        , activeRequest = Nothing
     }
 
 
@@ -303,7 +361,7 @@ navigateToSearchResult entityType entityId model =
             clearUnifiedSearchState model.search
 
         clearedSearch =
-            if entityType == "memory" then
+            if entityType == "observation" then
                 { baseClearedSearch
                     | query = ""
                     , filterMemoryTypes = []
@@ -348,8 +406,8 @@ navigateToSearchResult entityType entityId model =
                 }
 
         targetTab =
-            if entityType == "memory" then
-                MemoriesTab
+            if entityType == "observation" then
+                ObservationsTab
 
             else
                 ProjectsTab
@@ -361,12 +419,26 @@ navigateToSearchResult entityType entityId model =
                 , focus = updatedFocus
             }
     in
-    ( nextModel
-    , Cmd.batch
-        [ replaceFragment nextModel
-        , scrollToElement ("entity-" ++ entityId)
-        ]
-    )
+    if entityType == "observation" then
+        let
+            ( detailModel, detailCmd ) =
+                Feature.Observation.selectObservation entityId nextModel
+        in
+        ( detailModel
+        , Cmd.batch
+            [ replaceFragment detailModel
+            , detailCmd
+            , scrollToElement "observation-detail"
+            ]
+        )
+
+    else
+        ( nextModel
+        , Cmd.batch
+            [ replaceFragment nextModel
+            , scrollToElement ("entity-" ++ entityId)
+            ]
+        )
 
 
 viewSearchBar : Model -> Html Msg
@@ -398,8 +470,8 @@ viewSearchBar model =
                 ProjectsTab ->
                     viewFilterBar model
 
-                MemoriesTab ->
-                    viewMemoryFilterBar model
+                ObservationsTab ->
+                    text ""
 
                 TimelineTab ->
                     text ""
@@ -678,14 +750,14 @@ viewFilterPill label isActive msg =
 
 unifiedSearchResultCount : Api.UnifiedSearchResults -> Int
 unifiedSearchResultCount results =
-    List.length results.memories + List.length results.projects + List.length results.tasks
+    List.length results.observations + List.length results.projects + List.length results.tasks
 
 
 searchResultPresentations : Api.UnifiedSearchResults -> List SearchResultPresentation
 searchResultPresentations results =
     List.map projectResultPresentation results.projects
         ++ List.map taskResultPresentation results.tasks
-        ++ List.map memoryResultPresentation results.memories
+        ++ List.map observationResultPresentation results.observations
 
 
 viewUnifiedSearchLoading : Model -> Html Msg
@@ -731,7 +803,7 @@ viewUnifiedSearchResults model results =
                 else
                     [ viewSearchSection "Projects" results.projects projectResultPresentation
                     , viewSearchSection "Tasks" results.tasks taskResultPresentation
-                    , viewSearchSection "Memories" results.memories memoryResultPresentation
+                    , viewSearchSection "Observations" results.observations observationResultPresentation
                     ]
                )
         )
@@ -755,7 +827,7 @@ viewEmptySearchResults : Model -> Html Msg
 viewEmptySearchResults model =
     div [ class "empty-state search-empty-state" ]
         [ h3 [] [ text "No results found" ]
-        , p [] [ text ("No projects, tasks, or memories matched " ++ searchQueryLabel model ++ ".") ]
+        , p [] [ text ("No projects, tasks, or observations matched " ++ searchQueryLabel model ++ ".") ]
         ]
 
 
@@ -825,98 +897,86 @@ viewLinkedMemorySummary mem =
         ]
 
 
-projectResultPresentation : Api.ProjectSearchResult -> SearchResultPresentation
-projectResultPresentation result =
+projectResultPresentation : Api.Project -> SearchResultPresentation
+projectResultPresentation project =
     { entityType = "project"
     , entityTypeLabel = "PRJ"
     , entityTypeClass = "entity-type-project"
-    , entityId = result.project.id
-    , title = nonBlankString result.project.name ("Project " ++ shortId result.project.id)
-    , summary = nonBlankMaybe result.project.description "No description"
+    , entityId = project.id
+    , title = nonBlankString project.name ("Project " ++ shortId project.id)
+    , summary = nonBlankMaybe project.description "No description"
     , badges =
-        [ { label = humanizeToken (Api.projectStatusToString result.project.status)
-          , className = "badge badge-" ++ Api.projectStatusToString result.project.status
+        [ { label = humanizeToken (Api.projectStatusToString project.status)
+          , className = "badge badge-" ++ Api.projectStatusToString project.status
           , title = "Project status"
           }
-        , priorityBadge result.project.priority
+        , priorityBadge project.priority
         ]
     , tags = []
-    , linkedMemories = List.map linkedMemoryPresentation result.linkedMemories
+    , linkedMemories = []
     , actionLabel = "Focus project"
     }
 
 
-taskResultPresentation : Api.TaskSearchResult -> SearchResultPresentation
-taskResultPresentation result =
+taskResultPresentation : Api.Task -> SearchResultPresentation
+taskResultPresentation task =
     { entityType = "task"
     , entityTypeLabel =
-        if result.task.parentId == Nothing then
+        if task.parentId == Nothing then
             "TSK"
 
         else
             "SUB"
     , entityTypeClass =
-        if result.task.parentId == Nothing then
+        if task.parentId == Nothing then
             "entity-type-task"
 
         else
             "entity-type-subtask"
-    , entityId = result.task.id
-    , title = nonBlankString result.task.title ("Task " ++ shortId result.task.id)
-    , summary = nonBlankMaybe result.task.description "No description"
+    , entityId = task.id
+    , title = nonBlankString task.title ("Task " ++ shortId task.id)
+    , summary = nonBlankMaybe task.description "No description"
     , badges =
-        [ { label = humanizeToken (taskStatusDisplayText result.task.status)
-          , className = taskStatusBadgeClass result.task.status
-          , title = taskStatusTitle result.task.status
+        [ { label = humanizeToken (taskStatusDisplayText task.status)
+          , className = taskStatusBadgeClass task.status
+          , title = taskStatusTitle task.status
           }
-        , priorityBadge result.task.priority
+        , priorityBadge task.priority
         ]
     , tags = []
-    , linkedMemories = List.map linkedMemoryPresentation result.linkedMemories
+    , linkedMemories = []
     , actionLabel = "Focus task"
     }
 
 
-memoryResultPresentation : Api.Memory -> SearchResultPresentation
-memoryResultPresentation memory =
-    let
-        memoryTitle =
-            nonBlankMaybe memory.summary ("Memory " ++ shortId memory.id)
-    in
-    { entityType = "memory"
-    , entityTypeLabel = "MEM"
-    , entityTypeClass = "entity-type-memory"
-    , entityId = memory.id
-    , title = memoryTitle
-    , summary = nonBlankString memory.content "No memory content"
+observationResultPresentation : Api.ObservationSearchHit -> SearchResultPresentation
+observationResultPresentation observation =
+    { entityType = "observation"
+    , entityTypeLabel = "OBS"
+    , entityTypeClass = "entity-type-observation"
+    , entityId = observation.id
+    , title = observation.subject
+    , summary = nonBlankString observation.contentPreview "No observation content"
     , badges =
-        [ { label = memoryTypeLabel memory.memoryType
-          , className = "badge badge-" ++ Api.memoryTypeToString memory.memoryType
-          , title = "Memory type"
-          }
-        , { label = "I" ++ String.fromInt memory.importance
-          , className = "badge badge-priority"
-          , title = "Memory importance"
+        [ { label = subjectKindLabel observation.subjectKind
+          , className = "badge badge-observation"
+          , title = "Observation subject kind"
           }
         ]
-            ++ (if memory.pinned then
-                    [ { label = "Pinned", className = "badge badge-pinned", title = "Pinned memory" } ]
-
-                else
-                    []
-               )
-    , tags = memory.tags
+    , tags = []
     , linkedMemories = []
-    , actionLabel = "Open memory"
+    , actionLabel = "Open observation"
     }
 
 
-linkedMemoryPresentation : Api.LinkedMemorySummary -> LinkedMemoryPresentation
-linkedMemoryPresentation mem =
-    { summary = nonBlankMaybe mem.summary "(no summary)"
-    , importance = mem.importance
-    , tags = mem.tags
-    }
+subjectKindLabel : Api.SubjectKind -> String
+subjectKindLabel subjectKind =
+    case subjectKind of
+        Api.SubjectFile ->
+            "File"
+
+        Api.SubjectGlob ->
+            "Glob"
 
 
 priorityBadge : Int -> SearchResultBadge

@@ -47,24 +47,6 @@ port loginAuth : String -> Cmd msg
 
 
 
--- PORTS: Cytoscape
-
-
-port initCytoscape : Encode.Value -> Cmd msg
-
-
-port destroyCytoscape : () -> Cmd msg
-
-
-port updateCytoscape : Encode.Value -> Cmd msg
-
-
-port cytoscapeNodeClicked : (String -> msg) -> Sub msg
-
-
-port cytoscapeEdgeClicked : (String -> msg) -> Sub msg
-
-
 -- PORTS: Clipboard
 
 

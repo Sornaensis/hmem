@@ -3,17 +3,21 @@ module HMem.DB.WorkspaceGroup
   , getGroup
   , deleteGroup
   , listGroups
+  , AddMemberResult(..)
   , addMember
   , removeMember
   , listGroupMembers
   ) where
 
 import Control.Exception (throwIO)
-import Data.Functor.Contravariant ((>$<))
+import Data.Functor.Contravariant ((>$<), contramap)
 import Data.Pool (Pool)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
+import Hasql.Decoders qualified as Dec
+import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import Rel8
 
 import HMem.DB.Pool (runSession, DBException(..))
@@ -104,31 +108,51 @@ listGroups pool mlimit moffset = do
 -- Members
 ------------------------------------------------------------------------
 
-addMember :: Pool Hasql.Connection -> UUID -> UUID -> IO ()
-addMember pool gid wsId =
-  runSession pool $ Session.statement () $ run_ $
-    insert Insert
-      { into = workspaceGroupMemberSchema
-      , rows = values
-          [ WorkspaceGroupMemberT
-              { wgmGroupId     = lit gid
-              , wgmWorkspaceId = lit wsId
-              , wgmJoinedAt    = unsafeDefault
-              }
-          ]
-      , onConflict = DoNothing
-      , returning = NoReturning
-      }
+data AddMemberResult
+  = MemberAdded
+  | MemberAlreadyPresent
+  | MemberWorkspaceInactive
+  deriving stock (Eq, Show)
 
-removeMember :: Pool Hasql.Connection -> UUID -> UUID -> IO ()
-removeMember pool gid wsId =
-  runSession pool $ Session.statement () $ run_ $
+-- The workspace lock makes the active-state predicate and insert one atomic
+-- operation with respect to a concurrent workspace soft-delete.
+addMember :: Pool Hasql.Connection -> UUID -> UUID -> IO AddMemberResult
+addMember pool gid wsId = do
+  (inserted, active) <- runSession pool $ Session.statement (gid, wsId) addMemberStatement
+  pure $ case (inserted, active) of
+    (True, _) -> MemberAdded
+    (False, True) -> MemberAlreadyPresent
+    (False, False) -> MemberWorkspaceInactive
+
+addMemberStatement :: Statement.Statement (UUID, UUID) (Bool, Bool)
+addMemberStatement = Statement.Statement sql encoder decoder True where
+  sql =
+    "WITH active_workspace AS MATERIALIZED ("
+      <> " SELECT id FROM workspaces WHERE id = $2 AND deleted_at IS NULL FOR SHARE"
+      <> "), inserted AS ("
+      <> " INSERT INTO workspace_group_members (group_id, workspace_id)"
+      <> " SELECT $1, $2 FROM active_workspace"
+      <> " ON CONFLICT (group_id, workspace_id) DO NOTHING"
+      <> " RETURNING 1"
+      <> ")"
+      <> " SELECT EXISTS (SELECT 1 FROM inserted), EXISTS (SELECT 1 FROM active_workspace)"
+  encoder =
+       contramap fst (Enc.param (Enc.nonNullable Enc.uuid))
+    <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))
+  decoder = Dec.singleRow $
+    (,) <$> Dec.column (Dec.nonNullable Dec.bool)
+        <*> Dec.column (Dec.nonNullable Dec.bool)
+
+removeMember :: Pool Hasql.Connection -> UUID -> UUID -> IO Bool
+removeMember pool gid wsId = do
+  n <- runSession pool $ Session.statement () $ runN $
     delete Delete
       { from = workspaceGroupMemberSchema
       , using = pure ()
       , deleteWhere = \_ row -> row.wgmGroupId ==. lit gid &&. row.wgmWorkspaceId ==. lit wsId
       , returning = NoReturning
       }
+  pure (n > 0)
 
 listGroupMembers :: Pool Hasql.Connection -> UUID -> IO [UUID]
 listGroupMembers pool gid =

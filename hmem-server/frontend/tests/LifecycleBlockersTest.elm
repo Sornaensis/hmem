@@ -130,20 +130,20 @@ suite =
                     otherWorkspaceTask =
                         taskWithWorkspace "other-workspace-task" Nothing Nothing "workspace-b"
 
-                    workspaceMemory =
-                        memory "memory-a"
+                    workspaceObservation =
+                        observation "observation-a"
 
-                    otherWorkspaceMemory =
-                        memoryWithWorkspace "memory-b" "workspace-b"
+                    otherWorkspaceObservation =
+                        observationWithWorkspace "observation-b" "workspace-b"
                 in
-                [ Page.Workspace.workspaceSummaryParts True "workspace-a" [ activeProject ] [ openTask ] [ workspaceMemory ]
-                , Page.Workspace.workspaceSummaryParts False "workspace-a" [ activeProject, closedProject ] [ openTask, blockedTask, doneTask, otherWorkspaceTask ] [ workspaceMemory, otherWorkspaceMemory ]
+                [ Page.Workspace.workspaceSummaryParts True "workspace-a" [ activeProject ] [ openTask ] [ workspaceObservation ] False
+                , Page.Workspace.workspaceSummaryParts False "workspace-a" [ activeProject, closedProject ] [ openTask, blockedTask, doneTask, otherWorkspaceTask ] [ workspaceObservation, otherWorkspaceObservation ] False
                 ]
-                    |> Expect.equal [ [], [ "1 open project", "2 open tasks", "1 memory" ] ]
+                    |> Expect.equal [ [], [ "1 open project", "2 open tasks", "1 observation" ] ]
         , test "timeline tab fragment round-trips and exposes a workspace tab label" <|
             \_ ->
                 [ (Helpers.parseFragment (Just "tab=timeline")).tab == TimelineTab
-                , Helpers.buildFragment TimelineTab Nothing == "tab=timeline"
+                , Helpers.buildFragment TimelineTab Nothing Nothing == "tab=timeline"
                 , (Helpers.parseFragment (Just "tab=timeline&focus=task:abc")).focus == Just ( "task", "abc" )
                 , Page.Workspace.workspaceTabLabel TimelineTab == "Timeline"
                 ]
@@ -538,12 +538,11 @@ suite =
                         { affected = 4
                         , projectCount = 2
                         , taskCount = 2
-                        , memoryCount = 2
-                        , dependencyCount = 1
+                        , dependencyLinkCount = 1
                         }
                 in
                 Feature.Cards.cascadeDeleteSuccessMessage confirmation result
-                    |> Expect.equal "Deleted project subtree: 2 projects (including 1 subproject) and 2 tasks were deleted. Server counts changed since preview (preview: 1 project and 1 task; final: 2 projects and 2 tasks). Also updated 2 linked memories and 1 task dependency."
+                    |> Expect.equal "Deleted project subtree: 2 projects (including 1 subproject) and 2 tasks were deleted. Server counts changed since preview (preview: 1 project and 1 task; final: 2 projects and 2 tasks). Also updated 1 task dependency."
         , test "cascade delete error fallback prompts a refresh-safe retry" <|
             \_ ->
                 Feature.Cards.cascadeDeleteFailureFallback { entityType = "task", entityId = "root", preview = Nothing }
@@ -691,38 +690,6 @@ suite =
                         , Feature.Cards.nextTaskRationale candidate == "Ready now; completion is gated by 2 open subtasks."
                         ]
                             |> Expect.equal (List.repeat 5 True)
-
-                    Err err ->
-                        Expect.fail (Decode.errorToString err)
-        , test "workspace card hydration decodes links and computes task readiness before card expansion" <|
-            \_ ->
-                let
-                    hydrationBody =
-                        """{"project_memory_links":[{"project_id":"project-a","memory_id":"project-memory"}],"task_memory_links":[{"task_id":"root","memory_id":"task-memory"},{"task_id":"child","memory_id":"child-memory"}],"task_dependencies":[{"task_id":"root","depends_on_id":"dependency"}]}"""
-
-                    root =
-                        task "root" Nothing (Just "project-a")
-
-                    child =
-                        task "child" (Just "root") (Just "project-a")
-
-                    dependency =
-                        task "dependency" Nothing (Just "project-a")
-                in
-                case Decode.decodeString Api.workspaceCardHydrationDecoder hydrationBody of
-                    Ok hydration ->
-                        let
-                            rollup =
-                                Helpers.computeTaskReadinessRollupFrom [ root, child, dependency ] hydration.taskDependencies "root"
-                        in
-                        [ List.length hydration.taskMemoryLinks == 2
-                        , List.length hydration.projectMemoryLinks == 1
-                        , rollup.openSubtaskCount == 1
-                        , rollup.openDependencyCount == 1
-                        , rollup.dependencyBlockedTaskCount == 1
-                        , rollup.completionReady == False
-                        ]
-                            |> Expect.equal (List.repeat 6 True)
 
                     Err err ->
                         Expect.fail (Decode.errorToString err)
@@ -1218,11 +1185,24 @@ taskWithTitleStatus id parentId projectId title status =
     { base | title = title, status = status }
 
 
-memoryWithWorkspace : String -> String -> Api.Memory
-memoryWithWorkspace id workspaceId =
+observation : String -> Api.Observation
+observation id =
+    { id = id
+    , workspaceId = "workspace-a"
+    , subjectKind = Api.SubjectFile
+    , subject = "src/Main.elm"
+    , gitSha = "0123456789abcdef0123456789abcdef01234567"
+    , content = id
+    , createdAt = "2026-01-01T00:00:00Z"
+    , updatedAt = "2026-01-01T00:00:00Z"
+    }
+
+
+observationWithWorkspace : String -> String -> Api.Observation
+observationWithWorkspace id workspaceId =
     let
         base =
-            memory id
+            observation id
     in
     { base | workspaceId = workspaceId }
 

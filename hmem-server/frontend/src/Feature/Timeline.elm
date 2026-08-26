@@ -1,10 +1,9 @@
 module Feature.Timeline exposing (ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, sortTimelineEvents, timelineBucketTotal, timelineDateKey, timelineEventLabel, timelineEventToneClass, timelineHistogramAcceptsResponse, timelineStatusSummary, update, viewWorkspaceTimelinePanel)
 
 import Api
-import Browser.Navigation as Nav
 import Char
 import Feature.Focus as Focus
-import Helpers exposing (buildFragment, formatDate)
+import Helpers exposing (buildFragment, formatDate, pushUrl)
 import Html exposing (..)
 import Html.Attributes exposing (class, disabled, style, title, type_, value)
 import Html.Events exposing (onClick, onInput)
@@ -266,10 +265,11 @@ update msg model =
                                 , isSearching = False
                                 , searchError = Nothing
                                 , activeRequestQuery = Nothing
+                                , activeRequest = Nothing
                             }
                     in
                     ( { model | activeTab = targetTab, focus = updatedFocus, search = updatedSearch }
-                    , Nav.pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment targetTab (Just focusEntry))
+                    , pushUrl model.key ("/workspace/" ++ wsId ++ "#" ++ buildFragment targetTab (Just focusEntry) Nothing)
                     )
 
                 Nothing ->

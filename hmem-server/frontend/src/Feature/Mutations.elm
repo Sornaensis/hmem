@@ -2,10 +2,9 @@ module Feature.Mutations exposing (init, update)
 
 import Dict
 import Api
-import Helpers exposing (applyTaskMutationResult, beginWorkspaceDataReload, taskMutationResultIds, trackLocalMutation, trackLocalMutations)
+import Helpers exposing (applyTaskMutationResult, beginWorkspaceDataReload, pushUrl, taskMutationResultIds, trackLocalMutation, trackLocalMutations)
 import Toast exposing (addToast)
 import Types exposing (..)
-import Browser.Navigation as Nav
 import String
 
 
@@ -142,7 +141,7 @@ update msg model =
                         ( toastedModel, toastCmd ) =
                             addToast Success ("Created workspace: " ++ ws.name) trackedModel
                     in
-                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd, Nav.pushUrl model.key ("/workspace/" ++ ws.id) ] )
+                    ( toastedModel, Cmd.batch [ trackCmd, toastCmd, pushUrl model.key ("/workspace/" ++ ws.id) ] )
 
                 Err _ ->
                     addToast Error "Failed to create workspace" model

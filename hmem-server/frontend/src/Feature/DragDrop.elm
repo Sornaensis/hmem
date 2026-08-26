@@ -344,17 +344,7 @@ swapPriorities apiUrl requestId drag targetType targetId model =
                 ]
 
         "memory" ->
-            let
-                dragImp =
-                    Dict.get drag.entityId model.memories |> Maybe.map .importance |> Maybe.withDefault 5
-
-                targetImp =
-                    Dict.get targetId model.memories |> Maybe.map .importance |> Maybe.withDefault 5
-            in
-            Cmd.batch
-                [ Api.updateMemory apiUrl drag.entityId [ ( "importance", Encode.int targetImp ), ( "request_id", Encode.string requestId ) ] MemoryUpdated
-                , Api.updateMemory apiUrl targetId [ ( "importance", Encode.int dragImp ), ( "request_id", Encode.string requestId ) ] MemoryUpdated
-                ]
+            Cmd.none
 
         _ ->
             Cmd.none

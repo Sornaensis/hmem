@@ -8,229 +8,128 @@ import Test exposing (..)
 
 suite : Test
 suite =
-    describe "unified search result presentation"
-        [ test "mixed results expose counts, metadata, and actions" <|
+    describe "observation unified-search presentation"
+        [ test "server-shaped observation, project, and task results are presented" <|
             \_ ->
                 let
                     results =
-                        { memories = [ memory "memory-1" (Just "Memory summary") "Memory body" Api.LongTerm 9 True [ "elm", "search" ] ]
-                        , projects =
-                            [ { project = project "project-1" "Project Alpha" (Just "Project description") Api.ProjActive 7
-                              , linkedMemories = [ linkedMemory "linked-1" (Just "Linked memory") [ "context" ] 8 ]
-                              }
-                            ]
-                        , tasks =
-                            [ { task = task "task-1" "Task Alpha" (Just "Task description") Api.InProgress 5 Nothing
-                              , linkedMemories = []
-                              }
-                            ]
+                        { observations = [ observation "observation-1" "src/Main.elm" "Ranked FTS preview" ]
+                        , projects = [ project "project-1" "Project Alpha" ]
+                        , tasks = [ task "task-1" "Task Alpha" ]
                         }
 
                     presentations =
                         Feature.Search.searchResultPresentations results
                 in
                 [ Feature.Search.unifiedSearchResultCount results == 3
-                , List.map presentationBasics presentations
-                    == [ { entityType = "project", entityTypeLabel = "PRJ", title = "Project Alpha", summary = "Project description", badges = [ "Active", "P7" ], actionLabel = "Focus project" }
-                       , { entityType = "task", entityTypeLabel = "TSK", title = "Task Alpha", summary = "Task description", badges = [ "In Progress", "P5" ], actionLabel = "Focus task" }
-                       , { entityType = "memory", entityTypeLabel = "MEM", title = "Memory summary", summary = "Memory body", badges = [ "Long term", "I9", "Pinned" ], actionLabel = "Open memory" }
+                , List.map (\item -> { entityType = item.entityType, entityTypeLabel = item.entityTypeLabel, title = item.title, summary = item.summary, actionLabel = item.actionLabel }) presentations
+                    == [ { entityType = "project", entityTypeLabel = "PRJ", title = "Project Alpha", summary = "Project description", actionLabel = "Focus project" }
+                       , { entityType = "task", entityTypeLabel = "TSK", title = "Task Alpha", summary = "Task description", actionLabel = "Focus task" }
+                       , { entityType = "observation", entityTypeLabel = "OBS", title = "src/Main.elm", summary = "Ranked FTS preview", actionLabel = "Open observation" }
                        ]
-                , presentations
-                    |> List.head
-                    |> Maybe.map (.linkedMemories >> List.map .summary)
-                    |> Maybe.withDefault []
-                    |> (==) [ "Linked memory" ]
                 ]
-                    |> Expect.equal [ True, True, True ]
-        , test "empty result sets and missing optional fields use safe fallbacks" <|
+                    |> Expect.equal [ True, True ]
+        , test "unified search entity types only include observations for repositories" <|
+            \_ ->
+                [ Feature.Search.unifiedSearchEntityTypes Api.Repository
+                , Feature.Search.unifiedSearchEntityTypes Api.Planning
+                , Feature.Search.unifiedSearchEntityTypes Api.Personal
+                ]
+                    |> Expect.equal
+                        [ [ "project", "task", "observation" ]
+                        , [ "project", "task" ]
+                        , [ "project", "task" ]
+                        ]
+        , test "same-query and cross-workspace stale responses require the active request token" <|
             \_ ->
                 let
-                    emptyResults =
-                        { memories = [], projects = [], tasks = [] }
+                    base =
+                        Feature.Search.init
 
-                    missingResults =
-                        { memories = [ memory "memory-missing" Nothing "   " Api.ShortTerm 0 False [] ]
-                        , projects =
-                            [ { project = project "project-missing" "   " Nothing Api.ProjPaused 0
-                              , linkedMemories = [ linkedMemory "linked-missing" Nothing [] 1 ]
-                              }
-                            ]
-                        , tasks =
-                            [ { task = task "task-missing" "" Nothing Api.Blocked 1 (Just "parent-task")
-                              , linkedMemories = []
-                              }
-                            ]
+                    pending =
+                        { base
+                            | activeRequest = Just { workspaceId = "workspace-b", token = 2, query = "same query" }
+                            , activeRequestQuery = Just "same query"
+                            , nextRequestToken = 3
                         }
-
-                    missingPresentations =
-                        Feature.Search.searchResultPresentations missingResults
                 in
-                [ Feature.Search.unifiedSearchResultCount emptyResults == 0
-                , Feature.Search.searchResultPresentations emptyResults == []
-                , List.map fallbackBasics missingPresentations
-                    == [ { entityType = "project", entityTypeLabel = "PRJ", title = "Project project-", summary = "No description" }
-                       , { entityType = "task", entityTypeLabel = "SUB", title = "Task task-mis", summary = "No description" }
-                       , { entityType = "memory", entityTypeLabel = "MEM", title = "Memory memory-m", summary = "No memory content" }
-                       ]
-                , missingPresentations
-                    |> List.head
-                    |> Maybe.map (.linkedMemories >> List.map .summary)
-                    |> Maybe.withDefault []
-                    |> (==) [ "(no summary)" ]
+                [ Feature.Search.unifiedSearchResponseMatches "workspace-a" 1 "same query" (Just "workspace-a") pending
+                , Feature.Search.unifiedSearchResponseMatches "workspace-b" 1 "same query" (Just "workspace-b") pending
+                , Feature.Search.unifiedSearchResponseMatches "workspace-b" 2 "same query" (Just "workspace-a") pending
+                , Feature.Search.unifiedSearchResponseMatches "workspace-b" 2 "same query" (Just "workspace-b") pending
                 ]
-                    |> Expect.equal [ True, True, True, True ]
-        , test "tab navigation can clear stale unified search state without losing filters" <|
+                    |> Expect.equal [ False, False, False, True ]
+        , test "empty server-shaped result sets and transient clearing are safe" <|
             \_ ->
                 let
+                    emptySearchResults : Api.UnifiedSearchResults
+                    emptySearchResults =
+                        { observations = [], projects = [], tasks = [] }
+
                     baseSearch =
                         Feature.Search.init
 
                     staleSearch =
                         { baseSearch
                             | query = "alpha"
-                            , unifiedResults = Just { memories = [], projects = [], tasks = [] }
+                            , unifiedResults = Just emptySearchResults
                             , isSearching = True
                             , searchError = Just "Search failed"
                             , activeRequestQuery = Just "alpha"
-                            , filterMemoryTypes = [ "long_term" ]
-                            , filterTags = [ "tag-a" ]
                         }
 
                     cleared =
                         Feature.Search.clearTransientSearchState staleSearch
                 in
-                { query = cleared.query
-                , unifiedResults = cleared.unifiedResults
-                , isSearching = cleared.isSearching
-                , searchError = cleared.searchError
-                , activeRequestQuery = cleared.activeRequestQuery
-                , filterMemoryTypes = cleared.filterMemoryTypes
-                , filterTags = cleared.filterTags
-                }
-                    |> Expect.equal
-                        { query = "alpha"
-                        , unifiedResults = Nothing
-                        , isSearching = False
-                        , searchError = Nothing
-                        , activeRequestQuery = Nothing
-                        , filterMemoryTypes = [ "long_term" ]
-                        , filterTags = [ "tag-a" ]
-                        }
-        , test "long text and tags are preserved for wrapping by the UI" <|
-            \_ ->
-                let
-                    longTitle =
-                        String.repeat 12 "Long memory title segment "
-
-                    longContent =
-                        String.repeat 16 "Long memory content segment "
-
-                    longTag =
-                        String.repeat 10 "tag-segment-"
-
-                    results =
-                        { memories = [ memory "memory-long" (Just longTitle) longContent Api.LongTerm 10 False [ longTag ] ]
-                        , projects = []
-                        , tasks = []
-                        }
-                in
-                Feature.Search.searchResultPresentations results
-                    |> List.head
-                    |> Maybe.map (\p -> ( p.title, p.summary, p.tags ))
-                    |> Expect.equal (Just ( longTitle, longContent, [ longTag ] ))
+                [ Feature.Search.unifiedSearchResultCount emptySearchResults == 0
+                , Feature.Search.searchResultPresentations emptySearchResults == []
+                , { query = cleared.query, unifiedResults = cleared.unifiedResults, isSearching = cleared.isSearching, searchError = cleared.searchError, activeRequestQuery = cleared.activeRequestQuery }
+                    == { query = "alpha", unifiedResults = Nothing, isSearching = False, searchError = Nothing, activeRequestQuery = Nothing }
+                ]
+                    |> Expect.equal [ True, True, True ]
         ]
 
 
-type alias PresentationBasics =
-    { entityType : String
-    , entityTypeLabel : String
-    , title : String
-    , summary : String
-    , badges : List String
-    , actionLabel : String
-    }
-
-
-type alias FallbackBasics =
-    { entityType : String
-    , entityTypeLabel : String
-    , title : String
-    , summary : String
-    }
-
-
-presentationBasics : Feature.Search.SearchResultPresentation -> PresentationBasics
-presentationBasics presentation =
-    { entityType = presentation.entityType
-    , entityTypeLabel = presentation.entityTypeLabel
-    , title = presentation.title
-    , summary = presentation.summary
-    , badges = List.map .label presentation.badges
-    , actionLabel = presentation.actionLabel
-    }
-
-
-fallbackBasics : Feature.Search.SearchResultPresentation -> FallbackBasics
-fallbackBasics presentation =
-    { entityType = presentation.entityType
-    , entityTypeLabel = presentation.entityTypeLabel
-    , title = presentation.title
-    , summary = presentation.summary
-    }
-
-
-project : String -> String -> Maybe String -> Api.ProjectStatus -> Int -> Api.Project
-project id name description status priority =
+observation : String -> String -> String -> Api.ObservationSearchHit
+observation id subject contentPreview =
     { id = id
-    , workspaceId = "workspace-a"
+    , workspaceId = "workspace-1"
+    , subjectKind = Api.SubjectFile
+    , subject = subject
+    , gitSha = "0123456789abcdef0123456789abcdef01234567"
+    , contentPreview = contentPreview
+    , updatedAt = "2026-01-01T00:00:00Z"
+    }
+
+
+project : String -> String -> Api.Project
+project id name =
+    { id = id
+    , workspaceId = "workspace-1"
     , parentId = Nothing
     , name = name
-    , description = description
-    , status = status
-    , priority = priority
+    , description = Just "Project description"
+    , status = Api.ProjActive
+    , priority = 7
     , createdAt = "2026-01-01T00:00:00Z"
-    , updatedAt = "2026-01-02T00:00:00Z"
+    , updatedAt = "2026-01-01T00:00:00Z"
     }
 
 
-task : String -> String -> Maybe String -> Api.TaskStatus -> Int -> Maybe String -> Api.Task
-task id title description status priority parentId =
+task : String -> String -> Api.Task
+task id title =
     { id = id
-    , workspaceId = "workspace-a"
-    , projectId = Just "project-1"
-    , parentId = parentId
+    , workspaceId = "workspace-1"
+    , projectId = Nothing
+    , parentId = Nothing
     , title = title
-    , description = description
-    , status = status
-    , priority = priority
+    , description = Just "Task description"
+    , status = Api.InProgress
+    , priority = 5
     , dueAt = Nothing
     , completedAt = Nothing
     , dependencyCount = 0
+    , createdAt = "2026-01-01T00:00:00Z"
+    , updatedAt = "2026-01-01T00:00:00Z"
     , memoryLinkCount = 0
-    , createdAt = "2026-01-01T00:00:00Z"
-    , updatedAt = "2026-01-02T00:00:00Z"
-    }
-
-
-memory : String -> Maybe String -> String -> Api.MemoryType -> Int -> Bool -> List String -> Api.Memory
-memory id summary content memoryType importance pinned tags =
-    { id = id
-    , workspaceId = "workspace-a"
-    , content = content
-    , summary = summary
-    , memoryType = memoryType
-    , importance = importance
-    , pinned = pinned
-    , tags = tags
-    , createdAt = "2026-01-01T00:00:00Z"
-    , updatedAt = "2026-01-02T00:00:00Z"
-    }
-
-
-linkedMemory : String -> Maybe String -> List String -> Int -> Api.LinkedMemorySummary
-linkedMemory id summary tags importance =
-    { id = id
-    , summary = summary
-    , tags = tags
-    , importance = importance
     }

@@ -1,7 +1,7 @@
 name:                hmem-core
 version:             0.1.0.0
 synopsis:            Core types and database operations for hmem
-description:         Shared library for the hmem LLM memory and task management system.
+description:         Shared library for hmem observations, workspaces, projects, and tasks.
 license:             MPL-2.0
 author:              hmem contributors
 category:            Database

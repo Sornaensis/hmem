@@ -6,6 +6,7 @@ module HMem.Server.WebSocket
   , WorkspaceSubscription(..)
   , createTicket
   , consumeTicket
+  , ticketEventVisible
   , eventVisibleToSubscription
   , resolveLocalWebSocketAccess
     -- * Broadcast
@@ -37,7 +38,7 @@ import Network.WebSockets qualified as WS
 
 import HMem.Config (AuthConfig(..), AuthMode(..), LocalAuthConfig(..), LocalBotTokenConfig(..), authStaticBearerEnabled, authStaticBearerToken)
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
-import HMem.Server.Event (ChangeEvent(..))
+import HMem.Server.Event (ChangeEvent(..), EntityType(..))
 import HMem.Types (WebSocketTicketResponse(..))
 
 -- | Server-wide WebSocket state: a map of connection IDs to live
@@ -48,9 +49,10 @@ data WSState = WSState
   }
 
 data WSClient = WSClient
-  { clientConnection   :: !WS.Connection
-  , clientPrincipal    :: !(Maybe Principal)
-  , clientSubscription :: !WorkspaceSubscription
+  { clientConnection              :: !WS.Connection
+  , clientPrincipal               :: !(Maybe Principal)
+  , clientSubscription            :: !WorkspaceSubscription
+  , clientReceivesGlobalGroupEvents :: !Bool
   }
 
 data WorkspaceSubscription
@@ -59,9 +61,10 @@ data WorkspaceSubscription
   deriving (Show, Eq)
 
 data WebSocketTicket = WebSocketTicket
-  { ticketPrincipal   :: !Principal
-  , ticketWorkspaceId :: !UUID
-  , ticketExpiresAt   :: !UTCTime
+  { ticketPrincipal                 :: !Principal
+  , ticketWorkspaceId               :: !UUID
+  , ticketReceivesGlobalGroupEvents :: !Bool
+  , ticketExpiresAt                 :: !UTCTime
   }
 
 -- | Create a fresh (empty) WebSocket state.
@@ -76,13 +79,14 @@ connectionCount st = Map.size <$> readTVarIO st.connections
 -- Connection management
 ------------------------------------------------------------------------
 
-addConnection :: WSState -> WS.Connection -> Maybe Principal -> WorkspaceSubscription -> IO UUID
-addConnection st conn principal subscription = do
+addConnection :: WSState -> WS.Connection -> Maybe Principal -> WorkspaceSubscription -> Bool -> IO UUID
+addConnection st conn principal subscription receivesGlobalGroupEvents = do
   connId <- UUIDv4.nextRandom
   let client = WSClient
         { clientConnection = conn
         , clientPrincipal = principal
         , clientSubscription = subscription
+        , clientReceivesGlobalGroupEvents = receivesGlobalGroupEvents
         }
   STM.atomically $ modifyTVar' st.connections (Map.insert connId client)
   pure connId
@@ -102,25 +106,30 @@ broadcast :: WSState -> ChangeEvent -> IO ()
 broadcast st event = do
   let msg = encode event
   conns <- readTVarIO st.connections
-  mapM_ (trySend msg) (filter (\client -> eventVisibleToSubscription client.clientSubscription event) (Map.elems conns))
+  mapM_ (trySend msg) (filter (\client -> eventVisibleToSubscription client.clientReceivesGlobalGroupEvents client.clientSubscription event) (Map.elems conns))
   where
     trySend msg client =
       WS.sendTextData client.clientConnection msg
         `catch` \(_ :: SomeException) -> pure ()
 
-eventVisibleToSubscription :: WorkspaceSubscription -> ChangeEvent -> Bool
-eventVisibleToSubscription SubscribeAllWorkspaces _ = True
-eventVisibleToSubscription (SubscribeWorkspace workspaceId) event =
+-- | Workspace-scoped subscriptions always receive events for their workspace.
+-- Global workspace-group events are additionally visible only to connections
+-- whose ticket was issued to a global superadmin.
+eventVisibleToSubscription :: Bool -> WorkspaceSubscription -> ChangeEvent -> Bool
+eventVisibleToSubscription _ SubscribeAllWorkspaces _ = True
+eventVisibleToSubscription receivesGlobalGroupEvents (SubscribeWorkspace workspaceId) event =
   event.workspaceId == Just workspaceId
+    || (receivesGlobalGroupEvents && event.workspaceId == Nothing && event.entityType == ETWorkspaceGroup)
 
-createTicket :: WSState -> Principal -> UUID -> IO WebSocketTicketResponse
-createTicket st principal workspaceId = do
+createTicket :: WSState -> Principal -> UUID -> Bool -> IO WebSocketTicketResponse
+createTicket st principal workspaceId receivesGlobalGroupEvents = do
   now <- getCurrentTime
   ticketId <- UUID.toText <$> UUIDv4.nextRandom
   let expires = addUTCTime ticketTtlSeconds now
       ticket = WebSocketTicket
         { ticketPrincipal = principal
         , ticketWorkspaceId = workspaceId
+        , ticketReceivesGlobalGroupEvents = receivesGlobalGroupEvents
         , ticketExpiresAt = expires
         }
   STM.atomically $ do
@@ -139,6 +148,16 @@ consumeTicket st ticketId = do
         remaining = Map.delete ticketId pruned
     STM.writeTVar st.tickets remaining
     pure found
+
+-- | The event-visibility decision retained in a deployed ticket.  Keeping
+-- this next to ticket consumption makes the global-superadmin grant boundary
+-- testable without exposing ticket internals.
+ticketEventVisible :: WebSocketTicket -> ChangeEvent -> Bool
+ticketEventVisible ticket = uncurry eventVisibleToSubscription (ticketSubscription ticket)
+
+ticketSubscription :: WebSocketTicket -> (Bool, WorkspaceSubscription)
+ticketSubscription ticket =
+  (ticket.ticketReceivesGlobalGroupEvents, SubscribeWorkspace ticket.ticketWorkspaceId)
 
 ticketTtlSeconds :: NominalDiffTime
 ticketTtlSeconds = 60
@@ -173,16 +192,18 @@ wsApp authCfg st pending
       Just ticketText -> do
         mTicket <- consumeTicket st (TE.decodeUtf8Lenient ticketText)
         case mTicket of
-          Just ticket -> accept (Just ticket.ticketPrincipal) (SubscribeWorkspace ticket.ticketWorkspaceId)
+          Just ticket ->
+            let (receivesGlobalGroupEvents, subscription) = ticketSubscription ticket
+            in accept (Just ticket.ticketPrincipal) subscription receivesGlobalGroupEvents
           Nothing -> WS.rejectRequest pending "Unauthorized"
       Nothing -> WS.rejectRequest pending "Unauthorized"
   | otherwise = case resolveLocalWebSocketAccess authCfg (TE.decodeUtf8Lenient <$> tokenFromRequest (WS.pendingRequest pending)) of
-      Just (principal, subscription) -> accept principal subscription
+      Just (principal, subscription) -> accept principal subscription True
       Nothing -> WS.rejectRequest pending "Unauthorized"
   where
-    accept principal subscription = do
+    accept principal subscription receivesGlobalGroupEvents = do
       conn <- WS.acceptRequest pending
-      connId <- addConnection st conn principal subscription
+      connId <- addConnection st conn principal subscription receivesGlobalGroupEvents
       WS.withPingThread conn 30 (pure ()) $
         sinkMessages conn
           `finally` removeConnection st connId

@@ -565,7 +565,7 @@ installLinux = do
   let serverStdioLog = serverStdioLogPath logDir
   writeFile (systemdDir </> "hmem-server.service") $ unlines
     [ "[Unit]"
-    , "Description=hmem Memory Server"
+    , "Description=hmem Observation Server"
     , "After=hmem-postgres.service"
     , "Requires=hmem-postgres.service"
     , ""

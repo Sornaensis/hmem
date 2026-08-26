@@ -1,4 +1,4 @@
-module AppShell exposing (AppShellOwnedMsg(..), finalizeInit, handleOwned, initModel, subscriptions, viewDocument)
+module AppShell exposing (AppShellOwnedMsg(..), finalizeInit, handleOwned, initModel, sessionEpochMatches, subscriptions, viewDocument)
 
 import Api
 import Browser
@@ -12,15 +12,14 @@ import Feature.Dependencies
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
-import Feature.Graph
 import Feature.Groups
-import Feature.Memory
 import Feature.Mutations
+import Feature.Observation
 import Feature.Search
 import Feature.Timeline
 import Feature.WebSocket
 import Feature.WorkspaceAdmin
-import Helpers exposing (applyStoredFiltersIfCurrentWorkspace, replaceFragment)
+import Helpers exposing (applyStoredFiltersIfCurrentWorkspace, pushUrl, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (class, href, id)
 import Html.Keyed as Keyed
@@ -31,8 +30,7 @@ import Json.Encode as Encode
 import Page.Home
 import Page.Workspace
 import Permissions
-import Ports exposing (authSessionError, authTokenChanged, authUnauthorized, cytoscapeEdgeClicked, cytoscapeNodeClicked, disconnectWebSocket, localStorageReceived, loginAuth, logoutAuth, onMainContentScroll)
-import Route exposing (loadWorkspaceData)
+import Ports exposing (authSessionError, authTokenChanged, authUnauthorized, disconnectWebSocket, localStorageReceived, loginAuth, logoutAuth, onMainContentScroll)
 import Toast
 import Types exposing (..)
 import Url
@@ -41,7 +39,7 @@ import Url
 type AppShellOwnedMsg
     = SelectWorkspaceMsg String
     | SwitchTabMsg WorkspaceTab
-    | SessionContextLoadedMsg (Maybe String) (Result Http.Error Api.SessionContext)
+    | SessionContextLoadedMsg Int (Maybe String) (Result Http.Error Api.SessionContext)
     | AuthUnauthorizedMsg
     | AuthTokenChangedMsg Bool
     | AuthSessionErrorMsg String
@@ -53,9 +51,16 @@ type AppShellOwnedMsg
     | NoOpMsg
 
 
-initModel : Nav.Key -> Url.Url -> Page -> Flags -> Maybe Decode.Value -> { tab : WorkspaceTab, focus : Maybe ( String, String ) } -> Model
+initModel : Maybe Nav.Key -> Url.Url -> Page -> Flags -> Maybe Decode.Value -> { tab : WorkspaceTab, focus : Maybe ( String, String ), observationId : Maybe String } -> Model
 initModel key url page flags storedFilters frag =
     let
+        initialObservations =
+            let
+                observations =
+                    Feature.Observation.init
+            in
+            { observations | selectedId = frag.observationId }
+
         baseModel =
             { key = key
             , url = url
@@ -63,6 +68,7 @@ initModel key url page flags storedFilters frag =
             , flags = flags
             , auth = { status = AuthBooting, mode = Nothing }
             , sessionContext = Nothing
+            , sessionRequestEpoch = 0
             , selectedWorkspaceId = Nothing
             , activeTab = frag.tab
             , mainContentScrollY = 0
@@ -70,15 +76,15 @@ initModel key url page flags storedFilters frag =
             , projects = Dict.empty
             , tasks = Dict.empty
             , memories = Dict.empty
+            , observations = initialObservations
             , toast = Toast.init
             , webSocket = Feature.WebSocket.init
             , dataLoading = Feature.DataLoading.init
             , search = Feature.Search.init
             , editing = Feature.Editing.init
-            , memory = Feature.Memory.init
+            , memory = emptyMemoryModel
             , dependencies = Feature.Dependencies.init
             , cards = Feature.Cards.init
-            , graph = Feature.Graph.init
             , dragDrop = Feature.DragDrop.init
             , focus = Feature.Focus.init frag.focus
             , mutations = Feature.Mutations.init
@@ -106,6 +112,7 @@ finalizeInit page model =
 
                 _ ->
                     Nothing
+        , sessionRequestEpoch = model.sessionRequestEpoch + 1
         , dataLoading = Feature.DataLoading.prepareForPageLoad page model.dataLoading
     }
 
@@ -114,17 +121,17 @@ handleOwned : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )
 handleOwned ownedMsg model =
     case ownedMsg of
         SelectWorkspaceMsg wsId ->
-            ( model, Nav.pushUrl model.key ("/workspace/" ++ wsId) )
+            ( model, pushUrl model.key ("/workspace/" ++ wsId) )
 
         SwitchTabMsg tab ->
             let
                 newModel =
                     model
                         |> Feature.Editing.clearForTabSwitch
-                        |> Feature.Memory.clearForTabSwitch
                         |> (\currentModel ->
                                 { currentModel
                                     | activeTab = tab
+                                    , observations = Feature.Observation.selectionForTab tab currentModel.observations
                                     , search = Feature.Search.clearTransientSearchState currentModel.search
                                 }
                            )
@@ -160,8 +167,8 @@ handleOwned ownedMsg model =
             in
             ( finalModel, Cmd.batch [ replaceFragment finalModel, auditCmd, timelineCmd ] )
 
-        SessionContextLoadedMsg expectedWorkspace result ->
-            if sessionContextResponseMatches expectedWorkspace model then
+        SessionContextLoadedMsg epoch expectedWorkspace result ->
+            if sessionEpochMatches epoch model.sessionRequestEpoch && sessionContextResponseMatches expectedWorkspace model then
                 case result of
                     Ok sessionContext ->
                         let
@@ -280,6 +287,7 @@ handleOwned ownedMsg model =
                             { model
                                 | auth = { status = AuthRequired, mode = model.auth.mode }
                                 , sessionContext = Nothing
+                                , sessionRequestEpoch = model.sessionRequestEpoch + 1
                                 , webSocket = { currentWebSocket | state = Disconnected }
                             }
                         )
@@ -311,8 +319,8 @@ handleOwned ownedMsg model =
                     preparedModel =
                         { rebootModel | dataLoading = Feature.DataLoading.prepareForPageLoad model.page rebootModel.dataLoading }
                 in
-                ( preparedModel
-                , Cmd.batch [ disconnectWebSocket (), Api.fetchSessionContext model.flags.apiUrl expectedWorkspace (GotSessionContext expectedWorkspace) ]
+                ( { preparedModel | sessionRequestEpoch = model.sessionRequestEpoch + 1 }
+                , Cmd.batch [ disconnectWebSocket (), Api.fetchSessionContext model.flags.apiUrl expectedWorkspace (GotSessionContext (model.sessionRequestEpoch + 1) expectedWorkspace) ]
                 )
 
             else
@@ -320,11 +328,11 @@ handleOwned ownedMsg model =
                     ( toastedModel, toastCmd ) =
                         if Permissions.isLocalMode model then
                             Toast.addToast Warning "Local auth token was removed; local session will be refreshed when credentials are restored."
-                                (clearSessionScopedState { model | flags = updatedFlags, auth = { status = AuthRequired, mode = model.auth.mode }, sessionContext = Nothing })
+                                (clearSessionScopedState { model | flags = updatedFlags, auth = { status = AuthRequired, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1 })
 
                         else
                             Toast.addToast Warning "Signed out. Sign in again to continue."
-                                (clearSessionScopedState { model | flags = updatedFlags, auth = { status = AuthRequired, mode = model.auth.mode }, sessionContext = Nothing })
+                                (clearSessionScopedState { model | flags = updatedFlags, auth = { status = AuthRequired, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1 })
                 in
                 ( toastedModel, Cmd.batch [ toastCmd, disconnectWebSocket () ] )
 
@@ -342,7 +350,7 @@ handleOwned ownedMsg model =
                 updatedFlags =
                     { flags | authTokenPresent = False }
             in
-            ( clearSessionScopedState { model | flags = updatedFlags, auth = { status = AuthRequired, mode = model.auth.mode }, sessionContext = Nothing }
+            ( clearSessionScopedState { model | flags = updatedFlags, auth = { status = AuthRequired, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1 }
             , Cmd.batch [ disconnectWebSocket (), logoutAuth () ]
             )
 
@@ -356,7 +364,6 @@ handleOwned ownedMsg model =
                     , Feature.WorkspaceAdmin.handleEscape model
                     , Feature.DragDrop.handleEscape model
                     , Feature.Dependencies.handleEscape model
-                    , Feature.Memory.handleEscape model
                     , Feature.Editing.handleEscape model
                     ]
                     |> List.head of
@@ -376,6 +383,11 @@ handleOwned ownedMsg model =
             ( model, Cmd.none )
 
 
+sessionEpochMatches : Int -> Int -> Bool
+sessionEpochMatches responseEpoch activeEpoch =
+    responseEpoch == activeEpoch
+
+
 sessionContextResponseMatches : Maybe String -> Model -> Bool
 sessionContextResponseMatches expectedWorkspace model =
     case expectedWorkspace of
@@ -384,9 +396,6 @@ sessionContextResponseMatches expectedWorkspace model =
                 WorkspacePage currentWsId ->
                     currentWsId == wsId
 
-                MemoryGraphPage ->
-                    model.selectedWorkspaceId == Just wsId
-
                 _ ->
                     False
 
@@ -394,9 +403,6 @@ sessionContextResponseMatches expectedWorkspace model =
             case model.page of
                 WorkspacePage _ ->
                     False
-
-                MemoryGraphPage ->
-                    model.selectedWorkspaceId == Nothing
 
                 _ ->
                     True
@@ -408,9 +414,6 @@ currentSessionWorkspace model =
         WorkspacePage wsId ->
             Just wsId
 
-        MemoryGraphPage ->
-            model.selectedWorkspaceId
-
         _ ->
             Nothing
 
@@ -420,6 +423,10 @@ bootstrapAfterSession expectedWorkspace sessionContext model =
     let
         workspaceListLoadToken =
             model.dataLoading.nextWorkspaceListLoadToken
+
+        workspaceLoadToken =
+            model.dataLoading.activeWorkspaceLoadToken
+                |> Maybe.withDefault (model.dataLoading.nextWorkspaceLoadToken - 1)
 
         globalCmds =
             Api.fetchWorkspaces model.flags.apiUrl (GotWorkspaces workspaceListLoadToken)
@@ -434,8 +441,7 @@ bootstrapAfterSession expectedWorkspace sessionContext model =
             case model.page of
                 WorkspacePage currentWsId ->
                     if expectedWorkspace == Just currentWsId && sessionCanReadWorkspace currentWsId sessionContext then
-                        ( [ Api.fetchWorkspace model.flags.apiUrl currentWsId (GotWorkspace currentWsId)
-                          , loadWorkspaceData model.flags.apiUrl currentWsId model.dataLoading.activeWorkspaceLoadToken
+                        ( [ Api.fetchWorkspace model.flags.apiUrl currentWsId (GotWorkspace currentWsId workspaceLoadToken)
                           , Feature.WebSocket.connectCmd model.flags sessionContext currentWsId
                           ]
                         , True
@@ -443,18 +449,6 @@ bootstrapAfterSession expectedWorkspace sessionContext model =
 
                     else
                         ( [], False )
-
-                MemoryGraphPage ->
-                    case ( expectedWorkspace, model.selectedWorkspaceId ) of
-                        ( Just expectedWsId, Just selectedWsId ) ->
-                            if expectedWsId == selectedWsId && sessionCanReadWorkspace selectedWsId sessionContext then
-                                ( [ Api.fetchVisualization model.flags.apiUrl selectedWsId (GotVisualization selectedWsId) ], False )
-
-                            else
-                                ( [], False )
-
-                        _ ->
-                            ( [], False )
 
                 _ ->
                     ( [], False )
@@ -578,6 +572,15 @@ stopAllLoading dataLoading =
     }
 
 
+emptyMemoryModel : MemoryModel
+emptyMemoryModel =
+    { entityMemories = Dict.empty
+    , entityMemoryIds = Dict.empty
+    , linkingMemoryFor = Nothing
+    , linkingEntityFor = Nothing
+    }
+
+
 clearSessionScopedState : Model -> Model
 clearSessionScopedState model =
     { model
@@ -585,13 +588,13 @@ clearSessionScopedState model =
         , projects = Dict.empty
         , tasks = Dict.empty
         , memories = Dict.empty
+        , observations = Feature.Observation.init
         , dataLoading = stopAllLoading model.dataLoading
         , search = Feature.Search.init
         , editing = Feature.Editing.init
-        , memory = Feature.Memory.init
+        , memory = emptyMemoryModel
         , dependencies = Feature.Dependencies.init
         , cards = Feature.Cards.init
-        , graph = Feature.Graph.init
         , dragDrop = Feature.DragDrop.init
         , focus = Feature.Focus.init Nothing
         , groups = Feature.Groups.init
@@ -625,8 +628,6 @@ subscriptions =
         , authUnauthorized (\_ -> AuthUnauthorized)
         , authTokenChanged AuthTokenChanged
         , authSessionError AuthSessionError
-        , cytoscapeNodeClicked CytoscapeNodeClicked
-        , cytoscapeEdgeClicked CytoscapeEdgeClicked
         , Browser.Events.onKeyDown (Decode.map GlobalKeyDown (Decode.field "keyCode" Decode.int))
         , localStorageReceived LocalStorageLoaded
         , onMainContentScroll MainContentScrolled
@@ -693,9 +694,6 @@ pageKey page =
         WorkspacePage wsId ->
             "workspace-" ++ wsId
 
-        MemoryGraphPage ->
-            "graph"
-
         AuditLogPage ->
             "audit"
 
@@ -722,9 +720,6 @@ viewPage model =
 
                 WorkspacePage wsId ->
                     Page.Workspace.viewWorkspacePage wsId model
-
-                MemoryGraphPage ->
-                    Feature.Graph.viewGraphPage model
 
                 AuditLogPage ->
                     Feature.AuditLog.viewAuditLogPage model

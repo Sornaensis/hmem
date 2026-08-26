@@ -3,17 +3,9 @@ module HMem.DB.Schema
     WorkspaceT(..)
   , workspaceSchema
 
-    -- * Memories
-  , MemoryT(..)
-  , memorySchema
-
-    -- * Memory tags
-  , MemoryTagT(..)
-  , memoryTagSchema
-
-    -- * Memory links
-  , MemoryLinkT(..)
-  , memoryLinkSchema
+    -- * Observations
+  , ObservationT(..)
+  , observationSchema
 
     -- * Projects
   , ProjectT(..)
@@ -27,26 +19,6 @@ module HMem.DB.Schema
   , TaskDependencyT(..)
   , taskDependencySchema
 
-    -- * Project ↔ memory links
-  , ProjectMemoryLinkT(..)
-  , projectMemoryLinkSchema
-
-    -- * Task ↔ memory links
-  , TaskMemoryLinkT(..)
-  , taskMemoryLinkSchema
-
-    -- * Cleanup policies
-  , CleanupPolicyT(..)
-  , cleanupPolicySchema
-
-    -- * Memory categories
-  , MemoryCategoryT(..)
-  , memoryCategorySchema
-
-    -- * Memory ↔ category links
-  , MemoryCategoryLinkT(..)
-  , memoryCategoryLinkSchema
-
     -- * Workspace groups
   , WorkspaceGroupT(..)
   , workspaceGroupSchema
@@ -59,10 +31,8 @@ module HMem.DB.Schema
   , activeSavedView
 
   , activeWorkspace
-  , activeMemory
   , activeProject
   , activeTask
-  , activeCategory
   , deletedNow
 
     -- * PostgreSQL full-text search types
@@ -73,14 +43,14 @@ module HMem.DB.Schema
 
 import Data.Aeson (Value)
 import Data.ByteString (ByteString)
-import Data.Int (Int16, Int32)
+import Data.Int (Int16)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import GHC.Generics (Generic)
 import Rel8
 
-import HMem.Types (MemoryType, ProjectStatus, TaskStatus, RelationType, WorkspaceType)
+import HMem.Types (ProjectStatus, TaskStatus, SubjectKind, WorkspaceType)
 
 ------------------------------------------------------------------------
 -- PostgreSQL full-text search types (opaque wrappers for Rel8)
@@ -154,97 +124,38 @@ workspaceSchema = TableSchema
   }
 
 ------------------------------------------------------------------------
--- Memories
+-- Observations
 ------------------------------------------------------------------------
 
-data MemoryT f = MemoryT
-  { memId             :: Column f UUID
-  , memWorkspaceId    :: Column f UUID
-  , memContent        :: Column f Text
-  , memSummary        :: Column f (Maybe Text)
-  , memMemoryType     :: Column f MemoryType
-  , memImportance     :: Column f Int16
-  , memMetadata       :: Column f Value
-  , memExpiresAt      :: Column f (Maybe UTCTime)
-  , memSource         :: Column f (Maybe Text)
-  , memConfidence     :: Column f Double
-  , memPinned         :: Column f Bool
-  , memLastAccessedAt :: Column f UTCTime
-  , memAccessCount    :: Column f Int32
-  , memFtsLanguage    :: Column f Text
-  , memSearchVector   :: Column f PgTSVector
-  , memDeletedAt      :: Column f (Maybe UTCTime)
-  , memCreatedAt      :: Column f UTCTime
-  , memUpdatedAt      :: Column f UTCTime
+-- The conditionally provisioned pgvector @embedding@ column is intentionally
+-- absent here.  Keeping the mandatory Rel8 shape portable lets all base
+-- operations work when pgvector is not installed.
+data ObservationT f = ObservationT
+  { obsId          :: Column f UUID
+  , obsWorkspaceId :: Column f UUID
+  , obsSubjectKind :: Column f SubjectKind
+  , obsSubject     :: Column f Text
+  , obsGitSha      :: Column f Text
+  , obsContent     :: Column f Text
+  , obsSearchVector :: Column f PgTSVector
+  , obsCreatedAt   :: Column f UTCTime
+  , obsUpdatedAt   :: Column f UTCTime
   } deriving stock Generic
     deriving anyclass Rel8able
 
-memorySchema :: TableSchema (MemoryT Name)
-memorySchema = TableSchema
-  { name    = "memories"
-  , columns = MemoryT
-      { memId             = "id"
-      , memWorkspaceId    = "workspace_id"
-      , memContent        = "content"
-      , memSummary        = "summary"
-      , memMemoryType     = "memory_type"
-      , memImportance     = "importance"
-      , memMetadata       = "metadata"
-      , memExpiresAt      = "expires_at"
-      , memSource         = "source"
-      , memConfidence     = "confidence"
-      , memPinned         = "pinned"
-      , memLastAccessedAt = "last_accessed_at"
-      , memAccessCount    = "access_count"
-      , memFtsLanguage    = "fts_language"
-      , memSearchVector   = "search_vector"
-        , memDeletedAt      = "deleted_at"
-      , memCreatedAt      = "created_at"
-      , memUpdatedAt      = "updated_at"
-      }
-  }
-
-------------------------------------------------------------------------
--- Memory tags
-------------------------------------------------------------------------
-
-data MemoryTagT f = MemoryTagT
-  { mtMemoryId :: Column f UUID
-  , mtTag      :: Column f Text
-  } deriving stock Generic
-    deriving anyclass Rel8able
-
-memoryTagSchema :: TableSchema (MemoryTagT Name)
-memoryTagSchema = TableSchema
-  { name    = "memory_tags"
-  , columns = MemoryTagT
-      { mtMemoryId = "memory_id"
-      , mtTag      = "tag"
-      }
-  }
-
-------------------------------------------------------------------------
--- Memory links
-------------------------------------------------------------------------
-
-data MemoryLinkT f = MemoryLinkT
-  { mlSourceId     :: Column f UUID
-  , mlTargetId     :: Column f UUID
-  , mlRelationType :: Column f RelationType
-  , mlStrength     :: Column f Double
-  , mlCreatedAt    :: Column f UTCTime
-  } deriving stock Generic
-    deriving anyclass Rel8able
-
-memoryLinkSchema :: TableSchema (MemoryLinkT Name)
-memoryLinkSchema = TableSchema
-  { name    = "memory_links"
-  , columns = MemoryLinkT
-      { mlSourceId     = "source_id"
-      , mlTargetId     = "target_id"
-      , mlRelationType = "relation_type"
-      , mlStrength     = "strength"
-      , mlCreatedAt    = "created_at"
+observationSchema :: TableSchema (ObservationT Name)
+observationSchema = TableSchema
+  { name = "observations"
+  , columns = ObservationT
+      { obsId           = "id"
+      , obsWorkspaceId  = "workspace_id"
+      , obsSubjectKind  = "subject_kind"
+      , obsSubject      = "subject"
+      , obsGitSha       = "git_sha"
+      , obsContent      = "content"
+      , obsSearchVector = "search_vector"
+      , obsCreatedAt    = "created_at"
+      , obsUpdatedAt    = "updated_at"
       }
   }
 
@@ -352,125 +263,6 @@ taskDependencySchema = TableSchema
   }
 
 ------------------------------------------------------------------------
--- Project ↔ memory links
-------------------------------------------------------------------------
-
-data ProjectMemoryLinkT f = ProjectMemoryLinkT
-  { pmlProjectId :: Column f UUID
-  , pmlMemoryId  :: Column f UUID
-  } deriving stock Generic
-    deriving anyclass Rel8able
-
-projectMemoryLinkSchema :: TableSchema (ProjectMemoryLinkT Name)
-projectMemoryLinkSchema = TableSchema
-  { name    = "project_memory_links"
-  , columns = ProjectMemoryLinkT
-      { pmlProjectId = "project_id"
-      , pmlMemoryId  = "memory_id"
-      }
-  }
-
-------------------------------------------------------------------------
--- Task ↔ memory links
-------------------------------------------------------------------------
-
-data TaskMemoryLinkT f = TaskMemoryLinkT
-  { tmlTaskId   :: Column f UUID
-  , tmlMemoryId :: Column f UUID
-  } deriving stock Generic
-    deriving anyclass Rel8able
-
-taskMemoryLinkSchema :: TableSchema (TaskMemoryLinkT Name)
-taskMemoryLinkSchema = TableSchema
-  { name    = "task_memory_links"
-  , columns = TaskMemoryLinkT
-      { tmlTaskId   = "task_id"
-      , tmlMemoryId = "memory_id"
-      }
-  }
-
-------------------------------------------------------------------------
--- Cleanup policies
-------------------------------------------------------------------------
-
-data CleanupPolicyT f = CleanupPolicyT
-  { cpId            :: Column f UUID
-  , cpWorkspaceId   :: Column f UUID
-  , cpMemoryType    :: Column f MemoryType
-  , cpMaxAgeHours   :: Column f (Maybe Int32)
-  , cpMaxCount      :: Column f (Maybe Int32)
-  , cpMinImportance :: Column f Int16
-  , cpEnabled       :: Column f Bool
-  , cpCreatedAt     :: Column f UTCTime
-  , cpUpdatedAt     :: Column f UTCTime
-  } deriving stock Generic
-    deriving anyclass Rel8able
-
-cleanupPolicySchema :: TableSchema (CleanupPolicyT Name)
-cleanupPolicySchema = TableSchema
-  { name    = "cleanup_policies"
-  , columns = CleanupPolicyT
-      { cpId            = "id"
-      , cpWorkspaceId   = "workspace_id"
-      , cpMemoryType    = "memory_type"
-      , cpMaxAgeHours   = "max_age_hours"
-      , cpMaxCount      = "max_count"
-      , cpMinImportance = "min_importance"
-      , cpEnabled       = "enabled"
-      , cpCreatedAt     = "created_at"
-      , cpUpdatedAt     = "updated_at"
-      }
-  }
-
-------------------------------------------------------------------------
--- Memory categories
-------------------------------------------------------------------------
-
-data MemoryCategoryT f = MemoryCategoryT
-  { mcId          :: Column f UUID
-  , mcWorkspaceId :: Column f (Maybe UUID)
-  , mcName        :: Column f Text
-  , mcDescription :: Column f (Maybe Text)
-  , mcParentId    :: Column f (Maybe UUID)
-  , mcDeletedAt   :: Column f (Maybe UTCTime)
-  , mcCreatedAt   :: Column f UTCTime
-  } deriving stock Generic
-    deriving anyclass Rel8able
-
-memoryCategorySchema :: TableSchema (MemoryCategoryT Name)
-memoryCategorySchema = TableSchema
-  { name    = "memory_categories"
-  , columns = MemoryCategoryT
-      { mcId          = "id"
-      , mcWorkspaceId = "workspace_id"
-      , mcName        = "name"
-      , mcDescription = "description"
-      , mcParentId    = "parent_id"
-        , mcDeletedAt   = "deleted_at"
-      , mcCreatedAt   = "created_at"
-      }
-  }
-
-------------------------------------------------------------------------
--- Memory ↔ category links
-------------------------------------------------------------------------
-
-data MemoryCategoryLinkT f = MemoryCategoryLinkT
-  { mclMemoryId   :: Column f UUID
-  , mclCategoryId :: Column f UUID
-  } deriving stock Generic
-    deriving anyclass Rel8able
-
-memoryCategoryLinkSchema :: TableSchema (MemoryCategoryLinkT Name)
-memoryCategoryLinkSchema = TableSchema
-  { name    = "memory_category_links"
-  , columns = MemoryCategoryLinkT
-      { mclMemoryId   = "memory_id"
-      , mclCategoryId = "category_id"
-      }
-  }
-
-------------------------------------------------------------------------
 -- Workspace groups
 ------------------------------------------------------------------------
 
@@ -556,17 +348,11 @@ savedViewSchema = TableSchema
 activeWorkspace :: WorkspaceT Expr -> Expr Bool
 activeWorkspace row = isNull row.wsDeletedAt
 
-activeMemory :: MemoryT Expr -> Expr Bool
-activeMemory row = isNull row.memDeletedAt
-
 activeProject :: ProjectT Expr -> Expr Bool
 activeProject row = isNull row.projDeletedAt
 
 activeTask :: TaskT Expr -> Expr Bool
 activeTask row = isNull row.taskDeletedAt
-
-activeCategory :: MemoryCategoryT Expr -> Expr Bool
-activeCategory row = isNull row.mcDeletedAt
 
 activeSavedView :: SavedViewT Expr -> Expr Bool
 activeSavedView row = isNull row.svDeletedAt

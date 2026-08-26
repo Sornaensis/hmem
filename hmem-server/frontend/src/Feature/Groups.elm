@@ -286,13 +286,7 @@ viewSidebar model =
             text ""
         , div [ class "sidebar-section" ]
             [ ul [ class "sidebar-nav" ]
-                [ li []
-                    [ a [ href "/memory-graph", class "sidebar-link" ]
-                        [ span [ class "sidebar-icon" ] [ text "◉" ]
-                        , text "Knowledge Graph"
-                        ]
-                    ]
-                , if Permissions.canViewGlobalAudit model then
+                [ if Permissions.canViewGlobalAudit model then
                     li []
                         [ a [ href "/audit", class "sidebar-link" ]
                             [ span [ class "sidebar-icon icon-audit" ] []

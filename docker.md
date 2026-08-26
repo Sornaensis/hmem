@@ -345,6 +345,10 @@ docker compose --profile admin run --rm migrate
 If migration validation fails, check the `postgres` and one-shot `migrate` logs
 before restarting the app.
 
+### V020 destructive migration warning
+
+**Back up before applying V020.** V020 permanently deletes all legacy Memory rows and their content-bearing audit history; it does not convert or export that data and cannot be rolled back. Schedule a change window, preserve any data you must retain outside hmem before the migration, and upgrade every REST, MCP, and web UI client first. Old Memory-era clients are incompatible with the Observation-only contract after V020.
+
 ## pgvector optionality
 
 The default `postgres:17-bookworm` image does not provide pgvector. hmem remains
@@ -359,9 +363,7 @@ first migration:
 POSTGRES_IMAGE=pgvector/pgvector:pg17
 ```
 
-Then run `docker compose up --build`. The initial migration creates the `vector`
-extension, `memories.embedding`, and the vector index only when the extension is
-available.
+Then run `docker compose up --build`. When pgvector is installed, V020 adds `observations.embedding` and its vector index; without the extension, neither is created.
 
 If you already initialized the database without pgvector, changing the postgres
 image later is not enough because the initial migration has already been marked

@@ -1,9 +1,8 @@
 module Feature.Focus exposing (auditReturnContext, buildProjectBreadcrumb, buildTaskBreadcrumb, clearReturnContext, focusReturnContextLabel, init, shouldShowReturnContext, timelineReturnContext, update, viewFocusBreadcrumbBar, viewTaskBreadcrumb)
 
 import Api
-import Browser.Navigation as Nav
 import Dict
-import Helpers exposing (buildFragment, replaceFragment)
+import Helpers exposing (buildFragment, pushUrl, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
@@ -157,6 +156,7 @@ update msg model =
                         , isSearching = False
                         , searchError = Nothing
                         , activeRequestQuery = Nothing
+                        , activeRequest = Nothing
                     }
 
                 newModel =
@@ -191,6 +191,7 @@ update msg model =
                         , isSearching = False
                         , searchError = Nothing
                         , activeRequestQuery = Nothing
+                        , activeRequest = Nothing
                     }
 
                 -- Only change what's focused, don't modify history
@@ -291,7 +292,7 @@ returnToTimelineSource context model =
             }
     in
     ( nextModel
-    , Nav.pushUrl model.key ("/workspace/" ++ context.workspaceId ++ "#" ++ buildFragment TimelineTab Nothing)
+    , pushUrl model.key ("/workspace/" ++ context.workspaceId ++ "#" ++ buildFragment TimelineTab Nothing Nothing)
     )
 
 
@@ -325,7 +326,7 @@ returnToWorkspaceAuditSource context model =
     in
     ( nextModel
     , Cmd.batch
-        [ Nav.pushUrl model.key ("/workspace/" ++ context.workspaceId ++ "#" ++ buildFragment AuditTab Nothing)
+        [ pushUrl model.key ("/workspace/" ++ context.workspaceId ++ "#" ++ buildFragment AuditTab Nothing Nothing)
         , Api.fetchAuditLog model.flags.apiUrl filters (GotAuditLog filters)
         ]
     )
@@ -334,7 +335,7 @@ returnToWorkspaceAuditSource context model =
 returnToGlobalAuditSource : Model -> ( Model, Cmd Msg )
 returnToGlobalAuditSource model =
     ( model
-    , Nav.pushUrl model.key "/audit"
+    , pushUrl model.key "/audit"
     )
 
 

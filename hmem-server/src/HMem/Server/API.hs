@@ -1,59 +1,50 @@
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
+-- | The public HTTP contract.  Observations are deliberately a small,
+-- repository-scoped immutable-provenance resource; the old memory graph and
+-- categorisation API is intentionally not represented here.
 module HMem.Server.API
   ( HMemAPI
+  , ObservationEmbedding(..)
   , server
-  , CreateMemoryRequest(..)
-  , CleanupRunReq(..)
-  , GroupMemberReq(..)
-  , CategoryLink(..)
   ) where
 
 import Control.Exception (try)
-import Control.Applicative ((<|>))
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON (..), ToJSON (..), genericToJSON, genericParseJSON, Value(..), object, (.=))
+import Data.Aeson (Value, object, (.=), ToJSON(..))
 import Data.Aeson qualified as Aeson
-import Data.Aeson.Key qualified as Aeson (fromText)
-import Data.Aeson.KeyMap qualified as KeyMap
+import Data.Aeson.Key qualified as AesonKey
+import Data.Aeson.KeyMap qualified as AesonKeyMap
 import Data.ByteString.Lazy.Char8 qualified as LBS8
-import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Pool (Pool, tryWithResource)
-import Data.String (fromString)
 import Data.Text (Text)
-import Data.Text qualified as T
-import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
+import Data.Text qualified as Text
+import Data.Time (UTCTime, getCurrentTime)
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
-import GHC.Generics (Generic)
 import Rel8 hiding (Delete)
-import Rel8 qualified (Delete(..))
 import Servant
 import System.IO (stderr)
 
+import HMem.Config qualified as Config
 import HMem.DB.Audit qualified as Audit
 import HMem.DB.Auth qualified as Auth
-import HMem.DB.Category qualified as Cat
-import HMem.DB.Cleanup qualified as Cleanup
-import HMem.DB.Memory qualified as Mem
+import HMem.DB.Observation qualified as Observation
 import HMem.DB.Overview qualified as Overview
-import HMem.DB.Pool (runSession, runTransaction, DBException(..), PoolMetrics(..), getPoolMetrics)
-import HMem.DB.Project qualified as Proj
-import HMem.DB.RequestContext (Principal(..), PrincipalAuthority(..), actorTypeToText, currentPrincipal, currentRequestId, withWorkspaceIdContext)
-import HMem.DB.SavedView qualified as SV
+import HMem.DB.Pool (DBException(..), PoolMetrics(..), getPoolMetrics, runSession)
+import HMem.DB.Project qualified as Project
+import HMem.DB.RequestContext (Principal(..), PrincipalAuthority(..), currentPrincipal, currentRequestId, actorTypeToText, withWorkspaceIdContext)
 import HMem.DB.Schema
 import HMem.DB.Search qualified as Search
 import HMem.DB.Task qualified as Task
-import HMem.DB.Timeline qualified as Timeline
-import HMem.DB.Workspace qualified as WorkspaceDB
-import HMem.DB.WorkspaceGroup qualified as WG
-import HMem.Config qualified as Config
-import HMem.Server.AccessTracker (AccessTracker, trackAccess, bufferSize)
+import HMem.DB.Workspace qualified as Workspace
+import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
+import HMem.Server.AccessTracker (AccessTracker, bufferSize)
 import HMem.Server.Event (Broadcast, ChangeEvent(..), ChangeType(..), EntityType(..))
 import HMem.Server.WebSocket qualified as WS
 import HMem.Types
@@ -63,2725 +54,519 @@ import HMem.Types
 ------------------------------------------------------------------------
 
 type HMemAPI = "api" :> "v1" :>
-  (    "health"      :> HealthAPI
-  :<|> "session"     :> SessionAPI
-  :<|> "ws-ticket"   :> WebSocketTicketAPI
-  :<|> "workspaces"  :> WorkspaceAPI
-  :<|> "memories"    :> MemoryAPI
-  :<|> "projects"    :> ProjectAPI
-  :<|> "tasks"       :> TaskAPI
-  :<|> "cleanup"     :> CleanupAPI
-  :<|> "categories"  :> CategoryAPI
-  :<|> "groups"      :> WorkspaceGroupAPI
-  :<|> "activity"    :> ActivityAPI
-  :<|> "saved-views" :> SavedViewAPI
-  :<|> "search"      :> SearchAPI
-  :<|> "audit"       :> AuditAPI
+  (    "health"       :> Get '[JSON] Value
+  :<|> "session"      :> QueryParam "workspace_id" UUID :> Get '[JSON] SessionContext
+  :<|> "workspaces"   :> WorkspaceAPI
+  :<|> "groups"       :> WorkspaceGroupAPI
+  :<|> "observations" :> ObservationAPI
+  :<|> "projects"     :> ProjectAPI
+  :<|> "tasks"        :> TaskAPI
+  :<|> "search"       :> ReqBody '[JSON] UnifiedSearchQuery :> Post '[JSON] UnifiedSearchResults
+  :<|> "audit"        :> AuditAPI
+  :<|> "ws-ticket"    :> ReqBody '[JSON] WebSocketTicketRequest :> Post '[JSON] WebSocketTicketResponse
   )
 
--- Health check
-type HealthAPI = Get '[JSON] Value
-
-type SessionAPI = QueryParam "workspace_id" UUID :> Get '[JSON] SessionContext
-
-type WebSocketTicketAPI = ReqBody '[JSON] WebSocketTicketRequest :> Post '[JSON] WebSocketTicketResponse
-
--- Workspaces
 type WorkspaceAPI =
-       QueryParam "limit" Int :> QueryParam "offset" Int
-         :> Get '[JSON] (PaginatedResult Workspace)
+       QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult Workspace)
   :<|> ReqBody '[JSON] CreateWorkspace :> Post '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> Get '[JSON] Workspace
-  :<|> Capture "workspaceId" UUID :> ReqBody '[JSON] UpdateWorkspace :> Put '[JSON] Workspace
-  :<|> Capture "workspaceId" UUID :> Delete '[JSON] NoContent
-  :<|> Capture "workspaceId" UUID :> "restore" :> Post '[JSON] NoContent
-  :<|> Capture "workspaceId" UUID :> "purge" :> Delete '[JSON] NoContent
-  :<|> Capture "workspaceId" UUID :> "memberships"
-         :> QueryParam "limit" Int :> QueryParam "offset" Int
-         :> Get '[JSON] (PaginatedResult Auth.WorkspaceMembership)
-  :<|> Capture "workspaceId" UUID :> "memberships"
-         :> ReqBody '[JSON] Auth.UpsertWorkspaceMembership
-         :> Post '[JSON] Auth.WorkspaceMembership
-  :<|> Capture "workspaceId" UUID :> "memberships" :> Capture "userId" UUID
-         :> Delete '[JSON] NoContent
-  :<|> Capture "workspaceId" UUID :> "card-hydration" :> Get '[JSON] WorkspaceCardHydration
-  :<|> Capture "workspaceId" UUID :> "timeline" :> "buckets"
-         :> QueryParam "since" UTCTime
-         :> QueryParam "until" UTCTime
-         :> QueryParam "bucket" Text
-         :> Get '[JSON] WorkspaceTimelineBucketsResponse
-  :<|> Capture "workspaceId" UUID :> "timeline"
-         :> QueryParam "entity_type" Text
-         :> QueryParam "event_type" Text
-         :> QueryParam "since" UTCTime
-         :> QueryParam "until" UTCTime
-         :> QueryParam "limit" Int
-         :> QueryParam "offset" Int
-         :> Get '[JSON] (PaginatedResult WorkspaceTimelineEvent)
 
--- Memories
-type MemoryAPI =
-       QueryParam "workspace_id" UUID
-         :> QueryParam "type" MemoryType
-         :> QueryParam "min_access_count" Int
-         :> QueryParam "sort_by" MemorySortBy
-         :> QueryParam "created_after" UTCTime
-         :> QueryParam "created_before" UTCTime
-         :> QueryParam "updated_after" UTCTime
-         :> QueryParam "updated_before" UTCTime
-         :> QueryParam "limit" Int
-          :> QueryParam "offset" Int
-          :> QueryParam "compact" Bool
-          :> Get '[JSON] (PaginatedResult Memory)
-  :<|> ReqBody '[JSON] CreateMemoryRequest :> Post '[JSON] Memory
-  :<|> "batch" :> ReqBody '[JSON] [CreateMemoryRequest] :> Post '[JSON] [Memory]
-  :<|> "search" :> QueryParam "compact" Bool :> ReqBody '[JSON] SearchQuery :> Post '[JSON] [Memory]
-  :<|> "contradictions" :> QueryParam "workspace_id" UUID :> Get '[JSON] [MemoryLink]
-  :<|> "by-relation" :> QueryParam "workspace_id" UUID
-         :> QueryParam "relation_type" RelationType :> Get '[JSON] [MemoryLink]
-  :<|> "workspace-links" :> QueryParam "workspace_id" UUID :> Get '[JSON] [MemoryLink]
-  :<|> Capture "memoryId" UUID :> Get '[JSON] Memory
-  :<|> Capture "memoryId" UUID :> ReqBody '[JSON] UpdateMemory :> Put '[JSON] Memory
-  :<|> Capture "memoryId" UUID :> Delete '[JSON] NoContent
-  :<|> Capture "memoryId" UUID :> "restore" :> Post '[JSON] NoContent
-  :<|> Capture "memoryId" UUID :> "purge" :> Delete '[JSON] NoContent
-  :<|> Capture "memoryId" UUID :> "links" :> Get '[JSON] [MemoryLink]
-  :<|> Capture "memoryId" UUID :> "links" :> ReqBody '[JSON] CreateMemoryLink
-         :> Post '[JSON] NoContent
-  :<|> Capture "memoryId" UUID :> "links" :> Capture "targetId" UUID
-         :> Capture "relationType" RelationType :> Delete '[JSON] NoContent
-  :<|> Capture "memoryId" UUID :> "tags" :> Get '[JSON] [Text]
-  :<|> Capture "memoryId" UUID :> "tags" :> ReqBody '[JSON] [Text]
-         :> Put '[JSON] NoContent
-  :<|> Capture "memoryId" UUID :> "graph" :> QueryParam "depth" Int
-         :> Get '[JSON] MemoryGraph
-  :<|> Capture "memoryId" UUID :> "importance" :> ReqBody '[JSON] AdjustImportance
-         :> Put '[JSON] Memory
-  :<|> Capture "memoryId" UUID :> "pin" :> Post '[JSON] Memory
-  :<|> Capture "memoryId" UUID :> "unpin" :> Post '[JSON] Memory
-  :<|> "similar" :> ReqBody '[JSON] SimilarQuery :> Post '[JSON] [SimilarMemory]
-  :<|> Capture "memoryId" UUID :> "embedding" :> ReqBody '[JSON] [Double]
-         :> Put '[JSON] NoContent
-  :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
-  :<|> "batch-set-tags" :> ReqBody '[JSON] BatchSetTagsRequest :> Post '[JSON] BatchResult
-  :<|> "batch-update" :> ReqBody '[JSON] BatchUpdateMemoryRequest :> Post '[JSON] BatchResult
+type WorkspaceGroupAPI =
+       QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult WorkspaceGroup)
+  :<|> ReqBody '[JSON] CreateWorkspaceGroup :> Post '[JSON] WorkspaceGroup
+  :<|> Capture "groupId" UUID :> Get '[JSON] WorkspaceGroup
+  :<|> Capture "groupId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "groupId" UUID :> "members" :> Get '[JSON] [UUID]
+  :<|> Capture "groupId" UUID :> "members" :> ReqBody '[JSON] WorkspaceGroupMemberInput :> Post '[JSON] NoContent
+  :<|> Capture "groupId" UUID :> "members" :> Capture "workspaceId" UUID :> Delete '[JSON] NoContent
 
--- Projects
-type ProjectAPI =
-       QueryParam "workspace_id" UUID
-         :> QueryParam "status" ProjectStatus
+type ObservationAPI =
+       QueryParam' '[Required] "workspace_id" UUID
+         :> QueryParam "subject_kind" SubjectKind
+         :> QueryParam "subject" Text
+         :> QueryParam "git_sha" Text
          :> QueryParam "query" Text
-         :> QueryParam "search_language" Text
-         :> QueryParam "created_after" UTCTime
-         :> QueryParam "created_before" UTCTime
-         :> QueryParam "updated_after" UTCTime
-         :> QueryParam "updated_before" UTCTime
-         :> QueryParam "limit" Int
-         :> QueryParam "offset" Int
-         :> Get '[JSON] (PaginatedResult Project)
+         :> QueryParam "limit" Int :> QueryParam "offset" Int
+         :> Get '[JSON] (PaginatedResult Observation)
+  :<|> ReqBody '[JSON] CreateObservation :> Post '[JSON] Observation
+  :<|> "similar" :> ReqBody '[JSON] SimilarObservationQuery :> Post '[JSON] [SimilarObservation]
+  :<|> Capture "observationId" UUID :> Get '[JSON] Observation
+  :<|> Capture "observationId" UUID :> ReqBody '[JSON] UpdateObservation :> Put '[JSON] Observation
+  :<|> Capture "observationId" UUID :> Delete '[JSON] NoContent
+  :<|> Capture "observationId" UUID :> "embedding" :> ReqBody '[JSON] ObservationEmbedding :> Put '[JSON] NoContent
+
+type ProjectAPI =
+       QueryParam "workspace_id" UUID :> QueryParam "status" ProjectStatus :> QueryParam "query" Text
+         :> QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult Project)
   :<|> ReqBody '[JSON] CreateProject :> Post '[JSON] Project
   :<|> Capture "projectId" UUID :> Get '[JSON] Project
   :<|> Capture "projectId" UUID :> ReqBody '[JSON] UpdateProject :> Put '[JSON] Project
   :<|> Capture "projectId" UUID :> Delete '[JSON] CascadeResult
-    :<|> Capture "projectId" UUID :> "restore" :> Post '[JSON] NoContent
-  :<|> Capture "projectId" UUID :> "purge" :> Delete '[JSON] CascadeResult
-  :<|> Capture "projectId" UUID :> "memories" :> ReqBody '[JSON] LinkMemory
-         :> Post '[JSON] NoContent
-  :<|> Capture "projectId" UUID :> "memories" :> Capture "memoryId" UUID
-         :> Delete '[JSON] NoContent
-  :<|> Capture "projectId" UUID :> "memories"
-         :> QueryParam "query" Text
-         :> QueryParams "tag" Text
-         :> QueryParam "min_importance" Int
-         :> QueryParam "memory_type" MemoryType
-         :> QueryParam "min_access_count" Int
-         :> Get '[JSON] [Memory]
-  :<|> Capture "projectId" UUID :> "memories" :> "batch"
-         :> ReqBody '[JSON] BatchMemoryLinkRequest :> Post '[JSON] BatchResult
-    :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
-    :<|> "batch-update" :> ReqBody '[JSON] BatchUpdateProjectRequest :> Post '[JSON] BatchResult
-  :<|> Capture "projectId" UUID :> "overview" :> QueryParam "extra_context" Bool :> Get '[JSON] ProjectOverview
-  :<|> Capture "projectId" UUID :> "next-tasks"
-       :> QueryParam "limit" Int
-       :> QueryParam "include_blocked" Bool
-       :> Get '[JSON] [NextTaskCandidate]
+  :<|> Capture "projectId" UUID :> "overview" :> Get '[JSON] ProjectOverview
+  :<|> Capture "projectId" UUID :> "next-tasks" :> QueryParam "limit" Int :> QueryParam "include_blocked" Bool :> Get '[JSON] [NextTaskCandidate]
+
 type TaskAPI =
-       QueryParam "workspace_id" UUID
-         :> QueryParam "project_id" UUID
-         :> QueryParam "status" TaskStatus
-         :> QueryParam "priority" Int
-         :> QueryParam "query" Text
-         :> QueryParam "search_language" Text
-         :> QueryParam "created_after" UTCTime
-         :> QueryParam "created_before" UTCTime
-         :> QueryParam "updated_after" UTCTime
-         :> QueryParam "updated_before" UTCTime
-         :> QueryParam "limit" Int
-         :> QueryParam "offset" Int
+       QueryParam "workspace_id" UUID :> QueryParam "project_id" UUID :> QueryParam "status" TaskStatus
+         :> QueryParam "priority" Int :> QueryParam "query" Text :> QueryParam "limit" Int :> QueryParam "offset" Int
          :> Get '[JSON] (PaginatedResult Task)
   :<|> ReqBody '[JSON] CreateTask :> Post '[JSON] Task
   :<|> Capture "taskId" UUID :> Get '[JSON] Task
   :<|> Capture "taskId" UUID :> ReqBody '[JSON] UpdateTask :> Put '[JSON] TaskMutationResult
   :<|> Capture "taskId" UUID :> Delete '[JSON] CascadeResult
-  :<|> Capture "taskId" UUID :> "restore" :> Post '[JSON] NoContent
-  :<|> Capture "taskId" UUID :> "purge" :> Delete '[JSON] CascadeResult
-  :<|> Capture "taskId" UUID :> "memories" :> ReqBody '[JSON] LinkMemory
-         :> Post '[JSON] NoContent
-  :<|> Capture "taskId" UUID :> "memories" :> Capture "memoryId" UUID
-         :> Delete '[JSON] NoContent
-  :<|> Capture "taskId" UUID :> "dependencies" :> ReqBody '[JSON] LinkDependency
-         :> Post '[JSON] DependencyMutationResult
-  :<|> Capture "taskId" UUID :> "dependencies" :> Capture "dependsOnId" UUID
-         :> Delete '[JSON] DependencyMutationResult
-  :<|> Capture "taskId" UUID :> "memories"
-         :> QueryParam "query" Text
-         :> QueryParams "tag" Text
-         :> QueryParam "min_importance" Int
-         :> QueryParam "memory_type" MemoryType
-         :> QueryParam "min_access_count" Int
-         :> Get '[JSON] [Memory]
-    :<|> Capture "taskId" UUID :> "overview"
-      :> QueryParam "extra_context" Bool :> Get '[JSON] TaskOverview
-  :<|> Capture "taskId" UUID :> "context"
-      :> QueryParam "detail_level" ContextDetailLevel :> Get '[JSON] ContextInfo
-  :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
-  :<|> "batch-move" :> ReqBody '[JSON] BatchMoveTasksRequest :> Post '[JSON] BatchResult
-  :<|> "batch-update" :> ReqBody '[JSON] BatchUpdateTaskRequest :> Post '[JSON] BatchResult
-  :<|> Capture "taskId" UUID :> "memories" :> "batch"
-         :> ReqBody '[JSON] BatchMemoryLinkRequest :> Post '[JSON] BatchResult
-type CleanupAPI =
-       "run" :> ReqBody '[JSON] CleanupRunReq :> Post '[JSON] CleanupResult
-  :<|> "policies" :> QueryParam "workspace_id" UUID
-         :> QueryParam "limit" Int :> QueryParam "offset" Int
-         :> Get '[JSON] (PaginatedResult CleanupPolicy)
-  :<|> "policies" :> ReqBody '[JSON] UpsertCleanupPolicy :> Post '[JSON] CleanupPolicy
+  :<|> Capture "taskId" UUID :> "overview" :> Get '[JSON] TaskOverview
 
--- Small request body for cleanup/run
-newtype CleanupRunReq = CleanupRunReq { workspaceId :: UUID }
-  deriving (Show, Eq, Generic)
-
-instance ToJSON CleanupRunReq where
-  toJSON = genericToJSON jsonOptions
-instance FromJSON CleanupRunReq where
-  parseJSON = genericParseJSON jsonOptions
-
--- Categories
-type CategoryAPI =
-       QueryParam "workspace_id" UUID
-         :> QueryParam "limit" Int :> QueryParam "offset" Int
-         :> Get '[JSON] (PaginatedResult MemoryCategory)
-  :<|> "global" :> QueryParam "limit" Int :> QueryParam "offset" Int
-         :> Get '[JSON] (PaginatedResult MemoryCategory)
-  :<|> ReqBody '[JSON] CreateMemoryCategory :> Post '[JSON] MemoryCategory
-  :<|> Capture "categoryId" UUID :> Get '[JSON] MemoryCategory
-  :<|> Capture "categoryId" UUID :> ReqBody '[JSON] UpdateMemoryCategory
-         :> Put '[JSON] MemoryCategory
-  :<|> Capture "categoryId" UUID :> Delete '[JSON] NoContent
-    :<|> Capture "categoryId" UUID :> "restore" :> Post '[JSON] NoContent
-    :<|> Capture "categoryId" UUID :> "purge" :> Delete '[JSON] NoContent
-    :<|> Capture "categoryId" UUID :> "memories" :> Get '[JSON] [Memory]
-    :<|> Capture "categoryId" UUID :> "memories" :> "batch"
-      :> ReqBody '[JSON] BatchMemoryLinkRequest :> Post '[JSON] BatchResult
-    :<|> "batch-delete" :> ReqBody '[JSON] BatchDeleteRequest :> Post '[JSON] BatchResult
-  :<|> "link" :> ReqBody '[JSON] CategoryLink :> Post '[JSON] NoContent
-  :<|> "unlink" :> ReqBody '[JSON] CategoryLink :> Post '[JSON] NoContent
-
--- Workspace Groups
-type WorkspaceGroupAPI =
-       QueryParam "limit" Int :> QueryParam "offset" Int
-         :> Get '[JSON] (PaginatedResult WorkspaceGroup)
-  :<|> ReqBody '[JSON] CreateWorkspaceGroup :> Post '[JSON] WorkspaceGroup
-  :<|> Capture "groupId" UUID :> Get '[JSON] WorkspaceGroup
-  :<|> Capture "groupId" UUID :> Delete '[JSON] NoContent
-  :<|> Capture "groupId" UUID :> "members" :> ReqBody '[JSON] GroupMemberReq
-         :> Post '[JSON] NoContent
-  :<|> Capture "groupId" UUID :> "members" :> Capture "workspaceId" UUID
-         :> Delete '[JSON] NoContent
-  :<|> Capture "groupId" UUID :> "members" :> Get '[JSON] [UUID]
-
--- Activity timeline
-type ActivityAPI =
-       QueryParam "workspace_id" UUID
-         :> QueryParam "entity_type" Text
-         :> QueryParam "limit" Int
-         :> Get '[JSON] (PaginatedResult ActivityEvent)
-
--- Saved views
-type SavedViewAPI =
-       QueryParam "workspace_id" UUID
-         :> QueryParam "limit" Int
-         :> QueryParam "offset" Int
-         :> Get '[JSON] (PaginatedResult SavedView)
-  :<|> ReqBody '[JSON] CreateSavedView :> Post '[JSON] SavedView
-  :<|> Capture "viewId" UUID :> Get '[JSON] SavedView
-  :<|> Capture "viewId" UUID :> ReqBody '[JSON] UpdateSavedView :> Put '[JSON] SavedView
-  :<|> Capture "viewId" UUID :> Delete '[JSON] NoContent
-  :<|> Capture "viewId" UUID :> "restore" :> Post '[JSON] NoContent
-  :<|> Capture "viewId" UUID :> "purge" :> Delete '[JSON] NoContent
-  :<|> Capture "viewId" UUID :> "execute"
-         :> QueryParam "limit" Int :> QueryParam "offset" Int :> QueryParam "detail" Bool
-         :> Post '[JSON] Value
-
--- Unified search
-type SearchAPI =
-  ReqBody '[JSON] UnifiedSearchQuery :> Post '[JSON] UnifiedSearchResults
-
--- Audit log
 type AuditAPI =
-       QueryParam "workspace_id" UUID
-          :> QueryParam "entity_type" Text
-          :> QueryParam "entity_id" Text
-         :> QueryParam "action" AuditAction
-         :> QueryParam "since" UTCTime
-         :> QueryParam "until" UTCTime
-         :> QueryParam "limit" Int
-         :> QueryParam "offset" Int
-         :> Get '[JSON] (PaginatedResult AuditLogEntry)
+       QueryParam "workspace_id" UUID :> QueryParam "entity_type" Text :> QueryParam "entity_id" Text
+         :> QueryParam "action" AuditAction :> QueryParam "since" UTCTime :> QueryParam "until" UTCTime
+         :> QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult AuditLogEntry)
   :<|> Capture "auditId" UUID :> "revert" :> Post '[JSON] RevertResult
   :<|> Capture "auditId" UUID :> Get '[JSON] AuditLogEntry
 
--- Request body for group member operations
-newtype GroupMemberReq = GroupMemberReq { workspaceId :: UUID }
-  deriving (Show, Eq, Generic)
-
-instance ToJSON GroupMemberReq where
-  toJSON = genericToJSON jsonOptions
-instance FromJSON GroupMemberReq where
-  parseJSON = genericParseJSON jsonOptions
-
--- Request body for category ↔ memory linking
-data CategoryLink = CategoryLink
-  { memoryId   :: UUID
-  , categoryId :: UUID
-  } deriving (Show, Eq, Generic)
-
-instance ToJSON CategoryLink where
-  toJSON = genericToJSON jsonOptions
-instance FromJSON CategoryLink where
-  parseJSON = genericParseJSON jsonOptions
-
--- Request body wrapper for memory creation.  The handler parses the raw JSON so
--- missing/invalid memory_type can be returned as the same structured validation
--- error body as semantic request validation, rather than Servant's plain-text
--- JSON parse failure.
-newtype CreateMemoryRequest = CreateMemoryRequest { createMemoryRequestValue :: Value }
-  deriving (Show, Eq, Generic)
-
-instance ToJSON CreateMemoryRequest where
-  toJSON (CreateMemoryRequest value) = value
-instance FromJSON CreateMemoryRequest where
-  parseJSON = pure . CreateMemoryRequest
-
-------------------------------------------------------------------------
--- Servant FromHttpApiData instances for query params
-------------------------------------------------------------------------
-
-instance FromHttpApiData MemoryType where
-  parseQueryParam "short_term" = Right ShortTerm
-  parseQueryParam "long_term"  = Right LongTerm
-  parseQueryParam t            = Left ("Invalid memory type: " <> t)
-
-instance FromHttpApiData MemorySortBy where
-  parseQueryParam "recent"       = Right SortRecent
-  parseQueryParam "importance"   = Right SortImportance
-  parseQueryParam "access_count" = Right SortAccessCount
-  parseQueryParam t              = Left ("Invalid memory sort: " <> t)
-
+instance FromHttpApiData SubjectKind where
+  parseQueryParam value = maybe (Left "subject_kind must be file or glob") Right (subjectKindFromText value)
 instance FromHttpApiData ProjectStatus where
-  parseQueryParam "active"    = Right ProjActive
-  parseQueryParam "paused"    = Right ProjPaused
-  parseQueryParam "completed" = Right ProjCompleted
-  parseQueryParam "archived"  = Right ProjArchived
-  parseQueryParam t           = Left ("Invalid project status: " <> t)
-
+  parseQueryParam value = maybe (Left "invalid project status") Right (projectStatusFromText value)
 instance FromHttpApiData TaskStatus where
-  parseQueryParam "todo"        = Right Todo
-  parseQueryParam "in_progress" = Right InProgress
-  parseQueryParam "blocked"     = Right Blocked
-  parseQueryParam "done"        = Right Done
-  parseQueryParam "cancelled"   = Right Cancelled
-  parseQueryParam t             = Left ("Invalid task status: " <> t)
-
-instance FromHttpApiData RelationType where
-  parseQueryParam "related"        = Right Related
-  parseQueryParam "supersedes"     = Right Supersedes
-  parseQueryParam "contradicts"    = Right Contradicts
-  parseQueryParam "elaborates"     = Right Elaborates
-  parseQueryParam "inspires"       = Right Inspires
-  parseQueryParam "depends_on"     = Right DependsOn
-  parseQueryParam "derived_from"   = Right DerivedFrom
-  parseQueryParam "alternative_to" = Right AlternativeTo
-  parseQueryParam t                = Left ("Invalid relation type: " <> t)
-
-instance FromHttpApiData WorkspaceType where
-  parseQueryParam "repository"   = Right WsRepository
-  parseQueryParam "planning"     = Right WsPlanning
-  parseQueryParam "personal"     = Right WsPersonal
-  parseQueryParam "organization" = Right WsOrganization
-  parseQueryParam t              = Left ("Invalid workspace type: " <> t)
-
-instance FromHttpApiData ContextDetailLevel where
-  parseQueryParam "light"  = Right ContextLight
-  parseQueryParam "medium" = Right ContextMedium
-  parseQueryParam "heavy"  = Right ContextHeavy
-  parseQueryParam t        = Left ("Invalid detail level: " <> t <> " (expected light, medium, or heavy)")
-
+  parseQueryParam value = maybe (Left "invalid task status") Right (taskStatusFromText value)
 instance FromHttpApiData AuditAction where
-  parseQueryParam "create" = Right AuditCreate
-  parseQueryParam "update" = Right AuditUpdate
-  parseQueryParam "delete" = Right AuditDelete
-  parseQueryParam t        = Left ("Invalid audit action: " <> t <> " (expected create, update, or delete)")
+  parseQueryParam value = maybe (Left "invalid audit action") Right (auditActionFromText value)
 
 ------------------------------------------------------------------------
--- Structured error handling
+-- Shared helpers
 ------------------------------------------------------------------------
 
--- | Run a database action, catching 'DBException' and mapping to
--- appropriate HTTP status codes with structured JSON error bodies.
 handleDBErrors :: IO a -> Handler a
-handleDBErrors io = do
-  result <- liftIO (try io)
+handleDBErrors action = do
+  result <- liftIO (try action)
   case result of
-    Right a -> pure a
-    Left dbErr -> do
-      liftIO $ logDatabaseError dbErr
-      throwError (dbExceptionToServerError dbErr)
-  where
-    errorBody :: Text -> Text -> Value
-    errorBody errType msg = object
-      [ "error"   .= errType
-      , "message" .= msg
-      ]
+    Right value -> pure value
+    Left exception -> do
+      liftIO $ LBS8.hPutStrLn stderr (Aeson.encode $ object ["level" .= ("error" :: Text), "error" .= show (exception :: DBException)])
+      throwError $ case exception of
+        DBUniqueViolation{} -> badRequest "conflict" "Resource already exists"
+        DBForeignKeyViolation{} -> badRequest "invalid_reference" "Referenced resource does not exist"
+        DBCheckViolation{} -> badRequest "invalid_request" "Request violates a data constraint"
+        DBCapabilityUnavailable{} -> err503 { errBody = Aeson.encode (object ["error" .= ("capability_unavailable" :: Text), "message" .= ("pgvector embedding support is unavailable" :: Text)]) }
+        DBStatementTimeout -> err504 { errBody = Aeson.encode (object ["error" .= ("timeout" :: Text)]) }
+        _ -> err500 { errBody = Aeson.encode (object ["error" .= ("internal" :: Text)]) }
 
-    dbExceptionToServerError :: DBException -> ServerError
-    dbExceptionToServerError = \case
-      DBUniqueViolation _ -> err409
-        { errBody = Aeson.encode $ errorBody "conflict" "Resource already exists" }
-      DBForeignKeyViolation _ -> err400
-        { errBody = Aeson.encode $ errorBody "invalid_reference" "Referenced resource does not exist" }
-      DBCheckViolation _ -> err400
-        { errBody = Aeson.encode $ errorBody "invalid_request" "Request violates a data constraint" }
-      DBCycleDetected _ -> err409
-        { errBody = Aeson.encode $ errorBody "cycle" "Operation would create a cycle" }
-      DBLifecycleViolation code msg detail hint -> err409
-        { errBody = Aeson.encode $ structuredErrorBody "lifecycle_conflict" code msg detail hint }
-      DBWorkflowViolation code msg detail hint -> err409
-        { errBody = Aeson.encode $ structuredErrorBody "workflow_conflict" code msg detail hint }
-      DBStatementTimeout -> err504
-        { errBody = Aeson.encode $ errorBody "timeout" "Database request timed out" }
-      DBOtherError _ -> err500
-        { errBody = Aeson.encode $ errorBody "internal" "Internal database error" }
+badRequest :: Text -> Text -> ServerError
+badRequest kind message = err400 { errBody = Aeson.encode (object ["error" .= kind, "message" .= message]) }
 
-    structuredErrorBody :: Text -> Text -> Text -> Maybe Text -> Maybe Text -> Value
-    structuredErrorBody errType code msg detail hint = object $
-      [ "error" .= errType
-      , "code" .= code
-      , "message" .= msg
-      ]
-      ++ [ "detail" .= decodeDetail d | Just d <- [detail] ]
-      ++ [ "hint" .= h | Just h <- [hint] ]
-      ++ [ "required_action" .= h | Just h <- [hint] ]
+reject :: [Text] -> Handler ()
+reject [] = pure ()
+reject errors = throwError $ badRequest "validation_error" (fromMaybe "Invalid request" (safeHead errors))
+  where safeHead [] = Nothing; safeHead (x:_) = Just x
 
-    decodeDetail :: Text -> Value
-    decodeDetail detailText = fromMaybe (String detailText) $
-      Aeson.decode @Value (LBS8.pack (T.unpack detailText))
+requireSuperadmin :: Pool Hasql.Connection -> Handler ()
+requireSuperadmin pool = do
+  principal <- liftIO currentPrincipal
+  allowed <- liftIO $ Auth.authorizeGlobal pool principal Auth.GlobalSuperadmin
+  either (throwError . authError) pure allowed
 
-logDatabaseError :: DBException -> IO ()
-logDatabaseError dbErr = do
-  requestId <- currentRequestId
-  LBS8.hPutStrLn stderr $ Aeson.encode $ object $
-    [ "level" .= ("error" :: Text)
-    , "event" .= ("db_error" :: Text)
-    , "error" .= dbErrorLabel dbErr
-    ]
-    ++ [ "request_id" .= rid | Just rid <- [requestId] ]
-    ++ [ "detail" .= detail | Just detail <- [dbErrorDetail dbErr] ]
-
-dbErrorLabel :: DBException -> Text
-dbErrorLabel = \case
-  DBUniqueViolation _ -> "unique_violation"
-  DBForeignKeyViolation _ -> "foreign_key_violation"
-  DBCheckViolation _ -> "check_violation"
-  DBCycleDetected _ -> "cycle_detected"
-  DBLifecycleViolation code _ _ _ -> "lifecycle_violation:" <> code
-  DBWorkflowViolation code _ _ _ -> "workflow_violation:" <> code
-  DBStatementTimeout -> "statement_timeout"
-  DBOtherError _ -> "other_error"
-
-dbErrorDetail :: DBException -> Maybe Text
-dbErrorDetail = \case
-  DBUniqueViolation detail -> Just detail
-  DBForeignKeyViolation detail -> Just detail
-  DBCheckViolation detail -> Just detail
-  DBCycleDetected detail -> Just detail
-  DBLifecycleViolation code msg detail hint -> Just $ T.intercalate " | " $
-    [ "code=" <> code, "message=" <> msg ]
-    ++ [ "detail=" <> d | Just d <- [detail] ]
-    ++ [ "hint=" <> h | Just h <- [hint] ]
-  DBWorkflowViolation code msg detail hint -> Just $ T.intercalate " | " $
-    [ "code=" <> code, "message=" <> msg ]
-    ++ [ "detail=" <> d | Just d <- [detail] ]
-    ++ [ "hint=" <> h | Just h <- [hint] ]
-  DBStatementTimeout -> Nothing
-  DBOtherError detail -> Just detail
-
-handleDBErrorsInWorkspace :: UUID -> IO a -> Handler a
-handleDBErrorsInWorkspace wsId io = handleDBErrors (withWorkspaceIdContext (Just wsId) io)
-
-requireGlobalPermissionH :: Pool Hasql.Connection -> Auth.GlobalPermission -> Handler ()
-requireGlobalPermissionH pool permission = do
-  mPrincipal <- liftIO currentPrincipal
-  result <- liftIO $ Auth.authorizeGlobal pool mPrincipal permission
-  either (throwError . authErrorToServerError) pure result
-
-requireAuthenticatedH :: Handler ()
-requireAuthenticatedH = do
-  mPrincipal <- liftIO currentPrincipal
-  case mPrincipal of
-    Just _  -> pure ()
-    Nothing -> throwError (authErrorToServerError Auth.MissingPrincipal)
-
-requireWorkspaceRoleH :: Pool Hasql.Connection -> UUID -> Auth.WorkspaceRole -> Handler ()
-requireWorkspaceRoleH pool wsId role = do
-  mPrincipal <- liftIO currentPrincipal
-  result <- liftIO $ Auth.authorizeWorkspace pool mPrincipal wsId role
-  either (throwError . authErrorToServerError) pure result
-
-requireActiveWorkspaceH :: Pool Hasql.Connection -> UUID -> Handler ()
-requireActiveWorkspaceH pool wsId = do
+requireWorkspace :: Pool Hasql.Connection -> UUID -> Auth.WorkspaceRole -> Handler ()
+requireWorkspace pool workspaceId role = do
+  principal <- liftIO currentPrincipal
+  authorized <- liftIO $ Auth.authorizeWorkspace pool principal workspaceId role
+  either (throwError . authError) pure authorized
   rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
     row <- each workspaceSchema
-    where_ $ row.wsId ==. lit wsId
+    where_ $ row.wsId ==. lit workspaceId
     where_ $ activeWorkspace row
     pure row.wsId
-  case rows of
-    (_:_) -> pure ()
-    []    -> throwError err404
+  case rows of [] -> throwError err404; _ -> pure ()
 
-requireEntityRoleH :: Pool Hasql.Connection -> Auth.EntityKind -> UUID -> Auth.WorkspaceRole -> Handler Auth.EntityScope
-requireEntityRoleH pool kind entityId role = do
-  scopeResult <- liftIO $ Auth.resolveEntityScopeRequired pool kind entityId
-  scope <- either (throwError . authErrorToServerError) pure scopeResult
-  mPrincipal <- liftIO currentPrincipal
-  authResult <- liftIO $ Auth.authorizeScope pool mPrincipal scope role
-  either (throwError . authErrorToServerError) (const $ pure scope) authResult
+-- | Observation operations are valid only while their repository workspace is
+-- active.  This is intentionally stricter than generic workspace auth.
+requireObservationWorkspace :: Pool Hasql.Connection -> UUID -> Auth.WorkspaceRole -> Handler ()
+requireObservationWorkspace pool workspaceId role = do
+  requireWorkspace pool workspaceId role
+  rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
+    row <- each workspaceSchema
+    where_ $ row.wsId ==. lit workspaceId
+    where_ $ row.wsType ==. lit WsRepository
+    where_ $ activeWorkspace row
+    pure row.wsId
+  case rows of [] -> throwError err404; _ -> pure ()
 
-requireOptionalWorkspaceRoleH :: Pool Hasql.Connection -> Maybe UUID -> Auth.WorkspaceRole -> Handler ()
-requireOptionalWorkspaceRoleH pool mWsId role = case mWsId of
-  Just wsId -> requireWorkspaceRoleH pool wsId role
-  Nothing   -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
+requireEntity :: Pool Hasql.Connection -> Auth.EntityKind -> UUID -> Auth.WorkspaceRole -> Handler UUID
+requireEntity pool kind entityId role = do
+  resolved <- liftIO $ Auth.resolveEntityScopeRequired pool kind entityId
+  scope <- either (throwError . authError) pure resolved
+  principal <- liftIO currentPrincipal
+  allowed <- liftIO $ Auth.authorizeScope pool principal scope role
+  either (throwError . authError) pure allowed
+  case scope of Auth.EntityWorkspaceScope workspaceId -> pure workspaceId; Auth.EntityGlobalScope -> throwError err404
 
-authErrorToServerError :: Auth.AuthorizationError -> ServerError
-authErrorToServerError = \case
+authError :: Auth.AuthorizationError -> ServerError
+authError = \case
   Auth.MissingPrincipal -> err401
-    { errBody = Aeson.encode $ authErrorBody "unauthorized" "Authentication is required" }
   Auth.EntityScopeNotFound{} -> err404
-  Auth.MissingGlobalPermission{} -> forbidden "forbidden" "Insufficient global permissions"
-  Auth.MissingWorkspaceRole{} -> forbidden "forbidden" "Insufficient workspace role"
-  Auth.GlobalScopeRequiresSuperadmin -> forbidden "forbidden" "Superadmin permission is required for global scope"
-  where
-    forbidden errType msg = err403 { errBody = Aeson.encode $ authErrorBody errType msg }
+  _ -> err403
 
-    authErrorBody errType msg = object
-      [ "error" .= (errType :: Text)
-      , "message" .= (msg :: Text)
-      ]
+emit :: Maybe UUID -> Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
+emit workspaceId broadcast change entity entityId payload = liftIO $ do
+  now <- getCurrentTime
+  requestId <- currentRequestId
+  principal <- currentPrincipal
+  broadcast ChangeEvent
+    { changeType = change, entityType = entity, entityId = entityId, workspaceId = workspaceId
+    , timestamp = now, requestId = requestId
+    , actorType = fmap (\(p :: Principal) -> actorTypeToText p.actorType) principal
+    , actorId = fmap (\(p :: Principal) -> p.actorId) principal
+    , actorLabel = fmap (\(p :: Principal) -> p.actorLabel) principal, payload = payload }
 
-requireSameWorkspaceScopesH :: Auth.EntityScope -> Auth.EntityScope -> Handler UUID
-requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope left) (Auth.EntityWorkspaceScope right)
-  | left == right = pure left
-  | otherwise = throwError crossWorkspaceRelationshipError
-requireSameWorkspaceScopesH _ _ = throwError crossWorkspaceRelationshipError
-
-crossWorkspaceRelationshipError :: ServerError
-crossWorkspaceRelationshipError = err400
-  { errBody = Aeson.encode $ object
-      [ "error" .= ("cross_workspace_relationship" :: Text)
-      , "message" .= ("Relationship endpoints require all participating resources to belong to the same workspace" :: Text)
-      ]
-  }
-
-purgeConflict :: ServerError
-purgeConflict = err409
-  { errBody = Aeson.encode $ object
-      [ "error" .= ("conflict" :: Text)
-      , "message" .= ("Resource must be soft-deleted before purge" :: Text)
-      ]
-  }
+page :: Maybe Int -> Maybe Int -> (Int, Int)
+page = capPagination
 
 ------------------------------------------------------------------------
--- Server implementation
+-- Handlers
 ------------------------------------------------------------------------
 
 server :: Config.AuthConfig -> Pool Hasql.Connection -> AccessTracker -> Broadcast -> WS.WSState -> Bool -> Server HMemAPI
-server authCfg pool tracker bc wsState pgvec =
-       healthHandler pool tracker
-  :<|> sessionHandler authCfg pool
-  :<|> webSocketTicketHandler pool wsState
-  :<|> workspaceHandlers pool bc
-  :<|> memoryHandlers pool tracker bc pgvec
-  :<|> projectHandlers pool bc
-  :<|> taskHandlers pool bc
-  :<|> cleanupHandlers pool bc
-  :<|> categoryHandlers pool bc
-  :<|> workspaceGroupHandlers pool bc
-  :<|> activityHandlers pool
-  :<|> savedViewHandlers pool bc
-  :<|> searchHandler pool
-  :<|> auditHandlers pool bc
+server authConfig pool tracker broadcast wsState _ =
+       health pool tracker
+  :<|> session authConfig pool
+  :<|> workspaces pool
+  :<|> groups pool broadcast
+  :<|> observations pool broadcast
+  :<|> projects pool broadcast
+  :<|> tasks pool broadcast
+  :<|> search pool
+  :<|> audit pool broadcast
+  :<|> ticket pool wsState
 
-webSocketTicketHandler :: Pool Hasql.Connection -> WS.WSState -> WebSocketTicketRequest -> Handler WebSocketTicketResponse
-webSocketTicketHandler pool wsState req = do
-  requireActiveWorkspaceH pool req.workspaceId
-  requireWorkspaceRoleH pool req.workspaceId Auth.WorkspaceRoleRead
-  mPrincipal <- liftIO currentPrincipal
-  principal <- case mPrincipal of
-    Just p -> pure p
-    Nothing -> throwError (authErrorToServerError Auth.MissingPrincipal)
-  liftIO $ WS.createTicket wsState principal req.workspaceId
-
-sessionHandler :: Config.AuthConfig -> Pool Hasql.Connection -> Maybe UUID -> Handler SessionContext
-sessionHandler authCfg pool mWorkspaceId = do
-  principal <- currentPrincipalH
+session :: Config.AuthConfig -> Pool Hasql.Connection -> Maybe UUID -> Handler SessionContext
+session config pool selectedWorkspace = do
+  principal <- liftIO currentPrincipal >>= maybe (throwError err401) pure
   createAllowed <- liftIO $ Auth.hasGlobalPermission pool (Just principal) Auth.GlobalCreateWorkspace
   superAllowed <- liftIO $ Auth.hasGlobalPermission pool (Just principal) Auth.GlobalSuperadmin
-  workspaceCtx <- traverse (sessionWorkspaceContextH pool principal superAllowed) mWorkspaceId
+  workspace <- traverse (sessionWorkspace pool principal superAllowed) selectedWorkspace
   pure SessionContext
-    { authMode = authModeToText authCfg.mode
-    , principal = sessionPrincipal principal
-    , globalPermissions = SessionGlobalPermissions
-        { createWorkspace = createAllowed
-        , superadmin = superAllowed
-        }
-    , workspace = workspaceCtx
-    }
-
-currentPrincipalH :: Handler Principal
-currentPrincipalH = do
-  mPrincipal <- liftIO currentPrincipal
-  case mPrincipal of
-    Just p -> pure p
-    Nothing -> throwError (authErrorToServerError Auth.MissingPrincipal)
-
-authModeToText :: Config.AuthMode -> Text
-authModeToText = \case
-  Config.AuthModeLocal -> "local"
-  Config.AuthModeDeployed -> "deployed"
-
-sessionPrincipal :: Principal -> SessionPrincipal
-sessionPrincipal principal = SessionPrincipal
-  { actorType = actorTypeToText principal.actorType
-  , actorId = principal.actorId
-  , actorLabel = principal.actorLabel
-  , authority = principalAuthorityToText principal.authority
-  , grantUserId = principalGrantUserId principal.authority
-  }
-
-principalAuthorityToText :: PrincipalAuthority -> Text
-principalAuthorityToText = \case
-  PrincipalNoAuthority -> "none"
-  PrincipalGrantUser{} -> "grant_user"
-  PrincipalSyntheticLocalSuperadmin -> "local_superadmin"
-
-principalGrantUserId :: PrincipalAuthority -> Maybe UUID
-principalGrantUserId = \case
-  PrincipalGrantUser userId -> Just userId
-  _ -> Nothing
-
-sessionWorkspaceContextH :: Pool Hasql.Connection -> Principal -> Bool -> UUID -> Handler SessionWorkspaceContext
-sessionWorkspaceContextH pool principal isSuperadmin workspaceId = do
-  requireActiveWorkspaceH pool workspaceId
-  liftIO $ sessionWorkspaceContext pool principal isSuperadmin workspaceId
-
-sessionWorkspaceContext :: Pool Hasql.Connection -> Principal -> Bool -> UUID -> IO SessionWorkspaceContext
-sessionWorkspaceContext pool principal isSuperadmin workspaceId = do
-  mStoredRole <- case principal.authority of
-    PrincipalGrantUser userId -> Auth.getWorkspaceRole pool workspaceId userId
-    _ -> pure Nothing
-  let mEffectiveRole
-        | isSuperadmin = Just Auth.WorkspaceRoleAdmin
-        | otherwise = mStoredRole
-      satisfies required = maybe False (`Auth.roleSatisfies` required) mEffectiveRole
-  pure SessionWorkspaceContext
-    { workspaceId = workspaceId
-    , role = Auth.roleToText <$> mEffectiveRole
-    , canRead = satisfies Auth.WorkspaceRoleRead
-    , canEdit = satisfies Auth.WorkspaceRoleEdit
-    , canAdmin = satisfies Auth.WorkspaceRoleAdmin
-    }
-
--- | Emit a change event to all connected WebSocket clients.
-emit :: Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
-emit = emitWithWorkspace Nothing
-
-emitInWorkspace :: UUID -> Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
-emitInWorkspace wsId = emitWithWorkspace (Just wsId)
-
-emitInScope :: Auth.EntityScope -> Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
-emitInScope scope = emitWithWorkspace (scopeWorkspaceId scope)
-
-scopeWorkspaceId :: Auth.EntityScope -> Maybe UUID
-scopeWorkspaceId = \case
-  Auth.EntityWorkspaceScope wsId -> Just wsId
-  Auth.EntityGlobalScope -> Nothing
-
-emitWithWorkspace :: Maybe UUID -> Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
-emitWithWorkspace explicitWsId bc ct et eid mpayload = liftIO $ do
-  now <- getCurrentTime
-  reqId <- currentRequestId
-  mPrincipal <- currentPrincipal
-  let mActorType = actorTypeToText . (.actorType) <$> mPrincipal
-      mActorId = (.actorId) <$> mPrincipal
-      mActorLabel = (.actorLabel) <$> mPrincipal
-      mWorkspaceId = explicitWsId <|> inferEventWorkspace et eid mpayload
-  bc ChangeEvent
-    { changeType = ct
-    , entityType = et
-    , entityId = eid
-    , workspaceId = mWorkspaceId
-    , timestamp = now
-    , requestId = reqId
-    , actorType = mActorType
-    , actorId = mActorId
-    , actorLabel = mActorLabel
-    , payload = mpayload
-    }
-
-inferEventWorkspace :: EntityType -> UUID -> Maybe Value -> Maybe UUID
-inferEventWorkspace ETWorkspace entityId _ = Just entityId
-inferEventWorkspace _ _ (Just (Object obj)) = do
-  value <- KeyMap.lookup (Aeson.fromText "workspace_id") obj
-  case Aeson.fromJSON value of
-    Aeson.Success wsId -> Just wsId
-    Aeson.Error _ -> Nothing
-inferEventWorkspace _ _ _ = Nothing
-
-emitManyInScopes :: Broadcast -> ChangeType -> EntityType -> [(UUID, Auth.EntityScope)] -> Handler ()
-emitManyInScopes bc ct et entries =
-  mapM_ (\(eid, scope) -> emitInScope scope bc ct et eid Nothing) entries
-
-dependencyMutationResult :: Text -> UUID -> UUID -> [TaskDependencyAutoBlockSnapshot] -> [TaskDependencyAutoBlockSnapshot] -> DependencyMutationResult
-dependencyMutationResult action taskId dependsOnId before after = DependencyMutationResult
-  { action = action
-  , taskId = taskId
-  , dependsOnId = dependsOnId
-  , affectedTasks = dependencyStatusChanges before after
-  }
-
-dependencyStatusChanges :: [TaskDependencyAutoBlockSnapshot] -> [TaskDependencyAutoBlockSnapshot] -> [TaskDependencyStatusChange]
-dependencyStatusChanges before after =
-  let beforeById = Map.fromList [(snapshot.task.id, snapshot) | snapshot <- before]
-      mkChange current = do
-        previous <- Map.lookup current.task.id beforeById
-        let statusChanged = previous.task.status /= current.task.status
-            autoChanged = previous.autoBlocked /= current.autoBlocked
-            dependencyChanged = previous.openDependencyCount /= current.openDependencyCount
-        if statusChanged || autoChanged || dependencyChanged
-          then Just TaskDependencyStatusChange
-            { task = current.task
-            , previousStatus = previous.task.status
-            , currentStatus = current.task.status
-            , previousAutoBlocked = previous.autoBlocked
-            , autoBlocked = current.autoBlocked
-            , previousOpenDependencyCount = previous.openDependencyCount
-            , openDependencyCount = current.openDependencyCount
-            , reason = dependencyStatusChangeReason previous current
-            }
-          else Nothing
-  in mapMaybe mkChange after
-
-dependencyStatusChangeReason :: TaskDependencyAutoBlockSnapshot -> TaskDependencyAutoBlockSnapshot -> Text
-dependencyStatusChangeReason previous current
-  | previous.openDependencyCount == 0 && current.openDependencyCount > 0 && current.autoBlocked = "blocked_by_open_dependencies"
-  | previous.openDependencyCount > 0 && current.openDependencyCount == 0 && previous.autoBlocked && not current.autoBlocked = "unblocked_dependencies_resolved"
-  | current.openDependencyCount > previous.openDependencyCount = "open_dependency_added"
-  | current.openDependencyCount < previous.openDependencyCount = "open_dependency_removed"
-  | current.openDependencyCount > 0 && current.autoBlocked = "blocked_by_open_dependencies"
-  | previous.task.status /= current.task.status = "dependency_status_recomputed"
-  | otherwise = "dependency_context_changed"
-
-emitDependencyMutationResult :: UUID -> Broadcast -> ChangeType -> UUID -> DependencyMutationResult -> Handler ()
-emitDependencyMutationResult wsId bc changeType taskId result = do
-  emitInWorkspace wsId bc changeType ETTaskDependency taskId (Just $ toJSON result)
-  mapM_ emitAffectedTask result.affectedTasks
+    { authMode = case config.mode of Config.AuthModeLocal -> "local"; Config.AuthModeDeployed -> "deployed"
+    , principal = SessionPrincipal { actorType = actorTypeToText principal.actorType, actorId = principal.actorId
+                                   , actorLabel = principal.actorLabel, authority = authorityText principal.authority
+                                   , grantUserId = case principal.authority of PrincipalGrantUser userId -> Just userId; _ -> Nothing }
+    , globalPermissions = SessionGlobalPermissions { createWorkspace = createAllowed, superadmin = superAllowed }
+    , workspace = workspace }
   where
-    emitAffectedTask change =
-      let changedTask = change.task
-      in emitInWorkspace wsId bc Updated ETTask changedTask.id (Just $ toJSON changedTask)
+    authorityText PrincipalNoAuthority = "none"
+    authorityText PrincipalGrantUser{} = "grant_user"
+    authorityText PrincipalSyntheticLocalSuperadmin = "local_superadmin"
 
-emitDependencyStatusChanges :: UUID -> Broadcast -> UUID -> [TaskDependencyStatusChange] -> Handler ()
-emitDependencyStatusChanges wsId bc primaryTaskId changes =
-  mapM_ emitChangedDependent changes
-  where
-    emitChangedDependent change = do
-      let changedTask = change.task
-      when (changedTask.id /= primaryTaskId) $
-        emitInWorkspace wsId bc Updated ETTask changedTask.id (Just $ toJSON changedTask)
+sessionWorkspace :: Pool Hasql.Connection -> Principal -> Bool -> UUID -> Handler SessionWorkspaceContext
+sessionWorkspace pool principal isSuperadmin workspaceId = do
+  requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
+  storedRole <- liftIO $ case principal.authority of PrincipalGrantUser userId -> Auth.getWorkspaceRole pool workspaceId userId; _ -> pure Nothing
+  let effective = if isSuperadmin then Just Auth.WorkspaceRoleAdmin else storedRole
+      can required = maybe False (`Auth.roleSatisfies` required) effective
+  pure SessionWorkspaceContext { workspaceId = workspaceId, role = Auth.roleToText <$> effective
+                               , canRead = can Auth.WorkspaceRoleRead, canEdit = can Auth.WorkspaceRoleEdit
+                               , canAdmin = can Auth.WorkspaceRoleAdmin }
 
--- Health handler ---------------------------------------------------
-
-healthHandler :: Pool Hasql.Connection -> AccessTracker -> Server HealthAPI
-healthHandler pool tracker = do
-  -- Non-blocking pool check: try to acquire a connection and run SELECT 1
-  mResult <- liftIO $ tryWithResource pool $ \conn ->
-    Session.run (Session.sql "SELECT 1") conn
-  bufSz <- liftIO $ bufferSize tracker
+health :: Pool Hasql.Connection -> AccessTracker -> Handler Value
+health pool tracker = do
+  database <- liftIO $ tryWithResource pool (\connection -> Session.run (Session.sql "SELECT 1") connection)
+  buffered <- liftIO $ bufferSize tracker
   metrics <- liftIO getPoolMetrics
-  let (dbStatus, overallStatus) = case mResult of
-        Just (Right _) -> ("connected" :: Text, "ok" :: Text)
-        Just (Left _)  -> ("error",             "degraded")
-        Nothing        -> ("pool_exhausted",    "degraded")
-      utilPct | metrics.maxConnections > 0 =
-                metrics.activeConnections * 100 `div` metrics.maxConnections
-              | otherwise = 0
-  pure $ object
-    [ "status"  .= overallStatus
-    , "version" .= ("0.1.0.0" :: Text)
-    , "database" .= object
-        [ "status" .= dbStatus
-        ]
-    , "pool" .= object
-        [ "active_connections" .= metrics.activeConnections
-        , "max_connections"    .= metrics.maxConnections
-        , "idle_connections"   .= Prelude.max 0 (metrics.maxConnections - metrics.activeConnections)
-        , "utilization_pct"    .= utilPct
-        ]
-    , "access_tracker" .= object
-        [ "buffered_count" .= bufSz
-        ]
-    ]
+  pure $ object [ "status" .= (case database of Just (Right _) -> ("ok" :: Text); _ -> "degraded")
+                , "access_tracker" .= object ["buffered_count" .= buffered]
+                , "pool" .= object ["active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections] ]
 
--- Workspace helpers ------------------------------------------------
+workspaces :: Pool Hasql.Connection -> Server WorkspaceAPI
+workspaces pool = listH :<|> createH :<|> getH where
+  listH limit offset = do
+    principal <- liftIO currentPrincipal
+    -- A caller without a principal cannot observe any workspace, including its names.
+    case principal of Nothing -> throwError err401; Just _ -> pure ()
+    let (takeN, skipN) = page limit offset
+    allRows <- handleDBErrors $ Workspace.listActiveWorkspaces pool (takeN + 1) skipN
+    pure PaginatedResult { items = take takeN allRows, hasMore = length allRows > takeN }
+  createH input = do
+    principal <- liftIO currentPrincipal
+    allowed <- liftIO $ Auth.authorizeGlobal pool principal Auth.GlobalCreateWorkspace
+    either (throwError . authError) pure allowed
+    reject (validateCreateWorkspaceInput input)
+    rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ insert Insert
+      { into = workspaceSchema
+      , rows = values [WorkspaceT
+          { wsId = unsafeDefault, wsName = lit input.name
+          , wsGhOwner = lit input.ghOwner, wsGhRepo = lit input.ghRepo
+          , wsType = lit (fromMaybe WsRepository input.workspaceType)
+          , wsDeletedAt = unsafeDefault, wsCreatedAt = unsafeDefault, wsUpdatedAt = unsafeDefault }]
+      , onConflict = Abort, returning = Returning id }
+    case rows of (row:_) -> pure Workspace { id = row.wsId, name = row.wsName, ghOwner = row.wsGhOwner, ghRepo = row.wsGhRepo, workspaceType = row.wsType, createdAt = row.wsCreatedAt, updatedAt = row.wsUpdatedAt }; [] -> throwError err500
+  getH workspaceId = do
+    requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
+      row <- each workspaceSchema; where_ (row.wsId ==. lit workspaceId &&. activeWorkspace row); pure row
+    case rows of (row:_) -> pure Workspace { id = row.wsId, name = row.wsName, ghOwner = row.wsGhOwner, ghRepo = row.wsGhRepo, workspaceType = row.wsType, createdAt = row.wsCreatedAt, updatedAt = row.wsUpdatedAt }; [] -> throwError err404
 
-rowToWorkspace :: WorkspaceT Result -> Workspace
-rowToWorkspace r = Workspace
-  { id            = r.wsId
-  , name          = r.wsName
-  , ghOwner       = r.wsGhOwner
-  , ghRepo        = r.wsGhRepo
-  , workspaceType = r.wsType
-  , createdAt     = r.wsCreatedAt
-  , updatedAt     = r.wsUpdatedAt
-  }
+groups :: Pool Hasql.Connection -> Broadcast -> Server WorkspaceGroupAPI
+groups pool broadcast = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembersH :<|> addMemberH :<|> removeMemberH where
+  listH limit offset = do
+    requireSuperadmin pool
+    let (takeN, skipN) = page limit offset
+    rows <- handleDBErrors $ WorkspaceGroup.listGroups pool (Just (takeN + 1)) (Just skipN)
+    pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
+  createH input = do
+    requireSuperadmin pool
+    reject (validateCreateWorkspaceGroupInput input)
+    created <- handleDBErrors $ WorkspaceGroup.createGroup pool input
+    emit Nothing broadcast Created ETWorkspaceGroup created.id (Just (toJSON created))
+    pure created
+  getH groupId = do
+    requireSuperadmin pool
+    handleDBErrors (WorkspaceGroup.getGroup pool groupId) >>= maybe (throwError err404) pure
+  deleteH groupId = do
+    requireSuperadmin pool
+    deleted <- handleDBErrors $ WorkspaceGroup.deleteGroup pool groupId
+    if deleted then emit Nothing broadcast Deleted ETWorkspaceGroup groupId Nothing >> pure NoContent else throwError err404
+  listMembersH groupId = do
+    requireSuperadmin pool
+    _ <- handleDBErrors (WorkspaceGroup.getGroup pool groupId) >>= maybe (throwError err404) pure
+    handleDBErrors $ WorkspaceGroup.listGroupMembers pool groupId
+  addMemberH groupId input = do
+    requireSuperadmin pool
+    _ <- handleDBErrors (WorkspaceGroup.getGroup pool groupId) >>= maybe (throwError err404) pure
+    memberResult <- handleDBErrors $ WorkspaceGroup.addMember pool groupId input.workspaceId
+    case memberResult of
+      WorkspaceGroup.MemberAdded -> emit (Just input.workspaceId) broadcast Updated ETWorkspaceGroup groupId Nothing
+      WorkspaceGroup.MemberAlreadyPresent -> pure ()
+      WorkspaceGroup.MemberWorkspaceInactive -> throwError err404
+    pure NoContent
+  removeMemberH groupId workspaceId = do
+    requireSuperadmin pool
+    _ <- handleDBErrors (WorkspaceGroup.getGroup pool groupId) >>= maybe (throwError err404) pure
+    requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    removed <- handleDBErrors $ WorkspaceGroup.removeMember pool groupId workspaceId
+    if removed then emit (Just workspaceId) broadcast Updated ETWorkspaceGroup groupId Nothing else pure ()
+    pure NoContent
 
-workspaceHandlers :: Pool Hasql.Connection -> Broadcast -> Server WorkspaceAPI
-workspaceHandlers pool bc =
-       listWorkspacesH
-  :<|> createWorkspaceH
-  :<|> getWorkspaceH
-  :<|> updateWorkspaceH
-  :<|> deleteWorkspaceH
-  :<|> restoreWorkspaceH
-  :<|> purgeWorkspaceH
-  :<|> listMembershipsH
-  :<|> upsertMembershipH
-  :<|> deleteMembershipH
-  :<|> cardHydrationH
-  :<|> timelineBucketsH
-  :<|> timelineH
+observations :: Pool Hasql.Connection -> Broadcast -> Server ObservationAPI
+observations pool broadcast = listH :<|> createH :<|> similarH :<|> getH :<|> updateH :<|> deleteH :<|> embeddingH where
+  listH workspaceId kind subjectValue sha queryValue limit offset = do
+    requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    -- Validate client-supplied values before pagination defaults/caps are
+    -- applied; otherwise invalid bounds would be silently normalized.
+    let rawQuery = ObservationQuery workspaceId kind subjectValue sha queryValue limit offset
+    reject (validateObservationQuery rawQuery)
+    let (takeN, skipN) = page limit offset
+        query = ObservationQuery workspaceId kind subjectValue sha queryValue (Just takeN) (Just skipN)
+    rows <- handleDBErrors $ Observation.listObservationsOverfetch pool query
+    pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
+  createH input = do
+    requireObservationWorkspace pool input.workspaceId Auth.WorkspaceRoleEdit
+    reject (validateCreateObservationInput input)
+    created <- handleDBErrors $ withWorkspaceIdContext (Just input.workspaceId) (Observation.createObservation pool input)
+    emit (Just input.workspaceId) broadcast Created ETObservation created.id (Just (toJSON created))
+    pure created
+  similarH query = do
+    requireObservationWorkspace pool query.workspaceId Auth.WorkspaceRoleRead
+    reject (validateSimilarObservationQuery query)
+    handleDBErrors $ Observation.similarObservations pool query
+  getH observationId = do
+    workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleRead
+    requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    handleDBErrors (Observation.getObservation pool workspaceId observationId) >>= maybe (throwError err404) pure
+  updateH observationId input = do
+    workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleEdit
+    requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
+    reject (validateUpdateObservationInput input)
+    updated <- handleDBErrors (Observation.updateObservation pool workspaceId observationId input) >>= maybe (throwError err404) pure
+    emit (Just workspaceId) broadcast Updated ETObservation observationId (Just (toJSON updated))
+    pure updated
+  deleteH observationId = do
+    workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleEdit
+    requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
+    deleted <- handleDBErrors (Observation.deleteObservation pool workspaceId observationId)
+    if deleted then emit (Just workspaceId) broadcast Deleted ETObservation observationId Nothing >> pure NoContent else throwError err404
+  embeddingH observationId (ObservationEmbedding vector) = do
+    workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleEdit
+    requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
+    -- Verify existence so a no-op UPDATE is never reported as success.
+    _ <- handleDBErrors (Observation.getObservation pool workspaceId observationId) >>= maybe (throwError err404) pure
+    handleDBErrors $ Observation.setObservationEmbedding pool workspaceId observationId vector
+    emit (Just workspaceId) broadcast Updated ETObservation observationId Nothing
+    pure NoContent
+
+projects :: Pool Hasql.Connection -> Broadcast -> Server ProjectAPI
+projects pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> nextH where
+  listH workspaceId status queryValue limit offset = do
+    workspace <- maybe (throwError err403) pure workspaceId
+    requireWorkspace pool workspace Auth.WorkspaceRoleRead
+    let (takeN, skipN) = page limit offset
+        query = ProjectListQuery workspaceId status queryValue Nothing Nothing Nothing Nothing Nothing (Just (takeN + 1)) (Just skipN)
+    reject (validateProjectListQuery query)
+    rows <- handleDBErrors $ Project.listProjectsWithQuery pool query
+    pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
+  createH input = do
+    requireWorkspace pool input.workspaceId Auth.WorkspaceRoleEdit; reject (validateCreateProjectInput input)
+    created <- handleDBErrors $ Project.createProject pool input
+    emit (Just input.workspaceId) broadcast Created ETProject created.id (Just (toJSON created)); pure created
+  getH projectId = do
+    _ <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleRead
+    handleDBErrors (Project.getProject pool projectId) >>= maybe (throwError err404) pure
+  updateH projectId input = do
+    workspaceId <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleEdit; reject (validateUpdateProjectInput input)
+    updated <- handleDBErrors (Project.updateProject pool projectId input) >>= maybe (throwError err404) pure
+    emit (Just workspaceId) broadcast Updated ETProject projectId (Just (toJSON updated)); pure updated
+  deleteH projectId = do
+    workspaceId <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleEdit
+    handleDBErrors (Project.deleteProjectCascade pool projectId) >>= maybe (throwError err404) (\result -> emit (Just workspaceId) broadcast Deleted ETProject projectId (Just (toJSON result)) >> pure result)
+  overviewH projectId = do
+    _ <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleRead
+    handleDBErrors (Overview.getProjectOverview pool projectId) >>= maybe (throwError err404) pure
+  nextH projectId limit includeBlocked = do
+    _ <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleRead
+    handleDBErrors $ Task.listNextTasks pool projectId (fromMaybe False includeBlocked) (fromMaybe 5 limit)
+
+tasks :: Pool Hasql.Connection -> Broadcast -> Server TaskAPI
+tasks pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH where
+  listH workspaceId projectId status priority queryValue limit offset = do
+    workspace <- case (workspaceId, projectId) of
+      (Just id, _) -> requireWorkspace pool id Auth.WorkspaceRoleRead >> pure id
+      (Nothing, Just project) -> requireEntity pool Auth.EntityProject project Auth.WorkspaceRoleRead
+      (Nothing, Nothing) -> throwError err403
+    let (takeN, skipN) = page limit offset
+        query = TaskListQuery (Just workspace) projectId status priority queryValue Nothing Nothing Nothing Nothing Nothing (Just (takeN + 1)) (Just skipN)
+    reject (validateTaskListQuery query)
+    rows <- handleDBErrors $ Task.listTasksWithQuery pool query
+    pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
+  createH input = do
+    requireWorkspace pool input.workspaceId Auth.WorkspaceRoleEdit; reject (validateCreateTaskInput input)
+    created <- handleDBErrors $ Task.createTask pool input
+    emit (Just input.workspaceId) broadcast Created ETTask created.id (Just (toJSON created)); pure created
+  getH taskId = do
+    _ <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleRead
+    handleDBErrors (Task.getTask pool taskId) >>= maybe (throwError err404) pure
+  updateH taskId input = do
+    workspaceId <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleEdit; reject (validateUpdateTaskInput input)
+    result <- handleDBErrors (Task.updateTaskWithDependencySnapshots pool taskId input) >>= maybe (throwError err404) pure
+    let (updated, before, after) = result
+        effects = [] -- snapshots are persisted by core; task updates do not expose Memory effects.
+    emit (Just workspaceId) broadcast Updated ETTask taskId (Just (toJSON updated))
+    pure TaskMutationResult { task = updated, dependencyEffects = effects }
+  deleteH taskId = do
+    workspaceId <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleEdit
+    handleDBErrors (Task.deleteTaskCascade pool taskId) >>= maybe (throwError err404) (\result -> emit (Just workspaceId) broadcast Deleted ETTask taskId (Just (toJSON result)) >> pure result)
+  overviewH taskId = do
+    _ <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleRead
+    handleDBErrors (Overview.getTaskOverview pool taskId) >>= maybe (throwError err404) pure
+
+search :: Pool Hasql.Connection -> UnifiedSearchQuery -> Handler UnifiedSearchResults
+search pool query = do
+  reject (validateUnifiedSearchQuery query)
+  workspaceId <- maybe (throwError err403) pure query.workspaceId
+  if searchesObservations query
+    then requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    else requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
+  handleDBErrors $ Search.searchAll pool query
   where
-    listWorkspacesH :: Maybe Int -> Maybe Int -> Handler (PaginatedResult Workspace)
-    listWorkspacesH mlimit moffset = do
-      mPrincipal <- liftIO currentPrincipal
-      principal <- case mPrincipal of
-        Just p  -> pure p
-        Nothing -> throwError (authErrorToServerError Auth.MissingPrincipal)
-      let lim = capLimit mlimit
-          off = capOffset moffset
-          queryLimit = fromIntegral (lim + 1)
-          queryOffset = fromIntegral off
-      isSuperadmin <- liftIO $ Auth.hasGlobalPermission pool (Just principal) Auth.GlobalSuperadmin
-      rows <- if isSuperadmin
-        then handleDBErrors $ WorkspaceDB.listActiveWorkspaces pool queryLimit queryOffset
-        else case principal.authority of
-          PrincipalGrantUser userId ->
-            handleDBErrors $ WorkspaceDB.listVisibleWorkspaces pool userId queryLimit queryOffset
-          _ -> pure []
-      let results = rows
-      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-
-    createWorkspaceH :: CreateWorkspace -> Handler Workspace
-    createWorkspaceH cw = do
-      requireGlobalPermissionH pool Auth.GlobalCreateWorkspace
-      mCreator <- liftIO currentPrincipal
-      rejectValidationErrors (validateCreateWorkspaceInput cw)
-      mWs <- handleDBErrors $ runTransaction pool $ do
-        rows <- Session.statement () $ run $
-          insert Insert
-            { into = workspaceSchema
-            , rows = values
-                [ WorkspaceT
-                    { wsId        = unsafeDefault
-                    , wsName      = lit cw.name
-                    , wsGhOwner   = lit cw.ghOwner
-                    , wsGhRepo    = lit cw.ghRepo
-                    , wsType      = lit (fromMaybe WsRepository cw.workspaceType)
-                    , wsDeletedAt = unsafeDefault
-                    , wsCreatedAt = unsafeDefault
-                    , wsUpdatedAt = unsafeDefault
-                    }
-                ]
-            , onConflict = Abort
-            , returning  = Returning id
-            }
-        case rows of
-          (r:_) -> do
-            mapM_ (Auth.grantWorkspaceAdminToCreatorSession r.wsId) mCreator
-            pure . Just $ rowToWorkspace r
-          [] -> pure Nothing
-      ws <- maybe (throwError err500) pure mWs
-      emit bc Created ETWorkspace ws.id (Just $ toJSON ws)
-      pure ws
-
-    getWorkspaceH :: UUID -> Handler Workspace
-    getWorkspaceH wsId = do
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
-        row <- each workspaceSchema
-        where_ $ row.wsId ==. lit wsId
-        where_ $ activeWorkspace row
-        pure row
-      case rows of
-        (r:_) -> pure $ rowToWorkspace r
-        []    -> throwError err404
-
-    cardHydrationH :: UUID -> Handler WorkspaceCardHydration
-    cardHydrationH wsId = do
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-      handleDBErrors $ runSession pool $ do
-        projectMemoryRows <- Session.statement () $ run $ select $ do
-          link <- each projectMemoryLinkSchema
-          projectRow <- each projectSchema
-          where_ $ projectRow.projId ==. link.pmlProjectId
-          where_ $ projectRow.projWorkspaceId ==. lit wsId
-          where_ $ activeProject projectRow
-          memoryRow <- each memorySchema
-          where_ $ memoryRow.memId ==. link.pmlMemoryId
-          where_ $ memoryRow.memWorkspaceId ==. lit wsId
-          where_ $ activeMemory memoryRow
-          pure (link.pmlProjectId, link.pmlMemoryId)
-        taskMemoryRows <- Session.statement () $ run $ select $ do
-          link <- each taskMemoryLinkSchema
-          taskRow <- each taskSchema
-          where_ $ taskRow.taskId ==. link.tmlTaskId
-          where_ $ taskRow.taskWorkspaceId ==. lit wsId
-          where_ $ activeTask taskRow
-          memoryRow <- each memorySchema
-          where_ $ memoryRow.memId ==. link.tmlMemoryId
-          where_ $ memoryRow.memWorkspaceId ==. lit wsId
-          where_ $ activeMemory memoryRow
-          pure (link.tmlTaskId, link.tmlMemoryId)
-        taskDependencyRows <- Session.statement () $ run $ select $ do
-          dependency <- each taskDependencySchema
-          taskRow <- each taskSchema
-          where_ $ taskRow.taskId ==. dependency.tdTaskId
-          where_ $ taskRow.taskWorkspaceId ==. lit wsId
-          where_ $ activeTask taskRow
-          dependsOnTaskRow <- each taskSchema
-          where_ $ dependsOnTaskRow.taskId ==. dependency.tdDependsOnId
-          where_ $ dependsOnTaskRow.taskWorkspaceId ==. lit wsId
-          where_ $ activeTask dependsOnTaskRow
-          pure (dependency.tdTaskId, dependency.tdDependsOnId)
-        pure WorkspaceCardHydration
-          { projectMemoryLinks =
-              [ WorkspaceProjectMemoryLink { projectId = projectId, memoryId = memoryId }
-              | (projectId, memoryId) <- projectMemoryRows
-              ]
-          , taskMemoryLinks =
-              [ WorkspaceTaskMemoryLink { taskId = taskId, memoryId = memoryId }
-              | (taskId, memoryId) <- taskMemoryRows
-              ]
-          , taskDependencies =
-              [ WorkspaceTaskDependencyLink { taskId = taskId, dependsOnId = dependsOnId }
-              | (taskId, dependsOnId) <- taskDependencyRows
-              ]
-          }
-
-    timelineBucketsH :: UUID -> Maybe UTCTime -> Maybe UTCTime -> Maybe Text -> Handler WorkspaceTimelineBucketsResponse
-    timelineBucketsH wsId mSince mUntil mBucket = do
-      requireActiveWorkspaceH pool wsId
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-      since <- requireTimelineBucketParam "since" mSince
-      untilTime <- requireTimelineBucketParam "until" mUntil
-      let bucket = fromMaybe "week" mBucket
-      rejectValidationErrors (validateTimelineBucketQuery since untilTime bucket)
-      buckets <- handleDBErrors $ Timeline.listWorkspaceTimelineBuckets pool wsId since untilTime bucket
-      when (length buckets > maxTimelineBuckets) $
-        rejectValidationErrors ["timeline bucket range produces too many buckets; narrow the range or choose a larger bucket"]
-      pure WorkspaceTimelineBucketsResponse
-        { timelineBucketsWorkspaceId = wsId
-        , timelineBucketsSince = since
-        , timelineBucketsUntil = untilTime
-        , timelineBucketsBucket = bucket
-        , timelineBucketsBuckets = buckets
-        }
-
-    timelineH :: UUID -> Maybe Text -> Maybe Text -> Maybe UTCTime -> Maybe UTCTime -> Maybe Int -> Maybe Int -> Handler (PaginatedResult WorkspaceTimelineEvent)
-    timelineH wsId mEntityType mEventType mSince mUntil mlimit moffset = do
-      requireActiveWorkspaceH pool wsId
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-      rejectValidationErrors (validateTimelineRangeQuery mSince mUntil)
-      let lim = capLimit mlimit
-          off = capOffset moffset
-      results <- handleDBErrors $ Timeline.listWorkspaceTimeline pool wsId mEntityType mEventType mSince mUntil (Just (lim + 1)) (Just off)
-      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-
-    updateWorkspaceH :: UUID -> UpdateWorkspace -> Handler Workspace
-    updateWorkspaceH wsId uw = do
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
-      rejectValidationErrors (validateUpdateWorkspaceInput uw)
-      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $
-        update Update
-          { target = workspaceSchema
-          , from = pure ()
-          , set = \_ row -> row
-              { wsName    = maybe row.wsName    lit uw.name
-              , wsType    = maybe row.wsType    lit uw.workspaceType
-              , wsGhOwner = applyNullableUpdate row.wsGhOwner uw.ghOwner
-              , wsGhRepo  = applyNullableUpdate row.wsGhRepo uw.ghRepo
-              }
-          , updateWhere = \_ row -> row.wsId ==. lit wsId &&. activeWorkspace row
-          , returning = Returning id
-          }
-      case rows of
-        (r:_) -> do
-          emit bc Updated ETWorkspace wsId (Just $ toJSON $ rowToWorkspace r)
-          pure $ rowToWorkspace r
-        []    -> throwError err404
-
-    deleteWorkspaceH :: UUID -> Handler NoContent
-    deleteWorkspaceH wsId = do
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
-      ok <- handleDBErrorsInWorkspace wsId $ runTransaction pool $ do
-        n <- Session.statement () $ runN $
-          update Update
-            { target = workspaceSchema
-            , from = pure ()
-            , set = \_ row -> row { wsDeletedAt = deletedNow }
-            , updateWhere = \_ row -> row.wsId ==. lit wsId &&. activeWorkspace row
-            , returning = NoReturning
-            }
-        if n == 0
-          then pure False
-          else do
-            memIds <- Session.statement () $ run $ select $ do
-              row <- each memorySchema
-              where_ $ row.memWorkspaceId ==. lit wsId
-              where_ $ activeMemory row
-              pure row.memId
-            taskIds <- Session.statement () $ run $ select $ do
-              row <- each taskSchema
-              where_ $ row.taskWorkspaceId ==. lit wsId
-              where_ $ activeTask row
-              pure row.taskId
-            catIds <- Session.statement () $ run $ select $ do
-              row <- each memoryCategorySchema
-              where_ $ row.mcWorkspaceId ==. lit (Just wsId)
-              where_ $ activeCategory row
-              pure row.mcId
-
-            case memIds of
-              [] -> pure ()
-              _ -> do
-                Session.statement () $ run_ $
-                  delete Rel8.Delete
-                    { from = memoryLinkSchema
-                    , using = pure ()
-                    , deleteWhere = \_ row -> in_ row.mlSourceId (map lit memIds) ||. in_ row.mlTargetId (map lit memIds)
-                    , returning = NoReturning
-                    }
-                Session.statement () $ run_ $
-                  delete Rel8.Delete
-                    { from = memoryTagSchema
-                    , using = pure ()
-                    , deleteWhere = \_ row -> in_ row.mtMemoryId (map lit memIds)
-                    , returning = NoReturning
-                    }
-
-            case memIds of
-              [] -> pure ()
-              _ -> Session.statement () $ run_ $
-                delete Rel8.Delete
-                  { from = memoryCategoryLinkSchema
-                  , using = pure ()
-                  , deleteWhere = \_ row -> in_ row.mclMemoryId (map lit memIds)
-                  , returning = NoReturning
-                  }
-
-            case catIds of
-              [] -> pure ()
-              _ -> Session.statement () $ run_ $
-                delete Rel8.Delete
-                  { from = memoryCategoryLinkSchema
-                  , using = pure ()
-                  , deleteWhere = \_ row -> in_ row.mclCategoryId (map lit catIds)
-                  , returning = NoReturning
-                  }
-
-            case taskIds of
-              [] -> pure ()
-              _ -> Session.statement () $ run_ $
-                delete Rel8.Delete
-                  { from = taskDependencySchema
-                  , using = pure ()
-                  , deleteWhere = \_ row -> in_ row.tdTaskId (map lit taskIds) ||. in_ row.tdDependsOnId (map lit taskIds)
-                  , returning = NoReturning
-                  }
-
-            Session.statement () $ run_ $
-              update Update
-                { target = memorySchema
-                , from = pure ()
-                , set = \_ row -> row { memDeletedAt = deletedNow }
-                , updateWhere = \_ row -> row.memWorkspaceId ==. lit wsId &&. activeMemory row
-                , returning = NoReturning
-                }
-            Session.statement () $ run_ $
-              update Update
-                { target = projectSchema
-                , from = pure ()
-                , set = \_ row -> row { projDeletedAt = deletedNow }
-                , updateWhere = \_ row -> row.projWorkspaceId ==. lit wsId &&. activeProject row
-                , returning = NoReturning
-                }
-            Session.statement () $ run_ $
-              update Update
-                { target = taskSchema
-                , from = pure ()
-                , set = \_ row -> row { taskDeletedAt = deletedNow }
-                , updateWhere = \_ row -> row.taskWorkspaceId ==. lit wsId &&. activeTask row
-                , returning = NoReturning
-                }
-            Session.statement () $ run_ $
-              update Update
-                { target = memoryCategorySchema
-                , from = pure ()
-                , set = \_ row -> row { mcDeletedAt = deletedNow }
-                , updateWhere = \_ row -> row.mcWorkspaceId ==. lit (Just wsId) &&. activeCategory row
-                , returning = NoReturning
-                }
-            Session.statement () $ run_ $
-              update Update
-                { target = savedViewSchema
-                , from = pure ()
-                , set = \_ row -> row { svDeletedAt = deletedNow }
-                , updateWhere = \_ row -> row.svWorkspaceId ==. lit wsId &&. activeSavedView row
-                , returning = NoReturning
-                }
-            Session.statement () $ run_ $
-              delete Rel8.Delete
-                { from = cleanupPolicySchema
-                , using = pure ()
-                , deleteWhere = \_ row -> row.cpWorkspaceId ==. lit wsId
-                , returning = NoReturning
-                }
-            Session.statement () $ run_ $
-              delete Rel8.Delete
-                { from = workspaceGroupMemberSchema
-                , using = pure ()
-                , deleteWhere = \_ row -> row.wgmWorkspaceId ==. lit wsId
-                , returning = NoReturning
-                }
-            pure True
-      if ok then do emit bc Deleted ETWorkspace wsId Nothing; pure NoContent else throwError err404
-
-    restoreWorkspaceH :: UUID -> Handler NoContent
-    restoreWorkspaceH wsId = do
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
-      ok <- handleDBErrors $ runTransaction pool $ do
-        rows <- Session.statement () $ run $ select $ do
-          row <- each workspaceSchema
-          where_ $ row.wsId ==. lit wsId
-          pure row
-        case rows of
-          [] -> pure False
-          (row:_)
-            | Just deletedAt <- row.wsDeletedAt -> do
-                Session.statement () $ run_ $
-                  update Update
-                    { target = workspaceSchema
-                    , from = pure ()
-                    , set = \_ workspace -> workspace { wsDeletedAt = lit (Nothing :: Maybe UTCTime) }
-                    , updateWhere = \_ workspace -> workspace.wsId ==. lit wsId &&. workspace.wsDeletedAt ==. lit (Just deletedAt)
-                    , returning = NoReturning
-                    }
-                Session.statement () $ run_ $
-                  update Update
-                    { target = memorySchema
-                    , from = pure ()
-                    , set = \_ memory -> memory { memDeletedAt = lit (Nothing :: Maybe UTCTime) }
-                    , updateWhere = \_ memory -> memory.memWorkspaceId ==. lit wsId &&. memory.memDeletedAt ==. lit (Just deletedAt)
-                    , returning = NoReturning
-                    }
-                Session.statement () $ run_ $
-                  update Update
-                    { target = projectSchema
-                    , from = pure ()
-                    , set = \_ projectRow -> projectRow { projDeletedAt = lit (Nothing :: Maybe UTCTime) }
-                    , updateWhere = \_ projectRow -> projectRow.projWorkspaceId ==. lit wsId &&. projectRow.projDeletedAt ==. lit (Just deletedAt)
-                    , returning = NoReturning
-                    }
-                Session.statement () $ run_ $
-                  update Update
-                    { target = taskSchema
-                    , from = pure ()
-                    , set = \_ task -> task { taskDeletedAt = lit (Nothing :: Maybe UTCTime) }
-                    , updateWhere = \_ task -> task.taskWorkspaceId ==. lit wsId &&. task.taskDeletedAt ==. lit (Just deletedAt)
-                    , returning = NoReturning
-                    }
-                Session.statement () $ run_ $
-                  update Update
-                    { target = memoryCategorySchema
-                    , from = pure ()
-                    , set = \_ category -> category { mcDeletedAt = lit (Nothing :: Maybe UTCTime) }
-                    , updateWhere = \_ category -> category.mcWorkspaceId ==. lit (Just wsId) &&. category.mcDeletedAt ==. lit (Just deletedAt)
-                    , returning = NoReturning
-                    }
-                Session.statement () $ run_ $
-                  update Update
-                    { target = savedViewSchema
-                    , from = pure ()
-                    , set = \_ view -> view { svDeletedAt = lit (Nothing :: Maybe UTCTime) }
-                    , updateWhere = \_ view -> view.svWorkspaceId ==. lit wsId &&. view.svDeletedAt ==. lit (Just deletedAt)
-                    , returning = NoReturning
-                    }
-                pure True
-            | otherwise -> pure False
-      if ok then do emit bc Updated ETWorkspace wsId Nothing; pure NoContent else throwError err404
-
-    purgeWorkspaceH :: UUID -> Handler NoContent
-    purgeWorkspaceH wsId = do
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
-      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
-        row <- each workspaceSchema
-        where_ $ row.wsId ==. lit wsId
-        pure row
-      case rows of
-        [] -> throwError err404
-        (r:_)
-          | r.wsDeletedAt == Nothing -> throwError purgeConflict
-          | otherwise -> do
-              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
-                delete Rel8.Delete
-                  { from = savedViewSchema
-                  , using = pure ()
-                  , deleteWhere = \_ row -> row.svWorkspaceId ==. lit wsId
-                  , returning = NoReturning
-                  }
-              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
-                delete Rel8.Delete
-                  { from = workspaceSchema
-                  , using = pure ()
-                  , deleteWhere = \_ row -> row.wsId ==. lit wsId
-                  , returning = NoReturning
-                  }
-              pure NoContent
-
-    listMembershipsH :: UUID -> Maybe Int -> Maybe Int -> Handler (PaginatedResult Auth.WorkspaceMembership)
-    listMembershipsH wsId mlimit moffset = do
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
-      requireActiveWorkspaceH pool wsId
-      let lim = capLimit mlimit
-          off = capOffset moffset
-      rows <- handleDBErrors $ Auth.listWorkspaceMemberships pool wsId (Just (lim + 1)) (Just off)
-      pure PaginatedResult { items = take lim rows, hasMore = length rows > lim }
-
-    upsertMembershipH :: UUID -> Auth.UpsertWorkspaceMembership -> Handler Auth.WorkspaceMembership
-    upsertMembershipH wsId req = do
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
-      requireActiveWorkspaceH pool wsId
-      mActor <- liftIO currentPrincipal
-      let grantedBy = case mActor of
-            Just principal -> case principal.authority of
-              PrincipalGrantUser userId -> Just userId
-              _                         -> Nothing
-            Nothing -> Nothing
-      handleDBErrorsInWorkspace wsId $ Auth.upsertWorkspaceMembership pool wsId req grantedBy
-
-    deleteMembershipH :: UUID -> UUID -> Handler NoContent
-    deleteMembershipH wsId userId = do
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
-      requireActiveWorkspaceH pool wsId
-      ok <- handleDBErrorsInWorkspace wsId $ Auth.deleteWorkspaceMembership pool wsId userId
-      if ok then pure NoContent else throwError err404
-
--- Memory handlers --------------------------------------------------
-
-memoryHandlers :: Pool Hasql.Connection -> AccessTracker -> Broadcast -> Bool -> Server MemoryAPI
-memoryHandlers pool tracker bc pgvec =
-       listMemoriesH
-  :<|> createMemoryH
-  :<|> createMemoryBatchH
-  :<|> searchMemoriesH
-  :<|> contradictionsH
-  :<|> byRelationH
-  :<|> workspaceLinksH
-  :<|> getMemoryH
-  :<|> updateMemoryH
-  :<|> deleteMemoryH
-  :<|> restoreMemoryH
-  :<|> purgeMemoryH
-  :<|> getLinksH
-  :<|> createLinkH
-  :<|> unlinkH
-  :<|> getTagsH
-  :<|> setTagsH
-  :<|> graphH
-  :<|> adjustImportanceH
-  :<|> pinH
-  :<|> unpinH
-  :<|> similarH
-  :<|> setEmbeddingH
-  :<|> batchDeleteH
-  :<|> batchSetTagsH
-  :<|> batchUpdateH
-  where
-    requireMemoryH mid = handleDBErrors (Mem.getMemory pool mid) >>= maybe (throwError err404) pure
-
-    listMemoriesH mws mtype mMinAccessCount mSortBy mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset mcompact = do
-      requireOptionalWorkspaceRoleH pool mws Auth.WorkspaceRoleRead
-      let lim = capLimit mlimit
-          off = capOffset moffset
-          compact = mcompact == Just True
-          query0 = MemoryListQuery
-            { workspaceId = mws
-            , memoryType = mtype
-            , minAccessCount = mMinAccessCount
-            , sortBy = mSortBy
-            , createdAfter = mcreatedAfter
-            , createdBefore = mcreatedBefore
-            , updatedAfter = mupdatedAfter
-            , updatedBefore = mupdatedBefore
-            , limit = Just (lim + 1)
-            , offset = Just off
-            }
-          query = MemoryListQuery
-            { workspaceId = query0.workspaceId
-            , memoryType = query0.memoryType
-            , minAccessCount = fmap (Prelude.max 0) query0.minAccessCount
-            , sortBy = query0.sortBy
-            , createdAfter = query0.createdAfter
-            , createdBefore = query0.createdBefore
-            , updatedAfter = query0.updatedAfter
-            , updatedBefore = query0.updatedBefore
-            , limit = query0.limit
-            , offset = query0.offset
-            }
-      rejectValidationErrors (validateMemoryListQuery query)
-      results <- handleDBErrors $ Mem.listMemoriesWithQuery pool query
-      let items = (if compact then map compactMemory else Prelude.id) $ take lim results
-      pure PaginatedResult { items = items, hasMore = length results > lim }
-
-    createMemoryH req = do
-      cm <- parseCreateMemoryRequest Nothing req
-      requireWorkspaceRoleH pool cm.workspaceId Auth.WorkspaceRoleEdit
-      authorizeCreateMemoryTarget Nothing cm
-      rejectValidationErrors (validateCreateMemoryInput cm)
-      mem <- handleDBErrors $ Mem.createMemory pool cm
-      emit bc Created ETMemory mem.id (Just $ toJSON mem)
-      pure mem
-
-    createMemoryBatchH reqs
-      | otherwise = do
-          cms <- sequence
-            [ parseCreateMemoryRequest (Just idx) req
-            | (idx, req) <- zip [(0 :: Int) ..] reqs
-            ]
-          requireAuthenticatedH
-          mapM_ (\wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleEdit) (dedupe $ map (.workspaceId) cms)
-          mapM_ (uncurry authorizeCreateMemoryTarget)
-            [ (Just idx, cm)
-            | (idx, cm) <- zip [(0 :: Int) ..] cms
-            ]
-          rejectValidationErrors (validateCreateMemoryBatchInput cms)
-          handleDBErrors $ Mem.createMemoryBatch pool cms
-
-    authorizeCreateMemoryTarget mIndex cm = do
-      let prefix = case mIndex of
-            Nothing  -> ""
-            Just idx -> "memories[" <> T.pack (show idx) <> "]."
-      case cm.projectId of
-        Just pid -> do
-          projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
-          _ <- requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope cm.workspaceId) projectScope
-          pure ()
-        Nothing -> pure ()
-      case cm.taskId of
-        Just tid -> do
-          taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
-          _ <- requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope cm.workspaceId) taskScope
-          mTask <- handleDBErrors $ Task.getTask pool tid
-          case mTask of
-            Nothing -> rejectValidationErrors
-              [ prefix <> "task_id must reference an active top-level task; deleted or missing task targets are not valid memory creation targets" ]
-            Just task | isJust (task.parentId) -> rejectValidationErrors
-              [ prefix <> "task_id must reference a top-level task; subtask task IDs are not valid memory creation targets" ]
-            Just _ -> pure ()
-        Nothing -> pure ()
-
-    searchMemoriesH mcompact sq = do
-      let sq' = SearchQuery
-            { workspaceId = sq.workspaceId
-            , query = sq.query
-            , memoryType = sq.memoryType
-            , tags = sq.tags
-            , minImportance = sq.minImportance
-            , minAccessCount = fmap (Prelude.max 0) sq.minAccessCount
-            , sortBy = sq.sortBy
-            , categoryId = sq.categoryId
-            , pinnedOnly = sq.pinnedOnly
-            , searchLanguage = sq.searchLanguage
-            , limit = sq.limit
-            , offset = sq.offset
-            }
-      let compact = mcompact == Just True
-      case sq'.workspaceId of
-        Just wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-        Nothing -> case sq'.categoryId of
-          Just cid -> do
-            _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleRead
-            pure ()
-          Nothing -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
-      rejectValidationErrors (validateSearchQuery sq')
-      results <- handleDBErrors $ Mem.searchMemories pool sq'
-      pure $ if compact then map compactMemory results else results
-
-    contradictionsH mws = do
-      wsId <- requireParam "workspace_id" mws
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-      handleDBErrors $ Mem.findByRelation pool wsId Contradicts
-
-    byRelationH mws mrt = do
-      wsId <- requireParam "workspace_id" mws
-      rt   <- requireParam "relation_type" mrt
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-      handleDBErrors $ Mem.findByRelation pool wsId rt
-
-    workspaceLinksH mws = do
-      wsId <- requireParam "workspace_id" mws
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-      handleDBErrors $ Mem.findLinksForWorkspace pool wsId
-
-    getMemoryH mid = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
-      mem <- requireMemoryH mid
-      liftIO $ trackAccess tracker mid
-      pure mem
-
-    updateMemoryH mid um = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
-      rejectValidationErrors (validateUpdateMemoryInput um)
-      mm <- handleDBErrors $ Mem.updateMemory pool mid um
-      case mm of
-        Nothing -> throwError err404
-        Just mem -> do
-          emit bc Updated ETMemory mid (Just $ toJSON mem)
-          pure mem
-
-    deleteMemoryH mid = do
-      scope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
-      ok <- handleDBErrors $ Mem.deleteMemory pool mid
-      if ok then do emitInScope scope bc Deleted ETMemory mid Nothing; pure NoContent else throwError err404
-
-    restoreMemoryH mid = do
-      scope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
-      ok <- handleDBErrors $ Mem.restoreMemory pool mid
-      if ok then do emitInScope scope bc Updated ETMemory mid Nothing; pure NoContent else throwError err404
-
-    purgeMemoryH mid = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleAdmin
-      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
-        row <- each memorySchema
-        where_ $ row.memId ==. lit mid
-        pure row
-      case rows of
-        [] -> throwError err404
-        (r:_)
-          | r.memDeletedAt == Nothing -> throwError purgeConflict
-          | otherwise -> do
-              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
-                delete Rel8.Delete
-                  { from = memorySchema
-                  , using = pure ()
-                  , deleteWhere = \_ row -> row.memId ==. lit mid
-                  , returning = NoReturning
-                  }
-              pure NoContent
-
-    getLinksH mid = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
-      _ <- requireMemoryH mid
-      handleDBErrors $ Mem.getMemoryLinks pool mid
-
-    createLinkH mid cml = do
-      sourceScope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
-      targetScope <- requireEntityRoleH pool Auth.EntityMemory cml.targetId Auth.WorkspaceRoleRead
-      _ <- requireSameWorkspaceScopesH sourceScope targetScope
-      mem <- requireMemoryH mid
-      _ <- requireMemoryH cml.targetId
-      handleDBErrorsInWorkspace mem.workspaceId $ Mem.linkMemories pool mid cml
-      emitInWorkspace mem.workspaceId bc Created ETMemoryLink mid (Just $ object ["source_id" .= mid, "target_id" .= cml.targetId])
-      pure NoContent
-
-    unlinkH mid tid rt = do
-      sourceScope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
-      targetScope <- requireEntityRoleH pool Auth.EntityMemory tid Auth.WorkspaceRoleRead
-      _ <- requireSameWorkspaceScopesH sourceScope targetScope
-      mem <- requireMemoryH mid
-      ok <- handleDBErrorsInWorkspace mem.workspaceId $ Mem.unlinkMemories pool mid tid rt
-      if ok then do emitInWorkspace mem.workspaceId bc Deleted ETMemoryLink mid (Just $ object ["source_id" .= mid, "target_id" .= tid]); pure NoContent else throwError err404
-
-    getTagsH mid = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
-      _ <- requireMemoryH mid
-      handleDBErrors $ Mem.getTags pool mid
-
-    setTagsH mid tags = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
-      mem <- requireMemoryH mid
-      handleDBErrorsInWorkspace mem.workspaceId $ Mem.setTags pool mid tags
-      emitInWorkspace mem.workspaceId bc Updated ETTag mid (Just $ object ["memory_id" .= mid, "tags" .= tags])
-      pure NoContent
-
-    graphH mid mdepth = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
-      mem <- requireMemoryH mid
-      let depth = fromMaybe 2 mdepth
-      graph <- handleDBErrors $ Mem.getRelatedGraph pool mid depth
-      pure $ filterMemoryGraphToWorkspace mem.workspaceId graph
-
-    adjustImportanceH mid adj = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
-      mm <- handleDBErrors $ Mem.adjustImportance pool mid adj.importance
-      case mm of
-        Nothing -> throwError err404
-        Just mem -> do
-          emit bc Updated ETMemory mid (Just $ toJSON mem)
-          pure mem
-
-    pinH mid = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
-      mm <- handleDBErrors $ Mem.togglePin pool mid True
-      maybe (throwError err404) pure mm
-
-    unpinH mid = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
-      mm <- handleDBErrors $ Mem.togglePin pool mid False
-      maybe (throwError err404) pure mm
-
-    similarH sq
-      | not pgvec = throwError err501
-          { errBody = "pgvector extension is not installed; similarity search is unavailable" }
-      | otherwise = do
-          requireWorkspaceRoleH pool sq.workspaceId Auth.WorkspaceRoleRead
-          handleDBErrors $ Mem.similarMemories pool sq
-
-    setEmbeddingH mid vec
-      | not pgvec = throwError err501
-          { errBody = "pgvector extension is not installed; embeddings are unavailable" }
-      | otherwise = do
-          _ <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit
-          _ <- requireMemoryH mid
-          handleDBErrors $ Mem.setEmbedding pool mid vec
-          pure NoContent
-
-    batchDeleteH br = do
-      requireAuthenticatedH
-      scopes <- mapM (\mid -> requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleEdit) br.ids
-      rejectValidationErrors (validateBatchDeleteRequest br)
-      n <- handleDBErrors $ Mem.deleteMemoryBatch pool br.ids
-      emitManyInScopes bc Deleted ETMemory (zip br.ids scopes)
-      pure BatchResult { affected = n }
-
-    batchSetTagsH bst = do
-      requireAuthenticatedH
-      resolvedItems <- mapM resolveTagBatchItem bst.items
-      let groupedItems = Map.toList $ Map.fromListWith (<>) resolvedItems
-      rejectValidationErrors (validateBatchSetTagsRequest bst)
-      counts <- mapM (\(wsId, items) -> handleDBErrorsInWorkspace wsId $ Mem.setTagsBatch pool items) groupedItems
-      let n = Prelude.sum counts
-      mapM_ (\(wsId, items) -> mapM_ (\(mid, _) -> emitInWorkspace wsId bc Updated ETTag mid Nothing) items) groupedItems
-      pure BatchResult { affected = n }
-
-    resolveTagBatchItem item = do
-      _ <- requireEntityRoleH pool Auth.EntityMemory item.memoryId Auth.WorkspaceRoleEdit
-      mem <- handleDBErrors (Mem.getMemory pool item.memoryId) >>= maybe (throwError err404) pure
-      pure (mem.workspaceId, [(item.memoryId, item.tags)])
-
-    batchUpdateH bur = do
-      requireAuthenticatedH
-      scopes <- mapM (\item -> requireEntityRoleH pool Auth.EntityMemory item.id Auth.WorkspaceRoleEdit) bur.items
-      rejectValidationErrors (validateBatchUpdateMemoryRequest bur)
-      n <- handleDBErrors $ Mem.updateMemoryBatch pool [(item.id, item.update) | item <- bur.items]
-      emitManyInScopes bc Updated ETMemory (zip (map (.id) bur.items) scopes)
-      pure BatchResult { affected = n }
-
--- Project handlers -------------------------------------------------
-
-projectHandlers :: Pool Hasql.Connection -> Broadcast -> Server ProjectAPI
-projectHandlers pool bc =
-       listProjectsH
-  :<|> createProjectH
-  :<|> getProjectH
-  :<|> updateProjectH
-  :<|> deleteProjectH
-  :<|> restoreProjectH
-  :<|> purgeProjectH
-  :<|> linkMemoryH
-  :<|> unlinkMemoryH
-  :<|> getProjectMemoriesH
-  :<|> batchLinkMemoriesH
-  :<|> batchDeleteH
-  :<|> batchUpdateH
-  :<|> projectOverviewH
-  :<|> projectNextTasksH
-  where
-    requireProjectH :: UUID -> Handler Project
-    requireProjectH pid = handleDBErrors (Proj.getProject pool pid) >>= maybe (throwError err404) pure
-
-    listProjectsH mws mstatus mquery msearchLang mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset = do
-      requireOptionalWorkspaceRoleH pool mws Auth.WorkspaceRoleRead
-      let lim = capLimit mlimit
-          off = capOffset moffset
-          query = ProjectListQuery
-            { workspaceId = mws
-            , status = mstatus
-            , query = mquery
-            , searchLanguage = msearchLang
-            , createdAfter = mcreatedAfter
-            , createdBefore = mcreatedBefore
-            , updatedAfter = mupdatedAfter
-            , updatedBefore = mupdatedBefore
-            , limit = Just (lim + 1)
-            , offset = Just off
-            }
-      rejectValidationErrors (validateProjectListQuery query)
-      results <- handleDBErrors $ Proj.listProjectsWithQuery pool query
-      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-
-    createProjectH cp = do
-      requireWorkspaceRoleH pool cp.workspaceId Auth.WorkspaceRoleEdit
-      mapM_ (\parentId -> do
-        parentScope <- requireEntityRoleH pool Auth.EntityProject parentId Auth.WorkspaceRoleRead
-        _ <- requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope cp.workspaceId) parentScope
-        pure ()) cp.parentId
-      rejectValidationErrors (validateCreateProjectInput cp)
-      proj <- handleDBErrors $ Proj.createProject pool cp
-      emit bc Created ETProject proj.id (Just $ toJSON proj)
-      pure proj
-    getProjectH pid = do
-      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
-      requireProjectH pid
-    updateProjectH pid up = do
-      projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
-      case up.parentId of
-        SetTo parentId -> do
-          parentScope <- requireEntityRoleH pool Auth.EntityProject parentId Auth.WorkspaceRoleRead
-          _ <- requireSameWorkspaceScopesH projectScope parentScope
-          pure ()
-        _ -> pure ()
-      rejectValidationErrors (validateUpdateProjectInput up)
-      mp <- handleDBErrors (Proj.updateProject pool pid up)
-      case mp of
-        Nothing -> throwError err404
-        Just proj -> do
-          emit bc Updated ETProject pid (Just $ toJSON proj)
-          pure proj
-
-    deleteProjectH pid = do
-      scope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
-      result <- handleDBErrors $ Proj.deleteProjectCascade pool pid
-      case result of
-        Nothing -> throwError err404
-        Just cascade -> do
-          emitInScope scope bc Deleted ETProject pid (Just $ toJSON cascade)
-          pure cascade
-
-    restoreProjectH pid = do
-      scope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
-      ok <- handleDBErrors $ Proj.restoreProject pool pid
-      if ok then do emitInScope scope bc Updated ETProject pid Nothing; pure NoContent else throwError err404
-
-    purgeProjectH pid = do
-      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleAdmin
-      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
-        row <- each projectSchema
-        where_ $ row.projId ==. lit pid
-        pure row
-      case rows of
-        [] -> throwError err404
-        (r:_)
-          | r.projDeletedAt == Nothing -> throwError purgeConflict
-          | otherwise -> do
-              result <- handleDBErrors $ Proj.purgeProjectCascade pool pid
-              case result of
-                Nothing -> throwError err404
-                Just cascade -> pure cascade
-
-    linkMemoryH pid lm = do
-      projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
-      memoryScope <- requireEntityRoleH pool Auth.EntityMemory lm.memoryId Auth.WorkspaceRoleRead
-      _ <- requireSameWorkspaceScopesH projectScope memoryScope
-      proj <- requireProjectH pid
-      _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
-      handleDBErrorsInWorkspace proj.workspaceId $ Proj.linkProjectMemory pool pid lm.memoryId
-      emitInWorkspace proj.workspaceId bc Updated ETProject pid (Just $ object ["linked_memory" .= lm.memoryId])
-      pure NoContent
-
-    unlinkMemoryH pid mid = do
-      projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
-      memoryScope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
-      _ <- requireSameWorkspaceScopesH projectScope memoryScope
-      proj <- requireProjectH pid
-      handleDBErrorsInWorkspace proj.workspaceId $ Proj.unlinkProjectMemory pool pid mid
-      emitInWorkspace proj.workspaceId bc Updated ETProject pid (Just $ object ["unlinked_memory" .= mid])
-      pure NoContent
-
-    getProjectMemoriesH pid mQuery mTags mMinImportance mMemoryType mMinAccessCount = do
-      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
-      proj <- requireProjectH pid
-      let lq0 = LinkedMemoryListQuery
-            { query = mQuery
-            , tags = case mTags of [] -> Nothing; xs -> Just xs
-            , minImportance = mMinImportance
-            , memoryType = mMemoryType
-            , minAccessCount = mMinAccessCount
-            }
-          lq = LinkedMemoryListQuery
-            { query = lq0.query
-            , tags = lq0.tags
-            , minImportance = fmap (Prelude.min 10 . Prelude.max 1) lq0.minImportance
-            , memoryType = lq0.memoryType
-            , minAccessCount = fmap (Prelude.max 0) lq0.minAccessCount
-            }
-      rejectValidationErrors (validateLinkedMemoryListQuery lq)
-      mems <- handleDBErrors $ Mem.getProjectMemories pool pid lq
-      pure $ Prelude.filter ((== proj.workspaceId) . (.workspaceId)) mems
-
-    batchLinkMemoriesH pid blr = do
-      requireAuthenticatedH
-      projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
-      memoryScopes <- mapM (\mid -> requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead) blr.memoryIds
-      mapM_ (requireSameWorkspaceScopesH projectScope) memoryScopes
-      proj <- requireProjectH pid
-      rejectValidationErrors (validateBatchMemoryLinkRequest blr)
-      n <- handleDBErrorsInWorkspace proj.workspaceId $ Proj.linkProjectMemoryBatch pool pid blr.memoryIds
-      emitInWorkspace proj.workspaceId bc Updated ETProject pid Nothing
-      pure BatchResult { affected = n }
-
-    batchDeleteH br = do
-      requireAuthenticatedH
-      scopes <- mapM (\pid -> requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit) br.ids
-      rejectValidationErrors (validateBatchDeleteRequest br)
-      n <- handleDBErrors $ Proj.deleteProjectBatch pool br.ids
-      emitManyInScopes bc Deleted ETProject (zip br.ids scopes)
-      pure BatchResult { affected = n }
-
-    batchUpdateH bur = do
-      requireAuthenticatedH
-      scopes <- mapM authorizeProjectUpdateItem bur.items
-      rejectValidationErrors (validateBatchUpdateProjectRequest bur)
-      n <- handleDBErrors $ Proj.updateProjectBatch pool [(item.id, item.update) | item <- bur.items]
-      emitManyInScopes bc Updated ETProject (zip (map (.id) bur.items) scopes)
-      pure BatchResult { affected = n }
-
-    projectOverviewH pid mExtraContext = do
-      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
-      let extraContext = fromMaybe False mExtraContext
-      handleDBErrors (Overview.getProjectOverview pool pid extraContext) >>= maybe (throwError err404) pure
-
-    projectNextTasksH pid mlimit mIncludeBlocked = do
-      _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
-      let lim = Prelude.min 200 . Prelude.max 1 $ fromMaybe 5 mlimit
-          includeBlocked = fromMaybe False mIncludeBlocked
-      handleDBErrors $ Task.listNextTasks pool pid includeBlocked lim
-
-    authorizeProjectUpdateItem item = do
-      projectScope <- requireEntityRoleH pool Auth.EntityProject item.id Auth.WorkspaceRoleEdit
-      case item.update.parentId of
-        SetTo parentId -> do
-          parentScope <- requireEntityRoleH pool Auth.EntityProject parentId Auth.WorkspaceRoleRead
-          _ <- requireSameWorkspaceScopesH projectScope parentScope
-          pure ()
-        _ -> pure ()
-      pure projectScope
-
--- Task handlers ----------------------------------------------------
-
-taskHandlers :: Pool Hasql.Connection -> Broadcast -> Server TaskAPI
-taskHandlers pool bc =
-       listTasksH
-  :<|> createTaskH
-  :<|> getTaskH
-  :<|> updateTaskH
-  :<|> deleteTaskH
-  :<|> restoreTaskH
-  :<|> purgeTaskH
-  :<|> linkMemoryH
-  :<|> unlinkMemoryH
-  :<|> addDepH
-  :<|> removeDepH
-  :<|> getTaskMemoriesH
-  :<|> taskOverviewH
-  :<|> contextInfoH
-  :<|> batchDeleteH
-  :<|> batchMoveH
-  :<|> batchUpdateH
-  :<|> batchLinkMemoriesH
-  where
-    requireTaskH :: UUID -> Handler Task
-    requireTaskH tid = handleDBErrors (Task.getTask pool tid) >>= maybe (throwError err404) pure
-
-    listTasksH mws mpid mstatus mpriority mquery msearchLang mcreatedAfter mcreatedBefore mupdatedAfter mupdatedBefore mlimit moffset = do
-      case (mws, mpid) of
-        (Just wsId, _) -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-        (Nothing, Just pid) -> do
-          _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
-          pure ()
-        (Nothing, Nothing) -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
-      let lim = capLimit mlimit
-          off = capOffset moffset
-          query = TaskListQuery
-            { workspaceId = mws
-            , projectId = mpid
-            , status = mstatus
-            , priority = mpriority
-            , query = mquery
-            , searchLanguage = msearchLang
-            , createdAfter = mcreatedAfter
-            , createdBefore = mcreatedBefore
-            , updatedAfter = mupdatedAfter
-            , updatedBefore = mupdatedBefore
-            , limit = Just (lim + 1)
-            , offset = Just off
-            }
-      rejectValidationErrors (validateTaskListQuery query)
-      results <- handleDBErrors $ Task.listTasksWithQuery pool query
-      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-
-    createTaskH ct = do
-      requireWorkspaceRoleH pool ct.workspaceId Auth.WorkspaceRoleEdit
-      mapM_ (\pid -> do
-        projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
-        _ <- requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope ct.workspaceId) projectScope
-        pure ()) ct.projectId
-      mapM_ (\parentId -> do
-        parentScope <- requireEntityRoleH pool Auth.EntityTask parentId Auth.WorkspaceRoleRead
-        _ <- requireSameWorkspaceScopesH (Auth.EntityWorkspaceScope ct.workspaceId) parentScope
-        pure ()) ct.parentId
-      rejectValidationErrors (validateCreateTaskInput ct)
-      task <- handleDBErrors $ Task.createTask pool ct
-      emit bc Created ETTask task.id (Just $ toJSON task)
-      pure task
-    getTaskH tid = do
-      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleRead
-      requireTaskH tid
-    updateTaskH tid ut = do
-      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
-      case ut.projectId of
-        SetTo pid -> do
-          projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
-          _ <- requireSameWorkspaceScopesH taskScope projectScope
-          pure ()
-        _ -> pure ()
-      case ut.parentId of
-        SetTo parentId -> do
-          parentScope <- requireEntityRoleH pool Auth.EntityTask parentId Auth.WorkspaceRoleRead
-          _ <- requireSameWorkspaceScopesH taskScope parentScope
-          pure ()
-        _ -> pure ()
-      rejectValidationErrors (validateUpdateTaskInput ut)
-      updateResult <- handleDBErrors (Task.updateTaskWithDependencySnapshots pool tid ut)
-      case updateResult of
-        Nothing -> throwError err404
-        Just (task, beforeDependencyState, afterDependencyState) -> do
-          let dependencyEffects = dependencyStatusChanges beforeDependencyState afterDependencyState
-          emit bc Updated ETTask tid (Just $ toJSON task)
-          emitDependencyStatusChanges task.workspaceId bc tid dependencyEffects
-          pure TaskMutationResult { task = task, dependencyEffects = dependencyEffects }
-
-    deleteTaskH tid = do
-      scope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
-      result <- handleDBErrors $ Task.deleteTaskCascade pool tid
-      case result of
-        Nothing -> throwError err404
-        Just cascade -> do
-          emitInScope scope bc Deleted ETTask tid (Just $ toJSON cascade)
-          pure cascade
-
-    restoreTaskH tid = do
-      scope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
-      ok <- handleDBErrors $ Task.restoreTask pool tid
-      if ok then do emitInScope scope bc Updated ETTask tid Nothing; pure NoContent else throwError err404
-
-    purgeTaskH tid = do
-      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleAdmin
-      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
-        row <- each taskSchema
-        where_ $ row.taskId ==. lit tid
-        pure row
-      case rows of
-        [] -> throwError err404
-        (r:_)
-          | r.taskDeletedAt == Nothing -> throwError purgeConflict
-          | otherwise -> do
-              result <- handleDBErrors $ Task.purgeTaskCascade pool tid
-              case result of
-                Nothing -> throwError err404
-                Just cascade -> pure cascade
-
-    linkMemoryH tid lm = do
-      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
-      memoryScope <- requireEntityRoleH pool Auth.EntityMemory lm.memoryId Auth.WorkspaceRoleRead
-      _ <- requireSameWorkspaceScopesH taskScope memoryScope
-      task <- requireTaskH tid
-      _ <- handleDBErrors (Mem.getMemory pool lm.memoryId) >>= maybe (throwError err404) pure
-      handleDBErrorsInWorkspace task.workspaceId $ Task.linkTaskMemory pool tid lm.memoryId
-      emitInWorkspace task.workspaceId bc Updated ETTask tid (Just $ object ["linked_memory" .= lm.memoryId])
-      pure NoContent
-
-    unlinkMemoryH tid mid = do
-      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
-      memoryScope <- requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead
-      _ <- requireSameWorkspaceScopesH taskScope memoryScope
-      task <- requireTaskH tid
-      handleDBErrorsInWorkspace task.workspaceId $ Task.unlinkTaskMemory pool tid mid
-      emitInWorkspace task.workspaceId bc Updated ETTask tid (Just $ object ["unlinked_memory" .= mid])
-      pure NoContent
-
-    addDepH tid ld = do
-      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
-      depScope <- requireEntityRoleH pool Auth.EntityTask ld.dependsOnId Auth.WorkspaceRoleRead
-      _ <- requireSameWorkspaceScopesH taskScope depScope
-      task <- requireTaskH tid
-      _ <- requireTaskH ld.dependsOnId
-      (beforeRaw, afterRaw) <- handleDBErrorsInWorkspace task.workspaceId $ Task.addDependencyWithSnapshots pool tid ld.dependsOnId
-      beforeDependencyState <- handleDBErrors $ Task.enrichDependencyAutoBlockSnapshots pool beforeRaw
-      afterDependencyState <- handleDBErrors $ Task.enrichDependencyAutoBlockSnapshots pool afterRaw
-      let result = dependencyMutationResult "add" tid ld.dependsOnId beforeDependencyState afterDependencyState
-      emitDependencyMutationResult task.workspaceId bc Created tid result
-      pure result
-
-    removeDepH tid depId = do
-      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
-      depScope <- requireEntityRoleH pool Auth.EntityTask depId Auth.WorkspaceRoleRead
-      _ <- requireSameWorkspaceScopesH taskScope depScope
-      task <- requireTaskH tid
-      (beforeRaw, afterRaw) <- handleDBErrorsInWorkspace task.workspaceId $ Task.removeDependencyWithSnapshots pool tid depId
-      beforeDependencyState <- handleDBErrors $ Task.enrichDependencyAutoBlockSnapshots pool beforeRaw
-      afterDependencyState <- handleDBErrors $ Task.enrichDependencyAutoBlockSnapshots pool afterRaw
-      let result = dependencyMutationResult "remove" tid depId beforeDependencyState afterDependencyState
-      emitDependencyMutationResult task.workspaceId bc Deleted tid result
-      pure result
-
-    getTaskMemoriesH tid mQuery mTags mMinImportance mMemoryType mMinAccessCount = do
-      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleRead
-      task <- requireTaskH tid
-      let lq0 = LinkedMemoryListQuery
-            { query = mQuery
-            , tags = case mTags of [] -> Nothing; xs -> Just xs
-            , minImportance = mMinImportance
-            , memoryType = mMemoryType
-            , minAccessCount = mMinAccessCount
-            }
-          lq = LinkedMemoryListQuery
-            { query = lq0.query
-            , tags = lq0.tags
-            , minImportance = fmap (Prelude.min 10 . Prelude.max 1) lq0.minImportance
-            , memoryType = lq0.memoryType
-            , minAccessCount = fmap (Prelude.max 0) lq0.minAccessCount
-            }
-      rejectValidationErrors (validateLinkedMemoryListQuery lq)
-      mems <- handleDBErrors $ Mem.getTaskMemories pool tid lq
-      pure $ Prelude.filter ((== task.workspaceId) . (.workspaceId)) mems
-
-    taskOverviewH tid mExtraContext = do
-      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleRead
-      let extraContext = fromMaybe False mExtraContext
-      handleDBErrors (Overview.getTaskOverview pool tid extraContext) >>= maybe (throwError err404) pure
-
-    contextInfoH tid mDetailLevel = do
-      _ <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleRead
-      let level = fromMaybe ContextMedium mDetailLevel
-      handleDBErrors (Overview.getContextInfo pool tid level) >>= maybe (throwError err404) pure
-
-    batchDeleteH br = do
-      requireAuthenticatedH
-      scopes <- mapM (\tid -> requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit) br.ids
-      rejectValidationErrors (validateBatchDeleteRequest br)
-      n <- handleDBErrors $ Task.deleteTaskBatch pool br.ids
-      emitManyInScopes bc Deleted ETTask (zip br.ids scopes)
-      pure BatchResult { affected = n }
-
-    batchMoveH bmr = do
-      requireAuthenticatedH
-      taskScopes <- mapM (\tid -> requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit) bmr.taskIds
-      mapM_ (\pid -> do
-        projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleEdit
-        mapM_ (requireSameWorkspaceScopesH projectScope) taskScopes) bmr.projectId
-      rejectValidationErrors (validateBatchMoveTasksRequest bmr)
-      n <- handleDBErrors $ Task.moveTasksBatch pool bmr.taskIds bmr.projectId
-      emitManyInScopes bc Updated ETTask (zip bmr.taskIds taskScopes)
-      pure BatchResult { affected = n }
-
-    batchUpdateH bur = do
-      requireAuthenticatedH
-      mapM_ authorizeTaskUpdateItem bur.items
-      rejectValidationErrors (validateBatchUpdateTaskRequest bur)
-      updateResults <- handleDBErrors $
-        mapM (\item -> Task.updateTaskWithDependencySnapshots pool item.id item.update) bur.items
-      let successfulUpdates = [result | Just result <- updateResults]
-      mapM_ emitTaskUpdate successfulUpdates
-      pure BatchResult { affected = length successfulUpdates }
-      where
-        emitTaskUpdate (task, beforeDependencyState, afterDependencyState) = do
-          let dependencyEffects = dependencyStatusChanges beforeDependencyState afterDependencyState
-          emitInWorkspace task.workspaceId bc Updated ETTask task.id (Just $ toJSON task)
-          emitDependencyStatusChanges task.workspaceId bc task.id dependencyEffects
-
-    batchLinkMemoriesH tid blr = do
-      requireAuthenticatedH
-      taskScope <- requireEntityRoleH pool Auth.EntityTask tid Auth.WorkspaceRoleEdit
-      memoryScopes <- mapM (\mid -> requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead) blr.memoryIds
-      mapM_ (requireSameWorkspaceScopesH taskScope) memoryScopes
-      task <- requireTaskH tid
-      rejectValidationErrors (validateBatchMemoryLinkRequest blr)
-      n <- handleDBErrorsInWorkspace task.workspaceId $ Task.linkTaskMemoryBatch pool tid blr.memoryIds
-      emitInWorkspace task.workspaceId bc Updated ETTask tid Nothing
-      pure BatchResult { affected = n }
-
-    authorizeTaskUpdateItem item = do
-      taskScope <- requireEntityRoleH pool Auth.EntityTask item.id Auth.WorkspaceRoleEdit
-      case item.update.projectId of
-        SetTo pid -> do
-          projectScope <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
-          _ <- requireSameWorkspaceScopesH taskScope projectScope
-          pure ()
-        _ -> pure ()
-      case item.update.parentId of
-        SetTo parentId -> do
-          parentScope <- requireEntityRoleH pool Auth.EntityTask parentId Auth.WorkspaceRoleRead
-          _ <- requireSameWorkspaceScopesH taskScope parentScope
-          pure ()
-        _ -> pure ()
-      pure taskScope
-
--- Cleanup handlers -------------------------------------------------
-
-cleanupHandlers :: Pool Hasql.Connection -> Broadcast -> Server CleanupAPI
-cleanupHandlers pool _bc =
-       runCleanupH
-  :<|> getPoliciesH
-  :<|> upsertPolicyH
-  where
-    runCleanupH req = do
-      requireWorkspaceRoleH pool req.workspaceId Auth.WorkspaceRoleEdit
-      handleDBErrors $ Cleanup.runCleanup pool req.workspaceId
-    getPoliciesH mws mlimit moffset = do
-      wsId <- requireParam "workspace_id" mws
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-      let lim = capLimit mlimit
-          off = capOffset moffset
-      results <- handleDBErrors $ Cleanup.getCleanupPolicies pool wsId (Just (lim + 1)) (Just off)
-      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-    upsertPolicyH p = do
-      requireWorkspaceRoleH pool p.workspaceId Auth.WorkspaceRoleEdit
-      handleDBErrors $ Cleanup.upsertCleanupPolicy pool p
-
--- Category handlers ------------------------------------------------
-
-categoryHandlers :: Pool Hasql.Connection -> Broadcast -> Server CategoryAPI
-categoryHandlers pool bc =
-       listCategoriesH
-  :<|> listGlobalCategoriesH
-  :<|> createCategoryH
-  :<|> getCategoryH
-  :<|> updateCategoryH
-  :<|> deleteCategoryH
-  :<|> restoreCategoryH
-  :<|> purgeCategoryH
-  :<|> getCategoryMemoriesH
-  :<|> batchLinkMemoriesH
-  :<|> batchDeleteH
-  :<|> linkH
-  :<|> unlinkH
-  where
-    requireCategoryH :: UUID -> Handler MemoryCategory
-    requireCategoryH cid = handleDBErrors (Cat.getCategory pool cid) >>= maybe (throwError err404) pure
-
-    categoryWorkspaceIdH :: MemoryCategory -> [UUID] -> Handler UUID
-    categoryWorkspaceIdH cat memoryIds =
-      case cat.workspaceId of
-        Just wsId -> pure wsId
-        Nothing -> case memoryIds of
-          [] -> throwError err400
-          (mid:_) -> do
-            mem <- handleDBErrors (Mem.getMemory pool mid) >>= maybe (throwError err404) pure
-            pure mem.workspaceId
-
-    categoryMemoryIdsByWorkspaceH :: MemoryCategory -> [UUID] -> Handler [(UUID, [UUID])]
-    categoryMemoryIdsByWorkspaceH cat memoryIds =
-      case cat.workspaceId of
-        Just wsId -> pure [(wsId, memoryIds)]
-        Nothing -> fmap (Map.toList . Map.fromListWith (<>)) $ mapM resolve memoryIds
-      where
-        resolve mid = do
-          mem <- handleDBErrors (Mem.getMemory pool mid) >>= maybe (throwError err404) pure
-          pure (mem.workspaceId, [mid])
-
-    listCategoriesH mws mlimit moffset = do
-      requireOptionalWorkspaceRoleH pool mws Auth.WorkspaceRoleRead
-      let lim = capLimit mlimit
-          off = capOffset moffset
-      results <- case mws of
-        Just wsId -> handleDBErrors $ Cat.listCategories pool wsId (Just (lim + 1)) (Just off)
-        Nothing   -> handleDBErrors $ Cat.listGlobalCategories pool (Just (lim + 1)) (Just off)
-      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-
-    listGlobalCategoriesH mlimit moffset = do
-      requireGlobalPermissionH pool Auth.GlobalSuperadmin
-      let lim = capLimit mlimit
-          off = capOffset moffset
-      results <- handleDBErrors $ Cat.listGlobalCategories pool (Just (lim + 1)) (Just off)
-      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-
-    createCategoryH cc = do
-      requireOptionalWorkspaceRoleH pool cc.workspaceId Auth.WorkspaceRoleEdit
-      rejectValidationErrors (validateCreateMemoryCategoryInput cc)
-      cat <- handleDBErrors $ Cat.createCategory pool cc
-      emit bc Created ETCategory cat.id (Just $ toJSON cat)
-      pure cat
-    getCategoryH cid = do
-      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleRead
-      requireCategoryH cid
-    updateCategoryH cid uc = do
-      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
-      rejectValidationErrors (validateUpdateMemoryCategoryInput uc)
-      mc <- handleDBErrors (Cat.updateCategory pool cid uc)
-      case mc of
-        Nothing -> throwError err404
-        Just cat -> do
-          emit bc Updated ETCategory cid (Just $ toJSON cat)
-          pure cat
-
-    deleteCategoryH cid = do
-      scope <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
-      ok <- handleDBErrors $ Cat.deleteCategory pool cid
-      if ok then do emitInScope scope bc Deleted ETCategory cid Nothing; pure NoContent else throwError err404
-
-    restoreCategoryH cid = do
-      scope <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
-      ok <- handleDBErrors $ Cat.restoreCategory pool cid
-      if ok then do emitInScope scope bc Updated ETCategory cid Nothing; pure NoContent else throwError err404
-
-    purgeCategoryH cid = do
-      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleAdmin
-      rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
-        row <- each memoryCategorySchema
-        where_ $ row.mcId ==. lit cid
-        pure row
-      case rows of
-        [] -> throwError err404
-        (r:_)
-          | r.mcDeletedAt == Nothing -> throwError purgeConflict
-          | otherwise -> do
-              handleDBErrors $ runSession pool $ Session.statement () $ run_ $
-                delete Rel8.Delete
-                  { from = memoryCategorySchema
-                  , using = pure ()
-                  , deleteWhere = \_ row -> row.mcId ==. lit cid
-                  , returning = NoReturning
-                  }
-              pure NoContent
-
-    getCategoryMemoriesH cid = do
-      _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleRead
-      cat <- requireCategoryH cid
-      mems <- handleDBErrors $ Mem.getCategoryMemories pool cid
-      pure $ case cat.workspaceId of
-        Just wsId -> Prelude.filter ((== wsId) . (.workspaceId)) mems
-        Nothing   -> mems
-
-    batchLinkMemoriesH cid blr = do
-      requireAuthenticatedH
-      catScope <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit
-      memoryScopes <- mapM (\mid -> requireEntityRoleH pool Auth.EntityMemory mid Auth.WorkspaceRoleRead) blr.memoryIds
-      case catScope of
-        Auth.EntityWorkspaceScope{} -> mapM_ (requireSameWorkspaceScopesH catScope) memoryScopes
-        Auth.EntityGlobalScope -> pure ()
-      cat <- requireCategoryH cid
-      rejectValidationErrors (validateBatchMemoryLinkRequest blr)
-      groupedIds <- categoryMemoryIdsByWorkspaceH cat blr.memoryIds
-      counts <- mapM (\(wsId, mids) -> handleDBErrorsInWorkspace wsId $ Cat.linkMemoryCategoryBatch pool cid mids) groupedIds
-      let n = Prelude.sum counts
-      case groupedIds of
-        [] -> emitInScope catScope bc Updated ETCategory cid Nothing
-        _  -> mapM_ (\(wsId, _) -> emitInWorkspace wsId bc Updated ETCategory cid Nothing) groupedIds
-      pure BatchResult { affected = n }
-
-    batchDeleteH br = do
-      requireAuthenticatedH
-      scopes <- mapM (\cid -> requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleEdit) br.ids
-      rejectValidationErrors (validateBatchDeleteRequest br)
-      n <- handleDBErrors $ Cat.deleteCategoryBatch pool br.ids
-      emitManyInScopes bc Deleted ETCategory (zip br.ids scopes)
-      pure BatchResult { affected = n }
-
-    linkH cl = do
-      catScope <- requireEntityRoleH pool Auth.EntityCategory cl.categoryId Auth.WorkspaceRoleEdit
-      memoryScope <- requireEntityRoleH pool Auth.EntityMemory cl.memoryId Auth.WorkspaceRoleEdit
-      case catScope of
-        Auth.EntityWorkspaceScope{} -> do
-          _ <- requireSameWorkspaceScopesH catScope memoryScope
-          pure ()
-        Auth.EntityGlobalScope -> pure ()
-      cat <- requireCategoryH cl.categoryId
-      _ <- handleDBErrors (Mem.getMemory pool cl.memoryId) >>= maybe (throwError err404) pure
-      wsId <- categoryWorkspaceIdH cat [cl.memoryId]
-      handleDBErrorsInWorkspace wsId $ Cat.linkMemoryCategory pool cl.memoryId cl.categoryId
-      emitInWorkspace wsId bc Created ETCategoryLink cl.categoryId (Just $ object ["category_id" .= cl.categoryId, "memory_id" .= cl.memoryId])
-      pure NoContent
-
-    unlinkH cl = do
-      catScope <- requireEntityRoleH pool Auth.EntityCategory cl.categoryId Auth.WorkspaceRoleEdit
-      memoryScope <- requireEntityRoleH pool Auth.EntityMemory cl.memoryId Auth.WorkspaceRoleEdit
-      case catScope of
-        Auth.EntityWorkspaceScope{} -> do
-          _ <- requireSameWorkspaceScopesH catScope memoryScope
-          pure ()
-        Auth.EntityGlobalScope -> pure ()
-      cat <- requireCategoryH cl.categoryId
-      wsId <- categoryWorkspaceIdH cat [cl.memoryId]
-      handleDBErrorsInWorkspace wsId $ Cat.unlinkMemoryCategory pool cl.memoryId cl.categoryId
-      emitInWorkspace wsId bc Deleted ETCategoryLink cl.categoryId (Just $ object ["category_id" .= cl.categoryId, "memory_id" .= cl.memoryId])
-      pure NoContent
-
--- Workspace group handlers -----------------------------------------
-
-workspaceGroupHandlers :: Pool Hasql.Connection -> Broadcast -> Server WorkspaceGroupAPI
-workspaceGroupHandlers pool bc =
-       listGroupsH
-  :<|> createGroupH
-  :<|> getGroupH
-  :<|> deleteGroupH
-  :<|> addMemberH
-  :<|> removeMemberH
-  :<|> listMembersH
-  where
-    listGroupsH mlimit moffset = do
-      requireGlobalPermissionH pool Auth.GlobalSuperadmin
-      let lim = capLimit mlimit
-          off = capOffset moffset
-      results <- handleDBErrors $ WG.listGroups pool (Just (lim + 1)) (Just off)
-      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-
-    createGroupH cg = do
-      requireGlobalPermissionH pool Auth.GlobalSuperadmin
-      rejectValidationErrors (validateCreateWorkspaceGroupInput cg)
-      grp <- handleDBErrors $ WG.createGroup pool cg
-      emit bc Created ETWorkspaceGroup grp.id (Just $ toJSON grp)
-      pure grp
-
-    getGroupH gid = do
-      requireGlobalPermissionH pool Auth.GlobalSuperadmin
-      mg <- handleDBErrors $ WG.getGroup pool gid
-      maybe (throwError err404) pure mg
-
-    deleteGroupH gid = do
-      requireGlobalPermissionH pool Auth.GlobalSuperadmin
-      ok <- handleDBErrors $ WG.deleteGroup pool gid
-      if ok then do emit bc Deleted ETWorkspaceGroup gid Nothing; pure NoContent else throwError err404
-
-    addMemberH gid req = do
-      requireGlobalPermissionH pool Auth.GlobalSuperadmin
-      handleDBErrors $ WG.addMember pool gid req.workspaceId
-      emit bc Updated ETWorkspaceGroup gid (Just $ object ["added_workspace" .= req.workspaceId])
-      pure NoContent
-
-    removeMemberH gid wsId = do
-      requireGlobalPermissionH pool Auth.GlobalSuperadmin
-      handleDBErrors $ WG.removeMember pool gid wsId
-      emit bc Updated ETWorkspaceGroup gid (Just $ object ["removed_workspace" .= wsId])
-      pure NoContent
-
-    listMembersH gid = do
-      requireGlobalPermissionH pool Auth.GlobalSuperadmin
-      handleDBErrors $ WG.listGroupMembers pool gid
-
--- Audit log handlers -----------------------------------------------
-
-auditHandlers :: Pool Hasql.Connection -> Broadcast -> Server AuditAPI
-auditHandlers pool bc =
-       listAuditH
-  :<|> revertAuditH
-  :<|> getAuditH
-  where
-    listAuditH :: Maybe UUID -> Maybe Text -> Maybe Text -> Maybe AuditAction -> Maybe UTCTime -> Maybe UTCTime
-               -> Maybe Int -> Maybe Int -> Handler (PaginatedResult AuditLogEntry)
-    listAuditH mWorkspaceId mEntityType mEntityId mAction mSince mUntil mlimit moffset = do
-      requireAuditReadH mWorkspaceId
-      let lim = capLimit mlimit
-          off = capOffset moffset
-          q = AuditLogQuery
-            { workspaceId = mWorkspaceId
-            , entityType = mEntityType
-            , entityId   = mEntityId
-            , action     = mAction
-            , since      = mSince
-            , until      = mUntil
-            , limit      = Just (lim + 1)
-            , offset     = Just off
-            }
-      results <- handleDBErrors $ Audit.getAuditLog pool q
-      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-
-    getAuditH :: UUID -> Handler AuditLogEntry
-    getAuditH auditId = do
-      requireAuthenticatedH
-      mEntry <- handleDBErrors $ Audit.getAuditEntry pool auditId
-      case mEntry of
-        Just entry -> do
-          allowed <- auditReadAllowedH entry.workspaceId
-          if allowed then pure entry else throwError err404
-        Nothing    -> throwError err404
-
-    requireAuditReadH :: Maybe UUID -> Handler ()
-    requireAuditReadH = \case
-      Just wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleAdmin
-      Nothing   -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
-
-    auditReadAllowedH :: Maybe UUID -> Handler Bool
-    auditReadAllowedH mWorkspaceId = do
-      mPrincipal <- liftIO currentPrincipal
-      result <- liftIO $ case mWorkspaceId of
-        Just wsId -> Auth.authorizeWorkspace pool mPrincipal wsId Auth.WorkspaceRoleAdmin
-        Nothing   -> Auth.authorizeGlobal pool mPrincipal Auth.GlobalSuperadmin
-      pure $ either (const False) (const True) result
-
-    revertAuditH :: UUID -> Handler RevertResult
-    revertAuditH auditId = do
-      requireGlobalPermissionH pool Auth.GlobalSuperadmin
-      mEntry <- handleDBErrors $ Audit.getAuditEntry pool auditId
-      entry <- case mEntry of
-        Just e  -> pure e
-        Nothing -> throwError err404
-
-      entityId <- case UUID.fromText entry.entityId of
-        Just uid -> pure uid
-        Nothing  -> throwError $ revertError "unsupported_entity"
-                      "Cannot revert composite-key entity types"
-
-      entityVal <- case (entry.entityType, entry.action) of
-        ("memory", AuditUpdate) -> do
-          um <- parseOldValues entry
-          mMem <- handleDBErrors (Mem.updateMemory pool entityId um)
-          case mMem of
-            Just mem -> do
-              emit bc Updated ETMemory entityId (Just $ toJSON mem)
-              pure (Just $ toJSON mem)
-            Nothing -> throwError $ revertError "conflict"
-                         "Memory not found or deleted; cannot revert update"
-
-        ("memory", AuditDelete) -> do
-          ok <- handleDBErrors $ Mem.restoreMemory pool entityId
-          if ok then do
-            mMem <- handleDBErrors (Mem.getMemory pool entityId)
-            let val = fmap toJSON mMem
-            emit bc Updated ETMemory entityId val
-            pure val
-          else throwError $ revertError "conflict" "Memory not found or not deleted"
-
-        ("memory", AuditCreate) -> do
-          ok <- handleDBErrors $ Mem.deleteMemory pool entityId
-          if ok then do
-            emit bc Deleted ETMemory entityId Nothing
-            pure Nothing
-          else throwError $ revertError "conflict" "Memory not found or already deleted"
-
-        ("project", AuditUpdate) -> do
-          up <- parseOldValues entry
-          mProj <- handleDBErrors (Proj.updateProject pool entityId up)
-          case mProj of
-            Just proj -> do
-              emit bc Updated ETProject entityId (Just $ toJSON proj)
-              pure (Just $ toJSON proj)
-            Nothing -> throwError $ revertError "conflict"
-                         "Project not found or deleted; cannot revert update"
-
-        ("project", AuditDelete) -> do
-          ok <- handleDBErrors $ Proj.restoreProject pool entityId
-          if ok then do
-            mProj <- handleDBErrors (Proj.getProject pool entityId)
-            let val = fmap toJSON mProj
-            emit bc Updated ETProject entityId val
-            pure val
-          else throwError $ revertError "conflict" "Project not found or not deleted"
-
-        ("project", AuditCreate) -> do
-          ok <- handleDBErrors $ Proj.deleteProject pool entityId
-          if ok then do
-            emit bc Deleted ETProject entityId Nothing
-            pure Nothing
-          else throwError $ revertError "conflict" "Project not found or already deleted"
-
-        ("task", AuditUpdate) -> do
-          ut <- parseOldValues entry
-          mTask <- handleDBErrors (Task.updateTask pool entityId ut)
-          case mTask of
-            Just task -> do
-              emit bc Updated ETTask entityId (Just $ toJSON task)
-              pure (Just $ toJSON task)
-            Nothing -> throwError $ revertError "conflict"
-                         "Task not found or deleted; cannot revert update"
-
-        ("task", AuditDelete) -> do
-          ok <- handleDBErrors $ Task.restoreTask pool entityId
-          if ok then do
-            mTask <- handleDBErrors (Task.getTask pool entityId)
-            let val = fmap toJSON mTask
-            emit bc Updated ETTask entityId val
-            pure val
-          else throwError $ revertError "conflict" "Task not found or not deleted"
-
-        ("task", AuditCreate) -> do
-          ok <- handleDBErrors $ Task.deleteTask pool entityId
-          if ok then do
-            emit bc Deleted ETTask entityId Nothing
-            pure Nothing
-          else throwError $ revertError "conflict" "Task not found or already deleted"
-
-        ("memory_category", AuditUpdate) -> do
-          uc <- parseOldValues entry
-          mCat <- handleDBErrors (Cat.updateCategory pool entityId uc)
-          case mCat of
-            Just cat -> do
-              emit bc Updated ETCategory entityId (Just $ toJSON cat)
-              pure (Just $ toJSON cat)
-            Nothing -> throwError $ revertError "conflict"
-                         "Category not found or deleted; cannot revert update"
-
-        ("memory_category", AuditDelete) -> do
-          ok <- handleDBErrors $ Cat.restoreCategory pool entityId
-          if ok then do
-            mCat <- handleDBErrors (Cat.getCategory pool entityId)
-            let val = fmap toJSON mCat
-            emit bc Updated ETCategory entityId val
-            pure val
-          else throwError $ revertError "conflict" "Category not found or not deleted"
-
-        ("memory_category", AuditCreate) -> do
-          ok <- handleDBErrors $ Cat.deleteCategory pool entityId
-          if ok then do
-            emit bc Deleted ETCategory entityId Nothing
-            pure Nothing
-          else throwError $ revertError "conflict" "Category not found or already deleted"
-
-        (typ, _) -> throwError $ revertError "unsupported_entity"
-                      ("Entity type not supported for revert: " <> typ)
-
-      pure RevertResult { auditEntry = entry, entity = entityVal }
-
-    parseOldValues :: FromJSON a => AuditLogEntry -> Handler a
-    parseOldValues entry = case entry.oldValues of
-      Nothing -> throwError $ revertError "missing_data" "Audit entry has no old_values"
-      Just val -> case Aeson.fromJSON val of
-        Aeson.Success a -> pure a
-        Aeson.Error msg -> throwError $ revertError "parse_error"
-                       ("Failed to parse old_values: " <> T.pack msg)
-
-    revertError :: Text -> Text -> ServerError
-    revertError errType msg = err409
-      { errBody = Aeson.encode $ object
-          [ "error"   .= errType
-          , "message" .= msg
-          ]
-      }
-
--- Activity handlers ------------------------------------------------
-
-activityHandlers :: Pool Hasql.Connection -> Server ActivityAPI
-activityHandlers pool mws mEntityType mlimit = do
-  requireOptionalWorkspaceRoleH pool mws Auth.WorkspaceRoleRead
-  let lim = capLimit mlimit
-  results <- handleDBErrors $ Mem.getRecentActivity pool mws mEntityType (Just (lim + 1))
-  pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-
--- Saved view handlers ------------------------------------------------
-
-savedViewHandlers :: Pool Hasql.Connection -> Broadcast -> Server SavedViewAPI
-savedViewHandlers pool bc =
-       listViewsH
-  :<|> createViewH
-  :<|> getViewH
-  :<|> updateViewH
-  :<|> deleteViewH
-  :<|> restoreViewH
-  :<|> purgeViewH
-  :<|> executeViewH
-  where
-    requireViewH :: UUID -> Handler SavedView
-    requireViewH vid = handleDBErrors (SV.getSavedView pool vid) >>= maybe (throwError err404) pure
-
-    listViewsH mws mlimit moffset = do
-      wsId <- requireParam "workspace_id" mws
-      requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-      let lim = capLimit mlimit
-          off = capOffset moffset
-      results <- handleDBErrors $ SV.listSavedViews pool wsId (Just (lim + 1)) (Just off)
-      pure PaginatedResult { items = take lim results, hasMore = length results > lim }
-
-    createViewH csv = do
-      requireWorkspaceRoleH pool csv.workspaceId Auth.WorkspaceRoleEdit
-      rejectValidationErrors (validateCreateSavedViewInput csv)
-      sv <- handleDBErrors $ SV.createSavedView pool csv
-      emit bc Created ETSavedView sv.id (Just $ toJSON sv)
-      pure sv
-
-    getViewH vid = do
-      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleRead
-      requireViewH vid
-
-    updateViewH vid usv = do
-      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleEdit
-      rejectValidationErrors (validateUpdateSavedViewInput usv)
-      msv <- handleDBErrors (SV.updateSavedView pool vid usv)
-      case msv of
-        Nothing -> throwError err404
-        Just sv -> do
-          emit bc Updated ETSavedView vid (Just $ toJSON sv)
-          pure sv
-
-    deleteViewH vid = do
-      scope <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleEdit
-      ok <- handleDBErrors $ SV.deleteSavedView pool vid
-      if ok then do emitInScope scope bc Deleted ETSavedView vid Nothing; pure NoContent else throwError err404
-
-    restoreViewH vid = do
-      scope <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleEdit
-      ok <- handleDBErrors $ SV.restoreSavedView pool vid
-      if ok then do emitInScope scope bc Updated ETSavedView vid Nothing; pure NoContent else throwError err404
-
-    purgeViewH vid = do
-      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleAdmin
-      ok <- handleDBErrors $ SV.purgeSavedView pool vid
-      if ok then pure NoContent else throwError err409
-        { errBody = Aeson.encode $ object
-            [ "error" .= ("conflict" :: Text)
-            , "message" .= ("Saved view must be soft-deleted before purge, or does not exist" :: Text)
-            ]
-        }
-
-    executeViewH vid mlimit' moffset' mdetail = do
-      _ <- requireEntityRoleH pool Auth.EntitySavedView vid Auth.WorkspaceRoleRead
-      view <- requireViewH vid
-      let lim = capLimit mlimit'
-          off = capOffset moffset'
-          compact = mdetail /= Just True
-      case view.entityType of
-        "memory_search" -> do
-          case Aeson.fromJSON @SearchQuery view.queryParams of
-            Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
-            Aeson.Success sq -> do
-              case sq.workspaceId of
-                Just wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-                Nothing -> case sq.categoryId of
-                  Just cid -> do
-                    _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleRead
-                    pure ()
-                  Nothing -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
-              let sq0 = SearchQuery
-                    { workspaceId = sq.workspaceId, query = sq.query
-                    , memoryType = sq.memoryType, tags = sq.tags
-                    , minImportance = sq.minImportance, minAccessCount = sq.minAccessCount, sortBy = sq.sortBy, categoryId = sq.categoryId
-                    , pinnedOnly = sq.pinnedOnly, searchLanguage = sq.searchLanguage
-                    , limit = Just lim, offset = Just off }
-                  sq' = SearchQuery
-                    { workspaceId = sq0.workspaceId, query = sq0.query
-                    , memoryType = sq0.memoryType, tags = sq0.tags
-                    , minImportance = sq0.minImportance, minAccessCount = fmap (Prelude.max 0) sq0.minAccessCount, sortBy = sq0.sortBy, categoryId = sq0.categoryId
-                    , pinnedOnly = sq0.pinnedOnly, searchLanguage = sq0.searchLanguage
-                    , limit = sq0.limit, offset = sq0.offset }
-              rejectValidationErrors (validateSearchQuery sq')
-              results <- handleDBErrors $ Mem.searchMemories pool sq'
-              pure $ Aeson.toJSON $ if compact then map compactMemory results else results
-        "memory_list" -> do
-          case Aeson.fromJSON @MemoryListQuery view.queryParams of
-            Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
-            Aeson.Success mq -> do
-              requireOptionalWorkspaceRoleH pool mq.workspaceId Auth.WorkspaceRoleRead
-              let mq0 = MemoryListQuery
-                    { workspaceId = mq.workspaceId, memoryType = mq.memoryType
-                    , minAccessCount = mq.minAccessCount, sortBy = mq.sortBy
-                    , createdAfter = mq.createdAfter, createdBefore = mq.createdBefore
-                    , updatedAfter = mq.updatedAfter, updatedBefore = mq.updatedBefore
-                    , limit = Just (lim + 1), offset = Just off }
-                  mq' = MemoryListQuery
-                    { workspaceId = mq0.workspaceId, memoryType = mq0.memoryType
-                    , minAccessCount = fmap (Prelude.max 0) mq0.minAccessCount, sortBy = mq0.sortBy
-                    , createdAfter = mq0.createdAfter, createdBefore = mq0.createdBefore
-                    , updatedAfter = mq0.updatedAfter, updatedBefore = mq0.updatedBefore
-                    , limit = mq0.limit, offset = mq0.offset }
-              rejectValidationErrors (validateMemoryListQuery mq')
-              results <- handleDBErrors $ Mem.listMemoriesWithQuery pool mq'
-              let items = (if compact then map compactMemory else Prelude.id) $ take lim results
-              pure $ Aeson.toJSON PaginatedResult { items = items, hasMore = length results > lim }
-        "project_list" -> do
-          case Aeson.fromJSON @ProjectListQuery view.queryParams of
-            Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
-            Aeson.Success pq -> do
-              requireOptionalWorkspaceRoleH pool pq.workspaceId Auth.WorkspaceRoleRead
-              let pq' = ProjectListQuery
-                    { workspaceId = pq.workspaceId, status = pq.status
-                    , query = pq.query, searchLanguage = pq.searchLanguage
-                    , createdAfter = pq.createdAfter, createdBefore = pq.createdBefore
-                    , updatedAfter = pq.updatedAfter, updatedBefore = pq.updatedBefore
-                    , limit = Just (lim + 1), offset = Just off }
-              results <- handleDBErrors $ Proj.listProjectsWithQuery pool pq'
-              pure $ Aeson.toJSON PaginatedResult { items = take lim results, hasMore = length results > lim }
-        "task_list" -> do
-          case Aeson.fromJSON @TaskListQuery view.queryParams of
-            Aeson.Error e -> throwError err400 { errBody = fromString $ "Invalid query_params: " <> e }
-            Aeson.Success tq -> do
-              case (tq.workspaceId, tq.projectId) of
-                (Just wsId, _) -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-                (Nothing, Just pid) -> do
-                  _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
-                  pure ()
-                (Nothing, Nothing) -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
-              let tq' = TaskListQuery
-                    { workspaceId = tq.workspaceId, projectId = tq.projectId
-                    , status = tq.status, priority = tq.priority
-                    , query = tq.query, searchLanguage = tq.searchLanguage
-                    , createdAfter = tq.createdAfter, createdBefore = tq.createdBefore
-                    , updatedAfter = tq.updatedAfter, updatedBefore = tq.updatedBefore
-                    , limit = Just (lim + 1), offset = Just off }
-              results <- handleDBErrors $ Task.listTasksWithQuery pool tq'
-              pure $ Aeson.toJSON PaginatedResult { items = take lim results, hasMore = length results > lim }
-        "activity" -> do
-          let parseField :: FromJSON a => Text -> Maybe a
-              parseField key = case view.queryParams of
-                Aeson.Object o -> case KeyMap.lookup (Aeson.fromText key) o of
-                  Just v  -> case Aeson.fromJSON v of
-                    Aeson.Success a -> Just a
-                    _               -> Nothing
-                  Nothing -> Nothing
-                _ -> Nothing
-              mws = parseField "workspace_id"
-              met = parseField "entity_type"
-          requireOptionalWorkspaceRoleH pool mws Auth.WorkspaceRoleRead
-          results <- handleDBErrors $ Mem.getRecentActivity pool mws met (Just (lim + 1))
-          pure $ Aeson.toJSON PaginatedResult { items = take lim results, hasMore = length results > lim }
-        other -> throwError err400
-          { errBody = Aeson.encode $ object
-              [ "error" .= ("invalid_entity_type" :: Text)
-              , "message" .= ("Unknown entity_type: " <> other)
-              ]
-          }
-
-------------------------------------------------------------------------
--- Unified search
-------------------------------------------------------------------------
-
-searchHandler :: Pool Hasql.Connection -> Server SearchAPI
-searchHandler pool usq = do
-  case usq.workspaceId of
-    Just wsId -> requireWorkspaceRoleH pool wsId Auth.WorkspaceRoleRead
-    Nothing -> case (usq.categoryId, usq.projectId) of
-      (Just cid, _) -> do
-        _ <- requireEntityRoleH pool Auth.EntityCategory cid Auth.WorkspaceRoleRead
-        pure ()
-      (Nothing, Just pid) -> do
-        _ <- requireEntityRoleH pool Auth.EntityProject pid Auth.WorkspaceRoleRead
-        pure ()
-      (Nothing, Nothing) -> requireGlobalPermissionH pool Auth.GlobalSuperadmin
-  rejectValidationErrors (validateUnifiedSearchQuery usq)
-  handleDBErrors $ Search.searchAll pool usq
-
-------------------------------------------------------------------------
--- Helpers
-------------------------------------------------------------------------
-
-requireParam :: Text -> Maybe a -> Handler a
-requireParam name Nothing  = throwError $ err400 { errBody = fromString ("Missing required parameter: " <> T.unpack name) }
-requireParam _    (Just a) = pure a
-
-requireTimelineBucketParam :: Text -> Maybe a -> Handler a
-requireTimelineBucketParam name Nothing = rejectValidationErrors [name <> " is required"] >> throwError err400
-requireTimelineBucketParam _ (Just value) = pure value
-
-validateTimelineRangeQuery :: Maybe UTCTime -> Maybe UTCTime -> [Text]
-validateTimelineRangeQuery mSince mUntil = case (mSince, mUntil) of
-  (Just since, Just untilTime)
-    | since >= untilTime -> ["since must be before until"]
-  _ -> []
-
-validateTimelineBucketQuery :: UTCTime -> UTCTime -> Text -> [Text]
-validateTimelineBucketQuery since untilTime bucket = concat
-  [ if bucket `elem` validTimelineBuckets
-      then []
-      else ["bucket must be one of day, week, month, or quarter"]
-  , validateTimelineRangeQuery (Just since) (Just untilTime)
-  , if diffUTCTime untilTime since > tenYearsSeconds
-      then ["timeline bucket range must not exceed ten years"]
-      else []
-  ]
-
-validTimelineBuckets :: [Text]
-validTimelineBuckets = ["day", "week", "month", "quarter"]
-
-maxTimelineBuckets :: Int
-maxTimelineBuckets = 366
-
-tenYearsSeconds :: NominalDiffTime
-tenYearsSeconds = 10 * 366 * 24 * 60 * 60
-
-rejectValidationErrors :: [Text] -> Handler ()
-rejectValidationErrors [] = pure ()
-rejectValidationErrors errs = throwError err400
-  { errBody = Aeson.encode $ object
-      [ "error" .= ("validation" :: Text)
-      , "message" .= ("Request validation failed" :: Text)
-      , "details" .= errs
-      ]
-  }
-
-parseCreateMemoryRequest :: Maybe Int -> CreateMemoryRequest -> Handler CreateMemory
-parseCreateMemoryRequest mIndex (CreateMemoryRequest raw) =
-  case Aeson.fromJSON raw of
-    Aeson.Success cm -> pure cm
-    Aeson.Error err  -> rejectValidationErrors (createMemoryParseErrors mIndex raw err) >> throwError err400
-
-createMemoryParseErrors :: Maybe Int -> Value -> String -> [Text]
-createMemoryParseErrors mIndex raw parseErr =
-  case raw of
-    Object obj ->
-      case KeyMap.lookup (Aeson.fromText "memory_type") obj of
-        Nothing -> [prefix <> "memory_type is required and must be short_term or long_term"]
-        Just (String rawType)
-          | memoryTypeFromText rawType == Nothing ->
-              [prefix <> "memory_type must be short_term or long_term"]
-        Just (String _) -> [prefix <> T.pack parseErr]
-        Just _ -> [prefix <> "memory_type must be a string: short_term or long_term"]
-    _ -> [prefix <> "memory create request must be a JSON object"]
-  where
-    prefix = case mIndex of
-      Nothing  -> ""
-      Just idx -> "memories[" <> T.pack (show idx) <> "]."
-
-dedupe :: Ord a => [a] -> [a]
-dedupe = Map.keys . Map.fromList . map (\x -> (x, ()))
-
-filterMemoryGraphToWorkspace :: UUID -> MemoryGraph -> MemoryGraph
-filterMemoryGraphToWorkspace wsId graph =
-  let scopedMemories = Prelude.filter ((== wsId) . (.workspaceId)) graph.memories
-      scopedIds = map (.id) scopedMemories
-      scopedLinks = Prelude.filter (\link -> link.sourceId `elem` scopedIds && link.targetId `elem` scopedIds) graph.links
-  in graph { memories = scopedMemories, links = scopedLinks }
-
--- | Clamp a user-supplied limit to [1, 200], defaulting to 50.
-capLimit :: Maybe Int -> Int
-capLimit = Prelude.min 200 . Prelude.max 1 . fromMaybe 50
-
--- | Clamp a user-supplied offset to [0, 10000], defaulting to 0.
-capOffset :: Maybe Int -> Int
-capOffset = Prelude.min 10000 . Prelude.max 0 . fromMaybe 0
+    -- Omitting entity_types includes observations, so it is an observation
+    -- operation and must use the same repository scope guard as every other
+    -- Observation endpoint.
+    searchesObservations searchQuery =
+      SearchObservation `elem` fromMaybe [SearchObservation, SearchProject, SearchTask] searchQuery.entityTypes
+
+audit :: Pool Hasql.Connection -> Broadcast -> Server AuditAPI
+audit pool broadcast = listH :<|> revertH :<|> getH where
+  listH workspaceId entityType entityId action since until limit offset = do
+    workspace <- maybe (throwError err403) pure workspaceId
+    if entityType == Just "observation"
+      then requireObservationWorkspace pool workspace Auth.WorkspaceRoleAdmin
+      else requireWorkspace pool workspace Auth.WorkspaceRoleAdmin
+    let (takeN, skipN) = page limit offset
+        query = AuditLogQuery workspaceId entityType entityId action since until (Just (takeN + 1)) (Just skipN)
+    rows <- handleDBErrors $ Audit.getAuditLog pool query
+    pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
+  getH auditId = do
+    entry <- handleDBErrors (Audit.getAuditEntry pool auditId) >>= maybe (throwError err404) pure
+    _ <- requireAuditEntryWorkspace entry
+    pure entry
+  revertH auditId = do
+    entry <- handleDBErrors (Audit.getAuditEntry pool auditId) >>= maybe (throwError err404) pure
+    workspaceId <- requireAuditEntryWorkspace entry
+    entityId <- maybe (throwError err409) pure (UUID.fromText entry.entityId)
+    entity <- case (entry.entityType, entry.action) of
+      ("project", AuditUpdate) | isSoftDelete entry -> restoreProject workspaceId entityId
+      ("project", AuditUpdate) -> do
+        old <- decodeOld entry
+        handleDBErrors (Project.updateProject pool entityId old) >>= maybe (throwError err409) (\project -> emit (Just workspaceId) broadcast Updated ETProject entityId (Just (toJSON project)) >> pure (Just (toJSON project)))
+      ("project", AuditDelete) -> do
+        restored <- handleDBErrors $ Project.restoreProject pool entityId
+        if restored then do project <- handleDBErrors (Project.getProject pool entityId); emit (Just workspaceId) broadcast Updated ETProject entityId (toJSON <$> project); pure (toJSON <$> project) else throwError err409
+      ("project", AuditCreate) -> do
+        deleted <- handleDBErrors $ Project.deleteProjectCascade pool entityId
+        case deleted of Nothing -> throwError err409; Just _ -> emit (Just workspaceId) broadcast Deleted ETProject entityId Nothing >> pure Nothing
+      ("task", AuditUpdate) | isSoftDelete entry -> restoreTask workspaceId entityId
+      ("task", AuditUpdate) -> do
+        old <- decodeOld entry
+        handleDBErrors (Task.updateTask pool entityId old) >>= maybe (throwError err409) (\task -> emit (Just workspaceId) broadcast Updated ETTask entityId (Just (toJSON task)) >> pure (Just (toJSON task)))
+      ("task", AuditDelete) -> do
+        restored <- handleDBErrors $ Task.restoreTask pool entityId
+        if restored then do task <- handleDBErrors (Task.getTask pool entityId); emit (Just workspaceId) broadcast Updated ETTask entityId (toJSON <$> task); pure (toJSON <$> task) else throwError err409
+      ("task", AuditCreate) -> do
+        deleted <- handleDBErrors $ Task.deleteTaskCascade pool entityId
+        case deleted of Nothing -> throwError err409; Just _ -> emit (Just workspaceId) broadcast Deleted ETTask entityId Nothing >> pure Nothing
+      -- Observation records are hard-deleted and their provenance is
+      -- immutable, so audit replay cannot safely recreate or alter them.
+      ("observation", _) -> throwError unsupportedObservation
+      _ -> throwError err409
+    pure RevertResult { auditEntry = entry, entity = entity }
+  decodeOld :: Aeson.FromJSON a => AuditLogEntry -> Handler a
+  decodeOld entry = case entry.oldValues >>= Aeson.decode . Aeson.encode of
+    Just value -> pure value
+    Nothing -> throwError err409
+  restoreProject workspace projectId = do
+    restored <- handleDBErrors $ Project.restoreProject pool projectId
+    if restored
+      then do
+        project <- handleDBErrors (Project.getProject pool projectId)
+        emit (Just workspace) broadcast Updated ETProject projectId (toJSON <$> project)
+        pure (toJSON <$> project)
+      else throwError err409
+  restoreTask workspace taskId = do
+    restored <- handleDBErrors $ Task.restoreTask pool taskId
+    if restored
+      then do
+        task <- handleDBErrors (Task.getTask pool taskId)
+        emit (Just workspace) broadcast Updated ETTask taskId (toJSON <$> task)
+        pure (toJSON <$> task)
+      else throwError err409
+  isSoftDelete auditEntry =
+    auditField "deleted_at" auditEntry.oldValues == Just Aeson.Null
+      && maybe False (/= Aeson.Null) (auditField "deleted_at" auditEntry.newValues)
+  auditField key = (>>= \case Aeson.Object values -> AesonKeyMap.lookup (AesonKey.fromText key) values; _ -> Nothing)
+  requireAuditEntryWorkspace entry = do
+    workspace <- maybe (throwError err403) pure entry.workspaceId
+    -- Observations are hard-deleted.  Their audit trail must remain readable
+    -- and explicitly non-revertible after deletion, so its recorded workspace
+    -- is the authoritative scope; the repository guard still prevents stale
+    -- or non-repository workspace access.
+    if entry.entityType == "observation"
+      then requireObservationWorkspace pool workspace Auth.WorkspaceRoleAdmin
+      else do
+        entityId <- maybe (throwError err404) pure (UUID.fromText entry.entityId)
+        kind <- case entry.entityType of
+          "workspace" -> pure Auth.EntityWorkspace
+          "project" -> pure Auth.EntityProject
+          "task" -> pure Auth.EntityTask
+          _ -> throwError err404
+        actual <- liftIO $ case kind of
+          Auth.EntityProject -> Auth.resolveEntityScopeIncludingDeleted pool kind entityId
+          Auth.EntityTask -> Auth.resolveEntityScopeIncludingDeleted pool kind entityId
+          _ -> Auth.resolveEntityScope pool kind entityId
+        case actual of
+          Just (Auth.EntityWorkspaceScope actualWorkspace) | actualWorkspace == workspace -> pure ()
+          _ -> throwError err404
+        requireWorkspace pool workspace Auth.WorkspaceRoleAdmin
+    pure workspace
+  unsupportedObservation = err409 { errBody = Aeson.encode (object ["error" .= ("unsupported_entity" :: Text), "message" .= ("Observation audit entries cannot be reverted" :: Text)]) }
+
+ticket :: Pool Hasql.Connection -> WS.WSState -> WebSocketTicketRequest -> Handler WebSocketTicketResponse
+ticket pool state request = do
+  requireWorkspace pool request.workspaceId Auth.WorkspaceRoleRead
+  principal <- liftIO currentPrincipal >>= maybe (throwError err401) pure
+  receivesGlobalGroupEvents <- liftIO $ Auth.hasGlobalPermission pool (Just principal) Auth.GlobalSuperadmin
+  liftIO $ WS.createTicket state principal request.workspaceId receivesGlobalGroupEvents

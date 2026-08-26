@@ -1,16 +1,18 @@
 module HMem.MCP.ToolsSpec (spec) where
 
 import Control.Concurrent.STM
-import Control.Monad (filterM)
+import Control.Monad (filterM, forM_)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Foldable (toList)
+import Data.List (sort)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.UUID (UUID)
 import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
 import Network.HTTP.Types (methodDelete, methodGet, methodPost, methodPut, status200, status204, status400, status401, status403, status404, status409, statusCode)
 import Network.Wai qualified as Wai
@@ -18,6 +20,7 @@ import Network.Wai.Handler.Warp (testWithApplication)
 import System.Directory (doesFileExist)
 import Test.Hspec
 
+import HMem.MCP.Server (handleStdioLine)
 import HMem.MCP.Tools
 import HMem.Types (CreateObservation(..), UpdateObservation(..))
 
@@ -56,6 +59,42 @@ spec = do
         `shouldSatisfy` maybe False nullableWorkspaceTypes
       toolDescription "task_finish" `shouldSatisfy` maybe False ("does not create an observation" `T.isInfixOf`)
       toolDescription "project_archive" `shouldSatisfy` maybe False (not . ("summary" `T.isInfixOf`))
+
+    it "keeps the advertised registry parser and dispatch reachability in lockstep" $ do
+      sort toolNames `shouldBe` sort (serverOwnedTools <> map fst toolSamples)
+      mapM_ (\(name, arguments) -> parseToolCall name arguments `shouldSatisfy` isRight) toolSamples
+      requests <- newTVarIO []
+      withMock requests $ \manager base ->
+        forM_ toolSamples $ \(name, arguments) -> do
+          response <- handleToolCall manager base Nothing (object ["name" .= name, "arguments" .= arguments])
+          response `shouldSatisfy` not . isMcpError
+      dispatched <- readTVarIO requests
+      all (`elem` map (.requestPath) dispatched)
+        [ "/api/v1/workspaces", "/api/v1/search", "/api/v1/observations"
+        , "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        , "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/embedding"
+        , "/api/v1/observations/similar", "/api/v1/projects", "/api/v1/tasks"
+        ] `shouldBe` True
+      manager <- newManager defaultManagerSettings
+      initialized <- newTVarIO True
+      workspaceContext <- newTVarIO Nothing
+      setResponse <- serverToolCall manager initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId])
+      setResponse `shouldSatisfy` maybe False (contains "workspace_context")
+      getResponse <- serverToolCall manager initialized workspaceContext "get_workspace" (object [])
+      getResponse `shouldSatisfy` maybe False (contains workspaceId)
+
+    it "routes every live tool through JSON-RPC, including server-owned workspace context" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        initialized <- newTVarIO True
+        workspaceContext <- newTVarIO Nothing
+        forM_ toolSamples $ \(name, arguments) -> do
+          response <- jsonRpcToolCall manager base initialized workspaceContext name arguments
+          response `shouldSatisfy` maybe False (not . isJsonRpcMcpError)
+        setResponse <- jsonRpcToolCall manager base initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId])
+        setResponse `shouldSatisfy` maybe False (not . isJsonRpcMcpError)
+        getResponse <- jsonRpcToolCall manager base initialized workspaceContext "get_workspace" (object [])
+        getResponse `shouldSatisfy` maybe False (contains workspaceId)
 
   describe "Observation compact response shaping" $ do
     it "derives bounded content_preview from a create/get response when the server supplies full content" $ do
@@ -246,6 +285,42 @@ similarArguments = object
   , "offset" .= (4 :: Int)
   ]
 
+serverOwnedTools :: [Text]
+serverOwnedTools = ["set_workspace", "get_workspace"]
+
+toolSamples :: [(Text, Value)]
+toolSamples =
+  [ ("workspace_list", object [])
+  , ("workspace_register", object ["name" .= ("Repository" :: Text)])
+  , ("search", object ["workspace_id" .= workspaceId, "entity_types" .= (["observation"] :: [Text]), "offset" .= (0 :: Int)])
+  , ("observation_create", observationArguments)
+  , ("observation_get", object ["observation_id" .= observationId])
+  , ("observation_update", object ["observation_id" .= observationId, "content" .= ("replacement" :: Text)])
+  , ("observation_list", observationListArguments)
+  , ("observation_delete", object ["observation_id" .= observationId])
+  , ("observation_set_embedding", object ["observation_id" .= observationId, "embedding" .= embedding])
+  , ("observation_similar", similarArguments)
+  , ("project_create", object ["workspace_id" .= workspaceId, "name" .= ("Project" :: Text)])
+  , ("project_update", object ["project_id" .= observationId, "name" .= ("Updated project" :: Text)])
+  , ("project_detail", object ["project_id" .= observationId])
+  , ("project_overview", object ["project_id" .= observationId])
+  , ("project_next_tasks", object ["project_id" .= observationId])
+  , ( "project_spec"
+    , object
+        [ "workspace_id" .= workspaceId
+        , "name" .= ("Project specification" :: Text)
+        , "tasks" .= [object ["title" .= ("Initial task" :: Text)]]
+        ]
+    )
+  , ("project_archive", object ["project_id" .= observationId])
+  , ("task_create", object ["workspace_id" .= workspaceId, "title" .= ("Task" :: Text)])
+  , ("task_update", object ["task_id" .= observationId, "title" .= ("Updated task" :: Text)])
+  , ("task_detail", object ["task_id" .= observationId])
+  , ("task_overview", object ["task_id" .= observationId])
+  , ("task_start", object ["task_id" .= observationId])
+  , ("task_finish", object ["task_id" .= observationId, "status" .= ("done" :: Text)])
+  ]
+
 toolNames :: [Text]
 toolNames = [name | Object tool <- toolDefinitions, Just (String name) <- [KM.lookup "name" tool]]
 
@@ -285,6 +360,12 @@ isLeft = \case Left _ -> True; Right _ -> False
 isRight :: Either a b -> Bool
 isRight = not . isLeft
 
+isMcpError :: Value -> Bool
+isMcpError value = jsonField "isError" value == Just (Bool True)
+
+isJsonRpcMcpError :: Value -> Bool
+isJsonRpcMcpError value = maybe True isMcpError (jsonField "result" value)
+
 jsonField :: Text -> Value -> Maybe Value
 jsonField key (Object objectValue) = KM.lookup (Key.fromText key) objectValue
 jsonField _ _ = Nothing
@@ -310,6 +391,26 @@ callWithKey manager base apiKey name arguments = do
       Object first : _ -> case KM.lookup "text" first of Just (String text) -> Just text; _ -> Nothing
       _ -> Nothing
     arrayText _ = Nothing
+
+serverToolCall :: Manager -> TVar Bool -> TVar (Maybe UUID) -> Text -> Value -> IO (Maybe Value)
+serverToolCall manager initialized workspaceContext name arguments =
+  handleStdioLine manager "http://unused.invalid" Nothing initialized workspaceContext
+    (BL.toStrict (encode (object
+      [ "jsonrpc" .= ("2.0" :: Text)
+      , "id" .= ("workspace-context" :: Text)
+      , "method" .= ("tools/call" :: Text)
+      , "params" .= object ["name" .= name, "arguments" .= arguments]
+      ])))
+
+jsonRpcToolCall :: Manager -> String -> TVar Bool -> TVar (Maybe UUID) -> Text -> Value -> IO (Maybe Value)
+jsonRpcToolCall manager base initialized workspaceContext name arguments =
+  handleStdioLine manager base Nothing initialized workspaceContext
+    (BL.toStrict (encode (object
+      [ "jsonrpc" .= ("2.0" :: Text)
+      , "id" .= ("jsonrpc-tool-call" :: Text)
+      , "method" .= ("tools/call" :: Text)
+      , "params" .= object ["name" .= name, "arguments" .= arguments]
+      ])))
 
 compactFixtures :: IO Value
 compactFixtures = do

@@ -3,7 +3,7 @@ module HMem.MCP.ServerSpec (spec) where
 import Control.Concurrent (ThreadId, forkIO, forkIOWithUnmask, killThread, threadDelay, throwTo)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, readMVar, tryPutMVar, tryReadMVar)
 import Control.Exception (AsyncException(..), SomeException, bracket, finally, fromException, throwIO, try)
-import Control.Concurrent.STM (TVar, newTVarIO)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVarIO)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
@@ -12,6 +12,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Foldable (toList)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.UUID (UUID)
 import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
 import Network.HTTP.Types (hContentType, status200)
@@ -22,7 +23,7 @@ import System.IO (Handle, SeekMode(..), hClose, hSeek, openTempFile)
 import GHC.Conc (ThreadStatus(..), threadStatus)
 import Test.Hspec
 
-import HMem.MCP.Server (encodeStdioResponse, handleStdioLine, runMCPServerWithHandles, runMCPServerWithHandlesObserved, runMCPServerWithHandlesObservedWithFork, sendResponseToHandle)
+import HMem.MCP.Server (encodeStdioResponse, handleStdioLine, injectWorkspaceContext, runMCPServerWithHandles, runMCPServerWithHandlesObserved, runMCPServerWithHandlesObservedWithFork, sendResponseToHandle)
 
 spec :: Spec
 spec = do
@@ -124,6 +125,85 @@ spec = do
             Nothing -> expectationFailure $ "Expected JSON-RPC response line, got: " <> show bytes
           linesOut -> expectationFailure $ "Expected one response line, got: " <> show linesOut
 
+  describe "workspace context ordering" $ do
+    it "sets, gets, clears, and rejects invalid values without mutating direct session state" $
+      withStdioState $ \mgr initialized wsContext -> do
+        atomically $ modifyTVar' initialized (const True)
+        setResponse <- workspaceCall mgr initialized wsContext "set" (Just (String workspaceA))
+        responseContains workspaceA setResponse `shouldBe` True
+        getResponse <- workspaceCall mgr initialized wsContext "get" Nothing
+        responseContains workspaceA getResponse `shouldBe` True
+        invalidResponse <- workspaceCall mgr initialized wsContext "set" (Just (Number 5))
+        responseContains "invalid workspace_id format" invalidResponse `shouldBe` True
+        unchanged <- workspaceCall mgr initialized wsContext "get" Nothing
+        responseContains workspaceA unchanged `shouldBe` True
+        cleared <- workspaceCall mgr initialized wsContext "set" Nothing
+        responseContains "cleared" cleared `shouldBe` True
+        finalGet <- workspaceCall mgr initialized wsContext "get" Nothing
+        responseContains workspaceA finalGet `shouldBe` False
+
+    it "keeps workspace sessions isolated and preserves explicit workspace_id values" $
+      withStdioState $ \mgr initialized firstContext -> do
+        atomically $ modifyTVar' initialized (const True)
+        secondInitialized <- newTVarIO True
+        secondContext <- newTVarIO Nothing
+        _ <- workspaceCall mgr initialized firstContext "set" (Just (String workspaceA))
+        _ <- workspaceCall mgr secondInitialized secondContext "set" (Just (String workspaceB))
+        firstGet <- workspaceCall mgr initialized firstContext "get" Nothing
+        secondGet <- workspaceCall mgr secondInitialized secondContext "get" Nothing
+        responseContains workspaceA firstGet `shouldBe` True
+        responseContains workspaceB firstGet `shouldBe` False
+        responseContains workspaceB secondGet `shouldBe` True
+        responseContains workspaceA secondGet `shouldBe` False
+
+        injected <- injectWorkspaceContext firstContext $ object
+          [ "name" .= ("project_create" :: Text)
+          , "arguments" .= object ["name" .= ("implicit" :: Text)]
+          ]
+        injected `shouldSatisfy` valueContains workspaceA
+        explicitNull <- injectWorkspaceContext firstContext $ object
+          [ "name" .= ("project_create" :: Text)
+          , "arguments" .= object ["workspace_id" .= Null, "name" .= ("explicit null" :: Text)]
+          ]
+        explicitNull `shouldSatisfy` valueContains "explicit null"
+        explicitNull `shouldSatisfy` not . valueContains workspaceA
+        explicitInvalid <- injectWorkspaceContext firstContext $ object
+          [ "name" .= ("project_create" :: Text)
+          , "arguments" .= object ["workspace_id" .= (5 :: Int), "name" .= ("invalid" :: Text)]
+          ]
+        explicitInvalid `shouldSatisfy` valueContains ("5" :: Text)
+        explicitInvalid `shouldSatisfy` not . valueContains workspaceA
+
+    it "commits pipelined controls before later gets and scoped call snapshots" $
+      withTempResponseFile $ \input ->
+      withTempResponseFile $ \output ->
+      withTempResponseFile $ \errHandle -> do
+        bodies <- newTVarIO []
+        withWorkspaceCaptureServer bodies $ \mgr base -> do
+          let requests =
+                [ initializeRequest "init"
+                , setWorkspaceRequest "set-a" (Just (String workspaceA))
+                , projectCreateRequest "call-a"
+                , setWorkspaceRequest "set-b" (Just (String workspaceB))
+                , getWorkspaceRequest "get-b"
+                , projectCreateRequest "call-b"
+                , setWorkspaceRequest "clear" Nothing
+                , projectCreateRequest "call-after-clear"
+                ]
+          BL.hPut input (BL.intercalate "\n" (map encode requests) <> "\n")
+          hSeek input AbsoluteSeek 0
+          runMCPServerWithHandles 2 8 input output errHandle mgr base Nothing
+        receivedBodies <- readTVarIO bodies
+        receivedBodies `shouldBe`
+          [ object ["workspace_id" .= workspaceA, "name" .= ("context ordering" :: Text)]
+          , object ["workspace_id" .= workspaceB, "name" .= ("context ordering" :: Text)]
+          ]
+        hSeek output AbsoluteSeek 0
+        outputLines <- BL8.lines <$> strictHandleContents output
+        let responses = [response | Just response <- map decode outputLines]
+        responseFor "get-b" responses `shouldSatisfy` maybe False (valueContains workspaceB)
+        responseFor "call-after-clear" responses `shouldSatisfy` maybe False (valueContains "workspace_id")
+
     it "cleans up active worker threads when shutdown logging fails" $
       withTempResponseFile $ \input ->
       withTempResponseFile $ \output ->
@@ -219,6 +299,86 @@ spec = do
 
 unusedServerUrl :: String
 unusedServerUrl = "http://127.0.0.1:9"
+
+workspaceA, workspaceB :: Text
+workspaceA = "11111111-2222-3333-4444-555555555555"
+workspaceB = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+
+initializeRequest :: Text -> Value
+initializeRequest requestId = object
+  [ "jsonrpc" .= ("2.0" :: Text)
+  , "id" .= requestId
+  , "method" .= ("initialize" :: Text)
+  ]
+
+setWorkspaceRequest :: Text -> Maybe Value -> Value
+setWorkspaceRequest requestId workspace = object
+  [ "jsonrpc" .= ("2.0" :: Text)
+  , "id" .= requestId
+  , "method" .= ("tools/call" :: Text)
+  , "params" .= object
+      [ "name" .= ("set_workspace" :: Text)
+      , "arguments" .= workspaceArguments workspace
+      ]
+  ]
+
+workspaceArguments :: Maybe Value -> Value
+workspaceArguments Nothing = object []
+workspaceArguments (Just value) = object ["workspace_id" .= value]
+
+getWorkspaceRequest :: Text -> Value
+getWorkspaceRequest requestId = object
+  [ "jsonrpc" .= ("2.0" :: Text)
+  , "id" .= requestId
+  , "method" .= ("tools/call" :: Text)
+  , "params" .= object ["name" .= ("get_workspace" :: Text), "arguments" .= object []]
+  ]
+
+projectCreateRequest :: Text -> Value
+projectCreateRequest requestId = object
+  [ "jsonrpc" .= ("2.0" :: Text)
+  , "id" .= requestId
+  , "method" .= ("tools/call" :: Text)
+  , "params" .= object
+      [ "name" .= ("project_create" :: Text)
+      , "arguments" .= object ["name" .= ("context ordering" :: Text)]
+      ]
+  ]
+
+workspaceCall :: Manager -> TVar Bool -> TVar (Maybe UUID) -> Text -> Maybe Value -> IO (Maybe Value)
+workspaceCall mgr initialized wsContext action workspace =
+  handleStdioLine mgr unusedServerUrl Nothing initialized wsContext $ jsonLine request
+  where
+    request = case action of
+      "get" -> getWorkspaceRequest "workspace-call"
+      _ -> setWorkspaceRequest "workspace-call" workspace
+
+responseContains :: Text -> Maybe Value -> Bool
+responseContains needle = maybe False (valueContains needle)
+
+valueContains :: Text -> Value -> Bool
+valueContains needle value = needle `T.isInfixOf` T.pack (BL8.unpack (encode value))
+
+responseFor :: Text -> [Value] -> Maybe Value
+responseFor requestId = go
+  where
+    go [] = Nothing
+    go (value:rest)
+      | jsonField "id" value == Just (String requestId) = Just value
+      | otherwise = go rest
+
+withWorkspaceCaptureServer :: TVar [Value] -> (Manager -> String -> IO a) -> IO a
+withWorkspaceCaptureServer bodies action =
+  testWithApplication (pure app) $ \port -> do
+    mgr <- newManager defaultManagerSettings
+    action mgr ("http://127.0.0.1:" <> show port)
+  where
+    app request respond = do
+      body <- Wai.strictRequestBody request
+      case eitherDecode body of
+        Right value -> atomically $ modifyTVar' bodies (<> [value])
+        Left _ -> pure ()
+      respond $ Wai.responseLBS status200 [(hContentType, "application/json")] "{}"
 
 withStdioState :: (Manager -> TVar Bool -> TVar (Maybe UUID) -> IO a) -> IO a
 withStdioState action = do

@@ -22,7 +22,7 @@ import Data.Maybe (fromMaybe)
 import Data.Pool (Pool, tryWithResource)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Time (UTCTime, getCurrentTime)
+import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Hasql.Connection qualified as Hasql
@@ -42,6 +42,7 @@ import HMem.DB.RequestContext (Principal(..), PrincipalAuthority(..), currentPri
 import HMem.DB.Schema
 import HMem.DB.Search qualified as Search
 import HMem.DB.Task qualified as Task
+import HMem.DB.Timeline qualified as Timeline
 import HMem.DB.Workspace qualified as Workspace
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.AccessTracker (AccessTracker, bufferSize)
@@ -70,6 +71,14 @@ type WorkspaceAPI =
        QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult Workspace)
   :<|> ReqBody '[JSON] CreateWorkspace :> Post '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> Get '[JSON] Workspace
+  :<|> Capture "workspaceId" UUID :> "timeline" :> "buckets"
+         :> QueryParam "since" UTCTime :> QueryParam "until" UTCTime :> QueryParam "bucket" Text
+         :> Get '[JSON] WorkspaceTimelineBucketsResponse
+  :<|> Capture "workspaceId" UUID :> "timeline"
+         :> QueryParam "entity_type" Text :> QueryParam "event_type" Text
+         :> QueryParam "since" UTCTime :> QueryParam "until" UTCTime
+         :> QueryParam "limit" Int :> QueryParam "offset" Int
+         :> Get '[JSON] (PaginatedResult WorkspaceTimelineEvent)
 
 type WorkspaceGroupAPI =
        QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult WorkspaceGroup)
@@ -274,7 +283,7 @@ health pool tracker = do
                 , "pool" .= object ["active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections] ]
 
 workspaces :: Pool Hasql.Connection -> Server WorkspaceAPI
-workspaces pool = listH :<|> createH :<|> getH where
+workspaces pool = listH :<|> createH :<|> getH :<|> timelineBucketsH :<|> timelineH where
   listH limit offset = do
     principal <- liftIO currentPrincipal
     -- A caller without a principal cannot observe any workspace, including its names.
@@ -301,6 +310,55 @@ workspaces pool = listH :<|> createH :<|> getH where
     rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
       row <- each workspaceSchema; where_ (row.wsId ==. lit workspaceId &&. activeWorkspace row); pure row
     case rows of (row:_) -> pure Workspace { id = row.wsId, name = row.wsName, ghOwner = row.wsGhOwner, ghRepo = row.wsGhRepo, workspaceType = row.wsType, createdAt = row.wsCreatedAt, updatedAt = row.wsUpdatedAt }; [] -> throwError err404
+  timelineBucketsH workspaceId mSince mUntil mBucket = do
+    requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    since <- requireTimelineBucketParam "since" mSince
+    untilTime <- requireTimelineBucketParam "until" mUntil
+    let bucket = fromMaybe "week" mBucket
+    reject (validateTimelineBucketQuery since untilTime bucket)
+    buckets <- handleDBErrors $ Timeline.listWorkspaceTimelineBuckets pool workspaceId since untilTime bucket
+    when (length buckets > maxTimelineBuckets) $
+      reject ["timeline bucket range produces too many buckets; narrow the range or choose a larger bucket"]
+    pure WorkspaceTimelineBucketsResponse
+      { timelineBucketsWorkspaceId = workspaceId
+      , timelineBucketsSince = since
+      , timelineBucketsUntil = untilTime
+      , timelineBucketsBucket = bucket
+      , timelineBucketsBuckets = buckets }
+  timelineH workspaceId entityType eventType since untilTime limit offset = do
+    requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    reject (validateTimelineRangeQuery since untilTime <> validateTimelinePagination limit offset)
+    let (takeN, skipN) = page limit offset
+    rows <- handleDBErrors $ Timeline.listWorkspaceTimeline pool workspaceId entityType eventType since untilTime (Just (takeN + 1)) (Just skipN)
+    pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
+
+requireTimelineBucketParam :: Text -> Maybe a -> Handler a
+requireTimelineBucketParam name = maybe (throwError (badRequest "validation_error" (name <> " is required"))) pure
+
+validateTimelineRangeQuery :: Maybe UTCTime -> Maybe UTCTime -> [Text]
+validateTimelineRangeQuery mSince mUntil = case (mSince, mUntil) of
+  (Just since, Just untilTime) | since >= untilTime -> ["since must be before until"]
+  _ -> []
+
+validateTimelinePagination :: Maybe Int -> Maybe Int -> [Text]
+validateTimelinePagination limit offset =
+  ["limit must be between 1 and " <> Text.pack (show maxPaginationLimit) | maybe False (\n -> n < 1 || n > maxPaginationLimit) limit]
+  <> ["offset must be between 0 and " <> Text.pack (show maxPaginationOffset) | maybe False (\n -> n < 0 || n > maxPaginationOffset) offset]
+
+validateTimelineBucketQuery :: UTCTime -> UTCTime -> Text -> [Text]
+validateTimelineBucketQuery since untilTime bucket =
+  ["bucket must be one of day, week, month, or quarter" | bucket `notElem` validTimelineBuckets]
+  <> validateTimelineRangeQuery (Just since) (Just untilTime)
+  <> ["timeline bucket range must not exceed ten years" | diffUTCTime untilTime since > tenYearsSeconds]
+
+validTimelineBuckets :: [Text]
+validTimelineBuckets = ["day", "week", "month", "quarter"]
+
+maxTimelineBuckets :: Int
+maxTimelineBuckets = 366
+
+tenYearsSeconds :: NominalDiffTime
+tenYearsSeconds = 10 * 366 * 24 * 60 * 60
 
 groups :: Pool Hasql.Connection -> Broadcast -> Server WorkspaceGroupAPI
 groups pool broadcast = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembersH :<|> addMemberH :<|> removeMemberH where

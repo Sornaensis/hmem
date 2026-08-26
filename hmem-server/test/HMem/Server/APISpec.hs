@@ -14,7 +14,8 @@ import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Maybe (isJust, isNothing)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
-import Data.Time (getCurrentTime)
+import Data.Time (addUTCTime, getCurrentTime)
+import Data.Time.Format.ISO8601 (iso8601Show)
 import Data.UUID (UUID)
 import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
@@ -302,6 +303,161 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         filteredPage.items `shouldSatisfy` (not . null)
         all (\entry -> entry.entityId == T.pack (show firstProject.id)) filteredPage.items `shouldBe` True
 
+  describe "Workspace Timeline HTTP contract" $ do
+    it "lists, buckets, validates queries, and rejects missing or deleted workspaces" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "timeline-api"
+      let workspacePath = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
+          bucketPath = workspacePath <> "/timeline/buckets?since=2020-01-01T00:00:00Z&until=2020-01-02T00:00:00Z&bucket=day"
+      timeline <- request app methodGet (workspacePath <> "/timeline?limit=1") ""
+      responseStatus timeline `shouldBe` status200
+      let Just page = decode (responseBody timeline) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      page.items `shouldBe` []
+      page.hasMore `shouldBe` False
+      buckets <- request app methodGet bucketPath ""
+      responseStatus buckets `shouldBe` status200
+      let Just bucketResponse = decode (responseBody buckets) :: Maybe WorkspaceTimelineBucketsResponse
+      bucketResponse.timelineBucketsWorkspaceId `shouldBe` workspace.id
+      bucketResponse.timelineBucketsBucket `shouldBe` "day"
+      bucketResponse.timelineBucketsBuckets `shouldSatisfy` (not . null)
+      mapM_ (\suffix -> request app methodGet (workspacePath <> suffix) "" >>= (\response -> responseStatus response `shouldBe` status400))
+        [ "/timeline?limit=0", "/timeline?limit=201", "/timeline?offset=-1"
+        , "/timeline?since=2021-01-02T00:00:00Z&until=2021-01-01T00:00:00Z"
+        , "/timeline/buckets?until=2021-01-02T00:00:00Z&bucket=day"
+        , "/timeline/buckets?since=2021-01-01T00:00:00Z&until=2021-01-02T00:00:00Z&bucket=year"
+        ]
+      request app methodGet "/api/v1/workspaces/00000000-0000-0000-0000-000000000099/timeline" "" >>= (\response -> responseStatus response `shouldBe` status404)
+      markWorkspaceDeleted env workspace.id
+      request app methodGet (workspacePath <> "/timeline") "" >>= (\response -> responseStatus response `shouldBe` status404)
+
+    it "preserves lifecycle filters, half-open ranges, ordering, pagination, and bucket totals" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "timeline-lifecycle"
+      rangeStart <- addUTCTime (-1) <$> getCurrentTime
+      let workspacePath = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
+          projectInput name = object ["workspace_id" .= workspace.id, "name" .= (name :: T.Text)]
+          taskInput title = object ["workspace_id" .= workspace.id, "title" .= (title :: T.Text)]
+          projectPath project = "/api/v1/projects/" <> Text.encodeUtf8 (T.pack (show project.id))
+          taskPath task = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show task.id))
+          getTimeline suffix = request app methodGet (workspacePath <> "/timeline" <> suffix) ""
+          timestamp value = Text.encodeUtf8 (T.pack (iso8601Show value))
+
+      rootResponse <- postJson app "/api/v1/projects" (projectInput "Timeline root")
+      responseStatus rootResponse `shouldBe` status200
+      let Just root = decode (responseBody rootResponse) :: Maybe Project
+      subprojectResponse <- postJson app "/api/v1/projects" (object
+        [ "workspace_id" .= workspace.id, "parent_id" .= root.id, "name" .= ("Timeline child project" :: T.Text) ])
+      responseStatus subprojectResponse `shouldBe` status200
+      let Just subproject = decode (responseBody subprojectResponse) :: Maybe Project
+      request app methodPut (projectPath subproject) (encode (object ["status" .= ("archived" :: T.Text)])) >>= (\response -> responseStatus response `shouldBe` status200)
+
+      completedTaskResponse <- postJson app "/api/v1/tasks" (taskInput "Timeline completed task")
+      responseStatus completedTaskResponse `shouldBe` status200
+      let Just completedTask = decode (responseBody completedTaskResponse) :: Maybe Task
+      request app methodPut (taskPath completedTask) (encode (object ["status" .= ("done" :: T.Text)])) >>= (\response -> responseStatus response `shouldBe` status200)
+
+      cancelledTaskResponse <- postJson app "/api/v1/tasks" (taskInput "Timeline cancelled task")
+      responseStatus cancelledTaskResponse `shouldBe` status200
+      let Just cancelledTask = decode (responseBody cancelledTaskResponse) :: Maybe Task
+      request app methodPut (taskPath cancelledTask) (encode (object ["status" .= ("cancelled" :: T.Text)])) >>= (\response -> responseStatus response `shouldBe` status200)
+
+      parentTaskResponse <- postJson app "/api/v1/tasks" (taskInput "Timeline parent task")
+      responseStatus parentTaskResponse `shouldBe` status200
+      let Just parentTask = decode (responseBody parentTaskResponse) :: Maybe Task
+      childTaskResponse <- postJson app "/api/v1/tasks" (object
+        [ "workspace_id" .= workspace.id, "parent_id" .= parentTask.id, "title" .= ("Timeline subtask" :: T.Text) ])
+      responseStatus childTaskResponse `shouldBe` status200
+      let Just childTask = decode (responseBody childTaskResponse) :: Maybe Task
+      request app methodPut (taskPath childTask) (encode (object ["status" .= ("done" :: T.Text)])) >>= (\response -> responseStatus response `shouldBe` status200)
+      rangeEnd <- addUTCTime 1 <$> getCurrentTime
+
+      allResponse <- getTimeline "?limit=50"
+      responseStatus allResponse `shouldBe` status200
+      let Just allEvents = decode (responseBody allResponse) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+          events = allEvents.items
+          eventIds = map (.id) events
+          hasEvent eventType entityId = any (\event -> event.eventType == eventType && event.entityId == entityId) events
+      hasEvent "project_created" root.id `shouldBe` True
+      hasEvent "subtask_completed" childTask.id `shouldBe` True
+      hasEvent "task_completed" completedTask.id `shouldBe` True
+      hasEvent "task_cancelled" cancelledTask.id `shouldBe` True
+
+      taskOnlyResponse <- getTimeline "?entity_type=task&limit=50"
+      let Just taskOnly = decode (responseBody taskOnlyResponse) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      responseStatus taskOnlyResponse `shouldBe` status200
+      taskOnly.items `shouldSatisfy` (not . null)
+      taskOnly.items `shouldSatisfy` all (\event -> event.entityType == "task")
+      subtaskOnlyResponse <- getTimeline "?entity_type=subtask&limit=50"
+      let Just subtaskOnly = decode (responseBody subtaskOnlyResponse) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      responseStatus subtaskOnlyResponse `shouldBe` status200
+      subtaskOnly.items `shouldSatisfy` all (\event -> event.entityType == "subtask")
+      completedOnlyResponse <- getTimeline "?event_type=task_completed&limit=50"
+      let Just completedOnly = decode (responseBody completedOnlyResponse) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      responseStatus completedOnlyResponse `shouldBe` status200
+      completedOnly.items `shouldBe` filter (\event -> event.eventType == "task_completed") events
+
+      let boundary = head events
+      untilBoundaryResponse <- getTimeline ("?until=" <> timestamp boundary.occurredAt <> "&limit=50")
+      let Just untilBoundary = decode (responseBody untilBoundaryResponse) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      responseStatus untilBoundaryResponse `shouldBe` status200
+      map (.id) untilBoundary.items `shouldSatisfy` (notElem boundary.id)
+      sinceBoundaryResponse <- getTimeline ("?since=" <> timestamp boundary.occurredAt <> "&limit=50")
+      let Just sinceBoundary = decode (responseBody sinceBoundaryResponse) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      responseStatus sinceBoundaryResponse `shouldBe` status200
+      boundary.id `shouldBe` head (map (.id) sinceBoundary.items)
+
+      firstPageResponse <- getTimeline "?limit=1"
+      secondPageResponse <- getTimeline "?limit=1&offset=1"
+      let Just firstPage = decode (responseBody firstPageResponse) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+          Just secondPage = decode (responseBody secondPageResponse) :: Maybe (PaginatedResult WorkspaceTimelineEvent)
+      responseStatus firstPageResponse `shouldBe` status200
+      responseStatus secondPageResponse `shouldBe` status200
+      map (.id) firstPage.items `shouldBe` take 1 eventIds
+      map (.id) secondPage.items `shouldBe` take 1 (drop 1 eventIds)
+      firstPage.hasMore `shouldBe` True
+      secondPage.hasMore `shouldBe` True
+
+      let bucketQuery = "/timeline/buckets?since=" <> timestamp rangeStart <> "&until=" <> timestamp rangeEnd <> "&bucket=day"
+      bucketsResponse <- request app methodGet (workspacePath <> bucketQuery) ""
+      responseStatus bucketsResponse `shouldBe` status200
+      let Just buckets = decode (responseBody bucketsResponse) :: Maybe WorkspaceTimelineBucketsResponse
+          totals select = sum (map select buckets.timelineBucketsBuckets)
+      totals (\bucket -> bucket.timelineBucketCounts.projectCounts.created) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketCounts.subprojectCounts.created) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketCounts.subprojectCounts.completed) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketCounts.taskCounts.created) `shouldBe` 3
+      totals (\bucket -> bucket.timelineBucketCounts.taskCounts.completed) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketCounts.taskCounts.cancelled) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketCounts.subtaskCounts.created) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketCounts.subtaskCounts.completed) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketTotals.created) `shouldBe` 6
+      totals (\bucket -> bucket.timelineBucketTotals.completed) `shouldBe` 3
+      totals (\bucket -> bucket.timelineBucketTotals.cancelled) `shouldBe` 1
+      futureBucketsResponse <- request app methodGet (workspacePath <> "/timeline/buckets?since=" <> timestamp rangeEnd <> "&until=" <> timestamp (addUTCTime 86400 rangeEnd) <> "&bucket=day") ""
+      responseStatus futureBucketsResponse `shouldBe` status200
+      let Just futureBuckets = decode (responseBody futureBucketsResponse) :: Maybe WorkspaceTimelineBucketsResponse
+          totalsFuture response = sum (map (\bucket -> bucket.timelineBucketTotals.created + bucket.timelineBucketTotals.completed + bucket.timelineBucketTotals.cancelled) response.timelineBucketsBuckets)
+      totalsFuture futureBuckets `shouldBe` 0
+
+    it "allows readers and superadmins, but denies non-members" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "timeline-auth"
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        outsiderId <- createDeployedSandboxUser ctx.deployedEnv False False
+        superadminId <- createDeployedSandboxUser ctx.deployedEnv False True
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+          (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Timeline reader"
+        outsiderToken <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Timeline outsider"
+        superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Timeline superadmin"
+        let timelinePath = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "/timeline"
+            bucketPath = timelinePath <> "/buckets?since=2020-01-01T00:00:00Z&until=2020-01-02T00:00:00Z&bucket=day"
+            authHeader token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+        requestWithHeaders ctx.deployedApplication methodGet timelinePath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
+        requestWithHeaders ctx.deployedApplication methodGet timelinePath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodGet timelinePath (authHeader superadminToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
+        requestWithHeaders ctx.deployedApplication methodGet bucketPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
+        requestWithHeaders ctx.deployedApplication methodGet bucketPath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodGet bucketPath (authHeader superadminToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
+
   describe "Observation HTTP contract" $ do
     it "creates, lists, updates content only, and hard deletes repository observations" $ \(env, app) -> do
       workspace <- createTestWorkspace env "observation-api"
@@ -405,7 +561,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       entityTypeToText ETObservation `shouldBe` "observation"
 
   describe "OpenAPI" $ do
-    it "documents Observation contracts while excluding legacy paths" $ \(_env, app) -> do
+    it "documents Observation and Timeline contracts while excluding legacy paths" $ \(_env, app) -> do
       -- Check the served document too, not merely the value used by middleware.
       served <- request app methodGet "/api/v1/openapi.json" ""
       responseStatus served `shouldBe` status200
@@ -434,7 +590,9 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         , "/api/v1/observations"
         , "/api/v1/observations/similar"
         , "/api/v1/observations/{observationId}"
-        , "/api/v1/observations/{observationId}/embedding" ]
+        , "/api/v1/observations/{observationId}/embedding"
+        , "/api/v1/workspaces/{workspaceId}/timeline"
+        , "/api/v1/workspaces/{workspaceId}/timeline/buckets" ]
       let hasWorkspaceGroupTag path method = jsonStrings (operationTags path method) == Just ["Workspace Groups"]
       mapM_ (\(path, method) -> hasWorkspaceGroupTag path method `shouldBe` True)
         [ ("/api/v1/groups", "get"), ("/api/v1/groups", "post")
@@ -450,6 +608,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         , ("/api/v1/observations/{observationId}/embedding", "put") ]
       enum "SubjectKind" `shouldBe` Just ["file", "glob"]
       enum "EntitySearchType" `shouldBe` Just ["observation", "project", "task"]
+      schema "WorkspaceTimelineEvent" `shouldSatisfy` isJust
+      schema "WorkspaceTimelineBucketsResponse" `shouldSatisfy` isJust
       fixedEmbedding `shouldBe` Just (Number 1536, Number 1536)
       hasOptionalAuditWorkspace `shouldBe` True
       mapM_ (\legacyPath -> (paths >>= jsonField legacyPath) `shouldBe` Nothing)

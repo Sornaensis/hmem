@@ -1,4 +1,5 @@
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE LambdaCase #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | OpenAPI definitions are kept beside the Servant contract so removed
@@ -23,6 +24,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & tags .~ InsOrdSet.fromList
       [ Tag "Observations" (Just "Repository-scoped, provenance-bound observations.") Nothing
       , Tag "Workspace Groups" (Just "Global-superadmin workspace group management.") Nothing
+      , Tag "Timeline" (Just "Workspace lifecycle timeline and histogram.") Nothing
       ]
   & paths . at "/api/v1/groups" . _Just . get %~ fmap tagWorkspaceGroups
   & paths . at "/api/v1/groups" . _Just . post %~ fmap tagWorkspaceGroups
@@ -38,9 +40,12 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/observations/{observationId}" . _Just . put %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}" . _Just . delete %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}/embedding" . _Just . put %~ fmap tagObservation
+  & paths . at "/api/v1/workspaces/{workspaceId}/timeline" . _Just . get %~ fmap tagTimeline
+  & paths . at "/api/v1/workspaces/{workspaceId}/timeline/buckets" . _Just . get %~ fmap tagTimeline
   where
     tagObservation operation = operation & tags .~ InsOrdSet.singleton "Observations"
     tagWorkspaceGroups operation = operation & tags .~ InsOrdSet.singleton "Workspace Groups"
+    tagTimeline operation = operation & tags .~ InsOrdSet.singleton "Timeline"
 
 opts :: SchemaOptions
 opts = defaultSchemaOptions { fieldLabelModifier = camelToSnake }
@@ -72,6 +77,16 @@ instance ToSchema SimilarObservationQuery where
     NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @SimilarObservationQuery)
     pure $ NamedSchema name (schema & properties . at "embedding" ?~ Inline embeddingSchema)
 instance ToSchema SimilarObservation where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema WorkspaceTimelineEvent where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TimelineActor where declareNamedSchema = genericDeclareNamedSchema timelineActorOpts
+instance ToSchema TimelineProjectContext where declareNamedSchema = genericDeclareNamedSchema timelineProjectContextOpts
+instance ToSchema TimelineTaskContext where declareNamedSchema = genericDeclareNamedSchema timelineTaskContextOpts
+instance ToSchema TimelineStatusTransition where declareNamedSchema = genericDeclareNamedSchema timelineStatusTransitionOpts
+instance ToSchema TimelineNavigation where declareNamedSchema = genericDeclareNamedSchema timelineNavigationOpts
+instance ToSchema TimelineBucketCounts where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TimelineBucketEntityCounts where declareNamedSchema = genericDeclareNamedSchema timelineBucketEntityCountsOpts
+instance ToSchema WorkspaceTimelineBucket where declareNamedSchema = genericDeclareNamedSchema timelineBucketOpts
+instance ToSchema WorkspaceTimelineBucketsResponse where declareNamedSchema = genericDeclareNamedSchema timelineBucketsResponseOpts
 
 -- Both vector endpoints accept precisely the storage dimension.  Keep this
 -- schema separate from the runtime validation so the generated contract cannot
@@ -113,3 +128,35 @@ instance ToSchema SessionPrincipal where declareNamedSchema = genericDeclareName
 instance ToSchema SessionGlobalPermissions where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionWorkspaceContext where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema a => ToSchema (PaginatedResult a) where declareNamedSchema = genericDeclareNamedSchema opts
+
+timelineActorOpts :: SchemaOptions
+timelineActorOpts = opts { fieldLabelModifier = \case
+  "actorType" -> "type"; "actorId" -> "id"; "actorLabel" -> "label"; other -> camelToSnake other }
+
+timelineProjectContextOpts :: SchemaOptions
+timelineProjectContextOpts = opts { fieldLabelModifier = \case
+  "projectContextId" -> "id"; "projectContextName" -> "name"; other -> camelToSnake other }
+
+timelineTaskContextOpts :: SchemaOptions
+timelineTaskContextOpts = opts { fieldLabelModifier = \case
+  "taskContextId" -> "id"; "taskContextTitle" -> "title"; other -> camelToSnake other }
+
+timelineStatusTransitionOpts :: SchemaOptions
+timelineStatusTransitionOpts = opts { fieldLabelModifier = \case
+  "transitionFrom" -> "from"; "transitionTo" -> "to"; other -> camelToSnake other }
+
+timelineNavigationOpts :: SchemaOptions
+timelineNavigationOpts = opts { fieldLabelModifier = \case
+  "navigationEntityType" -> "entity_type"; "navigationEntityId" -> "entity_id"; other -> camelToSnake other }
+
+timelineBucketEntityCountsOpts :: SchemaOptions
+timelineBucketEntityCountsOpts = opts { fieldLabelModifier = \case
+  "projectCounts" -> "project"; "subprojectCounts" -> "subproject"; "taskCounts" -> "task"; "subtaskCounts" -> "subtask"; other -> camelToSnake other }
+
+timelineBucketOpts :: SchemaOptions
+timelineBucketOpts = opts { fieldLabelModifier = \case
+  "timelineBucketStart" -> "bucket_start"; "timelineBucketEnd" -> "bucket_end"; "timelineBucketLabel" -> "label"; "timelineBucketCounts" -> "counts"; "timelineBucketTotals" -> "totals"; other -> camelToSnake other }
+
+timelineBucketsResponseOpts :: SchemaOptions
+timelineBucketsResponseOpts = opts { fieldLabelModifier = \case
+  "timelineBucketsWorkspaceId" -> "workspace_id"; "timelineBucketsSince" -> "since"; "timelineBucketsUntil" -> "until"; "timelineBucketsBucket" -> "bucket"; "timelineBucketsBuckets" -> "buckets"; other -> camelToSnake other }

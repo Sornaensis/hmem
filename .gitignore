@@ -75,3 +75,4 @@ test-results/
 # npm stuff
 **/dist/
 **/node_modules/
+.playwright-cli/

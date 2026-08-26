@@ -250,6 +250,58 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         fmap (`ticketEventVisible` globalGroupEvent) superTicketState `shouldBe` Just True
         fmap (`ticketEventVisible` globalGroupEvent) memberTicketState `shouldBe` Just False
 
+  describe "Global Audit Log authorization" $ do
+    it "allows only deployed global superadmins to list across workspaces while preserving scoped admins and filters" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        firstWorkspace <- createTestWorkspace ctx.deployedEnv "global-audit-first"
+        secondWorkspace <- createTestWorkspace ctx.deployedEnv "global-audit-second"
+        superadminId <- createDeployedSandboxUser ctx.deployedEnv False True
+        superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Audit superadmin"
+        workspaceAdminId <- createDeployedSandboxUser ctx.deployedEnv False False
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool firstWorkspace.id
+          (Auth.UpsertWorkspaceMembership workspaceAdminId Auth.WorkspaceRoleAdmin) Nothing
+        workspaceAdminToken <- issueDeployedSandboxPAT ctx.deployedEnv workspaceAdminId "Audit workspace admin"
+        let authHeader token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            projectInput workspace name = object
+              [ "workspace_id" .= workspace.id, "name" .= (name :: T.Text) ]
+            projectPath = "/api/v1/projects"
+            auditPath = "/api/v1/audit?entity_type=project"
+        firstCreated <- requestWithHeaders ctx.deployedApplication methodPost projectPath (authHeader superadminToken) (encode (projectInput firstWorkspace "First audit project"))
+        secondCreated <- requestWithHeaders ctx.deployedApplication methodPost projectPath (authHeader superadminToken) (encode (projectInput secondWorkspace "Second audit project"))
+        responseStatus firstCreated `shouldBe` status200
+        responseStatus secondCreated `shouldBe` status200
+        let Just firstProject = decode (responseBody firstCreated) :: Maybe Project
+
+        unauthenticated <- request ctx.deployedApplication methodGet auditPath ""
+        responseStatus unauthenticated `shouldBe` status401
+        denied <- requestWithHeaders ctx.deployedApplication methodGet auditPath (authHeader workspaceAdminToken) ""
+        responseStatus denied `shouldBe` status403
+        scoped <- requestWithHeaders ctx.deployedApplication methodGet
+          (auditPath <> "&workspace_id=" <> Text.encodeUtf8 (T.pack (show firstWorkspace.id)))
+          (authHeader workspaceAdminToken) ""
+        responseStatus scoped `shouldBe` status200
+        let Just scopedPage = decode (responseBody scoped) :: Maybe (PaginatedResult AuditLogEntry)
+        scopedPage.items `shouldSatisfy` (not . null)
+        all (\entry -> entry.workspaceId == Just firstWorkspace.id) scopedPage.items `shouldBe` True
+
+        firstGlobalPage <- requestWithHeaders ctx.deployedApplication methodGet (auditPath <> "&limit=1") (authHeader superadminToken) ""
+        responseStatus firstGlobalPage `shouldBe` status200
+        let Just firstPage = decode (responseBody firstGlobalPage) :: Maybe (PaginatedResult AuditLogEntry)
+        firstPage.hasMore `shouldBe` True
+        global <- requestWithHeaders ctx.deployedApplication methodGet (auditPath <> "&limit=10") (authHeader superadminToken) ""
+        responseStatus global `shouldBe` status200
+        let Just globalPage = decode (responseBody global) :: Maybe (PaginatedResult AuditLogEntry)
+            globalWorkspaces = map (.workspaceId) globalPage.items
+        globalWorkspaces `shouldSatisfy` (elem (Just firstWorkspace.id))
+        globalWorkspaces `shouldSatisfy` (elem (Just secondWorkspace.id))
+        filtered <- requestWithHeaders ctx.deployedApplication methodGet
+          (auditPath <> "&entity_id=" <> Text.encodeUtf8 (T.pack (show firstProject.id)))
+          (authHeader superadminToken) ""
+        responseStatus filtered `shouldBe` status200
+        let Just filteredPage = decode (responseBody filtered) :: Maybe (PaginatedResult AuditLogEntry)
+        filteredPage.items `shouldSatisfy` (not . null)
+        all (\entry -> entry.entityId == T.pack (show firstProject.id)) filteredPage.items `shouldBe` True
+
   describe "Observation HTTP contract" $ do
     it "creates, lists, updates content only, and hard deletes repository observations" $ \(env, app) -> do
       workspace <- createTestWorkspace env "observation-api"
@@ -369,6 +421,11 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
             minimum <- jsonField "minItems" embedding
             maximum <- jsonField "maxItems" embedding
             pure (minimum, maximum)
+          hasOptionalAuditWorkspace = case jsonPath ["paths", "/api/v1/audit", "get", "parameters"] document of
+            Just (Array parameters) -> any (\parameter ->
+              jsonField "name" parameter == Just (String "workspace_id")
+                && jsonField "required" parameter == Just (Bool False)) parameters
+            _ -> False
       mapM_ (\path -> hasPath path `shouldBe` True)
         [ "/api/v1/groups"
         , "/api/v1/groups/{groupId}"
@@ -394,6 +451,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       enum "SubjectKind" `shouldBe` Just ["file", "glob"]
       enum "EntitySearchType" `shouldBe` Just ["observation", "project", "task"]
       fixedEmbedding `shouldBe` Just (Number 1536, Number 1536)
+      hasOptionalAuditWorkspace `shouldBe` True
       mapM_ (\legacyPath -> (paths >>= jsonField legacyPath) `shouldBe` Nothing)
         [ "/api/v1/memories", "/api/v1/categories", "/api/v1/cleanup/policies"
         , "/api/v1/projects/{projectId}/memories", "/api/v1/tasks/{taskId}/context" ]

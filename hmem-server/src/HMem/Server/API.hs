@@ -472,10 +472,11 @@ search pool query = do
 audit :: Pool Hasql.Connection -> Broadcast -> Server AuditAPI
 audit pool broadcast = listH :<|> revertH :<|> getH where
   listH workspaceId entityType entityId action since until limit offset = do
-    workspace <- maybe (throwError err403) pure workspaceId
-    if entityType == Just "observation"
-      then requireObservationWorkspace pool workspace Auth.WorkspaceRoleAdmin
-      else requireWorkspace pool workspace Auth.WorkspaceRoleAdmin
+    case workspaceId of
+      Just id
+        | entityType == Just "observation" -> requireObservationWorkspace pool id Auth.WorkspaceRoleAdmin
+        | otherwise -> requireWorkspace pool id Auth.WorkspaceRoleAdmin
+      Nothing -> requireSuperadmin pool
     let (takeN, skipN) = page limit offset
         query = AuditLogQuery workspaceId entityType entityId action since until (Just (takeN + 1)) (Just skipN)
     rows <- handleDBErrors $ Audit.getAuditLog pool query

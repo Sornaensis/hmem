@@ -37,7 +37,7 @@ main :: IO ()
 main = do
   opts <- execParser $ info (optsParser <**> helper)
     ( fullDesc
-   <> progDesc "hmem-mcp - MCP bridge for LLM memory management"
+   <> progDesc "hmem-mcp - MCP bridge for observation, project & task management"
    <> header "hmem-mcp"
      )
   cfg <- Config.loadConfig

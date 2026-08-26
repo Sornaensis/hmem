@@ -145,7 +145,7 @@ spec = do
                     [ "name" .= ("search" :: Text)
                     , "arguments" .= object
                         [ "workspace_id" .= ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" :: Text)
-                        , "entity_types" .= (["memory"] :: [Text])
+                        , "entity_types" .= (["observation"] :: [Text])
                         , "limit" .= (1 :: Int)
                         ]
                     ]

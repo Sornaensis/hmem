@@ -1,401 +1,89 @@
 {
-  "task_create": {
-    "max_chars": 300,
-    "max_mcp_envelope_chars": 450,
-    "max_jsonrpc_stdio_chars": 450,
+  "observation_create": {
     "payload": {
       "ok": true,
       "action": "created",
-      "entity_type": "task",
-      "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-      "status": "todo",
-      "summary": {
-        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        "title": "Task",
-        "status": "todo",
-        "priority": 9,
-        "project_id": "22222222-3333-4444-5555-666666666666"
-      }
-    }
-  },
-  "project_create": {
-    "max_chars": 280,
-    "max_mcp_envelope_chars": 420,
-    "max_jsonrpc_stdio_chars": 420,
-    "payload": {
-      "ok": true,
-      "action": "created",
-      "entity_type": "project",
-      "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-      "status": "active",
-      "summary": {
-        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        "name": "Project",
-        "status": "active",
-        "priority": 8
-      }
-    }
-  },
-  "memory_create": {
-    "max_chars": 360,
-    "max_mcp_envelope_chars": 540,
-    "max_jsonrpc_stdio_chars": 540,
-    "payload": {
-      "ok": true,
-      "action": "created",
-      "entity_type": "memory",
+      "entity_type": "observation",
       "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
       "summary": {
         "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        "memory_type": "long_term",
-        "importance": 7,
-        "tags": ["contract"],
-        "pinned": true
-      },
-      "project_id": "11111111-2222-3333-4444-555555555555",
-      "task_id": "22222222-3333-4444-5555-666666666666"
-    }
-  },
-  "project_spec_10_tasks": {
-    "max_chars": 1100,
-    "max_mcp_envelope_chars": 1700,
-    "max_jsonrpc_stdio_chars": 1700,
-    "payload": {
-      "ok": true,
-      "action": "created",
-      "entity_type": "project_spec",
-      "project_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-      "name": "Project",
-      "status": "active",
-      "priority": 8,
-      "tasks_created": [
-        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
-        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
-        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
-        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
-        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
-        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
-        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
-        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
-        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 },
-        { "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "title": "Task", "priority": 9 }
-      ]
-    }
-  },
-  "project_overview": {
-    "max_chars": 700,
-    "max_mcp_envelope_chars": 1050,
-    "max_jsonrpc_stdio_chars": 1050,
-    "payload": {
-      "project": {
-        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        "name": "Project",
-        "status": "active",
-        "priority": 8
-      },
-      "tasks": [
-        {
-          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-          "title": "Task",
-          "status": "todo",
-          "priority": 9,
-          "project_id": "22222222-3333-4444-5555-666666666666"
-        }
-      ],
-      "subprojects": [
-        {
-          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-          "name": "Project",
-          "status": "active",
-          "priority": 8
-        }
-      ],
-      "connected_memories": [
-        {
-          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-          "summary": "Project memory",
-          "scope": "project"
-        }
-      ],
-      "readiness_rollup": {
-        "completion_ready": false,
-        "open_task_count": 2,
-        "blocked_task_count": 1
+        "subject_kind": "file",
+        "subject": "src/HMem/Types.hs",
+        "git_sha": "0123456789abcdef0123456789abcdef01234567",
+        "content_preview": "complete observation content"
       }
-    }
-  },
-  "project_detail": {
-    "max_chars": 2200,
-    "max_mcp_envelope_chars": 3300,
-    "max_jsonrpc_stdio_chars": 3300,
-    "payload": {
-      "project": {
-        "id": "55555555-6666-7777-8888-999999999999",
-        "name": "Detail project",
-        "status": "active",
-        "priority": 6,
-        "parent_id": "11111111-2222-3333-4444-555555555555",
-        "description": "Full project detail description that should not be truncated or copied to child rows."
-      },
-      "tasks": [
-        {
-          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-          "title": "Todo direct",
-          "status": "todo",
-          "priority": 7,
-          "project_id": "55555555-6666-7777-8888-999999999999",
-          "due_at": "2026-06-01T00:00:00Z"
-        },
-        {
-          "id": "11111111-2222-3333-4444-555555555555",
-          "title": "Blocked direct",
-          "status": "blocked",
-          "priority": 7,
-          "project_id": "55555555-6666-7777-8888-999999999999",
-          "parent_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        },
-        {
-          "id": "22222222-3333-4444-5555-666666666666",
-          "title": "In progress direct",
-          "status": "in_progress",
-          "priority": 7,
-          "project_id": "55555555-6666-7777-8888-999999999999"
-        }
-      ],
-      "blocked_tasks": {
-        "items": [
-          {
-            "id": "11111111-2222-3333-4444-555555555555",
-            "title": "Blocked direct",
-            "status": "blocked",
-            "priority": 7,
-            "project_id": "55555555-6666-7777-8888-999999999999",
-            "parent_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-          }
-        ],
-        "returned_count": 1,
-        "subtree_blocked_task_count": 3,
-        "subtree_dependency_blocked_task_count": 2,
-        "subtree_open_dependency_count": 5
-      },
-      "subprojects": [
-        {
-          "id": "11111111-2222-3333-4444-555555555555",
-          "name": "Active child",
-          "status": "active",
-          "priority": 5,
-          "parent_id": "55555555-6666-7777-8888-999999999999"
-        },
-        {
-          "id": "22222222-3333-4444-5555-666666666666",
-          "name": "Archived child",
-          "status": "archived",
-          "priority": 5,
-          "parent_id": "55555555-6666-7777-8888-999999999999"
-        }
-      ],
-      "linked_memories": [
-        {
-          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-          "summary": "Linked memory",
-          "memory_type": "long_term",
-          "importance": 5,
-          "tags": ["linked"]
-        }
-      ],
-      "connected_memories": [
-        {
-          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-          "summary": "Direct project memory",
-          "scope": "project"
-        }
-      ],
-      "readiness_rollup": {
-        "completion_ready": false,
-        "closed_project_count": 1,
-        "open_task_count": 4,
-        "done_task_count": 1,
-        "cancelled_task_count": 1,
-        "blocked_task_count": 3,
-        "dependency_blocked_task_count": 2,
-        "open_dependency_count": 5
-      }
-    }
-  },
-  "task_detail": {
-    "max_chars": 1300,
-    "max_mcp_envelope_chars": 2000,
-    "max_jsonrpc_stdio_chars": 2000,
-    "payload": {
-      "task": {
-        "id": "44444444-5555-6666-7777-888888888888",
-        "title": "Task detail done task",
-        "status": "done",
-        "priority": 9,
-        "project_id": "22222222-3333-4444-5555-666666666666",
-        "parent_id": "11111111-2222-3333-4444-555555555555",
-        "due_at": "2026-06-15T00:00:00Z",
-        "description": "Task detail target description that should not be truncated."
-      },
-      "project": {
-        "id": "22222222-3333-4444-5555-666666666666",
-        "name": "Task detail parent project",
-        "status": "active",
-        "priority": 8,
-        "parent_id": "11111111-2222-3333-4444-555555555555",
-        "description": "Task detail parent project description that should not be truncated."
-      },
-      "dependencies": [
-        {
-          "id": "11111111-2222-3333-4444-555555555555",
-          "name": "Dependency by name",
-          "status": "done"
-        },
-        {
-          "id": "33333333-4444-5555-6666-777777777777",
-          "title": "Dependency by title",
-          "status": "todo"
-        }
-      ],
-      "connected_memories": [
-        {
-          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-          "summary": "Task detail memory",
-          "scope": "task"
-        }
-      ],
-      "readiness_rollup": {
-        "completion_ready": false,
-        "open_dependency_count": 1,
-        "open_subtask_count": 2
-      }
-    }
-  },
-  "context_get": {
-    "max_chars": 680,
-    "max_mcp_envelope_chars": 1000,
-    "max_jsonrpc_stdio_chars": 1000,
-    "payload": {
-      "task": {
-        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        "title": "Task",
-        "status": "todo",
-        "priority": 9,
-        "project_id": "22222222-3333-4444-5555-666666666666"
-      },
-      "detail_level": "medium",
-      "task_memories": [
-        {
-          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-          "summary": "Task memory",
-          "scope": "task"
-        }
-      ],
-      "project_memories": [
-        {
-          "id": "11111111-2222-3333-4444-555555555555",
-          "summary": "Project memory",
-          "scope": "project"
-        }
-      ],
-      "workspace_memories": [
-        {
-          "id": "22222222-3333-4444-5555-666666666666",
-          "summary": "Workspace memory",
-          "scope": "workspace"
-        }
-      ]
-    }
-  },
-  "task_start": {
-    "max_chars": 560,
-    "max_mcp_envelope_chars": 850,
-    "max_jsonrpc_stdio_chars": 850,
-    "payload": {
-      "result": "started",
-      "started": true,
-      "task_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-      "status": "todo",
-      "task": {
-        "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        "title": "Task",
-        "status": "todo",
-        "priority": 9,
-        "project_id": "22222222-3333-4444-5555-666666666666"
-      },
-      "detail_level": "light",
-      "task_memories": [],
-      "project_memories": [],
-      "workspace_memories": []
     }
   },
   "unified_search": {
-    "max_chars": 900,
-    "max_mcp_envelope_chars": 1350,
-    "max_jsonrpc_stdio_chars": 1350,
     "payload": {
-      "memories": [
+      "observations": [
         {
           "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-          "summary": "Search memory",
-          "memory_type": "long_term",
-          "importance": 7,
-          "tags": ["contract"],
-          "pinned": true
+          "subject_kind": "file",
+          "subject": "src/HMem/Types.hs",
+          "git_sha": "0123456789abcdef0123456789abcdef01234567",
+          "content_preview": "complete observation content"
         }
       ],
-      "projects": [
-        {
-          "project": {
-            "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "name": "Project",
-            "status": "active",
-            "priority": 8
-          },
-          "linked_memories": [
-            {
-              "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-              "summary": "Linked memory",
-              "importance": 5,
-              "tags": ["linked"]
-            }
-          ]
-        }
-      ],
-      "tasks": [
-        {
-          "task": {
-            "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            "title": "Task",
-            "status": "todo",
-            "priority": 9,
-            "project_id": "22222222-3333-4444-5555-666666666666"
-          },
-          "linked_memories": [
-            {
-              "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-              "summary": "Linked memory",
-              "importance": 5,
-              "tags": ["linked"]
-            }
-          ]
-        }
-      ]
+      "projects": [],
+      "tasks": []
     }
   },
-  "memory_graph": {
-    "max_chars": 200,
-    "max_mcp_envelope_chars": 320,
-    "max_jsonrpc_stdio_chars": 320,
+  "observation_list": {
     "payload": {
-      "links": [
+      "items": [
         {
-          "source_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-          "target_id": "11111111-2222-3333-4444-555555555555",
-          "relation_type": "related",
-          "strength": 0.75
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "subject_kind": "file",
+          "subject": "src/HMem/Types.hs",
+          "git_sha": "0123456789abcdef0123456789abcdef01234567",
+          "content_preview": "complete observation content"
+        },
+        {
+          "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "subject_kind": "file",
+          "subject": "src/HMem/Types.hs",
+          "git_sha": "0123456789abcdef0123456789abcdef01234567",
+          "content_preview": "complete observation content"
         }
-      ]
+      ],
+      "has_more": true,
+      "next_offset": 2
+    }
+  },
+  "observation_delete": {
+    "payload": {
+      "ok": true,
+      "action": "deleted",
+      "entity_type": "observation",
+      "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    }
+  },
+  "observation_set_embedding": {
+    "payload": {
+      "ok": true,
+      "action": "embedding_set",
+      "entity_type": "observation",
+      "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    }
+  },
+  "observation_similar": {
+    "payload": {
+      "items": [
+        {
+          "observation": {
+            "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "subject_kind": "file",
+            "subject": "src/HMem/Types.hs",
+            "git_sha": "0123456789abcdef0123456789abcdef01234567",
+            "content_preview": "complete observation content"
+          },
+          "similarity": 0.75
+        }
+      ],
+      "offset": 4,
+      "limit": 2,
+      "returned_count": 1
     }
   }
 }

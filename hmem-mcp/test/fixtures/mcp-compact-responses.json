@@ -7,6 +7,10 @@
       "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
       "summary": {
         "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "subjects": [
+          { "subject_kind": "file", "subject": "src/HMem/Types.hs" },
+          { "subject_kind": "glob", "subject": "my/src/proj/**/*.java" }
+        ],
         "subject_kind": "file",
         "subject": "src/HMem/Types.hs",
         "git_sha": "0123456789abcdef0123456789abcdef01234567",
@@ -19,6 +23,10 @@
       "observations": [
         {
           "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "subjects": [
+            { "subject_kind": "file", "subject": "src/HMem/Types.hs" },
+            { "subject_kind": "glob", "subject": "my/src/proj/**/*.java" }
+          ],
           "subject_kind": "file",
           "subject": "src/HMem/Types.hs",
           "git_sha": "0123456789abcdef0123456789abcdef01234567",
@@ -34,6 +42,10 @@
       "items": [
         {
           "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "subjects": [
+            { "subject_kind": "file", "subject": "src/HMem/Types.hs" },
+            { "subject_kind": "glob", "subject": "my/src/proj/**/*.java" }
+          ],
           "subject_kind": "file",
           "subject": "src/HMem/Types.hs",
           "git_sha": "0123456789abcdef0123456789abcdef01234567",
@@ -41,6 +53,10 @@
         },
         {
           "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "subjects": [
+            { "subject_kind": "file", "subject": "src/HMem/Types.hs" },
+            { "subject_kind": "glob", "subject": "my/src/proj/**/*.java" }
+          ],
           "subject_kind": "file",
           "subject": "src/HMem/Types.hs",
           "git_sha": "0123456789abcdef0123456789abcdef01234567",
@@ -73,6 +89,10 @@
         {
           "observation": {
             "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "subjects": [
+              { "subject_kind": "file", "subject": "src/HMem/Types.hs" },
+              { "subject_kind": "glob", "subject": "my/src/proj/**/*.java" }
+            ],
             "subject_kind": "file",
             "subject": "src/HMem/Types.hs",
             "git_sha": "0123456789abcdef0123456789abcdef01234567",
@@ -84,6 +104,33 @@
       "offset": 4,
       "limit": 2,
       "returned_count": 1
+    }
+  },
+  "observation_match": {
+    "payload": {
+      "items": [
+        {
+          "observation": {
+            "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "subjects": [
+              { "subject_kind": "file", "subject": "src/HMem/Types.hs" },
+              { "subject_kind": "glob", "subject": "my/src/proj/**/*.java" }
+            ],
+            "subject_kind": "file",
+            "subject": "src/HMem/Types.hs",
+            "git_sha": "0123456789abcdef0123456789abcdef01234567",
+            "content_preview": "complete observation content"
+          },
+          "matched_paths": ["my/src/proj/Main.java", "src/HMem/Types.hs"],
+          "matched_subjects": [
+            { "subject_kind": "file", "subject": "src/HMem/Types.hs" },
+            { "subject_kind": "glob", "subject": "my/src/proj/**/*.java" }
+          ]
+        }
+      ],
+      "has_more": true,
+      "returned_count": 2,
+      "next_offset": 2
     }
   }
 }

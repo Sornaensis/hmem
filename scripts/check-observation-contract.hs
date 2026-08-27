@@ -26,7 +26,7 @@ toolsDispatched :: [Tool]
 toolsDispatched =
   [ Tool "workspace_list" "WorkspaceList", Tool "workspace_register" "WorkspaceRegister", Tool "search" "UnifiedSearch"
   , Tool "observation_create" "ObservationCreate", Tool "observation_get" "ObservationGet", Tool "observation_update" "ObservationUpdate"
-  , Tool "observation_list" "ObservationList", Tool "observation_delete" "ObservationDelete", Tool "observation_set_embedding" "ObservationSetEmbedding", Tool "observation_similar" "ObservationSimilar"
+  , Tool "observation_list" "ObservationList", Tool "observation_match" "ObservationMatchCall", Tool "observation_delete" "ObservationDelete", Tool "observation_set_embedding" "ObservationSetEmbedding", Tool "observation_similar" "ObservationSimilar"
   , Tool "project_create" "ProjectCreate", Tool "project_update" "ProjectUpdate", Tool "project_detail" "ProjectDetail", Tool "project_overview" "ProjectOverviewCall", Tool "project_next_tasks" "ProjectNextTasks", Tool "project_spec" "ProjectSpec", Tool "project_archive" "ProjectArchive"
   , Tool "task_create" "TaskCreate", Tool "task_update" "TaskUpdate", Tool "task_detail" "TaskDetail", Tool "task_overview" "TaskOverviewCall", Tool "task_start" "TaskStart", Tool "task_finish" "TaskFinish"
   ]
@@ -79,6 +79,7 @@ guardSources :: [(FilePath, String)] -> [String]
 guardSources sources = concat
   [ registryChecks toolsSource
   , parserAndDispatchChecks toolsSource
+  , observationSubjectChecks toolsSource
   , sessionChecks serverSource
   , legacyChecks [("Tools.hs", toolsSource), ("Server.hs", serverSource)]
   , testCoverageChecks toolsSpec serverSpec fixture
@@ -106,6 +107,15 @@ parserAndDispatchChecks source = concatMap check toolsDispatched
       <> require ("dispatcher case missing constructor: " <> toolConstructor tool)
         (any (isPrefixOf ("  " <> toolConstructor tool <> " ")) dispatchBody)
 
+observationSubjectChecks :: String -> [String]
+observationSubjectChecks source = concat
+  [ require "observation_create must advertise canonical subjects" ("\"subjects\" .= object" `isInfixOf` source)
+  , require "observation_create must keep legacy singleton parser compatibility" ("parseCreateObservation" `isInfixOf` source && "subject_kind" `isInfixOf` source)
+  , require "observation_match must reject generic glob inputs through shared validation" ("validateObservationMatchQuery" `isInfixOf` source)
+  , require "observation compact summaries must retain ordered subjects" ("copy \"subjects\"" `isInfixOf` source)
+  , require "observation_match must preserve matching evidence" (all (`isInfixOf` source) ["matched_paths", "matched_subjects", "next_offset"])
+  ]
+
 sessionChecks :: String -> [String]
 sessionChecks source = concat
   [ require "Server-owned set_workspace dispatch is missing" ("Just \"set_workspace\" -> handleSetWorkspace" `isInfixOf` source)
@@ -130,7 +140,7 @@ testCoverageChecks toolsSpec serverSpec fixture = concat
   ]
 
 compactFixtureTools :: [String]
-compactFixtureTools = ["observation_create", "unified_search", "observation_list", "observation_delete", "observation_set_embedding", "observation_similar"]
+compactFixtureTools = ["observation_create", "unified_search", "observation_list", "observation_match", "observation_delete", "observation_set_embedding", "observation_similar"]
 
 registeredTools :: String -> [String]
 registeredTools = mapMaybe registration . lines
@@ -170,11 +180,15 @@ selfTest = do
       staleAlias = guardSources (mutateTools (<> "\nlegacyAlias = \"memory_create\"\n"))
       missingTool = guardSources (mutateTools (replaceFirst "tool \"observation_get\"" "tool \"observation_missing\""))
       dispatcherMismatch = guardSources (mutateTools (replaceFirst "ObservationGet oid" "MissingObservationGet oid"))
+      missingSubjects = guardSources (mutateTools (replaceFirst "\"subjects\" .= object" "\"subject_set\" .= object"))
+      missingMatch = guardSources (mutateTools (replaceFirst "tool \"observation_match\"" "tool \"observation_missing\""))
   unless (null (guardSources sources)) $ failContract ["self-test baseline unexpectedly failed"]
   requireSelfTest "stale legacy alias" "forbidden removed-Memory alias `memory_create`" staleAlias
   requireSelfTest "missing accepted tool" "registry missing live tool(s): observation_get" missingTool
   requireSelfTest "registry/dispatcher mismatch" "dispatcher case missing constructor: ObservationGet" dispatcherMismatch
-  putStrLn "Observation MCP contract self-test passed (baseline, stale alias, missing tool, and dispatcher mismatch fixtures)."
+  requireSelfTest "missing subjects" "observation_create must advertise canonical subjects" missingSubjects
+  requireSelfTest "missing observation_match" "registry missing live tool(s): observation_match" missingMatch
+  putStrLn "Observation MCP contract self-test passed (baseline, stale alias, missing tool, dispatcher mismatch, subjects, and match fixtures)."
 
 requireSelfTest :: String -> String -> [String] -> IO ()
 requireSelfTest label expected diagnostics =

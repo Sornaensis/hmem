@@ -7,6 +7,7 @@ module HMem.MCP.Tools
   , compactObservationSummary
   , compactObservationDetail
   , compactObservationList
+  , compactObservationMatches
   , compactSimilarObservations
   , compactSearchResults
   , compactProjectSummary
@@ -55,12 +56,11 @@ toolDefinitions =
       , "limit" .= prop "integer" "Maximum results per entity type"
       , "offset" .= prop "integer" "Result offset per entity type"
       ] [])
-  , tool "observation_create" "Create a provenance-bound observation. subject_kind, subject, and git_sha are immutable after creation." (schema
-      [ "subject_kind" .= enumProp "Repository subject kind" ["file", "glob"]
-      , "subject" .= prop "string" "Canonical repository-relative path or glob"
+  , tool "observation_create" "Create a provenance-bound observation for one or more repository-relative subjects. Pass subjects as an ordered array; subjects are OR alternatives and, with git_sha, immutable after creation. File subjects must be concrete paths. Glob subjects may use only *, ?, and ** path components (for example my/src/proj/**/*.java)." (schema
+      [ "subjects" .= object ["type" .= ("array" :: Text), "description" .= ("One to " <> T.pack (show maxObservationSubjects) <> " ordered file or glob subjects; duplicate entries are removed in first-occurrence order"), "minItems" .= (1 :: Int), "maxItems" .= maxObservationSubjects, "items" .= object ["type" .= ("object" :: Text), "properties" .= object ["subject_kind" .= enumProp "Repository subject kind" ["file", "glob"], "subject" .= prop "string" "Canonical repository-relative path or safe glob"], "required" .= (["subject_kind", "subject"] :: [Text])]]
       , "git_sha" .= prop "string" "Lowercase 40-character Git SHA"
       , "content" .= prop "string" "Observation content"
-      ] ["subject_kind", "subject", "git_sha", "content"])
+      ] ["subjects", "git_sha", "content"])
   , tool "observation_get" "Get an observation by ID, including content and immutable provenance." (schema ["observation_id" .= prop "string" "Observation UUID"] ["observation_id"])
   , tool "observation_update" "Replace observation content. Provenance fields cannot be updated." (schema ["observation_id" .= prop "string" "Observation UUID", "content" .= prop "string" "Replacement content"] ["observation_id", "content"])
   , tool "observation_list" "List observations using exact provenance filters and optional text search. When has_more is true, pass next_offset to retrieve the next page." (schema
@@ -71,6 +71,14 @@ toolDefinitions =
       , "limit" .= prop "integer" "Maximum results (1-200)"
       , "offset" .= prop "integer" "Result offset"
       ] [])
+  , tool "observation_match" "Find observations whose stored file subjects or safe glob subjects match any concrete repository-relative path supplied in paths. Paths are ORed; do not pass globs here and no repository filesystem is read. Optional filters compose with matching. Continue with next_offset until has_more is false." (schema
+      [ "paths" .= object ["type" .= ("array" :: Text), "description" .= ("One to 256 concrete repository-relative files; globs are rejected" :: Text), "minItems" .= (1 :: Int), "maxItems" .= (256 :: Int), "items" .= prop "string" "Concrete repository-relative path"]
+      , "subject_kind" .= enumProp "Filter matching stored subjects by kind" ["file", "glob"]
+      , "git_sha" .= prop "string" "Exact observation Git SHA"
+      , "query" .= prop "string" "Optional full-text query"
+      , "limit" .= prop "integer" "Maximum results (1-200)"
+      , "offset" .= prop "integer" "Result offset"
+      ] ["paths"])
   , tool "observation_delete" "Delete an observation by ID." (schema ["observation_id" .= prop "string" "Observation UUID"] ["observation_id"])
   , tool "observation_set_embedding" "Set the exact 1536-dimension embedding for an observation." (schema
       [ "observation_id" .= prop "string" "Observation UUID"
@@ -113,6 +121,7 @@ data ToolCall
   | ObservationGet UUID
   | ObservationUpdate UUID UpdateObservation
   | ObservationList ObservationQuery
+  | ObservationMatchCall ObservationMatchQuery
   | ObservationDelete UUID
   | ObservationSetEmbedding UUID ObservationEmbedding
   | ObservationSimilar SimilarObservationQuery
@@ -138,10 +147,11 @@ data SpecTask = SpecTask { specTitle :: Text, specDescription :: Maybe Text, spe
 
 parseToolCall :: Text -> Value -> Either String ToolCall
 parseToolCall name args = case name of
-  "observation_create" -> ObservationCreate <$> parse args
+  "observation_create" -> ObservationCreate <$> parseCreateObservation args
   "observation_get" -> ObservationGet <$> required "observation_id"
   "observation_update" -> ObservationUpdate <$> required "observation_id" <*> parseUpdateObservation args
   "observation_list" -> ObservationList <$> parse args
+  "observation_match" -> ObservationMatchCall <$> parse args
   "observation_delete" -> ObservationDelete <$> required "observation_id"
   "observation_set_embedding" -> ObservationSetEmbedding <$> required "observation_id" <*> (ObservationEmbedding <$> required "embedding")
   "observation_similar" -> ObservationSimilar <$> parse args
@@ -177,6 +187,16 @@ parseUpdateObservation = parseEither $ withObject "observation_update" $ \o -> d
   if null unexpected then pure (UpdateObservation contentValue)
   else fail ("observation_update accepts only observation_id and content; unexpected fields: " <> show unexpected)
 
+-- | Core accepts the deprecated singleton form during the compatibility window.
+-- The MCP registry advertises only @subjects@, but parsing retains the legacy
+-- form so existing agents do not fail abruptly. Core parsing rejects mixed and
+-- incomplete provenance forms before any HTTP request is made.
+parseCreateObservation :: Value -> Either String CreateObservation
+parseCreateObservation = parseEither $ withObject "observation_create" $ \o -> do
+  let unexpected = filter (`notElem` ["workspace_id", "subjects", "subject_kind", "subject", "git_sha", "content"]) (Key.toText <$> KM.keys o)
+  if null unexpected then parseJSON (Object o)
+  else fail ("observation_create received unexpected fields: " <> show unexpected)
+
 parseTasks :: Value -> Either String [SpecTask]
 parseTasks = parseEither $ withObject "project_spec" $ \o -> do
   values <- o .: "tasks"
@@ -187,6 +207,7 @@ validateToolCall call = case call of
   ObservationCreate input -> checked (validateCreateObservationInput input) call
   ObservationUpdate _ input -> checked (validateUpdateObservationInput input) call
   ObservationList input -> checked (validateObservationQuery input) call
+  ObservationMatchCall input -> checked (validateObservationMatchQuery input) call
   ObservationSetEmbedding _ (ObservationEmbedding values) -> checked (validateEmbedding values) call
   ObservationSimilar input -> checked (validateSimilarObservationQuery input) call
   WorkspaceRegister input -> checked (validateCreateWorkspaceInput input) call
@@ -223,6 +244,7 @@ execute manager base apiKey = \case
   ObservationGet oid -> request manager base apiKey "GET" ("/api/v1/observations/" <> uuidPath oid) Nothing compactObservationDetail
   ObservationUpdate oid input -> request manager base apiKey "PUT" ("/api/v1/observations/" <> uuidPath oid) (Just (encode input)) (mutationAck "updated" "observation" . compactObservationSummary)
   ObservationList input@(ObservationQuery _ _ _ _ _ _ offset) -> request manager base apiKey "GET" (observationListPath input) Nothing (compactObservationList (fromMaybe 0 offset))
+  ObservationMatchCall input@(ObservationMatchQuery _ _ _ _ _ _ offset) -> request manager base apiKey "POST" "/api/v1/observations/match" (Just (encode input)) (compactObservationMatches (fromMaybe 0 offset))
   ObservationDelete oid -> noContentRequest manager base apiKey "DELETE" ("/api/v1/observations/" <> uuidPath oid) Nothing (statusAck "deleted" "observation" oid)
   ObservationSetEmbedding oid embeddingValue -> noContentRequest manager base apiKey "PUT" ("/api/v1/observations/" <> uuidPath oid <> "/embedding") (Just (encode embeddingValue)) (statusAck "embedding_set" "observation" oid)
   ObservationSimilar input@(SimilarObservationQuery _ _ _ _ _ _ limit offset) -> request manager base apiKey "POST" "/api/v1/observations/similar" (Just (encode input)) (compactSimilarObservations (fromMaybe 50 limit) (fromMaybe 0 offset))
@@ -295,7 +317,7 @@ rawRequest manager base apiKey method path body = do
       pure (Left (mcpError "Could not connect to hmem-server"))
 
 compactObservationSummary :: Value -> Value
-compactObservationSummary value = object (catMaybes [copy "id", copy "subject_kind", copy "subject", copy "git_sha", preview])
+compactObservationSummary value = object (catMaybes [copy "id", copy "subjects", copy "subject_kind", copy "subject", copy "git_sha", preview])
   where
     copy key = (Key.fromText key .=) <$> field key value
     preview = case field "content_preview" value of
@@ -305,7 +327,7 @@ compactObservationSummary value = object (catMaybes [copy "id", copy "subject_ki
         _ -> Nothing
 
 compactObservationDetail :: Value -> Value
-compactObservationDetail value = object (catMaybes [copy "id", copy "subject_kind", copy "subject", copy "git_sha", copy "content"])
+compactObservationDetail value = object (catMaybes [copy "id", copy "subjects", copy "subject_kind", copy "subject", copy "git_sha", copy "content"])
   where copy key = (Key.fromText key .=) <$> field key value
 
 compactObservationList :: Int -> Value -> Value
@@ -315,6 +337,32 @@ compactObservationList offsetValue value = object
     ] <> ["next_offset" .= (offsetValue + length (mapField "items" id value)) | hasMoreValue] )
   where
     hasMoreValue = field "has_more" value == Just (Bool True)
+
+compactObservationMatches :: Int -> Value -> Value
+compactObservationMatches offsetValue value = object
+  ( [ "items" .= rows
+    , "has_more" .= hasMoreValue
+    , "returned_count" .= returnedCount
+    ] <> ["next_offset" .= (offsetValue + returnedCount) | hasMoreValue] )
+  where
+    sourceRows = mapField "items" id value
+    returnedCount = length sourceRows
+    rows = deduplicateObservationMatches sourceRows
+    hasMoreValue = field "has_more" value == Just (Bool True)
+
+deduplicateObservationMatches :: [Value] -> [Value]
+deduplicateObservationMatches = go []
+  where
+    go _ [] = []
+    go seen (row:rest) = case field "observation" row >>= field "id" of
+      Just identifier | identifier `elem` seen -> go seen rest
+      Just identifier -> compactMatch row : go (identifier : seen) rest
+      Nothing -> compactMatch row : go seen rest
+    compactMatch row = object (catMaybes
+      [ ("observation" .=) . compactObservationSummary <$> field "observation" row
+      , ("matched_paths" .=) <$> field "matched_paths" row
+      , ("matched_subjects" .=) <$> field "matched_subjects" row
+      ])
 
 compactSimilarObservations :: Int -> Int -> Value -> Value
 compactSimilarObservations limitValue offsetValue value = object

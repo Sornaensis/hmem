@@ -14,7 +14,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
 import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
-import Network.HTTP.Types (methodDelete, methodGet, methodPost, methodPut, status200, status204, status400, status401, status403, status404, status409, statusCode)
+import Network.HTTP.Types (methodDelete, methodGet, methodPost, methodPut, status200, status204, status400, status401, status403, status404, status409, status500, statusCode)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
 import System.Directory (doesFileExist)
@@ -22,18 +22,19 @@ import Test.Hspec
 
 import HMem.MCP.Server (handleStdioLine)
 import HMem.MCP.Tools
-import HMem.Types (CreateObservation(..), UpdateObservation(..))
+import HMem.Types (CreateObservation(..), ObservationSubject(..), SubjectKind(..), UpdateObservation(..), maxObservationSubjects)
 
 spec :: Spec
 spec = do
   describe "Observation MCP registry" $ do
     it "advertises and parses every Observation capability, with no removed memory, link, or context tools" $ do
-      toolNames `shouldContain` ["observation_create", "observation_get", "observation_update", "observation_list", "observation_delete", "observation_set_embedding", "observation_similar"]
+      toolNames `shouldContain` ["observation_create", "observation_get", "observation_update", "observation_list", "observation_match", "observation_delete", "observation_set_embedding", "observation_similar"]
       mapM_ (\(name, arguments) -> parseToolCall name arguments `shouldSatisfy` isRight)
         [ ("observation_create", observationArguments)
         , ("observation_get", object ["observation_id" .= observationId])
         , ("observation_update", object ["observation_id" .= observationId, "content" .= ("replacement" :: Text)])
         , ("observation_list", observationListArguments)
+        , ("observation_match", observationMatchArguments)
         , ("observation_delete", object ["observation_id" .= observationId])
         , ("observation_set_embedding", object ["observation_id" .= observationId, "embedding" .= embedding])
         , ("observation_similar", similarArguments)
@@ -43,9 +44,10 @@ spec = do
         ["memory_create", "memory_get", "memory_update", "memory_link", "link_memory", "context_get"]
 
     it "advertises only provenance fields on observation tools and search" $ do
-      all (`elem` schemaProperties "observation_create") ["subject_kind", "subject", "git_sha", "content"] `shouldBe` True
-      length (schemaProperties "observation_create") `shouldBe` 4
-      schemaRequired "observation_create" `shouldBe` ["subject_kind", "subject", "git_sha", "content"]
+      all (`elem` schemaProperties "observation_create") ["subjects", "git_sha", "content"] `shouldBe` True
+      schemaProperties "observation_create" `shouldNotContain` ["subject_kind", "subject", "workspace_id"]
+      schemaRequired "observation_create" `shouldBe` ["subjects", "git_sha", "content"]
+      (schemaProperty "observation_create" "subjects" >>= jsonField "maxItems") `shouldBe` Just (Number (fromIntegral maxObservationSubjects))
       all (`elem` schemaProperties "observation_update") ["observation_id", "content"] `shouldBe` True
       length (schemaProperties "observation_update") `shouldBe` 2
       all (`elem` schemaProperties "search") ["subject_kind", "subject", "git_sha"] `shouldBe` True
@@ -54,6 +56,10 @@ spec = do
       schemaProperties "observation_list" `shouldNotContain` ["workspace_id"]
       all (`elem` schemaProperties "observation_similar") ["embedding", "min_similarity", "limit", "offset"] `shouldBe` True
       schemaProperties "observation_similar" `shouldNotContain` ["workspace_id"]
+      all (`elem` schemaProperties "observation_match") ["paths", "subject_kind", "git_sha", "query", "limit", "offset"] `shouldBe` True
+      schemaProperties "observation_match" `shouldNotContain` ["workspace_id", "subject"]
+      schemaRequired "observation_match" `shouldBe` ["paths"]
+      toolDescription "observation_match" `shouldSatisfy` maybe False (\description -> all (\needle -> needle `T.isInfixOf` description) ["concrete", "OR", "glob", "next_offset"])
       schemaProperties "search" `shouldNotContain` ["memory_type", "tags", "pinned_only", "min_importance"]
       (schemaProperty "set_workspace" "workspace_id" >>= jsonField "anyOf")
         `shouldSatisfy` maybe False nullableWorkspaceTypes
@@ -72,8 +78,8 @@ spec = do
       all (`elem` map (.requestPath) dispatched)
         [ "/api/v1/workspaces", "/api/v1/search", "/api/v1/observations"
         , "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        , "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/embedding"
-        , "/api/v1/observations/similar", "/api/v1/projects", "/api/v1/tasks"
+         , "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/embedding"
+         , "/api/v1/observations/match", "/api/v1/observations/similar", "/api/v1/projects", "/api/v1/tasks"
         ] `shouldBe` True
       manager <- newManager defaultManagerSettings
       initialized <- newTVarIO True
@@ -96,11 +102,23 @@ spec = do
         getResponse <- jsonRpcToolCall manager base initialized workspaceContext "get_workspace" (object [])
         getResponse `shouldSatisfy` maybe False (contains workspaceId)
 
+    it "injects the session workspace into observation_match when agents omit it" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        initialized <- newTVarIO True
+        workspaceContext <- newTVarIO Nothing
+        _ <- serverToolCall manager initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId])
+        response <- jsonRpcToolCall manager base initialized workspaceContext "observation_match"
+          (object ["paths" .= (["src/HMem/Types.hs"] :: [Text])])
+        response `shouldSatisfy` maybe False (not . isJsonRpcMcpError)
+      [request] <- readTVarIO requests
+      decode request.requestBody `shouldBe` Just (object ["workspace_id" .= workspaceId, "paths" .= (["src/HMem/Types.hs"] :: [Text])])
+
   describe "Observation compact response shaping" $ do
     it "derives bounded content_preview from a create/get response when the server supplies full content" $ do
-      let summary = compactObservationSummary (object ["id" .= observationId, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= (T.replicate 600 "x")])
+      let summary = compactObservationSummary (object ["id" .= observationId, "subjects" .= observationSubjects, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= (T.replicate 600 "x")])
       jsonField "content_preview" summary `shouldBe` Just (String (T.replicate 500 "x"))
-      summary `shouldSatisfy` hasFields ["id", "subject_kind", "subject", "git_sha", "content_preview"]
+      summary `shouldSatisfy` hasFields ["id", "subjects", "subject_kind", "subject", "git_sha", "content_preview"]
 
     it "matches fixture-backed compact golden outputs for new Observation tools" $ do
       golden <- compactFixtures
@@ -118,12 +136,14 @@ spec = do
         embedded `shouldBe` fixturePayload golden "observation_set_embedding"
         similar <- call manager base "observation_similar" similarArguments
         similar `shouldBe` fixturePayload golden "observation_similar"
+        matched <- call manager base "observation_match" observationMatchArguments
+        matched `shouldBe` fixturePayload golden "observation_match"
 
   describe "Observation parsing and validation" $ do
     it "parses provenance-bound creates and content-only updates" $ do
       case parseToolCall "observation_create" observationArguments of
-        Right (ObservationCreate (CreateObservation _ _ subject sha _)) -> do
-          subject `shouldBe` "src/HMem/Types.hs"
+        Right (ObservationCreate (CreateObservation _ values sha _)) -> do
+          values `shouldBe` observationSubjects
           sha `shouldBe` gitSha
         result -> expectationFailure (show result)
       case parseToolCall "observation_update" (object ["workspace_id" .= workspaceId, "observation_id" .= observationId, "content" .= ("replacement" :: Text)]) of
@@ -132,7 +152,8 @@ spec = do
 
     it "rejects mutable provenance fields on update and malformed provenance on create" $ do
       parseToolCall "observation_update" (object ["observation_id" .= observationId, "content" .= ("replacement" :: Text), "git_sha" .= gitSha]) `shouldSatisfy` isLeft
-      case parseToolCall "observation_create" (object ["workspace_id" .= workspaceId, "subject_kind" .= ("file" :: Text), "subject" .= ("/absolute" :: Text), "git_sha" .= ("bad" :: Text), "content" .= ("content" :: Text)]) of
+      parseToolCall "observation_create" (object ["workspace_id" .= workspaceId, "subjects" .= observationSubjects, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= ("content" :: Text)]) `shouldSatisfy` isLeft
+      case parseToolCall "observation_create" (object ["workspace_id" .= workspaceId, "subjects" .= [object ["subject_kind" .= ("file" :: Text), "subject" .= ("/absolute" :: Text)]], "git_sha" .= ("bad" :: Text), "content" .= ("content" :: Text)]) of
         Right parsed -> validateToolCall parsed `shouldSatisfy` isLeft
         result -> expectationFailure (show result)
 
@@ -150,6 +171,45 @@ spec = do
       case parseToolCall "observation_set_embedding" (object ["observation_id" .= observationId, "embedding" .= ([0 :: Double] :: [Double])]) of
         Right parsed -> validateToolCall parsed `shouldSatisfy` isLeft
         result -> expectationFailure (show result)
+      case parseToolCall "observation_match" (object ["workspace_id" .= workspaceId, "paths" .= (["src/**/*.hs"] :: [Text])]) of
+        Right parsed -> validateToolCall parsed `shouldSatisfy` isLeft
+        result -> expectationFailure (show result)
+
+    it "supports canonical multi-subject creates and unadvertised legacy singleton compatibility" $ do
+      case parseToolCall "observation_create" legacyObservationArguments of
+        Right (ObservationCreate (CreateObservation _ values _ _)) -> values `shouldBe` [ObservationSubject SubjectFile "src/HMem/Types.hs"]
+        result -> expectationFailure (show result)
+      parseToolCall "observation_create" (object ["workspace_id" .= workspaceId, "subject_kind" .= ("file" :: Text), "git_sha" .= gitSha, "content" .= ("content" :: Text)]) `shouldSatisfy` isLeft
+
+    it "rejects incomplete legacy create forms before any HTTP request" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        let malformed fields = handleToolCall manager base Nothing
+              (object ["name" .= ("observation_create" :: Text), "arguments" .= object (["workspace_id" .= workspaceId, "git_sha" .= gitSha, "content" .= ("content" :: Text)] <> fields)])
+        subjectOnly <- malformed ["subject" .= ("src/HMem/Types.hs" :: Text)]
+        kindOnly <- malformed ["subject_kind" .= ("file" :: Text)]
+        subjectOnly `shouldSatisfy` isMcpError
+        kindOnly `shouldSatisfy` isMcpError
+      requestsAfter <- readTVarIO requests
+      length requestsAfter `shouldBe` 0
+
+    it "rejects 257 unique subjects and concrete match paths before HTTP dispatch" $ do
+      requests <- newTVarIO []
+      let tooManySubjects = [ObservationSubject SubjectFile ("src/File" <> T.pack (show index) <> ".hs") | index <- [1 .. maxObservationSubjects + 1]]
+          tooManyPaths = ["src/File" <> T.pack (show index) <> ".hs" | index <- [1 .. 257 :: Int]]
+      withMock requests $ \manager base -> do
+        tooManyCreate <- handleToolCall manager base Nothing (object
+          [ "name" .= ("observation_create" :: Text)
+          , "arguments" .= object ["workspace_id" .= workspaceId, "subjects" .= tooManySubjects, "git_sha" .= gitSha, "content" .= ("content" :: Text)]
+          ])
+        tooManyMatch <- handleToolCall manager base Nothing (object
+          [ "name" .= ("observation_match" :: Text)
+          , "arguments" .= object ["workspace_id" .= workspaceId, "paths" .= tooManyPaths]
+          ])
+        tooManyCreate `shouldSatisfy` isMcpError
+        tooManyMatch `shouldSatisfy` isMcpError
+      requestsAfter <- readTVarIO requests
+      length requestsAfter `shouldBe` 0
 
   describe "Observation dispatch and status-only workflows" $ do
     it "uses Observation paths and compact provenance shapes" $ do
@@ -161,6 +221,7 @@ spec = do
         jsonField "workspace_id" created `shouldBe` Nothing
         detail <- call manager base "observation_get" (object ["observation_id" .= observationId])
         jsonField "content" detail `shouldBe` Just (String "complete observation content")
+        detail `shouldSatisfy` hasFields ["subjects", "subject_kind", "subject"]
         detail `shouldSatisfy` not . contains "workspace_id"
         update <- call manager base "observation_update" (object ["observation_id" .= observationId, "content" .= ("replacement" :: Text)])
         jsonField "action" update `shouldBe` Just (String "updated")
@@ -183,7 +244,7 @@ spec = do
         first <- call manager base "observation_list" observationListArguments
         jsonField "has_more" first `shouldBe` Just (Bool True)
         jsonField "next_offset" first `shouldBe` Just (Number 2)
-        jsonField "items" first `shouldSatisfy` maybe False (arrayFirst (hasFields ["id", "subject_kind", "subject", "git_sha", "content_preview"]))
+        jsonField "items" first `shouldSatisfy` maybe False (arrayFirst (hasFields ["id", "subjects", "subject_kind", "subject", "git_sha", "content_preview"]))
         final <- call manager base "observation_list" (object ["workspace_id" .= workspaceId, "limit" .= (2 :: Int), "offset" .= (2 :: Int)])
         jsonField "has_more" final `shouldBe` Just (Bool False)
         jsonField "next_offset" final `shouldBe` Nothing
@@ -191,6 +252,69 @@ spec = do
       firstRequest.requestPath `shouldBe` "/api/v1/observations"
       firstRequest.requestQuery `shouldBe` "?workspace_id=11111111-2222-3333-4444-555555555555&subject_kind=file&subject=src%2FHMem%2FTypes.hs&git_sha=0123456789abcdef0123456789abcdef01234567&query=types&limit=2&offset=0"
       finalRequest.requestQuery `shouldBe` "?workspace_id=11111111-2222-3333-4444-555555555555&limit=2&offset=2"
+
+    it "sends canonical subject arrays for both advertised and legacy singleton creation" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        _ <- call manager base "observation_create" observationArguments
+        _ <- call manager base "observation_create" legacyObservationArguments
+        pure ()
+      [canonicalRequest, legacyRequest] <- readTVarIO requests
+      let expectedCanonical = object ["workspace_id" .= workspaceId, "subjects" .= observationSubjects, "git_sha" .= gitSha, "content" .= ("complete observation content" :: Text)]
+          expectedLegacy = object ["workspace_id" .= workspaceId, "subjects" .= [ObservationSubject SubjectFile "src/HMem/Types.hs"], "git_sha" .= gitSha, "content" .= ("complete observation content" :: Text)]
+      canonicalRequest.requestMethod `shouldBe` methodPost
+      legacyRequest.requestMethod `shouldBe` methodPost
+      canonicalRequest.requestPath `shouldBe` "/api/v1/observations"
+      legacyRequest.requestPath `shouldBe` "/api/v1/observations"
+      decode canonicalRequest.requestBody `shouldBe` Just expectedCanonical
+      decode legacyRequest.requestBody `shouldBe` Just expectedLegacy
+
+    it "matches concrete paths with deterministic evidence, bearer forwarding, and continuation metadata" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        result <- callWithKey manager base (Just "test-token") "observation_match" observationMatchArguments
+        jsonField "has_more" result `shouldBe` Just (Bool True)
+        jsonField "returned_count" result `shouldBe` Just (Number 2)
+        jsonField "next_offset" result `shouldBe` Just (Number 2)
+        jsonField "items" result `shouldSatisfy` maybe False (arrayFirst (hasFields ["observation", "matched_paths", "matched_subjects"]))
+      [request] <- readTVarIO requests
+      request.requestMethod `shouldBe` methodPost
+      request.requestPath `shouldBe` "/api/v1/observations/match"
+      request.authorization `shouldBe` Just "Bearer test-token"
+      decode request.requestBody `shouldBe` Just (object ["workspace_id" .= workspaceId, "paths" .= (["src/HMem/Types.hs", "my/src/proj/Main.java"] :: [Text]), "subject_kind" .= ("glob" :: Text), "git_sha" .= gitSha, "query" .= ("types" :: Text), "limit" .= (2 :: Int), "offset" .= (0 :: Int)])
+
+    it "continues observation_match without a final or empty cursor" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        first <- call manager base "observation_match" observationMatchArguments
+        jsonField "has_more" first `shouldBe` Just (Bool True)
+        jsonField "next_offset" first `shouldBe` Just (Number 2)
+        final <- call manager base "observation_match" (withOffset observationMatchArguments 2)
+        jsonField "has_more" final `shouldBe` Just (Bool False)
+        jsonField "returned_count" final `shouldBe` Just (Number 0)
+        jsonField "next_offset" final `shouldBe` Nothing
+      observed <- readTVarIO requests
+      map (.requestMethod) observed `shouldBe` [methodPost, methodPost]
+      map (decode . (.requestBody)) observed `shouldBe`
+        [ Just (object ["workspace_id" .= workspaceId, "paths" .= (["src/HMem/Types.hs", "my/src/proj/Main.java"] :: [Text]), "subject_kind" .= ("glob" :: Text), "git_sha" .= gitSha, "query" .= ("types" :: Text), "limit" .= (2 :: Int), "offset" .= (0 :: Int)])
+        , Just (object ["workspace_id" .= workspaceId, "paths" .= (["src/HMem/Types.hs", "my/src/proj/Main.java"] :: [Text]), "subject_kind" .= ("glob" :: Text), "git_sha" .= gitSha, "query" .= ("types" :: Text), "limit" .= (2 :: Int), "offset" .= (2 :: Int)])
+        ]
+
+    it "deduplicates match rows and emits no cursor for nonempty-final or empty pages" $ do
+      let matchedObservation = object ["id" .= observationId, "subjects" .= observationSubjects, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content_preview" .= ("preview" :: Text)]
+          row = object ["observation" .= matchedObservation, "matched_paths" .= (["src/HMem/Types.hs"] :: [Text]), "matched_subjects" .= observationSubjects]
+          page = compactObservationMatches 4 (object ["items" .= [row, row], "has_more" .= True])
+          nonemptyFinalPage = compactObservationMatches 6 (object ["items" .= [row], "has_more" .= False])
+          finalPage = compactObservationMatches 6 (object ["items" .= ([] :: [Value]), "has_more" .= False])
+      jsonField "returned_count" page `shouldBe` Just (Number 2)
+      jsonField "next_offset" page `shouldBe` Just (Number 6)
+      case jsonField "items" page of
+        Just (Array values) -> length values `shouldBe` 1
+        _ -> expectationFailure "match page did not contain items"
+      jsonField "returned_count" nonemptyFinalPage `shouldBe` Just (Number 1)
+      jsonField "next_offset" nonemptyFinalPage `shouldBe` Nothing
+      jsonField "returned_count" finalPage `shouldBe` Just (Number 0)
+      jsonField "next_offset" finalPage `shouldBe` Nothing
 
     it "uses raw embeddings, forwards authorization, and returns signal-only acknowledgements for 204 mutations" $ do
       requests <- newTVarIO []
@@ -236,8 +360,9 @@ spec = do
         run "observation_delete" (object ["observation_id" .= observationId]) "[HTTP_404] status 404"
         run "observation_set_embedding" (object ["observation_id" .= observationId, "embedding" .= embedding]) "[HTTP_409] status 409"
         run "observation_similar" similarArguments "[HTTP_400] status 400"
+        run "observation_match" observationMatchArguments "[HTTP_500] status 500"
       observed <- readTVarIO requests
-      map (.authorization) observed `shouldBe` replicate 5 (Just "Bearer test-token")
+      map (.authorization) observed `shouldBe` replicate 6 (Just "Bearer test-token")
 
     it "makes task_finish and project_archive single status mutations without observation side effects" $ do
       requests <- newTVarIO []
@@ -257,7 +382,31 @@ observationId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 gitSha = "0123456789abcdef0123456789abcdef01234567"
 
 observationArguments :: Value
-observationArguments = object ["workspace_id" .= workspaceId, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= ("complete observation content" :: Text)]
+observationArguments = object ["workspace_id" .= workspaceId, "subjects" .= observationSubjects, "git_sha" .= gitSha, "content" .= ("complete observation content" :: Text)]
+
+legacyObservationArguments :: Value
+legacyObservationArguments = object ["workspace_id" .= workspaceId, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= ("complete observation content" :: Text)]
+
+observationSubjects :: [ObservationSubject]
+observationSubjects =
+  [ ObservationSubject SubjectFile "src/HMem/Types.hs"
+  , ObservationSubject SubjectGlob "my/src/proj/**/*.java"
+  ]
+
+observationMatchArguments :: Value
+observationMatchArguments = object
+  [ "workspace_id" .= workspaceId
+  , "paths" .= (["src/HMem/Types.hs", "my/src/proj/Main.java"] :: [Text])
+  , "subject_kind" .= ("glob" :: Text)
+  , "git_sha" .= gitSha
+  , "query" .= ("types" :: Text)
+  , "limit" .= (2 :: Int)
+  , "offset" .= (0 :: Int)
+  ]
+
+withOffset :: Value -> Int -> Value
+withOffset (Object values) value = Object (KM.insert "offset" (toJSON value) values)
+withOffset arguments _ = arguments
 
 observationListArguments :: Value
 observationListArguments = object
@@ -297,6 +446,7 @@ toolSamples =
   , ("observation_get", object ["observation_id" .= observationId])
   , ("observation_update", object ["observation_id" .= observationId, "content" .= ("replacement" :: Text)])
   , ("observation_list", observationListArguments)
+  , ("observation_match", observationMatchArguments)
   , ("observation_delete", object ["observation_id" .= observationId])
   , ("observation_set_embedding", object ["observation_id" .= observationId, "embedding" .= embedding])
   , ("observation_similar", similarArguments)
@@ -447,7 +597,7 @@ mockApp requests request respond = do
   case request.requestMethod of
     method | method == methodDelete -> respond $ Wai.responseLBS status204 [] ""
     method | method == methodPut && "/embedding" `T.isSuffixOf` TE.decodeUtf8 request.rawPathInfo -> respond $ Wai.responseLBS status204 [] ""
-    _ -> respond $ Wai.responseLBS status200 [("Content-Type", "application/json")] (encode (responseFor request.requestMethod request.rawPathInfo request.rawQueryString))
+    _ -> respond $ Wai.responseLBS status200 [("Content-Type", "application/json")] (encode (responseFor request.requestMethod request.rawPathInfo request.rawQueryString body))
 
 withErrorMock :: (Manager -> String -> IO a) -> IO a
 withErrorMock action = testWithApplication (pure errorApp) $ \port -> do
@@ -467,6 +617,7 @@ statusApp requests request respond = do
   body <- Wai.strictRequestBody request
   atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders)])
   let status
+        | request.rawPathInfo == "/api/v1/observations/match" = status500
         | request.rawPathInfo == "/api/v1/observations/similar" = status400
         | "/embedding" `T.isSuffixOf` TE.decodeUtf8 request.rawPathInfo = status409
         | request.requestMethod == methodDelete = status404
@@ -475,9 +626,11 @@ statusApp requests request respond = do
       message = "status " <> T.pack (show (statusCode status))
   respond $ Wai.responseLBS status [("Content-Type", "text/plain")] (BL.fromStrict (TE.encodeUtf8 message))
 
-responseFor :: ByteString -> ByteString -> ByteString -> Value
-responseFor method path rawQuery
+responseFor :: ByteString -> ByteString -> ByteString -> BL.ByteString -> Value
+responseFor method path rawQuery body
   | path == "/api/v1/search" = object ["observations" .= [observation], "projects" .= ([] :: [Value]), "tasks" .= ([] :: [Value])]
+  | path == "/api/v1/observations/match" && "\"offset\":2" `T.isInfixOf` TE.decodeUtf8 (BL.toStrict body) = object ["items" .= ([] :: [Value]), "has_more" .= False]
+  | path == "/api/v1/observations/match" = object ["items" .= [match, match], "has_more" .= True]
   | path == "/api/v1/observations/similar" = toJSON [object ["observation" .= observation, "similarity" .= (0.75 :: Double)]]
   | method == methodPost && path == "/api/v1/observations" = observation
   | method == methodPost && path == "/api/v1/projects" = project
@@ -489,6 +642,7 @@ responseFor method path rawQuery
   | path == "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" = project
   | otherwise = object []
   where
-    observation = object ["id" .= observationId, "workspace_id" .= workspaceId, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= ("complete observation content" :: Text), "content_preview" .= ("complete observation content" :: Text)]
+    observation = object ["id" .= observationId, "workspace_id" .= workspaceId, "subjects" .= observationSubjects, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= ("complete observation content" :: Text), "content_preview" .= ("complete observation content" :: Text)]
+    match = object ["observation" .= observation, "matched_paths" .= (["my/src/proj/Main.java", "src/HMem/Types.hs"] :: [Text]), "matched_subjects" .= observationSubjects]
     task = object ["id" .= observationId, "workspace_id" .= workspaceId, "title" .= ("Task" :: Text), "status" .= ("done" :: Text), "priority" .= (5 :: Int)]
     project = object ["id" .= observationId, "workspace_id" .= workspaceId, "name" .= ("Project" :: Text), "status" .= ("archived" :: Text), "priority" .= (5 :: Int)]

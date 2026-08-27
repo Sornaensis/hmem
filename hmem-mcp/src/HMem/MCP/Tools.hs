@@ -93,20 +93,37 @@ toolDefinitions =
       , "limit" .= prop "integer" "Maximum results (1-200)"
       , "offset" .= prop "integer" "Result offset"
       ] ["embedding"])
-  , tool "project_create" "Create a project in the active workspace." (schema ["name" .= prop "string" "Project name", "description" .= prop "string" "Optional description", "parent_id" .= prop "string" "Parent project UUID", "priority" .= prop "integer" "Priority 1 through 10"] ["name"])
-  , tool "project_update" "Update a project." (schema ["project_id" .= prop "string" "Project UUID", "name" .= prop "string" "Name", "description" .= prop "string" "Description or null", "parent_id" .= prop "string" "Parent UUID or null", "status" .= enumProp "Status" ["active", "paused", "completed", "archived"], "priority" .= prop "integer" "Priority"] ["project_id"])
+  , tool "project_create" "Create a project in the active workspace. Its description is a durable specification; status records execution state." (schema ["name" .= prop "string" "Project name", "description" .= prop "string" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates", "parent_id" .= prop "string" "Optional parent project UUID for hierarchy", "priority" .= prop "integer" "Priority 1 through 10"] ["name"])
+  , tool "project_update" "Update a project's durable specification, hierarchy, or execution state. Descriptions are not logs of progress or updates." (schema ["project_id" .= prop "string" "Project UUID", "name" .= prop "string" "Project name", "description" .= prop "string" "Durable project specification: aims, scope, constraints, approach, and acceptance intent, or null; not a log of progress or updates", "parent_id" .= prop "string" "Parent project UUID for hierarchy, or null", "status" .= enumProp "Execution state; record progress here, not in the description" ["active", "paused", "completed", "archived"], "priority" .= prop "integer" "Priority"] ["project_id"])
   , tool "project_detail" "Get compact project details." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
   , tool "project_overview" "Get a compact project overview with tasks and subprojects." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
   , tool "project_next_tasks" "Get actionable tasks for a project subtree." (schema ["project_id" .= prop "string" "Project UUID", "limit" .= prop "integer" "Maximum candidates", "include_blocked" .= prop "boolean" "Include blocked candidates"] ["project_id"])
-  , tool "project_spec" "Create a project and initial tasks in one call." (schema ["name" .= prop "string" "Project name", "description" .= prop "string" "Optional description", "priority" .= prop "integer" "Project priority", "tasks" .= object ["type" .= ("array" :: Text), "items" .= object ["type" .= ("object" :: Text)]]] ["name", "tasks"])
+  , tool "project_spec" "Create a project and its initial atomic tasks in one call. Descriptions are durable specifications; status records execution state. Create later-discovered atomic work as subtasks." (schema
+      [ "name" .= prop "string" "Project name"
+      , "description" .= prop "string" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates"
+      , "priority" .= prop "integer" "Project priority"
+      , "tasks" .= object
+          [ "type" .= ("array" :: Text)
+          , "description" .= ("Initial atomic tasks; later-discovered atomic work must be created as subtasks, not appended to a parent description" :: Text)
+          , "items" .= object
+              [ "type" .= ("object" :: Text)
+              , "properties" .= object
+                  [ "title" .= prop "string" "Atomic task title"
+                  , "description" .= prop "string" "Durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates"
+                  , "priority" .= prop "integer" "Task priority"
+                  ]
+              , "required" .= (["title"] :: [Text])
+              ]
+          ]
+      ] ["name", "tasks"])
   , tool "project_archive" "Archive a project by changing only its status." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
-  , tool "task_create" "Create a task in the active workspace." (schema ["project_id" .= prop "string" "Optional project UUID", "title" .= prop "string" "Task title", "description" .= prop "string" "Optional description", "parent_id" .= prop "string" "Optional parent task UUID", "priority" .= prop "integer" "Priority", "due_at" .= prop "string" "ISO-8601 due time"] ["title"])
-  , tool "task_update" "Update a task." (schema ["task_id" .= prop "string" "Task UUID", "title" .= prop "string" "Title", "description" .= prop "string" "Description or null", "project_id" .= prop "string" "Project UUID or null", "parent_id" .= prop "string" "Parent UUID or null", "status" .= enumProp "Status" ["todo", "in_progress", "blocked", "done", "cancelled"], "priority" .= prop "integer" "Priority", "due_at" .= prop "string" "ISO-8601 due time or null"] ["task_id"])
+  , tool "task_create" "Create a task in the active workspace. Its description is a durable specification; status records execution state. Create later-discovered atomic work as subtasks." (schema ["project_id" .= prop "string" "Optional project UUID", "title" .= prop "string" "Atomic task title", "description" .= prop "string" "Optional durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates", "parent_id" .= prop "string" "Optional parent task UUID; use it to create a subtask for later-discovered atomic work", "priority" .= prop "integer" "Priority", "due_at" .= prop "string" "ISO-8601 due time"] ["title"])
+  , tool "task_update" "Update a task's durable specification, hierarchy, or execution state. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks." (schema ["task_id" .= prop "string" "Task UUID", "title" .= prop "string" "Task title", "description" .= prop "string" "Durable task specification: scope, constraints, approach, and acceptance intent, or null; not a log of progress or updates", "project_id" .= prop "string" "Project UUID or null", "parent_id" .= prop "string" "Parent task UUID to make this an atomic subtask for later-discovered work, or null", "status" .= enumProp "Execution state; record progress here, not in the description" ["todo", "in_progress", "blocked", "done", "cancelled"], "priority" .= prop "integer" "Priority", "due_at" .= prop "string" "ISO-8601 due time or null"] ["task_id"])
   , tool "task_detail" "Get compact task details." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_overview" "Get a compact task overview and dependency summaries." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
-  , tool "task_dependency" "Add or remove a task dependency." (schema ["task_id" .= prop "string" "Dependent task UUID", "depends_on_id" .= prop "string" "Prerequisite task UUID", "action" .= enumProp "Dependency mutation" ["add", "remove"]] ["task_id", "depends_on_id", "action"])
-  , tool "task_start" "Set a task status to in_progress." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
-  , tool "task_finish" "Set a task status to done, blocked, or cancelled. This does not create an observation." (schema ["task_id" .= prop "string" "Task UUID", "status" .= enumProp "Final status" ["done", "blocked", "cancelled"]] ["task_id", "status"])
+  , tool "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates." (schema ["task_id" .= prop "string" "Dependent task UUID", "depends_on_id" .= prop "string" "Prerequisite task UUID", "action" .= enumProp "Dependency mutation" ["add", "remove"]] ["task_id", "depends_on_id", "action"])
+  , tool "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
+  , tool "task_finish" "Set a task's execution state to done, blocked, or cancelled. Status records progress; this does not create an observation." (schema ["task_id" .= prop "string" "Task UUID", "status" .= enumProp "Final execution state" ["done", "blocked", "cancelled"]] ["task_id", "status"])
   ]
   where
     tool name description inputSchema = object ["name" .= (name :: Text), "description" .= (description :: Text), "inputSchema" .= inputSchema]

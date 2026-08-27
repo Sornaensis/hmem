@@ -68,6 +68,30 @@ spec = do
       sort (schemaProperties "task_dependency") `shouldBe` sort ["task_id", "depends_on_id", "action"]
       schemaRequired "task_dependency" `shouldBe` ["task_id", "depends_on_id", "action"]
 
+    it "guides durable project and task descriptions, status, and atomic subtasks" $ do
+      toolDescriptionIs "project_create" "Create a project in the active workspace. Its description is a durable specification; status records execution state."
+      toolDescriptionIs "project_update" "Update a project's durable specification, hierarchy, or execution state. Descriptions are not logs of progress or updates."
+      toolDescriptionIs "project_spec" "Create a project and its initial atomic tasks in one call. Descriptions are durable specifications; status records execution state. Create later-discovered atomic work as subtasks."
+      toolDescriptionIs "task_create" "Create a task in the active workspace. Its description is a durable specification; status records execution state. Create later-discovered atomic work as subtasks."
+      toolDescriptionIs "task_update" "Update a task's durable specification, hierarchy, or execution state. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks."
+      toolDescriptionIs "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates."
+      toolDescriptionIs "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress."
+      toolDescriptionIs "task_finish" "Set a task's execution state to done, blocked, or cancelled. Status records progress; this does not create an observation."
+      schemaPropertyDescriptionIs "project_create" "description" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates"
+      schemaPropertyDescriptionIs "project_update" "description" "Durable project specification: aims, scope, constraints, approach, and acceptance intent, or null; not a log of progress or updates"
+      schemaPropertyDescriptionIs "project_update" "status" "Execution state; record progress here, not in the description"
+      schemaPropertyDescriptionIs "project_spec" "description" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates"
+      schemaPropertyDescriptionIs "task_create" "description" "Optional durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates"
+      schemaPropertyDescriptionIs "task_create" "parent_id" "Optional parent task UUID; use it to create a subtask for later-discovered atomic work"
+      schemaPropertyDescriptionIs "task_update" "description" "Durable task specification: scope, constraints, approach, and acceptance intent, or null; not a log of progress or updates"
+      schemaPropertyDescriptionIs "task_update" "parent_id" "Parent task UUID to make this an atomic subtask for later-discovered work, or null"
+      schemaPropertyDescriptionIs "task_update" "status" "Execution state; record progress here, not in the description"
+      schemaPropertyDescriptionIs "project_spec" "tasks" "Initial atomic tasks; later-discovered atomic work must be created as subtasks, not appended to a parent description"
+      projectSpecTaskPropertyDescriptionIs "title" "Atomic task title"
+      projectSpecTaskPropertyDescriptionIs "description" "Durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates"
+      projectSpecTaskPropertyDescriptionIs "priority" "Task priority"
+      (schemaProperty "project_spec" "tasks" >>= jsonField "items" >>= jsonField "required") `shouldBe` Just (toJSON (["title"] :: [Text]))
+
     it "parses, validates, dispatches, and JSON-RPC-routes task dependency mutations" $ do
       let addArguments = object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("add" :: Text)]
           removeArguments = object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("remove" :: Text)]
@@ -517,6 +541,9 @@ schemaRequired name = case [schema | Object tool <- toolDefinitions, KM.lookup "
 toolDescription :: Text -> Maybe Text
 toolDescription name = case [description | Object tool <- toolDefinitions, KM.lookup "name" tool == Just (String name), Just (String description) <- [KM.lookup "description" tool]] of description : _ -> Just description; [] -> Nothing
 
+toolDescriptionIs :: Text -> Text -> Expectation
+toolDescriptionIs name expected = toolDescription name `shouldBe` Just expected
+
 schemaProperty :: Text -> Text -> Maybe Value
 schemaProperty toolName propertyName = case
   [ property
@@ -528,6 +555,20 @@ schemaProperty toolName propertyName = case
   ] of
     property : _ -> Just property
     [] -> Nothing
+
+schemaPropertyDescriptionIs :: Text -> Text -> Text -> Expectation
+schemaPropertyDescriptionIs toolName propertyName expected =
+  (schemaProperty toolName propertyName >>= jsonField "description")
+    `shouldBe` Just (String expected)
+
+projectSpecTaskPropertyDescriptionIs :: Text -> Text -> Expectation
+projectSpecTaskPropertyDescriptionIs propertyName expected =
+  (schemaProperty "project_spec" "tasks" >>= jsonField "items" >>= jsonField "properties" >>= objectField propertyName >>= jsonField "description")
+    `shouldBe` Just (String expected)
+
+objectField :: Text -> Value -> Maybe Value
+objectField name (Object fields) = KM.lookup (Key.fromText name) fields
+objectField _ _ = Nothing
 
 nullableWorkspaceTypes :: Value -> Bool
 nullableWorkspaceTypes (Array values) = map (jsonField "type") (toList values) == [Just (String "string"), Just (String "null")]

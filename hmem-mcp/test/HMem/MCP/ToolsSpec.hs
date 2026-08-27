@@ -65,6 +65,35 @@ spec = do
         `shouldSatisfy` maybe False nullableWorkspaceTypes
       toolDescription "task_finish" `shouldSatisfy` maybe False ("does not create an observation" `T.isInfixOf`)
       toolDescription "project_archive" `shouldSatisfy` maybe False (not . ("summary" `T.isInfixOf`))
+      sort (schemaProperties "task_dependency") `shouldBe` sort ["task_id", "depends_on_id", "action"]
+      schemaRequired "task_dependency" `shouldBe` ["task_id", "depends_on_id", "action"]
+
+    it "parses, validates, dispatches, and JSON-RPC-routes task dependency mutations" $ do
+      let addArguments = object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("add" :: Text)]
+          removeArguments = object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("remove" :: Text)]
+      parseToolCall "task_dependency" addArguments `shouldSatisfy` isRight
+      parseToolCall "task_dependency" (object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("replace" :: Text)])
+        `shouldSatisfy` isRight
+      case parseToolCall "task_dependency" (object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("replace" :: Text)]) of
+        Right parsed -> validateToolCall parsed `shouldSatisfy` isLeft
+        Left err -> expectationFailure err
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        added <- call manager base "task_dependency" addArguments
+        added `shouldSatisfy` hasFields ["ok", "action", "entity_type", "task_id", "depends_on_id", "affected_tasks"]
+        removed <- call manager base "task_dependency" removeArguments
+        removed `shouldSatisfy` hasFields ["ok", "action", "entity_type", "task_id", "depends_on_id", "affected_tasks"]
+        initialized <- newTVarIO True
+        workspaceContext <- newTVarIO Nothing
+        jsonRpcToolCall manager base initialized workspaceContext "task_dependency" addArguments
+          >>= (`shouldSatisfy` maybe False (not . isJsonRpcMcpError))
+      [addRequest, removeRequest, jsonRpcRequest] <- readTVarIO requests
+      addRequest.requestMethod `shouldBe` methodPost
+      addRequest.requestPath `shouldBe` "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/dependencies"
+      decode addRequest.requestBody `shouldBe` Just (object ["depends_on_id" .= workspaceId])
+      removeRequest.requestMethod `shouldBe` methodDelete
+      removeRequest.requestPath `shouldBe` "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/dependencies/11111111-2222-3333-4444-555555555555"
+      jsonRpcRequest.requestPath `shouldBe` "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/dependencies"
 
     it "keeps the advertised registry parser and dispatch reachability in lockstep" $ do
       sort toolNames `shouldBe` sort (serverOwnedTools <> map fst toolSamples)
@@ -467,6 +496,7 @@ toolSamples =
   , ("task_update", object ["task_id" .= observationId, "title" .= ("Updated task" :: Text)])
   , ("task_detail", object ["task_id" .= observationId])
   , ("task_overview", object ["task_id" .= observationId])
+  , ("task_dependency", object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("add" :: Text)])
   , ("task_start", object ["task_id" .= observationId])
   , ("task_finish", object ["task_id" .= observationId, "status" .= ("done" :: Text)])
   ]
@@ -595,6 +625,7 @@ mockApp requests request respond = do
   body <- Wai.strictRequestBody request
   atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders)])
   case request.requestMethod of
+    method | method == methodDelete && "/dependencies/" `T.isInfixOf` TE.decodeUtf8 request.rawPathInfo -> respond $ Wai.responseLBS status200 [("Content-Type", "application/json")] (encode (responseFor request.requestMethod request.rawPathInfo request.rawQueryString body))
     method | method == methodDelete -> respond $ Wai.responseLBS status204 [] ""
     method | method == methodPut && "/embedding" `T.isSuffixOf` TE.decodeUtf8 request.rawPathInfo -> respond $ Wai.responseLBS status204 [] ""
     _ -> respond $ Wai.responseLBS status200 [("Content-Type", "application/json")] (encode (responseFor request.requestMethod request.rawPathInfo request.rawQueryString body))
@@ -632,6 +663,8 @@ responseFor method path rawQuery body
   | path == "/api/v1/observations/match" && "\"offset\":2" `T.isInfixOf` TE.decodeUtf8 (BL.toStrict body) = object ["items" .= ([] :: [Value]), "has_more" .= False]
   | path == "/api/v1/observations/match" = object ["items" .= [match, match], "has_more" .= True]
   | path == "/api/v1/observations/similar" = toJSON [object ["observation" .= observation, "similarity" .= (0.75 :: Double)]]
+  | method == methodPost && path == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/dependencies" = dependencyMutation "add"
+  | method == methodDelete && path == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/dependencies/11111111-2222-3333-4444-555555555555" = dependencyMutation "remove"
   | method == methodPost && path == "/api/v1/observations" = observation
   | method == methodPost && path == "/api/v1/projects" = project
   | method == methodPost && path == "/api/v1/tasks" = task
@@ -646,3 +679,5 @@ responseFor method path rawQuery body
     match = object ["observation" .= observation, "matched_paths" .= (["my/src/proj/Main.java", "src/HMem/Types.hs"] :: [Text]), "matched_subjects" .= observationSubjects]
     task = object ["id" .= observationId, "workspace_id" .= workspaceId, "title" .= ("Task" :: Text), "status" .= ("done" :: Text), "priority" .= (5 :: Int)]
     project = object ["id" .= observationId, "workspace_id" .= workspaceId, "name" .= ("Project" :: Text), "status" .= ("archived" :: Text), "priority" .= (5 :: Int)]
+    dependencyMutation :: Text -> Value
+    dependencyMutation action = object ["action" .= action, "task_id" .= observationId, "depends_on_id" .= workspaceId, "affected_tasks" .= [object ["task" .= task, "previous_status" .= ("todo" :: Text), "current_status" .= ("blocked" :: Text), "auto_blocked" .= True, "open_dependency_count" .= (1 :: Int), "reason" .= ("blocked_by_open_dependencies" :: Text)]]]

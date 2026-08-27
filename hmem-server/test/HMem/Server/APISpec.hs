@@ -126,6 +126,52 @@ recordingObservationApp env = do
 
 spec :: Spec
 spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app))) $ do
+  describe "Task dependency HTTP contract" $ do
+    it "adds and removes same-workspace dependencies with the frontend paths and payloads" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "task-dependency-contract"
+      let taskInput title = object ["workspace_id" .= workspace.id, "title" .= (title :: T.Text)]
+          taskPath taskId = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show taskId))
+          requestHeaders = [("X-Request-Id", "task-dependency-contract")]
+      dependentResponse <- postJson app "/api/v1/tasks" (taskInput "dependent")
+      dependencyResponse <- postJson app "/api/v1/tasks" (taskInput "dependency")
+      let Just dependent = decode (responseBody dependentResponse) :: Maybe Task
+          Just dependency = decode (responseBody dependencyResponse) :: Maybe Task
+          addPath = taskPath dependent.id <> "/dependencies"
+          removePath = addPath <> "/" <> Text.encodeUtf8 (T.pack (show dependency.id))
+          requestBody = encode (object ["depends_on_id" .= dependency.id, "request_id" .= ("task-dependency-contract" :: T.Text)])
+      added <- requestWithHeaders app methodPost addPath requestHeaders requestBody
+      responseStatus added `shouldBe` status200
+      let Just addResult = decode (responseBody added) :: Maybe DependencyMutationResult
+      addResult.action `shouldBe` "add"
+      addResult.taskId `shouldBe` dependent.id
+      addResult.dependsOnId `shouldBe` dependency.id
+      overview <- request app methodGet (taskPath dependent.id <> "/overview") ""
+      let Just dependencyOverview = decode (responseBody overview) :: Maybe TaskOverview
+      map (.id) dependencyOverview.dependencies `shouldBe` [dependency.id]
+      removed <- requestWithHeaders app methodDelete removePath requestHeaders requestBody
+      responseStatus removed `shouldBe` status200
+      let Just removeResult = decode (responseBody removed) :: Maybe DependencyMutationResult
+      removeResult.action `shouldBe` "remove"
+      removeResult.taskId `shouldBe` dependent.id
+      removeResult.dependsOnId `shouldBe` dependency.id
+      afterRemoval <- request app methodGet (taskPath dependent.id <> "/overview") ""
+      let Just removedOverview = decode (responseBody afterRemoval) :: Maybe TaskOverview
+      removedOverview.dependencies `shouldBe` []
+
+    it "rejects self, missing, and cross-workspace task dependencies before mutation" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "task-dependency-validation"
+      otherWorkspace <- createTestWorkspace env "task-dependency-other-workspace"
+      let create workspaceId title = postJson app "/api/v1/tasks" (object ["workspace_id" .= workspaceId, "title" .= (title :: T.Text)])
+          taskPath taskId = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show taskId))
+      dependentResponse <- create workspace.id "dependent"
+      otherDependencyResponse <- create otherWorkspace.id "foreign dependency"
+      let Just dependent = decode (responseBody dependentResponse) :: Maybe Task
+          Just otherDependency = decode (responseBody otherDependencyResponse) :: Maybe Task
+          add dependencyId = postJson app (taskPath dependent.id <> "/dependencies") (object ["depends_on_id" .= dependencyId])
+      add dependent.id >>= (\response -> responseStatus response `shouldBe` status400)
+      add otherDependency.id >>= (\response -> responseStatus response `shouldBe` status400)
+      add (read "00000000-0000-0000-0000-000000000001" :: UUID) >>= (\response -> responseStatus response `shouldBe` status404)
+
   describe "Workspace Groups HTTP contract" $ do
     it "creates, lists, views, deletes, and manages active workspace members" $ \(env, app) -> do
       workspace <- createTestWorkspace env "group-member"
@@ -801,8 +847,10 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         , "/api/v1/observations/match"
         , "/api/v1/observations/similar"
         , "/api/v1/observations/{observationId}"
-        , "/api/v1/observations/{observationId}/embedding"
-        , "/api/v1/workspaces/{workspaceId}/timeline"
+         , "/api/v1/observations/{observationId}/embedding"
+         , "/api/v1/tasks/{taskId}/dependencies"
+         , "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}"
+         , "/api/v1/workspaces/{workspaceId}/timeline"
         , "/api/v1/workspaces/{workspaceId}/timeline/buckets" ]
       let hasWorkspaceGroupTag path method = jsonStrings (operationTags path method) == Just ["Workspace Groups"]
       mapM_ (\(path, method) -> hasWorkspaceGroupTag path method `shouldBe` True)
@@ -823,6 +871,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       schema "ObservationSubject" `shouldSatisfy` isJust
       schema "ObservationMatchQuery" `shouldSatisfy` isJust
       schema "ObservationMatch" `shouldSatisfy` isJust
+      schema "LinkDependency" `shouldSatisfy` isJust
+      schema "DependencyMutationResult" `shouldSatisfy` isJust
       hasSchemaProperty "Observation" "subjects" `shouldBe` True
       hasSchemaProperty "Observation" "subject_kind" `shouldBe` True
       hasSchemaProperty "Observation" "subject" `shouldBe` True

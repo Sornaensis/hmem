@@ -9,7 +9,7 @@ module HMem.Types
   , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
   , ProjectStatus(..), Project(..), CreateProject(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..)
   , TaskDependencySummary(..), TaskOverview(..), TaskReadinessRollup(..)
-  , TaskStatus(..), Task(..), NextTaskCandidate(..), TaskDependencyAutoBlockSnapshot(..), TaskDependencyStatusChange(..), DependencyMutationResult(..), TaskMutationResult(..), CreateTask(..), UpdateTask(..), TaskListQuery(..)
+  , TaskStatus(..), Task(..), NextTaskCandidate(..), TaskDependencyAutoBlockSnapshot(..), TaskDependencyStatusChange(..), LinkDependency(..), DependencyMutationResult(..), TaskMutationResult(..), CreateTask(..), UpdateTask(..), TaskListQuery(..)
   , EntitySearchType(..), ObservationSearchHit(..), UnifiedSearchQuery(..), UnifiedSearchResults(..), validateUnifiedSearchQuery
   , ActivityEvent(..), WorkspaceTimelineEvent(..), TimelineActor(..), TimelineProjectContext(..), TimelineTaskContext(..), TimelineStatusTransition(..), TimelineNavigation(..), TimelineBucketCounts(..), TimelineBucketEntityCounts(..), WorkspaceTimelineBucket(..), WorkspaceTimelineBucketsResponse(..)
   , SavedView(..), CreateSavedView(..), UpdateSavedView(..), SavedViewListQuery(..)
@@ -942,6 +942,14 @@ instance ToJSON TaskDependencyStatusChange where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON TaskDependencyStatusChange where
   parseJSON  = genericParseJSON jsonOptions
+
+data LinkDependency = LinkDependency
+  { dependsOnId :: UUID } deriving (Show, Eq, Generic)
+
+instance ToJSON LinkDependency where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON LinkDependency where
+  parseJSON = genericParseJSON jsonOptions
 
 data DependencyMutationResult = DependencyMutationResult
   { action        :: Text

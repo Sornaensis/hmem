@@ -20,7 +20,7 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as AesonKeyMap
 import Data.ByteString.Lazy.Char8 qualified as LBS8
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Pool (Pool, tryWithResource)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -130,8 +130,10 @@ type TaskAPI =
   :<|> ReqBody '[JSON] CreateTask :> Post '[JSON] Task
   :<|> Capture "taskId" UUID :> Get '[JSON] Task
   :<|> Capture "taskId" UUID :> ReqBody '[JSON] UpdateTask :> Put '[JSON] TaskMutationResult
-  :<|> Capture "taskId" UUID :> Delete '[JSON] CascadeResult
-  :<|> Capture "taskId" UUID :> "overview" :> Get '[JSON] TaskOverview
+   :<|> Capture "taskId" UUID :> Delete '[JSON] CascadeResult
+   :<|> Capture "taskId" UUID :> "overview" :> Get '[JSON] TaskOverview
+   :<|> Capture "taskId" UUID :> "dependencies" :> ReqBody '[JSON] LinkDependency :> Post '[JSON] DependencyMutationResult
+   :<|> Capture "taskId" UUID :> "dependencies" :> Capture "dependsOnId" UUID :> Delete '[JSON] DependencyMutationResult
 
 type AuditAPI =
        QueryParam "workspace_id" UUID :> QueryParam "entity_type" Text :> QueryParam "entity_id" Text
@@ -516,7 +518,7 @@ projects pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH
     handleDBErrors $ Task.listNextTasks pool projectId (fromMaybe False includeBlocked) (fromMaybe 5 limit)
 
 tasks :: Pool Hasql.Connection -> Broadcast -> Server TaskAPI
-tasks pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH where
+tasks pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> addDependencyH :<|> removeDependencyH where
   listH workspaceId projectId status priority queryValue limit offset = do
     workspace <- case (workspaceId, projectId) of
       (Just id, _) -> requireWorkspace pool id Auth.WorkspaceRoleRead >> pure id
@@ -547,6 +549,52 @@ tasks pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<
   overviewH taskId = do
     _ <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleRead
     handleDBErrors (Overview.getTaskOverview pool taskId) >>= maybe (throwError err404) pure
+  addDependencyH taskId input = mutateDependency "add" Created taskId input.dependsOnId Task.addDependencyWithSnapshots
+  removeDependencyH taskId dependsOnId = mutateDependency "remove" Deleted taskId dependsOnId Task.removeDependencyWithSnapshots
+  mutateDependency action change taskId dependsOnId mutate = do
+    taskWorkspace <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleEdit
+    dependencyWorkspace <- requireEntity pool Auth.EntityTask dependsOnId Auth.WorkspaceRoleRead
+    when (taskId == dependsOnId) $ reject ["a task cannot depend on itself"]
+    when (taskWorkspace /= dependencyWorkspace) $ reject ["task dependencies must belong to the same workspace"]
+    (before, after) <- handleDBErrors $ mutate pool taskId dependsOnId
+    let result = DependencyMutationResult
+          { action = action
+          , taskId = taskId
+          , dependsOnId = dependsOnId
+          , affectedTasks = dependencyStatusChanges action before after
+          }
+    emit (Just taskWorkspace) broadcast change ETTaskDependency taskId (Just (toJSON result))
+    pure result
+
+dependencyStatusChanges :: Text -> [TaskDependencyAutoBlockSnapshot] -> [TaskDependencyAutoBlockSnapshot] -> [TaskDependencyStatusChange]
+dependencyStatusChanges action before after = mapMaybe changed after
+  where
+    previous snapshot = case [value | value <- before, value.task.id == snapshot.task.id] of
+      value : _ -> value
+      [] -> snapshot
+    changed snapshot
+      | snapshot.task.status == old.task.status
+          && snapshot.autoBlocked == old.autoBlocked
+          && snapshot.openDependencyCount == old.openDependencyCount = Nothing
+      | otherwise = Just TaskDependencyStatusChange
+          { task = snapshot.task
+          , previousStatus = old.task.status
+          , currentStatus = snapshot.task.status
+          , previousAutoBlocked = old.autoBlocked
+          , autoBlocked = snapshot.autoBlocked
+          , previousOpenDependencyCount = old.openDependencyCount
+          , openDependencyCount = snapshot.openDependencyCount
+           , reason = dependencyStatusChangeReason old snapshot
+           }
+      where old = previous snapshot
+
+dependencyStatusChangeReason :: TaskDependencyAutoBlockSnapshot -> TaskDependencyAutoBlockSnapshot -> Text
+dependencyStatusChangeReason previous current
+  | not previous.autoBlocked && current.autoBlocked = "blocked_by_open_dependencies"
+  | previous.autoBlocked && not current.autoBlocked = "unblocked_dependencies_resolved"
+  | current.openDependencyCount > previous.openDependencyCount = "open_dependency_added"
+  | current.openDependencyCount < previous.openDependencyCount = "open_dependency_removed"
+  | otherwise = "dependency_status_changed"
 
 search :: Pool Hasql.Connection -> UnifiedSearchQuery -> Handler UnifiedSearchResults
 search pool query = do

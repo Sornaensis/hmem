@@ -104,6 +104,7 @@ toolDefinitions =
   , tool "task_update" "Update a task." (schema ["task_id" .= prop "string" "Task UUID", "title" .= prop "string" "Title", "description" .= prop "string" "Description or null", "project_id" .= prop "string" "Project UUID or null", "parent_id" .= prop "string" "Parent UUID or null", "status" .= enumProp "Status" ["todo", "in_progress", "blocked", "done", "cancelled"], "priority" .= prop "integer" "Priority", "due_at" .= prop "string" "ISO-8601 due time or null"] ["task_id"])
   , tool "task_detail" "Get compact task details." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_overview" "Get a compact task overview and dependency summaries." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
+  , tool "task_dependency" "Add or remove a task dependency." (schema ["task_id" .= prop "string" "Dependent task UUID", "depends_on_id" .= prop "string" "Prerequisite task UUID", "action" .= enumProp "Dependency mutation" ["add", "remove"]] ["task_id", "depends_on_id", "action"])
   , tool "task_start" "Set a task status to in_progress." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_finish" "Set a task status to done, blocked, or cancelled. This does not create an observation." (schema ["task_id" .= prop "string" "Task UUID", "status" .= enumProp "Final status" ["done", "blocked", "cancelled"]] ["task_id", "status"])
   ]
@@ -139,6 +140,7 @@ data ToolCall
   | TaskUpdate UUID UpdateTask
   | TaskDetail UUID
   | TaskOverviewCall UUID
+  | TaskDependency UUID UUID Text
   | TaskStart UUID
   | TaskFinish UUID TaskStatus
   deriving (Show, Eq)
@@ -169,6 +171,7 @@ parseToolCall name args = case name of
   "task_update" -> TaskUpdate <$> required "task_id" <*> parse args
   "task_detail" -> TaskDetail <$> required "task_id"
   "task_overview" -> TaskOverviewCall <$> required "task_id"
+  "task_dependency" -> TaskDependency <$> required "task_id" <*> required "depends_on_id" <*> required "action"
   "task_start" -> TaskStart <$> required "task_id"
   "task_finish" -> TaskFinish <$> required "task_id" <*> required "status"
   _ -> Left ("Unknown tool: " <> T.unpack name)
@@ -216,6 +219,10 @@ validateToolCall call = case call of
   ProjectUpdate _ input -> checked (validateUpdateProjectInput input) call
   TaskCreate input -> checked (validateCreateTaskInput input) call
   TaskUpdate _ input -> checked (validateUpdateTaskInput input) call
+  TaskDependency taskId dependsOnId action
+    | taskId == dependsOnId -> Left "task_dependency: a task cannot depend on itself"
+    | action `notElem` ["add", "remove"] -> Left "task_dependency: action must be add or remove"
+    | otherwise -> Right call
   ProjectSpec _ name _ _priority tasks
     | T.null (T.strip name) -> Left "project_spec: name must not be blank"
     | null tasks -> Left "project_spec: tasks must not be empty"
@@ -262,6 +269,8 @@ execute manager base apiKey = \case
   TaskUpdate tid input -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode input)) (mutationAck "updated" "task" . compactTaskSummary)
   TaskDetail tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid) Nothing compactTaskSummary
   TaskOverviewCall tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid <> "/overview") Nothing compactTaskOverview
+  TaskDependency tid depId "add" -> request manager base apiKey "POST" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies") (Just (encode (object ["depends_on_id" .= depId]))) compactTaskDependencyMutation
+  TaskDependency tid depId "remove" -> request manager base apiKey "DELETE" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/" <> uuidPath depId) Nothing compactTaskDependencyMutation
   TaskStart tid -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= ("in_progress" :: Text)]))) (mutationAck "started" "task" . compactTaskSummary)
   TaskFinish tid status -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= status]))) (mutationAck "finished" "task" . compactTaskSummary)
 
@@ -409,6 +418,25 @@ compactTaskOverview value = object
   , "dependencies" .= fromMaybe (Array mempty) (field "dependencies" value)
   , "readiness_rollup" .= fromMaybe (object []) (field "readiness_rollup" value)
   ]
+
+compactTaskDependencyMutation :: Value -> Value
+compactTaskDependencyMutation value = object
+  [ "ok" .= True
+  , "action" .= fromMaybe Null (field "action" value)
+  , "entity_type" .= ("task_dependency" :: Text)
+  , "task_id" .= fromMaybe Null (field "task_id" value)
+  , "depends_on_id" .= fromMaybe Null (field "depends_on_id" value)
+  , "affected_tasks" .= mapField "affected_tasks" compactChange value
+  ]
+  where
+    compactChange change = object (catMaybes
+      [ ("task" .=) . compactTaskSummary <$> field "task" change
+      , ("previous_status" .=) <$> field "previous_status" change
+      , ("current_status" .=) <$> field "current_status" change
+      , ("auto_blocked" .=) <$> field "auto_blocked" change
+      , ("open_dependency_count" .=) <$> field "open_dependency_count" change
+      , ("reason" .=) <$> field "reason" change
+      ])
 
 compactNextTasks :: Value -> Value
 compactNextTasks (Array rows) = toJSON (map compactRow (toList rows)) where

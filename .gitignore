@@ -1,5 +1,5 @@
-# Stack
-.stack-work/
+# Stack work directories, at the root or inside packages/task-local builds.
+**/.stack-work*/
 # Commit the root lock file so Docker/CI builds use pinned snapshots and extra-deps.
 !/stack.yaml.lock
 /stack-*.yaml.lock

@@ -1189,6 +1189,7 @@ observation : String -> Api.Observation
 observation id =
     { id = id
     , workspaceId = "workspace-a"
+    , subjects = [ { subjectKind = Api.SubjectFile, subject = "src/Main.elm" } ]
     , subjectKind = Api.SubjectFile
     , subject = "src/Main.elm"
     , gitSha = "0123456789abcdef0123456789abcdef01234567"

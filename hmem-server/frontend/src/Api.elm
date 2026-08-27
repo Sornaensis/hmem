@@ -1,5 +1,5 @@
 module Api exposing
-    ( Workspace, Project, Task, NextTaskCandidate, Memory, MemoryLink, Observation, ObservationListQuery
+    ( Workspace, Project, Task, NextTaskCandidate, Memory, MemoryLink, Observation, ObservationSubject, ObservationListQuery, ObservationMatchQuery, ObservationMatch
     , WorkspaceGroup, WorkspaceMembership
     , WorkspaceProjectMemoryLink, WorkspaceTaskMemoryLink, WorkspaceTaskDependencyLink
     , TaskDependencySummary, TaskDependencyStatusChange, TaskReadinessRollup, DependencyMutationResult, TaskMutationResult, TaskOverview
@@ -19,7 +19,7 @@ module Api exposing
     , fetchProjects, fetchProjectsPage, fetchProject
     , fetchTasks, fetchTasksPage, fetchTask
     , fetchMemories, fetchMemoriesPage, fetchMemory
-    , fetchObservations, fetchObservationsPage, fetchObservation, observationListUrl
+    , fetchObservations, fetchObservationsPage, fetchObservation, fetchObservationMatches, observationListUrl, observationMatchBody
     , fetchMemoryLinks
     , fetchWorkspaceLinks
     , fetchProjectMemories, fetchTaskMemories
@@ -37,7 +37,7 @@ module Api exposing
     , fetchGroupMembers, addGroupMember, removeGroupMember
     , fetchAuditLog, fetchEntityHistory, revertAuditEntry, fetchWorkspaceTimeline, fetchWorkspaceTimelineRange, fetchWorkspaceTimelineBuckets
     , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder, nextTaskCandidateDecoder
-    , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, observationDecoder, paginatedDecoder, cascadeResultDecoder, auditLogEntryDecoder, workspaceTimelineEventDecoder, workspaceTimelineBucketsResponseDecoder
+    , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, observationDecoder, observationMatchDecoder, paginatedDecoder, cascadeResultDecoder, auditLogEntryDecoder, workspaceTimelineEventDecoder, workspaceTimelineBucketsResponseDecoder
     , memoryTypeToString, memoryTypeFromString, subjectKindToString, subjectKindFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
     , auditActionToString, auditActionFromString
     , projectStatusFromString, taskStatusFromString
@@ -47,7 +47,7 @@ module Api exposing
 
 import Http
 import Json.Decode as D exposing (Decoder)
-import Json.Decode.Pipeline exposing (required, optional)
+import Json.Decode.Pipeline exposing (custom, required, optional)
 import Json.Encode as E
 import Time
 import Url
@@ -151,12 +151,20 @@ type alias Memory =
 type alias Observation =
     { id : String
     , workspaceId : String
+    , subjects : List ObservationSubject
+    -- Kept as the primary-subject compatibility projection for existing callers.
     , subjectKind : SubjectKind
     , subject : String
     , gitSha : String
     , content : String
     , createdAt : String
     , updatedAt : String
+    }
+
+
+type alias ObservationSubject =
+    { subjectKind : SubjectKind
+    , subject : String
     }
 
 
@@ -168,6 +176,24 @@ type alias ObservationListQuery =
     , query : Maybe String
     , limit : Int
     , offset : Int
+    }
+
+
+type alias ObservationMatchQuery =
+    { workspaceId : String
+    , paths : List String
+    , subjectKind : Maybe SubjectKind
+    , gitSha : Maybe String
+    , query : Maybe String
+    , limit : Int
+    , offset : Int
+    }
+
+
+type alias ObservationMatch =
+    { observation : Observation
+    , matchedPaths : List String
+    , matchedSubjects : List ObservationSubject
     }
 
 
@@ -1037,15 +1063,91 @@ memoryDecoder =
 
 observationDecoder : Decoder Observation
 observationDecoder =
-    D.succeed Observation
+    D.succeed observationFromFields
         |> required "id" D.string
         |> required "workspace_id" D.string
-        |> required "subject_kind" subjectKindDecoder
-        |> required "subject" D.string
+        |> custom observationSubjectsDecoder
         |> required "git_sha" D.string
         |> required "content" D.string
         |> required "created_at" D.string
         |> required "updated_at" D.string
+
+
+observationFromFields : String -> String -> List ObservationSubject -> String -> String -> String -> String -> Observation
+observationFromFields id workspaceId subjects gitSha content createdAt updatedAt =
+    case subjects of
+        primary :: _ ->
+            { id = id
+            , workspaceId = workspaceId
+            , subjects = subjects
+            , subjectKind = primary.subjectKind
+            , subject = primary.subject
+            , gitSha = gitSha
+            , content = content
+            , createdAt = createdAt
+            , updatedAt = updatedAt
+            }
+
+        [] ->
+            -- observationSubjectsDecoder rejects this before construction.
+            { id = id
+            , workspaceId = workspaceId
+            , subjects = []
+            , subjectKind = SubjectFile
+            , subject = ""
+            , gitSha = gitSha
+            , content = content
+            , createdAt = createdAt
+            , updatedAt = updatedAt
+            }
+
+
+observationSubjectsDecoder : Decoder (List ObservationSubject)
+observationSubjectsDecoder =
+    D.oneOf
+        [ D.map Just (D.field "subjects" D.value)
+        , D.succeed Nothing
+        ]
+        |> D.andThen
+            (\canonicalSubjects ->
+                case canonicalSubjects of
+                    Just subjectsValue ->
+                        case D.decodeValue (D.list observationSubjectDecoder) subjectsValue of
+                            Ok subjects ->
+                                nonEmptySubjectsDecoder subjects
+
+                            Err error ->
+                                D.fail (D.errorToString error)
+
+                    Nothing ->
+                        D.map2 (\subjectKind subject -> [ { subjectKind = subjectKind, subject = subject } ])
+                            (D.field "subject_kind" subjectKindDecoder)
+                            (D.field "subject" D.string)
+            )
+
+
+nonEmptySubjectsDecoder : List ObservationSubject -> Decoder (List ObservationSubject)
+nonEmptySubjectsDecoder subjects =
+    if List.isEmpty subjects then
+        D.fail "Observation subjects must not be empty"
+
+    else
+        D.succeed subjects
+
+
+observationSubjectDecoder : Decoder ObservationSubject
+observationSubjectDecoder =
+    D.map2 ObservationSubject
+        (D.field "subject_kind" subjectKindDecoder)
+        (D.field "subject" D.string)
+
+
+observationMatchDecoder : Decoder ObservationMatch
+observationMatchDecoder =
+    D.succeed ObservationMatch
+        |> required "observation" observationDecoder
+        |> required "matched_paths" (D.list D.string)
+        |> required "matched_subjects" (D.list observationSubjectDecoder)
 
 
 workspaceGroupDecoder : Decoder WorkspaceGroup
@@ -1746,6 +1848,39 @@ fetchObservation apiUrl observationId toMsg =
         { url = apiUrl ++ "/api/v1/observations/" ++ Url.percentEncode observationId
         , expect = Http.expectJson toMsg observationDecoder
         }
+
+
+fetchObservationMatches : String -> ObservationMatchQuery -> (Result Http.Error (PaginatedResult ObservationMatch) -> msg) -> Cmd msg
+fetchObservationMatches apiUrl matchQuery toMsg =
+    Http.request
+        { method = "POST"
+        , headers = []
+        , url = apiUrl ++ "/api/v1/observations/match"
+        , body = Http.jsonBody (observationMatchBody matchQuery)
+        , expect = Http.expectJson toMsg (paginatedDecoder observationMatchDecoder)
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+observationMatchBody : ObservationMatchQuery -> E.Value
+observationMatchBody matchQuery =
+    let
+        optional name encodeValue value =
+            value |> Maybe.map (\present -> ( name, encodeValue present ))
+    in
+    E.object
+        ([ ( "workspace_id", E.string matchQuery.workspaceId )
+         , ( "paths", E.list E.string matchQuery.paths )
+         , ( "limit", E.int matchQuery.limit )
+         , ( "offset", E.int matchQuery.offset )
+         ]
+            ++ List.filterMap identity
+                [ optional "subject_kind" (E.string << subjectKindToString) matchQuery.subjectKind
+                , optional "git_sha" E.string matchQuery.gitSha
+                , optional "query" E.string matchQuery.query
+                ]
+        )
 
 
 fetchWorkspaceTimeline : String -> String -> (Result Http.Error (PaginatedResult WorkspaceTimelineEvent) -> msg) -> Cmd msg

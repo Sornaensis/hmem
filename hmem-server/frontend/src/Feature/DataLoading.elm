@@ -1,4 +1,4 @@
-module Feature.DataLoading exposing (acceptWorkspaceLoad, finishWorkspaceLoad, init, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, update)
+module Feature.DataLoading exposing (acceptWorkspaceLoad, finishWorkspaceLoad, init, listObservationResponseMatches, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, update)
 
 import Api
 import Dict
@@ -417,7 +417,7 @@ update msg model =
                 ( { model | dependencies = updatedDependencies, dataLoading = completedLoading }, Cmd.none )
 
         GotObservations wsId maybeToken generation fingerprint offset result ->
-            if model.selectedWorkspaceId /= Just wsId || not (acceptWorkspaceLoad maybeToken model.dataLoading) || not (observationResponseMatches generation fingerprint offset model.observations) then
+            if model.selectedWorkspaceId /= Just wsId || not (acceptWorkspaceLoad maybeToken model.dataLoading) || not (listObservationResponseMatches generation fingerprint offset model.observations) then
                 ( model, Cmd.none )
 
             else
@@ -457,6 +457,12 @@ observationResponseMatches generation fingerprint offset observations =
     observations.requestGeneration == generation
         && observations.queryFingerprint == fingerprint
         && observations.expectedOffset == Just offset
+
+
+listObservationResponseMatches : Int -> String -> Int -> ObservationModel -> Bool
+listObservationResponseMatches generation fingerprint offset observations =
+    observations.requestMode == ObservationListMode
+        && observationResponseMatches generation fingerprint offset observations
 
 
 mergeObservationPage : Int -> Api.PaginatedResult Api.Observation -> ObservationModel -> ObservationModel

@@ -151,6 +151,10 @@ type alias ObservationModel =
     , subjectKind : Maybe Api.SubjectKind
     , subject : String
     , gitSha : String
+    , requestMode : ObservationRequestMode
+    , matchPathsInput : String
+    , matchValidationError : Maybe String
+    , matchEvidence : Dict String Api.ObservationMatch
     , requestGeneration : Int
     , queryFingerprint : String
     , expectedOffset : Maybe Int
@@ -162,6 +166,11 @@ type alias ObservationModel =
     , activeDetailRequest : Maybe ObservationDetailRequest
     , nextDetailRequestToken : Int
     }
+
+
+type ObservationRequestMode
+    = ObservationListMode
+    | ObservationMatchMode
 
 
 type alias MemoryModel =
@@ -530,6 +539,7 @@ type Msg
     | GotMemories String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Memory))
     | GotSingleMemory (Result Http.Error Api.Memory)
     | GotObservations String (Maybe Int) Int String Int (Result Http.Error (Api.PaginatedResult Api.Observation))
+    | GotObservationMatches String Int String Int (Result Http.Error (Api.PaginatedResult Api.ObservationMatch))
     | GotObservationDetail String String Int (Result Http.Error Api.Observation)
     | GotInitialTaskOverview String Int String (Result Http.Error Api.TaskOverview)
     | GotInitialProjectOverview String Int String (Result Http.Error Api.ProjectOverview)
@@ -572,8 +582,12 @@ type Msg
     | SetObservationSubject String
     | SetObservationGitSha String
     | ApplyObservationFilters
+    | SetObservationMatchPaths String
+    | ApplyObservationMatch
+    | ClearObservationMatch
     | LoadMoreObservations
     | SelectObservation String
+    | CopyObservationSubject String
       -- Inline editing
     | StartEdit String String String String
     | EditInput String

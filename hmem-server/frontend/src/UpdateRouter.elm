@@ -80,6 +80,9 @@ update msg model =
         GotObservations _ _ _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
+        GotObservationMatches _ _ _ _ _ ->
+            Ok (Feature.Observation.update msg model)
+
         GotMemories _ _ _ _ ->
             Ok ( model, Cmd.none )
 
@@ -222,10 +225,22 @@ update msg model =
         ApplyObservationFilters ->
             Ok (Feature.Observation.update msg model)
 
+        SetObservationMatchPaths _ ->
+            Ok (Feature.Observation.update msg model)
+
+        ApplyObservationMatch ->
+            Ok (Feature.Observation.update msg model)
+
+        ClearObservationMatch ->
+            Ok (Feature.Observation.update msg model)
+
         LoadMoreObservations ->
             Ok (Feature.Observation.update msg model)
 
         SelectObservation _ ->
+            Ok (Feature.Observation.update msg model)
+
+        CopyObservationSubject _ ->
             Ok (Feature.Observation.update msg model)
 
         -- Inline editing

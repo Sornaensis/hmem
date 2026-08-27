@@ -8,11 +8,12 @@ import Feature.DataLoading
 import Feature.Observation
 import Helpers
 import Json.Decode as Decode
+import Json.Encode as Encode
 import Route
 import Test exposing (..)
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
-import Types exposing (Flags, Model, ObservationModel, Page(..), WorkspaceTab(..))
+import Types exposing (Flags, Model, Msg(..), ObservationModel, ObservationRequestMode(..), Page(..), WorkspaceTab(..))
 import Url
 
 
@@ -176,7 +177,11 @@ suite =
                         fixtureObservation "glob" "2026-01-01T00:00:00Z"
 
                     glob =
-                        { baseGlob | subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }
+                        { baseGlob
+                            | subjects = [ { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } ]
+                            , subjectKind = Api.SubjectGlob
+                            , subject = "src/**/*.elm"
+                        }
 
                     loaded =
                         { empty
@@ -231,7 +236,7 @@ suite =
                 in
                 Expect.all
                     [ \_ -> view |> Query.find [ Selector.class "observation-filters" ] |> Query.has [ Selector.class "filter-bar" ]
-                    , \_ -> view |> Query.findAll [ Selector.class "observation-filter-input" ] |> Query.count (Expect.equal 3)
+                    , \_ -> view |> Query.findAll [ Selector.class "observation-filter-input" ] |> Query.count (Expect.equal 4)
                     , \_ -> view |> Query.find [ Selector.class "observation-filter-select" ] |> Query.has [ Selector.tag "select", Selector.class "filter-select" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-filter-apply" ] |> Query.has [ Selector.tag "button", Selector.class "btn", Selector.class "btn-primary", Selector.text "Apply filters" ]
                     , \_ -> view |> Query.find [ Selector.id "entity-selected" ] |> Query.has [ Selector.tag "button", Selector.class "card", Selector.class "observation-card", Selector.class "observation-card-selected" ]
@@ -284,6 +289,206 @@ suite =
                 , unfiltered.orderedIds == [ "ranked-first", "ranked-second", "server-third" ]
                 ]
                     |> Expect.equal [ True, True ]
+        , test "decodes canonical ordered subjects and the legacy singleton fallback" <|
+            \_ ->
+                let
+                    canonical =
+                        """{"id":"multi","workspace_id":"workspace-1","subjects":[{"subject_kind":"glob","subject":"src/**/*.elm"},{"subject_kind":"file","subject":"src/Main.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content":"Evidence","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"""
+
+                    canonicalSubjects =
+                        Decode.decodeString Api.observationDecoder canonical
+                            |> Result.map (List.map .subject << .subjects)
+
+                    legacySubjects =
+                        Decode.decodeString Api.observationDecoder fileFixture
+                            |> Result.map (List.map .subject << .subjects)
+                in
+                [ canonicalSubjects == Ok [ "src/**/*.elm", "src/Main.elm" ]
+                , legacySubjects == Ok [ "src/Main.elm" ]
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[],\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[{\"subject_kind\":\"other\",\"subject\":\"x\"}],\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":\"not-an-array\",\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[],\"subject_kind\":\"file\",\"subject\":\"src/legacy.elm\",\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":\"not-an-array\",\"subject_kind\":\"file\",\"subject\":\"src/legacy.elm\",\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                ]
+                    |> Expect.equal [ True, True, True, True, True, True, True, True ]
+        , test "normalizes bounded concrete match paths and encodes the match request" <|
+            \_ ->
+                let
+                    body =
+                        Api.observationMatchBody
+                            { workspaceId = "workspace-1"
+                            , paths = [ "src/Main.elm", "my/src/proj/Main.java" ]
+                            , subjectKind = Just Api.SubjectGlob
+                            , gitSha = Just fullSha
+                            , query = Just "render"
+                            , limit = 50
+                            , offset = 0
+                            }
+                            |> Encode.encode 0
+                in
+                [ Feature.Observation.normalizeMatchPaths "src/Main.elm\nsrc/Main.elm\nmy/src/proj/Main.java" == Ok [ "src/Main.elm", "my/src/proj/Main.java" ]
+                , Feature.Observation.normalizeMatchPaths "src/**/*.elm" |> isErr
+                , Feature.Observation.normalizeMatchPaths "/src/Main.elm" |> isErr
+                , Feature.Observation.normalizeMatchPaths "C:/repo/Main.elm" |> isErr
+                , Feature.Observation.normalizeMatchPaths "src/\u{0007}Main.elm" |> isErr
+                , Feature.Observation.normalizeMatchPaths (String.repeat 4096 "a") |> isOk
+                , Feature.Observation.normalizeMatchPaths (String.repeat 4097 "a") |> isErr
+                , Feature.Observation.normalizeMatchPaths (String.repeat 1366 "€") |> isErr
+                , Feature.Observation.normalizeMatchPaths (largePathInput 256 1025) |> isErr
+                , body == "{\"workspace_id\":\"workspace-1\",\"paths\":[\"src/Main.elm\",\"my/src/proj/Main.java\"],\"limit\":50,\"offset\":0,\"subject_kind\":\"glob\",\"git_sha\":\"0123456789abcdef0123456789abcdef01234567\",\"query\":\"render\"}"
+                ]
+                    |> Expect.equal [ True, True, True, True, True, True, True, True, True, True ]
+        , test "renders all subjects and match evidence without accepting stale list responses in match mode" <|
+            \_ ->
+                let
+                    baseObservation =
+                        fixtureObservation "matched" "2026-01-01T00:00:00Z"
+
+                    observation =
+                        { baseObservation
+                            | subjects =
+                                [ { subjectKind = Api.SubjectFile, subject = "src/Main.elm" }
+                                , { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }
+                                ]
+                        }
+
+                    baseState =
+                        Feature.Observation.init
+
+                    state =
+                        { baseState
+                            | items = Dict.singleton observation.id observation
+                            , orderedIds = [ observation.id ]
+                            , selectedId = Just observation.id
+                            , selectedDetail = Just observation
+                            , requestMode = ObservationMatchMode
+                            , requestGeneration = 4
+                            , queryFingerprint = "match-request"
+                            , expectedOffset = Just 0
+                            , matchEvidence = Dict.singleton observation.id { observation = observation, matchedPaths = [ "src/Main.elm" ], matchedSubjects = List.drop 1 observation.subjects }
+                        }
+
+                    view =
+                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) state |> Query.fromHtml
+                in
+                Expect.all
+                    [ \_ -> view |> Query.has [ Selector.text "src/Main.elm", Selector.text "src/**/*.elm", Selector.text "Matched files: src/Main.elm", Selector.text "Matching subjects: src/**/*.elm" ]
+                    , \_ -> view |> Query.find [ Selector.id "observation-match-paths" ] |> Query.has [ Selector.tag "textarea" ]
+                    , \_ -> Feature.Observation.matchResponseMatches 4 "match-request" 0 state |> Expect.equal True
+                    , \_ -> Feature.DataLoading.observationResponseMatches 4 "match-request" 0 state |> Expect.equal True
+                    ]
+                    ()
+        , test "decodes paginated V020 singleton and V021 multi-subject match evidence" <|
+            \_ ->
+                let
+                    response =
+                        """{"items":[{"observation":{"id":"v020","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Legacy.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content":"Legacy","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Legacy.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Legacy.elm"}]},{"observation":{"id":"v021","workspace_id":"workspace-1","subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content":"Canonical","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Main.elm"],"matched_subjects":[{"subject_kind":"glob","subject":"src/**/*.elm"}]}],"has_more":true}"""
+
+                    decoded =
+                        Decode.decodeString (Api.paginatedDecoder Api.observationMatchDecoder) response
+                in
+                case decoded of
+                    Ok page ->
+                        [ page.hasMore
+                        , List.map (\match -> List.map .subject match.observation.subjects) page.items == [ [ "src/Legacy.elm" ], [ "src/Main.elm", "src/**/*.elm" ] ]
+                        , List.map (\match -> List.map .subject match.matchedSubjects) page.items == [ [ "src/Legacy.elm" ], [ "src/**/*.elm" ] ]
+                        ]
+                            |> Expect.equal [ True, True, True ]
+
+                    Err _ ->
+                        Expect.fail "match response should decode"
+        , test "match mode has accessible controls and distinct loading, empty, error, and pagination states" <|
+            \_ ->
+                let
+                    initial =
+                        Feature.Observation.init
+
+                    base =
+                        { initial | requestMode = ObservationMatchMode, matchPathsInput = "src/Main.elm" }
+
+                    baseObservation =
+                        fixtureObservation "page" "2026-01-01T00:00:00Z"
+
+                    observation =
+                        { baseObservation
+                            | subjects =
+                                [ { subjectKind = Api.SubjectFile, subject = "src/Main.elm" }
+                                , { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }
+                                ]
+                        }
+
+                    loaded =
+                        { base
+                            | items = Dict.singleton observation.id observation
+                            , orderedIds = [ observation.id ]
+                            , selectedId = Just observation.id
+                            , selectedDetail = Just observation
+                            , hasMore = True
+                            , matchEvidence = Dict.singleton observation.id { observation = observation, matchedPaths = [ "src/Main.elm" ], matchedSubjects = List.drop 1 observation.subjects }
+                        }
+
+                    repository =
+                        observationWorkspace Api.Repository
+                in
+                Expect.all
+                    [ \_ -> Feature.Observation.viewObservationsState repository { base | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Matching repository files..." ]
+                    , \_ -> Feature.Observation.viewObservationsState repository base |> Query.fromHtml |> Query.has [ Selector.text "No matching observations", Selector.text "Try different concrete repository paths or clear the match." ]
+                    , \_ -> Feature.Observation.viewObservationsState repository { base | error = Just "Failed to match repository files." } |> Query.fromHtml |> Query.has [ Selector.text "Failed to match repository files." ]
+                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.find [ Selector.id "observation-subject" ] |> Query.has [ Selector.disabled True ]
+                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.text "+1", Selector.class "observation-subject-copy", Selector.text "Matched files: src/Main.elm" ]
+                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.findAll [ Selector.class "observation-subject-copy", Selector.tag "button" ] |> Query.count (Expect.equal 2)
+                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.find [ Selector.class "observation-load-more" ] |> Query.hasNot [ Selector.disabled True ]
+                    ]
+                    ()
+        , test "late list, match, and workspace responses cannot overwrite an active match" <|
+            \_ ->
+                let
+                    base =
+                        Feature.Observation.init
+
+                    matchState =
+                        { base
+                            | requestMode = ObservationMatchMode
+                            , requestGeneration = 9
+                            , queryFingerprint = "match-fingerprint"
+                            , expectedOffset = Just 0
+                            }
+
+                    workspace =
+                        observationWorkspace Api.Repository
+
+                    baseModel =
+                        sameWorkspaceModel matchState
+
+                    model =
+                        { baseModel | selectedWorkspaceId = Just workspace.id, workspaces = Dict.singleton workspace.id workspace }
+
+                    listResult =
+                        Feature.DataLoading.update
+                            (GotObservations workspace.id Nothing 9 "match-fingerprint" 0 (Ok { items = [ fixtureObservation "late-list" "2026-01-01T00:00:00Z" ], hasMore = False }))
+                            model
+                            |> Tuple.first
+
+                    wrongWorkspaceResult =
+                        Feature.Observation.update
+                            (GotObservationMatches "other-workspace" 9 "match-fingerprint" 0 (Ok { items = [], hasMore = False }))
+                            model
+                            |> Tuple.first
+
+                    wrongMatchResult =
+                        Feature.Observation.update
+                            (GotObservationMatches workspace.id 8 "match-fingerprint" 0 (Ok { items = [], hasMore = False }))
+                            model
+                            |> Tuple.first
+                in
+                [ Dict.isEmpty listResult.observations.items
+                , wrongWorkspaceResult.observations.expectedOffset == Just 0
+                , wrongMatchResult.observations.expectedOffset == Just 0
+                , Feature.DataLoading.listObservationResponseMatches 9 "match-fingerprint" 0 matchState == False
+                ]
+                    |> Expect.equal [ True, True, True, True ]
         , test "workspace batch tokens reject overlap and retain pending work for stale responses" <|
             \_ ->
                 let
@@ -441,6 +646,7 @@ fixtureObservation : String -> String -> Api.Observation
 fixtureObservation id createdAt =
     { id = id
     , workspaceId = "workspace-1"
+    , subjects = [ { subjectKind = Api.SubjectFile, subject = "src/Main.elm" } ]
     , subjectKind = Api.SubjectFile
     , subject = "src/Main.elm"
     , gitSha = fullSha
@@ -458,3 +664,37 @@ paginatedFixture hasMore =
 globFixture : String
 globFixture =
     """{"id":"observation-glob","workspace_id":"workspace-1","subject_kind":"glob","subject":"src/**/*.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content":"Glob observation","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}"""
+
+
+isErr : Result error value -> Bool
+isErr result =
+    case result of
+        Err _ ->
+            True
+
+        Ok _ ->
+            False
+
+
+isOk : Result error value -> Bool
+isOk result =
+    case result of
+        Ok _ ->
+            True
+
+        Err _ ->
+            False
+
+
+largePathInput : Int -> Int -> String
+largePathInput count bytesPerPath =
+    List.range 1 count
+        |> List.map
+            (\index ->
+                let
+                    prefix =
+                        String.fromInt index ++ "/"
+                in
+                prefix ++ String.repeat (bytesPerPath - String.length prefix) "a"
+            )
+        |> String.join "\n"

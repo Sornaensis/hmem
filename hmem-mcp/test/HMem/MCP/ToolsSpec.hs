@@ -92,6 +92,21 @@ spec = do
       projectSpecTaskPropertyDescriptionIs "priority" "Task priority"
       (schemaProperty "project_spec" "tasks" >>= jsonField "items" >>= jsonField "required") `shouldBe` Just (toJSON (["title"] :: [Text]))
 
+    it "guides Observations as durable repository insights and treats Git SHAs as staleness sentinels" $ do
+      toolDescriptionIs "search" "Search observations, projects, and tasks. An Observation is a durable, non-obvious repository insight tied to file or glob subjects; subject_kind, subject, and git_sha are exact provenance filters."
+      toolDescriptionIs "observation_create" "Create an Observation: a durable, non-obvious repository insight tied to one or more repository-relative file or glob subjects. git_sha records the repository state where the insight was established; use it as a sentinel to decide whether the insight needs re-audit, not as timeless proof. Pass subjects as an ordered array; they are OR alternatives and, with git_sha, immutable after creation. File subjects must be concrete paths. Glob subjects may use only *, ?, and ** path components (for example my/src/proj/**/*.java)."
+      toolDescriptionIs "observation_update" "Replace only the content of a durable, non-obvious repository insight. Subjects and git_sha are immutable provenance; git_sha remains the state where the insight was established and a staleness-audit sentinel, not timeless proof."
+      toolDescriptionIs "observation_list" "List durable, non-obvious repository insights using exact subject and git_sha provenance filters and optional text search. git_sha is a sentinel for deciding when an insight needs re-audit, not timeless proof. When has_more is true, pass next_offset to retrieve the next page."
+      toolDescriptionIs "observation_match" "Find durable, non-obvious repository insights whose stored file subjects or safe glob subjects match any concrete repository-relative path supplied in paths. Paths are ORed; do not pass globs here and no repository filesystem is read. Optional filters compose with matching. git_sha is a staleness-audit sentinel, not timeless proof. Continue with next_offset until has_more is false."
+      toolDescriptionIs "observation_similar" "Find semantically similar durable, non-obvious repository insights. Subject and git_sha filters are exact provenance filters; git_sha is a staleness-audit sentinel, not timeless proof. To continue, add returned_count to offset and repeat until returned_count is less than limit or zero."
+      schemaPropertyDescriptionIs "observation_create" "content" "Durable, non-obvious repository insight about its subjects; not a progress update or routine fact"
+      schemaPropertyDescriptionIs "observation_create" "git_sha" "Lowercase 40-character Git SHA for the repository state where this insight was established; a staleness-audit sentinel, not timeless proof"
+      schemaPropertyDescriptionIs "observation_update" "content" "Replacement durable, non-obvious repository insight about the existing subjects; not a progress update or routine fact"
+      schemaPropertyDescriptionIs "observation_match" "paths" "One to 256 concrete repository-relative files to match against stored Observation subjects; globs are rejected"
+      observationGuidance `shouldSatisfy` observationGuidanceContract
+      T.replace "durable, non-obvious" "routine, obvious" observationGuidance `shouldNotSatisfy` observationGuidanceContract
+      T.replace "not timeless proof" "timeless proof" observationGuidance `shouldNotSatisfy` observationGuidanceContract
+
     it "parses, validates, dispatches, and JSON-RPC-routes task dependency mutations" $ do
       let addArguments = object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("add" :: Text)]
           removeArguments = object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("remove" :: Text)]
@@ -543,6 +558,23 @@ toolDescription name = case [description | Object tool <- toolDefinitions, KM.lo
 
 toolDescriptionIs :: Text -> Text -> Expectation
 toolDescriptionIs name expected = toolDescription name `shouldBe` Just expected
+
+observationGuidance :: Text
+observationGuidance = T.intercalate "\n" $
+  [ toolDescription name
+  | name <- ["search", "observation_create", "observation_update", "observation_list", "observation_match", "observation_similar"]
+  ] >>= maybe [] pure
+
+observationGuidanceContract :: Text -> Bool
+observationGuidanceContract text =
+  all (`T.isInfixOf` text)
+    [ "durable, non-obvious repository insight"
+    , "file or glob subjects"
+    , "repository-relative"
+    , "immutable provenance"
+    , "staleness-audit sentinel"
+    , "not timeless proof"
+    ]
 
 schemaProperty :: Text -> Text -> Maybe Value
 schemaProperty toolName propertyName = case

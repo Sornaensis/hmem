@@ -44,38 +44,38 @@ toolDefinitions =
   , tool "get_workspace" "Get the active workspace context UUID, if any." (schema [] [])
   , tool "workspace_list" "List registered workspaces." (schema ["limit" .= prop "integer" "Maximum results (default 50)"] [])
   , tool "workspace_register" "Register a workspace." (schema ["name" .= prop "string" "Workspace name", "workspace_type" .= enumProp "Workspace type" ["repository", "planning", "personal", "organization"]] ["name"])
-  , tool "search" "Search observations, projects, and tasks. Observation filters subject_kind, subject, and git_sha are exact provenance filters." (schema
+  , tool "search" "Search observations, projects, and tasks. An Observation is a durable, non-obvious repository insight tied to file or glob subjects; subject_kind, subject, and git_sha are exact provenance filters." (schema
       [ "query" .= prop "string" "Optional full-text query"
       , "entity_types" .= arrayEnum "Entity types (default: observation, project, task)" ["observation", "project", "task"]
-      , "subject_kind" .= enumProp "Exact observation subject kind" ["file", "glob"]
-      , "subject" .= prop "string" "Exact observation repository-relative subject"
-      , "git_sha" .= prop "string" "Exact observation Git SHA"
+      , "subject_kind" .= enumProp "Exact kind of repository subject tied to observations" ["file", "glob"]
+      , "subject" .= prop "string" "Exact repository-relative subject tied to observations"
+      , "git_sha" .= prop "string" "Exact Git SHA where an Observation insight was established; use it to select potentially stale insights for re-audit"
       , "project_status" .= enumProp "Project status" ["active", "paused", "completed", "archived"]
       , "task_status" .= enumProp "Task status" ["todo", "in_progress", "blocked", "done", "cancelled"]
       , "project_id" .= prop "string" "Filter tasks by project UUID"
       , "limit" .= prop "integer" "Maximum results per entity type"
       , "offset" .= prop "integer" "Result offset per entity type"
       ] [])
-  , tool "observation_create" "Create a provenance-bound observation for one or more repository-relative subjects. Pass subjects as an ordered array; subjects are OR alternatives and, with git_sha, immutable after creation. File subjects must be concrete paths. Glob subjects may use only *, ?, and ** path components (for example my/src/proj/**/*.java)." (schema
-      [ "subjects" .= object ["type" .= ("array" :: Text), "description" .= ("One to " <> T.pack (show maxObservationSubjects) <> " ordered file or glob subjects; duplicate entries are removed in first-occurrence order"), "minItems" .= (1 :: Int), "maxItems" .= maxObservationSubjects, "items" .= object ["type" .= ("object" :: Text), "properties" .= object ["subject_kind" .= enumProp "Repository subject kind" ["file", "glob"], "subject" .= prop "string" "Canonical repository-relative path or safe glob"], "required" .= (["subject_kind", "subject"] :: [Text])]]
-      , "git_sha" .= prop "string" "Lowercase 40-character Git SHA"
-      , "content" .= prop "string" "Observation content"
+  , tool "observation_create" "Create an Observation: a durable, non-obvious repository insight tied to one or more repository-relative file or glob subjects. git_sha records the repository state where the insight was established; use it as a sentinel to decide whether the insight needs re-audit, not as timeless proof. Pass subjects as an ordered array; they are OR alternatives and, with git_sha, immutable after creation. File subjects must be concrete paths. Glob subjects may use only *, ?, and ** path components (for example my/src/proj/**/*.java)." (schema
+      [ "subjects" .= object ["type" .= ("array" :: Text), "description" .= ("One to " <> T.pack (show maxObservationSubjects) <> " ordered repository-relative file or glob subjects tied to this durable insight; duplicate entries are removed in first-occurrence order"), "minItems" .= (1 :: Int), "maxItems" .= maxObservationSubjects, "items" .= object ["type" .= ("object" :: Text), "properties" .= object ["subject_kind" .= enumProp "Kind of repository subject tied to this durable insight" ["file", "glob"], "subject" .= prop "string" "Canonical repository-relative path or safe glob tied to this durable insight"], "required" .= (["subject_kind", "subject"] :: [Text])]]
+      , "git_sha" .= prop "string" "Lowercase 40-character Git SHA for the repository state where this insight was established; a staleness-audit sentinel, not timeless proof"
+      , "content" .= prop "string" "Durable, non-obvious repository insight about its subjects; not a progress update or routine fact"
       ] ["subjects", "git_sha", "content"])
   , tool "observation_get" "Get an observation by ID, including content and immutable provenance." (schema ["observation_id" .= prop "string" "Observation UUID"] ["observation_id"])
-  , tool "observation_update" "Replace observation content. Provenance fields cannot be updated." (schema ["observation_id" .= prop "string" "Observation UUID", "content" .= prop "string" "Replacement content"] ["observation_id", "content"])
-  , tool "observation_list" "List observations using exact provenance filters and optional text search. When has_more is true, pass next_offset to retrieve the next page." (schema
-      [ "subject_kind" .= enumProp "Exact observation subject kind" ["file", "glob"]
-      , "subject" .= prop "string" "Exact repository-relative subject"
-      , "git_sha" .= prop "string" "Exact observation Git SHA"
-      , "query" .= prop "string" "Optional full-text query"
+  , tool "observation_update" "Replace only the content of a durable, non-obvious repository insight. Subjects and git_sha are immutable provenance; git_sha remains the state where the insight was established and a staleness-audit sentinel, not timeless proof." (schema ["observation_id" .= prop "string" "Observation UUID", "content" .= prop "string" "Replacement durable, non-obvious repository insight about the existing subjects; not a progress update or routine fact"] ["observation_id", "content"])
+  , tool "observation_list" "List durable, non-obvious repository insights using exact subject and git_sha provenance filters and optional text search. git_sha is a sentinel for deciding when an insight needs re-audit, not timeless proof. When has_more is true, pass next_offset to retrieve the next page." (schema
+      [ "subject_kind" .= enumProp "Exact kind of repository subject tied to observations" ["file", "glob"]
+      , "subject" .= prop "string" "Exact repository-relative subject tied to observations"
+      , "git_sha" .= prop "string" "Exact Git SHA where an Observation insight was established; use it to select potentially stale insights for re-audit"
+      , "query" .= prop "string" "Optional full-text query over durable repository insights"
       , "limit" .= prop "integer" "Maximum results (1-200)"
       , "offset" .= prop "integer" "Result offset"
       ] [])
-  , tool "observation_match" "Find observations whose stored file subjects or safe glob subjects match any concrete repository-relative path supplied in paths. Paths are ORed; do not pass globs here and no repository filesystem is read. Optional filters compose with matching. Continue with next_offset until has_more is false." (schema
-      [ "paths" .= object ["type" .= ("array" :: Text), "description" .= ("One to 256 concrete repository-relative files; globs are rejected" :: Text), "minItems" .= (1 :: Int), "maxItems" .= (256 :: Int), "items" .= prop "string" "Concrete repository-relative path"]
-      , "subject_kind" .= enumProp "Filter matching stored subjects by kind" ["file", "glob"]
-      , "git_sha" .= prop "string" "Exact observation Git SHA"
-      , "query" .= prop "string" "Optional full-text query"
+  , tool "observation_match" "Find durable, non-obvious repository insights whose stored file subjects or safe glob subjects match any concrete repository-relative path supplied in paths. Paths are ORed; do not pass globs here and no repository filesystem is read. Optional filters compose with matching. git_sha is a staleness-audit sentinel, not timeless proof. Continue with next_offset until has_more is false." (schema
+      [ "paths" .= object ["type" .= ("array" :: Text), "description" .= ("One to 256 concrete repository-relative files to match against stored Observation subjects; globs are rejected" :: Text), "minItems" .= (1 :: Int), "maxItems" .= (256 :: Int), "items" .= prop "string" "Concrete repository-relative file to match against Observation subjects"]
+      , "subject_kind" .= enumProp "Filter matching repository subjects by kind" ["file", "glob"]
+      , "git_sha" .= prop "string" "Exact Git SHA where an Observation insight was established; use it to select potentially stale insights for re-audit"
+      , "query" .= prop "string" "Optional full-text query over durable repository insights"
       , "limit" .= prop "integer" "Maximum results (1-200)"
       , "offset" .= prop "integer" "Result offset"
       ] ["paths"])
@@ -84,10 +84,10 @@ toolDefinitions =
       [ "observation_id" .= prop "string" "Observation UUID"
       , "embedding" .= object ["type" .= ("array" :: Text), "description" .= ("Exactly 1536 finite numeric dimensions" :: Text), "minItems" .= (observationEmbeddingDimensions :: Int), "maxItems" .= (observationEmbeddingDimensions :: Int), "items" .= object ["type" .= ("number" :: Text)]]
       ] ["observation_id", "embedding"])
-  , tool "observation_similar" "Find semantically similar observations. To continue, add returned_count to offset and repeat until returned_count is less than limit or zero." (schema
-      [ "subject_kind" .= enumProp "Exact observation subject kind" ["file", "glob"]
-      , "subject" .= prop "string" "Exact repository-relative subject"
-      , "git_sha" .= prop "string" "Exact observation Git SHA"
+  , tool "observation_similar" "Find semantically similar durable, non-obvious repository insights. Subject and git_sha filters are exact provenance filters; git_sha is a staleness-audit sentinel, not timeless proof. To continue, add returned_count to offset and repeat until returned_count is less than limit or zero." (schema
+      [ "subject_kind" .= enumProp "Exact kind of repository subject tied to observations" ["file", "glob"]
+      , "subject" .= prop "string" "Exact repository-relative subject tied to observations"
+      , "git_sha" .= prop "string" "Exact Git SHA where an Observation insight was established; use it to select potentially stale insights for re-audit"
       , "embedding" .= object ["type" .= ("array" :: Text), "description" .= ("Exactly 1536 finite numeric dimensions" :: Text), "minItems" .= (observationEmbeddingDimensions :: Int), "maxItems" .= (observationEmbeddingDimensions :: Int), "items" .= object ["type" .= ("number" :: Text)]]
       , "min_similarity" .= prop "number" "Minimum similarity from 0 through 1"
       , "limit" .= prop "integer" "Maximum results (1-200)"

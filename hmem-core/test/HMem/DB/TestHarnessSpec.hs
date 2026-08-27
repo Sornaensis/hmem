@@ -5,13 +5,14 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Data.Functor.Contravariant (contramap)
 import Data.List (isInfixOf, sort)
-import Data.Pool (destroyAllResources)
+import Data.Pool (Pool, destroyAllResources)
 import Data.Text (Text)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text qualified as T
 import Data.UUID (UUID)
 import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
+import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, listDirectory, removeDirectoryRecursive, withCurrentDirectory)
@@ -23,6 +24,8 @@ import Test.Hspec
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool (DBException(..), createPool, runSession, runTransaction)
 import HMem.DB.TestHarness
+import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
+import HMem.Types (SubjectKind, subjectKindToText)
 
 spec :: Spec
 spec = do
@@ -601,6 +604,52 @@ spec = do
               runSession pool (queryBool "SELECT to_regclass('public.observations') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_type WHERE typname = 'observation_subject_kind') AND NOT EXISTS (SELECT 1 FROM pg_type WHERE typname IN ('memory_type_enum', 'relation_type_enum'))") `shouldReturn` True
               runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'observations' AND column_name = 'embedding') AND to_regclass('public.idx_observations_embedding') IS NULL") `shouldReturn` True
 
+    it "observationSubjectSetMigration upgrades populated V020 observations without losing recursive-glob provenance" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              preV20 <- copyMigrationSubset sandbox migrations "pre-v020-subject-set" (\name -> name < "V020")
+              v20 <- copyMigrationSubset sandbox migrations "v020-subject-set" (== "V020__replace_memories_with_observations.sql")
+              v21 <- copyMigrationSubset sandbox migrations "v021-subject-set" (== "V021__observation_subject_sets.sql")
+              Migration.runMigrations pool preV20 >>= (\result -> result.failed `shouldBe` Nothing)
+              Migration.runMigrations pool v20 >>= (\result -> result.failed `shouldBe` Nothing)
+              runSession pool $ Session.sql "INSERT INTO workspaces (name) VALUES ('subject-set-upgrade')"
+              runSession pool $ Session.sql "INSERT INTO observations (id, workspace_id, subject_kind, subject, git_sha, content, created_at, updated_at) SELECT '00000000-0000-0000-0000-000000000021', id, 'glob', 'src/**/*.hs', '0123456789abcdef0123456789abcdef01234567', 'recursive provenance', '2001-02-03T04:05:06Z', '2001-02-03T04:05:06Z' FROM workspaces WHERE name = 'subject-set-upgrade'"
+              runSession pool $ Session.sql "INSERT INTO observations (id, workspace_id, subject_kind, subject, git_sha, content) SELECT '00000000-0000-0000-0000-000000000023', id, 'file', 'src/Deleted.hs', '0123456789abcdef0123456789abcdef01234567', 'deleted provenance' FROM workspaces WHERE name = 'subject-set-upgrade'"
+              runSession pool $ Session.sql "UPDATE observations SET content = 'deleted provenance revised' WHERE id = '00000000-0000-0000-0000-000000000023'"
+              runSession pool $ Session.sql "DELETE FROM observations WHERE id = '00000000-0000-0000-0000-000000000023'"
+              runSession pool $ Session.sql "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN EXECUTE format('UPDATE observations SET embedding = %L::vector WHERE id = %L', '[' || repeat('0,', 1535) || '1]', '00000000-0000-0000-0000-000000000021'); END IF; END $$"
+              runSession pool $ Session.sql "UPDATE observations SET content = 'recursive provenance revised' WHERE id = '00000000-0000-0000-0000-000000000021'"
+              runSession pool $ Session.sql "CREATE TEMP TABLE v021_fixture_before AS SELECT id, created_at, updated_at FROM observations WHERE id = '00000000-0000-0000-0000-000000000021'"
+              Migration.runMigrations pool v21 >>= (\result -> result.failed `shouldBe` Nothing)
+              runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'observations' AND column_name IN ('subject_kind', 'subject'))") `shouldReturn` True
+              runSession pool (queryBool "SELECT EXISTS (SELECT 1 FROM observation_subjects s JOIN observations o ON o.id = s.observation_id WHERE o.id = '00000000-0000-0000-0000-000000000021' AND s.subject_kind = 'glob' AND s.subject = 'src/**/*.hs' AND s.ordinal = 0 AND o.content = 'recursive provenance revised')") `shouldReturn` True
+              runSession pool (queryBool "SELECT o.created_at = f.created_at AND o.updated_at = f.updated_at FROM observations o JOIN v021_fixture_before f ON f.id = o.id") `shouldReturn` True
+              runSession pool (queryBool "SELECT (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000021' AND action = 'create') = 1") `shouldReturn` True
+              runSession pool (queryBool "SELECT (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000021' AND action = 'update') = 1") `shouldReturn` True
+              runSession pool (queryBool "SELECT (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000021' AND action = 'create' AND new_values->'subjects' = '[{\"subject\": \"src/**/*.hs\", \"subject_kind\": \"glob\"}]'::jsonb AND new_values->>'subject_kind' = 'glob' AND new_values->>'subject' = 'src/**/*.hs') = 1") `shouldReturn` True
+              runSession pool (queryBool "SELECT (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000021' AND action = 'update' AND old_values->'subjects' = '[{\"subject\": \"src/**/*.hs\", \"subject_kind\": \"glob\"}]'::jsonb AND new_values->'subjects' = '[{\"subject\": \"src/**/*.hs\", \"subject_kind\": \"glob\"}]'::jsonb AND old_values->>'subject' = 'src/**/*.hs' AND new_values->>'subject' = 'src/**/*.hs') = 1") `shouldReturn` True
+              runSession pool (queryBool "SELECT (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000023') = 3 AND (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000023' AND action = 'create' AND old_values IS NULL AND new_values->'subjects' = '[{\"subject\": \"src/Deleted.hs\", \"subject_kind\": \"file\"}]'::jsonb AND new_values->>'subject_kind' = 'file' AND new_values->>'subject' = 'src/Deleted.hs') = 1 AND (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000023' AND action = 'update' AND old_values->'subjects' = '[{\"subject\": \"src/Deleted.hs\", \"subject_kind\": \"file\"}]'::jsonb AND new_values->'subjects' = '[{\"subject\": \"src/Deleted.hs\", \"subject_kind\": \"file\"}]'::jsonb AND old_values->>'subject_kind' = 'file' AND old_values->>'subject' = 'src/Deleted.hs' AND new_values->>'subject_kind' = 'file' AND new_values->>'subject' = 'src/Deleted.hs') = 1 AND (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000023' AND action = 'delete' AND old_values->'subjects' = '[{\"subject\": \"src/Deleted.hs\", \"subject_kind\": \"file\"}]'::jsonb AND old_values->>'subject_kind' = 'file' AND old_values->>'subject' = 'src/Deleted.hs' AND new_values IS NULL) = 1") `shouldReturn` True
+              runSession pool $ Session.sql "WITH inserted AS (INSERT INTO observations (id, workspace_id, git_sha, content, subject_set_open) SELECT '00000000-0000-0000-0000-000000000022', id, '0123456789abcdef0123456789abcdef01234567', 'multi-subject audit', TRUE FROM workspaces WHERE name = 'subject-set-upgrade' RETURNING id), inserted_subjects AS (INSERT INTO observation_subjects (observation_id, ordinal, subject_kind, subject) SELECT inserted.id, entries.ordinal, entries.subject_kind::observation_subject_kind, entries.subject FROM inserted CROSS JOIN (VALUES (0, 'glob', 'src/**/*.hs'), (1, 'file', 'README.md')) AS entries(ordinal, subject_kind, subject) RETURNING observation_id) SELECT 1 FROM inserted_subjects"
+              runSession pool (queryBool "SELECT (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000022' AND action = 'create' AND new_values->'subjects' = '[{\"subject\": \"src/**/*.hs\", \"subject_kind\": \"glob\"}, {\"subject\": \"README.md\", \"subject_kind\": \"file\"}]'::jsonb AND new_values->>'subject_kind' = 'glob' AND new_values->>'subject' = 'src/**/*.hs') = 1") `shouldReturn` True
+              runSession pool $ Session.sql "UPDATE observations SET content = 'multi-subject audit revised' WHERE id = '00000000-0000-0000-0000-000000000022'"
+              runSession pool (queryBool "SELECT (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000022' AND action = 'update' AND old_values->'subjects' = '[{\"subject\": \"src/**/*.hs\", \"subject_kind\": \"glob\"}, {\"subject\": \"README.md\", \"subject_kind\": \"file\"}]'::jsonb AND new_values->'subjects' = '[{\"subject\": \"src/**/*.hs\", \"subject_kind\": \"glob\"}, {\"subject\": \"README.md\", \"subject_kind\": \"file\"}]'::jsonb AND old_values->>'subject' = 'src/**/*.hs' AND new_values->>'subject' = 'src/**/*.hs') = 1") `shouldReturn` True
+              runSession pool $ Session.sql "DELETE FROM observations WHERE id = '00000000-0000-0000-0000-000000000022'"
+              runSession pool (queryBool "SELECT (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000022' AND action = 'delete' AND old_values->'subjects' = '[{\"subject\": \"src/**/*.hs\", \"subject_kind\": \"glob\"}, {\"subject\": \"README.md\", \"subject_kind\": \"file\"}]'::jsonb AND old_values->>'subject_kind' = 'glob' AND old_values->>'subject' = 'src/**/*.hs') = 1 AND (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000022') = 3") `shouldReturn` True
+              runSession pool $ Session.sql "DO $$ DECLARE preserved BOOLEAN; BEGIN IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN EXECUTE format('SELECT embedding <-> %L::vector = 0 FROM observations WHERE id = %L', '[' || repeat('0,', 1535) || '1]', '00000000-0000-0000-0000-000000000021') INTO preserved; IF NOT preserved THEN RAISE EXCEPTION 'embedding was not preserved'; END IF; END IF; END $$"
+              mapM_ (assertSqlSubjectMatch pool) observationSubjectMatchCorpus
+              runSession pool (queryBool "SELECT to_regclass('idx_observation_subjects_exact') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'observation_subjects'::regclass AND conname IN ('uq_observation_subjects_kind_subject', 'chk_observation_subjects_ordinal', 'chk_observation_subjects_length'))") `shouldReturn` True
+              immutable <- try (runSession pool $ Session.sql "UPDATE observation_subjects SET subject = 'src/Other.hs'") :: IO (Either DBException ())
+              immutable `shouldSatisfy` either (const True) (const False)
+              inserted <- try (runSession pool $ Session.sql "INSERT INTO observation_subjects (observation_id, ordinal, subject_kind, subject) SELECT id, 1, 'file', 'README.md' FROM observations") :: IO (Either DBException ())
+              inserted `shouldSatisfy` either (const True) (const False)
+              removed <- try (runSession pool $ Session.sql "DELETE FROM observation_subjects") :: IO (Either DBException ())
+              removed `shouldSatisfy` either (const True) (const False)
+              runSession pool $ Session.sql "DELETE FROM observations"
+              runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM observation_subjects) AND (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000021' AND action = 'delete') = 1") `shouldReturn` True
+
     it "observationMigration fresh chain creates pgvector artifacts when vector is available" $
       withTestSandbox $ \sandbox -> do
         migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
@@ -642,6 +691,22 @@ spec = do
 
 queryBool :: BS.ByteString -> Session.Session Bool
 queryBool sql = Session.statement () $ Statement.Statement sql E.noParams (D.singleRow (D.column (D.nonNullable D.bool))) True
+
+assertSqlSubjectMatch :: Pool Hasql.Connection -> (SubjectKind, Text, Text, Bool) -> IO ()
+assertSqlSubjectMatch pool (kind, pattern, path, expected) = do
+  actual <- runSession pool (Session.statement (subjectKindToText kind, pattern, path) subjectMatchStatement)
+  if actual == expected
+    then pure ()
+    else expectationFailure $ "SQL glob corpus mismatch for " <> show (kind, pattern, path) <> ": expected " <> show expected <> ", got " <> show actual
+
+subjectMatchStatement :: Statement.Statement (Text, Text, Text) Bool
+subjectMatchStatement = Statement.Statement
+  "SELECT hmem_observation_subject_matches($1::observation_subject_kind, $2, $3)"
+  ((contramap (\(kind, _, _) -> kind) (E.param (E.nonNullable E.text)))
+    <> (contramap (\(_, pattern, _) -> pattern) (E.param (E.nonNullable E.text)))
+    <> (contramap (\(_, _, path) -> path) (E.param (E.nonNullable E.text))))
+  (D.singleRow (D.column (D.nonNullable D.bool)))
+  True
 
 withEnvVar :: String -> Maybe String -> IO a -> IO a
 withEnvVar name value = bracket setup restore . const

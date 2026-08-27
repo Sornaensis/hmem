@@ -5,18 +5,24 @@ module HMem.DB.Observation
   , deleteObservation
   , listObservations
   , listObservationsOverfetch
+  , matchObservations
+  , matchObservationsOverfetch
   , setObservationEmbedding
   , similarObservations
   ) where
 
 import Control.Exception (throwIO)
+import Data.Aeson qualified as Aeson
+import Data.Aeson (eitherDecodeStrict')
 import Data.ByteString.Char8 qualified as BS8
+import Data.ByteString.Lazy qualified as LBS
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32)
 import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as Dec
@@ -30,18 +36,6 @@ import HMem.DB.Pool (DBException(..), runSession)
 import HMem.DB.Schema
 import HMem.Types
 
-rowToObservation :: ObservationT Result -> Observation
-rowToObservation row = Observation
-  { id = row.obsId
-  , workspaceId = row.obsWorkspaceId
-  , subjectKind = row.obsSubjectKind
-  , subject = row.obsSubject
-  , gitSha = row.obsGitSha
-  , content = row.obsContent
-  , createdAt = row.obsCreatedAt
-  , updatedAt = row.obsUpdatedAt
-  }
-
 validateOrThrow :: [Text] -> IO ()
 validateOrThrow [] = pure ()
 validateOrThrow errors = throwIO $ DBCheckViolation (T.intercalate "; " errors)
@@ -50,19 +44,24 @@ validateOrThrow errors = throwIO $ DBCheckViolation (T.intercalate "; " errors)
 -- the workspace row, preventing a type/deletion change from racing a create.
 createObservation :: Pool Hasql.Connection -> CreateObservation -> IO Observation
 createObservation pool create = do
-  validateOrThrow $ validateCreateObservationInput create
+  let normalizedCreate = CreateObservation
+        { workspaceId = create.workspaceId
+        , subjects = normalizeObservationSubjects create.subjects
+        , gitSha = create.gitSha
+        , content = create.content
+        }
+  validateOrThrow $ validateCreateObservationInput normalizedCreate
   rows <- runSession pool $ Session.statement
-    ( create.workspaceId
-    , subjectKindToText create.subjectKind
-    , create.subject
-    , create.gitSha
-    , create.content
+    ( normalizedCreate.workspaceId
+    , subjectsJson normalizedCreate.subjects
+    , normalizedCreate.gitSha
+    , normalizedCreate.content
     ) createObservationStatement
   case rows of
     (row:_) -> pure row
     [] -> throwIO $ DBCheckViolation "observations require an active repository workspace"
 
-createObservationStatement :: Statement.Statement (UUID, Text, Text, Text, Text) [Observation]
+createObservationStatement :: Statement.Statement (UUID, Text, Text, Text) [Observation]
 createObservationStatement = Statement.Statement sql encoder (Dec.rowList observationDecoder) True
   where
     sql = BS8.pack $ unlines
@@ -71,26 +70,30 @@ createObservationStatement = Statement.Statement sql encoder (Dec.rowList observ
       , "  WHERE id = $1 AND workspace_type = 'repository' AND deleted_at IS NULL"
       , "  FOR UPDATE"
       , "), inserted AS ("
-      , "  INSERT INTO observations (workspace_id, subject_kind, subject, git_sha, content)"
-      , "  SELECT id, $2::observation_subject_kind, $3, $4, $5 FROM repository_workspace"
-      , "  RETURNING id, workspace_id, subject_kind::text, subject, git_sha, content, created_at, updated_at"
-      , ") SELECT * FROM inserted"
+      , "  INSERT INTO observations (workspace_id, git_sha, content, subject_set_open)"
+      , "  SELECT id, $3, $4, TRUE FROM repository_workspace"
+      , "  RETURNING id, workspace_id, git_sha, content, created_at, updated_at"
+      , "), inserted_subjects AS ("
+      , "  INSERT INTO observation_subjects (observation_id, ordinal, subject_kind, subject)"
+      , "  SELECT inserted.id, entry.ordinality - 1, (entry.value ->> 'subject_kind')::observation_subject_kind, entry.value ->> 'subject'"
+      , "  FROM inserted CROSS JOIN jsonb_array_elements($2::jsonb) WITH ORDINALITY AS entry(value, ordinality)"
+      , "  RETURNING observation_id, ordinal, subject_kind, subject"
+      , ")"
+      , "SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at,"
+      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text"
+      , "FROM inserted o JOIN inserted_subjects s ON s.observation_id = o.id"
+      , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at"
       ]
     encoder =
-         contramap (\(a,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
-      <> contramap (\(_,b,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text))
-      <> contramap (\(_,_,c,_,_) -> c) (Enc.param (Enc.nonNullable Enc.text))
-      <> contramap (\(_,_,_,d,_) -> d) (Enc.param (Enc.nonNullable Enc.text))
-      <> contramap (\(_,_,_,_,e) -> e) (Enc.param (Enc.nonNullable Enc.text))
+         contramap (\(a,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,b,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,_,c,_) -> c) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nonNullable Enc.text))
 
 getObservation :: Pool Hasql.Connection -> UUID -> UUID -> IO (Maybe Observation)
 getObservation pool workspace observationId = do
-  rows <- runSession pool $ Session.statement () $ run $ select $ do
-    row <- each observationSchema
-    where_ $ row.obsId ==. lit observationId
-    where_ $ row.obsWorkspaceId ==. lit workspace
-    pure row
-  pure $ rowToObservation <$> case rows of
+  rows <- runSession pool $ Session.statement (workspace, observationId) getObservationStatement
+  pure $ case rows of
     (row:_) -> Just row
     [] -> Nothing
 
@@ -105,9 +108,12 @@ updateObservation pool workspace observationId update = do
       , updateWhere = \_ row -> row.obsId ==. lit observationId &&. row.obsWorkspaceId ==. lit workspace
       , returning = Returning id
       }
-  pure $ rowToObservation <$> case rows of
-    (row:_) -> Just row
-    [] -> Nothing
+  -- Rel8 can return the parent row, then retrieve its subjects in one SQL
+  -- statement.  This preserves the content-only update while avoiding a
+  -- mutable subject path.
+  case rows of
+    (row:_) -> getObservation pool workspace observationId
+    [] -> pure Nothing
 
 -- | Observations are permanently deleted; there is no soft-delete state.
 deleteObservation :: Pool Hasql.Connection -> UUID -> UUID -> IO Bool
@@ -135,7 +141,7 @@ listObservationsOverfetch :: Pool Hasql.Connection -> ObservationQuery -> IO [Ob
 listObservationsOverfetch pool queryValue = do
   validateOrThrow $ validateObservationQuery queryValue
   let queryWithExtra :: ObservationQuery
-      queryWithExtra = queryValue { limit = (+ 1) <$> queryValue.limit }
+      queryWithExtra = queryValue { limit = Just (fromMaybe 50 queryValue.limit + 1) }
   listObservationsUnchecked pool queryWithExtra
 
 listObservationsUnchecked :: Pool Hasql.Connection -> ObservationQuery -> IO [Observation]
@@ -152,26 +158,105 @@ listObservationsUnchecked pool queryValue = do
     , offsetValue
     ) listObservationsStatement
 
+-- | Match concrete repository-relative paths against stored file and glob
+-- subjects.  The SQL predicate is the scalable counterpart to
+-- 'observationSubjectMatchesPath'; it returns evidence in stable caller and
+-- stored-subject order without duplicating observations.
+matchObservations :: Pool Hasql.Connection -> ObservationMatchQuery -> IO [ObservationMatch]
+matchObservations pool queryValue = do
+  validateOrThrow $ validateObservationMatchQuery queryValue
+  matchObservationsUnchecked pool queryValue
+
+matchObservationsUnchecked :: Pool Hasql.Connection -> ObservationMatchQuery -> IO [ObservationMatch]
+matchObservationsUnchecked pool queryValue = do
+  let limitValue = fromIntegral (fromMaybe 50 queryValue.limit) :: Int32
+      offsetValue = fromIntegral (fromMaybe 0 queryValue.offset) :: Int32
+  runSession pool $ Session.statement
+    ( queryValue.workspaceId, subjectsJson (map (ObservationSubject SubjectFile) (normalizePaths queryValue.paths))
+    , subjectKindToText <$> queryValue.subjectKind, queryValue.gitSha, queryValue.query, limitValue, offsetValue
+    ) matchObservationsStatement
+
+matchObservationsOverfetch :: Pool Hasql.Connection -> ObservationMatchQuery -> IO [ObservationMatch]
+matchObservationsOverfetch pool queryValue = do
+  validateOrThrow $ validateObservationMatchQuery queryValue
+  matchObservationsUnchecked pool queryValue { limit = Just (fromMaybe 50 queryValue.limit + 1) }
+
 listObservationsStatement :: Statement.Statement
   (UUID, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Int32, Int32) [Observation]
 listObservationsStatement = Statement.Statement sql encoder (Dec.rowList observationDecoder) True
   where
     sql = BS8.pack $ unlines
-      [ "SELECT id, workspace_id, subject_kind::text, subject, git_sha, content, created_at, updated_at"
-      , "FROM observations"
-      , "WHERE workspace_id = $1"
-      , "  AND ($2::text IS NULL OR subject_kind::text = $2)"
-      , "  AND ($3::text IS NULL OR subject = $3)"
-      , "  AND ($4::text IS NULL OR git_sha = $4)"
-      , "  AND ($5::text IS NULL OR search_vector @@ plainto_tsquery('simple', $5))"
+      [ "SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at,"
+      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text"
+      , "FROM observations o JOIN observation_subjects s ON s.observation_id = o.id"
+      , "WHERE o.workspace_id = $1"
+      , "  AND (($2::text IS NULL AND $3::text IS NULL) OR EXISTS (SELECT 1 FROM observation_subjects f WHERE f.observation_id = o.id AND ($2::text IS NULL OR f.subject_kind::text = $2) AND ($3::text IS NULL OR f.subject = $3)))"
+      , "  AND ($4::text IS NULL OR o.git_sha = $4)"
+      , "  AND ($5::text IS NULL OR o.search_vector @@ plainto_tsquery('simple', $5))"
+      , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.search_vector"
       , "ORDER BY"
       , "  CASE WHEN $5::text IS NULL THEN 0 ELSE ts_rank(search_vector, plainto_tsquery('simple', $5)) END DESC,"
-      , "  updated_at DESC, id DESC"
+      , "  o.updated_at DESC, o.id DESC"
       , "LIMIT $6 OFFSET $7"
       ]
     encoder =
          contramap (\(a,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
       <> contramap (\(_,b,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,c,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,d,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,e,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,f,_) -> f) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,g) -> g) (Enc.param (Enc.nonNullable Enc.int4))
+
+matchObservationsStatement :: Statement.Statement
+  (UUID, Text, Maybe Text, Maybe Text, Maybe Text, Int32, Int32) [ObservationMatch]
+matchObservationsStatement = Statement.Statement sql encoder (Dec.rowList matchObservationDecoder) True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH requested_paths AS ("
+      , "  SELECT path.value ->> 'subject' AS path, path.ordinality AS path_ordinal"
+      , "  FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS path(value, ordinality)"
+      , "), scoped_candidates AS ("
+      , "  SELECT o.id"
+      , "  FROM observations o"
+      , "  WHERE o.workspace_id = $1"
+      , "    AND ($4::text IS NULL OR o.git_sha = $4)"
+      , "    AND ($5::text IS NULL OR o.search_vector @@ plainto_tsquery('simple', $5))"
+      , "), matching_subjects AS ("
+      , "  SELECT s.observation_id, s.ordinal, s.subject_kind, s.subject, rp.path, rp.path_ordinal"
+      , "  FROM scoped_candidates c JOIN observation_subjects s ON s.observation_id = c.id"
+      , "  JOIN requested_paths rp ON s.subject_kind = 'file' AND s.subject = rp.path"
+      , "  WHERE $3::text IS NULL OR s.subject_kind::text = $3"
+      , "  UNION ALL"
+      , "  SELECT s.observation_id, s.ordinal, s.subject_kind, s.subject, rp.path, rp.path_ordinal"
+      , "  FROM scoped_candidates c JOIN observation_subjects s ON s.observation_id = c.id"
+      , "  JOIN requested_paths rp ON s.subject_kind = 'glob' AND hmem_observation_subject_matches(s.subject_kind, s.subject, rp.path)"
+      , "  WHERE $3::text IS NULL OR s.subject_kind::text = $3"
+      , "), candidate_ids AS ("
+      , "  SELECT DISTINCT observation_id AS id FROM matching_subjects"
+      , "), candidates AS ("
+      , "  SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.search_vector,"
+      , "         jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text AS subjects_json"
+      , "  FROM candidate_ids ids JOIN observations o ON o.id = ids.id"
+      , "  JOIN observation_subjects s ON s.observation_id = o.id"
+      , "  GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.search_vector"
+      , "), matched_pairs AS ("
+      , "  SELECT DISTINCT c.*, ms.path, ms.path_ordinal, ms.ordinal, ms.subject_kind, ms.subject"
+      , "  FROM candidates c JOIN matching_subjects ms ON ms.observation_id = c.id"
+      , "), matched AS ("
+      , "  SELECT DISTINCT p.id, p.workspace_id, p.git_sha, p.content, p.created_at, p.updated_at, p.search_vector, p.subjects_json,"
+      , "    (SELECT jsonb_agg(path ORDER BY path_ordinal) FROM (SELECT DISTINCT path, path_ordinal FROM matched_pairs q WHERE q.id = p.id) paths) AS paths_json,"
+      , "    (SELECT jsonb_agg(jsonb_build_object('subject_kind', subject_kind::text, 'subject', subject) ORDER BY ordinal) FROM (SELECT DISTINCT ordinal, subject_kind, subject FROM matched_pairs q WHERE q.id = p.id) subjects) AS matched_subjects_json"
+      , "  FROM matched_pairs p"
+      , ")"
+      , "SELECT id, workspace_id, git_sha, content, created_at, updated_at, subjects_json, paths_json::text, matched_subjects_json::text"
+      , "FROM matched"
+      , "ORDER BY CASE WHEN $5::text IS NULL THEN 0 ELSE ts_rank(search_vector, plainto_tsquery('simple', $5)) END DESC, updated_at DESC, id DESC"
+      , "LIMIT $6 OFFSET $7"
+      ]
+    encoder =
+         contramap (\(a,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,b,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text))
       <> contramap (\(_,_,c,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
       <> contramap (\(_,_,_,d,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
       <> contramap (\(_,_,_,_,e,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
@@ -235,16 +320,17 @@ similarObservationsStatement :: Statement.Statement
 similarObservationsStatement = Statement.Statement sql encoder (Dec.rowList similarObservationDecoder) True
   where
     sql = BS8.pack $ unlines
-      [ "SELECT id, workspace_id, subject_kind::text, subject, git_sha, content, created_at, updated_at,"
-      , "       1 - (embedding <=> $1::vector) AS similarity"
-      , "FROM observations"
-      , "WHERE embedding IS NOT NULL"
-      , "  AND workspace_id = $2"
-      , "  AND ($3::text IS NULL OR subject_kind::text = $3)"
-      , "  AND ($4::text IS NULL OR subject = $4)"
-      , "  AND ($5::text IS NULL OR git_sha = $5)"
-      , "  AND 1 - (embedding <=> $1::vector) >= $6"
-      , "ORDER BY embedding <=> $1::vector ASC, updated_at DESC, id DESC"
+      [ "SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at,"
+      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text,"
+      , "       1 - (o.embedding <=> $1::vector) AS similarity"
+      , "FROM observations o JOIN observation_subjects s ON s.observation_id = o.id"
+      , "WHERE o.embedding IS NOT NULL"
+      , "  AND o.workspace_id = $2"
+      , "  AND (($3::text IS NULL AND $4::text IS NULL) OR EXISTS (SELECT 1 FROM observation_subjects f WHERE f.observation_id = o.id AND ($3::text IS NULL OR f.subject_kind::text = $3) AND ($4::text IS NULL OR f.subject = $4)))"
+      , "  AND ($5::text IS NULL OR o.git_sha = $5)"
+      , "  AND 1 - (o.embedding <=> $1::vector) >= $6"
+      , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.embedding"
+      , "ORDER BY o.embedding <=> $1::vector ASC, o.updated_at DESC, o.id DESC"
       , "LIMIT $7 OFFSET $8"
       ]
     encoder =
@@ -261,21 +347,52 @@ observationDecoder :: Dec.Row Observation
 observationDecoder = do
   observationId <- Dec.column (Dec.nonNullable Dec.uuid)
   workspace <- Dec.column (Dec.nonNullable Dec.uuid)
-  kindText <- Dec.column (Dec.nonNullable Dec.text)
-  kind <- maybe (fail $ "Unexpected observation_subject_kind: " <> T.unpack kindText) pure (subjectKindFromText kindText)
-  observationSubject <- Dec.column (Dec.nonNullable Dec.text)
   sha <- Dec.column (Dec.nonNullable Dec.text)
   observationContent <- Dec.column (Dec.nonNullable Dec.text)
   created <- Dec.column (Dec.nonNullable Dec.timestamptz)
   updated <- Dec.column (Dec.nonNullable Dec.timestamptz)
+  subjectsJson <- Dec.column (Dec.nonNullable Dec.text)
+  subjectsValue <- either (fail . show) pure (eitherDecodeStrict' (TE.encodeUtf8 subjectsJson))
   pure Observation
-    { id = observationId, workspaceId = workspace, subjectKind = kind
-    , subject = observationSubject, gitSha = sha, content = observationContent
+    { id = observationId, workspaceId = workspace, subjects = subjectsValue
+    , gitSha = sha, content = observationContent
     , createdAt = created, updatedAt = updated
     }
 
 similarObservationDecoder :: Dec.Row SimilarObservation
 similarObservationDecoder = SimilarObservation <$> observationDecoder <*> Dec.column (Dec.nonNullable Dec.float8)
 
+matchObservationDecoder :: Dec.Row ObservationMatch
+matchObservationDecoder = do
+  matchedObservation <- observationDecoder
+  pathsJson <- Dec.column (Dec.nonNullable Dec.text)
+  subjectsValue <- Dec.column (Dec.nonNullable Dec.text)
+  pathsValue <- either (fail . show) pure (eitherDecodeStrict' (TE.encodeUtf8 pathsJson))
+  matchedSubjectsValue <- either (fail . show) pure (eitherDecodeStrict' (TE.encodeUtf8 subjectsValue))
+  pure ObservationMatch
+    { observation = matchedObservation
+    , matchedPaths = pathsValue
+    , matchedSubjects = matchedSubjectsValue
+    }
+
 vecText :: [Double] -> Text
 vecText vectorValues = "[" <> T.intercalate "," (map (T.pack . show) vectorValues) <> "]"
+
+subjectsJson :: [ObservationSubject] -> Text
+subjectsJson = TE.decodeUtf8 . LBS.toStrict . Aeson.encode
+
+normalizePaths :: [Text] -> [Text]
+normalizePaths = map (.subject) . normalizeObservationSubjects . map (ObservationSubject SubjectFile)
+
+getObservationStatement :: Statement.Statement (UUID, UUID) [Observation]
+getObservationStatement = Statement.Statement sql encoder (Dec.rowList observationDecoder) True
+  where
+    sql = BS8.pack $ unlines
+      [ "SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at,"
+      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text"
+      , "FROM observations o JOIN observation_subjects s ON s.observation_id = o.id"
+      , "WHERE o.workspace_id = $1 AND o.id = $2"
+      , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at"
+      ]
+    encoder = contramap fst (Enc.param (Enc.nonNullable Enc.uuid))
+           <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))

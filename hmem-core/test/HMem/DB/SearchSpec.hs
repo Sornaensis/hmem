@@ -19,11 +19,15 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
     it "searches workspace-scoped observations with exact provenance filters without enriching other hits" $ \env -> do
       workspace <- createTestWorkspace env "unified-observation-search"
       matching <- createObservation env.pool CreateObservation
-        { workspaceId = workspace.id, subjectKind = SubjectFile, subject = "src/Search.hs"
+        { workspaceId = workspace.id, subjects = [ObservationSubject SubjectFile "src/Search.hs"]
         , gitSha = canonicalSha, content = "needle observation" }
       _distractor <- createObservation env.pool CreateObservation
-        { workspaceId = workspace.id, subjectKind = SubjectGlob, subject = "src/**/*.hs"
+        { workspaceId = workspace.id, subjects = [ObservationSubject SubjectGlob "src/**/*.hs"]
         , gitSha = canonicalSha, content = "needle distractor" }
+      crossRow <- createObservation env.pool CreateObservation
+        { workspaceId = workspace.id
+        , subjects = [ObservationSubject SubjectGlob "src/Search.hs", ObservationSubject SubjectFile "src/Else.hs"]
+        , gitSha = canonicalSha, content = "needle cross-row" }
       project <- createProject env.pool CreateProject
         { workspaceId = workspace.id, parentId = Nothing, name = "needle project"
         , description = Nothing, priority = Nothing, metadata = Nothing }
@@ -36,7 +40,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       results.projects `shouldBe` []
       results.tasks `shouldBe` []
       allResults <- searchAll env.pool (unifiedQuery (Just workspace.id) Nothing Nothing Nothing Nothing)
-      map (.id) allResults.observations `shouldMatchList` [matching.id, _distractor.id]
+      map (.id) allResults.observations `shouldMatchList` [matching.id, _distractor.id, crossRow.id]
       map (.id) allResults.projects `shouldBe` [project.id]
       map (.id) allResults.tasks `shouldBe` [task.id]
 

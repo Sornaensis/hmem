@@ -12,6 +12,6 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
   describe "Entity scope kinds" $
     it "resolves observations to their workspace" $ \env -> do
       workspace <- createTestWorkspace env "observation-auth-scope"
-      observation <- createObservation env.pool (CreateObservation workspace.id SubjectFile "src/Auth.hs" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "scope")
+      observation <- createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/Auth.hs"] "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "scope")
       resolveEntityScope env.pool EntityObservation observation.id
         `shouldReturn` Just (EntityWorkspaceScope workspace.id)

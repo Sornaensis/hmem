@@ -133,8 +133,6 @@ workspaceSchema = TableSchema
 data ObservationT f = ObservationT
   { obsId          :: Column f UUID
   , obsWorkspaceId :: Column f UUID
-  , obsSubjectKind :: Column f SubjectKind
-  , obsSubject     :: Column f Text
   , obsGitSha      :: Column f Text
   , obsContent     :: Column f Text
   , obsSearchVector :: Column f PgTSVector
@@ -149,8 +147,6 @@ observationSchema = TableSchema
   , columns = ObservationT
       { obsId           = "id"
       , obsWorkspaceId  = "workspace_id"
-      , obsSubjectKind  = "subject_kind"
-      , obsSubject      = "subject"
       , obsGitSha       = "git_sha"
       , obsContent      = "content"
       , obsSearchVector = "search_vector"

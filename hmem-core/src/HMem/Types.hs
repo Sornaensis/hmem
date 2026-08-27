@@ -1,10 +1,10 @@
 module HMem.Types
   ( jsonOptions, camelToSnake
   , SubjectKind(..), subjectKindToText, subjectKindFromText
-  , Observation(..), CreateObservation(..), UpdateObservation(..), ObservationQuery(..), SimilarObservationQuery(..), SimilarObservation(..)
-  , maxObservationSubjectBytes, maxObservationContentBytes, observationEmbeddingDimensions
+  , ObservationSubject(..), Observation(..), CreateObservation(..), UpdateObservation(..), ObservationQuery(..), SimilarObservationQuery(..), SimilarObservation(..), ObservationMatchQuery(..), ObservationMatch(..)
+  , maxObservationSubjectBytes, maxObservationSubjects, maxObservationSubjectBytesTotal, maxObservationContentBytes, observationEmbeddingDimensions
   , ObservationEmbedding(..)
-  , validateCreateObservationInput, validateUpdateObservationInput, validateObservationQuery, validateSimilarObservationQuery
+  , validateCreateObservationInput, validateUpdateObservationInput, validateObservationQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
   , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
   , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
   , ProjectStatus(..), Project(..), CreateProject(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..)
@@ -292,6 +292,12 @@ instance DBEq SubjectKind
 maxObservationSubjectBytes :: Int
 maxObservationSubjectBytes = 4096
 
+maxObservationSubjects :: Int
+maxObservationSubjects = 256
+
+maxObservationSubjectBytesTotal :: Int
+maxObservationSubjectBytesTotal = 256 * 1024
+
 maxObservationContentBytes :: Int
 maxObservationContentBytes = 512 * 1024
 
@@ -308,11 +314,18 @@ instance ToJSON ObservationEmbedding where
 instance FromJSON ObservationEmbedding where
   parseJSON value = ObservationEmbedding <$> parseJSON value
 
+data ObservationSubject = ObservationSubject
+  { subjectKind :: SubjectKind
+  , subject     :: Text
+  } deriving (Show, Eq, Ord, Generic)
+
+instance ToJSON ObservationSubject where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationSubject where parseJSON = genericParseJSON jsonOptions
+
 data Observation = Observation
   { id          :: UUID
   , workspaceId :: UUID
-  , subjectKind :: SubjectKind
-  , subject     :: Text
+  , subjects    :: [ObservationSubject]
   , gitSha      :: Text
   , content     :: Text
   , createdAt   :: UTCTime
@@ -320,23 +333,33 @@ data Observation = Observation
   } deriving (Show, Eq, Generic)
 
 instance ToJSON Observation where
-  toJSON = genericToJSON jsonOptions
+  toJSON observation = object $
+    [ "id" .= observation.id, "workspace_id" .= observation.workspaceId
+    , "subjects" .= observation.subjects, "git_sha" .= observation.gitSha
+    , "content" .= observation.content, "created_at" .= observation.createdAt
+    , "updated_at" .= observation.updatedAt
+    ] <> legacySubjectPairs observation.subjects
 instance FromJSON Observation where
-  parseJSON = genericParseJSON jsonOptions
+  parseJSON = withObject "Observation" $ \o -> Observation
+    <$> o .: "id" <*> o .: "workspace_id" <*> parseSubjects o <*> o .: "git_sha"
+    <*> o .: "content" <*> o .: "created_at" <*> o .: "updated_at"
 
 -- | Provenance is supplied once, on creation, and is immutable thereafter.
 data CreateObservation = CreateObservation
   { workspaceId :: UUID
-  , subjectKind :: SubjectKind
-  , subject     :: Text
+  , subjects    :: [ObservationSubject]
   , gitSha      :: Text
   , content     :: Text
   } deriving (Show, Eq, Generic)
 
 instance ToJSON CreateObservation where
-  toJSON = genericToJSON jsonOptions
+  toJSON create = object
+    [ "workspace_id" .= create.workspaceId, "subjects" .= create.subjects
+    , "git_sha" .= create.gitSha, "content" .= create.content
+    ]
 instance FromJSON CreateObservation where
-  parseJSON = genericParseJSON jsonOptions
+  parseJSON = withObject "CreateObservation" $ \o -> CreateObservation
+    <$> o .: "workspace_id" <*> parseCreateObservationSubjects o <*> o .: "git_sha" <*> o .: "content"
 
 -- | Observation updates deliberately expose only mutable content.
 newtype UpdateObservation = UpdateObservation { content :: Text }
@@ -394,9 +417,34 @@ instance ToJSON SimilarObservation where
 instance FromJSON SimilarObservation where
   parseJSON = genericParseJSON jsonOptions
 
+-- | Returns each observation once for concrete repository-relative paths.
+-- Matching is OR across paths and subjects; ordering is retained to make a
+-- result useful to agents without additional sorting or de-duplication.
+data ObservationMatchQuery = ObservationMatchQuery
+  { workspaceId :: UUID
+  , paths       :: [Text]
+  , subjectKind :: Maybe SubjectKind
+  , gitSha      :: Maybe Text
+  , query       :: Maybe Text
+  , limit       :: Maybe Int
+  , offset      :: Maybe Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationMatchQuery where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationMatchQuery where parseJSON = genericParseJSON jsonOptions
+
+data ObservationMatch = ObservationMatch
+  { observation     :: Observation
+  , matchedPaths    :: [Text]
+  , matchedSubjects :: [ObservationSubject]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationMatch where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationMatch where parseJSON = genericParseJSON jsonOptions
+
 validateCreateObservationInput :: CreateObservation -> [Text]
 validateCreateObservationInput co =
-  validateObservationSubject co.subject
+  validateObservationSubjects co.subjects
   <> ["git_sha must be a lowercase 40-character hexadecimal Git SHA" | not (validGitSha co.gitSha)]
   <> validateRequiredText "content" maxObservationContentBytes co.content
 
@@ -421,13 +469,112 @@ validateSimilarObservationQuery soq =
   <> ["min_similarity must be between 0 and 1"
      | maybe False (\x -> x < 0 || x > 1 || isNaN x || isInfinite x) soq.minSimilarity]
 
+validateObservationMatchQuery :: ObservationMatchQuery -> [Text]
+validateObservationMatchQuery omq =
+  validateObservationPagination omq.limit omq.offset
+  <> validateConcretePaths omq.paths
+  <> maybe [] validateGitSha omq.gitSha
+
+normalizeObservationSubjects :: [ObservationSubject] -> [ObservationSubject]
+normalizeObservationSubjects = reverse . snd . foldl' keep ([], [])
+  where
+    keep (seen, kept) candidate
+      | candidate `elem` seen = (seen, kept)
+      | otherwise = (candidate : seen, candidate : kept)
+
+validateObservationSubjects :: [ObservationSubject] -> [Text]
+validateObservationSubjects values =
+  ["subjects must contain between 1 and " <> T.pack (show maxObservationSubjects) <> " entries"
+  | null normalized || length normalized > maxObservationSubjects]
+  <> concatMap validateSubject normalized
+  <> ["subjects must total at most 262144 UTF-8 bytes"
+     | sum (map (BS.length . TE.encodeUtf8 . (.subject)) normalized) > maxObservationSubjectBytesTotal]
+  where
+    normalized = normalizeObservationSubjects values
+    validateSubject candidate = validateObservationSubject candidate.subject
+      <> ["file subjects must be concrete paths" | candidate.subjectKind == SubjectFile && T.any (`elem` ['*', '?']) candidate.subject]
+      <> ["glob subjects support only *, ?, and ** path components" | candidate.subjectKind == SubjectGlob && not (validGlob candidate.subject)]
+
 validateObservationSubject :: Text -> [Text]
 validateObservationSubject value =
   ["subject must be a canonical repository-relative forward-slash path or glob"
   | T.null value || T.isPrefixOf "/" value || T.isPrefixOf "./" value
     || T.any (== '\\') value || isWindowsAbsolute value
     || any (`elem` ["", ".", ".."]) (T.splitOn "/" value)]
+  <> ["subject must not contain control characters" | T.any (\c -> c < ' ' || c == '\DEL') value]
   <> validateByteLength "subject" maxObservationSubjectBytes value
+
+validateConcretePaths :: [Text] -> [Text]
+validateConcretePaths values =
+  ["paths must contain between 1 and " <> T.pack (show maxObservationSubjects) <> " entries"
+  | null normalized || length normalized > maxObservationSubjects]
+  <> concatMap (\path -> validateObservationSubject path <> ["paths must be concrete paths" | T.any (`elem` ['*', '?']) path]) normalized
+  <> ["paths must total at most 262144 UTF-8 bytes" | sum (map (BS.length . TE.encodeUtf8) normalized) > maxObservationSubjectBytesTotal]
+  where normalized = reverse . snd $ foldl' (\(seen, kept) path -> if path `elem` seen then (seen, kept) else (path:seen, path:kept)) ([], []) values
+
+validGlob :: Text -> Bool
+validGlob value =
+  not (T.any (`elem` ['[', ']', '{', '}']) value)
+  && all validComponent (T.splitOn "/" value)
+  where
+    validComponent component
+      | component == "**" = True
+      | T.isInfixOf "**" component = False
+      | otherwise = True
+
+-- | Pure reference matcher.  It intentionally treats dotfiles as ordinary
+-- path components and never reads the filesystem or Git state.
+observationSubjectMatchesPath :: ObservationSubject -> Text -> Bool
+observationSubjectMatchesPath candidate path
+  | not (null (validateObservationSubject path)) || T.any (`elem` ['*', '?']) path = False
+  | candidate.subjectKind == SubjectFile = candidate.subject == path
+  | not (null (validateObservationSubjects [candidate])) = False
+  | otherwise = matchGlob (T.unpack candidate.subject) (T.unpack path)
+  where
+    -- Keep this character-level definition in lockstep with the SQL function
+    -- in V021.  The validated grammar permits ** only as a full path segment;
+    -- **/ has the conventional zero-directory case.
+    matchGlob [] [] = True
+    matchGlob [] _ = False
+    matchGlob ('*':'*':'/':patterns) chars =
+      matchGlob patterns chars || case chars of
+        [] -> False
+        _ -> case break (== '/') chars of
+          (_, '/':remaining) -> matchGlob ('*':'*':'/':patterns) remaining
+          _ -> False
+    matchGlob ('*':'*':patterns) chars =
+      matchGlob patterns chars || case chars of
+        [] -> False
+        (_:remaining) -> matchGlob ('*':'*':patterns) remaining
+    matchGlob ('*':patterns) chars =
+      matchGlob patterns chars || case chars of
+        [] -> False
+        ('/':_) -> False
+        (_:remaining) -> matchGlob ('*':patterns) remaining
+    matchGlob ('?':patterns) (c:remaining) = c /= '/' && matchGlob patterns remaining
+    matchGlob ('?':_) [] = False
+    matchGlob (pattern:patterns) (candidateChar:remaining) = pattern == candidateChar && matchGlob patterns remaining
+    matchGlob _ _ = False
+
+parseSubjects :: Object -> Parser [ObservationSubject]
+parseSubjects o = do
+  supplied <- o .:? "subjects"
+  case supplied of
+    Just values -> pure values
+    Nothing -> (: []) <$> (ObservationSubject <$> o .: "subject_kind" <*> o .: "subject")
+
+parseCreateObservationSubjects :: Object -> Parser [ObservationSubject]
+parseCreateObservationSubjects o
+  | hasSubjects && hasLegacySubject = fail "subjects cannot be combined with subject_kind or subject"
+  | hasSubjects = o .: "subjects"
+  | otherwise = (: []) <$> (ObservationSubject <$> o .: "subject_kind" <*> o .: "subject")
+  where
+    hasSubjects = KM.member "subjects" o
+    hasLegacySubject = KM.member "subject_kind" o || KM.member "subject" o
+
+legacySubjectPairs :: [ObservationSubject] -> [Pair]
+legacySubjectPairs [] = []
+legacySubjectPairs (first:_) = ["subject_kind" .= first.subjectKind, "subject" .= first.subject]
 
 isWindowsAbsolute :: Text -> Bool
 isWindowsAbsolute value = case T.unpack (T.take 3 value) of
@@ -1517,11 +1664,18 @@ instance FromJSON UnifiedSearchQuery where parseJSON = genericParseJSON jsonOpti
 -- | Search results deliberately expose a compact derived preview instead of
 -- the full, potentially large Observation content body.
 data ObservationSearchHit = ObservationSearchHit
-  { id :: UUID, workspaceId :: UUID, subjectKind :: SubjectKind, subject :: Text
+  { id :: UUID, workspaceId :: UUID, subjects :: [ObservationSubject]
   , gitSha :: Text, contentPreview :: Text, updatedAt :: UTCTime }
   deriving (Show, Eq, Generic)
-instance ToJSON ObservationSearchHit where toJSON = genericToJSON jsonOptions
-instance FromJSON ObservationSearchHit where parseJSON = genericParseJSON jsonOptions
+instance ToJSON ObservationSearchHit where
+  toJSON hit = object $
+    [ "id" .= hit.id, "workspace_id" .= hit.workspaceId, "subjects" .= hit.subjects
+    , "git_sha" .= hit.gitSha, "content_preview" .= hit.contentPreview, "updated_at" .= hit.updatedAt
+    ] <> legacySubjectPairs hit.subjects
+instance FromJSON ObservationSearchHit where
+  parseJSON = withObject "ObservationSearchHit" $ \o -> ObservationSearchHit
+    <$> o .: "id" <*> o .: "workspace_id" <*> parseSubjects o <*> o .: "git_sha"
+    <*> o .: "content_preview" <*> o .: "updated_at"
 
 data UnifiedSearchResults = UnifiedSearchResults
   { observations :: [ObservationSearchHit], projects :: [Project], tasks :: [Task] }

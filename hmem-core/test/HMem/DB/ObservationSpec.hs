@@ -1,7 +1,8 @@
 module HMem.DB.ObservationSpec (spec) where
 
 import Control.Exception (try)
-import Data.List (sortBy)
+import Data.ByteString.Char8 qualified as B8
+import Data.List (sort, sortBy)
 import Data.Maybe (isJust, isNothing)
 import Data.Text qualified as T
 import Data.UUID (UUID)
@@ -21,8 +22,8 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       file <- createObservation env.pool (newObservation workspace.id SubjectFile "src/Main.hs" "first")
       glob <- createObservation env.pool (newObservation workspace.id SubjectGlob "src/**/*.hs" "second")
       duplicate <- createObservation env.pool (newObservation workspace.id SubjectFile "src/Main.hs" "third")
-      file.subjectKind `shouldBe` SubjectFile
-      glob.subjectKind `shouldBe` SubjectGlob
+      (head file.subjects).subjectKind `shouldBe` SubjectFile
+      (head glob.subjects).subjectKind `shouldBe` SubjectGlob
       duplicate.id `shouldNotBe` file.id
       getObservation env.pool workspace.id file.id >>= (`shouldSatisfy` isJust)
 
@@ -55,7 +56,52 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       assertRejectedCreate env planning.id
       assertRejectedCreate env deleted.id
 
+    it "seals subjects after creation so a later insert in the same transaction is rejected" $ \env -> do
+      workspace <- createTestWorkspace env "observation-sealed-subjects"
+      created <- createObservation env.pool (newObservation workspace.id SubjectFile "src/Main.hs" "sealed")
+      result <- try @DBException $ runSession env.pool $
+        Session.sql ("INSERT INTO observation_subjects (observation_id, ordinal, subject_kind, subject) VALUES ('" <> B8.pack (show created.id) <> "', 1, 'file', 'README.md')")
+      result `shouldSatisfy` isRejected
+
   describe "Observation queries" $ do
+    it "matches concrete paths against every stored subject with stable deduplicated evidence" $ \env -> do
+      workspace <- createTestWorkspace env "observation-path-match"
+      target <- createObservation env.pool CreateObservation
+        { workspaceId = workspace.id
+        , subjects = [ ObservationSubject SubjectGlob "src/**/Config*.hs"
+                     , ObservationSubject SubjectFile "README.md"
+                     , ObservationSubject SubjectGlob "docs/**"
+                     ]
+        , gitSha = canonicalSha, content = "path evidence"
+        }
+      results <- matchObservations env.pool ObservationMatchQuery
+        { workspaceId = workspace.id
+        , paths = ["docs/guide.md", "src/ConfigMain.hs", "README.md", "docs/guide.md"]
+        , subjectKind = Nothing, gitSha = Nothing, query = Nothing, limit = Nothing, offset = Nothing
+        }
+      map (.observation.id) results `shouldBe` [target.id]
+      case results of
+        [result] -> do
+          result.matchedPaths `shouldBe` ["docs/guide.md", "src/ConfigMain.hs", "README.md"]
+          result.matchedSubjects `shouldBe`
+            [ ObservationSubject SubjectGlob "src/**/Config*.hs"
+            , ObservationSubject SubjectFile "README.md"
+            , ObservationSubject SubjectGlob "docs/**"
+            ]
+        _ -> expectationFailure "expected one path-match result"
+      -- Overfetch deliberately permits the internal 201-row page when a
+      -- caller asks for the public maximum, and defaults to 51 rows.
+      -- Generate more than both thresholds so this exercises the actual
+      -- internal extra-row behavior rather than merely validation.
+      mapM_ (\n -> createObservation env.pool (newObservation workspace.id SubjectFile "README.md" ("bulk " <> T.pack (show n)))) [1 .. (201 :: Int)]
+      let baseMatchQuery = ObservationMatchQuery
+            { workspaceId = workspace.id, paths = ["README.md"], subjectKind = Nothing
+            , gitSha = Nothing, query = Nothing, limit = Nothing, offset = Nothing }
+      matchObservationsOverfetch env.pool baseMatchQuery >>= (\page -> length page `shouldBe` 51)
+      matchObservationsOverfetch env.pool baseMatchQuery { limit = Just 200 } >>= (\page -> length page `shouldBe` 201)
+      listObservationsOverfetch env.pool (observationQuery workspace.id Nothing Nothing Nothing) >>= (\page -> length page `shouldBe` 51)
+      listObservationsOverfetch env.pool (observationQuery workspace.id Nothing (Just 200) Nothing) >>= (\page -> length page `shouldBe` 201)
+
     it "orders equal-rank FTS ties by recency/id and paginates unranked and ranked lists" $ \env -> do
       workspace <- createTestWorkspace env "observation-query"
       newerRank <- createObservation env.pool (newObservation workspace.id SubjectFile "src/New.hs" "needle needle alpha")
@@ -82,11 +128,18 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       target <- createObservation env.pool (newObservation workspace.id SubjectFile "src/Main.hs" "needle target")
       kindDistractor <- createObservation env.pool (newObservation workspace.id SubjectGlob "src/**/*.hs" "needle kind")
       subjectDistractor <- createObservation env.pool (newObservation workspace.id SubjectFile "src/Other.hs" "needle subject")
+      crossRow <- createObservation env.pool CreateObservation
+        { workspaceId = workspace.id
+        , subjects = [ObservationSubject SubjectGlob "src/Cross.hs", ObservationSubject SubjectFile "src/Else.hs"]
+        , gitSha = canonicalSha, content = "needle cross-row"
+        }
       shaDistractor <- createObservation env.pool (newObservationWithSha workspace.id SubjectFile "src/Main.hs" alternateSha "needle sha")
-      listIds env (queryWith workspace.id (Just SubjectGlob) Nothing Nothing) `shouldReturn` [kindDistractor.id]
+      fmap sort (listIds env (queryWith workspace.id (Just SubjectGlob) Nothing Nothing)) `shouldReturn` sort [crossRow.id, kindDistractor.id]
       listIds env (queryWith workspace.id Nothing (Just "src/Other.hs") Nothing) `shouldReturn` [subjectDistractor.id]
       listIds env (queryWith workspace.id Nothing Nothing (Just alternateSha)) `shouldReturn` [shaDistractor.id]
       listIds env (queryWith workspace.id (Just SubjectFile) (Just "src/Main.hs") (Just canonicalSha)) `shouldReturn` [target.id]
+      listIds env (queryWith workspace.id (Just SubjectFile) (Just "src/Cross.hs") Nothing) `shouldReturn` []
+      crossRow.id `shouldNotBe` target.id
 
   describe "Observation embeddings" $ do
     it "reports an explicit capability error on the verified pgvector-absent path" $ \env -> do
@@ -111,22 +164,27 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
           target <- createObservation env.pool (newObservation owner.id SubjectFile "src/Main.hs" "target")
           kindDistractor <- createObservation env.pool (newObservation owner.id SubjectGlob "src/**/*.hs" "kind")
           subjectDistractor <- createObservation env.pool (newObservation owner.id SubjectFile "src/Other.hs" "subject")
+          crossRow <- createObservation env.pool CreateObservation
+            { workspaceId = owner.id
+            , subjects = [ObservationSubject SubjectGlob "src/Cross.hs", ObservationSubject SubjectFile "src/Else.hs"]
+            , gitSha = canonicalSha, content = "cross-row" }
           shaDistractor <- createObservation env.pool (newObservationWithSha owner.id SubjectFile "src/Main.hs" alternateSha "sha")
           thresholdExcluded <- createObservation env.pool (newObservation owner.id SubjectFile "src/Excluded.hs" "excluded")
           tieA <- createObservation env.pool (newObservation owner.id SubjectFile "src/TieA.hs" "tie")
           tieB <- createObservation env.pool (newObservation owner.id SubjectFile "src/TieB.hs" "tie")
           outsiderObservation <- createObservation env.pool (newObservation outsider.id SubjectFile "src/Outsider.hs" "outsider")
           mapM_ (uncurry (setObservationEmbedding env.pool owner.id))
-            [ (target.id, unitX), (kindDistractor.id, unitX), (subjectDistractor.id, unitX)
-            , (shaDistractor.id, unitX), (thresholdExcluded.id, unitY), (tieA.id, unitY), (tieB.id, unitY)
+             [ (target.id, unitX), (kindDistractor.id, unitX), (subjectDistractor.id, unitX)
+             , (crossRow.id, unitX), (shaDistractor.id, unitX), (thresholdExcluded.id, unitY), (tieA.id, unitY), (tieB.id, unitY)
             ]
           setObservationEmbedding env.pool owner.id outsiderObservation.id unitX
           similarIds env (similarQuery outsider.id Nothing Nothing Nothing unitX Nothing Nothing Nothing) `shouldReturn` []
           setObservationEmbedding env.pool outsider.id outsiderObservation.id unitX
-          similarIds env (similarQuery owner.id (Just SubjectGlob) Nothing Nothing unitX Nothing Nothing Nothing) `shouldReturn` [kindDistractor.id]
+          fmap sort (similarIds env (similarQuery owner.id (Just SubjectGlob) Nothing Nothing unitX Nothing Nothing Nothing)) `shouldReturn` sort [kindDistractor.id, crossRow.id]
           similarIds env (similarQuery owner.id Nothing (Just "src/Other.hs") Nothing unitX Nothing Nothing Nothing) `shouldReturn` [subjectDistractor.id]
           similarIds env (similarQuery owner.id Nothing Nothing (Just alternateSha) unitX Nothing Nothing Nothing) `shouldReturn` [shaDistractor.id]
           similarIds env (similarQuery owner.id (Just SubjectFile) (Just "src/Main.hs") (Just canonicalSha) unitX Nothing Nothing Nothing) `shouldReturn` [target.id]
+          similarIds env (similarQuery owner.id (Just SubjectFile) (Just "src/Cross.hs") Nothing unitX Nothing Nothing Nothing) `shouldReturn` []
           similarIds env (similarQuery owner.id (Just SubjectFile) (Just "src/Main.hs") (Just canonicalSha) unitX (Just 1) Nothing Nothing) `shouldReturn` [target.id]
           similarIds env (similarQuery owner.id (Just SubjectFile) (Just "src/Excluded.hs") Nothing unitX (Just 0.1) Nothing Nothing) `shouldReturn` []
           let equalSimilarity = sortBy (flip compare) [thresholdExcluded.id, tieA.id, tieB.id]
@@ -152,12 +210,16 @@ isCapabilityUnavailable :: Either DBException a -> Bool
 isCapabilityUnavailable (Left (DBCapabilityUnavailable _)) = True
 isCapabilityUnavailable _ = False
 
+isRejected :: Either DBException a -> Bool
+isRejected (Left _) = True
+isRejected _ = False
+
 newObservation :: UUID -> SubjectKind -> T.Text -> T.Text -> CreateObservation
 newObservation workspace kind path body = newObservationWithSha workspace kind path canonicalSha body
 
 newObservationWithSha :: UUID -> SubjectKind -> T.Text -> T.Text -> T.Text -> CreateObservation
 newObservationWithSha workspace kind path sha body = CreateObservation
-  { workspaceId = workspace, subjectKind = kind, subject = path, gitSha = sha, content = body }
+  { workspaceId = workspace, subjects = [ObservationSubject kind path], gitSha = sha, content = body }
 
 observationQuery :: UUID -> Maybe T.Text -> Maybe Int -> Maybe Int -> ObservationQuery
 observationQuery workspace searchTerm pageLimit pageOffset = ObservationQuery

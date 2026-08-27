@@ -75,6 +75,6 @@ searchAll pool queryValue = do
 compactObservation :: Observation -> ObservationSearchHit
 compactObservation observation = ObservationSearchHit
   { id = observation.id, workspaceId = observation.workspaceId
-  , subjectKind = observation.subjectKind, subject = observation.subject
+  , subjects = observation.subjects
   , gitSha = observation.gitSha, contentPreview = Text.take 280 observation.content
   , updatedAt = observation.updatedAt }

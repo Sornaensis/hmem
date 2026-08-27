@@ -17,7 +17,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
     it "returns project/task hierarchy, dependencies, and readiness without observation links" $ \env -> do
       workspace <- createTestWorkspace env "overview-without-observation-links"
       _observation <- createObservation env.pool CreateObservation
-        { workspaceId = workspace.id, subjectKind = SubjectFile, subject = "src/Overview.hs"
+        { workspaceId = workspace.id, subjects = [ObservationSubject SubjectFile "src/Overview.hs"]
         , gitSha = canonicalSha, content = "independent observation" }
       project <- createProject env.pool CreateProject
         { workspaceId = workspace.id, parentId = Nothing, name = "project", description = Nothing

@@ -13,7 +13,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
   describe "Task lifecycle" $
     it "does not mutate independent observations" $ \env -> do
       workspace <- createTestWorkspace env "task-observation-isolation"
-      observation <- createObservation env.pool (CreateObservation workspace.id SubjectFile "src/Task.hs" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "independent")
+      observation <- createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/Task.hs"] "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "independent")
       task <- createTask env.pool CreateTask
         { workspaceId = workspace.id, projectId = Nothing, parentId = Nothing, title = "task", description = Nothing
         , priority = Nothing, metadata = Nothing, dueAt = Nothing }

@@ -34,6 +34,7 @@ data-files:
     migrations/V018__flatten_nested_subtasks.sql
     migrations/V019__cascade_delete_task_project_subtrees.sql
     migrations/V020__replace_memories_with_observations.sql
+    migrations/V021__observation_subject_sets.sql
 
 library
   exposed-modules:

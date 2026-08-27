@@ -91,6 +91,9 @@ spec = do
       projectSpecTaskPropertyDescriptionIs "description" "Durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates"
       projectSpecTaskPropertyDescriptionIs "priority" "Task priority"
       (schemaProperty "project_spec" "tasks" >>= jsonField "items" >>= jsonField "required") `shouldBe` Just (toJSON (["title"] :: [Text]))
+      planningGuidance `shouldSatisfy` planningGuidanceContract
+      T.replace "durable specification" "progress log" planningGuidance `shouldNotSatisfy` planningGuidanceContract
+      T.replace "atomic work as subtasks" "parent description" planningGuidance `shouldNotSatisfy` planningGuidanceContract
 
     it "guides Observations as durable repository insights and treats Git SHAs as staleness sentinels" $ do
       toolDescriptionIs "search" "Search observations, projects, and tasks. An Observation is a durable, non-obvious repository insight tied to file or glob subjects; subject_kind, subject, and git_sha are exact provenance filters."
@@ -558,6 +561,21 @@ toolDescription name = case [description | Object tool <- toolDefinitions, KM.lo
 
 toolDescriptionIs :: Text -> Text -> Expectation
 toolDescriptionIs name expected = toolDescription name `shouldBe` Just expected
+
+planningGuidance :: Text
+planningGuidance = T.intercalate "\n" $
+  [ toolDescription name
+  | name <- ["project_create", "project_update", "project_spec", "task_create", "task_update", "task_start", "task_finish"]
+  ] >>= maybe [] pure
+
+planningGuidanceContract :: Text -> Bool
+planningGuidanceContract text =
+  all (`T.isInfixOf` text)
+    [ "durable specification"
+    , "not logs of progress or updates"
+    , "status records"
+    , "atomic work as subtasks"
+    ]
 
 observationGuidance :: Text
 observationGuidance = T.intercalate "\n" $

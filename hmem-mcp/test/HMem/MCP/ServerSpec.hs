@@ -10,7 +10,6 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Lazy.Char8 qualified as BL8
-import Data.Foldable (toList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID (UUID)
@@ -24,6 +23,7 @@ import GHC.Conc (ThreadStatus(..), threadStatus)
 import Test.Hspec
 
 import HMem.MCP.Server (encodeStdioResponse, handleStdioLine, injectWorkspaceContext, runMCPServerWithHandles, runMCPServerWithHandlesObserved, runMCPServerWithHandlesObservedWithFork, sendResponseToHandle)
+import HMem.MCP.Tools (toolDefinitions)
 
 spec :: Spec
 spec = do
@@ -83,9 +83,8 @@ spec = do
           , "method" .= ("tools/list" :: Text)
           ]
         (toolsResponse >>= jsonField "id") `shouldBe` Just (String "tools")
-        case toolsResponse >>= jsonField "result" >>= jsonField "tools" of
-          Just (Array tools) -> length (toList tools) `shouldSatisfy` (> 0)
-          other -> expectationFailure $ "Expected tools/list array from stdio line, got: " <> show other
+        (toolsResponse >>= jsonField "result" >>= jsonField "tools")
+          `shouldBe` Just (toJSON toolDefinitions)
 
     it "writes newline-delimited JSON responses to handles" $ do
       let response = object

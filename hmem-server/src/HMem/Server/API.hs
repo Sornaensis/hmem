@@ -7,13 +7,15 @@
 module HMem.Server.API
   ( HMemAPI
   , ObservationEmbedding(..)
+  , CreateObservationRequest(..)
+  , ObservationMatchRequest(..)
   , server
   ) where
 
 import Control.Exception (try)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (Value, object, (.=), ToJSON(..))
+import Data.Aeson (FromJSON, Value, object, (.=), ToJSON(..))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as AesonKeyMap
@@ -91,13 +93,20 @@ type WorkspaceGroupAPI =
 
 type ObservationAPI =
        QueryParam' '[Required] "workspace_id" UUID
+         :> Description "Exact stored subject kind. When supplied with subject, both values must match the same stored subject row."
          :> QueryParam "subject_kind" SubjectKind
+         :> Description "Exact canonical repository-relative subject path or glob. When supplied with subject_kind, both values must match the same stored subject row."
          :> QueryParam "subject" Text
+         :> Description "Exact immutable 40-character lowercase hexadecimal Git SHA."
          :> QueryParam "git_sha" Text
          :> QueryParam "query" Text
-         :> QueryParam "limit" Int :> QueryParam "offset" Int
+         :> Description "Page size; defaults to 50 and must be between 1 and 200."
+         :> QueryParam "limit" Int
+         :> Description "Zero-based page offset; defaults to 0 and must be at most 100000."
+         :> QueryParam "offset" Int
          :> Get '[JSON] (PaginatedResult Observation)
-  :<|> ReqBody '[JSON] CreateObservation :> Post '[JSON] Observation
+  :<|> ReqBody '[JSON] CreateObservationRequest :> Post '[JSON] Observation
+  :<|> "match" :> ReqBody '[JSON] ObservationMatchRequest :> Post '[JSON] (PaginatedResult ObservationMatch)
   :<|> "similar" :> ReqBody '[JSON] SimilarObservationQuery :> Post '[JSON] [SimilarObservation]
   :<|> Capture "observationId" UUID :> Get '[JSON] Observation
   :<|> Capture "observationId" UUID :> ReqBody '[JSON] UpdateObservation :> Put '[JSON] Observation
@@ -161,6 +170,22 @@ handleDBErrors action = do
 
 badRequest :: Text -> Text -> ServerError
 badRequest kind message = err400 { errBody = Aeson.encode (object ["error" .= kind, "message" .= message]) }
+
+newtype CreateObservationRequest = CreateObservationRequest (Either Text CreateObservation)
+newtype ObservationMatchRequest = ObservationMatchRequest (Either Text ObservationMatchQuery)
+
+instance FromJSON CreateObservationRequest where
+  parseJSON value = pure $ CreateObservationRequest $ case Aeson.fromJSON value of
+    Aeson.Error message -> Left (Text.pack message)
+    Aeson.Success parsed -> Right parsed
+
+instance FromJSON ObservationMatchRequest where
+  parseJSON value = pure $ ObservationMatchRequest $ case Aeson.fromJSON value of
+    Aeson.Error message -> Left (Text.pack message)
+    Aeson.Success parsed -> Right parsed
+
+decodeRequest :: Either Text a -> Handler a
+decodeRequest = either (throwError . badRequest "validation_error") pure
 
 reject :: [Text] -> Handler ()
 reject [] = pure ()
@@ -402,7 +427,7 @@ groups pool broadcast = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembe
     pure NoContent
 
 observations :: Pool Hasql.Connection -> Broadcast -> Server ObservationAPI
-observations pool broadcast = listH :<|> createH :<|> similarH :<|> getH :<|> updateH :<|> deleteH :<|> embeddingH where
+observations pool broadcast = listH :<|> createH :<|> matchH :<|> similarH :<|> getH :<|> updateH :<|> deleteH :<|> embeddingH where
   listH workspaceId kind subjectValue sha queryValue limit offset = do
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
     -- Validate client-supplied values before pagination defaults/caps are
@@ -413,12 +438,23 @@ observations pool broadcast = listH :<|> createH :<|> similarH :<|> getH :<|> up
         query = ObservationQuery workspaceId kind subjectValue sha queryValue (Just takeN) (Just skipN)
     rows <- handleDBErrors $ Observation.listObservationsOverfetch pool query
     pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
-  createH input = do
+  createH (CreateObservationRequest requestBody) = do
+    input <- decodeRequest requestBody
     requireObservationWorkspace pool input.workspaceId Auth.WorkspaceRoleEdit
     reject (validateCreateObservationInput input)
     created <- handleDBErrors $ withWorkspaceIdContext (Just input.workspaceId) (Observation.createObservation pool input)
     emit (Just input.workspaceId) broadcast Created ETObservation created.id (Just (toJSON created))
     pure created
+  matchH (ObservationMatchRequest requestBody) = do
+    query <- decodeRequest requestBody
+    requireObservationWorkspace pool query.workspaceId Auth.WorkspaceRoleRead
+    reject (validateObservationMatchQuery query)
+    let (takeN, skipN) = page query.limit query.offset
+        pagedQuery = ObservationMatchQuery
+          query.workspaceId query.paths query.subjectKind query.gitSha query.query
+          (Just takeN) (Just skipN)
+    rows <- handleDBErrors $ Observation.matchObservationsOverfetch pool pagedQuery
+    pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
   similarH query = do
     requireObservationWorkspace pool query.workspaceId Auth.WorkspaceRoleRead
     reject (validateSimilarObservationQuery query)

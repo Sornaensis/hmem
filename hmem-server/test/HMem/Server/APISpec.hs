@@ -3,12 +3,13 @@ module HMem.Server.APISpec (spec) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (poll, wait, withAsync)
 import Control.Exception (onException)
-import Control.Monad (void)
-import Data.Aeson (Value(..), decode, encode, object, (.=))
+import Control.Monad (forM_, void)
+import Data.Aeson (Value(..), decode, encode, object, toJSON, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.Foldable (toList)
 import Data.Functor.Contravariant ((>$<))
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Maybe (isJust, isNothing)
@@ -21,7 +22,7 @@ import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
-import Network.HTTP.Types (Header, methodDelete, methodGet, methodPost, methodPut, parseQuery, status200, status400, status401, status403, status404, status409)
+import Network.HTTP.Types (Header, methodDelete, methodGet, methodPost, methodPut, parseQuery, status200, status400, status401, status403, status404, status409, status503)
 import Network.HTTP.Types qualified
 import Network.Wai (Application, defaultRequest)
 import Network.Wai qualified as Wai
@@ -77,6 +78,12 @@ jsonStrings (Just (Array values)) = foldr collect (Just []) values
     collect _ _ = Nothing
 jsonStrings _ = Nothing
 
+firstJsonArrayValue :: Maybe Value -> Maybe Value
+firstJsonArrayValue (Just (Array values)) = case toList values of
+  value : _ -> Just value
+  [] -> Nothing
+firstJsonArrayValue _ = Nothing
+
 softDeleteWorkspaceStatement :: Statement.Statement UUID ()
 softDeleteWorkspaceStatement = Statement.Statement
   "UPDATE workspaces SET deleted_at = now() WHERE id = $1"
@@ -102,6 +109,18 @@ recordingGroupApp env = do
       app = serve (Proxy @HMemAPI) (server Config.defaultConfig.auth env.pool tracker broadcast wsState True)
       localSuperadmin = Principal
         { actorType = ActorUser, actorId = "group-event-test", actorLabel = "Group Event Test"
+        , authority = PrincipalSyntheticLocalSuperadmin }
+  pure (\req respond -> withPrincipalContext (Just localSuperadmin) (app req respond), reverse <$> readIORef events)
+
+recordingObservationApp :: TestEnv -> IO (Application, IO [ChangeEvent])
+recordingObservationApp env = do
+  tracker <- newAccessTracker env.pool 3600
+  wsState <- newWSState
+  events <- newIORef []
+  let broadcast event = modifyIORef' events (event :)
+      app = serve (Proxy @HMemAPI) (server Config.defaultConfig.auth env.pool tracker broadcast wsState True)
+      localSuperadmin = Principal
+        { actorType = ActorUser, actorId = "observation-event-test", actorLabel = "Observation Event Test"
         , authority = PrincipalSyntheticLocalSuperadmin }
   pure (\req respond -> withPrincipalContext (Just localSuperadmin) (app req respond), reverse <$> readIORef events)
 
@@ -459,33 +478,205 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         requestWithHeaders ctx.deployedApplication methodGet bucketPath (authHeader superadminToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
 
   describe "Observation HTTP contract" $ do
-    it "creates, lists, updates content only, and hard deletes repository observations" $ \(env, app) -> do
+    it "preserves legacy singleton creates and exposes canonical multi-subject observations" $ \(env, app) -> do
       workspace <- createTestWorkspace env "observation-api"
-      createdResponse <- postJson app "/api/v1/observations" (object
+      legacyResponse <- postJson app "/api/v1/observations" (object
         [ "workspace_id" .= workspace.id, "subject_kind" .= ("file" :: T.Text)
-        , "subject" .= ("src/Main.hs" :: T.Text), "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text)
+        , "subject" .= ("src/Legacy.hs" :: T.Text), "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text)
+        , "content" .= ("legacy observation" :: T.Text) ])
+      responseStatus legacyResponse `shouldBe` status200
+      let Just legacy = decode (responseBody legacyResponse) :: Maybe Observation
+      legacy.subjects `shouldBe` [ObservationSubject SubjectFile "src/Legacy.hs"]
+      createdResponse <- postJson app "/api/v1/observations" (object
+        [ "workspace_id" .= workspace.id
+        , "subjects" .= [ ObservationSubject SubjectFile "src/Main.hs"
+                          , ObservationSubject SubjectGlob "src/**/*.hs"
+                          , ObservationSubject SubjectFile "src/Main.hs" ]
+        , "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text)
         , "content" .= ("initial observation" :: T.Text) ])
       responseStatus createdResponse `shouldBe` status200
       let Just created = decode (responseBody createdResponse) :: Maybe Observation
+      created.subjects `shouldBe`
+        [ ObservationSubject SubjectFile "src/Main.hs", ObservationSubject SubjectGlob "src/**/*.hs" ]
+      let Just createdJson = decode (responseBody createdResponse) :: Maybe Value
+      jsonField "subject_kind" createdJson `shouldBe` Just (String "file")
+      jsonField "subject" createdJson `shouldBe` Just (String "src/Main.hs")
       listed <- request app methodGet ("/api/v1/observations?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "&subject_kind=file&subject=src/Main.hs") ""
       responseStatus listed `shouldBe` status200
       let Just page = decode (responseBody listed) :: Maybe (PaginatedResult Observation)
       page.items `shouldBe` [created]
+      byGlob <- request app methodGet ("/api/v1/observations?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "&subject_kind=glob&subject=src/**/*.hs") ""
+      let Just globPage = decode (responseBody byGlob) :: Maybe (PaginatedResult Observation)
+      globPage.items `shouldBe` [created]
       maximumPage <- request app methodGet ("/api/v1/observations?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "&limit=200") ""
       responseStatus maximumPage `shouldBe` status200
       mapM_ (\suffix -> request app methodGet ("/api/v1/observations?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> suffix) "" >>= (\response -> responseStatus response `shouldBe` status400))
         ["&limit=0", "&limit=201", "&offset=-1", "&offset=100001"]
+      let sha = ("0123456789abcdef0123456789abcdef01234567" :: T.Text)
+          subjectCountOverflow = [ObservationSubject SubjectFile ("src/Count" <> T.pack (show index) <> ".hs") | index <- [1 .. 257 :: Int]]
+          subjectByteOverflow = [ObservationSubject SubjectFile ("src/" <> T.replicate 4090 "a" <> T.pack (show index)) | index <- [1 .. 65 :: Int]]
+          invalidCreates =
+            [ object [ "workspace_id" .= workspace.id, "git_sha" .= sha, "content" .= ("missing subjects" :: T.Text) ]
+            , object [ "workspace_id" .= workspace.id, "subject_kind" .= ("file" :: T.Text), "git_sha" .= sha, "content" .= ("half legacy kind" :: T.Text) ]
+            , object [ "workspace_id" .= workspace.id, "subject" .= ("src/Half.hs" :: T.Text), "git_sha" .= sha, "content" .= ("half legacy subject" :: T.Text) ]
+            , object [ "workspace_id" .= workspace.id, "subjects" .= ([] :: [ObservationSubject]), "git_sha" .= sha, "content" .= ("empty" :: T.Text) ]
+            , object [ "workspace_id" .= workspace.id, "subjects" .= [ObservationSubject SubjectFile "src/Mixed.hs"]
+                     , "subject_kind" .= ("file" :: T.Text), "subject" .= ("src/Other.hs" :: T.Text), "git_sha" .= sha, "content" .= ("mixed" :: T.Text) ]
+            , object [ "workspace_id" .= workspace.id, "subjects" .= [ObservationSubject SubjectFile "../outside.hs"], "git_sha" .= sha, "content" .= ("bad path" :: T.Text) ]
+            , object [ "workspace_id" .= workspace.id, "subjects" .= [ObservationSubject SubjectGlob "src/**bad/*.hs"], "git_sha" .= sha, "content" .= ("bad glob" :: T.Text) ]
+            , object [ "workspace_id" .= workspace.id, "subjects" .= subjectCountOverflow, "git_sha" .= sha, "content" .= ("too many subjects" :: T.Text) ]
+            , object [ "workspace_id" .= workspace.id, "subjects" .= subjectByteOverflow, "git_sha" .= sha, "content" .= ("too many subject bytes" :: T.Text) ]
+            ]
+      forM_ invalidCreates $ \input -> do
+        rejected <- postJson app "/api/v1/observations" input
+        responseStatus rejected `shouldBe` status400
+        let Just rejection = decode (responseBody rejected) :: Maybe Value
+        jsonField "error" rejection `shouldBe` Just (String "validation_error")
+        jsonField "message" rejection `shouldSatisfy` maybe False (\value -> case value of String message -> not (T.null message); _ -> False)
+      searchResponse <- postJson app "/api/v1/search" (object
+        [ "workspace_id" .= workspace.id, "query" .= ("initial" :: T.Text), "entity_types" .= ["observation" :: T.Text] ])
+      responseStatus searchResponse `shouldBe` status200
+      let Just unified = decode (responseBody searchResponse) :: Maybe UnifiedSearchResults
+      map (.id) unified.observations `shouldBe` [created.id]
+      let Just searchJson = decode (responseBody searchResponse) :: Maybe Value
+          Just searchHit = firstJsonArrayValue (jsonField "observations" searchJson)
+      jsonField "subjects" searchHit `shouldBe` Just (toJSON created.subjects)
+      jsonField "subject_kind" searchHit `shouldBe` Just (String "file")
+      jsonField "subject" searchHit `shouldBe` Just (String "src/Main.hs")
+      let vector = (1 : replicate (observationEmbeddingDimensions - 1) 0) :: [Double]
+          observationPath = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))
+      embeddingResponse <- request app methodPut (observationPath <> "/embedding") (encode vector)
+      case responseStatus embeddingResponse of
+        status | status == status503 -> pure ()
+        status -> do
+          status `shouldBe` status200
+          similarResponse <- postJson app "/api/v1/observations/similar" (object
+            [ "workspace_id" .= workspace.id, "embedding" .= vector ])
+          responseStatus similarResponse `shouldBe` status200
+          let Just similar = decode (responseBody similarResponse) :: Maybe [SimilarObservation]
+          map (.observation.id) similar `shouldBe` [created.id]
+          let Just similarJson = decode (responseBody similarResponse) :: Maybe Value
+              Just similarHit = firstJsonArrayValue (Just similarJson)
+              Just similarObservationJson = jsonField "observation" similarHit
+          jsonField "subjects" similarObservationJson `shouldBe` Just (toJSON created.subjects)
+          jsonField "subject_kind" similarObservationJson `shouldBe` Just (String "file")
+          jsonField "subject" similarObservationJson `shouldBe` Just (String "src/Main.hs")
       updated <- request app methodPut ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))) (encode (object ["content" .= ("revised observation" :: T.Text)]))
       responseStatus updated `shouldBe` status200
       let Just revised = decode (responseBody updated) :: Maybe Observation
       revised.content `shouldBe` "revised observation"
-      revised.subject `shouldBe` created.subject
+      revised.subjects `shouldBe` created.subjects
       immutable <- request app methodPut ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))) (encode (object ["content" .= ("x" :: T.Text), "git_sha" .= ("different" :: T.Text)]))
       responseStatus immutable `shouldBe` status400 -- Servant rejects non-contract request bodies before routing the handler.
       deleted <- request app methodDelete ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))) ""
       responseStatus deleted `shouldBe` status200
       missing <- request app methodGet ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))) ""
       responseStatus missing `shouldBe` status404
+
+    it "emits canonical and legacy multi-subject Observation event payloads" $ \(env, _app) -> do
+      workspace <- createTestWorkspace env "observation-event"
+      (app, readEvents) <- recordingObservationApp env
+      let subjectsValue = [ObservationSubject SubjectFile "src/Event.hs", ObservationSubject SubjectGlob "src/**/*.hs"]
+      response <- postJson app "/api/v1/observations" (object
+        [ "workspace_id" .= workspace.id, "subjects" .= subjectsValue
+        , "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text), "content" .= ("event observation" :: T.Text) ])
+      responseStatus response `shouldBe` status200
+      let Just observation = decode (responseBody response) :: Maybe Observation
+      events <- readEvents
+      let [event] = events
+      (event.changeType, event.entityType, event.entityId, event.workspaceId) `shouldBe`
+        (Created, ETObservation, observation.id, Just workspace.id)
+      (event.payload >>= jsonField "subjects") `shouldBe` Just (toJSON subjectsValue)
+      (event.payload >>= jsonField "subject_kind") `shouldBe` Just (String "file")
+      (event.payload >>= jsonField "subject") `shouldBe` Just (String "src/Event.hs")
+
+    it "matches concrete paths with subject evidence, filters, pagination, and workspace isolation" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "observation-match"
+      otherWorkspace <- createTestWorkspace env "observation-match-other"
+      let sha = ("0123456789abcdef0123456789abcdef01234567" :: T.Text)
+          observationInput workspaceId value subjectsValue = object
+            [ "workspace_id" .= workspaceId, "subjects" .= subjectsValue, "git_sha" .= sha, "content" .= (value :: T.Text) ]
+          matchInput workspaceId requested = object ["workspace_id" .= workspaceId, "paths" .= (requested :: [T.Text])]
+      firstResponse <- postJson app "/api/v1/observations" (observationInput workspace.id "first matching observation"
+        [ObservationSubject SubjectFile "src/Main.hs", ObservationSubject SubjectGlob "src/**/*.hs"])
+      secondResponse <- postJson app "/api/v1/observations" (observationInput workspace.id "second matching observation"
+        [ObservationSubject SubjectGlob "lib/**/*.hs"])
+      _ <- postJson app "/api/v1/observations" (observationInput otherWorkspace.id "isolated observation"
+        [ObservationSubject SubjectGlob "src/**/*.hs"])
+      let Just first = decode (responseBody firstResponse) :: Maybe Observation
+          Just second = decode (responseBody secondResponse) :: Maybe Observation
+      matchedResponse <- postJson app "/api/v1/observations/match" (matchInput workspace.id ["src/Main.hs", "src/Other.hs", "lib/HMem/Thing.hs"])
+      responseStatus matchedResponse `shouldBe` status200
+      let Just matched = decode (responseBody matchedResponse) :: Maybe (PaginatedResult ObservationMatch)
+          findMatch observationId = filter (\item -> item.observation.id == observationId) matched.items
+      length matched.items `shouldBe` 2
+      let [firstMatch] = findMatch first.id
+      firstMatch.matchedPaths `shouldBe` ["src/Main.hs", "src/Other.hs"]
+      firstMatch.matchedSubjects `shouldBe`
+        [ObservationSubject SubjectFile "src/Main.hs", ObservationSubject SubjectGlob "src/**/*.hs"]
+      let [secondMatch] = findMatch second.id
+      secondMatch.matchedPaths `shouldBe` ["lib/HMem/Thing.hs"]
+      secondMatch.matchedSubjects `shouldBe` [ObservationSubject SubjectGlob "lib/**/*.hs"]
+      globOnly <- postJson app "/api/v1/observations/match" (object
+        [ "workspace_id" .= workspace.id, "paths" .= (["src/Main.hs"] :: [T.Text]), "subject_kind" .= ("glob" :: T.Text) ])
+      let Just globMatches = decode (responseBody globOnly) :: Maybe (PaginatedResult ObservationMatch)
+      map (.observation.id) globMatches.items `shouldBe` [first.id]
+      filtered <- postJson app "/api/v1/observations/match" (object
+        [ "workspace_id" .= workspace.id, "paths" .= (["src/Main.hs"] :: [T.Text]), "git_sha" .= sha, "query" .= ("first" :: T.Text) ])
+      let Just filteredMatches = decode (responseBody filtered) :: Maybe (PaginatedResult ObservationMatch)
+      map (.observation.id) filteredMatches.items `shouldBe` [first.id]
+      nonmatchingSha <- postJson app "/api/v1/observations/match" (object
+        [ "workspace_id" .= workspace.id, "paths" .= (["src/Main.hs"] :: [T.Text]), "git_sha" .= ("fedcba9876543210fedcba9876543210fedcba98" :: T.Text) ])
+      responseStatus nonmatchingSha `shouldBe` status200
+      let Just nonmatchingShaMatches = decode (responseBody nonmatchingSha) :: Maybe (PaginatedResult ObservationMatch)
+      nonmatchingShaMatches.items `shouldBe` []
+      firstPage <- postJson app "/api/v1/observations/match" (object
+        [ "workspace_id" .= workspace.id, "paths" .= (["src/Main.hs", "lib/HMem/Thing.hs"] :: [T.Text]), "limit" .= (1 :: Int) ])
+      let Just paged = decode (responseBody firstPage) :: Maybe (PaginatedResult ObservationMatch)
+      length paged.items `shouldBe` 1
+      paged.hasMore `shouldBe` True
+      secondPage <- postJson app "/api/v1/observations/match" (object
+        [ "workspace_id" .= workspace.id, "paths" .= (["src/Main.hs", "lib/HMem/Thing.hs"] :: [T.Text]), "limit" .= (1 :: Int), "offset" .= (1 :: Int) ])
+      let Just secondPaged = decode (responseBody secondPage) :: Maybe (PaginatedResult ObservationMatch)
+      secondPaged.hasMore `shouldBe` False
+      map (.observation.id) (paged.items <> secondPaged.items) `shouldBe` map (.observation.id) matched.items
+      let pathCountOverflow = ["src/Path" <> T.pack (show index) <> ".hs" | index <- [1 .. 257 :: Int]]
+          pathByteOverflow = ["src/" <> T.replicate 4090 "a" <> T.pack (show index) | index <- [1 .. 65 :: Int]]
+      let invalidMatches =
+            [ object ["workspace_id" .= workspace.id]
+            , matchInput workspace.id ([] :: [T.Text])
+            , matchInput workspace.id ["src/*.hs"]
+            , object ["workspace_id" .= workspace.id, "paths" .= (["src/Main.hs"] :: [T.Text]), "limit" .= (201 :: Int)]
+            , object ["workspace_id" .= workspace.id, "paths" .= pathCountOverflow]
+            , object ["workspace_id" .= workspace.id, "paths" .= pathByteOverflow] ]
+      forM_ invalidMatches $ \input -> do
+        rejected <- postJson app "/api/v1/observations/match" input
+        responseStatus rejected `shouldBe` status400
+        let Just rejection = decode (responseBody rejected) :: Maybe Value
+        jsonField "error" rejection `shouldBe` Just (String "validation_error")
+        jsonField "message" rejection `shouldSatisfy` maybe False (\value -> case value of String message -> not (T.null message); _ -> False)
+
+    it "authorizes Observation matching as a repository read operation" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "observation-match-auth"
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        outsiderId <- createDeployedSandboxUser ctx.deployedEnv False False
+        superadminId <- createDeployedSandboxUser ctx.deployedEnv False True
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+          (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Observation match reader"
+        outsiderToken <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Observation match outsider"
+        superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Observation match superadmin"
+        let authHeader token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            input = object
+              [ "workspace_id" .= workspace.id, "subjects" .= [ObservationSubject SubjectGlob "src/**/*.hs"]
+              , "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text), "content" .= ("auth observation" :: T.Text) ]
+            matchInput = encode (object ["workspace_id" .= workspace.id, "paths" .= (["src/Main.hs"] :: [T.Text])])
+        created <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations" (authHeader superadminToken) (encode input)
+        responseStatus created `shouldBe` status200
+        request ctx.deployedApplication methodPost "/api/v1/observations/match" matchInput >>= (\response -> responseStatus response `shouldBe` status401)
+        requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations/match" (authHeader outsiderToken) matchInput >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations/match" (authHeader readerToken) matchInput >>= (\response -> responseStatus response `shouldBe` status200)
 
     it "rejects planning and deleted workspaces through every Observation-bearing HTTP surface" $ \(env, app) -> do
       planningResponse <- postJson app "/api/v1/workspaces" (object
@@ -500,6 +691,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           rejected response = responseStatus response `shouldBe` status404
       postJson app "/api/v1/observations" (observationInput planning.id) >>= rejected
       request app methodGet ("/api/v1/observations?workspace_id=" <> planningId) "" >>= rejected
+      postJson app "/api/v1/observations/match" (object ["workspace_id" .= planning.id, "paths" .= (["src/Scope.hs"] :: [T.Text])]) >>= rejected
       postJson app "/api/v1/observations/similar" (object ["workspace_id" .= planning.id, "embedding" .= ([] :: [Double])]) >>= rejected
       postJson app "/api/v1/search" (object ["workspace_id" .= planning.id, "entity_types" .= ["observation" :: T.Text]]) >>= rejected
       request app methodGet ("/api/v1/audit?workspace_id=" <> planningId <> "&entity_type=observation") "" >>= rejected
@@ -513,6 +705,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       markWorkspaceDeleted env repository.id
       request app methodGet ("/api/v1/observations?workspace_id=" <> repositoryId) "" >>= rejected
       postJson app "/api/v1/observations" (observationInput repository.id) >>= rejected
+      postJson app "/api/v1/observations/match" (object ["workspace_id" .= repository.id, "paths" .= (["src/Scope.hs"] :: [T.Text])]) >>= rejected
       postJson app "/api/v1/observations/similar" (object ["workspace_id" .= repository.id, "embedding" .= ([] :: [Double])]) >>= rejected
       request app methodGet observationPath "" >>= rejected
       request app methodPut observationPath (encode (object ["content" .= ("rejected" :: T.Text)])) >>= rejected
@@ -531,8 +724,9 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
     it "lists observation audit entries and explicitly rejects audit reverts" $ \(env, app) -> do
       workspace <- createTestWorkspace env "observation-audit"
       response <- postJson app "/api/v1/observations" (object
-        [ "workspace_id" .= workspace.id, "subject_kind" .= ("glob" :: T.Text)
-        , "subject" .= ("src/**/*.hs" :: T.Text), "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text)
+        [ "workspace_id" .= workspace.id
+        , "subjects" .= [ObservationSubject SubjectFile "src/Audit.hs", ObservationSubject SubjectGlob "src/**/*.hs"]
+        , "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text)
         , "content" .= ("audit me" :: T.Text) ])
       responseStatus response `shouldBe` status200
       let Just observation = decode (responseBody response) :: Maybe Observation
@@ -542,6 +736,11 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       auditPage.items `shouldSatisfy` (not . null)
       let entry = head auditPage.items
       entry.entityType `shouldBe` "observation"
+      let Just createdSnapshot = entry.newValues
+      jsonField "subjects" createdSnapshot `shouldBe` Just (toJSON
+        [ObservationSubject SubjectFile "src/Audit.hs", ObservationSubject SubjectGlob "src/**/*.hs"])
+      jsonField "subject_kind" createdSnapshot `shouldBe` Just (String "file")
+      jsonField "subject" createdSnapshot `shouldBe` Just (String "src/Audit.hs")
       revert <- request app methodPost ("/api/v1/audit/" <> Text.encodeUtf8 (T.pack (show entry.id)) <> "/revert") ""
       responseStatus revert `shouldBe` status409
       deleted <- request app methodDelete ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show observation.id))) ""
@@ -571,6 +770,17 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           hasPath path = isJust (paths >>= jsonField path)
           operationTags path method = paths >>= jsonField path >>= jsonField method >>= jsonField "tags"
           hasObservationTag path method = jsonStrings (operationTags path method) == Just ["Observations"]
+          hasSchemaProperty schemaName propertyName = isJust (schema schemaName >>= jsonField "properties" >>= jsonField propertyName)
+          requiredSchemaFields schemaName = jsonStrings (schema schemaName >>= jsonField "required")
+          hasCreateVariantProperty propertyName = case schema "CreateObservation" >>= jsonField "oneOf" of
+            Just (Array variants) -> any (\variant -> isJust (jsonField "properties" variant >>= jsonField propertyName)) variants
+            _ -> False
+          createVariantRequired propertyName = case schema "CreateObservation" >>= jsonField "oneOf" of
+            Just (Array variants) -> any (\variant -> maybe False (elem propertyName) (jsonStrings (jsonField "required" variant))) variants
+            _ -> False
+          deprecatedProperty schemaName propertyName = schema schemaName >>= jsonField "properties" >>= jsonField propertyName >>= jsonField "deprecated"
+          schemaDescription schemaName = schema schemaName >>= jsonField "description"
+          matchPathsSchema = schema "ObservationMatchQuery" >>= jsonField "properties" >>= jsonField "paths"
           enum name = jsonStrings (schema name >>= jsonField "enum")
           embeddingSchema = schema "SimilarObservationQuery" >>= jsonField "properties" >>= jsonField "embedding"
           fixedEmbedding = embeddingSchema >>= \embedding -> do
@@ -588,6 +798,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         , "/api/v1/groups/{groupId}/members"
         , "/api/v1/groups/{groupId}/members/{workspaceId}"
         , "/api/v1/observations"
+        , "/api/v1/observations/match"
         , "/api/v1/observations/similar"
         , "/api/v1/observations/{observationId}"
         , "/api/v1/observations/{observationId}/embedding"
@@ -601,6 +812,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         , ("/api/v1/groups/{groupId}/members/{workspaceId}", "delete") ]
       mapM_ (\(path, method) -> hasObservationTag path method `shouldBe` True)
         [ ("/api/v1/observations", "get"), ("/api/v1/observations", "post")
+        , ("/api/v1/observations/match", "post")
         , ("/api/v1/observations/similar", "post")
         , ("/api/v1/observations/{observationId}", "get")
         , ("/api/v1/observations/{observationId}", "put")
@@ -608,6 +820,59 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         , ("/api/v1/observations/{observationId}/embedding", "put") ]
       enum "SubjectKind" `shouldBe` Just ["file", "glob"]
       enum "EntitySearchType" `shouldBe` Just ["observation", "project", "task"]
+      schema "ObservationSubject" `shouldSatisfy` isJust
+      schema "ObservationMatchQuery" `shouldSatisfy` isJust
+      schema "ObservationMatch" `shouldSatisfy` isJust
+      hasSchemaProperty "Observation" "subjects" `shouldBe` True
+      hasSchemaProperty "Observation" "subject_kind" `shouldBe` True
+      hasSchemaProperty "Observation" "subject" `shouldBe` True
+      hasSchemaProperty "ObservationSearchHit" "subjects" `shouldBe` True
+      hasSchemaProperty "ObservationSearchHit" "subject_kind" `shouldBe` True
+      hasSchemaProperty "ObservationSearchHit" "subject" `shouldBe` True
+      hasCreateVariantProperty "subjects" `shouldBe` True
+      hasCreateVariantProperty "subject_kind" `shouldBe` True
+      hasCreateVariantProperty "subject" `shouldBe` True
+      createVariantRequired "subjects" `shouldBe` True
+      createVariantRequired "subject_kind" `shouldBe` True
+      createVariantRequired "subject" `shouldBe` True
+      case schema "CreateObservation" >>= jsonField "oneOf" of
+        Just (Array variants) -> do
+          let branches = toList variants
+              branchRequired branch = jsonStrings (jsonField "required" branch)
+              canonical = filter (maybe False (elem "subjects") . branchRequired) branches
+              legacy = filter (maybe False (elem "subject_kind") . branchRequired) branches
+              hasProperty branch propertyName = isJust (jsonField "properties" branch >>= jsonField propertyName)
+              isClosed branch = jsonField "additionalProperties" branch == Just (Bool False)
+          length branches `shouldBe` 2
+          length canonical `shouldBe` 1
+          length legacy `shouldBe` 1
+          let [canonicalBranch] = canonical
+              [legacyBranch] = legacy
+          branchRequired canonicalBranch `shouldBe` Just ["workspace_id", "subjects", "git_sha", "content"]
+          branchRequired legacyBranch `shouldBe` Just ["workspace_id", "subject_kind", "subject", "git_sha", "content"]
+          hasProperty canonicalBranch "subjects" `shouldBe` True
+          hasProperty canonicalBranch "subject_kind" `shouldBe` False
+          hasProperty canonicalBranch "subject" `shouldBe` False
+          isClosed canonicalBranch `shouldBe` True
+          hasProperty legacyBranch "subjects" `shouldBe` False
+          hasProperty legacyBranch "subject_kind" `shouldBe` True
+          hasProperty legacyBranch "subject" `shouldBe` True
+          (jsonField "properties" legacyBranch >>= jsonField "subject_kind" >>= jsonField "deprecated") `shouldBe` Just (Bool True)
+          (jsonField "properties" legacyBranch >>= jsonField "subject" >>= jsonField "deprecated") `shouldBe` Just (Bool True)
+          isClosed legacyBranch `shouldBe` True
+        _ -> expectationFailure "CreateObservation must use a two-form oneOf"
+      deprecatedProperty "Observation" "subject_kind" `shouldBe` Just (Bool True)
+      deprecatedProperty "Observation" "subject" `shouldBe` Just (Bool True)
+      deprecatedProperty "ObservationSearchHit" "subject_kind" `shouldBe` Just (Bool True)
+      deprecatedProperty "ObservationSearchHit" "subject" `shouldBe` Just (Bool True)
+      hasSchemaProperty "ObservationMatchQuery" "paths" `shouldBe` True
+      requiredSchemaFields "ObservationMatchQuery" `shouldSatisfy` maybe False (elem "paths")
+      (matchPathsSchema >>= jsonField "minItems") `shouldBe` Just (Number 1)
+      (matchPathsSchema >>= jsonField "maxItems") `shouldBe` Just (Number 256)
+      schemaDescription "CreateObservation" `shouldSatisfy` maybe False (== String "Create with exactly one non-empty canonical `subjects` array or the complete deprecated legacy `subject_kind` plus `subject` pair. The forms are mutually exclusive; missing or half legacy pairs are rejected. Duplicate canonical subjects are de-duplicated in first-occurrence order. Subjects and Git provenance are immutable after creation.")
+      schemaDescription "ObservationMatchQuery" `shouldSatisfy` maybe False (\value -> case value of
+        String text -> all (`T.isInfixOf` text) ["matched_paths", "updated_at DESC", "limit 50", "40-character"]
+        _ -> False)
       schema "WorkspaceTimelineEvent" `shouldSatisfy` isJust
       schema "WorkspaceTimelineBucketsResponse" `shouldSatisfy` isJust
       fixedEmbedding `shouldBe` Just (Number 1536, Number 1536)

@@ -10,12 +10,13 @@ module HMem.Server.API
   , CreateObservationRequest(..)
   , ObservationMatchRequest(..)
   , server
+  , serverWithChangeStream
   ) where
 
 import Control.Exception (try)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON, Value, object, (.=), ToJSON(..))
+import Data.Aeson (FromJSON, Value, object, (.=), ToJSON(..), Result(..))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as AesonKeyMap
@@ -24,7 +25,7 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Pool (Pool, tryWithResource)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
+import Data.Time (NominalDiffTime, UTCTime, diffUTCTime)
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Hasql.Connection qualified as Hasql
@@ -35,12 +36,13 @@ import System.IO (stderr)
 
 import HMem.Config qualified as Config
 import HMem.DB.Audit qualified as Audit
+import HMem.DB.ChangeStream qualified as ChangeStream
 import HMem.DB.Auth qualified as Auth
 import HMem.DB.Observation qualified as Observation
 import HMem.DB.Overview qualified as Overview
 import HMem.DB.Pool (DBException(..), PoolMetrics(..), getPoolMetrics, runSession)
 import HMem.DB.Project qualified as Project
-import HMem.DB.RequestContext (Principal(..), PrincipalAuthority(..), currentPrincipal, currentRequestId, actorTypeToText, withWorkspaceIdContext)
+import HMem.DB.RequestContext (Principal(..), PrincipalAuthority(..), actorTypeToText, currentPrincipal, withWorkspaceIdContext)
 import HMem.DB.Schema
 import HMem.DB.Search qualified as Search
 import HMem.DB.Task qualified as Task
@@ -48,8 +50,8 @@ import HMem.DB.Timeline qualified as Timeline
 import HMem.DB.Workspace qualified as Workspace
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.AccessTracker (AccessTracker, bufferSize)
-import HMem.Server.Event (Broadcast, ChangeEvent(..), ChangeType(..), EntityType(..))
 import HMem.Server.WebSocket qualified as WS
+import HMem.Server.Snapshot (materializeSnapshot)
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -67,6 +69,8 @@ type HMemAPI = "api" :> "v1" :>
   :<|> "search"       :> ReqBody '[JSON] UnifiedSearchQuery :> Post '[JSON] UnifiedSearchResults
   :<|> "audit"        :> AuditAPI
   :<|> "ws-ticket"    :> ReqBody '[JSON] WebSocketTicketRequest :> Post '[JSON] WebSocketTicketResponse
+  :<|> "change-stream" :> "resync" :> ReqBody '[JSON] ChangeStreamResyncRequest :> Post '[JSON] ChangeStreamResyncResponse
+  :<|> "change-stream" :> "ticket" :> ReqBody '[JSON] CanonicalWebSocketTicketRequest :> Post '[JSON] WebSocketTicketResponse
   )
 
 type WorkspaceAPI =
@@ -240,18 +244,6 @@ authError = \case
   Auth.EntityScopeNotFound{} -> err404
   _ -> err403
 
-emit :: Maybe UUID -> Broadcast -> ChangeType -> EntityType -> UUID -> Maybe Value -> Handler ()
-emit workspaceId broadcast change entity entityId payload = liftIO $ do
-  now <- getCurrentTime
-  requestId <- currentRequestId
-  principal <- currentPrincipal
-  broadcast ChangeEvent
-    { changeType = change, entityType = entity, entityId = entityId, workspaceId = workspaceId
-    , timestamp = now, requestId = requestId
-    , actorType = fmap (\(p :: Principal) -> actorTypeToText p.actorType) principal
-    , actorId = fmap (\(p :: Principal) -> p.actorId) principal
-    , actorLabel = fmap (\(p :: Principal) -> p.actorLabel) principal, payload = payload }
-
 page :: Maybe Int -> Maybe Int -> (Int, Int)
 page = capPagination
 
@@ -259,18 +251,24 @@ page = capPagination
 -- Handlers
 ------------------------------------------------------------------------
 
-server :: Config.AuthConfig -> Pool Hasql.Connection -> AccessTracker -> Broadcast -> WS.WSState -> Bool -> Server HMemAPI
-server authConfig pool tracker broadcast wsState _ =
+server :: Config.AuthConfig -> Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Bool -> Server HMemAPI
+server authConfig pool tracker wsState =
+  serverWithChangeStream authConfig Config.defaultConfig.changeStream pool tracker wsState
+
+serverWithChangeStream :: Config.AuthConfig -> Config.ChangeStreamConfig -> Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Bool -> Server HMemAPI
+serverWithChangeStream authConfig changeStreamConfig pool tracker wsState _ =
        health pool tracker
   :<|> session authConfig pool
   :<|> workspaces pool
-  :<|> groups pool broadcast
-  :<|> observations pool broadcast
-  :<|> projects pool broadcast
-  :<|> tasks pool broadcast
+  :<|> groups pool
+  :<|> observations pool
+  :<|> projects pool
+  :<|> tasks pool
   :<|> search pool
-  :<|> audit pool broadcast
+  :<|> audit pool
   :<|> ticket pool wsState
+  :<|> resync changeStreamConfig pool
+  :<|> canonicalTicket changeStreamConfig pool wsState
 
 session :: Config.AuthConfig -> Pool Hasql.Connection -> Maybe UUID -> Handler SessionContext
 session config pool selectedWorkspace = do
@@ -387,8 +385,8 @@ maxTimelineBuckets = 366
 tenYearsSeconds :: NominalDiffTime
 tenYearsSeconds = 10 * 366 * 24 * 60 * 60
 
-groups :: Pool Hasql.Connection -> Broadcast -> Server WorkspaceGroupAPI
-groups pool broadcast = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembersH :<|> addMemberH :<|> removeMemberH where
+groups :: Pool Hasql.Connection -> Server WorkspaceGroupAPI
+groups pool = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembersH :<|> addMemberH :<|> removeMemberH where
   listH limit offset = do
     requireSuperadmin pool
     let (takeN, skipN) = page limit offset
@@ -398,7 +396,6 @@ groups pool broadcast = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembe
     requireSuperadmin pool
     reject (validateCreateWorkspaceGroupInput input)
     created <- handleDBErrors $ WorkspaceGroup.createGroup pool input
-    emit Nothing broadcast Created ETWorkspaceGroup created.id (Just (toJSON created))
     pure created
   getH groupId = do
     requireSuperadmin pool
@@ -406,7 +403,7 @@ groups pool broadcast = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembe
   deleteH groupId = do
     requireSuperadmin pool
     deleted <- handleDBErrors $ WorkspaceGroup.deleteGroup pool groupId
-    if deleted then emit Nothing broadcast Deleted ETWorkspaceGroup groupId Nothing >> pure NoContent else throwError err404
+    if deleted then pure NoContent else throwError err404
   listMembersH groupId = do
     requireSuperadmin pool
     _ <- handleDBErrors (WorkspaceGroup.getGroup pool groupId) >>= maybe (throwError err404) pure
@@ -416,7 +413,7 @@ groups pool broadcast = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembe
     _ <- handleDBErrors (WorkspaceGroup.getGroup pool groupId) >>= maybe (throwError err404) pure
     memberResult <- handleDBErrors $ WorkspaceGroup.addMember pool groupId input.workspaceId
     case memberResult of
-      WorkspaceGroup.MemberAdded -> emit (Just input.workspaceId) broadcast Updated ETWorkspaceGroup groupId Nothing
+      WorkspaceGroup.MemberAdded -> pure ()
       WorkspaceGroup.MemberAlreadyPresent -> pure ()
       WorkspaceGroup.MemberWorkspaceInactive -> throwError err404
     pure NoContent
@@ -425,11 +422,11 @@ groups pool broadcast = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembe
     _ <- handleDBErrors (WorkspaceGroup.getGroup pool groupId) >>= maybe (throwError err404) pure
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     removed <- handleDBErrors $ WorkspaceGroup.removeMember pool groupId workspaceId
-    if removed then emit (Just workspaceId) broadcast Updated ETWorkspaceGroup groupId Nothing else pure ()
+    if removed then pure () else pure ()
     pure NoContent
 
-observations :: Pool Hasql.Connection -> Broadcast -> Server ObservationAPI
-observations pool broadcast = listH :<|> createH :<|> matchH :<|> similarH :<|> getH :<|> updateH :<|> deleteH :<|> embeddingH where
+observations :: Pool Hasql.Connection -> Server ObservationAPI
+observations pool = listH :<|> createH :<|> matchH :<|> similarH :<|> getH :<|> updateH :<|> deleteH :<|> embeddingH where
   listH workspaceId kind subjectValue sha queryValue limit offset = do
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
     -- Validate client-supplied values before pagination defaults/caps are
@@ -445,7 +442,6 @@ observations pool broadcast = listH :<|> createH :<|> matchH :<|> similarH :<|> 
     requireObservationWorkspace pool input.workspaceId Auth.WorkspaceRoleEdit
     reject (validateCreateObservationInput input)
     created <- handleDBErrors $ withWorkspaceIdContext (Just input.workspaceId) (Observation.createObservation pool input)
-    emit (Just input.workspaceId) broadcast Created ETObservation created.id (Just (toJSON created))
     pure created
   matchH (ObservationMatchRequest requestBody) = do
     query <- decodeRequest requestBody
@@ -470,24 +466,22 @@ observations pool broadcast = listH :<|> createH :<|> matchH :<|> similarH :<|> 
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
     reject (validateUpdateObservationInput input)
     updated <- handleDBErrors (Observation.updateObservation pool workspaceId observationId input) >>= maybe (throwError err404) pure
-    emit (Just workspaceId) broadcast Updated ETObservation observationId (Just (toJSON updated))
     pure updated
   deleteH observationId = do
     workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleEdit
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
     deleted <- handleDBErrors (Observation.deleteObservation pool workspaceId observationId)
-    if deleted then emit (Just workspaceId) broadcast Deleted ETObservation observationId Nothing >> pure NoContent else throwError err404
+    if deleted then pure NoContent else throwError err404
   embeddingH observationId (ObservationEmbedding vector) = do
     workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleEdit
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
     -- Verify existence so a no-op UPDATE is never reported as success.
     _ <- handleDBErrors (Observation.getObservation pool workspaceId observationId) >>= maybe (throwError err404) pure
     handleDBErrors $ Observation.setObservationEmbedding pool workspaceId observationId vector
-    emit (Just workspaceId) broadcast Updated ETObservation observationId Nothing
     pure NoContent
 
-projects :: Pool Hasql.Connection -> Broadcast -> Server ProjectAPI
-projects pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> nextH where
+projects :: Pool Hasql.Connection -> Server ProjectAPI
+projects pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> nextH where
   listH workspaceId status queryValue limit offset = do
     workspace <- maybe (throwError err403) pure workspaceId
     requireWorkspace pool workspace Auth.WorkspaceRoleRead
@@ -499,17 +493,17 @@ projects pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH
   createH input = do
     requireWorkspace pool input.workspaceId Auth.WorkspaceRoleEdit; reject (validateCreateProjectInput input)
     created <- handleDBErrors $ Project.createProject pool input
-    emit (Just input.workspaceId) broadcast Created ETProject created.id (Just (toJSON created)); pure created
+    pure created
   getH projectId = do
     _ <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleRead
     handleDBErrors (Project.getProject pool projectId) >>= maybe (throwError err404) pure
   updateH projectId input = do
     workspaceId <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleEdit; reject (validateUpdateProjectInput input)
     updated <- handleDBErrors (Project.updateProject pool projectId input) >>= maybe (throwError err404) pure
-    emit (Just workspaceId) broadcast Updated ETProject projectId (Just (toJSON updated)); pure updated
+    pure updated
   deleteH projectId = do
     workspaceId <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleEdit
-    handleDBErrors (Project.deleteProjectCascade pool projectId) >>= maybe (throwError err404) (\result -> emit (Just workspaceId) broadcast Deleted ETProject projectId (Just (toJSON result)) >> pure result)
+    handleDBErrors (Project.deleteProjectCascade pool projectId) >>= maybe (throwError err404) pure
   overviewH projectId = do
     _ <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleRead
     handleDBErrors (Overview.getProjectOverview pool projectId) >>= maybe (throwError err404) pure
@@ -517,8 +511,8 @@ projects pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH
     _ <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleRead
     handleDBErrors $ Task.listNextTasks pool projectId (fromMaybe False includeBlocked) (fromMaybe 5 limit)
 
-tasks :: Pool Hasql.Connection -> Broadcast -> Server TaskAPI
-tasks pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> addDependencyH :<|> removeDependencyH where
+tasks :: Pool Hasql.Connection -> Server TaskAPI
+tasks pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> addDependencyH :<|> removeDependencyH where
   listH workspaceId projectId status priority queryValue limit offset = do
     workspace <- case (workspaceId, projectId) of
       (Just id, _) -> requireWorkspace pool id Auth.WorkspaceRoleRead >> pure id
@@ -532,7 +526,7 @@ tasks pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<
   createH input = do
     requireWorkspace pool input.workspaceId Auth.WorkspaceRoleEdit; reject (validateCreateTaskInput input)
     created <- handleDBErrors $ Task.createTask pool input
-    emit (Just input.workspaceId) broadcast Created ETTask created.id (Just (toJSON created)); pure created
+    pure created
   getH taskId = do
     _ <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleRead
     handleDBErrors (Task.getTask pool taskId) >>= maybe (throwError err404) pure
@@ -541,17 +535,16 @@ tasks pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<
     result <- handleDBErrors (Task.updateTaskWithDependencySnapshots pool taskId input) >>= maybe (throwError err404) pure
     let (updated, before, after) = result
         effects = [] -- snapshots are persisted by core; task updates do not expose Memory effects.
-    emit (Just workspaceId) broadcast Updated ETTask taskId (Just (toJSON updated))
     pure TaskMutationResult { task = updated, dependencyEffects = effects }
   deleteH taskId = do
     workspaceId <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleEdit
-    handleDBErrors (Task.deleteTaskCascade pool taskId) >>= maybe (throwError err404) (\result -> emit (Just workspaceId) broadcast Deleted ETTask taskId (Just (toJSON result)) >> pure result)
+    handleDBErrors (Task.deleteTaskCascade pool taskId) >>= maybe (throwError err404) pure
   overviewH taskId = do
     _ <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleRead
     handleDBErrors (Overview.getTaskOverview pool taskId) >>= maybe (throwError err404) pure
-  addDependencyH taskId input = mutateDependency "add" Created taskId input.dependsOnId Task.addDependencyWithSnapshots
-  removeDependencyH taskId dependsOnId = mutateDependency "remove" Deleted taskId dependsOnId Task.removeDependencyWithSnapshots
-  mutateDependency action change taskId dependsOnId mutate = do
+  addDependencyH taskId input = mutateDependency "add" taskId input.dependsOnId Task.addDependencyWithSnapshots
+  removeDependencyH taskId dependsOnId = mutateDependency "remove" taskId dependsOnId Task.removeDependencyWithSnapshots
+  mutateDependency action taskId dependsOnId mutate = do
     taskWorkspace <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleEdit
     dependencyWorkspace <- requireEntity pool Auth.EntityTask dependsOnId Auth.WorkspaceRoleRead
     when (taskId == dependsOnId) $ reject ["a task cannot depend on itself"]
@@ -563,7 +556,6 @@ tasks pool broadcast = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<
           , dependsOnId = dependsOnId
           , affectedTasks = dependencyStatusChanges action before after
           }
-    emit (Just taskWorkspace) broadcast change ETTaskDependency taskId (Just (toJSON result))
     pure result
 
 dependencyStatusChanges :: Text -> [TaskDependencyAutoBlockSnapshot] -> [TaskDependencyAutoBlockSnapshot] -> [TaskDependencyStatusChange]
@@ -611,8 +603,8 @@ search pool query = do
     searchesObservations searchQuery =
       SearchObservation `elem` fromMaybe [SearchObservation, SearchProject, SearchTask] searchQuery.entityTypes
 
-audit :: Pool Hasql.Connection -> Broadcast -> Server AuditAPI
-audit pool broadcast = listH :<|> revertH :<|> getH where
+audit :: Pool Hasql.Connection -> Server AuditAPI
+audit pool = listH :<|> revertH :<|> getH where
   listH workspaceId entityType entityId action since until limit offset = do
     case workspaceId of
       Just id
@@ -635,23 +627,23 @@ audit pool broadcast = listH :<|> revertH :<|> getH where
       ("project", AuditUpdate) | isSoftDelete entry -> restoreProject workspaceId entityId
       ("project", AuditUpdate) -> do
         old <- decodeOld entry
-        handleDBErrors (Project.updateProject pool entityId old) >>= maybe (throwError err409) (\project -> emit (Just workspaceId) broadcast Updated ETProject entityId (Just (toJSON project)) >> pure (Just (toJSON project)))
+        handleDBErrors (Project.updateProject pool entityId old) >>= maybe (throwError err409) (pure . Just . toJSON)
       ("project", AuditDelete) -> do
         restored <- handleDBErrors $ Project.restoreProject pool entityId
-        if restored then do project <- handleDBErrors (Project.getProject pool entityId); emit (Just workspaceId) broadcast Updated ETProject entityId (toJSON <$> project); pure (toJSON <$> project) else throwError err409
+        if restored then do project <- handleDBErrors (Project.getProject pool entityId); pure (toJSON <$> project) else throwError err409
       ("project", AuditCreate) -> do
         deleted <- handleDBErrors $ Project.deleteProjectCascade pool entityId
-        case deleted of Nothing -> throwError err409; Just _ -> emit (Just workspaceId) broadcast Deleted ETProject entityId Nothing >> pure Nothing
+        case deleted of Nothing -> throwError err409; Just _ -> pure Nothing
       ("task", AuditUpdate) | isSoftDelete entry -> restoreTask workspaceId entityId
       ("task", AuditUpdate) -> do
         old <- decodeOld entry
-        handleDBErrors (Task.updateTask pool entityId old) >>= maybe (throwError err409) (\task -> emit (Just workspaceId) broadcast Updated ETTask entityId (Just (toJSON task)) >> pure (Just (toJSON task)))
+        handleDBErrors (Task.updateTask pool entityId old) >>= maybe (throwError err409) (pure . Just . toJSON)
       ("task", AuditDelete) -> do
         restored <- handleDBErrors $ Task.restoreTask pool entityId
-        if restored then do task <- handleDBErrors (Task.getTask pool entityId); emit (Just workspaceId) broadcast Updated ETTask entityId (toJSON <$> task); pure (toJSON <$> task) else throwError err409
+        if restored then do task <- handleDBErrors (Task.getTask pool entityId); pure (toJSON <$> task) else throwError err409
       ("task", AuditCreate) -> do
         deleted <- handleDBErrors $ Task.deleteTaskCascade pool entityId
-        case deleted of Nothing -> throwError err409; Just _ -> emit (Just workspaceId) broadcast Deleted ETTask entityId Nothing >> pure Nothing
+        case deleted of Nothing -> throwError err409; Just _ -> pure Nothing
       -- Observation records are hard-deleted and their provenance is
       -- immutable, so audit replay cannot safely recreate or alter them.
       ("observation", _) -> throwError unsupportedObservation
@@ -666,7 +658,6 @@ audit pool broadcast = listH :<|> revertH :<|> getH where
     if restored
       then do
         project <- handleDBErrors (Project.getProject pool projectId)
-        emit (Just workspace) broadcast Updated ETProject projectId (toJSON <$> project)
         pure (toJSON <$> project)
       else throwError err409
   restoreTask workspace taskId = do
@@ -674,7 +665,6 @@ audit pool broadcast = listH :<|> revertH :<|> getH where
     if restored
       then do
         task <- handleDBErrors (Task.getTask pool taskId)
-        emit (Just workspace) broadcast Updated ETTask taskId (toJSON <$> task)
         pure (toJSON <$> task)
       else throwError err409
   isSoftDelete auditEntry =
@@ -712,4 +702,76 @@ ticket pool state request = do
   requireWorkspace pool request.workspaceId Auth.WorkspaceRoleRead
   principal <- liftIO currentPrincipal >>= maybe (throwError err401) pure
   receivesGlobalGroupEvents <- liftIO $ Auth.hasGlobalPermission pool (Just principal) Auth.GlobalSuperadmin
-  liftIO $ WS.createTicket state principal request.workspaceId receivesGlobalGroupEvents
+  receivesWorkspaceAdminEvents <- liftIO $ Auth.hasWorkspaceRole pool (Just principal) request.workspaceId Auth.WorkspaceRoleAdmin
+  liftIO $ WS.createTicketWithAudience state principal request.workspaceId receivesGlobalGroupEvents receivesWorkspaceAdminEvents
+
+-- Canonical resync uses the durable core state machine for both initial and
+-- continuation pages.  The API never exposes its high-watermark or cursor.
+resync :: Config.ChangeStreamConfig -> Pool Hasql.Connection -> ChangeStreamResyncRequest -> Handler ChangeStreamResyncResponse
+resync changeStreamConfig pool request = do
+  (scope', audience) <- changeStreamIdentity pool request.scope
+  let pageSize = fromMaybe 100 request.pageSize
+  when (pageSize < 1 || pageSize > 1000) $
+    throwError (badRequest "validation_error" "page_size must be between 1 and 1000")
+  result <- liftIO $ case request.pageToken of
+    Nothing -> do
+      case request.startIdempotencyKey of
+        Nothing -> pure (Left ChangeStream.SnapshotOutOfOrder)
+        Just startKey -> do
+          begun <- ChangeStream.beginResyncWithStartKey pool (fromIntegral changeStreamConfig.snapshotSessionTtlSeconds) scope' audience startKey pageSize (materializeSnapshot scope')
+          case begun of
+            Left err -> pure (Left err)
+            Right begin -> ChangeStream.readSnapshotPageWithTtls pool (fromIntegral changeStreamConfig.snapshotSessionTtlSeconds) (fromIntegral changeStreamConfig.resumeTokenTtlSeconds) scope' audience begin.snapshotToken pageSize
+    Just token -> ChangeStream.readSnapshotPageWithTtls pool (fromIntegral changeStreamConfig.snapshotSessionTtlSeconds) (fromIntegral changeStreamConfig.resumeTokenTtlSeconds) scope' audience (ChangeStream.SnapshotToken token) pageSize
+  case result of
+    Left ChangeStream.ResyncUnauthorized -> throwError err403
+    Left _ -> throwError resyncRequired
+    Right snapshotPage -> do
+      typedItems <- traverse decodeSnapshotItem snapshotPage.snapshotPageItems
+      pure ChangeStreamResyncResponse
+        { items = typedItems
+        , hasMore = snapshotPage.snapshotPageHasMore
+        , nextPageToken = renderSnapshotToken <$> snapshotPage.snapshotNextToken
+        , resumeToken = renderResumeToken <$> snapshotPage.snapshotResumeToken
+        }
+
+canonicalTicket :: Config.ChangeStreamConfig -> Pool Hasql.Connection -> WS.WSState -> CanonicalWebSocketTicketRequest -> Handler WebSocketTicketResponse
+canonicalTicket _changeStreamConfig pool state request = do
+  (scope', audience) <- changeStreamIdentity pool request.scope
+  principal <- liftIO currentPrincipal >>= maybe (throwError err401) pure
+  valid <- liftIO $ ChangeStream.validateCanonicalResumeToken pool scope' audience (ChangeStream.ResumeToken request.resumeToken)
+  case valid of
+    Left ChangeStream.ResyncUnauthorized -> throwError err403
+    Left _ -> throwError resyncRequired
+    Right resumeExpiresAt -> liftIO $ WS.createCanonicalTicketWithExpiry state resumeExpiresAt principal scope' (ChangeStream.ResumeToken request.resumeToken)
+
+-- The authorization check is done before bearer work, and the corresponding
+-- database state machine checks it again under the scope lock.  A grant-user
+-- audience binds to the stable authenticated user id; local synthetic
+-- principals are confined to the private local-server audience.
+changeStreamIdentity :: Pool Hasql.Connection -> ChangeStreamScopeRequest -> Handler (ChangeStream.ChangeScope, ChangeStream.ChangeAudience)
+changeStreamIdentity pool scopeRequest = do
+  principal <- liftIO currentPrincipal >>= maybe (throwError err401) pure
+  scope' <- case scopeRequest of
+    ChangeStreamWorkspace workspace -> requireWorkspace pool workspace Auth.WorkspaceRoleRead >> pure (ChangeStream.WorkspaceScope workspace)
+    ChangeStreamGlobal -> requireSuperadmin pool >> pure ChangeStream.GlobalScope
+  audience <- case principal.authority of
+    PrincipalGrantUser userId -> pure (ChangeStream.AuthenticatedAudience (UUID.toText userId) userId)
+    PrincipalSyntheticLocalSuperadmin -> pure (ChangeStream.TrustedAudience ("local:" <> principal.actorId))
+    PrincipalNoAuthority -> throwError err401
+  pure (scope', audience)
+
+decodeSnapshotItem :: Value -> Handler ChangeStreamSnapshotItem
+decodeSnapshotItem value = case Aeson.fromJSON value of
+  Aeson.Success item -> pure item
+  Aeson.Error _ -> throwError err500
+
+resyncRequired :: ServerError
+resyncRequired = err409
+  { errBody = Aeson.encode (object ["error" .= ("resync_required" :: Text)]) }
+
+renderSnapshotToken :: ChangeStream.SnapshotToken -> Text
+renderSnapshotToken (ChangeStream.SnapshotToken value) = value
+
+renderResumeToken :: ChangeStream.ResumeToken -> Text
+renderResumeToken (ChangeStream.ResumeToken value) = value

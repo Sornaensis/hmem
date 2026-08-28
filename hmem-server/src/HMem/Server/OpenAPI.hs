@@ -226,6 +226,13 @@ instance ToSchema AuditLogEntry where declareNamedSchema = genericDeclareNamedSc
 instance ToSchema RevertResult where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WebSocketTicketRequest where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema WebSocketTicketResponse where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ChangeStreamScopeRequest where
+  declareNamedSchema _ = pure $ NamedSchema (Just "ChangeStreamScopeRequest") changeStreamScopeSchema
+instance ToSchema ChangeStreamResyncRequest where
+  declareNamedSchema _ = pure $ NamedSchema (Just "ChangeStreamResyncRequest") changeStreamResyncSchema
+instance ToSchema ChangeStreamSnapshotItem where declareNamedSchema = genericDeclareNamedSchema changeStreamItemOpts
+instance ToSchema ChangeStreamResyncResponse where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema CanonicalWebSocketTicketRequest where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionContext where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionPrincipal where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionGlobalPermissions where declareNamedSchema = genericDeclareNamedSchema opts
@@ -235,6 +242,58 @@ instance ToSchema a => ToSchema (PaginatedResult a) where declareNamedSchema = g
 timelineActorOpts :: SchemaOptions
 timelineActorOpts = opts { fieldLabelModifier = \case
   "actorType" -> "type"; "actorId" -> "id"; "actorLabel" -> "label"; other -> camelToSnake other }
+
+changeStreamItemOpts :: SchemaOptions
+changeStreamItemOpts = opts { fieldLabelModifier = \case
+  "data_" -> "data"
+  other -> camelToSnake other }
+
+-- The resync request has two disjoint wire states.  Keeping the distinction
+-- explicit in OpenAPI prevents generated clients from accidentally combining
+-- a continuation bearer with a new-start idempotency key.
+changeStreamScopeSchema :: Schema
+changeStreamScopeSchema = mempty
+  & description ?~ "Exactly one scope form: global has no workspace_id; workspace requires workspace_id."
+  & oneOf ?~ [Inline globalScopeSchema, Inline workspaceScopeSchema]
+
+globalScopeSchema :: Schema
+globalScopeSchema = mempty
+  & type_ ?~ OpenApiObject
+  & properties .~ InsOrdMap.fromList [("scope", Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["global"]))]
+  & required .~ ["scope"]
+  & additionalProperties ?~ AdditionalPropertiesAllowed False
+
+workspaceScopeSchema :: Schema
+workspaceScopeSchema = mempty
+  & type_ ?~ OpenApiObject
+  & properties .~ InsOrdMap.fromList
+      [ ("scope", Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["workspace"]))
+      , ("workspace_id", Inline (mempty & type_ ?~ OpenApiString & format ?~ "uuid")) ]
+  & required .~ ["scope", "workspace_id"]
+  & additionalProperties ?~ AdditionalPropertiesAllowed False
+
+changeStreamResyncSchema :: Schema
+changeStreamResyncSchema = mempty
+  & description ?~ "Exactly one resync form: a start uses a client-generated, high-entropy start_idempotency_key of at least 32 characters; a continuation uses page_token. Page size is immutable after the start."
+  & oneOf ?~ [Inline resyncStartSchema, Inline resyncContinuationSchema]
+
+changeStreamSharedProperties = InsOrdMap.fromList
+  [ ("scope", Inline changeStreamScopeSchema)
+  , ("page_size", Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 1 & maximum_ ?~ 1000)) ]
+
+resyncStartSchema :: Schema
+resyncStartSchema = mempty
+  & type_ ?~ OpenApiObject
+  & properties .~ InsOrdMap.insert "start_idempotency_key" (Inline (mempty & type_ ?~ OpenApiString & minLength ?~ 32 & maxLength ?~ 512)) changeStreamSharedProperties
+  & required .~ ["scope", "start_idempotency_key"]
+  & additionalProperties ?~ AdditionalPropertiesAllowed False
+
+resyncContinuationSchema :: Schema
+resyncContinuationSchema = mempty
+  & type_ ?~ OpenApiObject
+  & properties .~ InsOrdMap.insert "page_token" (Inline (mempty & type_ ?~ OpenApiString & minLength ?~ 1)) changeStreamSharedProperties
+  & required .~ ["scope", "page_token"]
+  & additionalProperties ?~ AdditionalPropertiesAllowed False
 
 timelineProjectContextOpts :: SchemaOptions
 timelineProjectContextOpts = opts { fieldLabelModifier = \case

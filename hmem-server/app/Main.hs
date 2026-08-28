@@ -21,7 +21,8 @@ import HMem.Config qualified as Config
 import HMem.DB.Pool qualified as Pool
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), withSandboxedTestEnv)
 import HMem.Server.AccessTracker (newAccessTracker, flushNow)
-import HMem.Server.App (mkApp)
+import HMem.Server.App (mkApp, mkAppWithChangeStream)
+import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
 import HMem.Server.LogRotation (preRotateLogFileIfNeeded)
 import HMem.Server.Logging (newLogger, parseLogLevel, logInfo, logWarn, jsonRequestLogger)
 import HMem.Server.Static (resolveStaticDir)
@@ -106,6 +107,7 @@ runDevMode opts = do
     tracker <- newAccessTracker pool 5
     pgvec <- Pool.checkPgvector pool
     wsState <- newWSState
+    streamWorker <- startChangeStreamWorker pool Config.defaultConfig.changeStream wsState
     mStaticDir <- resolveStaticDir (Just "hmem-server/static")
 
     (logAction, cleanupLog) <- newFastLogger (LogStderr defaultBufSize)
@@ -142,6 +144,7 @@ runDevMode opts = do
         shutdown = do
           logInfo logger "[dev] Shutting down..."
           flushNow pool tracker `catch` \(_ :: SomeException) -> pure ()
+          stopChangeStreamWorker streamWorker
           destroyAllResources pool
           cleanupLog
 
@@ -152,7 +155,7 @@ runDevMode opts = do
         exitFailure
       Nothing -> pure ()
 
-    app <- mkApp requestLogger devAuth devCors devRateLimit pool tracker wsState mStaticDir pgvec
+    app <- mkAppWithChangeStream Config.defaultConfig.changeStream requestLogger devAuth devCors devRateLimit pool tracker wsState mStaticDir pgvec
     runSettings settings app `finally` shutdown
 
 -- | Seed some sample data for dev mode so the UI has something to show.
@@ -244,6 +247,7 @@ runNormalMode opts = do
 
   -- WebSocket state
   wsState <- newWSState
+  streamWorker <- startChangeStreamWorker pool cfg.changeStream wsState
 
   -- Resolve static file directory for the web frontend
   mStaticDir <- if cfg.web.webEnabled
@@ -294,6 +298,7 @@ runNormalMode opts = do
         logInfo logger "hmem-server: shutting down..."
         flushNow pool tracker
           `catch` \(_ :: SomeException) -> logWarn logger "failed to flush access tracker"
+        stopChangeStreamWorker streamWorker
         destroyAllResources pool
         cleanupLog
 
@@ -301,7 +306,7 @@ runNormalMode opts = do
   let mTlsCert = opts.optTlsCert <|> cfg.tls.tlsCertFile
       mTlsKey  = opts.optTlsKey  <|> cfg.tls.tlsKeyFile
 
-  app <- mkApp requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker wsState mStaticDir pgvec
+  app <- mkAppWithChangeStream cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker wsState mStaticDir pgvec
   case (mTlsCert, mTlsKey) of
     (Just cert, Just key) -> do
       logInfo logger $ "TLS enabled: cert=" <> T.pack cert <> " key=" <> T.pack key

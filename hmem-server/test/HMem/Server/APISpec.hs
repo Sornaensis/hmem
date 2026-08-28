@@ -32,7 +32,7 @@ import Test.Hspec
 
 import HMem.Config qualified as Config
 import HMem.DB.Auth qualified as Auth
-import HMem.DB.ChangeStream (ChangeScope(..), OutboxRecord(..), listOutboxAfter)
+import HMem.DB.ChangeStream (ChangeScope(..), ChangeAudience(..), ResumeToken(..), ReplayPage(..), OutboxRecord(..), listOutboxAfter, replayAndRotateResumeToken)
 import HMem.DB.Pool qualified as DBPool
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
@@ -102,29 +102,25 @@ groupMembershipExists env groupId workspaceId = DBPool.runSession env.pool $
     ((fst >$< Enc.param (Enc.nonNullable Enc.uuid)) <> (snd >$< Enc.param (Enc.nonNullable Enc.uuid)))
     (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True)
 
-recordingGroupApp :: TestEnv -> IO (Application, IO [ChangeEvent])
+recordingGroupApp :: TestEnv -> IO Application
 recordingGroupApp env = do
   tracker <- newAccessTracker env.pool 3600
   wsState <- newWSState
-  events <- newIORef []
-  let broadcast event = modifyIORef' events (event :)
-      app = serve (Proxy @HMemAPI) (server Config.defaultConfig.auth env.pool tracker broadcast wsState True)
+  let app = serve (Proxy @HMemAPI) (server Config.defaultConfig.auth env.pool tracker wsState True)
       localSuperadmin = Principal
         { actorType = ActorUser, actorId = "group-event-test", actorLabel = "Group Event Test"
         , authority = PrincipalSyntheticLocalSuperadmin }
-  pure (\req respond -> withPrincipalContext (Just localSuperadmin) (app req respond), reverse <$> readIORef events)
+  pure $ \req respond -> withPrincipalContext (Just localSuperadmin) (app req respond)
 
-recordingObservationApp :: TestEnv -> IO (Application, IO [ChangeEvent])
+recordingObservationApp :: TestEnv -> IO Application
 recordingObservationApp env = do
   tracker <- newAccessTracker env.pool 3600
   wsState <- newWSState
-  events <- newIORef []
-  let broadcast event = modifyIORef' events (event :)
-      app = serve (Proxy @HMemAPI) (server Config.defaultConfig.auth env.pool tracker broadcast wsState True)
+  let app = serve (Proxy @HMemAPI) (server Config.defaultConfig.auth env.pool tracker wsState True)
       localSuperadmin = Principal
         { actorType = ActorUser, actorId = "observation-event-test", actorLabel = "Observation Event Test"
         , authority = PrincipalSyntheticLocalSuperadmin }
-  pure (\req respond -> withPrincipalContext (Just localSuperadmin) (app req respond), reverse <$> readIORef events)
+  pure $ \req respond -> withPrincipalContext (Just localSuperadmin) (app req respond)
 
 spec :: Spec
 spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app))) $ do
@@ -210,9 +206,9 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       request app methodGet (groupPath <> "/members") "" >>= (\response -> responseStatus response `shouldBe` status404)
       entityTypeToText ETWorkspaceGroup `shouldBe` "workspace_group"
 
-    it "emits global group events and workspace-scoped membership events" $ \(env, _app) -> do
+    it "records group and membership changes in the durable outbox" $ \(env, _app) -> do
       workspace <- createTestWorkspace env "group-event-member"
-      (app, readEvents) <- recordingGroupApp env
+      app <- recordingGroupApp env
       createdResponse <- postJson app "/api/v1/groups" (object ["name" .= ("event group" :: T.Text)])
       let Just created = decode (responseBody createdResponse) :: Maybe WorkspaceGroup
           groupPath = "/api/v1/groups/" <> Text.encodeUtf8 (T.pack (show created.id))
@@ -224,17 +220,63 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       request app methodDelete (groupPath <> "/members/" <> Text.encodeUtf8 (T.pack (show workspace.id))) "" >>= (\response -> responseStatus response `shouldBe` status200)
       request app methodDelete (groupPath <> "/members/" <> Text.encodeUtf8 (T.pack (show workspace.id))) "" >>= (\response -> responseStatus response `shouldBe` status200)
       request app methodDelete groupPath "" >>= (\response -> responseStatus response `shouldBe` status200)
-      events <- readEvents
-      map (\event -> (event.changeType, event.entityType, event.entityId, event.workspaceId)) events
-        `shouldBe`
-          [ (Created, ETWorkspaceGroup, created.id, Nothing)
-          , (Updated, ETWorkspaceGroup, created.id, Just workspace.id)
-          , (Updated, ETWorkspaceGroup, created.id, Just workspace.id)
-          , (Deleted, ETWorkspaceGroup, created.id, Nothing)
-          ]
-      let createdEvent = head events
-      eventVisibleToSubscription True (SubscribeWorkspace workspace.id) createdEvent `shouldBe` True
-      eventVisibleToSubscription False (SubscribeWorkspace workspace.id) createdEvent `shouldBe` False
+      global <- listOutboxAfter env.pool GlobalScope 0 100
+      workspaceRecords <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      let globalActions = [ jsonPath ["entity", "action"] record.outboxEnvelope
+                          | record <- global
+                          , jsonPath ["entity", "type"] record.outboxEnvelope == Just (String "workspace_group")
+                          , jsonPath ["entity", "id"] record.outboxEnvelope == Just (String (T.pack (show created.id))) ]
+          membershipActions = [ jsonPath ["entity", "action"] record.outboxEnvelope
+                              | record <- workspaceRecords
+                              , jsonPath ["entity", "type"] record.outboxEnvelope == Just (String "workspace_group_membership")
+                              , maybe False (T.isPrefixOf (T.pack (show created.id))) (jsonPath ["entity", "id"] record.outboxEnvelope >>= \case String value -> Just value; _ -> Nothing) ]
+      globalActions `shouldBe` [Just (String "created"), Just (String "deleted")]
+      membershipActions `shouldBe` [Just (String "created"), Just (String "deleted")]
+
+  describe "Canonical change-stream resync" $ do
+    it "returns allowlisted snapshot items and an opaque terminal token without a cursor" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "canonical-resync"
+      let start = object
+            [ "scope" .= object ["scope" .= ("workspace" :: T.Text), "workspace_id" .= workspace.id]
+            , "page_size" .= (20 :: Int), "start_idempotency_key" .= ("canonical-resync-response-loss-key-0001" :: T.Text) ]
+      response <- postJson app "/api/v1/change-stream/resync" start
+      responseStatus response `shouldBe` status200
+      let Just body = decode (responseBody response) :: Maybe Value
+      jsonField "resume_token" body `shouldSatisfy` (/= Nothing)
+      jsonField "next_page_token" body `shouldBe` Nothing
+      jsonField "cursor" body `shouldBe` Nothing
+      -- Retrying a lost start response returns the same materialized first
+      -- page/token; the client cannot silently create another snapshot.
+      retry <- postJson app "/api/v1/change-stream/resync" start
+      responseStatus retry `shouldBe` status200
+      responseBody retry `shouldBe` responseBody response
+      pageSizeMismatch <- postJson app "/api/v1/change-stream/resync" (object
+        [ "scope" .= object ["scope" .= ("workspace" :: T.Text), "workspace_id" .= workspace.id]
+        , "page_size" .= (21 :: Int), "start_idempotency_key" .= ("canonical-resync-response-loss-key-0001" :: T.Text) ])
+      responseStatus pageSizeMismatch `shouldBe` status409
+      weakStartKey <- postJson app "/api/v1/change-stream/resync" (object
+        [ "scope" .= object ["scope" .= ("workspace" :: T.Text), "workspace_id" .= workspace.id]
+        , "page_size" .= (20 :: Int), "start_idempotency_key" .= ("predictable" :: T.Text) ])
+      responseStatus weakStartKey `shouldBe` status400
+      -- The public ticket endpoint must accept a successor token, not only
+      -- the terminal snapshot token from which it descended. This is the
+      -- reconnect path after the server has replayed/rotated a prior page.
+      resume <- case jsonField "resume_token" body of
+        Just (String value) -> pure (ResumeToken value)
+        _ -> expectationFailure "terminal resync omitted resume_token" >> fail "unreachable"
+      rotated <- replayAndRotateResumeToken env.pool 60 (WorkspaceScope workspace.id) (TrustedAudience "local:local-user") resume 20
+      successor <- case rotated of
+        Right ReplayPage { replayPageResumeToken = value } -> pure value
+        Left err -> expectationFailure (show err) >> fail "unreachable"
+      ticketResponse <- postJson app "/api/v1/change-stream/ticket" (object
+        [ "scope" .= object ["scope" .= ("workspace" :: T.Text), "workspace_id" .= workspace.id]
+        , "resume_token" .= successor.unResumeToken ])
+      responseStatus ticketResponse `shouldBe` status200
+      case jsonField "items" body of
+        Just (Array items) -> do
+          not (null items) `shouldBe` True
+          all (\item -> jsonField "schema_version" item == Just (Number 1) && jsonField "data" item /= Nothing) items `shouldBe` True
+        _ -> expectationFailure "expected snapshot items"
 
     it "validates create input and atomically rejects inactive member workspaces" $ \(env, app) -> do
       postJson app "/api/v1/groups" (object ["name" .= ("" :: T.Text)]) >>= (\response -> responseStatus response `shouldBe` status400)
@@ -691,22 +733,21 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       missing <- request app methodGet ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))) ""
       responseStatus missing `shouldBe` status404
 
-    it "emits canonical and legacy multi-subject Observation event payloads" $ \(env, _app) -> do
+    it "records Observation changes without projecting handler-local payloads" $ \(env, _app) -> do
       workspace <- createTestWorkspace env "observation-event"
-      (app, readEvents) <- recordingObservationApp env
+      app <- recordingObservationApp env
       let subjectsValue = [ObservationSubject SubjectFile "src/Event.hs", ObservationSubject SubjectGlob "src/**/*.hs"]
       response <- postJson app "/api/v1/observations" (object
         [ "workspace_id" .= workspace.id, "subjects" .= subjectsValue
         , "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text), "content" .= ("event observation" :: T.Text) ])
       responseStatus response `shouldBe` status200
       let Just observation = decode (responseBody response) :: Maybe Observation
-      events <- readEvents
-      let [event] = events
-      (event.changeType, event.entityType, event.entityId, event.workspaceId) `shouldBe`
-        (Created, ETObservation, observation.id, Just workspace.id)
-      (event.payload >>= jsonField "subjects") `shouldBe` Just (toJSON subjectsValue)
-      (event.payload >>= jsonField "subject_kind") `shouldBe` Just (String "file")
-      (event.payload >>= jsonField "subject") `shouldBe` Just (String "src/Event.hs")
+      records <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
+      let observed = [ record | record <- records
+                      , jsonPath ["entity", "type"] record.outboxEnvelope == Just (String "observation")
+                      , jsonPath ["entity", "id"] record.outboxEnvelope == Just (String (T.pack (show observation.id))) ]
+      length observed `shouldBe` 1
+      jsonPath ["payload"] (head observed).outboxEnvelope `shouldBe` Nothing
 
     it "matches concrete paths with subject evidence, filters, pagination, and workspace isolation" $ \(env, app) -> do
       workspace <- createTestWorkspace env "observation-match"
@@ -997,6 +1038,23 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         _ -> False)
       schema "WorkspaceTimelineEvent" `shouldSatisfy` isJust
       schema "WorkspaceTimelineBucketsResponse" `shouldSatisfy` isJust
+      -- Change-stream requests are intentionally a disjoint start versus
+      -- continuation contract, and scope itself is a global/workspace oneOf.
+      -- Assert the served document so generated clients cannot combine bearer
+      -- and start-key fields despite the runtime parser rejecting that form.
+      case schema "ChangeStreamScopeRequest" >>= jsonField "oneOf" of
+        Just (Array branches) -> length (toList branches) `shouldBe` 2
+        _ -> expectationFailure "ChangeStreamScopeRequest must use a two-form oneOf"
+      case schema "ChangeStreamResyncRequest" >>= jsonField "oneOf" of
+        Just (Array branches) -> do
+          let forms = toList branches
+              required branch = jsonStrings (jsonField "required" branch)
+              startForms = filter (maybe False (elem "start_idempotency_key") . required) forms
+              continuationForms = filter (maybe False (elem "page_token") . required) forms
+          length forms `shouldBe` 2
+          length startForms `shouldBe` 1
+          length continuationForms `shouldBe` 1
+        _ -> expectationFailure "ChangeStreamResyncRequest must use start/continuation oneOf"
       fixedEmbedding `shouldBe` Just (Number 1536, Number 1536)
       hasOptionalAuditWorkspace `shouldBe` True
       mapM_ (\legacyPath -> (paths >>= jsonField legacyPath) `shouldBe` Nothing)

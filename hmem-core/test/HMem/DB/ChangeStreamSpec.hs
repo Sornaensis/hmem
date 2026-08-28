@@ -9,7 +9,7 @@ import Control.Concurrent.Async (async, concurrently, wait)
 import Control.Exception (SomeException, finally, try)
 import Control.Monad (void)
 import Crypto.Hash (Digest, SHA256, hash)
-import Data.Either (isLeft)
+import Data.Either (isLeft, isRight)
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int64)
 import Data.List (find)
@@ -84,6 +84,48 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     (_, removedSessions) <- cleanupChangeStream env.pool now
     removedSessions `shouldBe` 1
     readSnapshotPage env.pool scope audience begin.snapshotToken 0 1 `shouldReturn` Left SnapshotNotFound
+  it "uses fresh server-random lineage after an expired start key and serializes concurrent retries" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-start-idempotency"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "start-idempotency-audience"
+        startKey = "opaque-response-loss-key"
+    firstResult <- beginResyncWithStartKey env.pool 0.1 scope audience startKey 10 (pure [String "expired"])
+    first <- case firstResult of Right value -> pure value; Left err -> expectationFailure (show err) >> fail "unreachable"
+    firstTerminal <- readSnapshotPageWithTtls env.pool 0.1 2 scope audience first.snapshotToken 10
+    firstResume <- case firstTerminal of Right SnapshotPage { snapshotResumeToken = Just value } -> pure value; other -> expectationFailure (show other) >> fail "unreachable"
+    threadDelay 250000
+    freshResult <- beginResyncWithStartKey env.pool 60 scope audience startKey 10 (pure [String "fresh"])
+    fresh <- case freshResult of Right value -> pure value; Left err -> expectationFailure (show err) >> fail "unreachable"
+    fresh.snapshotToken `shouldNotBe` first.snapshotToken
+    validateCanonicalResumeToken env.pool scope audience firstResume `shouldReturn` Left ResumeNotFound
+    freshPage <- readSnapshotPageWithTtls env.pool 60 2 scope audience fresh.snapshotToken 10
+    freshResume <- case freshPage of Right SnapshotPage { snapshotResumeToken = Just value } -> pure value; other -> expectationFailure (show other) >> fail "unreachable"
+    freshResume `shouldNotBe` firstResume
+    (first, second) <- concurrently
+      (beginResyncWithStartKey env.pool 60 scope audience "concurrent-opaque-key" 10 (pure [String "one"]))
+      (beginResyncWithStartKey env.pool 60 scope audience "concurrent-opaque-key" 10 (pure [String "two"]))
+    case (first, second) of
+      (Right left, Right right) -> do
+        left.snapshotToken `shouldBe` right.snapshotToken
+        page <- readSnapshotPageWithTtl env.pool 60 scope audience left.snapshotToken 10
+        case page of
+          Right SnapshotPage { snapshotPageItems = [String item], snapshotResumeToken = Just _ } ->
+            item `shouldSatisfy` (`elem` ["one", "two"])
+          _ -> expectationFailure (show page)
+      other -> expectationFailure (show other)
+  it "keeps a terminal resume bearer alive beyond an idle snapshot session, then expires it at its own TTL" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-distinct-resume-ttl"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "distinct-resume-ttl-audience"
+    begun <- beginResync env.pool 0.1 scope audience (pure [])
+    begin <- case begun of Right value -> pure value; Left err -> expectationFailure (show err) >> fail "unreachable"
+    terminal <- readSnapshotPageWithTtls env.pool 0.1 0.6 scope audience begin.snapshotToken 10
+    resume <- case terminal of Right SnapshotPage { snapshotResumeToken = Just value } -> pure value; other -> expectationFailure (show other) >> fail "unreachable"
+    threadDelay 250000
+    validated <- validateCanonicalResumeToken env.pool scope audience resume
+    validated `shouldSatisfy` isRight
+    threadDelay 500000
+    validateCanonicalResumeToken env.pool scope audience resume `shouldReturn` Left ResumeExpired
   it "rejects a snapshot bearer that expires while its token lock is held" $ \env -> do
     workspace <- createTestWorkspace env "change-stream-snapshot-lock-expiry"
     let scope = WorkspaceScope workspace.id
@@ -101,20 +143,65 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     putMVar release ()
     void (wait holder)
     wait reader `shouldReturn` Left SnapshotExpired
-  it "starts a snapshot-session TTL after scope serialization and materialization" $ \env -> do
+  it "binds start-derived bearers to their scope and audience" $ \env -> do
+    firstWorkspace <- createTestWorkspace env "change-stream-start-token-first"
+    secondWorkspace <- createTestWorkspace env "change-stream-start-token-second"
+    firstUser <- UUIDV4.nextRandom
+    secondUser <- UUIDV4.nextRandom
+    runSession env.pool $ Session.statement firstUser insertTestUserStatement
+    runSession env.pool $ Session.statement secondUser insertTestUserStatement
+    _ <- Auth.upsertWorkspaceMembership env.pool firstWorkspace.id (Auth.UpsertWorkspaceMembership firstUser Auth.WorkspaceRoleRead) Nothing
+    _ <- Auth.upsertWorkspaceMembership env.pool firstWorkspace.id (Auth.UpsertWorkspaceMembership secondUser Auth.WorkspaceRoleRead) Nothing
+    let startKey = "opaque-start-capability-key"
+        firstScope = WorkspaceScope firstWorkspace.id
+        firstAudience = AuthenticatedAudience "first" firstUser
+        secondAudience = AuthenticatedAudience "second" secondUser
+    first <- beginResyncWithStartKey env.pool 60 firstScope firstAudience startKey 10 (pure [])
+    otherScope <- beginResyncWithStartKey env.pool 60 (WorkspaceScope secondWorkspace.id) (TrustedAudience "other-scope") startKey 10 (pure [])
+    otherUser <- beginResyncWithStartKey env.pool 60 firstScope secondAudience startKey 10 (pure [])
+    case (first, otherScope, otherUser) of
+      (Right firstBegin, Right otherScopeBegin, Right otherUserBegin) -> do
+        firstBegin.snapshotToken `shouldNotBe` otherScopeBegin.snapshotToken
+        firstBegin.snapshotToken `shouldNotBe` otherUserBegin.snapshotToken
+        T.isInfixOf startKey firstBegin.snapshotToken.unSnapshotToken `shouldBe` False
+      result -> expectationFailure (show result)
+  it "orders retry starts and snapshot pages without an interleaved lock cycle" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-start-page-lock-order"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "start-page-lock-order"
+        startKey = "start-page-lock-order-key"
+    begun <- beginResyncWithStartKey env.pool 60 scope audience startKey 10 (pure [String "item"])
+    begin <- case begun of Right value -> pure value; Left err -> expectationFailure (show err) >> fail "unreachable"
+    acquired <- newEmptyMVar
+    release <- newEmptyMVar
+    holder <- async $ holdScopeLock env.pool workspace.id acquired release
+    takeMVar acquired
+    page <- async $ readSnapshotPageWithTtl env.pool 60 scope audience begin.snapshotToken 10
+    -- In the former page-token-then-scope order this has acquired the page
+    -- row and is blocked on scope before the retry acquires scope and blocks
+    -- on that page row. The fixed order serializes both behind scope.
+    threadDelay 100000
+    retry <- async $ beginResyncWithStartKey env.pool 60 scope audience startKey 10 (pure [String "other"])
+    threadDelay 100000
+    putMVar release ()
+    completed <- timeout 2000000 ((,) <$> wait page <*> wait retry)
+    void (wait holder)
+    completed `shouldSatisfy` \case
+      Just (Right SnapshotPage { snapshotPageItems = [String "item"] }, Right _) -> True
+      _ -> False
+  it "starts a short snapshot-session TTL only after materialization" $ \env -> do
     workspace <- createTestWorkspace env "change-stream-scope-lock-session-ttl"
     let scope = WorkspaceScope workspace.id
         audience = TrustedAudience "scope-lock-session-ttl-audience"
-    -- Materialization runs after beginResync has acquired the scope lock.  The
-    -- database marker is captured after a fixed delay longer than the TTL; a
-    -- process timestamp taken before lock/materialization would therefore
-    -- persist an expiry at or before this marker.
-    begun <- beginResync env.pool 0.1 scope audience $ do
+    -- The materializer delays longer than this short TTL. Capturing the clock
+    -- before materialization would return an expired bearer; capturing it
+    -- afterwards leaves a usable interval after the marker.
+    begun <- beginResync env.pool 0.2 scope audience $ do
       marker <- Session.statement () snapshotTimingMarkerStatement
       pure [String (T.pack (show marker))]
     begin <- case begun of Right value -> pure value; Left err -> expectationFailure (show err) >> fail "unreachable"
     expiresAt <- runSession env.pool $ Session.statement (tokenHashForTest begin.snapshotToken.unSnapshotToken) snapshotExpiryStatement
-    page <- readSnapshotPageWithTtl env.pool 0.1 scope audience begin.snapshotToken 1
+    page <- readSnapshotPageWithTtl env.pool 0.2 scope audience begin.snapshotToken 1
     case page of
       Right SnapshotPage { snapshotPageItems = [String markerText] } ->
         case readMaybe (T.unpack markerText) of
@@ -154,7 +241,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     terminal `shouldSatisfy` \case Right SnapshotPage { snapshotPageItems = [String "authorized-at-begin"] } -> True; _ -> False
     _ <- Auth.upsertWorkspaceMembership env.pool workspace.id (Auth.UpsertWorkspaceMembership userId Auth.WorkspaceRoleEdit) Nothing
     -- A terminal retry rechecks auth/epoch and must not leak its cached item.
-    readSnapshotPage env.pool scope audience begin.snapshotToken 0 1 `shouldReturn` Left ResyncUnauthorized
+    readSnapshotPage env.pool scope audience begin.snapshotToken 0 1 `shouldReturn` Left SnapshotSuperseded
   it "binds snapshot and resume bearers to audience kind, key, and authenticated user separately" $ \env -> do
     workspace <- createTestWorkspace env "change-stream-audience-components"
     firstUser <- UUIDV4.nextRandom
@@ -270,8 +357,8 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     runSession env.pool $ Session.statement userId grantTestSuperadminStatement
     fresh <- beginResync env.pool 60 scope audience (pure [String "fresh-after-regrant"])
     fresh `shouldSatisfy` \case Right _ -> True; _ -> False
-    readSnapshotPage env.pool scope audience begin.snapshotToken 0 1 `shouldReturn` Left ResyncUnauthorized
-    replayAndRotateResumeToken env.pool 60 scope audience resume 10 `shouldReturn` Left ResyncUnauthorized
+    readSnapshotPage env.pool scope audience begin.snapshotToken 0 1 `shouldReturn` Left SnapshotSuperseded
+    replayAndRotateResumeToken env.pool 60 scope audience resume 10 `shouldReturn` Left ResumeSuperseded
   it "invalidates pre-delete snapshot and resume bearers across delete and restore" $ \env -> do
     workspace <- createTestWorkspace env "change-stream-soft-deleted-workspace"
     userId <- UUIDV4.nextRandom
@@ -295,8 +382,8 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     runSession env.pool $ Session.statement workspace.id restoreWorkspaceStatement
     begunAfterRestore <- beginResync env.pool 60 scope audience (pure [String "fresh-after-restore"])
     begunAfterRestore `shouldSatisfy` \case Right _ -> True; _ -> False
-    readSnapshotPage env.pool scope audience begin.snapshotToken 0 1 `shouldReturn` Left ResyncUnauthorized
-    replayAndRotateResumeToken env.pool 60 scope audience resume 10 `shouldReturn` Left ResyncUnauthorized
+    readSnapshotPage env.pool scope audience begin.snapshotToken 0 1 `shouldReturn` Left SnapshotSuperseded
+    replayAndRotateResumeToken env.pool 60 scope audience resume 10 `shouldReturn` Left ResumeSuperseded
   it "rolls back an unauthorized resync without persisting scope or bearer state" $ \env -> do
     workspace <- createTestWorkspace env "change-stream-unauthorized-resync"
     let scope = WorkspaceScope workspace.id
@@ -429,6 +516,43 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
         map (.outboxCursor) records `shouldBe` [3]
         hasMore `shouldBe` False
       _ -> expectationFailure (show second)
+  it "keeps the prior bearer reconnectable until an explicitly acknowledged replay page" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-send-failure-reconnect"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "send-failure-reconnect-audience"
+    begun <- beginResync env.pool 60 scope audience (pure [])
+    begin <- case begun of Right value -> pure value; Left err -> expectationFailure (show err) >> fail "unreachable"
+    terminal <- readSnapshotPage env.pool scope audience begin.snapshotToken 0 1
+    token <- case terminal of Right SnapshotPage { snapshotResumeToken = Just value } -> pure value; _ -> expectationFailure (show terminal) >> fail "unreachable"
+    _ <- createProject env.pool CreateProject
+      { workspaceId = workspace.id, parentId = Nothing, name = "retry-after-send-failure", description = Nothing, priority = Nothing, metadata = Nothing }
+    unsent <- replayUnacknowledgedResumeToken env.pool scope audience token 10
+    page <- case unsent of Right value -> pure value; Left err -> expectationFailure (show err) >> fail "unreachable"
+    retry <- replayUnacknowledgedResumeToken env.pool scope audience token 10
+    retry `shouldBe` Right page
+    cursor <- case reverse page.replayPageRecords of record:_ -> pure record.outboxCursor; [] -> expectationFailure "expected replay record" >> fail "unreachable"
+    successor <- acknowledgeReplayPage env.pool 60 scope audience token cursor
+    successor `shouldSatisfy` \case Right _ -> True; _ -> False
+    replayUnacknowledgedResumeToken env.pool scope audience token 10 `shouldReturn` Left ResumeSuperseded
+  it "preserves the original bearer expiry while rebasing hidden delivery" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-hidden-rebase-expiry"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "hidden-rebase-expiry-audience"
+    begun <- beginResync env.pool 60 scope audience (pure [])
+    begin <- case begun of Right value -> pure value; Left err -> expectationFailure (show err) >> fail "unreachable"
+    terminal <- readSnapshotPageWithTtl env.pool 60 scope audience begin.snapshotToken 1
+    token <- case terminal of Right SnapshotPage { snapshotResumeToken = Just value } -> pure value; _ -> expectationFailure (show terminal) >> fail "unreachable"
+    _ <- createProject env.pool CreateProject
+      { workspaceId = workspace.id, parentId = Nothing, name = "hidden-rebase-record", description = Nothing, priority = Nothing, metadata = Nothing }
+    records <- listOutboxAfter env.pool scope 0 10
+    record <- case safeLast records of
+      Just value -> pure value
+      Nothing -> expectationFailure "expected hidden rebase record" >> fail "unreachable"
+    expiresBefore <- runSession env.pool $ Session.statement (tokenHashForTest token.unResumeToken) resumeExpiryStatement
+    rebased <- rebaseResumeTokenAfterHidden env.pool 86400 scope audience token record.outboxCursor
+    rebased `shouldBe` Right token
+    expiresAfter <- runSession env.pool $ Session.statement (tokenHashForTest token.unResumeToken) resumeExpiryStatement
+    expiresAfter `shouldBe` expiresBefore
   it "cleans up a superseded resume bearer without deleting its replacement" $ \env -> do
     workspace <- createTestWorkspace env "change-stream-superseded-cleanup"
     let scope = WorkspaceScope workspace.id
@@ -772,7 +896,13 @@ snapshotTimingMarkerStatement = Statement.Statement
 
 snapshotExpiryStatement :: Statement.Statement ByteString UTCTime
 snapshotExpiryStatement = Statement.Statement
-  "SELECT expires_at FROM change_stream_snapshot_sessions WHERE session_hash = $1"
+  "SELECT s.expires_at FROM change_stream_snapshot_sessions s JOIN change_stream_snapshot_page_tokens p ON p.session_hash = s.session_hash WHERE p.token_hash = $1"
+  (Enc.param (Enc.nonNullable Enc.bytea))
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.timestamptz))) True
+
+resumeExpiryStatement :: Statement.Statement ByteString UTCTime
+resumeExpiryStatement = Statement.Statement
+  "SELECT expires_at FROM change_stream_resume_tokens WHERE token_hash = $1"
   (Enc.param (Enc.nonNullable Enc.bytea))
   (Dec.singleRow (Dec.column (Dec.nonNullable Dec.timestamptz))) True
 

@@ -1,5 +1,6 @@
 module HMem.Server.App
   ( mkApp
+  , mkAppWithChangeStream
   , mkAppWithOidcCodeExchange -- ^ Test-only seam; production callers should use 'mkApp'.
   , OidcCodeExchange -- ^ Test-only injected OIDC code exchange type.
   , requestIdMiddleware
@@ -47,14 +48,20 @@ import HMem.Config (AuthConfig(..), AuthMode(..), DeployedAuthConfig(..), LocalA
 import HMem.DB.Auth qualified as Auth
 import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, withChangeCauseContext, withPrincipalContext, withRequestContext, emptyRequestContext)
 import HMem.Server.AccessTracker (AccessTracker)
-import HMem.Server.API (HMemAPI, server)
+import HMem.Config qualified as Config
+import HMem.Server.API (HMemAPI, serverWithChangeStream)
 import HMem.Server.OpenAPI (openApiSpec)
 import HMem.Server.Static (staticMiddleware)
-import HMem.Server.WebSocket (WSState, broadcast, wsMiddleware)
+import HMem.Server.WebSocket (WSState, wsMiddleware)
 
 -- | Build the WAI Application.
 mkApp :: Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
 mkApp = mkAppWithOidcCodeExchange defaultOidcCodeExchange
+
+-- | Production entry points provide the configured change-stream lifetimes;
+-- the compatibility constructor above retains the default for focused tests.
+mkAppWithChangeStream :: Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
+mkAppWithChangeStream = mkAppWithOidcCodeExchangeAndChangeStream defaultOidcCodeExchange
 
 type OidcCodeExchange = DeployedAuthConfig -> Text -> IO (Maybe Text)
 
@@ -64,22 +71,24 @@ type OidcCodeExchange = DeployedAuthConfig -> Text -> IO (Maybe Text)
 -- flow. Production entry points should call 'mkApp', which always uses
 -- 'defaultOidcCodeExchange' and the configured HTTPS provider token endpoint.
 mkAppWithOidcCodeExchange :: OidcCodeExchange -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
-mkAppWithOidcCodeExchange oidcCodeExchange logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
+mkAppWithOidcCodeExchange oidcCodeExchange = mkAppWithOidcCodeExchangeAndChangeStream oidcCodeExchange Config.defaultConfig.changeStream
+
+mkAppWithOidcCodeExchangeAndChangeStream :: OidcCodeExchange -> Config.ChangeStreamConfig -> Middleware -> AuthConfig -> CorsConfig -> RateLimitConfig -> Pool Hasql.Connection -> AccessTracker -> WSState -> Maybe FilePath -> Bool -> IO Application
+mkAppWithOidcCodeExchangeAndChangeStream oidcCodeExchange changeStreamConfig logger authCfg corsCfg rateLimitCfg pool tracker wsState mStaticDir pgvec = do
   rateLimit <- rateLimitMiddleware rateLimitCfg
   jwksCache <- newIORef Nothing
-  let bc = broadcast wsState
   pure $ requestIdMiddleware
        $ logger
        $ staticMiddleware mStaticDir
         $ corsMiddleware authCfg corsCfg
         $ rateLimit
-        $ wsMiddleware authCfg wsState
+         $ wsMiddleware authCfg pool wsState
         $ oidcAuthRoutesMiddleware oidcCodeExchange jwksCache authCfg pool
         $ csrfMiddleware authCfg pool
         $ principalContextMiddleware jwksCache authCfg pool
         $ authMiddleware authCfg
         $ openApiMiddleware
-       $ serve (Proxy @HMemAPI) (server authCfg pool tracker bc wsState pgvec)
+         $ serve (Proxy @HMemAPI) (serverWithChangeStream authCfg changeStreamConfig pool tracker wsState pgvec)
 
 -- | Middleware that assigns a unique X-Request-Id to every request.
 -- If the incoming request already has an X-Request-Id header, it is

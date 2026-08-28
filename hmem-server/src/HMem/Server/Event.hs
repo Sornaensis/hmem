@@ -5,8 +5,6 @@ module HMem.Server.Event
     EntityType(..)
   , ChangeType(..)
   , ChangeEvent(..)
-    -- * Broadcast function type
-  , Broadcast
     -- * Helpers
   , entityTypeToText
   , changeTypeToText
@@ -47,9 +45,6 @@ data ChangeEvent = ChangeEvent
   , actorLabel  :: !(Maybe Text)
   , payload     :: !(Maybe Value)
   } deriving (Show, Generic)
-
--- | Function to broadcast a change event to all connected clients.
-type Broadcast = ChangeEvent -> IO ()
 
 entityTypeToText :: EntityType -> Text
 entityTypeToText = \case

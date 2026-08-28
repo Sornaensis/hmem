@@ -14,7 +14,7 @@ module HMem.Types
   , ActivityEvent(..), WorkspaceTimelineEvent(..), TimelineActor(..), TimelineProjectContext(..), TimelineTaskContext(..), TimelineStatusTransition(..), TimelineNavigation(..), TimelineBucketCounts(..), TimelineBucketEntityCounts(..), WorkspaceTimelineBucket(..), WorkspaceTimelineBucketsResponse(..)
   , SavedView(..), CreateSavedView(..), UpdateSavedView(..), SavedViewListQuery(..)
   , AuditAction(..), AuditLogEntry(..), AuditLogQuery(..), RevertResult(..), auditActionToText, auditActionFromText
-  , WebSocketTicketRequest(..), WebSocketTicketResponse(..), SessionContext(..), SessionPrincipal(..), SessionGlobalPermissions(..), SessionWorkspaceContext(..), PaginatedResult(..)
+  , WebSocketTicketRequest(..), WebSocketTicketResponse(..), ChangeStreamScopeRequest(..), ChangeStreamResyncRequest(..), ChangeStreamSnapshotItem(..), ChangeStreamResyncResponse(..), CanonicalWebSocketTicketRequest(..), SessionContext(..), SessionPrincipal(..), SessionGlobalPermissions(..), SessionWorkspaceContext(..), PaginatedResult(..)
   , BatchDeleteRequest(..), BatchMoveTasksRequest(..), BatchResult(..), CascadeResult(..), BatchUpdateProjectItem(..), BatchUpdateProjectRequest(..), BatchUpdateTaskItem(..), BatchUpdateTaskRequest(..)
   , validateBatchDeleteRequest, validateBatchMoveTasksRequest, validateBatchUpdateProjectRequest, validateBatchUpdateTaskRequest
   , projectStatusToText, projectStatusFromText, taskStatusToText, taskStatusFromText, workspaceTypeToText, workspaceTypeFromText
@@ -1464,6 +1464,78 @@ instance ToJSON WebSocketTicketResponse where
   toJSON = genericToJSON jsonOptions
 instance FromJSON WebSocketTicketResponse where
   parseJSON = genericParseJSON jsonOptions
+
+-- | Public change-stream scope.  This is deliberately separate from the
+-- database scope type: clients name only a scope, never a cursor or audience.
+data ChangeStreamScopeRequest
+  = ChangeStreamWorkspace !UUID
+  | ChangeStreamGlobal
+  deriving (Show, Eq, Generic)
+
+instance ToJSON ChangeStreamScopeRequest where
+  toJSON ChangeStreamGlobal = object ["scope" .= ("global" :: Text)]
+  toJSON (ChangeStreamWorkspace workspace) = object
+    [ "scope" .= ("workspace" :: Text), "workspace_id" .= workspace ]
+instance FromJSON ChangeStreamScopeRequest where
+  parseJSON = withObject "ChangeStreamScopeRequest" $ \o -> do
+    kind <- o .: "scope"
+    case (kind :: Text) of
+      "global"
+        | KM.member "workspace_id" o -> fail "workspace_id is only valid for workspace scope"
+        | otherwise -> pure ChangeStreamGlobal
+      "workspace" -> ChangeStreamWorkspace <$> o .: "workspace_id"
+      _ -> fail "scope must be workspace or global"
+
+data ChangeStreamResyncRequest = ChangeStreamResyncRequest
+  { scope :: !ChangeStreamScopeRequest
+  , pageSize :: !(Maybe Int)
+  , pageToken :: !(Maybe Text)
+  , startIdempotencyKey :: !(Maybe Text)
+  } deriving (Show, Eq, Generic)
+instance ToJSON ChangeStreamResyncRequest where toJSON = genericToJSON jsonOptions
+instance FromJSON ChangeStreamResyncRequest where
+  parseJSON = withObject "ChangeStreamResyncRequest" $ \o -> do
+    request <- ChangeStreamResyncRequest <$> o .: "scope" <*> o .:? "page_size" <*> o .:? "page_token" <*> o .:? "start_idempotency_key"
+    case request.pageSize of
+      Just size | size < 1 || size > 1000 -> fail "page_size must be between 1 and 1000"
+      _ -> case (request.pageToken, request.startIdempotencyKey) of
+        (Nothing, Nothing) -> fail "start_idempotency_key is required when page_token is absent"
+        (Nothing, Just key) | T.length (T.strip key) < 32 || T.length key > 512 -> fail "start_idempotency_key must be between 32 and 512 characters"
+        (Just token, Nothing) | T.null (T.strip token) -> fail "page_token must be nonempty"
+        (Just _, Just _) -> fail "start_idempotency_key is only valid when page_token is absent"
+        _ -> pure request
+
+-- | An immutable, allowlisted item in a resync response.  Its `data` field is
+-- always an existing public REST representation, never a database row.
+data ChangeStreamSnapshotItem = ChangeStreamSnapshotItem
+  { schemaVersion :: !Int
+  , kind :: !Text
+  , data_ :: !Value
+  } deriving (Show, Eq, Generic)
+instance ToJSON ChangeStreamSnapshotItem where
+  toJSON item = object ["schema_version" .= item.schemaVersion, "kind" .= item.kind, "data" .= item.data_]
+instance FromJSON ChangeStreamSnapshotItem where
+  parseJSON = withObject "ChangeStreamSnapshotItem" $ \o -> ChangeStreamSnapshotItem
+    <$> o .: "schema_version" <*> o .: "kind" <*> o .: "data"
+
+data ChangeStreamResyncResponse = ChangeStreamResyncResponse
+  { items :: ![ChangeStreamSnapshotItem]
+  , hasMore :: !Bool
+  , nextPageToken :: !(Maybe Text)
+  , resumeToken :: !(Maybe Text)
+  } deriving (Show, Eq, Generic)
+instance ToJSON ChangeStreamResyncResponse where toJSON = genericToJSON jsonOptions
+instance FromJSON ChangeStreamResyncResponse where parseJSON = genericParseJSON jsonOptions
+
+-- | The canonical ticket binds the server-selected scope to the opaque token
+-- created at the terminal resync page.  It intentionally has no audience
+-- field: the server derives that from the authenticated principal.
+data CanonicalWebSocketTicketRequest = CanonicalWebSocketTicketRequest
+  { scope :: !ChangeStreamScopeRequest
+  , resumeToken :: !Text
+  } deriving (Show, Eq, Generic)
+instance ToJSON CanonicalWebSocketTicketRequest where toJSON = genericToJSON jsonOptions
+instance FromJSON CanonicalWebSocketTicketRequest where parseJSON = genericParseJSON jsonOptions
 
 ------------------------------------------------------------------------
 -- Session context

@@ -148,8 +148,15 @@ scoped resync rather than guessing.
 
 Fresh connection and resync use an atomic snapshot-to-resume-token handoff,
 never an ordinary REST fetch followed by an independently observed current
-cursor. The client starts it with `POST /api/v1/change-stream/resync` and no
-page token. For each start attempt, the server opens a serializable (or
+cursor. The client starts it with `POST /api/v1/change-stream/resync`, no page
+token, a bounded `page_size`, and a client-generated opaque
+`start_idempotency_key` with at least 32 characters of CSPRNG material. The
+server stores only the key hash alongside the immutable session and its page
+size, while its snapshot bearer comes from server-generated random session
+lineage: retrying a lost response with the same live key returns the original
+first page/session, while retrying after expiry starts a fresh lineage that
+cannot collide with an older resume bearer. Continuations cannot change the
+stored page size. For each start attempt, the server opens a serializable (or
 equivalent transactionally consistent) transaction and **first** acquires the
 scope counter lock. Every membership/role mutation that can change access to
 that scope uses this same lock before its membership write and outbox write.
@@ -157,6 +164,9 @@ While holding the lock and in that transaction's snapshot, the server
 evaluates authorization, reads the internal scope high-water cursor `H`,
 materializes the authorized, redaction-reviewed REST-shaped snapshot as
 immutable ordinal items, and creates an opaque pending snapshot-session token.
+Global snapshots include only public workspace and workspace-group DTOs; they
+never include workspace-group membership rows. Membership state is instead
+handled through targeted authorization controls and invalidations.
 The transaction commits before the first page is returned. It does **not**
 keep a database transaction open between HTTP pages. A serialization failure
 retries the whole start transaction; failed authorization rolls back and
@@ -204,7 +214,9 @@ the internal `H`; the next writer can allocate only `H + 1` or later. The
 client discards that scope's cached state, applies the snapshot, persists the
 opaque `resume_token`, and establishes the stream with it. Events committed
 between that commit and stream establishment are retained and replayed, so none
-can be lost. The server reauthorizes the subscription and filters replay as
+can be lost. A terminal checkpoint writes its deterministic successor bearer
+before acknowledging the delivered page; a failed socket write leaves the old
+bearer valid for at-least-once reconnect. The server reauthorizes the subscription and filters replay as
 specified above. An absent, invalid, expired, superseded, or retention-pruned
 resume token, a malformed record, unknown schema, or failed client ordering
 check requires this handoff again. A membership grant

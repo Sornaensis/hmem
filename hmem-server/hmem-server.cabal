@@ -36,6 +36,7 @@ data-files:
     migrations/V020__replace_memories_with_observations.sql
     migrations/V021__observation_subject_sets.sql
     migrations/V022__change_stream_outbox.sql
+    migrations/V023__change_stream_snapshot_bindings.sql
 
 library
   exposed-modules:
@@ -45,12 +46,14 @@ library
       HMem.Server.AuthBootstrap
       HMem.Server.AuthTokens
       HMem.Server.AuthUsers
+      HMem.Server.ChangeStream
       HMem.Server.CtlMigrate
       HMem.Server.CtlPaths
       HMem.Server.Event
       HMem.Server.Logging
       HMem.Server.LogRotation
       HMem.Server.OpenAPI
+      HMem.Server.Snapshot
       HMem.Server.Static
       HMem.Server.WebSocket
   other-modules:
@@ -386,6 +389,7 @@ test-suite hmem-server-test
       HMem.Server.AuthBootstrapSpec
       HMem.Server.AuthTokensSpec
       HMem.Server.AuthUsersSpec
+      HMem.Server.ChangeStreamSpec
       HMem.Server.CtlMigrateSpec
       HMem.Server.CtlPathsSpec
       HMem.Server.DeployedSandboxSpec

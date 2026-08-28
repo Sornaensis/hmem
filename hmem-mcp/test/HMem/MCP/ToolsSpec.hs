@@ -1,6 +1,7 @@
 module HMem.MCP.ToolsSpec (spec) where
 
 import Control.Concurrent.STM
+import Control.Exception (bracket)
 import Control.Monad (filterM, forM_)
 import Data.Aeson
 import Data.Aeson.Key qualified as Key
@@ -13,7 +14,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
-import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
+import Network.HTTP.Client (Manager, closeManager, defaultManagerSettings, newManager)
 import Network.HTTP.Types (methodDelete, methodGet, methodPost, methodPut, status200, status204, status400, status401, status403, status404, status409, status500, statusCode)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
@@ -67,6 +68,18 @@ spec = do
       toolDescription "project_archive" `shouldSatisfy` maybe False (not . ("summary" `T.isInfixOf`))
       sort (schemaProperties "task_dependency") `shouldBe` sort ["task_id", "depends_on_id", "action"]
       schemaRequired "task_dependency" `shouldBe` ["task_id", "depends_on_id", "action"]
+
+    it "forwards both trusted-MCP headers only when the bridge is configured" $ do
+      mcpProvenanceHeadersFor (Just "test-private-provenance")
+        `shouldBe` [("X-HMem-Change-Cause", "mcp"), ("X-HMem-MCP-Provenance", "test-private-provenance")]
+      mcpProvenanceHeadersFor (Just "  trimmed-private-provenance  ")
+        `shouldBe` [("X-HMem-Change-Cause", "mcp"), ("X-HMem-MCP-Provenance", "trimmed-private-provenance")]
+      mcpProvenanceHeadersFor (Just "  provenance-\955  ")
+        `shouldBe` [("X-HMem-Change-Cause", "mcp"), ("X-HMem-MCP-Provenance", TE.encodeUtf8 "provenance-\955")]
+      mcpProvenanceHeadersFor Nothing
+        `shouldBe` [("X-HMem-Change-Cause", "mcp")]
+      mcpProvenanceHeadersFor (Just " \t ")
+        `shouldBe` [("X-HMem-Change-Cause", "mcp")]
 
     it "guides durable project and task descriptions, status, and atomic subtasks" $ do
       toolDescriptionIs "project_create" "Create a project in the active workspace. Its description is a durable specification; status records execution state."
@@ -306,7 +319,7 @@ spec = do
         result <- call manager base "search" (object ["workspace_id" .= workspaceId, "entity_types" .= (["observation"] :: [Text]), "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha])
         jsonField "observations" result `shouldSatisfy` maybe False (arrayFirst (hasFields ["id", "subject_kind", "subject", "git_sha", "content_preview"]))
         result `shouldSatisfy` not . contains "linked_memories"
-      [RequestInfo _ _ _ body _] <- readTVarIO requests
+      [RequestInfo _ _ _ body _ _ _] <- readTVarIO requests
       decode body `shouldSatisfy` maybe False (\value -> hasFields ["subject_kind", "subject", "git_sha"] value)
 
     it "forwards list filters and gives an exact next offset only when the server reports another page" $ do
@@ -704,17 +717,19 @@ data RequestInfo = RequestInfo
   , requestQuery :: ByteString
   , requestBody :: BL.ByteString
   , authorization :: Maybe ByteString
+  , requestChangeCause :: Maybe ByteString
+  , requestMcpProvenance :: Maybe ByteString
   }
 
 withMock :: TVar [RequestInfo] -> (Manager -> String -> IO a) -> IO a
-withMock requests action = testWithApplication (pure (mockApp requests)) $ \port -> do
-  manager <- newManager defaultManagerSettings
-  action manager ("http://127.0.0.1:" <> show port)
+withMock requests action = testWithApplication (pure (mockApp requests)) $ \port ->
+  bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+    action manager ("http://127.0.0.1:" <> show port)
 
 mockApp :: TVar [RequestInfo] -> Wai.Application
 mockApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders)])
   case request.requestMethod of
     method | method == methodDelete && "/dependencies/" `T.isInfixOf` TE.decodeUtf8 request.rawPathInfo -> respond $ Wai.responseLBS status200 [("Content-Type", "application/json")] (encode (responseFor request.requestMethod request.rawPathInfo request.rawQueryString body))
     method | method == methodDelete -> respond $ Wai.responseLBS status204 [] ""
@@ -722,22 +737,22 @@ mockApp requests request respond = do
     _ -> respond $ Wai.responseLBS status200 [("Content-Type", "application/json")] (encode (responseFor request.requestMethod request.rawPathInfo request.rawQueryString body))
 
 withErrorMock :: (Manager -> String -> IO a) -> IO a
-withErrorMock action = testWithApplication (pure errorApp) $ \port -> do
-  manager <- newManager defaultManagerSettings
-  action manager ("http://127.0.0.1:" <> show port)
+withErrorMock action = testWithApplication (pure errorApp) $ \port ->
+  bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+    action manager ("http://127.0.0.1:" <> show port)
 
 errorApp :: Wai.Application
 errorApp _ respond = respond $ Wai.responseLBS status400 [("Content-Type", "text/plain")] "pgvector extension is required"
 
 withStatusMock :: TVar [RequestInfo] -> (Manager -> String -> IO a) -> IO a
-withStatusMock requests action = testWithApplication (pure (statusApp requests)) $ \port -> do
-  manager <- newManager defaultManagerSettings
-  action manager ("http://127.0.0.1:" <> show port)
+withStatusMock requests action = testWithApplication (pure (statusApp requests)) $ \port ->
+  bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+    action manager ("http://127.0.0.1:" <> show port)
 
 statusApp :: TVar [RequestInfo] -> Wai.Application
 statusApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders)])
   let status
         | request.rawPathInfo == "/api/v1/observations/match" = status500
         | request.rawPathInfo == "/api/v1/observations/similar" = status400

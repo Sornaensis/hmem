@@ -19,6 +19,7 @@ library
       HMem.Config
       HMem.DB.Audit
       HMem.DB.Auth
+      HMem.DB.ChangeStream
       HMem.DB.Migration
       HMem.DB.Observation
       HMem.DB.Overview
@@ -86,6 +87,7 @@ test-suite hmem-core-test
       HMem.ConfigSpec
       HMem.DB.AuditSpec
       HMem.DB.AuthSpec
+      HMem.DB.ChangeStreamSpec
       HMem.DB.ObservationSpec
       HMem.DB.OverviewSpec
       HMem.DB.ProjectSpec

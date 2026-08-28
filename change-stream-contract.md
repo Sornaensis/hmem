@@ -113,7 +113,7 @@ named in `invalidations`; a payload is optional as specified above.
 | Subject | Writers and source table/operation | Scope; entity/action | Payload or invalidations | Derived impacts | Client action |
 | --- | --- | --- | --- | --- | --- |
 | Workspace catalogue | workspace registration/lifecycle writer; `workspaces` INSERT/UPDATE/soft-delete/restore | global; `workspace` created/updated/deleted/restored | allowlisted workspace or `workspace-catalog` | group membership and workspace selection | patch if allowed; otherwise refetch catalogue |
-| Workspace membership | `Auth.upsertWorkspaceMembership`, `Auth.deleteWorkspaceMembership`, creator grant, REST/MCP-through-REST, or direct core writer; `workspace_memberships` INSERT, `ON CONFLICT DO UPDATE`, or DELETE | affected workspace; `workspace_membership` created/updated/deleted, identity `workspace_id:user_id` | no membership payload by default; invalidate `workspace:{id}:memberships` for authorized administrators plus the affected user's `workspace-catalog`, session authorization, and permission cache | workspace visibility (`listVisibleWorkspaces`), role permissions, current subscriptions, admin member list | administrators refetch memberships; an affected user's authenticated connections receive `access_granted` or `access_revoked`: grant invalidates/refetches their workspace catalogue then opens the workspace stream, while revoke clears that workspace's entities/selection and permission cache, aborts in-flight workspace requests, and closes/reconnects only after a fresh catalogue fetch |
+| Workspace membership | `Auth.upsertWorkspaceMembership`, `Auth.deleteWorkspaceMembership`, creator grant, REST/MCP-through-REST, or direct core writer; `workspace_memberships` INSERT, `ON CONFLICT DO UPDATE`, or DELETE | affected workspace; `workspace_membership` created/updated/deleted, identity `workspace_id:user_id` | no membership payload. Invalidations are `collection/workspace:{id}:memberships` with `audience: workspace-admins`, plus `catalogue/workspace-catalog`, `session_authorization/session-authorization`, and `permission_cache/permission-cache`, each with `audience: user:{affected-user-id}` | workspace visibility (`listVisibleWorkspaces`), role permissions, current subscriptions, admin member list | administrators refetch memberships; an affected user's authenticated connections receive `access_granted` or `access_revoked`: grant invalidates/refetches their workspace catalogue then opens the workspace stream, while revoke clears that workspace's entities/selection and permission cache, aborts in-flight workspace requests, and closes/reconnects only after a fresh catalogue fetch |
 | Workspace group | group REST/core writer; `workspace_groups` INSERT/UPDATE/DELETE | global; `workspace_group` created/updated/deleted | allowlisted group or `workspace-groups` | member lists and global access view | refetch groups; privileged clients only |
 | Group membership | group-member REST/core writer; `workspace_group_members` INSERT/DELETE, including group/workspace cascade | affected workspace; `workspace_group_membership` created/deleted | `group:{id}:members` and affected `workspace:{id}:groups` | recipient authorization and group views | refetch group members/workspace groups; reconnect if access changes |
 | Observation | REST/core/MCP writer; `observations` INSERT/UPDATE/DELETE plus creation of `observation_subjects` | workspace; `observation` created/updated/deleted | allowlisted observation only after review; otherwise observation/entity and observation-list/query invalidations | subject search vector and provenance views | normally refetch affected list/entity |
@@ -148,17 +148,56 @@ scoped resync rather than guessing.
 
 Fresh connection and resync use an atomic snapshot-to-resume-token handoff,
 never an ordinary REST fetch followed by an independently observed current
-cursor. The client requests `begin_resync(scope, workspace_id)`. For each
-attempt, the server opens a serializable (or equivalent transactionally
-consistent) transaction and **first** acquires the scope counter lock. Every
-membership/role mutation that can change access to that scope uses this same
-lock before its membership write and outbox write. While holding the lock and
-in that transaction's snapshot, the server evaluates authorization, reads the
-internal scope high-water cursor `H`, reads the authorized REST snapshot, and
-stores a new audience-specific resume token at `H`. The transaction commits
-before the server returns `{snapshot, resume_token}`. A serialization failure
-retries the entire transaction; failed authorization rolls back and returns a
-denial only--never a snapshot, high-water value, or resume token.
+cursor. The client starts it with `POST /api/v1/change-stream/resync` and no
+page token. For each start attempt, the server opens a serializable (or
+equivalent transactionally consistent) transaction and **first** acquires the
+scope counter lock. Every membership/role mutation that can change access to
+that scope uses this same lock before its membership write and outbox write.
+While holding the lock and in that transaction's snapshot, the server
+evaluates authorization, reads the internal scope high-water cursor `H`,
+materializes the authorized, redaction-reviewed REST-shaped snapshot as
+immutable ordinal items, and creates an opaque pending snapshot-session token.
+The transaction commits before the first page is returned. It does **not**
+keep a database transaction open between HTTP pages. A serialization failure
+retries the whole start transaction; failed authorization rolls back and
+returns a denial only--never a snapshot, high-water value, session token, or
+resume token.
+
+Membership upserts acquire the workspace counter lock even when their role and
+grantor are unchanged, but those no-op writes neither advance the authorization
+epoch nor emit an outbox record. Disabling or re-enabling a user increments the
+epoch for each of that user's current workspace memberships and, when the user
+is a superadmin, for the global scope. Multi-scope invalidation locks workspace
+counters by ascending workspace UUID and locks the global counter last.
+
+The first response contains the first ordinal page and a next page token when
+more items remain. Later `POST` calls carrying that opaque body page token
+read the exact same immutable ordinal range; retries return the same page,
+continuation, and terminal items rather than consuming a token. Each one rechecks current
+authorization, the audience authorization epoch, and session expiry before
+returning data. The terminal page atomically marks the session terminal and
+creates/returns the audience-specific opaque resume token at `H`. Repeated
+page calls are idempotent while the session is valid, but a token is never
+activated before the terminal page. Any expired, mismatched, revoked, or
+epoch-invalid session requires a fresh resync and reveals no partial snapshot
+or hidden cursor.
+
+Defaults are configurable: retained outbox records are kept for 604800 seconds
+(7 days); resume tokens expire 86400 seconds (24 hours) after terminal
+activation; pending snapshot sessions expire after 300 seconds. The settings
+are `change_stream.retention_seconds`,
+`change_stream.resume_token_ttl_seconds`, and
+`change_stream.snapshot_session_ttl_seconds`, with environment overrides
+`HMEM_CHANGE_STREAM_OUTBOX_RETENTION_SECONDS`,
+`HMEM_CHANGE_STREAM_RESUME_TOKEN_TTL_SECONDS`, and
+`HMEM_CHANGE_STREAM_SNAPSHOT_SESSION_TTL_SECONDS`. Configuration validation
+requires the resume-token plus session TTL budget to be strictly less than
+outbox retention.
+
+Trusted MCP attribution additionally requires the bridge's private
+`HMEM_MCP_PROVENANCE_TOKEN` to match the server's
+`auth.mcp_provenance_token`. The forwarded user bearer and an
+`X-HMem-Change-Cause` header alone always remain REST.
 
 Consequently the snapshot contains every committed material mutation through
 the internal `H`; the next writer can allocate only `H + 1` or later. The
@@ -198,7 +237,7 @@ path.
 | Database/core | One outbox row per committed material row; scope-local contiguous cursors; required shared transaction IDs for cascade/trigger rows; no row on no-op/rollback; workspace-membership create/update/delete; cascade rows/edges; trigger-derived rows and invalidations; redaction assertions. |
 | REST/audit | Create/update/delete/restore and audit-revert records have transaction/request/cause metadata; no handler-local emit; payload allowlists match REST authorization. |
 | MCP | Each mutating MCP tool reaches the REST path and yields the same canonical record; direct core/database invocation yields an equivalent record without REST/MCP. |
-| WebSocket/dispatcher | Post-commit only; current authorization filtering with audience-specific opaque resume tokens; policy test that inserting/removing a hidden record does not change a subscriber's frames, token contents, or observable timing; token replay/rotation, audience/epoch rejection, retention expiry, and resync; membership grant/revoke controls; duplicate delivery; atomic serializable snapshot-to-token handoff with retry; revoke-versus-`begin_resync` interleavings (revoke first yields denial with no snapshot/token; resync first yields an authorized snapshot, then revoke prevents further delivery); reconnect; and listener restart. |
+| WebSocket/dispatcher | Post-commit only; current authorization filtering with audience-specific opaque resume tokens; policy test that inserting/removing a hidden record does not change a subscriber's frames, token contents, or observable timing; replay returns a replacement token advanced only through its last scanned cursor plus explicit `has_more`, audience/epoch rejection, retention expiry, and resync; membership grant/revoke controls; duplicate delivery; atomic serializable snapshot-to-token handoff with response-loss retries for nonterminal and terminal pages; revoke-versus-`begin_resync` interleavings (revoke first yields denial with no snapshot/token; resync first yields an authorized snapshot, then revoke prevents further delivery); reconnect; and listener restart. |
 | Elm/front end | Per-scope resume-token/event-id persistence; replacement-token handling without state mutation; unknown-version and ordering-failure resync; invalidation refetch; no unsafe patch; workspace-membership grant/revoke clearing/catalogue refresh/reconnect behavior; and workspace/global authorization changes. |
 | Two clients | Concurrent same-workspace mutations, duplicate/reordered delivery, cascades, reconnect during dispatch, and no legacy/canonical double application. |
 

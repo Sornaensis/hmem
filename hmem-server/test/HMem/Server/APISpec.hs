@@ -32,6 +32,7 @@ import Test.Hspec
 
 import HMem.Config qualified as Config
 import HMem.DB.Auth qualified as Auth
+import HMem.DB.ChangeStream (ChangeScope(..), OutboxRecord(..), listOutboxAfter)
 import HMem.DB.Pool qualified as DBPool
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
@@ -40,6 +41,7 @@ import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.API (HMemAPI, server)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..), entityTypeToText)
+import HMem.Server.App (mkApp)
 import HMem.Server.TestHarness (DeployedSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, withDeployedSandboxAppContext, withLocalSandboxAppEnv)
 import HMem.Server.WebSocket (WorkspaceSubscription(..), consumeTicket, eventVisibleToSubscription, newWSState, ticketEventVisible)
 import HMem.Types
@@ -279,6 +281,76 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       groupMembershipExists env created.id workspace.id `shouldReturn` False
 
   describe "Workspace Groups authorization" $ do
+    it "keeps a spoofed MCP header from an ordinary bot PAT as REST in the durable outbox" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "spoofed-mcp-cause"
+        botUserId <- createDeployedSandboxUser ctx.deployedEnv False True
+        botToken <- issueDeployedSandboxPAT ctx.deployedEnv botUserId "mcp"
+        response <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/projects"
+          [ ("Authorization", "Bearer " <> Text.encodeUtf8 botToken.rawToken)
+          , ("X-HMem-Change-Cause", "mcp")
+          ]
+          (encode (object ["workspace_id" .= workspace.id, "name" .= ("spoofed MCP cause" :: T.Text)]))
+        responseStatus response `shouldBe` status200
+        records <- listOutboxAfter ctx.deployedEnv.pool (WorkspaceScope workspace.id) 0 10
+        case records of
+          [record] -> jsonPath ["transaction", "cause"] record.outboxEnvelope `shouldBe` Just (String "rest")
+          _ -> expectationFailure "expected exactly one durable project outbox record"
+    it "rejects an empty configured MCP provenance secret" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        tracker <- newAccessTracker ctx.deployedEnv.pool 3600
+        wsState <- newWSState
+        let cfg = ctx.deployedConfig
+            blankAuth = cfg.auth { Config.mcpProvenanceToken = Just " \t " }
+        blankApp <- mkApp id blankAuth cfg.cors cfg.rateLimit ctx.deployedEnv.pool tracker wsState cfg.web.webStaticDir True
+        workspace <- createTestWorkspace ctx.deployedEnv "blank-mcp-cause"
+        botUserId <- createDeployedSandboxUser ctx.deployedEnv False True
+        botToken <- issueDeployedSandboxPAT ctx.deployedEnv botUserId "mcp-blank"
+        response <- requestWithHeaders blankApp methodPost "/api/v1/projects"
+          [ ("Authorization", "Bearer " <> Text.encodeUtf8 botToken.rawToken)
+          , ("X-HMem-Change-Cause", "mcp")
+          , ("X-HMem-MCP-Provenance", " \t ")
+          ]
+          (encode (object ["workspace_id" .= workspace.id, "name" .= ("blank MCP cause" :: T.Text)]))
+        responseStatus response `shouldBe` status200
+        records <- listOutboxAfter ctx.deployedEnv.pool (WorkspaceScope workspace.id) 0 10
+        case records of
+          [record] -> jsonPath ["transaction", "cause"] record.outboxEnvelope `shouldBe` Just (String "rest")
+          _ -> expectationFailure "expected exactly one durable project outbox record"
+    it "attributes a server-authenticated MCP proxy mutation as MCP" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        tracker <- newAccessTracker ctx.deployedEnv.pool 3600
+        wsState <- newWSState
+        let cfg = ctx.deployedConfig
+            trustedAuth = cfg.auth { Config.mcpProvenanceToken = Just "test-mcp-provenance" }
+        trustedApp <- mkApp id trustedAuth cfg.cors cfg.rateLimit ctx.deployedEnv.pool tracker wsState cfg.web.webStaticDir True
+        workspace <- createTestWorkspace ctx.deployedEnv "trusted-mcp-cause"
+        botUserId <- createDeployedSandboxUser ctx.deployedEnv False True
+        botToken <- issueDeployedSandboxPAT ctx.deployedEnv botUserId "mcp-proxy"
+        response <- requestWithHeaders trustedApp methodPost "/api/v1/projects"
+          [ ("Authorization", "Bearer " <> Text.encodeUtf8 botToken.rawToken)
+          , ("X-HMem-Change-Cause", "mcp")
+          , ("X-HMem-MCP-Provenance", "test-mcp-provenance")
+          ]
+          (encode (object ["workspace_id" .= workspace.id, "name" .= ("trusted MCP cause" :: T.Text)]))
+        responseStatus response `shouldBe` status200
+        records <- listOutboxAfter ctx.deployedEnv.pool (WorkspaceScope workspace.id) 0 10
+        case records of
+          [record] -> jsonPath ["transaction", "cause"] record.outboxEnvelope `shouldBe` Just (String "mcp")
+          _ -> expectationFailure "expected exactly one durable MCP project outbox record"
+    it "records a project audit revert with the audit_revert cause" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "audit-revert-change-cause"
+      created <- postJson app "/api/v1/projects" (object ["workspace_id" .= workspace.id, "name" .= ("revert me" :: T.Text)])
+      responseStatus created `shouldBe` status200
+      audits <- request app methodGet ("/api/v1/audit?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "&entity_type=project") ""
+      let Just page = decode (responseBody audits) :: Maybe (PaginatedResult AuditLogEntry)
+          entry = head page.items
+      reverted <- request app methodPost ("/api/v1/audit/" <> Text.encodeUtf8 (T.pack (show entry.id)) <> "/revert") ""
+      responseStatus reverted `shouldBe` status200
+      records <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 1 10
+      case records of
+        (record:_) -> jsonPath ["transaction", "cause"] record.outboxEnvelope `shouldBe` Just (String "audit_revert")
+        _ -> expectationFailure "expected a durable audit-revert outbox record"
     it "requires global superadmin, not merely workspace-creation permission" $ \_ ->
       withDeployedSandboxAppContext $ \ctx -> do
         operatorId <- createDeployedSandboxUser ctx.deployedEnv True False

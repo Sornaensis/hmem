@@ -45,9 +45,10 @@ import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirecto
                          findExecutable, getCurrentDirectory, removeDirectoryRecursive)
 import System.Environment (getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>), isPathSeparator, normalise, takeDirectory, takeFileName)
-import System.IO (hFlush, hPutStrLn, stderr)
+import System.IO (IOMode(AppendMode), hFlush, hPutStrLn, stderr, withFile)
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
-import System.Process (callProcess)
+import System.Info (os)
+import System.Process (CreateProcess(..), ProcessHandle, StdStream(UseHandle), callProcess, createProcess, getProcessExitCode, proc, terminateProcess, waitForProcess)
 import System.Random (randomRIO)
 import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as D
@@ -313,6 +314,7 @@ data EphemeralPg = EphemeralPg
   , epConnStr :: Text
   , epLogFile :: FilePath
   , epDbName  :: Text
+  , epProcess :: Maybe ProcessHandle
   }
 
 -- | Bracket that starts an isolated sandboxed PostgreSQL instance, runs the
@@ -421,7 +423,7 @@ withSandboxedPostgres sandbox action = do
 -- | Fail immediately when required PostgreSQL CLI tools are missing.
 checkPgTools :: IO ()
 checkPgTools = do
-  let required = ["initdb", "pg_ctl", "createdb"]
+  let required = ["initdb", "pg_ctl", "createdb"] <> ["pg_isready" | os == "mingw32"]
   results <- mapM (\cmd -> (,) cmd <$> findExecutable cmd) required
   let missing = [cmd | (cmd, Nothing) <- results]
   case missing of
@@ -463,7 +465,7 @@ startEphemeralPgInSandbox sandbox = do
     , "listen_addresses = 'localhost'"
     ]
 
-  startedPort <- startPostgresWithRetries dataDir logFile port 5
+  (startedPort, process) <- startPostgresWithRetries dataDir logFile port 5
   let pg = EphemeralPg
         { epTmpDir  = sandbox.sandboxRoot
         , epDataDir = dataDir
@@ -471,6 +473,7 @@ startEphemeralPgInSandbox sandbox = do
         , epConnStr = "host=localhost port=" <> T.pack (show startedPort) <> " dbname=" <> dbName
         , epLogFile = logFile
         , epDbName  = dbName
+        , epProcess = process
         }
 
   bracketOnError
@@ -491,12 +494,14 @@ startEphemeralPgInSandbox sandbox = do
 -- | Retry a random port when another process wins the race between port
 -- selection and PostgreSQL binding. Windows frequently leaves just-closed
 -- loopback ports unavailable briefly during the migration-heavy test suite.
-startPostgresWithRetries :: FilePath -> FilePath -> Int -> Int -> IO Int
+startPostgresWithRetries :: FilePath -> FilePath -> Int -> Int -> IO (Int, Maybe ProcessHandle)
 startPostgresWithRetries dataDir logFile port attempts = do
-  started <- try (callProcess "pg_ctl"
-    [ "start", "-D", dataDir, "-l", logFile, "-w", "-t", "30" ]) :: IO (Either SomeException ())
+  started <- if os == "mingw32"
+    then startWindowsPostgres dataDir logFile port
+    else fmap (fmap (const Nothing)) $ try (callProcess "pg_ctl"
+      [ "start", "-D", dataDir, "-l", logFile, "-w", "-t", "30" ])
   case started of
-    Right () -> pure port
+    Right process -> pure (port, process)
     Left err
       | attempts <= 1 -> throwIO err
       | otherwise -> do
@@ -504,6 +509,36 @@ startPostgresWithRetries dataDir logFile port attempts = do
           hPutStrLn stderr $ "[test-pg] retrying port: " ++ show nextPort
           appendFile (dataDir </> "postgresql.conf") $ "port = " ++ show nextPort ++ "\n"
           startPostgresWithRetries dataDir logFile nextPort (attempts - 1)
+
+-- | PostgreSQL's Windows @pg_ctl start@ asks Windows to create a restricted
+-- child token.  That API is unavailable in some isolated test hosts even
+-- though @postgres@ itself can run normally.  Start the foreground server
+-- directly there and wait for its local readiness probe; other platforms keep
+-- pg_ctl's normal daemonized, wait-for-ready behavior.
+startWindowsPostgres :: FilePath -> FilePath -> Int -> IO (Either SomeException (Maybe ProcessHandle))
+startWindowsPostgres dataDir logFile port = try $ do
+  handle <- withFile logFile AppendMode $ \logHandle -> do
+    (_, _, _, process) <- createProcess (proc "postgres" ["-D", dataDir])
+      { std_out = UseHandle logHandle, std_err = UseHandle logHandle }
+    pure process
+  ready <- waitForLocalPostgres port handle 60
+  if ready then pure (Just handle) else do
+    terminateProcess handle
+    void $ waitForProcess handle
+    fail "postgres did not become ready"
+
+waitForLocalPostgres :: Int -> ProcessHandle -> Int -> IO Bool
+waitForLocalPostgres port process attempts = do
+  exited <- getProcessExitCode process
+  case exited of
+    Just _ -> pure False
+    Nothing -> do
+      ready <- try (callProcess "pg_isready" ["-h", "localhost", "-p", show port]) :: IO (Either SomeException ())
+      case ready of
+        Right () -> pure True
+        Left _
+          | attempts <= 1 -> pure False
+          | otherwise -> threadDelay 500000 >> waitForLocalPostgres port process (attempts - 1)
 
 -- | Stop the ephemeral PostgreSQL cluster and remove its temp
 -- directory.  Ignores errors so teardown always completes.
@@ -516,9 +551,11 @@ stopEphemeralPgServer :: EphemeralPg -> IO ()
 stopEphemeralPgServer pg = do
   hPutStrLn stderr "[test-pg] Tearing down..."
   hFlush stderr
-  stopResult <- try (callProcess "pg_ctl"
-        [ "stop", "-D", pg.epDataDir, "-m", "fast" ]
-        ) :: IO (Either SomeException ())
+  stopResult <- (try $ case pg.epProcess of
+    Just process -> do
+      terminateProcess process
+      void $ waitForProcess process
+    Nothing -> callProcess "pg_ctl" [ "stop", "-D", pg.epDataDir, "-m", "fast" ]) :: IO (Either SomeException ())
   case stopResult of
     Right () -> pure ()
     Left err -> hPutStrLn stderr $ "[test-pg] PostgreSQL teardown failed: " <> show err

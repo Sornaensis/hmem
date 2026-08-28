@@ -1,6 +1,8 @@
 module HMem.DB.RequestContext
   ( ActorType(..)
   , actorTypeToText
+  , ChangeCause(..)
+  , changeCauseToText
   , PrincipalAuthority(..)
   , Principal(..)
   , RequestContext(..)
@@ -9,10 +11,12 @@ module HMem.DB.RequestContext
   , withRequestIdContext
   , withPrincipalContext
   , withWorkspaceIdContext
+  , withChangeCauseContext
   , currentRequestContext
   , currentRequestId
   , currentPrincipal
   , currentWorkspaceId
+  , currentChangeCause
   ) where
 
 import Control.Concurrent (ThreadId, myThreadId)
@@ -46,10 +50,29 @@ data Principal = Principal
   , authority  :: !PrincipalAuthority
   } deriving stock (Show, Eq)
 
+-- | The initiating writer is deliberately a closed set.  It is persisted by
+-- V022 and must never be populated from arbitrary client text.
+data ChangeCause
+  = ChangeCauseRest
+  | ChangeCauseMcp
+  | ChangeCauseAuditRevert
+  | ChangeCauseCore
+  | ChangeCauseMigration
+  deriving stock (Show, Eq)
+
+changeCauseToText :: ChangeCause -> Text
+changeCauseToText = \case
+  ChangeCauseRest        -> "rest"
+  ChangeCauseMcp         -> "mcp"
+  ChangeCauseAuditRevert -> "audit_revert"
+  ChangeCauseCore        -> "core"
+  ChangeCauseMigration   -> "migration"
+
 data RequestContext = RequestContext
   { requestId   :: !(Maybe Text)
   , principal   :: !(Maybe Principal)
   , workspaceId :: !(Maybe UUID)
+  , changeCause :: !(Maybe ChangeCause)
   } deriving stock (Show, Eq)
 
 emptyRequestContext :: RequestContext
@@ -57,6 +80,7 @@ emptyRequestContext = RequestContext
   { requestId = Nothing
   , principal = Nothing
   , workspaceId = Nothing
+  , changeCause = Nothing
   }
 
 data RestoreAction
@@ -81,6 +105,11 @@ withWorkspaceIdContext mWorkspaceId = bracket (pushContext update) popContext . 
   where
     update ctx = ctx { workspaceId = mWorkspaceId }
 
+withChangeCauseContext :: Maybe ChangeCause -> IO a -> IO a
+withChangeCauseContext mCause = bracket (pushContext update) popContext . const
+  where
+    update ctx = ctx { changeCause = mCause }
+
 currentRequestContext :: IO RequestContext
 currentRequestContext = do
   tid <- myThreadId
@@ -94,6 +123,9 @@ currentPrincipal = (.principal) <$> currentRequestContext
 
 currentWorkspaceId :: IO (Maybe UUID)
 currentWorkspaceId = (.workspaceId) <$> currentRequestContext
+
+currentChangeCause :: IO (Maybe ChangeCause)
+currentChangeCause = (.changeCause) <$> currentRequestContext
 
 pushContext :: (RequestContext -> RequestContext) -> IO RestoreAction
 pushContext update = do

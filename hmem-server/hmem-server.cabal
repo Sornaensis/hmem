@@ -35,6 +35,7 @@ data-files:
     migrations/V019__cascade_delete_task_project_subtrees.sql
     migrations/V020__replace_memories_with_observations.sql
     migrations/V021__observation_subject_sets.sql
+    migrations/V022__change_stream_outbox.sql
 
 library
   exposed-modules:

@@ -3,6 +3,7 @@ module HMem.DB.Pool
   , withConn
   , runSession
   , runTransaction
+  , runSerializableTransaction
   , DBException(..)
   , checkPgvector
   , PoolMetrics(..)
@@ -12,6 +13,7 @@ module HMem.DB.Pool
 
 import Control.Exception (Exception, SomeException, bracket_, throwIO, try)
 import Control.Monad (void, when)
+import Data.ByteString (ByteString)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Pool (Pool, newPool, defaultPoolConfig, setNumStripes, withResource)
 import Data.Text.Encoding qualified as TE
@@ -28,7 +30,7 @@ import Hasql.Statement qualified as Statement
 import System.IO (hPutStrLn, stderr)
 import System.IO.Unsafe (unsafePerformIO)
 
-import HMem.DB.RequestContext (Principal(..), RequestContext(..), actorTypeToText, currentRequestContext)
+import HMem.DB.RequestContext (Principal(..), RequestContext(..), actorTypeToText, changeCauseToText, currentRequestContext)
 
 ------------------------------------------------------------------------
 -- Pool metrics (process-wide)
@@ -86,6 +88,8 @@ data DBException
   | DBCycleDetected Text
   | DBLifecycleViolation Text Text (Maybe Text) (Maybe Text)
   | DBStatementTimeout
+  | DBSerializationFailure
+  | DBResyncUnauthorized
   | DBCapabilityUnavailable Text
   | DBOtherError Text
   deriving (Show, Eq)
@@ -108,7 +112,9 @@ classifyError sessErr = classifyCmd cmdErr
       | sqlstate == "23503" = DBForeignKeyViolation (decode msg)
       | sqlstate == "23514" = DBCheckViolation (decode msg)
       | sqlstate == "P0001" = DBCycleDetected (decode msg)
-      | sqlstate == "57014" = DBStatementTimeout
+       | sqlstate == "57014" = DBStatementTimeout
+       | sqlstate == "40001" = DBSerializationFailure
+       | sqlstate == "HM501" = DBResyncUnauthorized
       | otherwise           = DBOtherError (decode msg)
     classifyCmd other = DBOtherError (T.pack (show other))
 
@@ -179,25 +185,30 @@ withConn pool action = withResource pool $ \conn ->
 -- | Run a Hasql Session via a connection pool, throwing a structured
 -- 'DBException' on error.
 runSession :: Pool Hasql.Connection -> Session.Session a -> IO a
-runSession = runManagedSession
+runSession = runManagedSession "BEGIN"
 
 -- | Run a Hasql 'Session' inside a database transaction (BEGIN/COMMIT/ROLLBACK).
 -- Throws a structured 'DBException' on error.
 runTransaction :: Pool Hasql.Connection -> Session.Session a -> IO a
-runTransaction = runManagedSession
+runTransaction = runManagedSession "BEGIN"
 
-runManagedSession :: Pool Hasql.Connection -> Session.Session a -> IO a
-runManagedSession pool sess = withConn pool $ \conn -> do
+-- | Run a transaction whose isolation level is selected by its BEGIN command,
+-- before request-context SET statements issue any query.
+runSerializableTransaction :: Pool Hasql.Connection -> Session.Session a -> IO a
+runSerializableTransaction = runManagedSession "BEGIN ISOLATION LEVEL SERIALIZABLE"
+
+runManagedSession :: ByteString -> Pool Hasql.Connection -> Session.Session a -> IO a
+runManagedSession beginSql pool sess = withConn pool $ \conn -> do
   testMode <- readIORef testTransactionModeRef
   reqCtx <- currentRequestContext
   if testMode
     then runWithSavepoint conn reqCtx sess
-    else runWithTransaction conn reqCtx sess
+    else runWithTransaction beginSql conn reqCtx sess
 
-runWithTransaction :: Hasql.Connection -> RequestContext -> Session.Session a -> IO a
-runWithTransaction conn reqCtx sess = do
+runWithTransaction :: ByteString -> Hasql.Connection -> RequestContext -> Session.Session a -> IO a
+runWithTransaction beginSql conn reqCtx sess = do
   let txn = do
-        Session.sql "BEGIN"
+        Session.sql beginSql
         applyRequestContext reqCtx
         a <- sess
         Session.sql "COMMIT"
@@ -237,9 +248,12 @@ applyRequestContext reqCtx = do
         RequestContext { principal = p } -> p
       mWorkspaceId = case reqCtx of
         RequestContext { workspaceId = wsId } -> wsId
+      mChangeCause = case reqCtx of
+        RequestContext { changeCause = cause } -> cause
   void $ Session.statement (maybe "" id mRequestId) setRequestIdStatement
   maybe clearPrincipalContext applyPrincipalContext mPrincipal
   void $ Session.statement (maybe "" (T.pack . show) mWorkspaceId) setWorkspaceIdStatement
+  void $ Session.statement (maybe "core" changeCauseToText mChangeCause) setChangeCauseStatement
 
 applyPrincipalContext :: Principal -> Session.Session ()
 applyPrincipalContext principal = do
@@ -287,6 +301,13 @@ setActorLabelStatement = Statement.Statement
 setWorkspaceIdStatement :: Statement.Statement Text Text
 setWorkspaceIdStatement = Statement.Statement
   "SELECT set_config('hmem.workspace_id', $1, true)"
+  (E.param (E.nonNullable E.text))
+  (D.singleRow (D.column (D.nonNullable D.text)))
+  True
+
+setChangeCauseStatement :: Statement.Statement Text Text
+setChangeCauseStatement = Statement.Statement
+  "SELECT set_config('hmem.change_cause', $1, true)"
   (E.param (E.nonNullable E.text))
   (D.singleRow (D.column (D.nonNullable D.text)))
   True

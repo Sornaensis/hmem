@@ -34,7 +34,42 @@ spec = do
           overridden = applyEnvOverrides Nothing (Just "from-env") Nothing cfg
       overridden.auth.apiKey `shouldBe` Just "from-env"
 
+    it "applies change-stream environment overrides before validation" $ do
+      let overridden = applyChangeStreamEnvOverrides (Just "100") (Just "40") (Just "20") defaultConfig
+      overridden.changeStream `shouldBe` ChangeStreamConfig 100 40 20
+
   describe "validateConfig" $ do
+    it "defaults change-stream retention and hand-off lifetimes" $ do
+      defaultConfig.changeStream `shouldBe` ChangeStreamConfig
+        { retentionSeconds = 604800
+        , resumeTokenTtlSeconds = 86400
+        , snapshotSessionTtlSeconds = 300
+        }
+
+    it "keeps the change-stream TTL budget below retention" $ do
+      let cfg = defaultConfig
+            { changeStream = ChangeStreamConfig
+                { retentionSeconds = 100
+                , resumeTokenTtlSeconds = 90
+                , snapshotSessionTtlSeconds = 20
+                }
+            }
+          (warnings, validated) = validateConfig cfg
+      warnings `shouldSatisfy` any ("exceeds maximum" `isInfixOf`)
+      validated.changeStream.resumeTokenTtlSeconds
+        + validated.changeStream.snapshotSessionTtlSeconds
+        `shouldSatisfy` (< validated.changeStream.retentionSeconds)
+
+    it "constructs a valid change-stream budget at the retention boundary" $ do
+      let cfg = defaultConfig { changeStream = ChangeStreamConfig 1 999 999 }
+          (_, validated) = validateConfig cfg
+          stream = validated.changeStream
+      stream.retentionSeconds `shouldBe` 3
+      stream.resumeTokenTtlSeconds `shouldBe` 1
+      stream.snapshotSessionTtlSeconds `shouldBe` 1
+      stream.resumeTokenTtlSeconds + stream.snapshotSessionTtlSeconds
+        `shouldSatisfy` (< stream.retentionSeconds)
+
     it "warns when legacy static bearer auth is enabled without an API key" $ do
       let cfg = defaultConfig { auth = defaultConfig.auth { enabled = True, apiKey = Nothing } }
           (warnings, validated) = validateConfig cfg
@@ -201,7 +236,33 @@ spec = do
     it "defaults deployed token lookup to database" $ do
       defaultConfig.auth.deployed.tokenLookup `shouldBe` TokenLookupDatabase
 
+  describe "change-stream schema" $ do
+    it "parses configured retention and hand-off lifetimes from YAML" $ do
+      let yaml = BS8.pack $ unlines
+            [ "change_stream:"
+            , "  retention_seconds: 120"
+            , "  resume_token_ttl_seconds: 60"
+            , "  snapshot_session_ttl_seconds: 30"
+            ]
+      case Yaml.decodeEither' yaml of
+        Left err -> expectationFailure (show err)
+        Right (cfg :: HMemConfig) -> cfg.changeStream `shouldBe` ChangeStreamConfig 120 60 30
+
   describe "auth config parsing" $ do
+    it "normalizes blank MCP provenance secrets from YAML and environment" $ do
+      let yaml = BS8.pack $ unlines
+            [ "auth:"
+            , "  mcp_provenance_token: '   '"
+            ]
+      case Yaml.decodeEither' yaml of
+        Left err -> expectationFailure (show err)
+        Right (cfg :: HMemConfig) -> authMcpProvenanceToken cfg.auth `shouldBe` Nothing
+      let configured = defaultConfig { auth = defaultConfig.auth { mcpProvenanceToken = Just "config-secret" } }
+      authMcpProvenanceToken (applyMcpProvenanceEnvOverride (Just " \t ") configured).auth
+        `shouldBe` Just "config-secret"
+      authMcpProvenanceToken (applyMcpProvenanceEnvOverride (Just "  env-secret  ") defaultConfig).auth
+        `shouldBe` Just "env-secret"
+
     it "parses a legacy auth config with enabled/api_key only" $ do
       let yaml = BS8.pack $ unlines
             [ "auth:"

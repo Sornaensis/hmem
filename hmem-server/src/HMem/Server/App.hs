@@ -11,6 +11,7 @@ module HMem.Server.App
 import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
 import Control.Lens ((&), (.~), (^.), preview)
+import Data.Bits (xor, (.|.))
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
 import Data.Map.Strict qualified as Map
@@ -20,7 +21,7 @@ import Data.ByteString (ByteString, isPrefixOf)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
-import Data.List (find)
+import Data.List (find, foldl')
 import Data.Pool (Pool)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -42,9 +43,9 @@ import Servant (Proxy (..), serve)
 
 import Crypto.JWT qualified as JWT
 import Crypto.JOSE.JWK qualified as JWK
-import HMem.Config (AuthConfig(..), AuthMode(..), DeployedAuthConfig(..), LocalAuthConfig(..), LocalBotTokenConfig(..), CorsConfig(..), RateLimitConfig(..), TokenLookupMode(..), authStaticBearerEnabled, authStaticBearerToken)
+import HMem.Config (AuthConfig(..), AuthMode(..), DeployedAuthConfig(..), LocalAuthConfig(..), LocalBotTokenConfig(..), CorsConfig(..), RateLimitConfig(..), TokenLookupMode(..), authMcpProvenanceToken, authStaticBearerEnabled, authStaticBearerToken)
 import HMem.DB.Auth qualified as Auth
-import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, withPrincipalContext, withRequestContext, emptyRequestContext)
+import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, withChangeCauseContext, withPrincipalContext, withRequestContext, emptyRequestContext)
 import HMem.Server.AccessTracker (AccessTracker)
 import HMem.Server.API (HMemAPI, server)
 import HMem.Server.OpenAPI (openApiSpec)
@@ -91,10 +92,33 @@ requestIdMiddleware app req respond = do
     Nothing       -> TE.encodeUtf8 . UUID.toText <$> UUID.nextRandom
   let req' = req { Wai.requestHeaders = ("X-Request-Id", rid) : Wai.requestHeaders req }
       reqCtx = emptyRequestContext
-        { requestId = Just (TE.decodeUtf8Lenient rid)
-        }
+        { requestId = Just (TE.decodeUtf8Lenient rid) }
   withRequestContext reqCtx $
     app req' $ \resp -> respond $ Wai.mapResponseHeaders (("X-Request-Id", rid) :) resp
+
+-- A MCP cause needs both the ordinary marker and a private provenance token.
+-- A user bearer/PAT can therefore never select it by adding a request header.
+changeCauseFromRequest :: AuthConfig -> Wai.Request -> ChangeCause
+changeCauseFromRequest authCfg req
+  | trustedMcpProvenance authCfg req = ChangeCauseMcp
+  | isAuditRevertPath (Wai.pathInfo req) = ChangeCauseAuditRevert
+  | otherwise = ChangeCauseRest
+
+trustedMcpProvenance :: AuthConfig -> Wai.Request -> Bool
+trustedMcpProvenance authCfg req =
+  lookup "X-HMem-Change-Cause" (Wai.requestHeaders req) == Just "mcp"
+    && maybe False (\secret -> maybe False (secureByteStringEqual (TE.encodeUtf8 secret)) (lookup "X-HMem-MCP-Provenance" (Wai.requestHeaders req))) (authMcpProvenanceToken authCfg)
+
+secureByteStringEqual :: ByteString -> ByteString -> Bool
+secureByteStringEqual expected actual =
+  not (BS.null expected)
+    && BS.length expected == BS.length actual
+    && foldl' (.|.) 0 (BS.zipWith xor expected actual) == 0
+
+isAuditRevertPath :: [Text] -> Bool
+isAuditRevertPath path = case path of
+  ["api", "v1", "audit", _, "revert"] -> True
+  _ -> False
 
 type JWKSetCache = IORef (Maybe (UTCTime, JWK.JWKSet))
 
@@ -104,7 +128,8 @@ principalContextMiddleware jwksCache authCfg pool app req respond = do
   resolvedPrincipal <- case existingPrincipal of
     Just principal -> pure (Just principal)
     Nothing -> resolveRequestPrincipalWithCache jwksCache pool authCfg req
-  withPrincipalContext resolvedPrincipal (app req respond)
+  withPrincipalContext resolvedPrincipal $
+    withChangeCauseContext (Just (changeCauseFromRequest authCfg req)) (app req respond)
 
 resolveRequestPrincipal :: AuthConfig -> Wai.Request -> Maybe Principal
 resolveRequestPrincipal authCfg req =

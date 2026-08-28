@@ -13,6 +13,7 @@ module HMem.Config
   , DeployedAuthConfig(..)
   , TokenLookupMode(..)
   , RateLimitConfig(..)
+  , ChangeStreamConfig(..)
   , TlsConfig(..)
   , WebConfig(..)
     -- * Defaults
@@ -27,6 +28,8 @@ module HMem.Config
   , configFilePath
     -- * Overrides
   , applyEnvOverrides
+  , applyChangeStreamEnvOverrides
+  , applyMcpProvenanceEnvOverride
     -- * Derived helpers
   , connectionString
   , serverUrl
@@ -38,13 +41,14 @@ module HMem.Config
   , localImplicitBootstrapStartupError
   , authStaticBearerEnabled
   , authStaticBearerToken
+  , authMcpProvenanceToken
   ) where
 
 import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), ToJSON(..), (.:), (.:?), (.!=), (.=))
 import Data.Aeson qualified as Aeson
 import Data.Char (isDigit)
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Yaml qualified as Yaml
@@ -134,6 +138,8 @@ data AuthConfig = AuthConfig
   { mode     :: !AuthMode
   , enabled  :: !Bool
   , apiKey   :: !(Maybe Text)
+  -- | Private credential for the MCP-to-server hop, distinct from user bearers.
+  , mcpProvenanceToken :: !(Maybe Text)
   , local    :: !LocalAuthConfig
   , deployed :: !DeployedAuthConfig
   } deriving stock (Show, Eq)
@@ -142,6 +148,15 @@ data RateLimitConfig = RateLimitConfig
   { rlEnabled           :: !Bool
   , rlRequestsPerSecond :: !Double
   , rlBurst             :: !Int
+  } deriving stock (Show, Eq)
+
+-- | Retention and hand-off lifetimes for the database-backed change stream.
+-- These values are intentionally expressed in seconds because they are also
+-- available as environment overrides in container deployments.
+data ChangeStreamConfig = ChangeStreamConfig
+  { retentionSeconds       :: !Int
+  , resumeTokenTtlSeconds  :: !Int
+  , snapshotSessionTtlSeconds :: !Int
   } deriving stock (Show, Eq)
 
 data TlsConfig = TlsConfig
@@ -162,6 +177,7 @@ data HMemConfig = HMemConfig
   , cors     :: !CorsConfig
   , auth     :: !AuthConfig
   , rateLimit :: !RateLimitConfig
+  , changeStream :: !ChangeStreamConfig
   , tls      :: !TlsConfig
   , web      :: !WebConfig
   } deriving stock (Show, Eq)
@@ -327,6 +343,7 @@ instance FromJSON AuthConfig where
     <$> o .:? "mode" .!= AuthModeLocal
     <*> o .:? "enabled" .!= False
     <*> o .:? "api_key"
+    <*> (normalizeMcpProvenanceToken <$> o .:? "mcp_provenance_token")
     <*> o .:? "local" .!= defLocalAuth
     <*> o .:? "deployed" .!= defDeployedAuth
 
@@ -338,6 +355,7 @@ instance ToJSON AuthConfig where
     , "deployed" .= ac.deployed
     ]
     <> maybe [] (\k -> ["api_key" .= k]) ac.apiKey
+    <> maybe [] (\k -> ["mcp_provenance_token" .= k]) ac.mcpProvenanceToken
 
 instance FromJSON RateLimitConfig where
   parseJSON = Aeson.withObject "RateLimitConfig" $ \o -> RateLimitConfig
@@ -350,6 +368,19 @@ instance ToJSON RateLimitConfig where
     [ "enabled" .= rl.rlEnabled
     , "requests_per_second" .= rl.rlRequestsPerSecond
     , "burst" .= rl.rlBurst
+    ]
+
+instance FromJSON ChangeStreamConfig where
+  parseJSON = Aeson.withObject "ChangeStreamConfig" $ \o -> ChangeStreamConfig
+    <$> o .:? "retention_seconds" .!= 604800
+    <*> o .:? "resume_token_ttl_seconds" .!= 86400
+    <*> o .:? "snapshot_session_ttl_seconds" .!= 300
+
+instance ToJSON ChangeStreamConfig where
+  toJSON cs = Aeson.object
+    [ "retention_seconds" .= cs.retentionSeconds
+    , "resume_token_ttl_seconds" .= cs.resumeTokenTtlSeconds
+    , "snapshot_session_ttl_seconds" .= cs.snapshotSessionTtlSeconds
     ]
 
 instance FromJSON TlsConfig where
@@ -382,6 +413,7 @@ instance FromJSON HMemConfig where
     <*> o .:? "cors"     .!= defCors
     <*> o .:? "auth"     .!= defAuth
     <*> o .:? "rate_limit" .!= defRateLimit
+    <*> o .:? "change_stream" .!= defChangeStream
     <*> o .:? "tls"      .!= defTls
     <*> o .:? "web"      .!= defWeb
 
@@ -394,6 +426,7 @@ instance ToJSON HMemConfig where
     , "cors"     .= cfg.cors
     , "auth"     .= cfg.auth
     , "rate_limit" .= cfg.rateLimit
+    , "change_stream" .= cfg.changeStream
     , "tls"      .= cfg.tls
     , "web"      .= cfg.web
     ]
@@ -455,6 +488,7 @@ defAuth = AuthConfig
   { mode = AuthModeLocal
   , enabled = False
   , apiKey = Nothing
+  , mcpProvenanceToken = Nothing
   , local = defLocalAuth
   , deployed = defDeployedAuth
   }
@@ -464,6 +498,13 @@ defRateLimit = RateLimitConfig
   { rlEnabled = False
   , rlRequestsPerSecond = 10.0
   , rlBurst = 20
+  }
+
+defChangeStream :: ChangeStreamConfig
+defChangeStream = ChangeStreamConfig
+  { retentionSeconds = 604800
+  , resumeTokenTtlSeconds = 86400
+  , snapshotSessionTtlSeconds = 300
   }
 
 defTls :: TlsConfig
@@ -481,6 +522,7 @@ defaultConfig = HMemConfig
   , cors     = defCors
   , auth     = defAuth
   , rateLimit = defRateLimit
+  , changeStream = defChangeStream
   , tls      = defTls
   , web      = defWeb
   }
@@ -523,9 +565,15 @@ loadConfig = do
     else pure defaultConfig
   envPassword <- fmap T.pack <$> lookupEnv "HMEM_DB_PASSWORD"
   envApiKey   <- fmap T.pack <$> lookupEnv "HMEM_API_KEY"
+  envMcpProvenanceToken <- fmap T.pack <$> lookupEnv "HMEM_MCP_PROVENANCE_TOKEN"
   envSslMode  <- fmap T.pack <$> lookupEnv "HMEM_DB_SSLMODE"
-  let cfg' = applyEnvOverrides envPassword envApiKey envSslMode cfg
-      (warnings, validated) = validateConfig cfg'
+  envRetention <- lookupEnv "HMEM_CHANGE_STREAM_OUTBOX_RETENTION_SECONDS"
+  envResumeTtl <- lookupEnv "HMEM_CHANGE_STREAM_RESUME_TOKEN_TTL_SECONDS"
+  envSessionTtl <- lookupEnv "HMEM_CHANGE_STREAM_SNAPSHOT_SESSION_TTL_SECONDS"
+  let cfg' = applyChangeStreamEnvOverrides envRetention envResumeTtl envSessionTtl
+           $ applyEnvOverrides envPassword envApiKey envSslMode cfg
+      cfg'' = applyMcpProvenanceEnvOverride envMcpProvenanceToken cfg'
+      (warnings, validated) = validateConfig cfg''
   mapM_ (\w -> hPutStrLn stderr $ "Config warning: " <> w) warnings
   pure validated
 
@@ -553,6 +601,31 @@ applyEnvOverrides mDbPassword mApiKey mDbSslMode cfg =
         }
     }
 
+applyChangeStreamEnvOverrides :: Maybe String -> Maybe String -> Maybe String -> HMemConfig -> HMemConfig
+applyChangeStreamEnvOverrides mRetention mResumeTtl mSessionTtl cfg = cfg
+  { changeStream = cfg.changeStream
+      { retentionSeconds = fromMaybe cfg.changeStream.retentionSeconds (mRetention >>= readMaybe)
+      , resumeTokenTtlSeconds = fromMaybe cfg.changeStream.resumeTokenTtlSeconds (mResumeTtl >>= readMaybe)
+      , snapshotSessionTtlSeconds = fromMaybe cfg.changeStream.snapshotSessionTtlSeconds (mSessionTtl >>= readMaybe)
+      }
+  }
+
+-- | Blank private credentials are not credentials.  Strip YAML/environment
+-- values once so every consumer fails closed on whitespace-only configuration.
+applyMcpProvenanceEnvOverride :: Maybe Text -> HMemConfig -> HMemConfig
+applyMcpProvenanceEnvOverride envToken cfg = cfg
+  { auth = cfg.auth
+      { mcpProvenanceToken = normalizeMcpProvenanceToken envToken <|> normalizeMcpProvenanceToken cfg.auth.mcpProvenanceToken
+      }
+  }
+
+normalizeMcpProvenanceToken :: Maybe Text -> Maybe Text
+normalizeMcpProvenanceToken = (>>= nonEmpty . T.strip)
+  where
+    nonEmpty value
+      | T.null value = Nothing
+      | otherwise = Just value
+
 ------------------------------------------------------------------------
 -- Validation
 ------------------------------------------------------------------------
@@ -568,8 +641,9 @@ validateConfig cfg = (warnings, corrected)
     (lgWarns,  lg)  = validateLog cfg.logging
     (auWarns,  au)  = validateAuth srv cfg.auth
     (rlWarns,  rl)  = validateRateLimit cfg.rateLimit
-    warnings  = srvWarns <> dbWarns <> plWarns <> lgWarns <> auWarns <> rlWarns
-    corrected = cfg { server = srv, database = db, pool = pl, logging = lg, auth = au, rateLimit = rl }
+    (csWarns, cs) = validateChangeStream cfg.changeStream
+    warnings  = srvWarns <> dbWarns <> plWarns <> lgWarns <> auWarns <> rlWarns <> csWarns
+    corrected = cfg { server = srv, database = db, pool = pl, logging = lg, auth = au, rateLimit = rl, changeStream = cs }
 
     validateServer s =
       let (ws, p) = clampField "server.port" 1 65535 s.port
@@ -600,8 +674,11 @@ validateConfig cfg = (warnings, corrected)
           (ws2, bc) = clampField "logging.backup_count" 0 100 l.backupCount
       in  (ws1 <> ws2, LogConfig { level = l.level, maxSizeMB = ms, backupCount = bc })
 
-    validateAuth s a = (missingLegacyWarn <> localExposureWarns <> deployedWarns, a)
+    validateAuth s a = (missingLegacyWarn <> blankMcpProvenanceWarn <> localExposureWarns <> deployedWarns, a { mcpProvenanceToken = normalizeMcpProvenanceToken a.mcpProvenanceToken })
       where
+        blankMcpProvenanceWarn =
+          ["auth.mcp_provenance_token is empty or whitespace-only; ignoring it"
+          | maybe False (T.null . T.strip) a.mcpProvenanceToken]
         missingLegacyWarn
           | a.mode == AuthModeLocal
           , a.enabled
@@ -653,6 +730,18 @@ validateConfig cfg = (warnings, corrected)
         , rlRequestsPerSecond = rps
         , rlBurst = burst
         })
+
+    validateChangeStream streamCfg =
+      let -- Three seconds is the smallest retention that can contain two
+          -- strictly positive hand-off lifetimes and still leave one second
+          -- of replay budget.  Clamp the session first, then derive the
+          -- resume maximum from it, which makes the invariant constructive.
+          (wRetention, retention) = clampField "change_stream.retention_seconds" 3 31536000 streamCfg.retentionSeconds
+          sessionMax = retention - 2
+          (wSession, session) = clampField "change_stream.snapshot_session_ttl_seconds" 1 sessionMax streamCfg.snapshotSessionTtlSeconds
+          resumeMax = retention - session - 1
+          (wResume, resume) = clampField "change_stream.resume_token_ttl_seconds" 1 resumeMax streamCfg.resumeTokenTtlSeconds
+      in (wRetention <> wSession <> wResume, ChangeStreamConfig retention resume session)
 
     clampField :: String -> Int -> Int -> Int -> ([String], Int)
     clampField name lo hi val
@@ -791,3 +880,7 @@ authStaticBearerToken :: AuthConfig -> Maybe Text
 authStaticBearerToken authCfg
   | authStaticBearerEnabled authCfg = authCfg.apiKey
   | otherwise = Nothing
+
+-- | Private bridge credential used solely to authenticate MCP provenance.
+authMcpProvenanceToken :: AuthConfig -> Maybe Text
+authMcpProvenanceToken = normalizeMcpProvenanceToken . (.mcpProvenanceToken)

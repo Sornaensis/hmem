@@ -12,6 +12,7 @@ module HMem.MCP.Tools
   , compactSearchResults
   , compactProjectSummary
   , compactTaskSummary
+  , mcpProvenanceHeadersFor
   , mcpResultWith
   ) where
 
@@ -20,6 +21,7 @@ import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (parseEither)
+import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32)
 import Data.Foldable (toList)
@@ -29,7 +31,9 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
+import System.Environment (lookupEnv)
 import Network.HTTP.Client
+import Network.HTTP.Types (HeaderName)
 import Network.HTTP.Types.Status (statusCode)
 import Network.HTTP.Types.URI (urlEncode)
 
@@ -312,8 +316,9 @@ noContentRequest :: Manager -> String -> Maybe Text -> String -> String -> Maybe
 noContentRequest manager base apiKey method path body acknowledgement = do
   outcome <- try $ do
     initial <- parseRequest (base <> path)
+    provenance <- mcpProvenanceHeaders
     let auth = maybe [] (\token -> [("Authorization", TE.encodeUtf8 ("Bearer " <> token))]) apiKey
-        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : auth, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
+        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : provenance <> auth, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
     response <- httpLbs requestValue manager
     if statusCode (responseStatus response) >= 200 && statusCode (responseStatus response) < 300
       then pure (Right ())
@@ -328,8 +333,9 @@ rawRequest :: Manager -> String -> Maybe Text -> String -> String -> Maybe BL.By
 rawRequest manager base apiKey method path body = do
   outcome <- try $ do
     initial <- parseRequest (base <> path)
+    provenance <- mcpProvenanceHeaders
     let auth = maybe [] (\token -> [("Authorization", TE.encodeUtf8 ("Bearer " <> token))]) apiKey
-        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : auth, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
+        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : provenance <> auth, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
     response <- httpLbs requestValue manager
     if statusCode (responseStatus response) >= 200 && statusCode (responseStatus response) < 300
       then case eitherDecode (responseBody response) of
@@ -341,6 +347,21 @@ rawRequest manager base apiKey method path body = do
     Left (exception :: SomeException) -> do
       case fromException exception :: Maybe SomeAsyncException of Just _ -> throwIO exception; Nothing -> pure ()
       pure (Left (mcpError "Could not connect to hmem-server"))
+
+-- | Forwarded user authorization is not provenance.  The bridge adds this
+-- independently configured private credential only when one is available.
+mcpProvenanceHeaders :: IO [(HeaderName, ByteString)]
+mcpProvenanceHeaders = mcpProvenanceHeadersFor <$> lookupEnv "HMEM_MCP_PROVENANCE_TOKEN"
+
+mcpProvenanceHeadersFor :: Maybe String -> [(HeaderName, ByteString)]
+mcpProvenanceHeadersFor configured =
+  case configured >>= nonEmpty . T.strip . T.pack of
+    Nothing -> [("X-HMem-Change-Cause", "mcp")]
+    Just value -> [("X-HMem-Change-Cause", "mcp"), ("X-HMem-MCP-Provenance", TE.encodeUtf8 value)]
+  where
+    nonEmpty value
+      | T.null value = Nothing
+      | otherwise = Just value
 
 compactObservationSummary :: Value -> Value
 compactObservationSummary value = object (catMaybes [copy "id", copy "subjects", copy "subject_kind", copy "subject", copy "git_sha", preview])

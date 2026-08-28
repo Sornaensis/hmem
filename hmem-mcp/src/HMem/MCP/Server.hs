@@ -131,7 +131,7 @@ runMCPServerWithHandlesObservedWithFork forkWorker observeWorkers workerCount qu
       requestWorkerCleanup = mapM_ (forkIO . killThread) workerIds
       runLoop = restore $ do
         -- Read stdin → queue
-        readLoop input output lock queue mgr serverUrl mApiKey initialized wsContext
+        readLoop input output lock queue active mgr serverUrl mApiKey initialized wsContext
         observeWorkers workerIds
         -- Drain: wait for queue to empty and all workers to finish
         hPutStrLn errHandle "MCP server: stdin closed, draining in-flight requests..."
@@ -174,8 +174,8 @@ worker output mgr lock url mApiKey queue active initialized wsContext = go
 
 -- | Main read loop: reads lines from an input handle and enqueues them.
 -- If the queue is full, sends an overload error immediately.
-readLoop :: Handle -> Handle -> MVar () -> TBQueue QueuedLine -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe UUID) -> IO ()
-readLoop input output lock queue mgr serverUrl mApiKey initialized wsContext = do
+readLoop :: Handle -> Handle -> MVar () -> TBQueue QueuedLine -> TVar Int -> Manager -> String -> Maybe Text -> TVar Bool -> TVar (Maybe UUID) -> IO ()
+readLoop input output lock queue active mgr serverUrl mApiKey initialized wsContext = do
   eof <- hIsEOF input `catch` \(e :: SomeException) -> rethrowAsync e >> pure True
   if eof
     then pure ()
@@ -185,7 +185,13 @@ readLoop input output lock queue mgr serverUrl mApiKey initialized wsContext = d
         then continue
         else do
           if isOrderedContextControl line
-            then processLine output mgr lock serverUrl mApiKey initialized wsContext line
+            then do
+              -- A context transition starts a new epoch.  Let all ordinary
+              -- requests accepted in the preceding epoch finish before
+              -- committing it, so their externally-visible effects cannot
+              -- overtake later context controls.
+              waitForDrain queue active
+              processLine output mgr lock serverUrl mApiKey initialized wsContext line
             else do
               workspaceSnapshot <- atomically $ readTVar wsContext
               full <- atomically $ do
@@ -199,7 +205,16 @@ readLoop input output lock queue mgr serverUrl mApiKey initialized wsContext = d
                 else pure ()
           continue
   where
-    continue = readLoop input output lock queue mgr serverUrl mApiKey initialized wsContext
+    continue = readLoop input output lock queue active mgr serverUrl mApiKey initialized wsContext
+
+-- | Wait until no accepted ordinary request can still be running.  This is
+-- used only at workspace-context epoch boundaries; workers remain concurrent
+-- for ordinary requests within an epoch.
+waitForDrain :: TBQueue QueuedLine -> TVar Int -> IO ()
+waitForDrain queue active = atomically $ do
+  empty <- isEmptyTBQueue queue
+  n <- readTVar active
+  if empty && n == 0 then pure () else retry
 
 -- | Initialization and workspace mutations are local state transitions.  Run
 -- them in the input reader so their effects are committed before accepting the

@@ -13,7 +13,7 @@ import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID (UUID)
-import Network.HTTP.Client (Manager, defaultManagerSettings, newManager)
+import Network.HTTP.Client (Manager, closeManager, defaultManagerSettings, newManager)
 import Network.HTTP.Types (hContentType, status200)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
@@ -203,6 +203,34 @@ spec = do
         responseFor "get-b" responses `shouldSatisfy` maybe False (valueContains workspaceB)
         responseFor "call-after-clear" responses `shouldSatisfy` maybe False (valueContains "workspace_id")
 
+    it "keeps ordinary requests concurrent within a workspace epoch" $
+      withTempResponseFile $ \input ->
+      withTempResponseFile $ \output ->
+      withTempResponseFile $ \errHandle -> do
+        requestCount <- newMVar (0 :: Int)
+        bothRequestsSeen <- newEmptyMVar
+        releaseRequests <- newEmptyMVar
+        resultVar <- newEmptyMVar
+        withTwoRequestBlockingServer requestCount bothRequestsSeen releaseRequests $ \mgr base -> do
+          let requests =
+                [ initializeRequest "init"
+                , setWorkspaceRequest "set-a" (Just (String workspaceA))
+                , projectCreateRequest "call-a"
+                , projectCreateRequest "call-b"
+                ]
+          BL.hPut input (BL.intercalate "\n" (map encode requests) <> "\n")
+          hSeek input AbsoluteSeek 0
+          _ <- forkIO $
+            try @SomeException
+              (runMCPServerWithHandles 2 8 input output errHandle mgr base Nothing)
+              >>= putMVar resultVar
+          waitForSignal bothRequestsSeen
+          putMVar releaseRequests ()
+          result <- waitForResult "Timed out waiting for concurrent epoch requests" resultVar
+          case result of
+            Left err -> expectationFailure $ "MCP server failed: " <> show err
+            Right () -> pure ()
+
     it "cleans up active worker threads when shutdown logging fails" $
       withTempResponseFile $ \input ->
       withTempResponseFile $ \output ->
@@ -368,9 +396,9 @@ responseFor requestId = go
 
 withWorkspaceCaptureServer :: TVar [Value] -> (Manager -> String -> IO a) -> IO a
 withWorkspaceCaptureServer bodies action =
-  testWithApplication (pure app) $ \port -> do
-    mgr <- newManager defaultManagerSettings
-    action mgr ("http://127.0.0.1:" <> show port)
+  testWithApplication (pure app) $ \port ->
+    bracket (newManager defaultManagerSettings) closeManager $ \mgr ->
+      action mgr ("http://127.0.0.1:" <> show port)
   where
     app request respond = do
       body <- Wai.strictRequestBody request
@@ -380,21 +408,34 @@ withWorkspaceCaptureServer bodies action =
       respond $ Wai.responseLBS status200 [(hContentType, "application/json")] "{}"
 
 withStdioState :: (Manager -> TVar Bool -> TVar (Maybe UUID) -> IO a) -> IO a
-withStdioState action = do
-  mgr <- newManager defaultManagerSettings
+withStdioState action = bracket (newManager defaultManagerSettings) closeManager $ \mgr -> do
   initialized <- newTVarIO False
   wsContext <- newTVarIO Nothing
   action mgr initialized wsContext
 
 withBlockingHmemServer :: MVar () -> MVar () -> (Manager -> String -> IO a) -> IO a
 withBlockingHmemServer requestSeen blocker action =
-  testWithApplication (pure blockingApp) $ \port -> do
-    mgr <- newManager defaultManagerSettings
-    action mgr ("http://127.0.0.1:" <> show port)
+  testWithApplication (pure blockingApp) $ \port ->
+    bracket (newManager defaultManagerSettings) closeManager $ \mgr ->
+      action mgr ("http://127.0.0.1:" <> show port)
   where
     blockingApp _req respond = do
       putMVar requestSeen ()
       readMVar blocker
+      respond $ Wai.responseLBS status200 [(hContentType, "application/json")] "{}"
+
+withTwoRequestBlockingServer :: MVar Int -> MVar () -> MVar () -> (Manager -> String -> IO a) -> IO a
+withTwoRequestBlockingServer requestCount bothRequestsSeen releaseRequests action =
+  testWithApplication (pure blockingApp) $ \port ->
+    bracket (newManager defaultManagerSettings) closeManager $ \mgr ->
+      action mgr ("http://127.0.0.1:" <> show port)
+  where
+    blockingApp _req respond = do
+      requestNumber <- modifyMVar requestCount $ \current -> do
+        let next = current + 1
+        pure (next, next)
+      if requestNumber == 2 then putMVar bothRequestsSeen () else pure ()
+      readMVar releaseRequests
       respond $ Wai.responseLBS status200 [(hContentType, "application/json")] "{}"
 
 failingSecondSpawn :: MVar ThreadId -> MVar Int -> IO () -> IO ThreadId

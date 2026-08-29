@@ -321,6 +321,7 @@ type alias TimelineModel =
     , error : Maybe String
     , loadedWorkspaceId : Maybe String
     , eventsActiveRequest : Maybe TimelineEventsRequest
+    , eventsActiveIdentity : Maybe TimelineRequestIdentity
     , eventsLoadedRequest : Maybe TimelineEventsRequest
     , entityFilter : TimelineEntityFilter
     , eventFilter : TimelineEventFilter
@@ -332,10 +333,16 @@ type alias TimelineModel =
     , histogramBucket : String
     , histogramClockWorkspaceId : Maybe String
     , histogramActiveRequest : Maybe TimelineHistogramRequest
+    , histogramActiveIdentity : Maybe TimelineRequestIdentity
     , histogramLoadedRequest : Maybe TimelineHistogramRequest
     , histogramSelectedBucket : Maybe TimelineHistogramSelection
     , chartSeries : TimelineChartSeries
     , chartPointFocus : Dict String Int
+    , refreshGeneration : Int
+    , refreshTimerGeneration : Maybe Int
+    , refreshDirty : Bool
+    , refreshEpoch : Int
+    , nextRequestIdentity : Int
     }
 
 
@@ -351,6 +358,13 @@ type alias TimelineHistogramRequest =
     , since : String
     , until : String
     , bucket : String
+    }
+
+
+type alias TimelineRequestIdentity =
+    { requestId : Int
+    , refreshGeneration : Int
+    , refreshEpoch : Int
     }
 
 
@@ -577,9 +591,11 @@ type Msg
     | GotObservationDetail String String Int (Result Http.Error Api.Observation)
     | GotInitialTaskOverview String Int String (Result Http.Error Api.TaskOverview)
     | GotInitialProjectOverview String Int String (Result Http.Error Api.ProjectOverview)
-    | GotWorkspaceTimeline TimelineEventsRequest (Result Http.Error (Api.PaginatedResult Api.WorkspaceTimelineEvent))
+    | GotWorkspaceTimeline TimelineRequestIdentity TimelineEventsRequest (Result Http.Error (Api.PaginatedResult Api.WorkspaceTimelineEvent))
     | GotTimelineHistogramClock String Time.Posix
-    | GotWorkspaceTimelineBuckets TimelineHistogramRequest (Result Http.Error Api.WorkspaceTimelineBucketsResponse)
+    | GotWorkspaceTimelineBuckets TimelineRequestIdentity TimelineHistogramRequest (Result Http.Error Api.WorkspaceTimelineBucketsResponse)
+    | RefreshTimelineAfterDebounce String Int Int
+    | RetryTimelineRefresh
       -- Mutation responses
     | MutationDone String (Result Http.Error ())
     | ProjectCreated (Result Api.ApiError Api.Project)

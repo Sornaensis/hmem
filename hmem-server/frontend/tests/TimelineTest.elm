@@ -1,9 +1,17 @@
 module TimelineTest exposing (suite)
 
-import Expect
+import Api
+import AppShell
 import Dict
+import Expect
 import Feature.Timeline
+import Helpers
+import Http
 import Test exposing (..)
+import Test.Html.Query as Query
+import Test.Html.Selector as Selector
+import Types exposing (Flags, Model, Msg(..), Page(..), TimelineModel, WorkspaceTab(..))
+import Url
 
 
 suite : Test
@@ -19,6 +27,36 @@ suite =
                 , Feature.Timeline.chartY 7 7
                 ]
                     |> Expect.equal [ 360, 360, 80, 640, 236, 40 ]
+        , test "live refresh uses the frozen trailing debounce and accepts only the newest request identity" <|
+            \_ ->
+                let
+                    first =
+                        { requestId = 17, refreshGeneration = 4, refreshEpoch = 8 }
+
+                    second =
+                        { requestId = 18, refreshGeneration = 4, refreshEpoch = 8 }
+                in
+                { debounceMs = Feature.Timeline.timelineDebounceMs
+                , activeTimerDispatches = Feature.Timeline.timelineRefreshDispatchAllowed True True 4 8 (Just 4) 4 8
+                , backgroundTimerDoesNotDispatch = Feature.Timeline.timelineRefreshDispatchAllowed False True 4 8 (Just 4) 4 8
+                , supersededTimerDoesNotDispatch = Feature.Timeline.timelineRefreshDispatchAllowed True True 5 8 (Just 4) 4 8
+                , resetEpochTimerDoesNotDispatch = Feature.Timeline.timelineRefreshDispatchAllowed True True 4 9 (Just 4) 4 8
+                , currentResponseAccepted = Feature.Timeline.timelineResponseIsCurrent first (Just first) 4 8
+                , sameRangeOlderResponseRejected = Feature.Timeline.timelineResponseIsCurrent first (Just second) 4 8
+                , reinvalidatedResponseRejected = Feature.Timeline.timelineResponseIsCurrent second (Just second) 5 8
+                , reenteredWorkspaceResponseRejected = Feature.Timeline.timelineResponseIsCurrent second (Just second) 4 9
+                }
+                    |> Expect.equal
+                        { debounceMs = 250
+                        , activeTimerDispatches = True
+                        , backgroundTimerDoesNotDispatch = False
+                        , supersededTimerDoesNotDispatch = False
+                        , resetEpochTimerDoesNotDispatch = False
+                        , currentResponseAccepted = True
+                        , sameRangeOlderResponseRejected = False
+                        , reinvalidatedResponseRejected = False
+                        , reenteredWorkspaceResponseRejected = False
+                        }
         , test "actual maxima and safe render domains keep zero baselines honest" <|
             \_ ->
                 let
@@ -40,6 +78,102 @@ suite =
                 , Feature.Timeline.lineChartRenderDomain 47
                 ]
                     |> Expect.equal [ 0, 0, 47, 1, 1, 3, 47 ]
+        , test "live refresh preserves exact selected event and configured bucket projections" <|
+            \_ ->
+                let
+                    selected =
+                        { label = "2026-W07", since = "2026-02-09T00:00:00Z", until = "2026-02-16T00:00:00Z" }
+
+                    initial =
+                        Feature.Timeline.init
+
+                    timeline =
+                        { initial
+                            | histogramSince = "2026-01-01"
+                            , histogramUntil = "2026-04-01"
+                            , histogramBucket = "week"
+                            , histogramSelectedBucket = Just selected
+                        }
+
+                    plan =
+                        Feature.Timeline.timelineRefreshPlan "workspace-a" timeline
+                in
+                Expect.equal
+                    { events = { workspaceId = "workspace-a", since = Just selected.since, until = Just selected.until }
+                    , histogram = Just { workspaceId = "workspace-a", since = "2026-01-01T00:00:00Z", until = "2026-04-01T00:00:00Z", bucket = "week" }
+                    }
+                    plan
+        , test "a refresh failure is nonblocking only when a last-good event response exists" <|
+            \_ ->
+                let
+                    request =
+                        { workspaceId = "workspace-a", since = Nothing, until = Nothing }
+
+                    initial =
+                        Feature.Timeline.init
+                in
+                { firstLoadFailureBlocks = Feature.Timeline.timelineErrorIsBlocking { initial | error = Just "failed" }
+                , cachedFailureRendersCards = not (Feature.Timeline.timelineErrorIsBlocking { initial | error = Just "failed", eventsLoadedRequest = Just request })
+                , resetEpoch = (Feature.Timeline.reset 9).refreshEpoch
+                , resetRequestIdentity = (Feature.Timeline.reset 9).nextRequestIdentity
+                }
+                    |> Expect.equal
+                        { firstLoadFailureBlocks = True
+                        , cachedFailureRendersCards = True
+                        , resetEpoch = 9
+                        , resetRequestIdentity = 1
+                        }
+        , test "same-workspace re-entry stamps the new session epoch before its first request" <|
+            \_ ->
+                let
+                    ( reentered, _ ) =
+                        Feature.Timeline.ensureLoaded "https://api.example" "workspace-1" 9 (Feature.Timeline.reset 0)
+                in
+                Expect.equal (Just 9) (reentered.eventsActiveIdentity |> Maybe.map .refreshEpoch)
+        , test "a live refresh failure retains cards and renders a retry action" <|
+            \_ ->
+                let
+                    request =
+                        { workspaceId = "workspace-1", since = Nothing, until = Nothing }
+
+                    identity =
+                        { requestId = 8, refreshGeneration = 3, refreshEpoch = 4 }
+
+                    event =
+                        timelineEvent "retained-card"
+
+                    initial =
+                        Feature.Timeline.init
+
+                    timeline =
+                        { initial
+                            | events = [ event ]
+                            , loadedWorkspaceId = Just "workspace-1"
+                            , eventsLoadedRequest = Just request
+                            , eventsActiveRequest = Just request
+                            , eventsActiveIdentity = Just identity
+                            , loading = True
+                            , refreshGeneration = 3
+                            , refreshEpoch = 4
+                        }
+
+                    afterFailure =
+                        Feature.Timeline.update
+                            (GotWorkspaceTimeline identity request (Err Http.Timeout))
+                            (timelineModel timeline)
+                            |> Tuple.first
+
+                    rendered =
+                        Feature.Timeline.viewWorkspaceTimelinePanel "workspace-1" afterFailure
+                            |> Query.fromHtml
+                in
+                Expect.all
+                    [ \_ -> Expect.equal [ event ] afterFailure.timeline.events
+                    , \_ -> Expect.equal (Just request) afterFailure.timeline.eventsLoadedRequest
+                    , \_ -> Expect.equal (Just "Failed to load timeline events.") afterFailure.timeline.error
+                    , \_ -> Query.has [ Selector.class "timeline-stale-notice", Selector.text "Retry", Selector.text "retained-card" ] rendered
+                    ]
+                    ()
         , test "ticks retain exact actual maxima for zero, small, spike, and non-multiple domains" <|
             \_ ->
                 [ Feature.Timeline.chartTickValues 0
@@ -133,3 +267,63 @@ suite =
                 ]
                     |> Expect.equal [ False, False, False, False, False ]
         ]
+
+
+timelineModel : TimelineModel -> Model
+timelineModel timeline =
+    let
+        sourceUrl =
+            { protocol = Url.Https
+            , host = "app.example"
+            , port_ = Nothing
+            , path = "/workspace/workspace-1"
+            , query = Nothing
+            , fragment = Just "tab=timeline"
+            }
+
+        initial =
+            AppShell.initModel
+                Nothing
+                sourceUrl
+                (WorkspacePage "workspace-1")
+                timelineFlags
+                Nothing
+                (Helpers.parseFragment sourceUrl.fragment)
+                |> AppShell.finalizeInit (WorkspacePage "workspace-1")
+    in
+    { initial
+        | selectedWorkspaceId = Just "workspace-1"
+        , activeTab = TimelineTab
+        , timeline = timeline
+    }
+
+
+timelineFlags : Flags
+timelineFlags =
+    { apiUrl = "https://api.example"
+    , wsUrl = "wss://api.example"
+    , sessionId = "session-1"
+    , runtimeMode = "test"
+    , authTokenStorageKey = "hmem-auth-token"
+    , authTokenPresent = False
+    , loginUrl = Nothing
+    , logoutUrl = Nothing
+    }
+
+
+timelineEvent : String -> Api.WorkspaceTimelineEvent
+timelineEvent title =
+    { id = "timeline-event"
+    , workspaceId = "workspace-1"
+    , eventType = "created"
+    , entityType = "task"
+    , entityId = "task-1"
+    , title = title
+    , occurredAt = "2026-08-29T12:00:00Z"
+    , actor = Nothing
+    , project = Nothing
+    , parentTask = Nothing
+    , statusTransition = Nothing
+    , navigation = { entityType = "task", entityId = "task-1" }
+    , sourceAuditId = Nothing
+    }

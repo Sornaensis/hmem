@@ -467,7 +467,7 @@ prepareWorkspaceTimelineFromRoute wsId tab model =
     if tab == TimelineTab then
         let
             ( timeline, timelineCmd ) =
-                Feature.Timeline.ensureLoaded model.flags.apiUrl wsId model.timeline
+                Feature.Timeline.ensureLoaded model.flags.apiUrl wsId model.sessionRequestEpoch model.timeline
         in
         ( { model | timeline = timeline }, timelineCmd )
 

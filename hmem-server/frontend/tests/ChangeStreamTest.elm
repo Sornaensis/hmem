@@ -27,7 +27,7 @@ suite =
                 , ChangeStream.reduceFrame (Api.CanonicalChange event) state |> Tuple.first |> ChangeStream.reduceFrame (Api.CanonicalChange event) |> Tuple.second
                 , ChangeStream.reduceFrame (Api.CanonicalChange wrong) state |> Tuple.second
                 ]
-                    |> Expect.equal [ [ ChangeStream.RefetchEntity "task" "t" ], [], [] ]
+                    |> Expect.equal [ [ ChangeStream.RefetchEntity "task" "t", ChangeStream.RefreshTimeline ], [], [] ]
         , test "checkpoint becomes live without mutation actions" <|
             \_ ->
                 let
@@ -35,6 +35,55 @@ suite =
                         ChangeStream.reduceFrame (Api.CanonicalCheckpoint "opaque") (ChangeStream.init ChangeStream.Global [])
                 in
                 Expect.equal ( True, Just "opaque", [] ) ( state.live, state.resumeToken, actions )
+        , test "Timeline eligibility is one coalesced action for lifecycle envelopes only" <|
+            \_ ->
+                let
+                    state =
+                        ChangeStream.init (ChangeStream.Workspace "w") []
+
+                    actions entityType entityAction invalidations =
+                        ChangeStream.reduceFrame
+                            (Api.CanonicalChange
+                                { eventId = entityType ++ "-" ++ entityAction
+                                , scope = Api.WorkspaceScope "w"
+                                , workspaceId = Just "w"
+                                , entityType = entityType
+                                , entityId = "id"
+                                , entityAction = entityAction
+                                , invalidations = invalidations
+                                }
+                            )
+                            state
+                            |> Tuple.second
+                            |> List.filter ((==) ChangeStream.RefreshTimeline)
+                in
+                [ actions "project" "created" [ { kind = "entity", target = "project:id" }, { kind = "collection", target = "projects:w" } ]
+                , actions "project" "updated" [ { kind = "entity", target = "project:id" } ]
+                , actions "project" "deleted" [ { kind = "entity", target = "project:id" } ]
+                , actions "project" "restored" [ { kind = "entity", target = "project:id" } ]
+                , actions "task" "created" [ { kind = "entity", target = "task:id" } ]
+                , actions "task" "updated" [ { kind = "entity", target = "task:id" } ]
+                , actions "task" "deleted" [ { kind = "entity", target = "task:id" } ]
+                , actions "task" "restored" [ { kind = "entity", target = "task:id" } ]
+                , actions "observation" "created" [ { kind = "entity", target = "observation:id" } ]
+                , actions "observation" "deleted" [ { kind = "entity", target = "observation:id" } ]
+                , actions "observation" "updated" [ { kind = "entity", target = "observation:id" } ]
+                , actions "task_dependency" "updated" [ { kind = "entity", target = "task_dependency:id:other" } ]
+                ]
+                    |> Expect.equal
+                        [ [ ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RefreshTimeline ]
+                        , []
+                        , []
+                        ]
         , test "coalesces a burst and fails closed for an unknown invalidation" <|
             \_ ->
                 let
@@ -65,7 +114,7 @@ suite =
                 , ChangeStream.reduceFrame (Api.CanonicalChange groupMembership) state |> Tuple.second
                 , ChangeStream.reduceFrame (Api.CanonicalChange workspaceMembership) state |> Tuple.second
                 ]
-                    |> Expect.equal [ [ ChangeStream.RefetchEntity "project" "p" ], [ ChangeStream.BeginResync ], [ ChangeStream.RemoveEntity "project" "p", ChangeStream.RefreshReadiness "project" "p", ChangeStream.RefetchEntity "task" "t" ], [ ChangeStream.RefreshGroupMembers "g", ChangeStream.NoAction ], [ ChangeStream.RefreshMemberships "a" ] ]
+                    |> Expect.equal [ [ ChangeStream.RefetchEntity "project" "p", ChangeStream.RefreshTimeline ], [ ChangeStream.BeginResync ], [ ChangeStream.RemoveEntity "project" "p", ChangeStream.RefreshReadiness "project" "p", ChangeStream.RefetchEntity "task" "t", ChangeStream.RefreshTimeline ], [ ChangeStream.RefreshGroupMembers "g", ChangeStream.NoAction ], [ ChangeStream.RefreshMemberships "a" ] ]
         , test "revocation clears only the current workspace scope" <|
             \_ ->
                 let
@@ -150,9 +199,10 @@ suite =
                           , ChangeStream.RefreshSearch "w"
                           , ChangeStream.RefreshMemberships "w"
                           , ChangeStream.RefreshGroupMembers "g"
-                          , ChangeStream.RefreshCatalogue
-                          , ChangeStream.RefreshSessionAuthorization
-                          ]
+                           , ChangeStream.RefreshCatalogue
+                           , ChangeStream.RefreshSessionAuthorization
+                           , ChangeStream.RefreshTimeline
+                           ]
                         , [ ChangeStream.RefetchEntity "workspace" "w", ChangeStream.RefreshCatalogue, ChangeStream.RefreshGroups ]
                         ]
         , test "unknown kind-target combinations fail closed without partial effects" <|
@@ -206,7 +256,7 @@ suite =
                     ( final, actions ) =
                         ChangeStream.reduceFrames [ event "one", event "two", Api.CanonicalCheckpoint "replacement" ] state
                 in
-                Expect.equal ( True, Just "replacement", [ ChangeStream.RefetchEntity "task" "t", ChangeStream.RefreshNextTasks "w" ] ) ( final.live, final.resumeToken, actions )
+                Expect.equal ( True, Just "replacement", [ ChangeStream.RefetchEntity "task" "t", ChangeStream.RefreshNextTasks "w", ChangeStream.RefreshTimeline ] ) ( final.live, final.resumeToken, actions )
         , test "entity transition coalescing preserves the final workspace, project, and task state" <|
             \_ ->
                 let
@@ -245,10 +295,10 @@ suite =
                     |> Expect.equal
                         [ [ ChangeStream.RefetchEntity "workspace" "w", ChangeStream.RefreshSessionAuthorization ]
                         , [ ChangeStream.RemoveEntity "workspace" "w", ChangeStream.ClearWorkspace "w", ChangeStream.RefreshSessionAuthorization ]
-                        , [ ChangeStream.RefetchEntity "project" "p" ]
-                        , [ ChangeStream.RemoveEntity "project" "p" ]
-                        , [ ChangeStream.RefetchEntity "task" "t" ]
-                        , [ ChangeStream.RemoveEntity "task" "t" ]
+                        , [ ChangeStream.RefetchEntity "project" "p", ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RemoveEntity "project" "p", ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RefetchEntity "task" "t", ChangeStream.RefreshTimeline ]
+                        , [ ChangeStream.RemoveEntity "task" "t", ChangeStream.RefreshTimeline ]
                         ]
         , test "dependency and readiness invalidations produce one normalized task-overview effect" <|
             \_ ->

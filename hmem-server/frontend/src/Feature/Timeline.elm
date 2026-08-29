@@ -1,4 +1,4 @@
-module Feature.Timeline exposing (chartCanvasWidth, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, pointMarkerOffset, sortTimelineEvents, timelineDateKey, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineStatusSummary, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel)
+module Feature.Timeline exposing (chartCanvasWidth, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, markDirty, pointMarkerOffset, reset, sortTimelineEvents, timelineDateKey, timelineDebounceMs, timelineErrorIsBlocking, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineRefreshDispatchAllowed, timelineRefreshPlan, timelineResponseIsCurrent, timelineStatusSummary, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel)
 
 import Api
 import Char
@@ -9,6 +9,7 @@ import Html exposing (..)
 import Html.Attributes exposing (attribute, class, disabled, title, type_, value)
 import Html.Events exposing (onClick, onInput, preventDefaultOn)
 import Json.Decode as Decode
+import Process
 import String
 import Svg
 import Svg.Attributes as SA
@@ -26,6 +27,7 @@ init =
     , error = Nothing
     , loadedWorkspaceId = Nothing
     , eventsActiveRequest = Nothing
+    , eventsActiveIdentity = Nothing
     , eventsLoadedRequest = Nothing
     , entityFilter = TimelineAllEntities
     , eventFilter = TimelineAllEvents
@@ -37,23 +39,42 @@ init =
     , histogramBucket = "week"
     , histogramClockWorkspaceId = Nothing
     , histogramActiveRequest = Nothing
+    , histogramActiveIdentity = Nothing
     , histogramLoadedRequest = Nothing
     , histogramSelectedBucket = Nothing
     , chartSeries = { projects = True, tasks = True, subtasks = True, observations = True }
     , chartPointFocus = Dict.empty
+    , refreshGeneration = 0
+    , refreshTimerGeneration = Nothing
+    , refreshDirty = False
+    , refreshEpoch = 0
+    , nextRequestIdentity = 1
     }
 
 
-ensureLoaded : String -> String -> TimelineModel -> ( TimelineModel, Cmd Msg )
-ensureLoaded apiUrl wsId timeline =
-    let
-        ( eventsTimeline, eventCmd ) =
-            ensureEventsLoaded apiUrl wsId timeline
+reset : Int -> TimelineModel
+reset refreshEpoch =
+    { init | refreshEpoch = refreshEpoch }
 
-        ( histogramTimeline, histogramCmd ) =
-            ensureHistogramLoaded apiUrl wsId eventsTimeline
+
+ensureLoaded : String -> String -> Int -> TimelineModel -> ( TimelineModel, Cmd Msg )
+ensureLoaded apiUrl wsId sessionEpoch timeline =
+    let
+        currentTimeline =
+            synchronizeRefreshEpoch sessionEpoch timeline
     in
-    ( histogramTimeline, Cmd.batch [ eventCmd, histogramCmd ] )
+    if currentTimeline.refreshDirty && currentTimeline.refreshTimerGeneration == Nothing then
+        refreshNow apiUrl wsId currentTimeline
+
+    else
+        let
+            ( eventsTimeline, eventCmd ) =
+                ensureEventsLoaded apiUrl wsId currentTimeline
+
+            ( histogramTimeline, histogramCmd ) =
+                ensureHistogramLoaded apiUrl wsId eventsTimeline
+        in
+        ( histogramTimeline, Cmd.batch [ eventCmd, histogramCmd ] )
 
 
 ensureEventsLoaded : String -> String -> TimelineModel -> ( TimelineModel, Cmd Msg )
@@ -71,17 +92,48 @@ ensureEventsLoaded apiUrl wsId timeline =
 
 startEventsFetch : String -> TimelineEventsRequest -> TimelineModel -> ( TimelineModel, Cmd Msg )
 startEventsFetch apiUrl request timeline =
+    startEventsFetchWithStaleData False apiUrl request timeline
+
+
+startEventsFetchWithStaleData : Bool -> String -> TimelineEventsRequest -> TimelineModel -> ( TimelineModel, Cmd Msg )
+startEventsFetchWithStaleData preserveData apiUrl request timeline =
+    let
+        identity =
+            { requestId = timeline.nextRequestIdentity, refreshGeneration = timeline.refreshGeneration, refreshEpoch = timeline.refreshEpoch }
+    in
     ( { timeline
         | loading = True
         , loadingWorkspaceId = Just request.workspaceId
         , error = Nothing
-        , events = []
-        , hasMore = False
-        , loadedWorkspaceId = Nothing
+        , events =
+            if preserveData then
+                timeline.events
+
+            else
+                []
+        , hasMore =
+            if preserveData then
+                timeline.hasMore
+
+            else
+                False
+        , loadedWorkspaceId =
+            if preserveData then
+                timeline.loadedWorkspaceId
+
+            else
+                Nothing
         , eventsActiveRequest = Just request
-        , eventsLoadedRequest = Nothing
+        , eventsActiveIdentity = Just identity
+        , eventsLoadedRequest =
+            if preserveData then
+                timeline.eventsLoadedRequest
+
+            else
+                Nothing
+        , nextRequestIdentity = timeline.nextRequestIdentity + 1
       }
-    , Api.fetchWorkspaceTimelineRange apiUrl request.workspaceId request.since request.until (GotWorkspaceTimeline request)
+    , Api.fetchWorkspaceTimelineRange apiUrl request.workspaceId request.since request.until (GotWorkspaceTimeline identity request)
     )
 
 
@@ -123,16 +175,131 @@ ensureHistogramLoaded apiUrl wsId timeline =
 
 startHistogramFetch : String -> TimelineHistogramRequest -> TimelineModel -> ( TimelineModel, Cmd Msg )
 startHistogramFetch apiUrl request timeline =
+    startHistogramFetchWithStaleData False apiUrl request timeline
+
+
+startHistogramFetchWithStaleData : Bool -> String -> TimelineHistogramRequest -> TimelineModel -> ( TimelineModel, Cmd Msg )
+startHistogramFetchWithStaleData preserveData apiUrl request timeline =
+    let
+        identity =
+            { requestId = timeline.nextRequestIdentity, refreshGeneration = timeline.refreshGeneration, refreshEpoch = timeline.refreshEpoch }
+    in
     ( { timeline
         | histogramLoading = True
         , histogramError = Nothing
-        , histogramBuckets = []
+        , histogramBuckets =
+            if preserveData then
+                timeline.histogramBuckets
+
+            else
+                []
         , histogramClockWorkspaceId = Nothing
         , histogramActiveRequest = Just request
-        , histogramLoadedRequest = Nothing
+        , histogramActiveIdentity = Just identity
+        , histogramLoadedRequest =
+            if preserveData then
+                timeline.histogramLoadedRequest
+
+            else
+                Nothing
+        , nextRequestIdentity = timeline.nextRequestIdentity + 1
       }
-    , Api.fetchWorkspaceTimelineBuckets apiUrl request.workspaceId request.since request.until request.bucket (GotWorkspaceTimelineBuckets request)
+    , Api.fetchWorkspaceTimelineBuckets apiUrl request.workspaceId request.since request.until request.bucket (GotWorkspaceTimelineBuckets identity request)
     )
+
+
+refreshNow : String -> String -> TimelineModel -> ( TimelineModel, Cmd Msg )
+refreshNow apiUrl wsId timeline =
+    let
+        readyTimeline =
+            { timeline | refreshDirty = False, refreshTimerGeneration = Nothing }
+
+        requestPlan =
+            timelineRefreshPlan wsId readyTimeline
+
+        ( eventsTimeline, eventCmd ) =
+            startEventsFetchWithStaleData True apiUrl requestPlan.events readyTimeline
+
+        ( histogramTimeline, histogramCmd ) =
+            case requestPlan.histogram of
+                Just histogramRequest ->
+                    startHistogramFetchWithStaleData True apiUrl histogramRequest eventsTimeline
+
+                Nothing ->
+                    ensureHistogramLoaded apiUrl wsId eventsTimeline
+    in
+    ( histogramTimeline, Cmd.batch [ eventCmd, histogramCmd ] )
+
+
+timelineRefreshPlan : String -> TimelineModel -> { events : TimelineEventsRequest, histogram : Maybe TimelineHistogramRequest }
+timelineRefreshPlan wsId timeline =
+    { events = timelineEventsRequest wsId timeline
+    , histogram = timelineHistogramRequest wsId timeline
+    }
+
+
+timelineErrorIsBlocking : TimelineModel -> Bool
+timelineErrorIsBlocking timeline =
+    timeline.error /= Nothing && timeline.eventsLoadedRequest == Nothing
+
+
+timelineDebounceMs : Float
+timelineDebounceMs =
+    250
+
+
+timelineResponseIsCurrent : TimelineRequestIdentity -> Maybe TimelineRequestIdentity -> Int -> Int -> Bool
+timelineResponseIsCurrent identity activeIdentity refreshGeneration refreshEpoch =
+    activeIdentity == Just identity
+        && identity.refreshGeneration == refreshGeneration
+        && identity.refreshEpoch == refreshEpoch
+
+
+timelineRefreshDispatchAllowed : Bool -> Bool -> Int -> Int -> Maybe Int -> Int -> Int -> Bool
+timelineRefreshDispatchAllowed isTimelineActive isDirty refreshGeneration refreshEpoch timerGeneration firedGeneration firedEpoch =
+    isTimelineActive
+        && isDirty
+        && refreshGeneration == firedGeneration
+        && refreshEpoch == firedEpoch
+        && timerGeneration == Just firedGeneration
+
+
+synchronizeRefreshEpoch : Int -> TimelineModel -> TimelineModel
+synchronizeRefreshEpoch sessionEpoch timeline =
+    { timeline | refreshEpoch = max timeline.refreshEpoch sessionEpoch }
+
+
+markDirty : Model -> ( Model, Cmd Msg )
+markDirty model =
+    case model.selectedWorkspaceId of
+        Nothing ->
+            ( model, Cmd.none )
+
+        Just workspaceId ->
+            let
+                nextGeneration =
+                    model.timeline.refreshGeneration + 1
+
+                currentTimeline =
+                    model.timeline
+
+                epochTimeline =
+                    synchronizeRefreshEpoch model.sessionRequestEpoch currentTimeline
+
+                dirtyTimeline =
+                    { epochTimeline
+                        | refreshDirty = True
+                        , refreshGeneration = nextGeneration
+                    }
+            in
+            if model.activeTab == TimelineTab then
+                ( { model | timeline = { dirtyTimeline | refreshTimerGeneration = Just nextGeneration } }
+                , Process.sleep timelineDebounceMs
+                    |> Task.perform (\_ -> RefreshTimelineAfterDebounce workspaceId nextGeneration dirtyTimeline.refreshEpoch)
+                )
+
+            else
+                ( { model | timeline = { dirtyTimeline | refreshTimerGeneration = Nothing } }, Cmd.none )
 
 
 timelineHistogramRequest : String -> TimelineModel -> Maybe TimelineHistogramRequest
@@ -329,8 +496,10 @@ update msg model =
             , focusElement targetId
             )
 
-        GotWorkspaceTimeline request result ->
-            if model.selectedWorkspaceId /= Just request.workspaceId || model.timeline.eventsActiveRequest /= Just request then
+        GotWorkspaceTimeline identity request result ->
+            if model.selectedWorkspaceId /= Just request.workspaceId
+                || model.timeline.eventsActiveRequest /= Just request
+                || not (timelineResponseIsCurrent identity model.timeline.eventsActiveIdentity model.timeline.refreshGeneration model.timeline.refreshEpoch) then
                 ( model, Cmd.none )
 
             else
@@ -350,6 +519,7 @@ update msg model =
                                     , error = Nothing
                                     , loadedWorkspaceId = Just request.workspaceId
                                     , eventsActiveRequest = Nothing
+                                    , eventsActiveIdentity = Nothing
                                     , eventsLoadedRequest = Just request
                                 }
                           }
@@ -357,15 +527,30 @@ update msg model =
                         )
 
                     Err _ ->
+                        let
+                            hasLastGoodData =
+                                currentTimeline.eventsLoadedRequest /= Nothing
+                        in
                         ( { model
                             | timeline =
                                 { currentTimeline
                                     | loading = False
                                     , loadingWorkspaceId = Nothing
                                     , error = Just "Failed to load timeline events."
-                                    , loadedWorkspaceId = Nothing
+                                    , loadedWorkspaceId =
+                                        if hasLastGoodData then
+                                            currentTimeline.loadedWorkspaceId
+
+                                        else
+                                            Nothing
                                     , eventsActiveRequest = Nothing
-                                    , eventsLoadedRequest = Nothing
+                                    , eventsActiveIdentity = Nothing
+                                    , eventsLoadedRequest =
+                                        if hasLastGoodData then
+                                            currentTimeline.eventsLoadedRequest
+
+                                        else
+                                            Nothing
                                 }
                           }
                         , Cmd.none
@@ -402,8 +587,10 @@ update msg model =
                 in
                 updateHistogramControls { model | timeline = initializedTimeline } identity
 
-        GotWorkspaceTimelineBuckets request result ->
-            if model.selectedWorkspaceId /= Just request.workspaceId || not (timelineHistogramAcceptsResponse request model.timeline) then
+        GotWorkspaceTimelineBuckets identity request result ->
+            if model.selectedWorkspaceId /= Just request.workspaceId
+                || not (timelineHistogramAcceptsResponse request model.timeline)
+                || not (timelineResponseIsCurrent identity model.timeline.histogramActiveIdentity model.timeline.refreshGeneration model.timeline.refreshEpoch) then
                 ( model, Cmd.none )
 
             else
@@ -421,6 +608,7 @@ update msg model =
                                     , histogramError = Nothing
                                     , histogramClockWorkspaceId = Nothing
                                     , histogramActiveRequest = Nothing
+                                    , histogramActiveIdentity = Nothing
                                     , histogramLoadedRequest = Just request
                                     , chartPointFocus = clampTimelinePointFocus (List.length response.buckets) currentTimeline.chartPointFocus
                                 }
@@ -429,19 +617,84 @@ update msg model =
                         )
 
                     Err _ ->
+                        let
+                            hasLastGoodData =
+                                currentTimeline.histogramLoadedRequest /= Nothing
+                        in
                         ( { model
                             | timeline =
                                 { currentTimeline
-                                    | histogramBuckets = []
+                                    | histogramBuckets =
+                                        if hasLastGoodData then
+                                            currentTimeline.histogramBuckets
+
+                                        else
+                                            []
                                     , histogramLoading = False
                                     , histogramError = Just "Failed to load timeline histogram."
                                     , histogramClockWorkspaceId = Nothing
                                     , histogramActiveRequest = Nothing
-                                    , histogramLoadedRequest = Nothing
+                                    , histogramActiveIdentity = Nothing
+                                    , histogramLoadedRequest =
+                                        if hasLastGoodData then
+                                            currentTimeline.histogramLoadedRequest
+
+                                        else
+                                            Nothing
                                 }
                           }
                         , Cmd.none
                         )
+
+        RefreshTimelineAfterDebounce workspaceId generation refreshEpoch ->
+            if model.selectedWorkspaceId == Just workspaceId
+                && model.timeline.refreshDirty
+                && model.timeline.refreshGeneration == generation
+                && model.timeline.refreshEpoch == refreshEpoch
+                && model.timeline.refreshTimerGeneration == Just generation then
+                if timelineRefreshDispatchAllowed
+                    (model.activeTab == TimelineTab)
+                    model.timeline.refreshDirty
+                    model.timeline.refreshGeneration
+                    model.timeline.refreshEpoch
+                    model.timeline.refreshTimerGeneration
+                    generation
+                    refreshEpoch then
+                    let
+                        ( timeline, cmd ) =
+                            refreshNow model.flags.apiUrl workspaceId model.timeline
+                    in
+                    ( { model | timeline = timeline }, cmd )
+
+                else
+                    let
+                        currentTimeline =
+                            model.timeline
+                    in
+                    ( { model | timeline = { currentTimeline | refreshTimerGeneration = Nothing } }, Cmd.none )
+
+            else
+                ( model, Cmd.none )
+
+        RetryTimelineRefresh ->
+            case model.selectedWorkspaceId of
+                Just workspaceId ->
+                    let
+                        currentTimeline =
+                            model.timeline
+
+                        ( timeline, cmd ) =
+                            refreshNow model.flags.apiUrl workspaceId
+                                { currentTimeline
+                                    | refreshDirty = True
+                                    , refreshTimerGeneration = Nothing
+                                    , refreshEpoch = max currentTimeline.refreshEpoch model.sessionRequestEpoch
+                                }
+                    in
+                    ( { model | timeline = timeline }, cmd )
+
+                Nothing ->
+                    ( model, Cmd.none )
 
         _ ->
             ( model, Cmd.none )
@@ -483,11 +736,14 @@ fetchEventsForTimeline model timeline =
     case model.selectedWorkspaceId of
         Just wsId ->
             let
+                currentTimeline =
+                    synchronizeRefreshEpoch model.sessionRequestEpoch timeline
+
                 request =
-                    timelineEventsRequest wsId timeline
+                    timelineEventsRequest wsId currentTimeline
 
                 ( nextTimeline, cmd ) =
-                    startEventsFetch model.flags.apiUrl request timeline
+                    startEventsFetch model.flags.apiUrl request currentTimeline
             in
             ( { model | timeline = nextTimeline }, cmd )
 
@@ -498,11 +754,14 @@ fetchEventsForTimeline model timeline =
 updateHistogramControls : Model -> (TimelineModel -> TimelineModel) -> ( Model, Cmd Msg )
 updateHistogramControls model updateTimeline =
     let
+        currentTimeline =
+            synchronizeRefreshEpoch model.sessionRequestEpoch model.timeline
+
         updatedTimeline =
-            updateTimeline model.timeline
+            updateTimeline currentTimeline
 
         selectionChanged =
-            model.timeline.histogramSelectedBucket /= updatedTimeline.histogramSelectedBucket
+            currentTimeline.histogramSelectedBucket /= updatedTimeline.histogramSelectedBucket
 
         finishWithOptionalEventRefresh nextTimeline histogramCmd =
             if selectionChanged then
@@ -539,6 +798,7 @@ updateHistogramControls model updateTimeline =
                             | histogramLoading = False
                             , histogramClockWorkspaceId = Nothing
                             , histogramActiveRequest = Nothing
+                            , histogramActiveIdentity = Nothing
                             , histogramLoadedRequest = Nothing
                             , histogramBuckets = []
                             , histogramError = Nothing
@@ -1081,44 +1341,57 @@ viewTimelineBody : String -> TimelineModel -> Html Msg
 viewTimelineBody wsId timeline =
     case timeline.error of
         Just message ->
-            div [ class "empty-state timeline-state" ]
-                [ h3 [] [ text "Timeline unavailable" ]
-                , p [] [ text message ]
-                , button [ class "btn-secondary", onClick (SwitchTab TimelineTab) ] [ text "Retry" ]
-                ]
-
-        Nothing ->
-            if List.isEmpty timeline.events && timeline.histogramSelectedBucket == Nothing then
-                div [ class "empty-state timeline-state" ]
-                    [ h3 [] [ text "No timeline events yet" ]
-                    , p [] [ text "Create or complete tasks and projects to populate this workspace timeline." ]
+            if not (timelineErrorIsBlocking timeline) then
+                div [ class "timeline-stale-notice" ]
+                    [ p [] [ text (message ++ " Showing the last successful timeline.") ]
+                    , button [ class "btn-secondary", onClick RetryTimelineRefresh ] [ text "Retry" ]
+                    , viewTimelineEvents wsId timeline
                     ]
 
             else
-                let
-                    visibleEvents =
-                        timeline.events
-                            |> filterTimelineEventsForSelection timeline.histogramSelectedBucket timeline.entityFilter timeline.eventFilter
-                            |> sortTimelineEvents
-
-                    groupedEvents =
-                        groupTimelineEvents visibleEvents
-                in
-                div []
-                    [ viewTimelineSelectionNote timeline.histogramSelectedBucket
-                    , viewTimelineFilters timeline
-                    , if timeline.hasMore then
-                        p [ class "timeline-more-note" ] [ text (timelineMoreNote timeline.histogramSelectedBucket) ]
-
-                      else
-                        text ""
-                    , if List.isEmpty visibleEvents then
-                        viewEmptyTimelineSelection timeline.histogramSelectedBucket
-
-                      else
-                        div [ class "timeline-event-list", title ("Timeline for workspace " ++ wsId) ]
-                            (List.map viewTimelineGroup groupedEvents)
+                div [ class "empty-state timeline-state" ]
+                    [ h3 [] [ text "Timeline unavailable" ]
+                    , p [] [ text message ]
+                    , button [ class "btn-secondary", onClick RetryTimelineRefresh ] [ text "Retry" ]
                     ]
+
+        Nothing ->
+            viewTimelineEvents wsId timeline
+
+
+viewTimelineEvents : String -> TimelineModel -> Html Msg
+viewTimelineEvents wsId timeline =
+    if List.isEmpty timeline.events && timeline.histogramSelectedBucket == Nothing then
+        div [ class "empty-state timeline-state" ]
+            [ h3 [] [ text "No timeline events yet" ]
+            , p [] [ text "Create or complete tasks and projects to populate this workspace timeline." ]
+            ]
+
+    else
+        let
+            visibleEvents =
+                timeline.events
+                    |> filterTimelineEventsForSelection timeline.histogramSelectedBucket timeline.entityFilter timeline.eventFilter
+                    |> sortTimelineEvents
+
+            groupedEvents =
+                groupTimelineEvents visibleEvents
+        in
+        div []
+            [ viewTimelineSelectionNote timeline.histogramSelectedBucket
+            , viewTimelineFilters timeline
+            , if timeline.hasMore then
+                p [ class "timeline-more-note" ] [ text (timelineMoreNote timeline.histogramSelectedBucket) ]
+
+              else
+                text ""
+            , if List.isEmpty visibleEvents then
+                viewEmptyTimelineSelection timeline.histogramSelectedBucket
+
+              else
+                div [ class "timeline-event-list", title ("Timeline for workspace " ++ wsId) ]
+                    (List.map viewTimelineGroup groupedEvents)
+            ]
 
 
 viewTimelineSelectionNote : Maybe TimelineHistogramSelection -> Html Msg

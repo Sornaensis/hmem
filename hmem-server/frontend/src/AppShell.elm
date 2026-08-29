@@ -158,7 +158,7 @@ handleOwned ownedMsg model =
                 ( timeline, timelineCmd ) =
                     case ( tab, newModel.selectedWorkspaceId ) of
                         ( TimelineTab, Just wsId ) ->
-                            Feature.Timeline.ensureLoaded newModel.flags.apiUrl wsId newModel.timeline
+                            Feature.Timeline.ensureLoaded newModel.flags.apiUrl wsId newModel.sessionRequestEpoch newModel.timeline
 
                         _ ->
                             ( newModel.timeline, Cmd.none )
@@ -245,7 +245,7 @@ handleOwned ownedMsg model =
                                 case ( expectedWorkspace, model.page ) of
                                     ( Just wsId, WorkspacePage currentWsId ) ->
                                         if wsId == currentWsId && model.activeTab == TimelineTab && sessionCanReadWorkspace wsId sessionContext then
-                                            Feature.Timeline.ensureLoaded model.flags.apiUrl wsId model.timeline
+                                            Feature.Timeline.ensureLoaded model.flags.apiUrl wsId model.sessionRequestEpoch model.timeline
 
                                         else
                                             ( model.timeline, Cmd.none )

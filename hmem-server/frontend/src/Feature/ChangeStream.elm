@@ -58,6 +58,7 @@ type Action
     | RefreshSessionAuthorization
     | AccessGranted String
     | ClearWorkspace String
+    | RefreshTimeline
     | BeginResync
     | NoAction
 
@@ -151,7 +152,18 @@ reduceFrame frame state =
                         ( state, [] )
 
                     Just next ->
-                        ( next, coalesce (List.concatMap (invalidationActions envelope) envelope.invalidations) )
+                        let
+                            invalidationActionsForEnvelope =
+                                List.concatMap (invalidationActions envelope) envelope.invalidations
+
+                            timelineActions =
+                                if timelineEligible envelope && not (List.member BeginResync invalidationActionsForEnvelope) then
+                                    [ RefreshTimeline ]
+
+                                else
+                                    []
+                        in
+                        ( next, coalesce (invalidationActionsForEnvelope ++ timelineActions) )
 
         Api.CanonicalScoped _ _ ->
             ( { state | live = False }, [ BeginResync ] )
@@ -214,6 +226,22 @@ validEnvelope envelope =
                 envelope.invalidations
     in
     scopeMatches && entityMatches && invalidationsValid && not (String.isEmpty envelope.eventId) && not (String.isEmpty envelope.entityId) && not (List.isEmpty envelope.invalidations)
+
+
+timelineEligible : Api.CanonicalEnvelope -> Bool
+timelineEligible envelope =
+    case ( envelope.scope, envelope.entityType, envelope.entityAction ) of
+        ( Api.WorkspaceScope _, "project", action ) ->
+            List.member action [ "created", "updated", "deleted", "restored" ]
+
+        ( Api.WorkspaceScope _, "task", action ) ->
+            List.member action [ "created", "updated", "deleted", "restored" ]
+
+        ( Api.WorkspaceScope _, "observation", action ) ->
+            List.member action [ "created", "deleted" ]
+
+        _ ->
+            False
 
 
 invalidationActions : Api.CanonicalEnvelope -> Api.CanonicalInvalidation -> List Action
@@ -439,6 +467,9 @@ coalesce actions =
 
                 ClearWorkspace workspace ->
                     "clear:" ++ workspace
+
+                RefreshTimeline ->
+                    "timeline"
 
                 BeginResync ->
                     "resync"

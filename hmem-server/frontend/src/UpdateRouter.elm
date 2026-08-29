@@ -131,13 +131,19 @@ update msg model =
         GotInitialProjectOverview _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
-        GotWorkspaceTimeline _ _ ->
+        GotWorkspaceTimeline _ _ _ ->
             Ok (Feature.Timeline.update msg model)
 
         GotTimelineHistogramClock _ _ ->
             Ok (Feature.Timeline.update msg model)
 
-        GotWorkspaceTimelineBuckets _ _ ->
+        GotWorkspaceTimelineBuckets _ _ _ ->
+            Ok (Feature.Timeline.update msg model)
+
+        RefreshTimelineAfterDebounce _ _ _ ->
+            Ok (Feature.Timeline.update msg model)
+
+        RetryTimelineRefresh ->
             Ok (Feature.Timeline.update msg model)
 
         SetTimelineEntityFilter _ ->

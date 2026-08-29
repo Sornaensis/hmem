@@ -8,6 +8,7 @@ module Feature.WebSocket exposing
 import Api
 import Dict
 import Feature.ChangeStream as ChangeStream
+import Feature.Timeline as Timeline
 import Helpers exposing (applyDependencyMutationResult, applyTaskDependencyLinkMutation, beginWorkspaceDataReload)
 import Http
 import Json.Decode as Decode
@@ -512,17 +513,16 @@ applyCanonicalSnapshot scope items token model =
                             loading =
                                 withStream.dataLoading
                         in
-                        ( { withStream
-                            | workspaces = Dict.union snapshot.workspaces withStream.workspaces
-                            , projects = snapshot.projects
-                            , tasks = snapshot.tasks
-                            , observations = { observations | items = snapshot.observations, orderedIds = Dict.keys snapshot.observations, hasMore = False, loading = False, error = Nothing, selectedDetail = Nothing, detailLoading = False, detailError = Nothing }
-                            , dependencies = { dependencies | taskDependencyLinks = snapshot.dependencies, taskDependencies = Dict.empty, taskReadinessRollups = Dict.empty, projectReadinessRollups = Dict.empty }
-                            , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
-                            , dataLoading = { loading | loadingWorkspaceData = False, pendingWorkspaceLoads = 0, activeWorkspaceLoadToken = Nothing, cardHydrationLoaded = True }
-                          }
-                        , Cmd.none
-                        )
+                        Timeline.markDirty
+                            { withStream
+                                | workspaces = Dict.union snapshot.workspaces withStream.workspaces
+                                , projects = snapshot.projects
+                                , tasks = snapshot.tasks
+                                , observations = { observations | items = snapshot.observations, orderedIds = Dict.keys snapshot.observations, hasMore = False, loading = False, error = Nothing, selectedDetail = Nothing, detailLoading = False, detailError = Nothing }
+                                , dependencies = { dependencies | taskDependencyLinks = snapshot.dependencies, taskDependencies = Dict.empty, taskReadinessRollups = Dict.empty, projectReadinessRollups = Dict.empty }
+                                , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
+                                , dataLoading = { loading | loadingWorkspaceData = False, pendingWorkspaceLoads = 0, activeWorkspaceLoadToken = Nothing, cardHydrationLoaded = True }
+                            }
 
 
 beginScopedResync : ChangeStream.Scope -> Model -> ( Model, Cmd Msg )
@@ -702,6 +702,7 @@ applyAction scope action ( model, accumulated ) =
                         , dependencies = { dependencies | taskDependencies = Dict.empty, taskDependencyLinks = [], taskReadinessRollups = Dict.empty, projectReadinessRollups = Dict.empty }
                         , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
                         , sessionRequestEpoch = model.sessionRequestEpoch + 1
+                        , timeline = Timeline.reset (model.sessionRequestEpoch + 1)
                         , webSocket =
                             scopedWebSocket
                     }
@@ -711,6 +712,13 @@ applyAction scope action ( model, accumulated ) =
 
             else
                 append scopeCommand { model | workspaces = Dict.remove workspaceId model.workspaces, webSocket = scopedWebSocket }
+
+        ChangeStream.RefreshTimeline ->
+            let
+                ( nextModel, command ) =
+                    Timeline.markDirty model
+            in
+            append command nextModel
 
         ChangeStream.BeginResync ->
             let

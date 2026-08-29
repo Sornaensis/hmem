@@ -233,6 +233,7 @@ a:hover {
   position: fixed;
   bottom: 1rem;
   left: 1rem;
+  pointer-events: none;
   padding: 0.25rem 0.75rem;
   border-radius: 9999px;
   font-size: 0.75rem;

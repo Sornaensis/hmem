@@ -2,7 +2,7 @@ module Main where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, tryPutMVar, tryTakeMVar)
-import Control.Exception (Exception, SomeException, finally, throwIO, try, catch)
+import Control.Exception (Exception, SomeException, bracket, finally, throwIO, try, catch)
 import Control.Monad (unless, when)
 import Data.Aeson (encode, toJSON)
 import Data.ByteString.Lazy qualified as LBS
@@ -38,6 +38,7 @@ import HMem.Server.AccessTracker (flushNow, newAccessTracker)
 import HMem.Server.App (mkAppWithChangeStream)
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
+import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
 import HMem.Server.Logging (jsonRequestLogger, logInfo, logWarn, newLogger, parseLogLevel)
 import HMem.Server.WebSocket (newWSState)
 
@@ -168,54 +169,60 @@ runHarness opts = withSandboxedTestEnv $ \env -> do
         , log_file_size = 10 * 1024 * 1024
         , log_backup_number = 3
         }
-  (logAction, cleanupLog) <- newFastLogger (LogFile fileSpec defaultBufSize)
-  let logger = newLogger logAction (parseLogLevel "info")
-  requestLogger <- jsonRequestLogger logAction
+  (bracket
+      (startChangeStreamWorker env.pool cfg.changeStream wsState)
+      stopChangeStreamWorker
+      (\_streamWorker ->
+        bracket
+          (newFastLogger (LogFile fileSpec defaultBufSize))
+          (\(_, cleanupLog) -> cleanupLog)
+          (\(logAction, _) -> do
+            let logger = newLogger logAction (parseLogLevel "info")
+            requestLogger <- jsonRequestLogger logAction
 
-  pgvec <- DBPool.checkPgvector env.pool
-  app <- mkAppWithChangeStream cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState cfg.web.webStaticDir pgvec
+            pgvec <- DBPool.checkPgvector env.pool
+            app <- mkAppWithChangeStream cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState cfg.web.webStaticDir pgvec
 
-  ready <- newEmptyMVar
-  serverDone <- newEmptyMVar
-  inputDone <- newEmptyMVar
-  let settings = setBeforeMainLoop (putMVar ready ())
-               $ setHost (fromString "127.0.0.1")
-               $ setPort port
-               $ setTimeout 60
-               $ setGracefulShutdownTimeout (Just 5)
-               $ defaultSettings
-      serverUrl = "http://127.0.0.1:" <> T.pack (show port)
-      shutdown = do
-        logInfo logger "[sandbox] Shutting down interactive harness..."
-        flushNow env.pool tracker `catch` \(_ :: SomeException) ->
-          logWarn logger "failed to flush access tracker"
-        destroyAllResources env.pool
-        cleanupLog
+            ready <- newEmptyMVar
+            serverDone <- newEmptyMVar
+            inputDone <- newEmptyMVar
+            let settings = setBeforeMainLoop (putMVar ready ())
+                         $ setHost (fromString "127.0.0.1")
+                         $ setPort port
+                         $ setTimeout 60
+                         $ setGracefulShutdownTimeout (Just 5)
+                         $ defaultSettings
+                serverUrl = "http://127.0.0.1:" <> T.pack (show port)
+                flushForShutdown = do
+                  logInfo logger "[sandbox] Shutting down interactive harness..."
+                  flushNow env.pool tracker `catch` \(_ :: SomeException) ->
+                    logWarn logger "failed to flush access tracker"
+                runInput = do
+                  inputResult <- try getLine
+                  case inputResult of
+                    Right _ -> do
+                      _ <- tryPutMVar inputDone ()
+                      pure ()
+                    Left (_ :: SomeException) -> do
+                      -- Non-interactive runners used by smoke tests may not provide a valid
+                      -- stdin handle.  Treat that the same as an immediate Enter press so the
+                      -- sandbox still starts, prints its coordinates, and tears down cleanly.
+                      _ <- tryPutMVar inputDone ()
+                      pure ()
 
-  serverThread <- forkIO $
-    try (runSettings settings app) >>= putMVar serverDone
-  inputThread <- forkIO $ do
-    inputResult <- try getLine
-    case inputResult of
-      Right _ -> do
-        _ <- tryPutMVar inputDone ()
-        pure ()
-      Left (_ :: SomeException) -> do
-        -- Non-interactive runners used by smoke tests may not provide a valid
-        -- stdin handle.  Treat that the same as an immediate Enter press so the
-        -- sandbox still starts, prints its coordinates, and tears down cleanly.
-        _ <- tryPutMVar inputDone ()
-        pure ()
-
-  let stopThreads = do
-        killThread inputThread
-        killThread serverThread
-      runInteractive = do
-        waitUntilReady ready serverDone
-        printBanner opts env cfg serverUrl logPath configPath seed
-        waitForStop inputDone serverDone serverThread
-
-  (runInteractive `finally` stopThreads) `finally` shutdown
+            (bracket
+                (forkIO $ try (runSettings settings app) >>= putMVar serverDone)
+                killThread
+                (\serverThread ->
+                  bracket
+                    (forkIO runInput)
+                    killThread
+                    (\_inputThread -> do
+                      waitUntilReady ready serverDone
+                      printBanner opts env cfg serverUrl logPath configPath seed
+                      waitForStop inputDone serverDone serverThread)))
+              `finally` flushForShutdown)))
+    `finally` destroyAllResources env.pool
   when opts.optPreserve $
     throwIO PreserveSandboxExit
 

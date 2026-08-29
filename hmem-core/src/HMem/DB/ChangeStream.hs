@@ -4,7 +4,7 @@
 module HMem.DB.ChangeStream
   ( ChangeScope(..), ChangeAudience(..), SnapshotToken(..), ResumeToken(..)
   , ChangeStreamError(..), OutboxRecord(..), SnapshotBegin(..), SnapshotPage(..), ReplayPage(..)
-  , beginResync, beginResyncWithStartKey, readSnapshotPage, readSnapshotPageWithTtl, readSnapshotPageWithTtls, validateCanonicalResumeToken, replayAndRotateResumeToken, replayUnacknowledgedResumeToken, replacementResumeToken, acknowledgeReplayPage, rebaseResumeTokenAfterHidden
+  , beginResync, beginResyncWithStartKey, readSnapshotPage, readSnapshotPageWithTtl, readSnapshotPageWithTtls, readSnapshotPageWithStoredTtls, validateCanonicalResumeToken, replayAndRotateResumeToken, replayUnacknowledgedResumeToken, replacementResumeToken, acknowledgeReplayPage, rebaseResumeTokenAfterHidden
   , listOutboxAfter, listOutboxScopes, pruneOutboxBefore, cleanupChangeStream
   ) where
 
@@ -152,8 +152,22 @@ readSnapshotPageWithTtl pool ttl = readSnapshotPageWithTtls pool ttl ttl
 -- completing it issues the longer resume bearer without extending the session.
 readSnapshotPageWithTtls :: Pool Hasql.Connection -> NominalDiffTime -> NominalDiffTime -> ChangeScope -> ChangeAudience -> SnapshotToken
   -> Int -> IO (Either ChangeStreamError SnapshotPage)
-readSnapshotPageWithTtls pool _sessionTtl resumeTtl scope audience token requestedLimit = do
-  let limit = fromIntegral (max 1 (min 1000 requestedLimit)) :: Int32
+readSnapshotPageWithTtls pool sessionTtl resumeTtl scope audience token requestedLimit =
+  readSnapshotPageWithOptionalTtls pool sessionTtl resumeTtl scope audience token (Just requestedLimit)
+
+-- | Continue with the immutable page size recorded by the snapshot start.
+-- Public continuation requests carry only their opaque page bearer, so a
+-- transport must not substitute its own default and accidentally change the
+-- session's page geometry.
+readSnapshotPageWithStoredTtls :: Pool Hasql.Connection -> NominalDiffTime -> NominalDiffTime -> ChangeScope -> ChangeAudience -> SnapshotToken
+  -> IO (Either ChangeStreamError SnapshotPage)
+readSnapshotPageWithStoredTtls pool sessionTtl resumeTtl scope audience token =
+  readSnapshotPageWithOptionalTtls pool sessionTtl resumeTtl scope audience token Nothing
+
+readSnapshotPageWithOptionalTtls :: Pool Hasql.Connection -> NominalDiffTime -> NominalDiffTime -> ChangeScope -> ChangeAudience -> SnapshotToken
+  -> Maybe Int -> IO (Either ChangeStreamError SnapshotPage)
+readSnapshotPageWithOptionalTtls pool _sessionTtl resumeTtl scope audience token requestedLimit = do
+  let requested = fromIntegral . max 1 . min 1000 <$> requestedLimit :: Maybe Int32
   runTransaction pool $ do
     let pageHash = tokenHash token.unSnapshotToken
     -- Select the immutable identity before locking. The actual page/session
@@ -175,8 +189,13 @@ readSnapshotPageWithTtls pool _sessionTtl resumeTtl scope audience token request
               Just session
                 | not (sameSession scope audience session) -> pure $ Left SnapshotNotFound
                 | otherwise -> do
+                    let limit = case requested of
+                          Just value -> value
+                          Nothing -> case session.snapshotPageSize of
+                            Just value -> value
+                            Nothing -> 100
                     now <- Session.statement () databaseClockStatement
-                    if session.snapshotPageSize /= Nothing && session.snapshotPageSize /= Just limit then pure (Left SnapshotOutOfOrder)
+                    if requested /= Nothing && session.snapshotPageSize /= Nothing && session.snapshotPageSize /= requested then pure (Left SnapshotOutOfOrder)
                     else if session.snapshotExpires <= now then pure (Left SnapshotExpired) else do
                       allowed <- authorized scope audience
                       if not allowed then pure (Left ResyncUnauthorized)

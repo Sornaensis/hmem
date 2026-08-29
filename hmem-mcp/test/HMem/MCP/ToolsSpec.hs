@@ -19,11 +19,20 @@ import Network.HTTP.Types (methodDelete, methodGet, methodPost, methodPut, statu
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
 import System.Directory (doesFileExist)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
 
+import HMem.Config qualified as Config
+import HMem.DB.ChangeStream (ChangeScope(..), OutboxRecord(..), listOutboxAfter)
+import HMem.DB.Pool qualified as DBPool
+import HMem.DB.TestHarness (TestDb(..), TestEnv(..), createTestWorkspace, withTestEnv)
 import HMem.MCP.Server (handleStdioLine)
 import HMem.MCP.Tools
-import HMem.Types (CreateObservation(..), ObservationSubject(..), SubjectKind(..), UpdateObservation(..), maxObservationSubjects)
+import HMem.Server.AccessTracker (newAccessTracker)
+import HMem.Server.App (mkAppWithChangeStream)
+import HMem.Server.Snapshot (materializeSnapshot)
+import HMem.Server.WebSocket (newWSState)
+import HMem.Types (CreateObservation(..), ObservationSubject(..), SubjectKind(..), UpdateObservation(..), Workspace(..), maxObservationSubjects)
 
 spec :: Spec
 spec = do
@@ -460,6 +469,51 @@ spec = do
       map (.requestMethod) observed `shouldBe` [methodPut, methodPut]
       mapM_ (\request -> decode request.requestBody `shouldBe` Just (object ["status" .= if request.requestPath == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" then ("done" :: Text) else "archived"])) observed
 
+  describe "Canonical change-stream integration" $
+    it "carries a real MCP proxy mutation through REST into the durable outbox and snapshot" $
+      withTestEnv $ \env -> do
+        if env.testDb.testDbUnsafeExternal
+          then fail "MCP release gate refuses unsafe external DB mode"
+          else pure ()
+        tracker <- newAccessTracker env.pool 3600
+        wsState <- newWSState
+        let cfg = trustedMcpConfig
+        app <- mkAppWithChangeStream cfg.changeStream id cfg.auth cfg.cors cfg.rateLimit
+          env.pool tracker wsState Nothing True
+        workspace <- createTestWorkspace env "mcp-change-stream-release-gate"
+        withEnvironment "HMEM_MCP_PROVENANCE_TOKEN" trustedMcpProvenance $
+          testWithApplication (pure app) $ \port ->
+            bracket (newManager defaultManagerSettings) closeManager $ \manager -> do
+              let base = "http://127.0.0.1:" <> show port
+              created <- callWithKey manager base (Just localMcpBotToken) "project_create"
+                (object ["workspace_id" .= workspace.id, "name" .= ("MCP canonical project" :: Text)])
+              projectId <- case jsonField "summary" created >>= jsonField "id" of
+                Just (String value) -> pure value
+                other -> expectationFailure ("MCP create omitted project identity: " <> show other) >> fail "unreachable"
+
+              records <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 20
+              let matching =
+                    [ record
+                    | record <- records
+                    , jsonPath ["entity", "type"] record.outboxEnvelope == Just (String "project")
+                    , jsonPath ["entity", "id"] record.outboxEnvelope == Just (String projectId)
+                    ]
+              case matching of
+                [record] -> do
+                  jsonPath ["transaction", "cause"] record.outboxEnvelope `shouldBe` Just (String "mcp")
+                  jsonField "invalidations" record.outboxEnvelope `shouldSatisfy` maybe False (contains ("project:" <> projectId))
+                  mapM_ (\forbidden -> jsonField forbidden record.outboxEnvelope `shouldBe` Nothing)
+                    ["old_values", "new_values", "embedding"]
+                _ -> expectationFailure "expected exactly one canonical MCP project record"
+
+              snapshot <- DBPool.runSession env.pool (materializeSnapshot (WorkspaceScope workspace.id))
+              snapshot `shouldSatisfy` any (\item ->
+                jsonField "kind" item == Just (String "project")
+                  && jsonPath ["data", "id"] item == Just (String projectId))
+              fetched <- callWithKey manager base (Just localMcpBotToken) "project_detail"
+                (object ["project_id" .= projectId])
+              jsonField "id" fetched `shouldBe` Just (String projectId)
+
 workspaceId, observationId, gitSha :: Text
 workspaceId = "11111111-2222-3333-4444-555555555555"
 observationId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -653,6 +707,8 @@ isJsonRpcMcpError value = maybe True isMcpError (jsonField "result" value)
 jsonField :: Text -> Value -> Maybe Value
 jsonField key (Object objectValue) = KM.lookup (Key.fromText key) objectValue
 jsonField _ _ = Nothing
+jsonPath :: [Text] -> Value -> Maybe Value
+jsonPath keys value = foldl (\current key -> current >>= jsonField key) (Just value) keys
 hasFields :: [Text] -> Value -> Bool
 hasFields keys value = all (\key -> jsonField key value /= Nothing) keys
 contains :: Text -> Value -> Bool
@@ -725,6 +781,44 @@ withMock :: TVar [RequestInfo] -> (Manager -> String -> IO a) -> IO a
 withMock requests action = testWithApplication (pure (mockApp requests)) $ \port ->
   bracket (newManager defaultManagerSettings) closeManager $ \manager ->
     action manager ("http://127.0.0.1:" <> show port)
+
+trustedMcpProvenance :: String
+trustedMcpProvenance = "release-gate-mcp-provenance"
+
+localMcpBotToken :: Text
+localMcpBotToken = "release-gate-local-mcp-bot"
+
+trustedMcpConfig :: Config.HMemConfig
+trustedMcpConfig =
+  let cfg = Config.defaultConfig
+  in cfg
+    { Config.auth = cfg.auth
+        { Config.mode = Config.AuthModeLocal
+        , Config.enabled = False
+        , Config.apiKey = Nothing
+        , Config.local = Config.LocalAuthConfig
+            { Config.bootstrapEnabled = False
+            , Config.allowRemoteBootstrap = False
+            , Config.botTokens =
+                [ Config.LocalBotTokenConfig
+                    { Config.label = "Release gate MCP bot"
+                    , Config.token = localMcpBotToken
+                    }
+                ]
+            }
+        , Config.mcpProvenanceToken = Just (T.pack trustedMcpProvenance)
+        }
+    }
+
+withEnvironment :: String -> String -> IO a -> IO a
+withEnvironment name value = bracket acquire restore . const
+  where
+    acquire = do
+      previous <- lookupEnv name
+      setEnv name value
+      pure previous
+    restore Nothing = unsetEnv name
+    restore (Just previous) = setEnv name previous
 
 mockApp :: TVar [RequestInfo] -> Wai.Application
 mockApp requests request respond = do

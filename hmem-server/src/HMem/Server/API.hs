@@ -14,7 +14,7 @@ module HMem.Server.API
   ) where
 
 import Control.Exception (try)
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, Value, object, (.=), ToJSON(..), Result(..))
 import Data.Aeson qualified as Aeson
@@ -710,11 +710,12 @@ ticket pool state request = do
 resync :: Config.ChangeStreamConfig -> Pool Hasql.Connection -> ChangeStreamResyncRequest -> Handler ChangeStreamResyncResponse
 resync changeStreamConfig pool request = do
   (scope', audience) <- changeStreamIdentity pool request.scope
-  let pageSize = fromMaybe 100 request.pageSize
-  when (pageSize < 1 || pageSize > 1000) $
-    throwError (badRequest "validation_error" "page_size must be between 1 and 1000")
+  forM_ request.pageSize $ \pageSize ->
+    when (pageSize < 1 || pageSize > 1000) $
+      throwError (badRequest "validation_error" "page_size must be between 1 and 1000")
   result <- liftIO $ case request.pageToken of
     Nothing -> do
+      let pageSize = fromMaybe 100 request.pageSize
       case request.startIdempotencyKey of
         Nothing -> pure (Left ChangeStream.SnapshotOutOfOrder)
         Just startKey -> do
@@ -722,7 +723,9 @@ resync changeStreamConfig pool request = do
           case begun of
             Left err -> pure (Left err)
             Right begin -> ChangeStream.readSnapshotPageWithTtls pool (fromIntegral changeStreamConfig.snapshotSessionTtlSeconds) (fromIntegral changeStreamConfig.resumeTokenTtlSeconds) scope' audience begin.snapshotToken pageSize
-    Just token -> ChangeStream.readSnapshotPageWithTtls pool (fromIntegral changeStreamConfig.snapshotSessionTtlSeconds) (fromIntegral changeStreamConfig.resumeTokenTtlSeconds) scope' audience (ChangeStream.SnapshotToken token) pageSize
+    Just token -> case request.pageSize of
+      Just pageSize -> ChangeStream.readSnapshotPageWithTtls pool (fromIntegral changeStreamConfig.snapshotSessionTtlSeconds) (fromIntegral changeStreamConfig.resumeTokenTtlSeconds) scope' audience (ChangeStream.SnapshotToken token) pageSize
+      Nothing -> ChangeStream.readSnapshotPageWithStoredTtls pool (fromIntegral changeStreamConfig.snapshotSessionTtlSeconds) (fromIntegral changeStreamConfig.resumeTokenTtlSeconds) scope' audience (ChangeStream.SnapshotToken token)
   case result of
     Left ChangeStream.ResyncUnauthorized -> throwError err403
     Left _ -> throwError resyncRequired

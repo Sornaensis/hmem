@@ -1,19 +1,25 @@
 module HMem.Server.ChangeStreamSpec (spec) where
 
 import Control.Concurrent (Chan, MVar, newChan, newEmptyMVar, putMVar, readChan, takeMVar, threadDelay, throwTo, tryTakeMVar, writeChan)
-import Control.Concurrent.Async (async, asyncThreadId, cancel, wait, waitCatch)
-import Control.Exception (AsyncException(..), SomeException, bracket, catch, fromException)
+import Control.Concurrent.Async (Async, async, asyncThreadId, cancel, wait, waitCatch)
+import Control.Exception (AsyncException(..), SomeException, bracket, catch, finally, fromException, try)
 import Control.Monad (forever)
-import Data.Aeson (Value(..), decode)
+import Data.Aeson (FromJSON, Value(..), decode, encode, object, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
 import Data.UUID qualified as UUID
+import Network.HTTP.Types (Header, methodGet, methodPost, parseQuery, status200)
+import Network.HTTP.Types qualified as HTTP
+import Network.Wai (Application, defaultRequest)
+import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
+import Network.Wai.Test qualified as WaiTest
 import Network.WebSockets qualified as WS
 import System.Timeout (timeout)
 import Test.Hspec
@@ -26,14 +32,28 @@ import HMem.DB.Project qualified as Project
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
-import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, withDeployedSandboxAppContext, withLocalSandboxAppContext)
+import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, withDeployedSandboxAppContext, withLocalSandboxAppContext)
+import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
 import HMem.Server.Snapshot (materializeSnapshot)
 import HMem.Server.WebSocket (createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, dispatchCanonicalOutbox, handleCanonicalDispatchFailure)
-import HMem.Types (CreateProject(..), CreateWorkspaceGroup(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
+import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateWorkspaceGroup(..), Project(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
 
 spec :: Spec
 spec = describe "canonical change-stream loopback" $ do
+  it "stops an acquired dispatcher when subsequent harness setup fails" $
+    withLocalSandboxAppContext $ \ctx -> do
+      stopped <- newEmptyMVar
+      result <- try @SomeException $
+        bracket
+          (startChangeStreamWorker ctx.localEnv.pool testChangeStreamConfig ctx.localWSState)
+          (\worker -> stopChangeStreamWorker worker `finally` putMVar stopped ())
+          (\_worker -> ioError $ userError "injected harness setup failure")
+      case result of
+        Left _ -> pure ()
+        Right () -> expectationFailure "injected harness setup failure unexpectedly succeeded"
+      timeout 2000000 (takeMVar stopped) `shouldReturn` Just ()
+
   it "rethrows cancellation from a deterministically blocked canonical dispatch" $ do
     entered <- newEmptyMVar
     cleanup <- newEmptyMVar
@@ -127,6 +147,148 @@ spec = describe "canonical change-stream loopback" $ do
         -- The client remains connected after its checkpoint, proving live
         -- dispatch rather than a replay-only one-shot socket.
         wait client
+
+  it "holds a paginated HTTP snapshot at H and replays a concurrent direct-core commit" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "canonical-snapshot-h"
+      userId <- createDeployedSandboxUser ctx.deployedEnv False False
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+        (Auth.UpsertWorkspaceMembership userId Auth.WorkspaceRoleAdmin) Nothing
+      accessToken <- issueDeployedSandboxPAT ctx.deployedEnv userId "snapshot H client"
+      let headers = authHeaders accessToken.rawToken
+          scopeValue = object ["scope" .= ("workspace" :: Text), "workspace_id" .= workspace.id]
+      preResponse <- apiRequest ctx.deployedApplication methodPost "/api/v1/projects" headers
+        (encode (object ["workspace_id" .= workspace.id, "name" .= ("before snapshot" :: Text)]))
+      responseStatus preResponse `shouldBe` status200
+      preSnapshot <- decodeResponse preResponse :: IO Project
+
+      firstResponse <- apiRequest ctx.deployedApplication methodPost "/api/v1/change-stream/resync" headers
+        (encode (object
+          [ "scope" .= scopeValue
+          , "page_size" .= (1 :: Int)
+          , "start_idempotency_key" .= ("snapshot-h-release-gate-key-000001" :: Text)
+          ]))
+      responseStatus firstResponse `shouldBe` status200
+      firstPage <- decodeResponse firstResponse :: IO ChangeStreamResyncResponse
+      firstPage.hasMore `shouldBe` True
+      firstPageToken <- case firstPage.nextPageToken of
+        Just token -> pure token
+        Nothing -> expectationFailure "nonterminal snapshot page omitted continuation token" >> fail "unreachable"
+
+      mismatchResponse <- apiRequest ctx.deployedApplication methodPost "/api/v1/change-stream/resync" headers
+        (encode (object
+          [ "scope" .= scopeValue
+          , "page_token" .= firstPageToken
+          , "page_size" .= (2 :: Int)
+          ]))
+      responseStatus mismatchResponse `shouldBe` HTTP.status409
+      mismatchBody <- decodeResponse mismatchResponse :: IO Value
+      jsonField "error" mismatchBody `shouldBe` Just (String "resync_required")
+      let streamConfig = ctx.deployedConfig.changeStream
+          audience = AuthenticatedAudience (UUID.toText userId) userId
+      readSnapshotPageWithTtls ctx.deployedEnv.pool
+          (fromIntegral streamConfig.snapshotSessionTtlSeconds)
+          (fromIntegral streamConfig.resumeTokenTtlSeconds)
+          (WorkspaceScope workspace.id) audience (SnapshotToken firstPageToken) 2
+        `shouldReturn` Left SnapshotOutOfOrder
+
+      concurrent <- Project.createProject ctx.deployedEnv.pool CreateProject
+        { workspaceId = workspace.id, parentId = Nothing, name = "during snapshot"
+        , description = Nothing, priority = Nothing, metadata = Nothing }
+      (snapshotItems, resumeToken) <- collectSnapshotPages
+        ctx.deployedApplication headers scopeValue firstPage
+      let projectIds =
+            [ projectId
+            | item <- snapshotItems
+            , item.kind == "project"
+            , Just (String projectId) <- [jsonField "id" item.data_]
+            ]
+      UUID.toText preSnapshot.id `shouldSatisfy` (`elem` projectIds)
+      UUID.toText concurrent.id `shouldSatisfy` (`notElem` projectIds)
+
+      currentResponse <- apiRequest ctx.deployedApplication methodGet
+        ("/api/v1/projects/" <> Text.encodeUtf8 (UUID.toText concurrent.id)) headers ""
+      responseStatus currentResponse `shouldBe` status200
+      current <- decodeResponse currentResponse :: IO Project
+      current.id `shouldBe` concurrent.id
+
+      ticketResponse <- apiRequest ctx.deployedApplication methodPost "/api/v1/change-stream/ticket" headers
+        (encode (object ["scope" .= scopeValue, "resume_token" .= resumeToken]))
+      responseStatus ticketResponse `shouldBe` status200
+      ticket <- decodeResponse ticketResponse :: IO WebSocketTicketResponse
+      durableRecord <- latestOutbox ctx (WorkspaceScope workspace.id)
+      replayed <- newEmptyMVar
+      checkpointed <- newEmptyMVar
+      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+        client <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket.ticket) $ \conn -> do
+          WS.receiveData conn >>= putMVar replayed
+          WS.receiveData conn >>= putMVar checkpointed
+          WS.sendClose conn ("done" :: Text)) `catch` \(_ :: WS.ConnectionException) -> pure ()
+        replayFrame <- awaitFrame replayed
+        frameType replayFrame `shouldBe` Just "change"
+        let replayEvent = jsonField "event" replayFrame
+        (replayEvent >>= jsonField "event_id") `shouldBe` Just (String $ UUID.toText durableRecord.outboxEventId)
+        (replayEvent >>= jsonField "entity" >>= jsonField "id") `shouldBe` Just (String $ UUID.toText concurrent.id)
+        (replayEvent >>= jsonField "transaction" >>= jsonField "cause") `shouldBe` Just (String "core")
+        (replayEvent >>= jsonField "cursor") `shouldBe` Nothing
+        frameType <$> awaitFrame checkpointed `shouldReturn` Just "checkpoint"
+        wait client
+
+  it "delivers only to the eligible workspace and global audiences without hidden cadence frames" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspaceA <- createTestWorkspace ctx.deployedEnv "canonical-audience-a"
+      workspaceB <- createTestWorkspace ctx.deployedEnv "canonical-audience-b"
+      memberId <- createDeployedSandboxUser ctx.deployedEnv False False
+      adminId <- createDeployedSandboxUser ctx.deployedEnv False False
+      unrelatedId <- createDeployedSandboxUser ctx.deployedEnv False False
+      superadminId <- createDeployedSandboxUser ctx.deployedEnv False True
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspaceA.id
+        (Auth.UpsertWorkspaceMembership memberId Auth.WorkspaceRoleRead) Nothing
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspaceA.id
+        (Auth.UpsertWorkspaceMembership adminId Auth.WorkspaceRoleAdmin) Nothing
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspaceB.id
+        (Auth.UpsertWorkspaceMembership unrelatedId Auth.WorkspaceRoleRead) Nothing
+      let workspaceAudience userId = AuthenticatedAudience (UUID.toText userId) userId
+      beginResync ctx.deployedEnv.pool 60 GlobalScope (workspaceAudience memberId) (pure [])
+        `shouldReturn` Left ResyncUnauthorized
+      memberTicket <- canonicalTicketFor ctx (grantPrincipal memberId) (WorkspaceScope workspaceA.id) (workspaceAudience memberId)
+      adminTicket <- canonicalTicketFor ctx (grantPrincipal adminId) (WorkspaceScope workspaceA.id) (workspaceAudience adminId)
+      unrelatedTicket <- canonicalTicketFor ctx (grantPrincipal unrelatedId) (WorkspaceScope workspaceB.id) (workspaceAudience unrelatedId)
+      globalTicket <- canonicalTicketFor ctx (grantPrincipal superadminId) GlobalScope (workspaceAudience superadminId)
+      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+        memberClient <- startOneFrameClient port memberTicket.ticket
+        adminClient <- startOneFrameClient port adminTicket.ticket
+        unrelatedClient <- startOneFrameClient port unrelatedTicket.ticket
+        globalClient <- startOneFrameClient port globalTicket.ticket
+        mapM_ (awaitFrame . (.clientInitial)) [memberClient, adminClient, unrelatedClient, globalClient]
+
+        projectA <- Project.createProject ctx.deployedEnv.pool CreateProject
+          { workspaceId = workspaceA.id, parentId = Nothing, name = "audience A"
+          , description = Nothing, priority = Nothing, metadata = Nothing }
+        recordA <- latestOutbox ctx (WorkspaceScope workspaceA.id)
+        dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [recordA]
+        memberFrame <- awaitFrame memberClient.clientObserved
+        adminFrame <- awaitFrame adminClient.clientObserved
+        mapM_ (assertChangeIdentity recordA projectA.id) [memberFrame, adminFrame]
+
+        projectB <- Project.createProject ctx.deployedEnv.pool CreateProject
+          { workspaceId = workspaceB.id, parentId = Nothing, name = "audience B"
+          , description = Nothing, priority = Nothing, metadata = Nothing }
+        recordB <- latestOutbox ctx (WorkspaceScope workspaceB.id)
+        dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [recordB]
+        unrelatedFrame <- awaitFrame unrelatedClient.clientObserved
+        assertChangeIdentity recordB projectB.id unrelatedFrame
+
+        group <- WorkspaceGroup.createGroup ctx.deployedEnv.pool (CreateWorkspaceGroup "global audience" Nothing)
+        globalRecord <- latestOutbox ctx GlobalScope
+        dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [globalRecord]
+        globalFrame <- awaitFrame globalClient.clientObserved
+        frameType globalFrame `shouldBe` Just "change"
+        (jsonField "event" globalFrame >>= jsonField "entity" >>= jsonField "type")
+          `shouldBe` Just (String "workspace_group")
+        (jsonField "event" globalFrame >>= jsonField "entity" >>= jsonField "id")
+          `shouldBe` Just (String $ UUID.toText group.id)
+        mapM_ (wait . (.clientWorker)) [memberClient, adminClient, unrelatedClient, globalClient]
 
   it "suppresses hidden-only membership activity without a frame or checkpoint" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -446,6 +608,76 @@ latestOutbox ctx scope = do
   case reverse records of
     record:_ -> pure record
     [] -> fail "expected a committed outbox record"
+
+canonicalTicketFor :: DeployedSandboxApp -> Principal -> ChangeScope -> ChangeAudience -> IO WebSocketTicketResponse
+canonicalTicketFor ctx principal scope audience = do
+  resume <- terminalResume ctx scope audience
+  createCanonicalTicket ctx.deployedWSState principal scope resume
+
+data OneFrameClient = OneFrameClient
+  { clientWorker :: !(Async ())
+  , clientInitial :: !(MVar Text)
+  , clientObserved :: !(MVar Text)
+  }
+
+startOneFrameClient :: Int -> Text -> IO OneFrameClient
+startOneFrameClient port ticket = do
+  initial <- newEmptyMVar
+  observed <- newEmptyMVar
+  worker <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket) $ \conn -> do
+    WS.receiveData conn >>= putMVar initial
+    WS.receiveData conn >>= putMVar observed
+    WS.sendClose conn ("done" :: Text)) `catch` \(_ :: WS.ConnectionException) -> pure ()
+  pure OneFrameClient { clientWorker = worker, clientInitial = initial, clientObserved = observed }
+
+assertChangeIdentity :: OutboxRecord -> UUID.UUID -> Value -> Expectation
+assertChangeIdentity record entityId frame = do
+  frameType frame `shouldBe` Just "change"
+  (jsonField "event" frame >>= jsonField "event_id")
+    `shouldBe` Just (String $ UUID.toText record.outboxEventId)
+  (jsonField "event" frame >>= jsonField "entity" >>= jsonField "id")
+    `shouldBe` Just (String $ UUID.toText entityId)
+
+authHeaders :: Text -> [Header]
+authHeaders token = [("Authorization", "Bearer " <> Text.encodeUtf8 token)]
+
+apiRequest :: Application -> BS.ByteString -> BS.ByteString -> [Header] -> LBS.ByteString -> IO WaiTest.SResponse
+apiRequest app method path headers body = WaiTest.runSession (WaiTest.srequest (WaiTest.SRequest request body)) app
+  where
+    (rawPath, rawQuery) = BS.break (== 63) path
+    request = defaultRequest
+      { Wai.requestMethod = method
+      , Wai.rawPathInfo = rawPath
+      , Wai.rawQueryString = rawQuery
+      , Wai.queryString = parseQuery rawQuery
+      , Wai.pathInfo = filter (not . T.null) (T.splitOn "/" (Text.decodeUtf8 rawPath))
+      , Wai.requestHeaders = ("Content-Type", "application/json") : headers
+      }
+
+responseStatus :: WaiTest.SResponse -> HTTP.Status
+responseStatus = WaiTest.simpleStatus
+
+decodeResponse :: FromJSON a => WaiTest.SResponse -> IO a
+decodeResponse response =
+  case decode (WaiTest.simpleBody response) of
+    Just value -> pure value
+    Nothing -> expectationFailure "canonical API returned invalid JSON" >> fail "unreachable"
+
+collectSnapshotPages :: Application -> [Header] -> Value -> ChangeStreamResyncResponse -> IO ([ChangeStreamSnapshotItem], Text)
+collectSnapshotPages app headers scopeValue = go []
+  where
+    go accumulated page =
+      let items = accumulated <> page.items
+      in case page.nextPageToken of
+        Just pageToken -> do
+          response <- apiRequest app methodPost "/api/v1/change-stream/resync" headers
+            (encode (object ["scope" .= scopeValue, "page_token" .= pageToken]))
+          responseStatus response `shouldBe` status200
+          next <- decodeResponse response
+          go items next
+        Nothing -> case page.resumeToken of
+          Just resume -> pure (items, resume)
+          Nothing -> expectationFailure "terminal snapshot page omitted resume token" >> fail "unreachable"
 
 checkpointResume :: Value -> IO ResumeToken
 checkpointResume value = case jsonField "resume_token" value of

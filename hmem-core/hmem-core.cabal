@@ -94,6 +94,7 @@ test-suite hmem-core-test
       HMem.DB.SearchSpec
       HMem.DB.TaskSpec
       HMem.DB.TestHarnessSpec
+      HMem.DB.TimelineSpec
       HMem.ObservationSubjectMatchCorpus
       HMem.TypesSpec
       SpecHook

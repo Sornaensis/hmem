@@ -498,6 +498,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       bucketResponse.timelineBucketsWorkspaceId `shouldBe` workspace.id
       bucketResponse.timelineBucketsBucket `shouldBe` "day"
       bucketResponse.timelineBucketsBuckets `shouldSatisfy` (not . null)
+      request app methodGet (workspacePath <> "/timeline/buckets?since=2020-01-01T00:00:00Z&until=2021-01-02T00:00:00Z&bucket=day") "" >>= (\response -> responseStatus response `shouldBe` status400)
       mapM_ (\suffix -> request app methodGet (workspacePath <> suffix) "" >>= (\response -> responseStatus response `shouldBe` status400))
         [ "/timeline?limit=0", "/timeline?limit=201", "/timeline?offset=-1"
         , "/timeline?since=2021-01-02T00:00:00Z&until=2021-01-01T00:00:00Z"
@@ -599,6 +600,9 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       responseStatus bucketsResponse `shouldBe` status200
       let Just buckets = decode (responseBody bucketsResponse) :: Maybe WorkspaceTimelineBucketsResponse
           totals select = sum (map select buckets.timelineBucketsBuckets)
+          Just rawBuckets = decode (responseBody bucketsResponse) :: Maybe Value
+          seriesActions entity = firstJsonArrayValue (jsonField "buckets" rawBuckets) >>= jsonPath ["series", entity]
+          hasActions entity = all (\action -> isJust (seriesActions entity >>= jsonField action)) ["created", "completed", "deleted"]
       totals (\bucket -> bucket.timelineBucketCounts.projectCounts.created) `shouldBe` 1
       totals (\bucket -> bucket.timelineBucketCounts.subprojectCounts.created) `shouldBe` 1
       totals (\bucket -> bucket.timelineBucketCounts.subprojectCounts.completed) `shouldBe` 1
@@ -610,6 +614,18 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       totals (\bucket -> bucket.timelineBucketTotals.created) `shouldBe` 6
       totals (\bucket -> bucket.timelineBucketTotals.completed) `shouldBe` 3
       totals (\bucket -> bucket.timelineBucketTotals.cancelled) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketSeries.seriesProject.created) `shouldBe` 2
+      totals (\bucket -> bucket.timelineBucketSeries.seriesProject.completed) `shouldBe` 0
+      totals (\bucket -> bucket.timelineBucketSeries.seriesTask.created) `shouldBe` 3
+      totals (\bucket -> bucket.timelineBucketSeries.seriesTask.completed) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketSeries.seriesSubtask.created) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketSeries.seriesSubtask.completed) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketSeries.seriesObservation.completed) `shouldBe` 0
+      totals (\bucket -> bucket.timelineBucketSeriesTotals.created) `shouldBe` 6
+      totals (\bucket -> bucket.timelineBucketSeriesTotals.completed) `shouldBe` 2
+      mapM_ (\entity -> hasActions entity `shouldBe` True) ["project", "task", "subtask", "observation"]
+      (firstJsonArrayValue (jsonField "buckets" rawBuckets) >>= jsonField "counts") `shouldSatisfy` isJust
+      (firstJsonArrayValue (jsonField "buckets" rawBuckets) >>= jsonField "totals") `shouldSatisfy` isJust
       futureBucketsResponse <- request app methodGet (workspacePath <> "/timeline/buckets?since=" <> timestamp rangeEnd <> "&until=" <> timestamp (addUTCTime 86400 rangeEnd) <> "&bucket=day") ""
       responseStatus futureBucketsResponse `shouldBe` status200
       let Just futureBuckets = decode (responseBody futureBucketsResponse) :: Maybe WorkspaceTimelineBucketsResponse
@@ -1038,6 +1054,10 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         _ -> False)
       schema "WorkspaceTimelineEvent" `shouldSatisfy` isJust
       schema "WorkspaceTimelineBucketsResponse" `shouldSatisfy` isJust
+      hasSchemaProperty "WorkspaceTimelineBucket" "series" `shouldBe` True
+      hasSchemaProperty "WorkspaceTimelineBucket" "series_totals" `shouldBe` True
+      deprecatedProperty "WorkspaceTimelineBucket" "counts" `shouldBe` Just (Bool True)
+      deprecatedProperty "WorkspaceTimelineBucket" "totals" `shouldBe` Just (Bool True)
       -- Change-stream requests are intentionally a disjoint start versus
       -- continuation contract, and scope itself is a global/workspace oneOf.
       -- Assert the served document so generated clients cannot combine bearer

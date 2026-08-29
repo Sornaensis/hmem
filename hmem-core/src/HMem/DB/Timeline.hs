@@ -22,6 +22,8 @@ import HMem.Types
   ( TimelineActor(..)
   , TimelineBucketCounts(..)
   , TimelineBucketEntityCounts(..)
+  , TimelineBucketSeries(..)
+  , TimelineBucketSeriesCounts(..)
   , TimelineNavigation(..)
   , TimelineProjectContext(..)
   , TimelineStatusTransition(..)
@@ -195,6 +197,8 @@ listWorkspaceTimelineBucketsStatement = Statement.Statement sql encoder decoder 
       , "    a.action::text AS action_text,"
       , "    NULLIF(a.old_values ->> 'status', '') AS old_status,"
       , "    NULLIF(a.new_values ->> 'status', '') AS new_status,"
+      , "    NULLIF(a.old_values ->> 'deleted_at', '') AS old_deleted_at,"
+      , "    NULLIF(a.new_values ->> 'deleted_at', '') AS new_deleted_at,"
       , "    NULLIF(CASE"
       , "      WHEN a.new_values ? 'parent_id' THEN a.new_values ->> 'parent_id'"
       , "      WHEN a.old_values ? 'parent_id' THEN a.old_values ->> 'parent_id'"
@@ -209,8 +213,8 @@ listWorkspaceTimelineBucketsStatement = Statement.Statement sql encoder decoder 
       , "  LEFT JOIN tasks t ON a.entity_type = 'task' AND t.id = a.entity_id::uuid"
       , "  LEFT JOIN projects p ON a.entity_type = 'project' AND p.id = a.entity_id::uuid"
       , "  WHERE a.workspace_id = $1"
-      , "    AND a.entity_type IN ('project', 'task')"
-      , "    AND a.action::text IN ('create', 'update')"
+      , "    AND a.entity_type IN ('project', 'task', 'observation')"
+      , "    AND a.action::text IN ('create', 'update', 'delete')"
       , "    AND a.changed_at >= $2"
       , "    AND a.changed_at < $3"
       , "), events AS ("
@@ -221,7 +225,7 @@ listWorkspaceTimelineBucketsStatement = Statement.Statement sql encoder decoder 
       , "      WHEN c.raw_entity_type = 'project' THEN 'project'"
       , "      WHEN c.raw_entity_type = 'task' AND c.parent_task_uuid IS NOT NULL THEN 'subtask'"
       , "      ELSE 'task'"
-      , "    END AS entity_kind,"
+      , "    END AS legacy_entity_kind,"
       , "    CASE"
       , "      WHEN c.raw_entity_type = 'project' AND c.action_text = 'create' THEN 'created'"
       , "      WHEN c.raw_entity_type = 'project' AND c.action_text = 'update' AND c.old_status IS NOT NULL AND c.new_status IN ('completed', 'archived') AND c.old_status <> c.new_status THEN 'completed'"
@@ -229,7 +233,21 @@ listWorkspaceTimelineBucketsStatement = Statement.Statement sql encoder decoder 
       , "      WHEN c.raw_entity_type = 'task' AND c.action_text = 'update' AND c.old_status IS NOT NULL AND c.new_status = 'done' AND c.old_status <> c.new_status THEN 'completed'"
       , "      WHEN c.raw_entity_type = 'task' AND c.action_text = 'update' AND c.old_status IS NOT NULL AND c.new_status = 'cancelled' AND c.old_status <> c.new_status THEN 'cancelled'"
       , "      ELSE NULL"
-      , "    END AS lifecycle_action"
+      , "    END AS legacy_lifecycle_action,"
+      , "    CASE"
+      , "      WHEN c.raw_entity_type = 'project' THEN 'project'"
+      , "      WHEN c.raw_entity_type = 'task' AND c.parent_task_uuid IS NOT NULL THEN 'subtask'"
+      , "      WHEN c.raw_entity_type = 'task' THEN 'task'"
+      , "      WHEN c.raw_entity_type = 'observation' THEN 'observation'"
+      , "    END AS canonical_entity_kind,"
+      , "    CASE"
+      , "      WHEN c.action_text = 'create' THEN 'created'"
+      , "      WHEN c.raw_entity_type = 'project' AND c.action_text = 'update' AND c.old_status IS DISTINCT FROM c.new_status AND c.new_status = 'completed' THEN 'completed'"
+      , "      WHEN c.raw_entity_type = 'task' AND c.action_text = 'update' AND c.old_status IS DISTINCT FROM c.new_status AND c.new_status = 'done' THEN 'completed'"
+      , "      WHEN c.action_text = 'delete' THEN 'deleted'"
+      , "      WHEN c.raw_entity_type IN ('project', 'task') AND c.action_text = 'update' AND c.old_deleted_at IS NULL AND c.new_deleted_at IS NOT NULL THEN 'deleted'"
+      , "      ELSE NULL"
+      , "    END AS canonical_lifecycle_action"
       , "  FROM candidates c"
       , ")"
       , "SELECT"
@@ -240,21 +258,33 @@ listWorkspaceTimelineBucketsStatement = Statement.Statement sql encoder decoder 
       , "    WHEN 'month' THEN to_char(b.bucket_start_utc, 'Mon YYYY')"
       , "    ELSE to_char(b.bucket_start_utc, 'YYYY-MM-DD')"
       , "  END AS label,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'project' AND e.lifecycle_action = 'created'))::int4 AS project_created,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'project' AND e.lifecycle_action = 'completed'))::int4 AS project_completed,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'project' AND e.lifecycle_action = 'cancelled'))::int4 AS project_cancelled,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'subproject' AND e.lifecycle_action = 'created'))::int4 AS subproject_created,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'subproject' AND e.lifecycle_action = 'completed'))::int4 AS subproject_completed,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'subproject' AND e.lifecycle_action = 'cancelled'))::int4 AS subproject_cancelled,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'task' AND e.lifecycle_action = 'created'))::int4 AS task_created,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'task' AND e.lifecycle_action = 'completed'))::int4 AS task_completed,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'task' AND e.lifecycle_action = 'cancelled'))::int4 AS task_cancelled,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'subtask' AND e.lifecycle_action = 'created'))::int4 AS subtask_created,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'subtask' AND e.lifecycle_action = 'completed'))::int4 AS subtask_completed,"
-      , "  (COUNT(e.lifecycle_action) FILTER (WHERE e.entity_kind = 'subtask' AND e.lifecycle_action = 'cancelled'))::int4 AS subtask_cancelled"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'project' AND e.legacy_lifecycle_action = 'created'))::int4 AS project_created,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'project' AND e.legacy_lifecycle_action = 'completed'))::int4 AS project_completed,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'project' AND e.legacy_lifecycle_action = 'cancelled'))::int4 AS project_cancelled,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subproject' AND e.legacy_lifecycle_action = 'created'))::int4 AS subproject_created,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subproject' AND e.legacy_lifecycle_action = 'completed'))::int4 AS subproject_completed,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subproject' AND e.legacy_lifecycle_action = 'cancelled'))::int4 AS subproject_cancelled,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'task' AND e.legacy_lifecycle_action = 'created'))::int4 AS task_created,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'task' AND e.legacy_lifecycle_action = 'completed'))::int4 AS task_completed,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'task' AND e.legacy_lifecycle_action = 'cancelled'))::int4 AS task_cancelled,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subtask' AND e.legacy_lifecycle_action = 'created'))::int4 AS subtask_created,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subtask' AND e.legacy_lifecycle_action = 'completed'))::int4 AS subtask_completed,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subtask' AND e.legacy_lifecycle_action = 'cancelled'))::int4 AS subtask_cancelled,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'project' AND e.canonical_lifecycle_action = 'created'))::int4 AS series_project_created,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'project' AND e.canonical_lifecycle_action = 'completed'))::int4 AS series_project_completed,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'project' AND e.canonical_lifecycle_action = 'deleted'))::int4 AS series_project_deleted,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'task' AND e.canonical_lifecycle_action = 'created'))::int4 AS series_task_created,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'task' AND e.canonical_lifecycle_action = 'completed'))::int4 AS series_task_completed,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'task' AND e.canonical_lifecycle_action = 'deleted'))::int4 AS series_task_deleted,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'subtask' AND e.canonical_lifecycle_action = 'created'))::int4 AS series_subtask_created,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'subtask' AND e.canonical_lifecycle_action = 'completed'))::int4 AS series_subtask_completed,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'subtask' AND e.canonical_lifecycle_action = 'deleted'))::int4 AS series_subtask_deleted,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'observation' AND e.canonical_lifecycle_action = 'created'))::int4 AS series_observation_created,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'observation' AND e.canonical_lifecycle_action = 'completed'))::int4 AS series_observation_completed,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'observation' AND e.canonical_lifecycle_action = 'deleted'))::int4 AS series_observation_deleted"
       , "FROM buckets b"
       , "LEFT JOIN events e"
-      , "  ON e.lifecycle_action IS NOT NULL"
+      , "  ON (e.legacy_lifecycle_action IS NOT NULL OR e.canonical_lifecycle_action IS NOT NULL)"
       , " AND e.occurred_at >= (b.bucket_start_utc AT TIME ZONE 'UTC')"
       , " AND e.occurred_at < (b.bucket_end_utc AT TIME ZONE 'UTC')"
       , "GROUP BY b.bucket_start_utc, b.bucket_end_utc"
@@ -346,6 +376,18 @@ timelineBucketRowDecoder = do
   subtaskCreated <- intColumn
   subtaskCompleted <- intColumn
   subtaskCancelled <- intColumn
+  seriesProjectCreated <- intColumn
+  seriesProjectCompleted <- intColumn
+  seriesProjectDeleted <- intColumn
+  seriesTaskCreated <- intColumn
+  seriesTaskCompleted <- intColumn
+  seriesTaskDeleted <- intColumn
+  seriesSubtaskCreated <- intColumn
+  seriesSubtaskCompleted <- intColumn
+  seriesSubtaskDeleted <- intColumn
+  seriesObservationCreated <- intColumn
+  seriesObservationCompleted <- intColumn
+  seriesObservationDeleted <- intColumn
   let projectCounts = TimelineBucketCounts projectCreated projectCompleted projectCancelled
       subprojectCounts = TimelineBucketCounts subprojectCreated subprojectCompleted subprojectCancelled
       taskCounts = TimelineBucketCounts taskCreated taskCompleted taskCancelled
@@ -354,6 +396,15 @@ timelineBucketRowDecoder = do
         { created = projectCreated + subprojectCreated + taskCreated + subtaskCreated
         , completed = projectCompleted + subprojectCompleted + taskCompleted + subtaskCompleted
         , cancelled = projectCancelled + subprojectCancelled + taskCancelled + subtaskCancelled
+        }
+      seriesProject = TimelineBucketSeriesCounts seriesProjectCreated seriesProjectCompleted seriesProjectDeleted
+      seriesTask = TimelineBucketSeriesCounts seriesTaskCreated seriesTaskCompleted seriesTaskDeleted
+      seriesSubtask = TimelineBucketSeriesCounts seriesSubtaskCreated seriesSubtaskCompleted seriesSubtaskDeleted
+      seriesObservation = TimelineBucketSeriesCounts seriesObservationCreated seriesObservationCompleted seriesObservationDeleted
+      seriesTotals = TimelineBucketSeriesCounts
+        { created = seriesProjectCreated + seriesTaskCreated + seriesSubtaskCreated + seriesObservationCreated
+        , completed = seriesProjectCompleted + seriesTaskCompleted + seriesSubtaskCompleted + seriesObservationCompleted
+        , deleted = seriesProjectDeleted + seriesTaskDeleted + seriesSubtaskDeleted + seriesObservationDeleted
         }
   pure WorkspaceTimelineBucket
     { timelineBucketStart = bucketStart
@@ -366,6 +417,13 @@ timelineBucketRowDecoder = do
         , subtaskCounts = subtaskCounts
         }
     , timelineBucketTotals = totalCounts
+    , timelineBucketSeries = TimelineBucketSeries
+        { seriesProject = seriesProject
+        , seriesTask = seriesTask
+        , seriesSubtask = seriesSubtask
+        , seriesObservation = seriesObservation
+        }
+    , timelineBucketSeriesTotals = seriesTotals
     }
   where
     intColumn = fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4)

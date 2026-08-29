@@ -11,7 +11,7 @@ module HMem.Types
   , TaskDependencySummary(..), TaskOverview(..), TaskReadinessRollup(..)
   , TaskStatus(..), Task(..), NextTaskCandidate(..), TaskDependencyAutoBlockSnapshot(..), TaskDependencyStatusChange(..), LinkDependency(..), DependencyMutationResult(..), TaskMutationResult(..), CreateTask(..), UpdateTask(..), TaskListQuery(..)
   , EntitySearchType(..), ObservationSearchHit(..), UnifiedSearchQuery(..), UnifiedSearchResults(..), validateUnifiedSearchQuery
-  , ActivityEvent(..), WorkspaceTimelineEvent(..), TimelineActor(..), TimelineProjectContext(..), TimelineTaskContext(..), TimelineStatusTransition(..), TimelineNavigation(..), TimelineBucketCounts(..), TimelineBucketEntityCounts(..), WorkspaceTimelineBucket(..), WorkspaceTimelineBucketsResponse(..)
+  , ActivityEvent(..), WorkspaceTimelineEvent(..), TimelineActor(..), TimelineProjectContext(..), TimelineTaskContext(..), TimelineStatusTransition(..), TimelineNavigation(..), TimelineBucketCounts(..), TimelineBucketEntityCounts(..), TimelineBucketSeriesCounts(..), TimelineBucketSeries(..), WorkspaceTimelineBucket(..), WorkspaceTimelineBucketsResponse(..)
   , SavedView(..), CreateSavedView(..), UpdateSavedView(..), SavedViewListQuery(..)
   , AuditAction(..), AuditLogEntry(..), AuditLogQuery(..), RevertResult(..), auditActionToText, auditActionFromText
   , WebSocketTicketRequest(..), WebSocketTicketResponse(..), ChangeStreamScopeRequest(..), ChangeStreamResyncRequest(..), ChangeStreamSnapshotItem(..), ChangeStreamResyncResponse(..), CanonicalWebSocketTicketRequest(..), SessionContext(..), SessionPrincipal(..), SessionGlobalPermissions(..), SessionWorkspaceContext(..), PaginatedResult(..)
@@ -1253,6 +1253,42 @@ instance FromJSON TimelineBucketEntityCounts where
       <*> o .: "task"
       <*> o .: "subtask"
 
+-- | Canonical lifecycle actions for one entity series in a Timeline bucket.
+-- The legacy 'TimelineBucketCounts' type remains unchanged for API-v1 clients.
+data TimelineBucketSeriesCounts = TimelineBucketSeriesCounts
+  { created :: Int
+  , completed :: Int
+  , deleted :: Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TimelineBucketSeriesCounts where
+  toJSON = genericToJSON jsonOptions
+instance FromJSON TimelineBucketSeriesCounts where
+  parseJSON = genericParseJSON jsonOptions
+
+-- | Canonical Timeline series. Nested projects fold into 'seriesProject'.
+data TimelineBucketSeries = TimelineBucketSeries
+  { seriesProject     :: TimelineBucketSeriesCounts
+  , seriesTask        :: TimelineBucketSeriesCounts
+  , seriesSubtask     :: TimelineBucketSeriesCounts
+  , seriesObservation :: TimelineBucketSeriesCounts
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON TimelineBucketSeries where
+  toJSON TimelineBucketSeries {..} = object
+    [ "project" .= seriesProject
+    , "task" .= seriesTask
+    , "subtask" .= seriesSubtask
+    , "observation" .= seriesObservation
+    ]
+instance FromJSON TimelineBucketSeries where
+  parseJSON = withObject "TimelineBucketSeries" $ \o ->
+    TimelineBucketSeries
+      <$> o .: "project"
+      <*> o .: "task"
+      <*> o .: "subtask"
+      <*> o .: "observation"
+
 -- | One horizontal histogram bucket for the workspace Timeline.
 data WorkspaceTimelineBucket = WorkspaceTimelineBucket
   { timelineBucketStart  :: UTCTime
@@ -1260,6 +1296,8 @@ data WorkspaceTimelineBucket = WorkspaceTimelineBucket
   , timelineBucketLabel  :: Text
   , timelineBucketCounts :: TimelineBucketEntityCounts
   , timelineBucketTotals :: TimelineBucketCounts
+  , timelineBucketSeries :: TimelineBucketSeries
+  , timelineBucketSeriesTotals :: TimelineBucketSeriesCounts
   } deriving (Show, Eq, Generic)
 
 instance ToJSON WorkspaceTimelineBucket where
@@ -1269,6 +1307,8 @@ instance ToJSON WorkspaceTimelineBucket where
     , "label" .= timelineBucketLabel
     , "counts" .= timelineBucketCounts
     , "totals" .= timelineBucketTotals
+    , "series" .= timelineBucketSeries
+    , "series_totals" .= timelineBucketSeriesTotals
     ]
 instance FromJSON WorkspaceTimelineBucket where
   parseJSON = withObject "WorkspaceTimelineBucket" $ \o ->
@@ -1278,6 +1318,8 @@ instance FromJSON WorkspaceTimelineBucket where
       <*> o .: "label"
       <*> o .: "counts"
       <*> o .: "totals"
+      <*> o .: "series"
+      <*> o .: "series_totals"
 
 -- | Capped bucket response for the workspace Timeline histogram.
 data WorkspaceTimelineBucketsResponse = WorkspaceTimelineBucketsResponse

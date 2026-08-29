@@ -12,6 +12,7 @@ import Data.HashMap.Strict.InsOrd qualified as InsOrdMap
 import Data.HashSet.InsOrd qualified as InsOrdSet
 import Data.OpenApi
 import Data.Proxy (Proxy(..))
+import Data.Text (Text)
 import Servant.OpenApi (toOpenApi)
 
 import HMem.Server.API (HMemAPI, CreateObservationRequest, ObservationMatchRequest)
@@ -116,7 +117,14 @@ instance ToSchema TimelineStatusTransition where declareNamedSchema = genericDec
 instance ToSchema TimelineNavigation where declareNamedSchema = genericDeclareNamedSchema timelineNavigationOpts
 instance ToSchema TimelineBucketCounts where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema TimelineBucketEntityCounts where declareNamedSchema = genericDeclareNamedSchema timelineBucketEntityCountsOpts
-instance ToSchema WorkspaceTimelineBucket where declareNamedSchema = genericDeclareNamedSchema timelineBucketOpts
+instance ToSchema TimelineBucketSeriesCounts where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TimelineBucketSeries where declareNamedSchema = genericDeclareNamedSchema timelineBucketSeriesOpts
+instance ToSchema WorkspaceTimelineBucket where
+  declareNamedSchema _ = do
+    NamedSchema name schema <- genericDeclareNamedSchema timelineBucketOpts (Proxy @WorkspaceTimelineBucket)
+    pure $ NamedSchema name $ schema
+      & properties . at "counts" ?~ deprecatedTimelineProjection "TimelineBucketEntityCounts"
+      & properties . at "totals" ?~ deprecatedTimelineProjection "TimelineBucketCounts"
 instance ToSchema WorkspaceTimelineBucketsResponse where declareNamedSchema = genericDeclareNamedSchema timelineBucketsResponseOpts
 
 -- Both vector endpoints accept precisely the storage dimension.  Keep this
@@ -317,7 +325,17 @@ timelineBucketEntityCountsOpts = opts { fieldLabelModifier = \case
 
 timelineBucketOpts :: SchemaOptions
 timelineBucketOpts = opts { fieldLabelModifier = \case
-  "timelineBucketStart" -> "bucket_start"; "timelineBucketEnd" -> "bucket_end"; "timelineBucketLabel" -> "label"; "timelineBucketCounts" -> "counts"; "timelineBucketTotals" -> "totals"; other -> camelToSnake other }
+  "timelineBucketStart" -> "bucket_start"; "timelineBucketEnd" -> "bucket_end"; "timelineBucketLabel" -> "label"; "timelineBucketCounts" -> "counts"; "timelineBucketTotals" -> "totals"; "timelineBucketSeries" -> "series"; "timelineBucketSeriesTotals" -> "series_totals"; other -> camelToSnake other }
+
+timelineBucketSeriesOpts :: SchemaOptions
+timelineBucketSeriesOpts = opts { fieldLabelModifier = \case
+  "seriesProject" -> "project"; "seriesTask" -> "task"; "seriesSubtask" -> "subtask"; "seriesObservation" -> "observation"; other -> camelToSnake other }
+
+deprecatedTimelineProjection :: Text -> Referenced Schema
+deprecatedTimelineProjection schemaName = Inline $ mempty
+  & deprecated ?~ True
+  & description ?~ "Deprecated API-v1 histogram projection. Use series and series_totals for canonical lifecycle values."
+  & allOf ?~ [Ref (Reference ("#/components/schemas/" <> schemaName))]
 
 timelineBucketsResponseOpts :: SchemaOptions
 timelineBucketsResponseOpts = opts { fieldLabelModifier = \case

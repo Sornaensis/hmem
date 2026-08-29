@@ -5,8 +5,8 @@ import Browser
 import Browser.Navigation as Nav
 import Dict
 import Feature.Observation
-import Helpers exposing (localStorageKey, parseFragment, pushUrl)
 import Feature.Timeline
+import Helpers exposing (localStorageKey, parseFragment, pushUrl)
 import Permissions
 import Ports exposing (disconnectWebSocket, requestLocalStorage)
 import Types exposing (..)
@@ -329,7 +329,7 @@ handleUrlChange url model =
                     , auth = { status = AuthBooting, mode = model.auth.mode }
                     , sessionContext = Nothing
                     , sessionRequestEpoch = model.sessionRequestEpoch + 1
-                    , webSocket = { state = Disconnected }
+                    , webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }
                     , selectedWorkspaceId = Just wsId
                     , activeTab = frag.tab
                     , projects = Dict.empty
@@ -416,7 +416,7 @@ handleUrlChange url model =
                 , sessionContext = Nothing
                 , sessionRequestEpoch = model.sessionRequestEpoch + 1
                 , selectedWorkspaceId = Nothing
-                , webSocket = { state = Disconnected }
+                , webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }
                 , auditLog = updatedAuditLog
                 , focus = updatedFocus
               }
@@ -435,7 +435,7 @@ handleUrlChange url model =
                 updatedFocus =
                     { currentFocus | returnContext = Nothing }
             in
-            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected }, focus = updatedFocus }
+            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }, focus = updatedFocus }
                 |> clearRouteConfirmations
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext (model.sessionRequestEpoch + 1) Nothing)

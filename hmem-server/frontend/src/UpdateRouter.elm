@@ -46,6 +46,39 @@ update msg model =
         WsMessageReceived _ ->
             Ok (Feature.WebSocket.update msg model)
 
+        CanonicalWorkspaceFetched _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        CanonicalProjectFetched _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        CanonicalTaskFetched _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        CanonicalObservationFetched _ _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        CanonicalTaskOverviewFetched _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        CanonicalProjectOverviewFetched _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        CanonicalCatalogueFetched _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        CanonicalGroupsFetched _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        CanonicalGroupMembersFetched _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        CanonicalMembershipsFetched _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
+        CanonicalSessionFetched _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
         AuthUnauthorized ->
             Err (HandleInAppShell AppShell.AuthUnauthorizedMsg)
 
@@ -88,6 +121,7 @@ update msg model =
 
         GotSingleMemory _ ->
             Ok ( model, Cmd.none )
+
         GotObservationDetail _ _ _ _ ->
             Ok (Feature.Observation.update msg model)
 

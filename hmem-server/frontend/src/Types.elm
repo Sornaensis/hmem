@@ -4,6 +4,7 @@ import Api exposing (..)
 import Browser
 import Browser.Navigation as Nav
 import Dict exposing (Dict)
+import Feature.ChangeStream
 import Http
 import Json.Encode as Encode
 import Time
@@ -85,6 +86,18 @@ type AuthStatus
 
 type alias WebSocketModel =
     { state : WSState
+    , streams : Dict String Feature.ChangeStream.State
+    , targetGenerations : Dict String Int
+    }
+
+
+type alias CanonicalRequestGuard =
+    { scopeKey : String
+    , targetKey : String
+    , targetGeneration : Int
+    , sessionEpoch : Int
+    , routeWorkspace : Maybe String
+    , audienceId : String
     }
 
 
@@ -525,6 +538,17 @@ type Msg
     | WsDisconnectedMsg
     | WsConnectionFailed String
     | WsMessageReceived String
+    | CanonicalWorkspaceFetched CanonicalRequestGuard String (Result Http.Error Api.Workspace)
+    | CanonicalProjectFetched CanonicalRequestGuard String (Result Http.Error Api.Project)
+    | CanonicalTaskFetched CanonicalRequestGuard String (Result Http.Error Api.Task)
+    | CanonicalObservationFetched CanonicalRequestGuard String String (Result Http.Error Api.Observation)
+    | CanonicalTaskOverviewFetched CanonicalRequestGuard String (Result Http.Error Api.TaskOverview)
+    | CanonicalProjectOverviewFetched CanonicalRequestGuard String (Result Http.Error Api.ProjectOverview)
+    | CanonicalCatalogueFetched CanonicalRequestGuard (Result Http.Error (Api.PaginatedResult Api.Workspace))
+    | CanonicalGroupsFetched CanonicalRequestGuard (Result Http.Error (Api.PaginatedResult Api.WorkspaceGroup))
+    | CanonicalGroupMembersFetched CanonicalRequestGuard String (Result Http.Error (List String))
+    | CanonicalMembershipsFetched CanonicalRequestGuard String (Result Http.Error (Api.PaginatedResult Api.WorkspaceMembership))
+    | CanonicalSessionFetched CanonicalRequestGuard (Maybe String) (Result Http.Error Api.SessionContext)
     | AuthUnauthorized
     | AuthTokenChanged Bool
     | AuthSessionError String

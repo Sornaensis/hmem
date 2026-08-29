@@ -13,6 +13,12 @@ port connectWebSocket : Encode.Value -> Cmd msg
 port disconnectWebSocket : () -> Cmd msg
 
 
+port disconnectChangeStreamScope : Encode.Value -> Cmd msg
+
+
+port clearChangeStreamScope : Encode.Value -> Cmd msg
+
+
 port sendWebSocket : String -> Cmd msg
 
 
@@ -51,6 +57,7 @@ port loginAuth : String -> Cmd msg
 
 
 port copyToClipboard : String -> Cmd msg
+
 
 
 -- PORTS: Local storage

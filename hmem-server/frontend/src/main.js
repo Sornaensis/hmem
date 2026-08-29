@@ -1,4 +1,5 @@
 import { Elm } from './Main.elm'
+import { createCanonicalFrameBatcher, createChangeStreamManager } from './change-stream.js'
 
 function createSessionId() {
   if (window.crypto && window.crypto.randomUUID) {
@@ -471,235 +472,90 @@ if (app.ports.loginAuth) {
 // WebSocket port
 // ---------------------------------------------------------------------------
 
-let ws = null
-let reconnectTimer = null
-let connectGeneration = 0
-let ticketRetryAttempts = 0
-let socketRetryAttempts = 0
-let preOpenFailureCount = 0
-const maxPreOpenHandshakeFailures = 3
-
-function currentWorkspaceId() {
-  const basePath = apiBasePath()
-  let pathname = window.location.pathname
-  if (basePath && pathname.startsWith(basePath + '/')) {
-    pathname = pathname.slice(basePath.length)
-  } else if (basePath && pathname === basePath) {
-    pathname = '/'
+const canonicalScopeAudiences = new Map()
+function canonicalScopeKey(scope, workspaceId) { return scope === 'global' ? 'global' : `workspace:${workspaceId}` }
+const canonicalFrameBatcher = createCanonicalFrameBatcher({
+  onBatch: function (scope, workspaceId, frames) {
+    if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'frames', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, frames }))
+  },
+  onIncomplete: function (scope, workspaceId) {
+    if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'frame', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, frame: { schema_version: 1, type: 'resync_required' } }))
   }
+})
+function clearCanonicalFrameBatch(scope, workspaceId) { canonicalFrameBatcher.clear(scope, workspaceId) }
+function clearAllCanonicalFrameBatches() { canonicalFrameBatcher.clearAll() }
 
-  const match = pathname.match(/^\/workspace\/([^/]+)/)
-  return match ? decodeURIComponent(match[1]) : null
-}
-
-function wsUrlWithTicket(url, ticket) {
-  const parsed = new URL(url, window.location.href)
-  parsed.searchParams.set('ticket', ticket)
-  return parsed.toString()
-}
-
-function wsUrlWithLocalToken(url) {
-  const token = currentAuthToken()
-  if (!token) return url
-  const parsed = new URL(url, window.location.href)
-  parsed.searchParams.set('token', token)
-  return parsed.toString()
-}
-
-function normalizeWsConfig(rawConfig) {
-  if (typeof rawConfig === 'string') {
-    return {
-      url: rawConfig,
-      workspaceId: currentWorkspaceId(),
-      authMode: runtimeMode,
-      sessionId: null
+const canonicalStreams = createChangeStreamManager({
+  apiUrl,
+  wsUrl,
+  storage: localStorage,
+  onState: function (scope, workspaceId, state) {
+    if (state === 'connecting' || state === 'replaying') { if (app.ports.wsConnecting) app.ports.wsConnecting.send(null) }
+    else if (state === 'unauthenticated') { notifyUnauthorized() }
+    else if (state === 'scope_forbidden') {
+      clearCanonicalFrameBatch(scope, workspaceId)
+      canonicalScopeAudiences.delete(canonicalScopeKey(scope, workspaceId))
+      canonicalStreams.clear(scope, workspaceId)
+      canonicalStreams.disconnect(scope, workspaceId)
+      if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'frame', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, frame: { schema_version: 1, type: 'access_revoked', ...(scope === 'workspace' ? { workspace_id: workspaceId } : {}) } }))
     }
+    else if (state === 'resync_required' || state === 'invalid_ticket') {
+      if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'frame', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, frame: { schema_version: 1, type: 'resync_required' } }))
+    }
+    else if (state !== 'resyncing' && state !== 'control_closed' && app.ports.wsConnectionFailed) app.ports.wsConnectionFailed.send(`canonical:${state}:${scope}:${workspaceId || ''}`)
+  },
+  onSnapshot: function (scope, workspaceId, snapshot) {
+    clearCanonicalFrameBatch(scope, workspaceId)
+    if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'snapshot', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, items: snapshot.items, resume_token: snapshot.resumeToken }))
+  },
+  onFrame: function (scope, workspaceId, frame) {
+    let parsedFrame = null
+    try { parsedFrame = JSON.parse(frame) } catch (_) { /* Elm fails closed below. */ }
+    canonicalFrameBatcher.queue(scope, workspaceId, parsedFrame)
   }
+})
 
-  return {
-    url: rawConfig && rawConfig.url ? rawConfig.url : wsUrl,
-    workspaceId: rawConfig && rawConfig.workspaceId ? rawConfig.workspaceId : null,
-    authMode: rawConfig && rawConfig.authMode ? rawConfig.authMode : runtimeMode,
-    sessionId: rawConfig && rawConfig.sessionId ? rawConfig.sessionId : null
+app.ports.connectWebSocket.subscribe(function (config) {
+  if (!config || (config.scope !== 'global' && (!config.workspaceId || config.scope !== 'workspace'))) return
+  const streamWorkspaceId = config.scope === 'workspace' ? config.workspaceId : null
+  const streamKey = canonicalScopeKey(config.scope, streamWorkspaceId)
+  if (canonicalScopeAudiences.has(streamKey) && canonicalScopeAudiences.get(streamKey) !== config.audienceId) clearCanonicalFrameBatch(config.scope, streamWorkspaceId)
+  canonicalScopeAudiences.set(streamKey, config.audienceId)
+  if (config.forceResync) {
+    clearCanonicalFrameBatch(config.scope, streamWorkspaceId)
+    canonicalStreams.clear(config.scope, streamWorkspaceId, config.audienceId)
+    canonicalStreams.disconnect(config.scope, streamWorkspaceId)
   }
-}
-
-function notifyWsConnecting() {
-  if (app.ports.wsConnecting) app.ports.wsConnecting.send(null)
-}
-
-function notifyWsConnectionFailed(reason) {
-  if (app.ports.wsConnectionFailed) app.ports.wsConnectionFailed.send(reason)
-}
-
-async function resolveWsUrl(config) {
-  if (!config.workspaceId) throw new Error('ws-config:no-workspace')
-
-  if (config.authMode === 'local') {
-    return wsUrlWithLocalToken(config.url)
-  }
-
-  const requestAuthSignature = authTokenSignature()
-  const requestAuthGeneration = authTokenGeneration
-  const response = await fetch(apiResourceUrl('/api/v1/ws-ticket'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaderObject(), ...csrfHeaderObject() },
-    credentials: 'include',
-    body: JSON.stringify({ workspace_id: config.workspaceId })
+  canonicalStreams.connect({
+    audienceId: config.audienceId,
+    scope: config.scope,
+    workspaceId: streamWorkspaceId,
+    headers: { ...authHeaderObject(), ...csrfHeaderObject() }
   })
-
-  if (!response.ok) {
-    if (response.status === 401) {
-      if (requestAuthGeneration === authTokenGeneration && requestAuthSignature === authTokenSignature()) {
-        notifyUnauthorized()
-      } else {
-        throw new Error('ws-ticket-transient:stale-401')
-      }
-      throw new Error('ws-auth:unauthorized')
-    }
-    if (response.status === 403) throw new Error('ws-auth:forbidden')
-    if (isTransientTicketStatus(response.status)) throw new Error(`ws-ticket-transient:${response.status}`)
-    throw new Error(`ws-config:ticket-${response.status}`)
-  }
-
-  let body
-  try {
-    body = await response.json()
-  } catch (err) {
-    throw new Error('ws-config:invalid-ticket-response')
-  }
-  if (!body || !body.ticket) throw new Error('ws-config:missing-ticket')
-  return wsUrlWithTicket(config.url, body.ticket)
-}
-
-function isTransientTicketStatus(status) {
-  return status === 408 || status === 429 || status >= 500
-}
-
-function retryDelayMs(attempt) {
-  return Math.min(30000, 1000 * Math.pow(2, attempt))
-}
-
-function nextTicketRetryDelayMs() {
-  const delay = retryDelayMs(ticketRetryAttempts)
-  ticketRetryAttempts += 1
-  return delay
-}
-
-function nextSocketRetryDelayMs(opened) {
-  const attempt = opened ? socketRetryAttempts : Math.max(0, preOpenFailureCount - 1)
-  const delay = retryDelayMs(attempt)
-  if (opened) socketRetryAttempts += 1
-  return delay
-}
-
-function shouldStopReconnect(reason) {
-  return reason.startsWith('ws-auth:') || reason.startsWith('ws-config:')
-}
-
-function terminalPreOpenFailureReason(config, opened) {
-  if (opened) return null
-  preOpenFailureCount += 1
-  // Treat the third consecutive pre-open close as terminal. This bounds
-  // handshake failures to one initial attempt plus two retries, independent
-  // of transient ticket-fetch retries.
-  if (preOpenFailureCount < maxPreOpenHandshakeFailures) return null
-  return config.authMode === 'local'
-    ? 'ws-auth:local-handshake-failed'
-    : 'ws-config:handshake-failed'
-}
-
-function connectWs(rawConfig, preserveRetryState) {
-  const config = normalizeWsConfig(rawConfig)
-  if (!preserveRetryState) {
-    ticketRetryAttempts = 0
-    socketRetryAttempts = 0
-    preOpenFailureCount = 0
-  }
-  connectGeneration += 1
-  const generation = connectGeneration
-  if (ws) { ws.close() }
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
-  notifyWsConnecting()
-
-  resolveWsUrl(config).then(function (resolvedUrl) {
-    if (generation !== connectGeneration) return
-    ticketRetryAttempts = 0
-
-    let socket
-    try {
-      socket = new WebSocket(resolvedUrl)
-    } catch (err) {
-      notifyWsConnectionFailed('connect:invalid-url')
-      return
-    }
-    ws = socket
-    let opened = false
-
-    socket.onopen = function () {
-      if (generation !== connectGeneration || ws !== socket) return
-      opened = true
-      ticketRetryAttempts = 0
-      socketRetryAttempts = 0
-      preOpenFailureCount = 0
-      app.ports.wsConnected.send(null)
-    }
-
-    socket.onmessage = function (event) {
-      if (generation !== connectGeneration || ws !== socket) return
-      app.ports.wsMessage.send(event.data)
-    }
-
-    socket.onclose = function () {
-      if (generation !== connectGeneration || ws !== socket) return
-      ws = null
-      const terminalPreOpenReason = terminalPreOpenFailureReason(config, opened)
-      if (terminalPreOpenReason) {
-        notifyWsConnectionFailed(terminalPreOpenReason)
-        return
-      }
-      app.ports.wsDisconnected.send(null)
-      // Auto-reconnect after 3 seconds. Resolve a fresh ticket each time.
-      reconnectTimer = setTimeout(function () {
-        connectWs(config, true)
-      }, nextSocketRetryDelayMs(opened))
-    }
-
-    socket.onerror = function () {
-      // onclose will fire after onerror
-    }
-  }).catch(function (err) {
-    if (generation !== connectGeneration) return
-    const reason = err && err.message ? String(err.message) : 'connect:failed'
-    if (shouldStopReconnect(reason)) {
-      notifyWsConnectionFailed(reason)
-      return
-    }
-    app.ports.wsDisconnected.send(null)
-    reconnectTimer = setTimeout(function () {
-      connectWs(config, true)
-    }, nextTicketRetryDelayMs())
-  })
-}
-
-app.ports.connectWebSocket.subscribe(connectWs)
-
-if (app.ports.sendWebSocket) {
-  app.ports.sendWebSocket.subscribe(function (message) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(message)
-    }
-  })
-}
+})
 
 if (app.ports.disconnectWebSocket) {
   app.ports.disconnectWebSocket.subscribe(function () {
-    connectGeneration += 1
-    ticketRetryAttempts = 0
-    socketRetryAttempts = 0
-    preOpenFailureCount = 0
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
-    if (ws) { ws.close(); ws = null }
+    clearAllCanonicalFrameBatches()
+    canonicalScopeAudiences.clear()
+    canonicalStreams.disconnectAll()
+  })
+}
+
+if (app.ports.disconnectChangeStreamScope) {
+  app.ports.disconnectChangeStreamScope.subscribe(function (config) {
+    if (!config || (config.scope !== 'global' && config.scope !== 'workspace')) return
+    const streamWorkspaceId = config.scope === 'workspace' ? config.workspaceId : null
+    clearCanonicalFrameBatch(config.scope, streamWorkspaceId)
+    canonicalScopeAudiences.delete(canonicalScopeKey(config.scope, streamWorkspaceId))
+    canonicalStreams.disconnect(config.scope, streamWorkspaceId)
+  })
+}
+
+if (app.ports.clearChangeStreamScope) {
+  app.ports.clearChangeStreamScope.subscribe(function (config) {
+    if (!config || (config.scope !== 'global' && config.scope !== 'workspace')) return
+    canonicalStreams.clear(config.scope, config.scope === 'workspace' ? config.workspaceId : null, config.audienceId)
   })
 }
 

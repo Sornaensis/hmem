@@ -1,53 +1,178 @@
 module Api exposing
-    ( Workspace, Project, Task, NextTaskCandidate, Memory, MemoryLink, Observation, ObservationSubject, ObservationListQuery, ObservationMatchQuery, ObservationMatch
-    , WorkspaceGroup, WorkspaceMembership
-    , WorkspaceProjectMemoryLink, WorkspaceTaskMemoryLink, WorkspaceTaskDependencyLink
-    , TaskDependencySummary, TaskDependencyStatusChange, TaskReadinessRollup, DependencyMutationResult, TaskMutationResult, TaskOverview
-    , ProjectReadinessRollup, ProjectOverview
-    , LinkedMemorySummary, ProjectSearchResult, TaskSearchResult, ObservationSearchHit, UnifiedSearchResults
-    , AuditAction(..), AuditLogEntry, RevertResult
-    , WorkspaceTimelineEvent, TimelineActor, TimelineProjectContext, TimelineTaskContext, TimelineStatusTransition, TimelineNavigation
-    , TimelineBucketCounts, TimelineBucketEntityCounts, WorkspaceTimelineBucket, WorkspaceTimelineBucketsResponse
-    , ApiError, apiErrorToUserMessage, decodeApiErrorBody, isLifecycleConflict
+    ( ApiError
+    , AuditAction(..)
+    , AuditLogEntry
+    , CanonicalEnvelope
+    , CanonicalFrame(..)
+    , CanonicalInvalidation
     , CascadeResult
+    , ChangeEvent
+    , ChangeStreamScope(..)
+    , ChangeType(..)
+    , DependencyMutationResult
+    , EntityType(..)
+    , LinkedMemorySummary
+    , Memory
+    , MemoryLink
+    , MemoryType(..)
+    , NextTaskCandidate
+    , Observation
+    , ObservationListQuery
+    , ObservationMatch
+    , ObservationMatchQuery
+    , ObservationSearchHit
+    , ObservationSubject
     , PaginatedResult
-    , SessionContext, SessionPrincipal, SessionGlobalPermissions, SessionWorkspaceContext
-    , MemoryType(..), SubjectKind(..), ProjectStatus(..), TaskStatus(..), WorkspaceType(..)
-    , ChangeEvent, ChangeType(..), EntityType(..)
-    , fetchSessionContext, fetchWorkspaces, fetchWorkspace, createWorkspace, updateWorkspace, deleteWorkspace, purgeWorkspace
-    , fetchWorkspaceMemberships, upsertWorkspaceMembership, deleteWorkspaceMembership
-    , fetchProjects, fetchProjectsPage, fetchProject
-    , fetchTasks, fetchTasksPage, fetchTask
-    , fetchMemories, fetchMemoriesPage, fetchMemory
-    , fetchObservations, fetchObservationsPage, fetchObservation, fetchObservationMatches, observationListUrl, observationMatchBody
+    , Project
+    , ProjectOverview
+    , ProjectReadinessRollup
+    , ProjectSearchResult
+    , ProjectStatus(..)
+    , ResyncPage
+    , RevertResult
+    , SessionContext
+    , SessionGlobalPermissions
+    , SessionPrincipal
+    , SessionWorkspaceContext
+    , SnapshotItem
+    , SubjectKind(..)
+    , Task
+    , TaskDependencyStatusChange
+    , TaskDependencySummary
+    , TaskMutationResult
+    , TaskOverview
+    , TaskReadinessRollup
+    , TaskSearchResult
+    , TaskStatus(..)
+    , TimelineActor
+    , TimelineBucketCounts
+    , TimelineBucketEntityCounts
+    , TimelineNavigation
+    , TimelineProjectContext
+    , TimelineStatusTransition
+    , TimelineTaskContext
+    , UnifiedSearchResults
+    , Workspace
+    , WorkspaceGroup
+    , WorkspaceMembership
+    , WorkspaceProjectMemoryLink
+    , WorkspaceTaskDependencyLink
+    , WorkspaceTaskMemoryLink
+    , WorkspaceTimelineBucket
+    , WorkspaceTimelineBucketsResponse
+    , WorkspaceTimelineEvent
+    , WorkspaceType(..)
+    , addGroupMember
+    , addTaskDependency
+    , allMemoryTypes
+    , allProjectStatuses
+    , allTaskStatuses
+    , allWorkspaceTypes
+    , apiErrorToUserMessage
+    , auditActionFromString
+    , auditActionToString
+    , auditLogEntryDecoder
+    , cascadeResultDecoder
+    , createMemory
+    , createProject
+    , createProjectWithParent
+    , createTask
+    , createTaskWithParent
+    , createWorkspace
+    , createWorkspaceGroup
+    , decodeApiErrorBody
+    , decodeCanonicalFrame
+    , decodeCanonicalTransportScope
+    , decodeChangeEvent
+    , deleteMemory
+    , deleteProject
+    , deleteTask
+    , deleteWorkspace
+    , deleteWorkspaceGroup
+    , deleteWorkspaceMembership
+    , dependencyMutationResultDecoder
+    , fetchAuditLog
+    , fetchChangeStreamResync
+    , fetchEntityHistory
+    , fetchGroupMembers
+    , fetchMemories
+    , fetchMemoriesPage
+    , fetchMemory
     , fetchMemoryLinks
+    , fetchObservation
+    , fetchObservationMatches
+    , fetchObservations
+    , fetchObservationsPage
+    , fetchProject
+    , fetchProjectMemories
+    , fetchProjectNextTasks
+    , fetchProjectOverview
+    , fetchProjects
+    , fetchProjectsPage
+    , fetchSessionContext
+    , fetchTask
+    , fetchTaskMemories
+    , fetchTaskOverview
+    , fetchTasks
+    , fetchTasksPage
+    , fetchWorkspace
+    , fetchWorkspaceGroups
     , fetchWorkspaceLinks
-    , fetchProjectMemories, fetchTaskMemories
-    , linkProjectMemory, unlinkProjectMemory
-    , linkTaskMemory, unlinkTaskMemory
-    , fetchTaskOverview, fetchProjectOverview, fetchProjectNextTasks
-    , addTaskDependency, removeTaskDependency
-    , searchMemories, unifiedSearch
-    , createProject, createProjectWithParent
-    , updateProject, deleteProject
-    , createTask, createTaskWithParent
-    , updateTask, deleteTask
-    , createMemory, updateMemory, deleteMemory, setTags
-    , fetchWorkspaceGroups, createWorkspaceGroup, deleteWorkspaceGroup
-    , fetchGroupMembers, addGroupMember, removeGroupMember
-    , fetchAuditLog, fetchEntityHistory, revertAuditEntry, fetchWorkspaceTimeline, fetchWorkspaceTimelineRange, fetchWorkspaceTimelineBuckets
-    , decodeChangeEvent, dependencyMutationResultDecoder, taskMutationResultDecoder, taskOverviewDecoder, projectOverviewDecoder, nextTaskCandidateDecoder
-    , workspaceDecoder, projectDecoder, taskDecoder, memoryDecoder, observationDecoder, observationMatchDecoder, paginatedDecoder, cascadeResultDecoder, auditLogEntryDecoder, workspaceTimelineEventDecoder, workspaceTimelineBucketsResponseDecoder
-    , memoryTypeToString, memoryTypeFromString, subjectKindToString, subjectKindFromString, projectStatusToString, taskStatusToString, workspaceTypeToString
-    , auditActionToString, auditActionFromString
-    , projectStatusFromString, taskStatusFromString
-    , projectStatusOrder, taskStatusOrder
-    , allProjectStatuses, allTaskStatuses, allMemoryTypes, allWorkspaceTypes
+    , fetchWorkspaceMemberships
+    , fetchWorkspaceTimeline
+    , fetchWorkspaceTimelineBuckets
+    , fetchWorkspaceTimelineRange
+    , fetchWorkspaces
+    , isLifecycleConflict
+    , linkProjectMemory
+    , linkTaskMemory
+    , memoryDecoder
+    , memoryTypeFromString
+    , memoryTypeToString
+    , nextTaskCandidateDecoder
+    , observationDecoder
+    , observationListUrl
+    , observationMatchBody
+    , observationMatchDecoder
+    , paginatedDecoder
+    , projectDecoder
+    , projectOverviewDecoder
+    , projectStatusFromString
+    , projectStatusOrder
+    , projectStatusToString
+    , purgeWorkspace
+    , removeGroupMember
+    , removeTaskDependency
+    , resyncPageDecoder
+    , revertAuditEntry
+    , searchMemories
+    , setTags
+    , subjectKindFromString
+    , subjectKindToString
+    , taskDecoder
+    , taskMutationResultDecoder
+    , taskOverviewDecoder
+    , taskStatusFromString
+    , taskStatusOrder
+    , taskStatusToString
+    , unifiedSearch
+    , unlinkProjectMemory
+    , unlinkTaskMemory
+    , updateMemory
+    , updateProject
+    , updateTask
+    , updateWorkspace
+    , upsertWorkspaceMembership
+    , workspaceDecoder
+    , workspaceGroupDecoder
+    , workspaceTimelineBucketsResponseDecoder
+    , workspaceTimelineEventDecoder
+    , workspaceTypeToString
     )
 
 import Http
 import Json.Decode as D exposing (Decoder)
-import Json.Decode.Pipeline exposing (custom, required, optional)
+import Json.Decode.Pipeline exposing (custom, optional, required)
 import Json.Encode as E
 import Time
 import Url
@@ -152,6 +277,7 @@ type alias Observation =
     { id : String
     , workspaceId : String
     , subjects : List ObservationSubject
+
     -- Kept as the primary-subject compatibility projection for existing callers.
     , subjectKind : SubjectKind
     , subject : String
@@ -898,10 +1024,17 @@ allWorkspaceTypes =
 projectStatusOrder : ProjectStatus -> Int
 projectStatusOrder ps =
     case ps of
-        ProjActive -> 0
-        ProjPaused -> 1
-        ProjCompleted -> 2
-        ProjArchived -> 3
+        ProjActive ->
+            0
+
+        ProjPaused ->
+            1
+
+        ProjCompleted ->
+            2
+
+        ProjArchived ->
+            3
 
 
 {-| Sort order for task statuses: in-progress first, cancelled last.
@@ -909,11 +1042,20 @@ projectStatusOrder ps =
 taskStatusOrder : TaskStatus -> Int
 taskStatusOrder ts =
     case ts of
-        InProgress -> 0
-        Todo -> 1
-        Blocked -> 2
-        Done -> 3
-        Cancelled -> 4
+        InProgress ->
+            0
+
+        Todo ->
+            1
+
+        Blocked ->
+            2
+
+        Done ->
+            3
+
+        Cancelled ->
+            4
 
 
 auditActionToString : AuditAction -> String
@@ -1510,6 +1652,380 @@ type EntityType
     | EOther String
 
 
+{-| Public v1 change-stream values. These intentionally do not model a
+cursor: cursor ordering is server-internal and clients only retain opaque
+bearers plus event ids.
+-}
+type ChangeStreamScope
+    = WorkspaceScope String
+    | GlobalScope
+
+
+type alias CanonicalInvalidation =
+    { kind : String
+    , target : String
+    }
+
+
+type alias CanonicalEnvelope =
+    { eventId : String
+    , scope : ChangeStreamScope
+    , workspaceId : Maybe String
+    , entityType : String
+    , entityId : String
+    , entityAction : String
+    , invalidations : List CanonicalInvalidation
+    }
+
+
+type CanonicalFrame
+    = CanonicalChange CanonicalEnvelope
+    | CanonicalCheckpoint String
+    | CanonicalAccessGranted String
+    | CanonicalAccessRevoked (Maybe String)
+    | CanonicalResyncRequired
+    | CanonicalScoped ChangeStreamScope CanonicalFrame
+    | CanonicalSnapshot ChangeStreamScope (List SnapshotItem) String
+    | CanonicalBatch ChangeStreamScope (List CanonicalFrame)
+
+
+type alias SnapshotItem =
+    { kind : String
+    , data : D.Value
+    }
+
+
+type alias ResyncPage =
+    { items : List SnapshotItem
+    , hasMore : Bool
+    , nextPageToken : Maybe String
+    , resumeToken : Maybe String
+    }
+
+
+scopeDecoder : Decoder ChangeStreamScope
+scopeDecoder =
+    D.field "scope" D.string
+        |> D.andThen
+            (\kind ->
+                case kind of
+                    "workspace" ->
+                        D.map WorkspaceScope (D.field "workspace_id" nonEmptyStringDecoder)
+
+                    "global" ->
+                        D.succeed GlobalScope
+
+                    _ ->
+                        D.fail "unknown change-stream scope"
+            )
+
+
+canonicalInvalidationDecoder : Decoder CanonicalInvalidation
+canonicalInvalidationDecoder =
+    D.map2 CanonicalInvalidation
+        (D.field "kind" nonEmptyStringDecoder)
+        (D.field "target" nonEmptyStringDecoder)
+
+
+nonEmptyStringDecoder : Decoder String
+nonEmptyStringDecoder =
+    D.string
+        |> D.andThen
+            (\value ->
+                if String.isEmpty value then
+                    D.fail "required string is empty"
+
+                else
+                    D.succeed value
+            )
+
+
+optionalNonEmptyField : String -> Decoder (Maybe String)
+optionalNonEmptyField fieldName =
+    D.value
+        |> D.andThen
+            (\object ->
+                case D.decodeValue (D.field fieldName D.value) object of
+                    Err _ ->
+                        D.succeed Nothing
+
+                    Ok raw ->
+                        case D.decodeValue (D.nullable nonEmptyStringDecoder) raw of
+                            Ok value ->
+                                D.succeed value
+
+                            Err _ ->
+                                D.fail ("invalid optional field: " ++ fieldName)
+            )
+
+
+schemaVersionOneDecoder : Decoder ()
+schemaVersionOneDecoder =
+    D.field "schema_version" D.int
+        |> D.andThen
+            (\version ->
+                if version == 1 then
+                    D.succeed ()
+
+                else
+                    D.fail "unsupported change-stream schema"
+            )
+
+
+canonicalEntityTypeDecoder : Decoder String
+canonicalEntityTypeDecoder =
+    nonEmptyStringDecoder
+        |> D.andThen
+            (\entityType ->
+                if List.member entityType [ "workspace", "workspace_group", "project", "task", "observation", "task_dependency", "workspace_group_membership", "workspace_membership" ] then
+                    D.succeed entityType
+
+                else
+                    D.fail "unknown canonical entity type"
+            )
+
+
+canonicalEntityActionDecoder : Decoder String
+canonicalEntityActionDecoder =
+    nonEmptyStringDecoder
+        |> D.andThen
+            (\action ->
+                if List.member action [ "created", "updated", "deleted", "restored" ] then
+                    D.succeed action
+
+                else
+                    D.fail "unknown canonical entity action"
+            )
+
+
+nonEmptyListDecoder : Decoder a -> Decoder (List a)
+nonEmptyListDecoder itemDecoder =
+    D.list itemDecoder
+        |> D.andThen
+            (\items ->
+                if List.isEmpty items then
+                    D.fail "required list is empty"
+
+                else
+                    D.succeed items
+            )
+
+
+canonicalTransactionDecoder : Decoder ()
+canonicalTransactionDecoder =
+    D.map3 (\_ _ _ -> ())
+        (D.field "id" nonEmptyStringDecoder)
+        (D.field "cause" nonEmptyStringDecoder
+            |> D.andThen
+                (\cause ->
+                    if List.member cause [ "rest", "mcp", "audit_revert", "core", "migration" ] then
+                        D.succeed cause
+
+                    else
+                        D.fail "unknown canonical transaction cause"
+                )
+        )
+        (D.field "request_id" (D.nullable nonEmptyStringDecoder))
+
+
+canonicalActorDecoder : Decoder ()
+canonicalActorDecoder =
+    D.map2 (\_ _ -> ())
+        (D.field "type" nonEmptyStringDecoder
+            |> D.andThen
+                (\actorType ->
+                    if List.member actorType [ "user", "service", "system" ] then
+                        D.succeed actorType
+
+                    else
+                        D.fail "unknown canonical actor type"
+                )
+        )
+        (D.field "id" (D.nullable nonEmptyStringDecoder))
+
+
+canonicalEnvelopeDecoder : Decoder CanonicalEnvelope
+canonicalEnvelopeDecoder =
+    let
+        fieldsDecoder =
+            D.map7 CanonicalEnvelope
+                (D.field "event_id" nonEmptyStringDecoder)
+                scopeDecoder
+                (D.field "workspace_id" (D.nullable nonEmptyStringDecoder))
+                (D.field "entity" (D.field "type" canonicalEntityTypeDecoder))
+                (D.field "entity" (D.field "id" nonEmptyStringDecoder))
+                (D.field "entity" (D.field "action" canonicalEntityActionDecoder))
+                (D.field "invalidations" (nonEmptyListDecoder canonicalInvalidationDecoder))
+
+        metadataDecoder =
+            D.map4 (\envelope _ _ _ -> envelope)
+                fieldsDecoder
+                schemaVersionOneDecoder
+                (D.field "occurred_at" nonEmptyStringDecoder)
+                (D.map2 (\_ _ -> ())
+                    (D.field "transaction" canonicalTransactionDecoder)
+                    (D.field "actor" canonicalActorDecoder)
+                )
+    in
+    metadataDecoder
+        |> D.andThen
+            (\envelope ->
+                case ( envelope.scope, envelope.workspaceId ) of
+                    ( WorkspaceScope scopeWorkspaceId, Just envelopeWorkspaceId ) ->
+                        if scopeWorkspaceId == envelopeWorkspaceId then
+                            D.succeed envelope
+
+                        else
+                            D.fail "workspace envelope scope mismatch"
+
+                    ( GlobalScope, Nothing ) ->
+                        D.succeed envelope
+
+                    _ ->
+                        D.fail "canonical envelope scope identity is inconsistent"
+            )
+
+
+canonicalFrameDecoder : Decoder CanonicalFrame
+canonicalFrameDecoder =
+    D.oneOf
+        [ canonicalTransportDecoder
+        , canonicalWireFrameDecoder
+        ]
+
+
+canonicalWireFrameDecoder : Decoder CanonicalFrame
+canonicalWireFrameDecoder =
+    schemaVersionOneDecoder
+        |> D.andThen
+            (\_ ->
+                D.field "type" nonEmptyStringDecoder
+                    |> D.andThen
+                        (\frameType ->
+                            case frameType of
+                                "change" ->
+                                    D.map CanonicalChange (D.field "event" canonicalEnvelopeDecoder)
+
+                                "checkpoint" ->
+                                    D.map CanonicalCheckpoint
+                                        (D.field "catch_up" nonEmptyStringDecoder
+                                            |> D.andThen
+                                                (\catchUp ->
+                                                    if catchUp == "complete" then
+                                                        D.field "resume_token" nonEmptyStringDecoder
+
+                                                    else
+                                                        D.fail "checkpoint is not terminal"
+                                                )
+                                        )
+
+                                "access_granted" ->
+                                    D.map CanonicalAccessGranted (D.field "workspace_id" nonEmptyStringDecoder)
+
+                                "access_revoked" ->
+                                    D.map CanonicalAccessRevoked (optionalNonEmptyField "workspace_id")
+
+                                "resync_required" ->
+                                    D.succeed CanonicalResyncRequired
+
+                                _ ->
+                                    D.fail "unknown change-stream frame"
+                        )
+            )
+
+
+canonicalTransportDecoder : Decoder CanonicalFrame
+canonicalTransportDecoder =
+    schemaVersionOneDecoder
+        |> D.andThen
+            (\_ ->
+                D.field "transport" nonEmptyStringDecoder
+                    |> D.andThen
+                        (\transport ->
+                            case transport of
+                                "frame" ->
+                                    D.map2 CanonicalScoped
+                                        (D.field "scope" scopeDecoder)
+                                        (D.field "frame" canonicalWireFrameDecoder)
+
+                                "frames" ->
+                                    D.map2 CanonicalBatch
+                                        (D.field "scope" scopeDecoder)
+                                        (D.field "frames" (nonEmptyListDecoder canonicalWireFrameDecoder))
+
+                                "snapshot" ->
+                                    D.map3 CanonicalSnapshot
+                                        (D.field "scope" scopeDecoder)
+                                        (D.field "items" (D.list snapshotItemDecoder))
+                                        (D.field "resume_token" nonEmptyStringDecoder)
+
+                                _ ->
+                                    D.fail "unknown change-stream transport message"
+                        )
+            )
+
+
+decodeCanonicalFrame : String -> Maybe CanonicalFrame
+decodeCanonicalFrame raw =
+    D.decodeString canonicalFrameDecoder raw |> Result.toMaybe
+
+
+decodeCanonicalTransportScope : String -> Maybe ChangeStreamScope
+decodeCanonicalTransportScope raw =
+    D.decodeString
+        (D.map2 (\_ scope -> scope)
+            schemaVersionOneDecoder
+            (D.field "scope" scopeDecoder)
+        )
+        raw
+        |> Result.toMaybe
+
+
+snapshotItemDecoder : Decoder SnapshotItem
+snapshotItemDecoder =
+    D.field "schema_version" D.int
+        |> D.andThen
+            (\version ->
+                if version == 1 then
+                    D.map2 SnapshotItem
+                        (D.field "kind" nonEmptyStringDecoder
+                            |> D.andThen
+                                (\kind ->
+                                    if List.member kind [ "workspace", "workspace_group", "project", "task", "task_dependency", "observation" ] then
+                                        D.succeed kind
+
+                                    else
+                                        D.fail "unknown snapshot kind"
+                                )
+                        )
+                        (D.field "data" D.value)
+
+                else
+                    D.fail "unsupported snapshot schema"
+            )
+
+
+resyncPageDecoder : Decoder ResyncPage
+resyncPageDecoder =
+    D.map4 ResyncPage
+        (D.field "items" (D.list snapshotItemDecoder))
+        (D.field "has_more" D.bool)
+        (optionalNonEmptyField "next_page_token")
+        (optionalNonEmptyField "resume_token")
+        |> D.andThen
+            (\page ->
+                case ( page.hasMore, page.nextPageToken, page.resumeToken ) of
+                    ( True, Just _, Nothing ) ->
+                        D.succeed page
+
+                    ( False, Nothing, Just _ ) ->
+                        D.succeed page
+
+                    _ ->
+                        D.fail "inconsistent resync page tokens"
+            )
+
+
 decodeChangeEvent : String -> Maybe ChangeEvent
 decodeChangeEvent json =
     D.decodeString changeEventDecoder json
@@ -1600,6 +2116,32 @@ entityTypeDecoder =
 
 
 -- HTTP REQUESTS
+
+
+fetchChangeStreamResync : String -> ChangeStreamScope -> Maybe String -> String -> (Result Http.Error ResyncPage -> msg) -> Cmd msg
+fetchChangeStreamResync apiUrl scope maybePageToken startKey toMsg =
+    let
+        scopeValue =
+            case scope of
+                WorkspaceScope workspaceId ->
+                    E.object [ ( "scope", E.string "workspace" ), ( "workspace_id", E.string workspaceId ) ]
+
+                GlobalScope ->
+                    E.object [ ( "scope", E.string "global" ) ]
+
+        body =
+            case maybePageToken of
+                Just pageToken ->
+                    E.object [ ( "scope", scopeValue ), ( "page_token", E.string pageToken ) ]
+
+                Nothing ->
+                    E.object [ ( "scope", scopeValue ), ( "page_size", E.int 100 ), ( "start_idempotency_key", E.string startKey ) ]
+    in
+    Http.post
+        { url = apiUrl ++ "/api/v1/change-stream/resync"
+        , body = Http.jsonBody body
+        , expect = Http.expectJson toMsg resyncPageDecoder
+        }
 
 
 fetchSessionContext : String -> Maybe String -> (Result Http.Error SessionContext -> msg) -> Cmd msg
@@ -2037,10 +2579,10 @@ createTask apiUrl wsId mProjectId title requestId toMsg =
         , body =
             Http.jsonBody
                 (E.object
-                     ([ ( "workspace_id", E.string wsId )
-                      , ( "title", E.string title )
-                      , ( "request_id", E.string requestId )
-                      ]
+                    ([ ( "workspace_id", E.string wsId )
+                     , ( "title", E.string title )
+                     , ( "request_id", E.string requestId )
+                     ]
                         ++ (case mProjectId of
                                 Just pid ->
                                     [ ( "project_id", E.string pid ) ]
@@ -2261,11 +2803,11 @@ createTaskWithParent apiUrl wsId mProjectId parentId title requestId toMsg =
         , body =
             Http.jsonBody
                 (E.object
-                     ([ ( "workspace_id", E.string wsId )
-                      , ( "parent_id", E.string parentId )
-                      , ( "title", E.string title )
-                      , ( "request_id", E.string requestId )
-                      ]
+                    ([ ( "workspace_id", E.string wsId )
+                     , ( "parent_id", E.string parentId )
+                     , ( "title", E.string title )
+                     , ( "request_id", E.string requestId )
+                     ]
                         ++ (case mProjectId of
                                 Just pid ->
                                     [ ( "project_id", E.string pid ) ]

@@ -7,6 +7,7 @@ import Browser.Navigation as Nav
 import Dict
 import Feature.AuditLog
 import Feature.Cards
+import Feature.ChangeStream
 import Feature.DataLoading
 import Feature.Dependencies
 import Feature.DragDrop
@@ -22,8 +23,8 @@ import Feature.WorkspaceAdmin
 import Helpers exposing (applyStoredFiltersIfCurrentWorkspace, pushUrl, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (class, href, id)
-import Html.Keyed as Keyed
 import Html.Events exposing (onClick)
+import Html.Keyed as Keyed
 import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
@@ -282,7 +283,8 @@ handleOwned ownedMsg model =
                         "Authentication is required or has expired. Please sign in again, then retry."
 
                 ( toastedModel, toastCmd ) =
-                    Toast.addToast Warning unauthorizedMessage
+                    Toast.addToast Warning
+                        unauthorizedMessage
                         (clearSessionScopedState
                             { model
                                 | auth = { status = AuthRequired, mode = model.auth.mode }
@@ -327,11 +329,13 @@ handleOwned ownedMsg model =
                 let
                     ( toastedModel, toastCmd ) =
                         if Permissions.isLocalMode model then
-                            Toast.addToast Warning "Local auth token was removed; local session will be refreshed when credentials are restored."
+                            Toast.addToast Warning
+                                "Local auth token was removed; local session will be refreshed when credentials are restored."
                                 (clearSessionScopedState { model | flags = updatedFlags, auth = { status = AuthRequired, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1 })
 
                         else
-                            Toast.addToast Warning "Signed out. Sign in again to continue."
+                            Toast.addToast Warning
+                                "Signed out. Sign in again to continue."
                                 (clearSessionScopedState { model | flags = updatedFlags, auth = { status = AuthRequired, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1 })
                 in
                 ( toastedModel, Cmd.batch [ toastCmd, disconnectWebSocket () ] )
@@ -359,14 +363,16 @@ handleOwned ownedMsg model =
 
         GlobalKeyDownMsg keyCode ->
             if keyCode == 27 then
-                case List.filterMap identity
-                    [ Feature.Cards.handleEscape model
-                    , Feature.WorkspaceAdmin.handleEscape model
-                    , Feature.DragDrop.handleEscape model
-                    , Feature.Dependencies.handleEscape model
-                    , Feature.Editing.handleEscape model
-                    ]
-                    |> List.head of
+                case
+                    List.filterMap identity
+                        [ Feature.Cards.handleEscape model
+                        , Feature.WorkspaceAdmin.handleEscape model
+                        , Feature.DragDrop.handleEscape model
+                        , Feature.Dependencies.handleEscape model
+                        , Feature.Editing.handleEscape model
+                        ]
+                        |> List.head
+                of
                     Just updatedModel ->
                         ( updatedModel, Cmd.none )
 
@@ -424,25 +430,18 @@ bootstrapAfterSession expectedWorkspace sessionContext model =
         workspaceListLoadToken =
             model.dataLoading.nextWorkspaceListLoadToken
 
-        workspaceLoadToken =
-            model.dataLoading.activeWorkspaceLoadToken
-                |> Maybe.withDefault (model.dataLoading.nextWorkspaceLoadToken - 1)
-
         globalCmds =
-            Api.fetchWorkspaces model.flags.apiUrl (GotWorkspaces workspaceListLoadToken)
-                :: (if sessionContext.globalPermissions.superadmin then
-                        [ Api.fetchWorkspaceGroups model.flags.apiUrl GotWorkspaceGroups ]
+            if sessionContext.globalPermissions.superadmin then
+                []
 
-                    else
-                        []
-                   )
+            else
+                [ Api.fetchWorkspaces model.flags.apiUrl (GotWorkspaces workspaceListLoadToken) ]
 
-        ( workspaceCmds, shouldKeepWebSocket ) =
+        ( workspaceCmds, shouldKeepWorkspaceStream ) =
             case model.page of
                 WorkspacePage currentWsId ->
                     if expectedWorkspace == Just currentWsId && sessionCanReadWorkspace currentWsId sessionContext then
-                        ( [ Api.fetchWorkspace model.flags.apiUrl currentWsId (GotWorkspace currentWsId workspaceLoadToken)
-                          , Feature.WebSocket.connectCmd model.flags sessionContext currentWsId
+                        ( [ Feature.WebSocket.connectCmd model.flags (Just sessionContext) (Feature.ChangeStream.Workspace currentWsId) False
                           ]
                         , True
                         )
@@ -453,14 +452,21 @@ bootstrapAfterSession expectedWorkspace sessionContext model =
                 _ ->
                     ( [], False )
 
+        globalStreamCmd =
+            if sessionContext.globalPermissions.superadmin then
+                [ Feature.WebSocket.connectCmd model.flags (Just sessionContext) Feature.ChangeStream.Global False ]
+
+            else
+                []
+
         websocketCmds =
-            if shouldKeepWebSocket then
+            if shouldKeepWorkspaceStream || sessionContext.globalPermissions.superadmin then
                 []
 
             else
                 [ disconnectWebSocket () ]
     in
-    Cmd.batch (globalCmds ++ workspaceCmds ++ websocketCmds)
+    Cmd.batch (globalCmds ++ globalStreamCmd ++ workspaceCmds ++ websocketCmds)
 
 
 sessionCanReadWorkspace : String -> Api.SessionContext -> Bool
@@ -528,7 +534,7 @@ updateLoadingAfterSession expectedWorkspace sessionContext model =
                 model.webSocket
 
             else
-                { state = Disconnected }
+                { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }
 
         nextGroups =
             if sessionContext.globalPermissions.superadmin then
@@ -601,7 +607,7 @@ clearSessionScopedState model =
         , auditLog = Feature.AuditLog.init
         , timeline = Feature.Timeline.init
         , workspaceAdmin = Feature.WorkspaceAdmin.init
-        , webSocket = { state = Disconnected }
+        , webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }
     }
 
 
@@ -644,7 +650,8 @@ viewDocument model =
 
               else
                 text ""
-            , Keyed.node "div" [ class "main-content", id "main-content-scroll" ]
+            , Keyed.node "div"
+                [ class "main-content", id "main-content-scroll" ]
                 [ ( pageKey model.page, viewPage model ) ]
             , Toast.view model.toast
             , viewConnectionStatus model.webSocket.state

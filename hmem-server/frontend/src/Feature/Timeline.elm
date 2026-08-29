@@ -1,13 +1,17 @@
-module Feature.Timeline exposing (ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, sortTimelineEvents, timelineBucketTotal, timelineDateKey, timelineEventLabel, timelineEventToneClass, timelineHistogramAcceptsResponse, timelineStatusSummary, update, viewWorkspaceTimelinePanel)
+module Feature.Timeline exposing (chartCanvasWidth, chartX, chartXWithWidth, chartY, chartTickValues, clampTimelinePointFocus, ensureLoaded, eventInTimelineSelection, filterTimelineEvents, filterTimelineEventsForSelection, groupTimelineEvents, init, lineChartMaximum, lineChartRenderDomain, pointMarkerOffset, sortTimelineEvents, timelineDateKey, timelineEventLabel, timelineEventToneClass, timelineEventsRequest, timelineHistogramAcceptsResponse, timelinePath, timelinePointFocusKey, timelinePointId, timelinePointNextIndex, timelineStatusSummary, toggleTimelineChartSeries, update, viewTimelineHistogram, viewWorkspaceTimelinePanel)
 
 import Api
 import Char
+import Dict
 import Feature.Focus as Focus
-import Helpers exposing (buildFragment, formatDate, pushUrl)
+import Helpers exposing (buildFragment, focusElement, formatDate, pushUrl)
 import Html exposing (..)
-import Html.Attributes exposing (class, disabled, style, title, type_, value)
-import Html.Events exposing (onClick, onInput)
+import Html.Attributes exposing (attribute, class, disabled, title, type_, value)
+import Html.Events exposing (onClick, onInput, preventDefaultOn)
+import Json.Decode as Decode
 import String
+import Svg
+import Svg.Attributes as SA
 import Task
 import Time
 import Types exposing (..)
@@ -35,6 +39,8 @@ init =
     , histogramActiveRequest = Nothing
     , histogramLoadedRequest = Nothing
     , histogramSelectedBucket = Nothing
+    , chartSeries = { projects = True, tasks = True, subtasks = True, observations = True }
+    , chartPointFocus = Dict.empty
     }
 
 
@@ -304,6 +310,25 @@ update msg model =
         ResetTimelineHistogramSelection ->
             resetHistogramSelection model
 
+        ToggleTimelineChartSeries series ->
+            let
+                currentTimeline =
+                    model.timeline
+            in
+            ( { model | timeline = { currentTimeline | chartSeries = toggleTimelineChartSeries series currentTimeline.chartSeries } }, Cmd.none )
+
+        FocusTimelineChartPoint action series index ->
+            let
+                currentTimeline =
+                    model.timeline
+
+                targetId =
+                    timelinePointId action series index
+            in
+            ( { model | timeline = { currentTimeline | chartPointFocus = Dict.insert (timelinePointFocusKey action series) index currentTimeline.chartPointFocus } }
+            , focusElement targetId
+            )
+
         GotWorkspaceTimeline request result ->
             if model.selectedWorkspaceId /= Just request.workspaceId || model.timeline.eventsActiveRequest /= Just request then
                 ( model, Cmd.none )
@@ -397,6 +422,7 @@ update msg model =
                                     , histogramClockWorkspaceId = Nothing
                                     , histogramActiveRequest = Nothing
                                     , histogramLoadedRequest = Just request
+                                    , chartPointFocus = clampTimelinePointFocus (List.length response.buckets) currentTimeline.chartPointFocus
                                 }
                           }
                         , Cmd.none
@@ -550,23 +576,23 @@ viewWorkspaceTimelinePanel wsId model =
 
 viewTimelineHistogram : TimelineModel -> Html Msg
 viewTimelineHistogram timeline =
-    div [ class "timeline-histogram-panel" ]
-        [ div [ class "timeline-histogram-header" ]
+    div [ class "timeline-chart-panel" ]
+        [ div [ class "timeline-graph-header" ]
             [ div []
-                [ h4 [] [ text "Activity histogram" ]
-                , p [] [ text "Lifecycle counts by UTC bucket. The event list below remains usable if this summary is unavailable." ]
+                [ h4 [] [ text "Lifecycle activity" ]
+                , p [] [ text "Create, Complete, and Delete counts by ascending UTC bucket. Select a point or table row to filter the event cards below." ]
                 ]
-            , viewTimelineHistogramLegend
             ]
         , viewTimelineHistogramControls timeline
+        , viewTimelineChartToggles timeline.chartSeries
         , viewTimelineHistogramContent timeline
         ]
 
 
 viewTimelineHistogramControls : TimelineModel -> Html Msg
 viewTimelineHistogramControls timeline =
-    div [ class "timeline-histogram-controls" ]
-        [ label [ class "timeline-histogram-control" ]
+    div [ class "timeline-graph-controls" ]
+        [ label [ class "timeline-graph-control" ]
             [ span [] [ text "Since" ]
             , input
                 [ type_ "date"
@@ -576,7 +602,7 @@ viewTimelineHistogramControls timeline =
                 ]
                 []
             ]
-        , label [ class "timeline-histogram-control" ]
+        , label [ class "timeline-graph-control" ]
             [ span [] [ text "Until" ]
             , input
                 [ type_ "date"
@@ -587,7 +613,7 @@ viewTimelineHistogramControls timeline =
                 ]
                 []
             ]
-        , label [ class "timeline-histogram-control" ]
+        , label [ class "timeline-graph-control" ]
             [ span [] [ text "Bucket" ]
             , select
                 [ value timeline.histogramBucket
@@ -603,44 +629,26 @@ viewTimelineHistogramControls timeline =
         ]
 
 
-viewTimelineHistogramLegend : Html Msg
-viewTimelineHistogramLegend =
-    div [ class "timeline-histogram-legend" ]
-        [ span [ class "timeline-histogram-legend-item" ]
-            [ span [ class "timeline-histogram-swatch timeline-histogram-created" ] []
-            , text "Created"
-            ]
-        , span [ class "timeline-histogram-legend-item" ]
-            [ span [ class "timeline-histogram-swatch timeline-histogram-completed" ] []
-            , text "Completed"
-            ]
-        , span [ class "timeline-histogram-legend-item" ]
-            [ span [ class "timeline-histogram-swatch timeline-histogram-cancelled" ] []
-            , text "Cancelled"
-            ]
-        ]
-
-
 viewTimelineHistogramContent : TimelineModel -> Html Msg
 viewTimelineHistogramContent timeline =
     let
         hasBuckets =
             not (List.isEmpty timeline.histogramBuckets)
     in
-    div [ class "timeline-histogram-content" ]
+    div [ class "timeline-graph-content" ]
         [ if timeline.histogramLoading && not hasBuckets then
-            div [ class "timeline-histogram-state" ] [ text "Loading histogram..." ]
+            div [ class "timeline-graph-state" ] [ text "Loading lifecycle graphs..." ]
 
           else
             text ""
         , case timeline.histogramError of
             Just message ->
-                div [ class "timeline-histogram-state timeline-histogram-error" ] [ text message ]
+                div [ class "timeline-graph-state timeline-graph-error" ] [ text message ]
 
             Nothing ->
                 text ""
         , if (not timeline.histogramLoading) && timeline.histogramError == Nothing && not hasBuckets then
-            div [ class "timeline-histogram-state" ] [ text "No histogram activity in this date range." ]
+            div [ class "timeline-graph-state" ] [ text "No lifecycle activity in this date range." ]
 
           else if hasBuckets then
             viewTimelineHistogramChart timeline
@@ -652,46 +660,420 @@ viewTimelineHistogramContent timeline =
 
 viewTimelineHistogramChart : TimelineModel -> Html Msg
 viewTimelineHistogramChart timeline =
+    div [ class "timeline-line-graphs", title "Timeline line graphs by lifecycle action and entity kind" ]
+        [ viewTimelineLineChart timeline "Create" "created"
+        , viewTimelineLineChart timeline "Complete" "completed"
+        , viewTimelineLineChart timeline "Delete" "deleted"
+        ]
+
+
+viewTimelineChartToggles : TimelineChartSeries -> Html Msg
+viewTimelineChartToggles series =
+    div [ class "timeline-chart-toggles", attribute "aria-label" "Visible entity series" ]
+        [ viewTimelineChartToggle "projects" "Projects" series.projects
+        , viewTimelineChartToggle "tasks" "Tasks" series.tasks
+        , viewTimelineChartToggle "subtasks" "Subtasks" series.subtasks
+        , viewTimelineChartToggle "observations" "Observations" series.observations
+        ]
+
+
+viewTimelineChartToggle : String -> String -> Bool -> Html Msg
+viewTimelineChartToggle key label visible =
+    button
+        [ class ("timeline-series-toggle timeline-series-" ++ key)
+        , attribute "aria-pressed" (if visible then "true" else "false")
+        , onClick (ToggleTimelineChartSeries key)
+        ]
+        [ span [ class "timeline-series-marker" ] []
+        , text label
+        ]
+
+
+toggleTimelineChartSeries : String -> TimelineChartSeries -> TimelineChartSeries
+toggleTimelineChartSeries key series =
+    case key of
+        "projects" ->
+            { series | projects = not series.projects }
+
+        "tasks" ->
+            { series | tasks = not series.tasks }
+
+        "subtasks" ->
+            { series | subtasks = not series.subtasks }
+
+        "observations" ->
+            { series | observations = not series.observations }
+
+        _ ->
+            series
+
+
+viewTimelineLineChart : TimelineModel -> String -> String -> Html Msg
+viewTimelineLineChart timeline actionLabel action =
     let
-        maxTotal =
-            timeline.histogramBuckets
-                |> List.map timelineBucketTotal
-                |> List.maximum
-                |> Maybe.withDefault 0
-                |> max 1
+        visibleSeries =
+            timelineChartSeries timeline.chartSeries action timeline.histogramBuckets
+
+        actualMaximum =
+            lineChartMaximum visibleSeries
+
+        renderDomain =
+            lineChartRenderDomain actualMaximum
+
+        bucketCount =
+            List.length timeline.histogramBuckets
+
+        canvasWidth =
+            chartCanvasWidth bucketCount
     in
-    div [ class "timeline-histogram-chart", title "Timeline bucket counts by lifecycle action and entity kind" ]
-        (List.map (viewTimelineHistogramBucket timeline.histogramSelectedBucket maxTotal) timeline.histogramBuckets)
+    section [ class "timeline-line-chart-panel" ]
+        [ h5 [] [ text actionLabel ]
+        , p [ class "timeline-line-chart-summary" ] [ text (actionLabel ++ " maximum: " ++ String.fromInt actualMaximum) ]
+        , div [ class "timeline-svg-scroll" ]
+            [ Svg.svg
+                [ SA.viewBox ("0 0 " ++ String.fromInt canvasWidth ++ " 280")
+                , SA.width (String.fromInt canvasWidth)
+                , SA.class "timeline-line-chart"
+                , attribute "aria-labelledby" ("timeline-chart-" ++ action ++ "-title timeline-chart-" ++ action ++ "-description")
+                ]
+                ([ Svg.title [ SA.id ("timeline-chart-" ++ action ++ "-title") ] [ Svg.text (actionLabel ++ " lifecycle counts by UTC bucket") ]
+                 , Svg.desc [ SA.id ("timeline-chart-" ++ action ++ "-description") ] [ Svg.text "Each interactive point selects its half-open UTC bucket for the event cards." ]
+                 ]
+                    ++ timelineChartGrid canvasWidth actualMaximum renderDomain
+                    ++ timelineXLabels canvasWidth timeline.histogramBuckets
+                    ++ List.concatMap (viewTimelineSeriesSvg timeline.chartPointFocus timeline.histogramSelectedBucket actionLabel action renderDomain canvasWidth bucketCount) visibleSeries
+                )
+            ]
+        , viewTimelineValueTable timeline.histogramSelectedBucket actionLabel action timeline.chartSeries timeline.histogramBuckets
+        ]
 
 
-viewTimelineHistogramBucket : Maybe TimelineHistogramSelection -> Int -> Api.WorkspaceTimelineBucket -> Html Msg
-viewTimelineHistogramBucket selectedBucket maxTotal bucket =
-    let
-        isSelected =
-            selectedBucket == Just { label = bucket.label, since = bucket.bucketStart, until = bucket.bucketEnd }
+lineChartMaximum : List TimelineSeriesDefinition -> Int
+lineChartMaximum series =
+    series
+        |> List.concatMap (\definition -> List.map .count definition.values)
+        |> List.maximum
+        |> Maybe.withDefault 0
 
-        bucketClass =
-            if isSelected then
-                "timeline-histogram-bucket timeline-histogram-bucket-selected"
+
+lineChartRenderDomain : Int -> Int
+lineChartRenderDomain actualMaximum =
+    max 1 actualMaximum
+
+
+type alias TimelineSeriesDefinition =
+    { key : String
+    , label : String
+    , values : List TimelineSeriesPoint
+    }
+
+
+type alias TimelineSeriesPoint =
+    { label : String
+    , since : String
+    , until : String
+    , count : Int
+    }
+
+
+timelineChartSeries : TimelineChartSeries -> String -> List Api.WorkspaceTimelineBucket -> List TimelineSeriesDefinition
+timelineChartSeries visibility action buckets =
+    [ { visible = visibility.projects, key = "projects", label = "Projects", selectCounts = \bucket -> bucket.series.project }
+    , { visible = visibility.tasks, key = "tasks", label = "Tasks", selectCounts = \bucket -> bucket.series.task }
+    , { visible = visibility.subtasks, key = "subtasks", label = "Subtasks", selectCounts = \bucket -> bucket.series.subtask }
+    , { visible = visibility.observations, key = "observations", label = "Observations", selectCounts = \bucket -> bucket.series.observation }
+    ]
+        |> List.filterMap
+            (\definition ->
+                if definition.visible then
+                    Just
+                        { key = definition.key
+                        , label = definition.label
+                        , values = List.map (\bucket -> { label = bucket.label, since = bucket.bucketStart, until = bucket.bucketEnd, count = timelineActionValue action (definition.selectCounts bucket) }) buckets
+                        }
+
+                else
+                    Nothing
+            )
+
+
+timelineActionValue : String -> Api.TimelineBucketActionCounts -> Int
+timelineActionValue action counts =
+    case action of
+        "created" ->
+            counts.created
+
+        "completed" ->
+            counts.completed
+
+        "deleted" ->
+            counts.deleted
+
+        _ ->
+            0
+
+
+timelineChartGrid : Int -> Int -> Int -> List (Svg.Svg Msg)
+timelineChartGrid canvasWidth actualMaximum renderDomain =
+    chartTickValues actualMaximum
+        |> List.concatMap
+            (\tick ->
+                let
+                    y = chartY renderDomain (toFloat tick)
+                in
+                [ Svg.line [ SA.x1 "44", SA.x2 (floatString (toFloat canvasWidth - 20)), SA.y1 (floatString y), SA.y2 (floatString y), SA.class "timeline-chart-grid" ] []
+                , Svg.text_ [ SA.x "38", SA.y (floatString (y + 4)), SA.class "timeline-chart-axis" ] [ Svg.text (String.fromInt tick) ]
+                ]
+            )
+
+
+chartTickValues : Int -> List Int
+chartTickValues actualMaximum =
+    if actualMaximum <= 3 then
+        List.range 0 actualMaximum
+
+    else
+        let
+            step =
+                ceiling (toFloat actualMaximum / 4)
+        in
+        [ 0, step, step * 2, step * 3, actualMaximum ]
+            |> List.filter (\tick -> tick <= actualMaximum)
+            |> uniqueInts
+
+
+uniqueInts : List Int -> List Int
+uniqueInts values =
+    List.foldl
+        (\value collected ->
+            if List.member value collected then
+                collected
 
             else
-                "timeline-histogram-bucket"
+                collected ++ [ value ]
+        )
+        []
+        values
+
+
+timelineXLabels : Int -> List Api.WorkspaceTimelineBucket -> List (Svg.Svg Msg)
+timelineXLabels canvasWidth buckets =
+    let
+        bucketCount =
+            List.length buckets
+
+        labelStep =
+            max 1 ((bucketCount + 7) // 8)
     in
-    button
-        [ class bucketClass
-        , title (timelineBucketTooltip bucket)
-        , onClick (SelectTimelineHistogramBucket bucket.label bucket.bucketStart bucket.bucketEnd)
+    buckets
+        |> List.indexedMap Tuple.pair
+        |> List.filter (\( index, _ ) -> modBy labelStep index == 0 || index == bucketCount - 1)
+        |> List.map
+            (\( index, bucket ) ->
+                Svg.text_
+                    [ SA.x (floatString (chartXWithWidth canvasWidth bucketCount index))
+                    , SA.y "264"
+                    , SA.class "timeline-chart-x-axis"
+                    ]
+                    [ Svg.text bucket.label ]
+            )
+
+
+viewTimelineSeriesSvg : Dict.Dict String Int -> Maybe TimelineHistogramSelection -> String -> String -> Int -> Int -> Int -> TimelineSeriesDefinition -> List (Svg.Svg Msg)
+viewTimelineSeriesSvg pointFocus selectedBucket actionLabel action renderDomain canvasWidth bucketCount series =
+    let
+        points =
+            List.indexedMap (\index point -> { x = chartXWithWidth canvasWidth bucketCount index + pointMarkerOffset series.key, y = chartY renderDomain (toFloat point.count), label = point.label, since = point.since, until = point.until, count = point.count }) series.values
+    in
+    Svg.path [ SA.d (timelinePath points), SA.class ("timeline-line timeline-series-" ++ series.key), SA.fill "none" ] []
+        :: List.indexedMap (viewTimelinePoint pointFocus selectedBucket actionLabel action series (List.length points)) points
+
+
+viewTimelinePoint : Dict.Dict String Int -> Maybe TimelineHistogramSelection -> String -> String -> TimelineSeriesDefinition -> Int -> Int -> { x : Float, y : Float, label : String, since : String, until : String, count : Int } -> Svg.Svg Msg
+viewTimelinePoint pointFocus selectedBucket actionLabel action series pointCount index point =
+    let
+        matchingBucket =
+            -- labels are response labels; the table remains the keyboard activation path.
+            (selectedBucket |> Maybe.map .label) == Just point.label
+
+        displayX =
+            point.x
+
+        pointId =
+            timelinePointId action series.key index
+
+        isRovingTarget =
+            Dict.get (timelinePointFocusKey action series.key) pointFocus
+                |> Maybe.withDefault 0
+                |> (==) index
+    in
+    Svg.g
+        [ SA.class ("timeline-point-control timeline-series-" ++ series.key ++ if matchingBucket then " timeline-point-selected" else "")
+        , SA.id pointId
+        , attribute "role" "button"
+        , attribute "tabindex" (if isRovingTarget then "0" else "-1")
+        , attribute "aria-pressed" (if matchingBucket then "true" else "false")
+        , attribute "aria-label" (actionLabel ++ ", " ++ series.label ++ ", " ++ point.label ++ ", " ++ point.since ++ " to " ++ point.until ++ " exclusive, " ++ String.fromInt point.count ++ ", " ++ if matchingBucket then "selected" else "not selected")
+        , onClick (SelectTimelineHistogramBucket point.label point.since point.until)
+        , onTimelinePointKey action series.key index pointCount (SelectTimelineHistogramBucket point.label point.since point.until)
         ]
-        [ div [ class "timeline-histogram-bar" ]
-            (timelineBucketSegments maxTotal bucket)
-        , div [ class "timeline-histogram-bucket-label" ] [ text bucket.label ]
-        , div [ class "timeline-histogram-bucket-total" ] [ text (String.fromInt (timelineBucketTotal bucket) ++ " events") ]
-        , div [ class "timeline-histogram-entity-counts" ]
-            [ span [] [ text ("P " ++ String.fromInt (timelineBucketEntityTotal bucket.counts.project)) ]
-            , span [] [ text ("SP " ++ String.fromInt (timelineBucketEntityTotal bucket.counts.subproject)) ]
-            , span [] [ text ("T " ++ String.fromInt (timelineBucketEntityTotal bucket.counts.task)) ]
-            , span [] [ text ("ST " ++ String.fromInt (timelineBucketEntityTotal bucket.counts.subtask)) ]
+        [ Svg.circle
+            [ SA.cx (floatString displayX)
+            , SA.cy (floatString point.y)
+            , SA.r "11"
+            , SA.class "timeline-point-hitarea"
             ]
+            []
+        , Svg.circle
+            [ SA.cx (floatString displayX)
+            , SA.cy (floatString point.y)
+            , SA.r "6"
+            , SA.class "timeline-point"
+            ]
+            []
+        , Svg.title [] [ Svg.text (actionLabel ++ " — " ++ series.label ++ " — " ++ point.label ++ " [" ++ point.since ++ ", " ++ point.until ++ "): " ++ String.fromInt point.count) ]
+        ]
+
+
+pointMarkerOffset : String -> Float
+pointMarkerOffset key =
+    case key of
+        "projects" ->
+            -36
+
+        "tasks" ->
+            -12
+
+        "subtasks" ->
+            12
+
+        "observations" ->
+            36
+
+        _ ->
+            0
+
+
+timelinePointFocusKey : String -> String -> String
+timelinePointFocusKey action series =
+    action ++ "-" ++ series
+
+
+timelinePointId : String -> String -> Int -> String
+timelinePointId action series index =
+    "timeline-point-" ++ timelinePointFocusKey action series ++ "-" ++ String.fromInt index
+
+
+timelinePointNextIndex : String -> Int -> Int -> Int
+timelinePointNextIndex key pointCount index =
+    case key of
+        "ArrowLeft" ->
+            max 0 (index - 1)
+
+        "ArrowRight" ->
+            min (pointCount - 1) (index + 1)
+
+        "Home" ->
+            0
+
+        "End" ->
+            max 0 (pointCount - 1)
+
+        "PageUp" ->
+            max 0 (index - 30)
+
+        "PageDown" ->
+            min (pointCount - 1) (index + 30)
+
+        _ ->
+            index
+
+
+clampTimelinePointFocus : Int -> Dict.Dict String Int -> Dict.Dict String Int
+clampTimelinePointFocus bucketCount pointFocus =
+    let
+        maximum =
+            max 0 (bucketCount - 1)
+    in
+    Dict.map (\_ index -> min maximum (max 0 index)) pointFocus
+
+
+onTimelinePointKey : String -> String -> Int -> Int -> Msg -> Html.Attribute Msg
+onTimelinePointKey action series index pointCount activate =
+    preventDefaultOn "keydown"
+        (Decode.field "key" Decode.string
+            |> Decode.andThen
+                (\key ->
+                    if key == "Enter" || key == " " || key == "Spacebar" then
+                        Decode.succeed ( activate, True )
+
+                    else if List.member key [ "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown" ] then
+                        Decode.succeed ( FocusTimelineChartPoint action series (timelinePointNextIndex key pointCount index), True )
+
+                    else
+                        Decode.fail "Not an activation key"
+                )
+        )
+
+
+chartX : Int -> Int -> Float
+chartX count index =
+    chartXWithWidth 720 count index
+
+
+chartCanvasWidth : Int -> Int
+chartCanvasWidth bucketCount =
+    max 720 (160 + (max 0 (bucketCount - 1) * 104))
+
+
+chartXWithWidth : Int -> Int -> Int -> Float
+chartXWithWidth canvasWidth count index =
+    if count <= 1 then
+        toFloat canvasWidth / 2
+
+    else
+        80 + (toFloat index * (toFloat canvasWidth - 160) / toFloat (count - 1))
+
+
+chartY : Int -> Float -> Float
+chartY maxValue value =
+    236 - (value / toFloat (max 1 maxValue) * 196)
+
+
+timelinePath : List { x : Float, y : Float, label : String, since : String, until : String, count : Int } -> String
+timelinePath points =
+    points
+        |> List.indexedMap (\index point -> (if index == 0 then "M " else "L ") ++ floatString point.x ++ " " ++ floatString point.y)
+        |> String.join " "
+
+
+floatString : Float -> String
+floatString value =
+    String.fromFloat value
+
+
+viewTimelineValueTable : Maybe TimelineHistogramSelection -> String -> String -> TimelineChartSeries -> List Api.WorkspaceTimelineBucket -> Html Msg
+viewTimelineValueTable selectedBucket actionLabel action visibility buckets =
+    table [ class "timeline-value-table" ]
+        [ caption [] [ text (actionLabel ++ " values by UTC bucket") ]
+        , thead [] [ tr [] [ th [] [ text "Bucket" ], th [] [ text "Projects" ], th [] [ text "Tasks" ], th [] [ text "Subtasks" ], th [] [ text "Observations" ] ] ]
+        , tbody []
+            (List.map
+                (\bucket ->
+                    let
+                        selected = selectedBucket == Just { label = bucket.label, since = bucket.bucketStart, until = bucket.bucketEnd }
+                        valueFor enabled counts = if enabled then String.fromInt (timelineActionValue action counts) else "Hidden"
+                    in
+                    tr [ class (if selected then "timeline-value-row-selected" else "") ]
+                        [ th [] [ button [ class "timeline-bucket-button", onClick (SelectTimelineHistogramBucket bucket.label bucket.bucketStart bucket.bucketEnd), attribute "aria-label" ("Show events for " ++ bucket.label ++ ", " ++ bucket.bucketStart ++ " through " ++ bucket.bucketEnd) ] [ text bucket.label ] ]
+                        , td [] [ text (valueFor visibility.projects bucket.series.project) ]
+                        , td [] [ text (valueFor visibility.tasks bucket.series.task) ]
+                        , td [] [ text (valueFor visibility.subtasks bucket.series.subtask) ]
+                        , td [] [ text (valueFor visibility.observations bucket.series.observation) ]
+                        ]
+                )
+                buckets
+            )
         ]
 
 
@@ -814,62 +1196,6 @@ viewFilterPill label active msg =
         , onClick msg
         ]
         [ text label ]
-
-
-timelineBucketSegments : Int -> Api.WorkspaceTimelineBucket -> List (Html Msg)
-timelineBucketSegments maxTotal bucket =
-    [ ( "timeline-histogram-created", bucket.totals.created, "Created" )
-    , ( "timeline-histogram-completed", bucket.totals.completed, "Completed" )
-    , ( "timeline-histogram-cancelled", bucket.totals.cancelled, "Cancelled" )
-    ]
-        |> List.filterMap
-            (\( className, count, label ) ->
-                if count <= 0 then
-                    Nothing
-
-                else
-                    Just
-                        (div
-                            [ class ("timeline-histogram-segment " ++ className)
-                            , style "height" (histogramSegmentHeight maxTotal count)
-                            , title (label ++ ": " ++ String.fromInt count)
-                            ]
-                            []
-                        )
-            )
-
-
-histogramSegmentHeight : Int -> Int -> String
-histogramSegmentHeight maxTotal count =
-    let
-        percent =
-            (toFloat count / toFloat (max 1 maxTotal)) * 100
-    in
-    String.fromInt (max 4 (round percent)) ++ "%"
-
-
-timelineBucketTotal : Api.WorkspaceTimelineBucket -> Int
-timelineBucketTotal bucket =
-    timelineBucketEntityTotal bucket.totals
-
-
-timelineBucketEntityTotal : Api.TimelineBucketCounts -> Int
-timelineBucketEntityTotal counts =
-    counts.created + counts.completed + counts.cancelled
-
-
-timelineBucketTooltip : Api.WorkspaceTimelineBucket -> String
-timelineBucketTooltip bucket =
-    String.join "\n"
-        [ bucket.label ++ " (" ++ bucket.bucketStart ++ " to " ++ bucket.bucketEnd ++ ")"
-        , "Created: " ++ String.fromInt bucket.totals.created
-        , "Completed: " ++ String.fromInt bucket.totals.completed
-        , "Cancelled: " ++ String.fromInt bucket.totals.cancelled
-        , "Projects: " ++ String.fromInt (timelineBucketEntityTotal bucket.counts.project)
-        , "Subprojects: " ++ String.fromInt (timelineBucketEntityTotal bucket.counts.subproject)
-        , "Tasks: " ++ String.fromInt (timelineBucketEntityTotal bucket.counts.task)
-        , "Subtasks: " ++ String.fromInt (timelineBucketEntityTotal bucket.counts.subtask)
-        ]
 
 
 sortTimelineEvents : List Api.WorkspaceTimelineEvent -> List Api.WorkspaceTimelineEvent

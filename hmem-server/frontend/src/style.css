@@ -3085,15 +3085,7 @@ button.observation-card.observation-card-selected {
   margin-bottom: 1rem;
 }
 
-.timeline-histogram-panel {
-  margin-bottom: 1rem;
-  padding: 1rem;
-  border: 1px solid var(--border);
-  border-radius: 0.875rem;
-  background: rgba(30, 41, 59, 0.72);
-}
-
-.timeline-histogram-header {
+.timeline-graph-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -3101,26 +3093,26 @@ button.observation-card.observation-card-selected {
   margin-bottom: 0.875rem;
 }
 
-.timeline-histogram-header h4 {
+.timeline-graph-header h4 {
   margin: 0 0 0.25rem;
   font-size: 1rem;
 }
 
-.timeline-histogram-header p,
-.timeline-histogram-state {
+.timeline-graph-header p,
+.timeline-graph-state {
   margin: 0;
   color: var(--text-muted);
   font-size: 0.8125rem;
 }
 
-.timeline-histogram-controls {
+.timeline-graph-controls {
   display: flex;
   flex-wrap: wrap;
   gap: 0.75rem;
   margin-bottom: 0.875rem;
 }
 
-.timeline-histogram-control {
+.timeline-graph-control {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
@@ -3132,8 +3124,8 @@ button.observation-card.observation-card-selected {
   letter-spacing: 0.04em;
 }
 
-.timeline-histogram-control input,
-.timeline-histogram-control select {
+.timeline-graph-control input,
+.timeline-graph-control select {
   min-height: 2.25rem;
   padding: 0.375rem 0.5rem;
   border: 1px solid var(--border);
@@ -3145,120 +3137,109 @@ button.observation-card.observation-card-selected {
   letter-spacing: normal;
 }
 
-.timeline-histogram-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  justify-content: flex-end;
-  color: var(--text-muted);
-  font-size: 0.75rem;
-}
-
-.timeline-histogram-legend-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-}
-
-.timeline-histogram-swatch {
-  display: inline-block;
-  width: 0.75rem;
-  height: 0.75rem;
-  border-radius: 0.1875rem;
-}
-
-.timeline-histogram-created {
-  background: rgba(34, 197, 94, 0.78);
-}
-
-.timeline-histogram-completed {
-  background: rgba(99, 102, 241, 0.82);
-}
-
-.timeline-histogram-cancelled {
-  background: rgba(239, 68, 68, 0.8);
-}
-
-.timeline-histogram-content {
+.timeline-graph-content {
   min-height: 2rem;
 }
 
-.timeline-histogram-error {
-  color: #fca5a5;
-}
-
-.timeline-histogram-chart {
-  display: flex;
-  align-items: flex-end;
-  gap: 0.75rem;
-  overflow-x: auto;
-  padding: 0.25rem 0 0.5rem;
-}
-
-.timeline-histogram-bucket {
-  flex: 0 0 5.5rem;
-  min-width: 5.5rem;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 0.375rem;
-  padding: 0.375rem;
-  border: 1px solid transparent;
-  border-radius: 0.625rem;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-
-.timeline-histogram-bucket:hover,
-.timeline-histogram-bucket-selected {
-  border-color: var(--accent);
-  background: rgba(99, 102, 241, 0.12);
-}
-
-.timeline-histogram-bucket-selected .timeline-histogram-bucket-label {
-  color: var(--accent-hover);
-}
-
-.timeline-histogram-bar {
-  display: flex;
-  flex-direction: column-reverse;
-  justify-content: flex-start;
-  height: 8rem;
-  overflow: hidden;
+.timeline-chart-panel {
+  margin-bottom: 1rem;
+  padding: 1rem;
   border: 1px solid var(--border);
-  border-radius: 0.5rem 0.5rem 0.25rem 0.25rem;
-  background: rgba(15, 23, 42, 0.65);
+  border-radius: 0.875rem;
+  background: rgba(30, 41, 59, 0.72);
 }
 
-.timeline-histogram-segment {
-  width: 100%;
-  min-height: 0.25rem;
+.timeline-chart-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
 }
 
-.timeline-histogram-bucket-label,
-.timeline-histogram-bucket-total,
-.timeline-histogram-entity-counts {
-  text-align: center;
-  font-size: 0.6875rem;
-}
-
-.timeline-histogram-bucket-label {
-  color: var(--text);
-  font-weight: 700;
-  overflow-wrap: anywhere;
-}
-
-.timeline-histogram-bucket-total,
-.timeline-histogram-entity-counts {
+.timeline-series-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2.25rem;
+  padding: 0.375rem 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
   color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
 }
 
-.timeline-histogram-entity-counts {
+.timeline-series-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--text);
+  background: rgba(99, 102, 241, 0.14);
+}
+
+.timeline-series-toggle:focus-visible,
+.timeline-bucket-button:focus-visible,
+.timeline-point-control:focus-visible {
+  outline: 3px solid #fbbf24;
+  outline-offset: 2px;
+}
+
+.timeline-series-marker {
+  width: 0.875rem;
+  height: 0.25rem;
+  border-top: 3px solid currentColor;
+}
+
+.timeline-series-tasks .timeline-series-marker { border-top-style: dashed; }
+.timeline-series-subtasks .timeline-series-marker { border-top-style: dotted; }
+.timeline-series-observations .timeline-series-marker { border-top-width: 5px; }
+
+.timeline-line-graphs {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.125rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.875rem;
+}
+
+.timeline-line-chart-panel {
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.625rem;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.timeline-line-chart-panel h5 { margin: 0; font-size: 0.95rem; }
+.timeline-line-chart-summary { margin: 0.25rem 0 0.5rem; color: var(--text-muted); font-size: 0.75rem; }
+.timeline-svg-scroll { overflow-x: auto; padding: 0.25rem 0 0.5rem; }
+.timeline-line-chart { display: block; min-width: 100%; height: auto; }
+.timeline-chart-grid { stroke: rgba(148, 163, 184, 0.28); stroke-width: 1; }
+.timeline-chart-axis { fill: var(--text-muted); font-size: 12px; text-anchor: end; }
+.timeline-chart-x-axis { fill: var(--text-muted); font-size: 11px; text-anchor: middle; }
+.timeline-line { fill: none; stroke: currentColor; stroke-width: 3; vector-effect: non-scaling-stroke; pointer-events: none; }
+.timeline-series-projects { color: #a5b4fc; }
+.timeline-series-tasks { color: #5eead4; stroke-dasharray: 8 4; }
+.timeline-series-subtasks { color: #fdba74; stroke-dasharray: 2 4; }
+.timeline-series-observations { color: #f9a8d4; stroke-dasharray: 12 3 2 3; }
+.timeline-point-control { cursor: pointer; }
+.timeline-point-hitarea { fill: transparent; stroke: transparent; }
+.timeline-point { fill: currentColor; stroke: var(--bg); stroke-width: 2; }
+.timeline-point-selected { stroke: #fbbf24; stroke-width: 4; }
+.timeline-point-selected .timeline-point { stroke: #fbbf24; stroke-width: 4; }
+
+.timeline-value-table {
+  width: 100%;
+  margin-top: 0.5rem;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+.timeline-value-table caption { text-align: left; color: var(--text-muted); margin-bottom: 0.25rem; }
+.timeline-value-table th, .timeline-value-table td { padding: 0.25rem; border-top: 1px solid var(--border); text-align: right; }
+.timeline-value-table th:first-child { text-align: left; }
+.timeline-bucket-button { border: 0; padding: 0.125rem 0; background: none; color: var(--accent-hover); cursor: pointer; font: inherit; text-decoration: underline; }
+.timeline-value-row-selected { background: rgba(99, 102, 241, 0.15); }
+
+.timeline-graph-error {
+  color: #fca5a5;
 }
 
 .timeline-more-note {
@@ -3494,21 +3475,29 @@ button.observation-card.observation-card-selected {
 }
 
 @media (max-width: 640px) {
-  .timeline-histogram-header {
+  .timeline-line-graphs {
+    grid-template-columns: 1fr;
+  }
+
+  .timeline-chart-toggles {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .timeline-series-toggle {
+    justify-content: center;
+  }
+
+  .timeline-value-table {
+    font-size: 0.6875rem;
+  }
+
+  .timeline-graph-header {
     flex-direction: column;
   }
 
-  .timeline-histogram-legend {
-    justify-content: flex-start;
-  }
-
-  .timeline-histogram-control {
+  .timeline-graph-control {
     flex: 1 1 100%;
-  }
-
-  .timeline-histogram-bucket {
-    flex-basis: 4.75rem;
-    min-width: 4.75rem;
   }
 
   .timeline-selection-note {

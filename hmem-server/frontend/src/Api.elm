@@ -46,7 +46,10 @@ module Api exposing
     , TaskStatus(..)
     , TimelineActor
     , TimelineBucketCounts
+    , TimelineBucketActionTotals
+    , TimelineBucketActionCounts
     , TimelineBucketEntityCounts
+    , TimelineBucketSeries
     , TimelineNavigation
     , TimelineProjectContext
     , TimelineStatusTransition
@@ -550,12 +553,36 @@ type alias TimelineBucketEntityCounts =
     }
 
 
+type alias TimelineBucketSeries =
+    { project : TimelineBucketActionCounts
+    , task : TimelineBucketActionCounts
+    , subtask : TimelineBucketActionCounts
+    , observation : TimelineBucketActionCounts
+    }
+
+
+type alias TimelineBucketActionCounts =
+    { created : Int
+    , completed : Int
+    , deleted : Int
+    }
+
+
+type alias TimelineBucketActionTotals =
+    { created : Int
+    , completed : Int
+    , deleted : Int
+    }
+
+
 type alias WorkspaceTimelineBucket =
     { bucketStart : String
     , bucketEnd : String
     , label : String
     , counts : TimelineBucketEntityCounts
     , totals : TimelineBucketCounts
+    , series : TimelineBucketSeries
+    , seriesTotals : TimelineBucketActionTotals
     }
 
 
@@ -1586,6 +1613,8 @@ workspaceTimelineBucketDecoder =
         |> required "label" D.string
         |> required "counts" timelineBucketEntityCountsDecoder
         |> required "totals" timelineBucketCountsDecoder
+        |> required "series" timelineBucketSeriesDecoder
+        |> required "series_totals" timelineBucketActionTotalsDecoder
 
 
 timelineBucketEntityCountsDecoder : Decoder TimelineBucketEntityCounts
@@ -1603,6 +1632,31 @@ timelineBucketCountsDecoder =
         |> required "created" D.int
         |> required "completed" D.int
         |> required "cancelled" D.int
+
+
+timelineBucketSeriesDecoder : Decoder TimelineBucketSeries
+timelineBucketSeriesDecoder =
+    D.succeed TimelineBucketSeries
+        |> required "project" timelineBucketActionCountsDecoder
+        |> required "task" timelineBucketActionCountsDecoder
+        |> required "subtask" timelineBucketActionCountsDecoder
+        |> required "observation" timelineBucketActionCountsDecoder
+
+
+timelineBucketActionCountsDecoder : Decoder TimelineBucketActionCounts
+timelineBucketActionCountsDecoder =
+    D.succeed TimelineBucketActionCounts
+        |> required "created" D.int
+        |> required "completed" D.int
+        |> required "deleted" D.int
+
+
+timelineBucketActionTotalsDecoder : Decoder TimelineBucketActionTotals
+timelineBucketActionTotalsDecoder =
+    D.succeed TimelineBucketActionTotals
+        |> required "created" D.int
+        |> required "completed" D.int
+        |> required "deleted" D.int
 
 
 revertResultDecoder : Decoder RevertResult

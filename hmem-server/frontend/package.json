@@ -3,13 +3,20 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "elm-test && node --test tests-js/*.test.js",
+    "test": "elm-test && elm make src/TimelineFixture.elm --output .timeline-fixture-test.js && node --test tests-js/*.test.js",
+    "test:timeline-fixture": "elm make src/TimelineFixture.elm --output .timeline-fixture-test.js && node --test tests-js/timeline-fixture.browser.test.js",
+    "test:browser:install": "playwright install chromium",
+    "test:clean-install": "npm ci && npm run test:browser:install && npm test",
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "elm": "^0.19.1-6",
     "elm-test": "^0.19.1-revision17",
     "vite": "^5.4.0",

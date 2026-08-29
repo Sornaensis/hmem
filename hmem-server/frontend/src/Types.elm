@@ -334,6 +334,8 @@ type alias TimelineModel =
     , histogramActiveRequest : Maybe TimelineHistogramRequest
     , histogramLoadedRequest : Maybe TimelineHistogramRequest
     , histogramSelectedBucket : Maybe TimelineHistogramSelection
+    , chartSeries : TimelineChartSeries
+    , chartPointFocus : Dict String Int
     }
 
 
@@ -356,6 +358,14 @@ type alias TimelineHistogramSelection =
     { label : String
     , since : String
     , until : String
+    }
+
+
+type alias TimelineChartSeries =
+    { projects : Bool
+    , tasks : Bool
+    , subtasks : Bool
+    , observations : Bool
     }
 
 
@@ -737,6 +747,8 @@ type Msg
     | SetTimelineHistogramBucket String
     | SelectTimelineHistogramBucket String String String
     | ResetTimelineHistogramSelection
+    | ToggleTimelineChartSeries String
+    | FocusTimelineChartPoint String String Int
     | ToggleEntityHistory String String
     | LoadMoreHistory String String
     | SetAuditFilter String String

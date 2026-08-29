@@ -173,7 +173,7 @@ suite =
             \_ ->
                 let
                     json =
-                        """{"workspace_id":"workspace-a","since":"2026-01-01T00:00:00Z","until":"2026-02-01T00:00:00Z","bucket":"week","buckets":[{"bucket_start":"2026-01-01T00:00:00Z","bucket_end":"2026-01-08T00:00:00Z","label":"2026-01-01","counts":{"project":{"created":1,"completed":0,"cancelled":0},"subproject":{"created":1,"completed":1,"cancelled":0},"task":{"created":2,"completed":0,"cancelled":1},"subtask":{"created":1,"completed":1,"cancelled":0}},"totals":{"created":5,"completed":2,"cancelled":1}}]}"""
+                        """{"workspace_id":"workspace-a","since":"2026-01-01T00:00:00Z","until":"2026-02-01T00:00:00Z","bucket":"week","buckets":[{"bucket_start":"2026-01-01T00:00:00Z","bucket_end":"2026-01-08T00:00:00Z","label":"2026-01-01","counts":{"project":{"created":1,"completed":0,"cancelled":0},"subproject":{"created":99,"completed":99,"cancelled":99},"task":{"created":2,"completed":0,"cancelled":88},"subtask":{"created":1,"completed":1,"cancelled":0}},"totals":{"created":5,"completed":2,"cancelled":88},"series":{"project":{"created":3,"completed":2,"deleted":4},"task":{"created":2,"completed":1,"deleted":1},"subtask":{"created":1,"completed":1,"deleted":0},"observation":{"created":7,"completed":0,"deleted":5}},"series_totals":{"created":13,"completed":4,"deleted":10}}]}"""
                 in
                 case Decode.decodeString Api.workspaceTimelineBucketsResponseDecoder json of
                     Ok response ->
@@ -182,13 +182,16 @@ suite =
                                 [ response.workspaceId
                                 , response.bucket
                                 , bucket.label
-                                , String.fromInt (Feature.Timeline.timelineBucketTotal bucket)
+                                , String.fromInt bucket.series.project.created
+                                , String.fromInt bucket.series.project.deleted
+                                , String.fromInt bucket.series.observation.completed
+                                , String.fromInt bucket.seriesTotals.deleted
                                 , String.fromInt bucket.counts.project.created
                                 , String.fromInt bucket.counts.subproject.completed
                                 , String.fromInt bucket.counts.task.cancelled
                                 , String.fromInt bucket.counts.subtask.completed
                                 ]
-                                    |> Expect.equal [ "workspace-a", "week", "2026-01-01", "8", "1", "1", "1", "1" ]
+                                    |> Expect.equal [ "workspace-a", "week", "2026-01-01", "3", "4", "0", "10", "1", "99", "88", "1" ]
 
                             _ ->
                                 Expect.fail "Expected one decoded bucket"
@@ -382,6 +385,49 @@ suite =
                     |> Feature.Timeline.filterTimelineEventsForSelection (Just selection) TimelineTasksOnly TimelineCompletedEvents
                     |> List.map .id
                     |> Expect.equal [ "inside-task" ]
+        , test "timeline drilldown uses the selected UTC range for the card fetch and filter" <|
+            \_ ->
+                let
+                    selection =
+                        { label = "Jan 1"
+                        , since = "2026-01-01T00:00:00Z"
+                        , until = "2026-01-02T00:00:00Z"
+                        }
+
+                    timeline =
+                        let
+                            initialTimeline =
+                                Feature.Timeline.init
+                        in
+                        { initialTimeline
+                            | histogramSelectedBucket = Just selection
+                            , entityFilter = TimelineTasksOnly
+                            , eventFilter = TimelineCompletedEvents
+                        }
+
+                    insideTask =
+                        timelineEvent "inside-task" "2026-01-01T10:00:00Z" "audit-inside"
+
+                    outsideTask =
+                        timelineEvent "outside-task" "2026-01-02T10:00:00Z" "audit-outside"
+
+                    request =
+                        Feature.Timeline.timelineEventsRequest "workspace-a" timeline
+                in
+                { workspaceId = request.workspaceId
+                , since = request.since
+                , until = request.until
+                , cardIds =
+                    [ insideTask, outsideTask ]
+                        |> Feature.Timeline.filterTimelineEventsForSelection timeline.histogramSelectedBucket timeline.entityFilter timeline.eventFilter
+                        |> List.map .id
+                }
+                    |> Expect.equal
+                        { workspaceId = "workspace-a"
+                        , since = Just "2026-01-01T00:00:00Z"
+                        , until = Just "2026-01-02T00:00:00Z"
+                        , cardIds = [ "inside-task" ]
+                        }
         , test "workspace timeline filters entity and lifecycle types" <|
             \_ ->
                 let

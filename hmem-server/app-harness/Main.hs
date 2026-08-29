@@ -35,7 +35,7 @@ import HMem.DB.Auth qualified as Auth
 import HMem.DB.Pool qualified as DBPool
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), TestSandbox(..), createTestWorkspace, withSandboxedTestEnv)
 import HMem.Server.AccessTracker (flushNow, newAccessTracker)
-import HMem.Server.App (mkApp)
+import HMem.Server.App (mkAppWithChangeStream)
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.Logging (jsonRequestLogger, logInfo, logWarn, newLogger, parseLogLevel)
@@ -173,7 +173,7 @@ runHarness opts = withSandboxedTestEnv $ \env -> do
   requestLogger <- jsonRequestLogger logAction
 
   pgvec <- DBPool.checkPgvector env.pool
-  app <- mkApp requestLogger cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState cfg.web.webStaticDir pgvec
+  app <- mkAppWithChangeStream cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState cfg.web.webStaticDir pgvec
 
   ready <- newEmptyMVar
   serverDone <- newEmptyMVar

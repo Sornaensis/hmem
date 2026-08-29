@@ -21,7 +21,7 @@ import HMem.Config qualified as Config
 import HMem.DB.Pool qualified as Pool
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), withSandboxedTestEnv)
 import HMem.Server.AccessTracker (newAccessTracker, flushNow)
-import HMem.Server.App (mkApp, mkAppWithChangeStream)
+import HMem.Server.App (mkAppWithChangeStream)
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
 import HMem.Server.LogRotation (preRotateLogFileIfNeeded)
 import HMem.Server.Logging (newLogger, parseLogLevel, logInfo, logWarn, jsonRequestLogger)
@@ -213,14 +213,37 @@ seedDevData pool = do
           \FROM tasks t1, tasks t2 \
           \WHERE t1.title = 'Add drag-and-drop' AND t2.title = 'Build graph view'; \
           \\
-          \INSERT INTO observations (workspace_id, subject_kind, subject, git_sha, content) \
-          \SELECT w.id, o.subject_kind::observation_subject_kind, o.subject, o.git_sha, o.content \
-          \FROM workspaces w, \
-          \     (VALUES ('file', 'src/HMem/Server/API.hs', '0123456789abcdef0123456789abcdef01234567', 'The server exposes repository-scoped Observations through a Servant REST API.'), \
-          \            ('file', 'hmem-server/migrations/V020__replace_memories_with_observations.sql', '0123456789abcdef0123456789abcdef01234567', 'V020 replaces the historical memory graph with provenance-bound observations.'), \
-          \            ('glob', 'hmem-server/src/**/*.hs', '0123456789abcdef0123456789abcdef01234567', 'WebSocket events identify observation changes with entity_type observation.')) \
-          \     AS o(subject_kind, subject, git_sha, content) \
-          \WHERE w.name = 'Demo Workspace';"
+          \DO $seed$ \
+          \DECLARE \
+          \  inserted_parent_count INTEGER; \
+          \  inserted_subject_count INTEGER; \
+          \BEGIN \
+          \  WITH demo_observations(subject_kind, subject, git_sha, content) AS ( \
+          \    VALUES ('file', 'src/HMem/Server/API.hs', '0123456789abcdef0123456789abcdef01234567', 'The server exposes repository-scoped Observations through a Servant REST API.'), \
+          \           ('file', 'hmem-server/migrations/V020__replace_memories_with_observations.sql', '0123456789abcdef0123456789abcdef01234567', 'V020 replaces the historical memory graph with provenance-bound observations.'), \
+          \           ('glob', 'hmem-server/src/**/*.hs', '0123456789abcdef0123456789abcdef01234567', 'WebSocket events identify observation changes with entity_type observation.') \
+          \  ), inserted_observations AS ( \
+          \    INSERT INTO observations (workspace_id, git_sha, content, subject_set_open) \
+          \    SELECT w.id, o.git_sha, o.content, TRUE \
+          \    FROM workspaces w CROSS JOIN demo_observations o \
+          \    WHERE w.name = 'Demo Workspace' \
+          \    RETURNING id, git_sha, content \
+          \  ), inserted_subjects AS ( \
+          \    INSERT INTO observation_subjects (observation_id, ordinal, subject_kind, subject) \
+          \    SELECT i.id, 0, o.subject_kind::observation_subject_kind, o.subject \
+          \    FROM inserted_observations i \
+          \    JOIN demo_observations o USING (git_sha, content) \
+          \    RETURNING observation_id \
+          \  ) \
+          \  SELECT (SELECT count(*) FROM inserted_observations), \
+          \         (SELECT count(*) FROM inserted_subjects) \
+          \  INTO inserted_parent_count, inserted_subject_count; \
+          \  IF inserted_parent_count <> 3 OR inserted_subject_count <> 3 THEN \
+          \    RAISE EXCEPTION 'dev observation seed mismatch: % parents, % subjects', \
+          \      inserted_parent_count, inserted_subject_count; \
+          \  END IF; \
+          \END \
+          \$seed$;"
     result <- Session.run (Session.sql seedSql) conn
     case result of
       Left err -> fail $ "[dev] demo seed failed: " ++ show err

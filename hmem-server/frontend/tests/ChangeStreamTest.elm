@@ -199,10 +199,10 @@ suite =
                           , ChangeStream.RefreshSearch "w"
                           , ChangeStream.RefreshMemberships "w"
                           , ChangeStream.RefreshGroupMembers "g"
-                           , ChangeStream.RefreshCatalogue
-                           , ChangeStream.RefreshSessionAuthorization
-                           , ChangeStream.RefreshTimeline
-                           ]
+                          , ChangeStream.RefreshCatalogue
+                          , ChangeStream.RefreshSessionAuthorization
+                          , ChangeStream.RefreshTimeline
+                          ]
                         , [ ChangeStream.RefetchEntity "workspace" "w", ChangeStream.RefreshCatalogue, ChangeStream.RefreshGroups ]
                         ]
         , test "unknown kind-target combinations fail closed without partial effects" <|
@@ -325,6 +325,34 @@ suite =
                     |> Expect.equal
                         [ [ ChangeStream.RefreshTaskOverview "t", ChangeStream.RefetchEntity "task" "t" ]
                         , [ ChangeStream.RemoveEntity "task_dependency" "t:d", ChangeStream.RefreshTaskOverview "t", ChangeStream.RefetchEntity "task" "t" ]
+                        ]
+        , test "observation invalidations coalesce targeted and active-page reconciliation" <|
+            \_ ->
+                let
+                    event action eventId =
+                        Api.CanonicalChange
+                            { eventId = eventId
+                            , scope = Api.WorkspaceScope "w"
+                            , workspaceId = Just "w"
+                            , entityType = "observation"
+                            , entityId = "o"
+                            , entityAction = action
+                            , invalidations =
+                                [ { kind = "entity", target = "observation:o" }
+                                , { kind = "collection", target = "observations:w" }
+                                , { kind = "collection", target = "observations:w" }
+                                ]
+                            }
+
+                    actions frames =
+                        ChangeStream.reduceFrames frames (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
+                in
+                [ actions [ event "updated" "u" ]
+                , actions [ event "updated" "u", event "deleted" "d" ]
+                ]
+                    |> Expect.equal
+                        [ [ ChangeStream.RefetchEntity "observation" "o", ChangeStream.RefreshObservations ]
+                        , [ ChangeStream.RemoveEntity "observation" "o", ChangeStream.RefreshObservations, ChangeStream.RefreshTimeline ]
                         ]
         , test "dedupe history is bounded and evicts the oldest accepted event" <|
             \_ ->

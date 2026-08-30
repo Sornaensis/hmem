@@ -122,7 +122,7 @@ update msg model =
         GotSingleMemory _ ->
             Ok ( model, Cmd.none )
 
-        GotObservationDetail _ _ _ _ ->
+        GotObservationDetail _ _ _ _ _ ->
             Ok (Feature.Observation.update msg model)
 
         GotInitialTaskOverview _ _ _ _ ->
@@ -287,6 +287,42 @@ update msg model =
             Ok (Feature.Observation.update msg model)
 
         CopyObservationSubject _ ->
+            Ok (Feature.Observation.update msg model)
+
+        StartObservationEdit ->
+            Ok (Feature.Observation.update msg model)
+
+        SetObservationDraft _ ->
+            Ok (Feature.Observation.update msg model)
+
+        SaveObservationEdit ->
+            Ok (Feature.Observation.update msg model)
+
+        CancelObservationEdit ->
+            Ok (Feature.Observation.update msg model)
+
+        ReloadObservationEdit ->
+            Ok (Feature.Observation.update msg model)
+
+        RebaseObservationEdit ->
+            Ok (Feature.Observation.update msg model)
+
+        ObservationUpdated _ _ ->
+            Ok (Feature.Observation.update msg model)
+
+        OpenObservationDelete ->
+            Ok (Feature.Observation.update msg model)
+
+        ConfirmObservationDelete ->
+            Ok (Feature.Observation.update msg model)
+
+        CancelObservationDelete ->
+            Ok (Feature.Observation.update msg model)
+
+        ObservationDeleteDialogKeyDown _ _ _ ->
+            Ok (Feature.Observation.update msg model)
+
+        ObservationDeleted _ _ ->
             Ok (Feature.Observation.update msg model)
 
         -- Inline editing

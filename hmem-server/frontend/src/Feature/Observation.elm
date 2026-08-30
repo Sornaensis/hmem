@@ -1,12 +1,42 @@
-module Feature.Observation exposing (canLoadMore, clearSelection, detailResponseMatches, init, listQuery, matchQuery, matchResponseMatches, normalizeMatchPaths, queryFingerprint, reload, selectObservation, selectionForTab, startReload, update, viewObservations, viewObservationsState)
+module Feature.Observation exposing
+    ( applyCanonicalObservation
+    , canLoadMore
+    , clearSelection
+    , deleteDialogFocusTarget
+    , detailResponseMatches
+    , init
+    , listQuery
+    , matchQuery
+    , matchResponseMatches
+    , mutationResponseMatches
+    , normalizeMatchPaths
+    , observationContentError
+    , preferNewerObservation
+    , queryFingerprint
+    , reconcileCurationPermission
+    , reconcileDeletedObservation
+    , refreshActiveResults
+    , reload
+    , removeObservation
+    , selectObservation
+    , selectionForTab
+    , startReload
+    , update
+    , viewObservations
+    , viewObservationsState
+    , viewObservationsStateWithPermission
+    )
 
 import Api
 import Char
 import Dict
-import Helpers exposing (formatDate, replaceFragment)
+import Helpers exposing (beginTrackedMutation, focusElement, formatDate, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (..)
-import Html.Events exposing (onClick, onInput)
+import Html.Events exposing (custom, onClick, onInput, stopPropagationOn)
+import Http
+import Json.Decode as Decode
+import Permissions
 import Ports exposing (copyToClipboard)
 import Toast exposing (addToast)
 import Types exposing (..)
@@ -37,12 +67,24 @@ init =
     , detailError = Nothing
     , activeDetailRequest = Nothing
     , nextDetailRequestToken = 1
+    , edit = Nothing
+    , deleteConfirmation = Nothing
+    , nextCurationContextToken = 1
+    , nextMutationRequestToken = 1
     }
 
 
 clearSelection : ObservationModel -> ObservationModel
 clearSelection state =
-    { state | selectedId = Nothing, selectedDetail = Nothing, detailLoading = False, detailError = Nothing, activeDetailRequest = Nothing }
+    { state
+        | selectedId = Nothing
+        , selectedDetail = Nothing
+        , detailLoading = False
+        , detailError = Nothing
+        , activeDetailRequest = Nothing
+        , edit = Nothing
+        , deleteConfirmation = Nothing
+    }
 
 
 selectionForTab : WorkspaceTab -> ObservationModel -> ObservationModel
@@ -124,11 +166,82 @@ update msg model =
             in
             ( updated, Cmd.batch [ copyToClipboard subject, toastCmd ] )
 
-        GotObservationDetail workspaceId observationId token result ->
-            if detailResponseMatches workspaceId observationId token model.selectedWorkspaceId model.observations then
+        StartObservationEdit ->
+            startEdit model
+
+        SetObservationDraft value ->
+            ( updateObservation
+                (\state ->
+                    { state
+                        | edit =
+                            state.edit
+                                |> Maybe.map (\edit -> { edit | draft = value, error = Nothing })
+                    }
+                )
+                model
+            , Cmd.none
+            )
+
+        SaveObservationEdit ->
+            saveEdit model
+
+        CancelObservationEdit ->
+            ( updateObservation (\state -> { state | edit = Nothing }) model
+            , focusElement "observation-edit"
+            )
+
+        ReloadObservationEdit ->
+            ( updateObservation reloadEdit model, Cmd.none )
+
+        RebaseObservationEdit ->
+            ( updateObservation rebaseEdit model, Cmd.none )
+
+        ObservationUpdated request result ->
+            handleUpdateResponse request result model
+
+        OpenObservationDelete ->
+            openDeleteConfirmation model
+
+        ConfirmObservationDelete ->
+            confirmDelete model
+
+        CancelObservationDelete ->
+            cancelDelete model
+
+        ObservationDeleteDialogKeyDown key shiftKey targetId ->
+            handleDeleteDialogKeyDown key shiftKey targetId model
+
+        ObservationDeleted request result ->
+            handleDeleteResponse request result model
+
+        GotObservationDetail workspaceId observationId sessionEpoch token result ->
+            if detailResponseMatches workspaceId observationId sessionEpoch token model.selectedWorkspaceId model.sessionRequestEpoch model.observations then
                 case result of
                     Ok observation ->
-                        ( updateObservation (\state -> { state | selectedDetail = Just observation, detailLoading = False, activeDetailRequest = Nothing }) model, Cmd.none )
+                        if observation.id == observationId && observation.workspaceId == workspaceId then
+                            ( updateObservation
+                                (applyCanonicalObservation observation
+                                    >> (\state -> { state | detailLoading = False, detailError = Nothing, activeDetailRequest = Nothing })
+                                )
+                                model
+                            , Cmd.none
+                            )
+
+                        else
+                            ( updateObservation (\state -> { state | detailLoading = False, detailError = Just "Observation detail did not match this workspace.", activeDetailRequest = Nothing }) model, Cmd.none )
+
+                    Err (Http.BadStatus 404) ->
+                        let
+                            ( cleaned, cleanupCmd ) =
+                                reconcileDeletedObservation observationId model
+
+                            ( refreshed, refreshCmd ) =
+                                refreshActiveResults cleaned
+
+                            ( toasted, toastCmd ) =
+                                addToast Warning "This observation was deleted." refreshed
+                        in
+                        ( toasted, Cmd.batch [ cleanupCmd, refreshCmd, toastCmd ] )
 
                     Err _ ->
                         ( updateObservation (\state -> { state | detailLoading = False, detailError = Just "Failed to load observation detail.", activeDetailRequest = Nothing }) model, Cmd.none )
@@ -150,6 +263,498 @@ update msg model =
 
         _ ->
             ( model, Cmd.none )
+
+
+startEdit : Model -> ( Model, Cmd Msg )
+startEdit model =
+    case currentSelectedObservation model.observations of
+        Just observation ->
+            if canMutateObservation observation model then
+                let
+                    state =
+                        model.observations
+
+                    contextToken =
+                        state.nextCurationContextToken
+
+                    edit =
+                        { workspaceId = observation.workspaceId
+                        , observationId = observation.id
+                        , sessionEpoch = model.sessionRequestEpoch
+                        , contextToken = contextToken
+                        , baseContent = observation.content
+                        , baseUpdatedAt = observation.updatedAt
+                        , draft = observation.content
+                        , latestCanonical = observation
+                        , conflict = False
+                        , saving = False
+                        , error = Nothing
+                        , activeRequest = Nothing
+                        }
+                in
+                ( updateObservation
+                    (\current ->
+                        { current
+                            | edit = Just edit
+                            , deleteConfirmation = Nothing
+                            , nextCurationContextToken = contextToken + 1
+                        }
+                    )
+                    model
+                , focusElement "observation-edit-content"
+                )
+
+            else
+                ( model, Cmd.none )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
+saveEdit : Model -> ( Model, Cmd Msg )
+saveEdit model =
+    case model.observations.edit of
+        Just edit ->
+            if not (editContextIsCurrent edit model) || edit.saving || edit.conflict then
+                ( model, Cmd.none )
+
+            else
+                case observationContentError edit.draft of
+                    Just message ->
+                        ( updateObservation
+                            (\state -> { state | edit = Just { edit | error = Just message } })
+                            model
+                        , Cmd.none
+                        )
+
+                    Nothing ->
+                        let
+                            requestToken =
+                                model.observations.nextMutationRequestToken
+
+                            request =
+                                { workspaceId = edit.workspaceId
+                                , observationId = edit.observationId
+                                , sessionEpoch = edit.sessionEpoch
+                                , contextToken = edit.contextToken
+                                , requestToken = requestToken
+                                }
+
+                            prepared =
+                                updateObservation
+                                    (\state ->
+                                        { state
+                                            | edit = Just { edit | saving = True, error = Nothing, activeRequest = Just request }
+                                            , nextMutationRequestToken = requestToken + 1
+                                        }
+                                    )
+                                    model
+
+                            ( tracked, requestId, clearCmd ) =
+                                beginTrackedMutation [ edit.observationId ] prepared
+                        in
+                        ( tracked
+                        , Cmd.batch
+                            [ clearCmd
+                            , Api.updateObservation model.flags.apiUrl edit.observationId edit.draft requestId (ObservationUpdated request)
+                            ]
+                        )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
+reloadEdit : ObservationModel -> ObservationModel
+reloadEdit state =
+    { state
+        | edit =
+            state.edit
+                |> Maybe.map
+                    (\edit ->
+                        { edit
+                            | baseContent = edit.latestCanonical.content
+                            , baseUpdatedAt = edit.latestCanonical.updatedAt
+                            , draft = edit.latestCanonical.content
+                            , conflict = False
+                            , saving = False
+                            , error = Nothing
+                            , activeRequest = Nothing
+                        }
+                    )
+    }
+
+
+rebaseEdit : ObservationModel -> ObservationModel
+rebaseEdit state =
+    { state
+        | edit =
+            state.edit
+                |> Maybe.map
+                    (\edit ->
+                        { edit
+                            | baseContent = edit.latestCanonical.content
+                            , baseUpdatedAt = edit.latestCanonical.updatedAt
+                            , conflict = False
+                            , saving = False
+                            , error = Nothing
+                            , activeRequest = Nothing
+                        }
+                    )
+    }
+
+
+handleUpdateResponse : ObservationMutationRequest -> Result Http.Error Api.Observation -> Model -> ( Model, Cmd Msg )
+handleUpdateResponse request result model =
+    if not (mutationResponseMatches request model) then
+        ( model, Cmd.none )
+
+    else
+        case ( model.observations.edit, result ) of
+            ( Just edit, Ok observation ) ->
+                if observation.id /= request.observationId || observation.workspaceId /= request.workspaceId || not (sameObservationProvenance edit.latestCanonical observation) then
+                    ( finishEditFailure "The server returned mismatched immutable provenance. Retry after reloading." edit model, Cmd.none )
+
+                else if observationIsOlderThan edit.latestCanonical observation then
+                    ( updateObservation
+                        (\state ->
+                            { state
+                                | edit =
+                                    Just
+                                        { edit
+                                            | latestCanonical = edit.latestCanonical
+                                            , conflict = True
+                                            , saving = False
+                                            , error = Just "A newer version arrived while this save was in flight. Choose how to continue."
+                                            , activeRequest = Nothing
+                                        }
+                            }
+                        )
+                        model
+                    , Cmd.none
+                    )
+
+                else
+                    let
+                        accepted =
+                            updateObservation
+                                (applyCanonicalObservation observation
+                                    >> (\state -> { state | edit = Nothing })
+                                )
+                                model
+
+                        ( refreshing, refreshCmd ) =
+                            refreshActiveResults accepted
+
+                        ( toasted, toastCmd ) =
+                            addToast Success "Observation content updated" refreshing
+                    in
+                    ( toasted, Cmd.batch [ refreshCmd, toastCmd ] )
+
+            ( Just edit, Err (Http.BadStatus 404) ) ->
+                deletedAfterMutation "This observation was already deleted." request.observationId model
+
+            ( Just edit, Err _ ) ->
+                ( finishEditFailure "Failed to update observation. Your draft is preserved; retry when ready." edit model, Cmd.none )
+
+            _ ->
+                ( model, Cmd.none )
+
+
+finishEditFailure : String -> ObservationEditState -> Model -> Model
+finishEditFailure message edit model =
+    updateObservation
+        (\state -> { state | edit = Just { edit | saving = False, error = Just message, activeRequest = Nothing } })
+        model
+
+
+openDeleteConfirmation : Model -> ( Model, Cmd Msg )
+openDeleteConfirmation model =
+    case currentSelectedObservation model.observations of
+        Just observation ->
+            if canMutateObservation observation model then
+                let
+                    state =
+                        model.observations
+
+                    contextToken =
+                        state.nextCurationContextToken
+
+                    confirmation =
+                        { workspaceId = observation.workspaceId
+                        , observationId = observation.id
+                        , sessionEpoch = model.sessionRequestEpoch
+                        , contextToken = contextToken
+                        , targetContent = observation.content
+                        , deleting = False
+                        , error = Nothing
+                        , activeRequest = Nothing
+                        }
+                in
+                ( updateObservation
+                    (\current ->
+                        { current
+                            | deleteConfirmation = Just confirmation
+                            , edit = Nothing
+                            , nextCurationContextToken = contextToken + 1
+                        }
+                    )
+                    model
+                , focusElement "observation-delete-cancel"
+                )
+
+            else
+                ( model, Cmd.none )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
+confirmDelete : Model -> ( Model, Cmd Msg )
+confirmDelete model =
+    case model.observations.deleteConfirmation of
+        Just confirmation ->
+            if confirmation.deleting then
+                ( model, Cmd.none )
+
+            else if not (deleteContextIsCurrent confirmation model) then
+                ( updateObservation
+                    (\state -> { state | deleteConfirmation = Just { confirmation | error = Just "You no longer have permission to delete this observation." } })
+                    model
+                , Cmd.none
+                )
+
+            else
+                let
+                    requestToken =
+                        model.observations.nextMutationRequestToken
+
+                    request =
+                        { workspaceId = confirmation.workspaceId
+                        , observationId = confirmation.observationId
+                        , sessionEpoch = confirmation.sessionEpoch
+                        , contextToken = confirmation.contextToken
+                        , requestToken = requestToken
+                        }
+
+                    prepared =
+                        updateObservation
+                            (\state ->
+                                { state
+                                    | deleteConfirmation = Just { confirmation | deleting = True, error = Nothing, activeRequest = Just request }
+                                    , nextMutationRequestToken = requestToken + 1
+                                }
+                            )
+                            model
+
+                    ( tracked, requestId, clearCmd ) =
+                        beginTrackedMutation [ confirmation.observationId ] prepared
+                in
+                ( tracked
+                , Cmd.batch
+                    [ clearCmd
+                    , Api.deleteObservation model.flags.apiUrl confirmation.observationId requestId (ObservationDeleted request)
+                    , focusElement "observation-delete-dialog"
+                    ]
+                )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
+cancelDelete : Model -> ( Model, Cmd Msg )
+cancelDelete model =
+    case model.observations.deleteConfirmation of
+        Just confirmation ->
+            if confirmation.deleting then
+                ( model, Cmd.none )
+
+            else
+                ( updateObservation (\state -> { state | deleteConfirmation = Nothing }) model
+                , focusElement "observation-delete"
+                )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
+handleDeleteDialogKeyDown : String -> Bool -> String -> Model -> ( Model, Cmd Msg )
+handleDeleteDialogKeyDown key shiftKey targetId model =
+    case model.observations.deleteConfirmation of
+        Just confirmation ->
+            if not (Permissions.canEditCurrentWorkspace model) then
+                ( reconcileCurationPermission model, Cmd.none )
+
+            else if key == "Escape" then
+                cancelDelete model
+
+            else if key == "Tab" then
+                ( model, focusElement (deleteDialogFocusTarget confirmation.deleting shiftKey targetId) )
+
+            else
+                ( model, Cmd.none )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
+deleteDialogFocusTarget : Bool -> Bool -> String -> String
+deleteDialogFocusTarget deleting shiftKey targetId =
+    if deleting then
+        "observation-delete-dialog"
+
+    else if targetId == "observation-delete-cancel" then
+        "observation-delete-confirm"
+
+    else if targetId == "observation-delete-confirm" then
+        "observation-delete-cancel"
+
+    else if shiftKey then
+        "observation-delete-confirm"
+
+    else
+        "observation-delete-cancel"
+
+
+handleDeleteResponse : ObservationMutationRequest -> Result Http.Error () -> Model -> ( Model, Cmd Msg )
+handleDeleteResponse request result model =
+    if not (mutationResponseMatches request model) then
+        ( model, Cmd.none )
+
+    else
+        case result of
+            Ok _ ->
+                deletedAfterMutation "Observation permanently deleted" request.observationId model
+
+            Err (Http.BadStatus 404) ->
+                deletedAfterMutation "Observation was already deleted" request.observationId model
+
+            Err _ ->
+                case model.observations.deleteConfirmation of
+                    Just confirmation ->
+                        ( updateObservation
+                            (\state ->
+                                { state
+                                    | deleteConfirmation =
+                                        Just
+                                            { confirmation
+                                                | deleting = False
+                                                , error = Just "Failed to delete observation. Nothing was removed; retry or cancel."
+                                                , activeRequest = Nothing
+                                            }
+                                }
+                            )
+                            model
+                        , Cmd.none
+                        )
+
+                    Nothing ->
+                        ( model, Cmd.none )
+
+
+deletedAfterMutation : String -> String -> Model -> ( Model, Cmd Msg )
+deletedAfterMutation message observationId model =
+    let
+        ( cleaned, cleanupCmd ) =
+            reconcileDeletedObservation observationId model
+
+        ( refreshing, refreshCmd ) =
+            refreshActiveResults cleaned
+
+        ( toasted, toastCmd ) =
+            addToast Success message refreshing
+    in
+    ( toasted, Cmd.batch [ cleanupCmd, refreshCmd, toastCmd, focusElement "observation-results" ] )
+
+
+mutationResponseMatches : ObservationMutationRequest -> Model -> Bool
+mutationResponseMatches request model =
+    let
+        matches activeRequest workspaceId observationId sessionEpoch contextToken =
+            model.selectedWorkspaceId
+                == Just workspaceId
+                && model.sessionRequestEpoch
+                == sessionEpoch
+                && request.workspaceId
+                == workspaceId
+                && request.observationId
+                == observationId
+                && request.sessionEpoch
+                == sessionEpoch
+                && request.contextToken
+                == contextToken
+                && activeRequest
+                == Just request
+    in
+    case ( model.observations.edit, model.observations.deleteConfirmation ) of
+        ( Just edit, _ ) ->
+            matches edit.activeRequest edit.workspaceId edit.observationId edit.sessionEpoch edit.contextToken
+
+        ( _, Just confirmation ) ->
+            matches confirmation.activeRequest confirmation.workspaceId confirmation.observationId confirmation.sessionEpoch confirmation.contextToken
+
+        _ ->
+            False
+
+
+editContextIsCurrent : ObservationEditState -> Model -> Bool
+editContextIsCurrent edit model =
+    model.selectedWorkspaceId
+        == Just edit.workspaceId
+        && model.sessionRequestEpoch
+        == edit.sessionEpoch
+        && Permissions.canEditCurrentWorkspace model
+        && repositoryWorkspaceId model
+        == Just edit.workspaceId
+
+
+deleteContextIsCurrent : ObservationDeleteState -> Model -> Bool
+deleteContextIsCurrent confirmation model =
+    model.selectedWorkspaceId
+        == Just confirmation.workspaceId
+        && model.sessionRequestEpoch
+        == confirmation.sessionEpoch
+        && Permissions.canEditCurrentWorkspace model
+        && repositoryWorkspaceId model
+        == Just confirmation.workspaceId
+
+
+canMutateObservation : Api.Observation -> Model -> Bool
+canMutateObservation observation model =
+    repositoryWorkspaceId model
+        == Just observation.workspaceId
+        && Permissions.canEditCurrentWorkspace model
+
+
+currentSelectedObservation : ObservationModel -> Maybe Api.Observation
+currentSelectedObservation state =
+    state.selectedId
+        |> Maybe.andThen
+            (\observationId ->
+                case ( state.selectedDetail, Dict.get observationId state.items ) of
+                    ( Just detail, Just listed ) ->
+                        Just (preferNewerObservation detail listed)
+
+                    ( Just detail, Nothing ) ->
+                        Just detail
+
+                    ( Nothing, Just listed ) ->
+                        Just listed
+
+                    _ ->
+                        Nothing
+            )
+
+
+observationContentError : String -> Maybe String
+observationContentError content =
+    if String.isEmpty (String.trim content) then
+        Just "Observation content must not be blank."
+
+    else if utf8Bytes content > 524288 then
+        Just "Observation content must not exceed 512 KiB of UTF-8 text."
+
+    else
+        Nothing
 
 
 {-| Reset a result set before issuing page zero. The generation and the complete
@@ -196,6 +801,65 @@ reload model =
 
         Nothing ->
             ( updateObservation (\state -> { state | loading = False, expectedOffset = Nothing }) model, Cmd.none )
+
+
+refreshActiveResults : Model -> ( Model, Cmd Msg )
+refreshActiveResults model =
+    case repositoryWorkspaceId model of
+        Just workspaceId ->
+            case model.observations.requestMode of
+                ObservationListMode ->
+                    let
+                        state =
+                            startListRefresh workspaceId model.observations
+
+                        updated =
+                            updateObservation (always state) model
+                    in
+                    fetchPage 0 updated
+
+                ObservationMatchMode ->
+                    case normalizeMatchPaths model.observations.matchPathsInput of
+                        Ok paths ->
+                            let
+                                state =
+                                    startMatchRefresh workspaceId model.observations
+
+                                updated =
+                                    updateObservation (always state) model
+                            in
+                            fetchMatchPage 0 paths updated
+
+                        Err _ ->
+                            ( model, Cmd.none )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
+startListRefresh : String -> ObservationModel -> ObservationModel
+startListRefresh workspaceId state =
+    { state
+        | loading = True
+        , error = Nothing
+        , requestGeneration = state.requestGeneration + 1
+        , queryFingerprint = queryFingerprint (listQuery workspaceId 0 state)
+        , expectedOffset = Just 0
+        , nextOffset = 0
+        , matchEvidence = Dict.empty
+    }
+
+
+startMatchRefresh : String -> ObservationModel -> ObservationModel
+startMatchRefresh workspaceId state =
+    { state
+        | loading = True
+        , error = Nothing
+        , requestGeneration = state.requestGeneration + 1
+        , queryFingerprint = matchFingerprint workspaceId state
+        , expectedOffset = Just 0
+        , nextOffset = 0
+    }
 
 
 fetchPage : Int -> Model -> ( Model, Cmd Msg )
@@ -435,7 +1099,8 @@ isConcreteRepositoryPath path =
         && not (String.contains "*" path)
         && not (String.contains "?" path)
         && not (windowsAbsolute path)
-        && utf8Bytes path <= 4096
+        && utf8Bytes path
+        <= 4096
         && List.all (not << controlCharacter) (String.toList path)
         && List.all (\segment -> not (String.isEmpty segment) && segment /= "." && segment /= "..") (String.split "/" path)
 
@@ -481,7 +1146,7 @@ utf8Bytes value =
                 if code <= 0x7F then
                     1
 
-                else if code <= 0x7FF then
+                else if code <= 0x07FF then
                     2
 
                 else if code <= 0xFFFF then
@@ -508,7 +1173,11 @@ selectObservation observationId model =
                     state.nextDetailRequestToken
 
                 request =
-                    { workspaceId = workspaceId, observationId = observationId, token = token }
+                    { workspaceId = workspaceId
+                    , observationId = observationId
+                    , sessionEpoch = model.sessionRequestEpoch
+                    , token = token
+                    }
 
                 updated =
                     updateObservation
@@ -520,13 +1189,15 @@ selectObservation observationId model =
                                 , detailError = Nothing
                                 , activeDetailRequest = Just request
                                 , nextDetailRequestToken = token + 1
+                                , edit = Nothing
+                                , deleteConfirmation = Nothing
                             }
                         )
                         model
             in
             ( updated
             , Cmd.batch
-                [ Api.fetchObservation model.flags.apiUrl observationId (GotObservationDetail workspaceId observationId token)
+                [ Api.fetchObservation model.flags.apiUrl observationId (GotObservationDetail workspaceId observationId model.sessionRequestEpoch token)
                 , replaceFragment updated
                 ]
             )
@@ -535,14 +1206,470 @@ selectObservation observationId model =
             ( model, Cmd.none )
 
 
-detailResponseMatches : String -> String -> Int -> Maybe String -> ObservationModel -> Bool
-detailResponseMatches workspaceId observationId token selectedWorkspaceId state =
+detailResponseMatches : String -> String -> Int -> Int -> Maybe String -> Int -> ObservationModel -> Bool
+detailResponseMatches workspaceId observationId sessionEpoch token selectedWorkspaceId currentSessionEpoch state =
     selectedWorkspaceId
         == Just workspaceId
+        && currentSessionEpoch
+        == sessionEpoch
         && state.selectedId
         == Just observationId
         && state.activeDetailRequest
-        == Just { workspaceId = workspaceId, observationId = observationId, token = token }
+        == Just { workspaceId = workspaceId, observationId = observationId, sessionEpoch = sessionEpoch, token = token }
+
+
+preferNewerObservation : Api.Observation -> Api.Observation -> Api.Observation
+preferNewerObservation candidate existing =
+    if not (sameObservationProvenance candidate existing) then
+        existing
+
+    else
+        case compareTimestamps candidate.updatedAt existing.updatedAt of
+            Just GT ->
+                candidate
+
+            Just EQ ->
+                if candidate.content == existing.content then
+                    candidate
+
+                else
+                    existing
+
+            _ ->
+                existing
+
+
+type alias ParsedTimestamp =
+    { second : Int
+    , fraction : String
+    }
+
+
+compareTimestamps : String -> String -> Maybe Order
+compareTimestamps left right =
+    case ( parseTimestamp left, parseTimestamp right ) of
+        ( Just parsedLeft, Just parsedRight ) ->
+            case compare parsedLeft.second parsedRight.second of
+                EQ ->
+                    let
+                        width =
+                            Basics.max (String.length parsedLeft.fraction) (String.length parsedRight.fraction)
+                    in
+                    Just (compare (String.padRight width '0' parsedLeft.fraction) (String.padRight width '0' parsedRight.fraction))
+
+                order ->
+                    Just order
+
+        _ ->
+            if left == right then
+                Just EQ
+
+            else
+                Nothing
+
+
+timestampsEquivalent : String -> String -> Bool
+timestampsEquivalent left right =
+    compareTimestamps left right == Just EQ
+
+
+parseTimestamp : String -> Maybe ParsedTimestamp
+parseTimestamp value =
+    if String.length value < 20 || String.slice 4 5 value /= "-" || String.slice 7 8 value /= "-" || String.slice 10 11 value /= "T" || String.slice 13 14 value /= ":" || String.slice 16 17 value /= ":" then
+        Nothing
+
+    else
+        parseTimestampComponents value
+            |> Maybe.andThen
+                (\components ->
+                    parseTimestampSuffix (String.dropLeft 19 value)
+                        |> Maybe.andThen
+                            (\suffix ->
+                                if validDateTime components.year components.month components.day components.hour components.minute components.second then
+                    Just
+                        { second =
+                                            (((daysBeforeYear components.year + daysBeforeMonth components.year components.month + components.day - 1) * 24 + components.hour) * 60 + components.minute) * 60
+                                                + components.second
+                                - suffix.offsetSeconds
+                        , fraction = suffix.fraction
+                        }
+
+                                else
+                                    Nothing
+                            )
+                )
+
+
+parseTimestampComponents : String -> Maybe { year : Int, month : Int, day : Int, hour : Int, minute : Int, second : Int }
+parseTimestampComponents value =
+    String.toInt (String.slice 0 4 value)
+        |> Maybe.andThen
+            (\year ->
+                String.toInt (String.slice 5 7 value)
+                    |> Maybe.andThen
+                        (\month ->
+                            String.toInt (String.slice 8 10 value)
+                                |> Maybe.andThen
+                                    (\day ->
+                                        String.toInt (String.slice 11 13 value)
+                                            |> Maybe.andThen
+                                                (\hour ->
+                                                    String.toInt (String.slice 14 16 value)
+                                                        |> Maybe.andThen
+                                                            (\minute ->
+                                                                String.toInt (String.slice 17 19 value)
+                                                                    |> Maybe.map
+                                                                        (\second ->
+                                                                            { year = year
+                                                                            , month = month
+                                                                            , day = day
+                                                                            , hour = hour
+                                                                            , minute = minute
+                                                                            , second = second
+                                                                            }
+                                                                        )
+                                                            )
+                                                )
+                                    )
+                        )
+            )
+
+
+parseTimestampSuffix : String -> Maybe { fraction : String, offsetSeconds : Int }
+parseTimestampSuffix suffix =
+    let
+        ( fraction, zone ) =
+            if String.startsWith "." suffix then
+                let
+                    afterDot =
+                        String.dropLeft 1 suffix
+
+                    digits =
+                        takeLeadingDigits afterDot
+                in
+                ( digits, String.dropLeft (String.length digits) afterDot )
+
+            else
+                ( "", suffix )
+    in
+    if String.startsWith "." suffix && String.isEmpty fraction then
+        Nothing
+
+    else
+        parseZoneOffset zone
+            |> Maybe.map (\offsetSeconds -> { fraction = fraction, offsetSeconds = offsetSeconds })
+
+
+takeLeadingDigits : String -> String
+takeLeadingDigits value =
+    value
+        |> String.toList
+        |> List.foldl
+            (\character ( reversed, accepting ) ->
+                if accepting && Char.isDigit character then
+                    ( character :: reversed, True )
+
+                else
+                    ( reversed, False )
+            )
+            ( [], True )
+        |> Tuple.first
+        |> List.reverse
+        |> String.fromList
+
+
+parseZoneOffset : String -> Maybe Int
+parseZoneOffset zone =
+    if zone == "Z" then
+        Just 0
+
+    else if String.length zone == 6 && String.slice 3 4 zone == ":" && (String.startsWith "+" zone || String.startsWith "-" zone) then
+        case ( String.toInt (String.slice 1 3 zone), String.toInt (String.slice 4 6 zone) ) of
+            ( Just hour, Just minute ) ->
+                if hour <= 23 && minute <= 59 then
+                    let
+                        magnitude =
+                            (hour * 60 + minute) * 60
+                    in
+                    if String.startsWith "-" zone then
+                        Just -magnitude
+
+                    else
+                        Just magnitude
+
+                else
+                    Nothing
+
+            _ ->
+                Nothing
+
+    else
+        Nothing
+
+
+validDateTime : Int -> Int -> Int -> Int -> Int -> Int -> Bool
+validDateTime year month day hour minute second =
+    year >= 1
+        && month >= 1
+        && month <= 12
+        && day >= 1
+        && day <= daysInMonth year month
+        && hour >= 0
+        && hour <= 23
+        && minute >= 0
+        && minute <= 59
+        && second >= 0
+        && second <= 59
+
+
+daysBeforeYear : Int -> Int
+daysBeforeYear year =
+    let
+        completedYears =
+            year - 1
+    in
+    365 * completedYears + completedYears // 4 - completedYears // 100 + completedYears // 400
+
+
+daysBeforeMonth : Int -> Int -> Int
+daysBeforeMonth year month =
+    List.range 1 (month - 1)
+        |> List.map (daysInMonth year)
+        |> List.sum
+
+
+daysInMonth : Int -> Int -> Int
+daysInMonth year month =
+    case month of
+        2 ->
+            if modBy 400 year == 0 || (modBy 4 year == 0 && modBy 100 year /= 0) then
+                29
+
+            else
+                28
+
+        4 ->
+            30
+
+        6 ->
+            30
+
+        9 ->
+            30
+
+        11 ->
+            30
+
+        _ ->
+            31
+
+
+sameObservationProvenance : Api.Observation -> Api.Observation -> Bool
+sameObservationProvenance left right =
+    left.id
+        == right.id
+        && left.workspaceId
+        == right.workspaceId
+        && left.subjects
+        == right.subjects
+        && left.subjectKind
+        == right.subjectKind
+        && left.subject
+        == right.subject
+        && left.gitSha
+        == right.gitSha
+        && left.createdAt
+        == right.createdAt
+
+
+observationIsOlderThan : Api.Observation -> Api.Observation -> Bool
+observationIsOlderThan current candidate =
+    preferNewerObservation candidate current
+        == current
+        && candidate
+        /= current
+
+
+applyCanonicalObservation : Api.Observation -> ObservationModel -> ObservationModel
+applyCanonicalObservation candidate state =
+    let
+        existing =
+            case ( Dict.get candidate.id state.items, state.selectedDetail ) of
+                ( Just listed, Just detail ) ->
+                    if detail.id == candidate.id then
+                        Just (preferNewerObservation detail listed)
+
+                    else
+                        Just listed
+
+                ( Just listed, Nothing ) ->
+                    Just listed
+
+                ( Nothing, Just detail ) ->
+                    if detail.id == candidate.id then
+                        Just detail
+
+                    else
+                        Nothing
+
+                _ ->
+                    Nothing
+
+        accepted =
+            existing
+                |> Maybe.map (preferNewerObservation candidate)
+                |> Maybe.withDefault candidate
+
+        acceptedCandidate =
+            accepted == candidate
+
+        selectedDetail =
+            if state.selectedId == Just candidate.id then
+                Just accepted
+
+            else
+                state.selectedDetail
+
+        edit =
+            if acceptedCandidate then
+                reconcileEditWithCanonical accepted state.edit
+
+            else
+                state.edit
+    in
+    { state
+        | items = Dict.insert accepted.id accepted state.items
+        , selectedDetail = selectedDetail
+        , edit = edit
+    }
+
+
+reconcileEditWithCanonical : Api.Observation -> Maybe ObservationEditState -> Maybe ObservationEditState
+reconcileEditWithCanonical observation maybeEdit =
+    maybeEdit
+        |> Maybe.map
+            (\edit ->
+                if edit.workspaceId /= observation.workspaceId || edit.observationId /= observation.id then
+                    edit
+
+                else if timestampsEquivalent observation.updatedAt edit.latestCanonical.updatedAt && observation.content == edit.latestCanonical.content then
+                    edit
+
+                else if edit.draft == edit.baseContent && not edit.saving then
+                    { edit
+                        | baseContent = observation.content
+                        , baseUpdatedAt = observation.updatedAt
+                        , draft = observation.content
+                        , latestCanonical = observation
+                        , conflict = False
+                        , error = Nothing
+                    }
+
+                else
+                    { edit
+                        | latestCanonical = observation
+                        , conflict = not (timestampsEquivalent observation.updatedAt edit.baseUpdatedAt) || observation.content /= edit.baseContent
+                        , error = Nothing
+                    }
+            )
+
+
+removeObservation : String -> ObservationModel -> ObservationModel
+removeObservation observationId state =
+    let
+        selected =
+            state.selectedId == Just observationId
+
+        removesEdit edit =
+            edit.observationId == observationId
+
+        removesConfirmation confirmation =
+            confirmation.observationId == observationId
+    in
+    { state
+        | items = Dict.remove observationId state.items
+        , orderedIds = List.filter ((/=) observationId) state.orderedIds
+        , matchEvidence = Dict.remove observationId state.matchEvidence
+        , selectedId =
+            if selected then
+                Nothing
+
+            else
+                state.selectedId
+        , selectedDetail =
+            if selected then
+                Nothing
+
+            else
+                state.selectedDetail
+        , detailLoading =
+            if selected then
+                False
+
+            else
+                state.detailLoading
+        , detailError =
+            if selected then
+                Nothing
+
+            else
+                state.detailError
+        , activeDetailRequest =
+            if selected then
+                Nothing
+
+            else
+                state.activeDetailRequest
+        , edit =
+            state.edit
+                |> Maybe.andThen
+                    (\edit ->
+                        if removesEdit edit then
+                            Nothing
+
+                        else
+                            Just edit
+                    )
+        , deleteConfirmation =
+            state.deleteConfirmation
+                |> Maybe.andThen
+                    (\confirmation ->
+                        if removesConfirmation confirmation then
+                            Nothing
+
+                        else
+                            Just confirmation
+                    )
+    }
+
+
+reconcileDeletedObservation : String -> Model -> ( Model, Cmd Msg )
+reconcileDeletedObservation observationId model =
+    let
+        wasSelected =
+            model.observations.selectedId == Just observationId
+
+        updated =
+            updateObservation (removeObservation observationId) model
+    in
+    ( updated
+    , if wasSelected then
+        replaceFragment updated
+
+      else
+        Cmd.none
+    )
+
+
+reconcileCurationPermission : Model -> Model
+reconcileCurationPermission model =
+    if Permissions.canEditCurrentWorkspace model then
+        model
+
+    else
+        updateObservation
+            (\state -> { state | edit = Nothing, deleteConfirmation = Nothing })
+            model
 
 
 updateObservation : (ObservationModel -> ObservationModel) -> Model -> Model
@@ -552,22 +1679,33 @@ updateObservation fn model =
 
 observationResponseMatches : Int -> String -> Int -> ObservationModel -> Bool
 observationResponseMatches generation fingerprint offset state =
-    state.requestGeneration == generation
-        && state.queryFingerprint == fingerprint
-        && state.expectedOffset == Just offset
+    state.requestGeneration
+        == generation
+        && state.queryFingerprint
+        == fingerprint
+        && state.expectedOffset
+        == Just offset
 
 
 matchResponseMatches : Int -> String -> Int -> ObservationModel -> Bool
 matchResponseMatches generation fingerprint offset state =
-    state.requestMode == ObservationMatchMode
+    state.requestMode
+        == ObservationMatchMode
         && observationResponseMatches generation fingerprint offset state
 
 
 mergeMatchPage : Int -> Api.PaginatedResult Api.ObservationMatch -> ObservationModel -> ObservationModel
 mergeMatchPage offset paginated state =
     let
+        baseEvidence =
+            if offset == 0 then
+                Dict.empty
+
+            else
+                state.matchEvidence
+
         matchesById =
-            List.foldl (\match evidence -> Dict.insert match.observation.id match evidence) state.matchEvidence paginated.items
+            List.foldl (\match evidence -> Dict.insert match.observation.id match evidence) baseEvidence paginated.items
 
         observations =
             List.map .observation paginated.items
@@ -581,9 +1719,29 @@ mergeMatchPage offset paginated state =
 
             else
                 state.orderedIds ++ List.filter (\observationId -> not (List.member observationId state.orderedIds)) receivedIds
+
+        pageItems =
+            List.foldl
+                (\observation accumulatedItems ->
+                    Dict.insert observation.id
+                        (Dict.get observation.id state.items
+                            |> Maybe.map (preferNewerObservation observation)
+                            |> Maybe.withDefault observation
+                        )
+                        accumulatedItems
+                )
+                Dict.empty
+                observations
+
+        items =
+            if offset == 0 then
+                pageItems
+
+            else
+                Dict.union pageItems state.items
     in
     { state
-        | items = List.foldl (\observation items -> Dict.insert observation.id observation items) state.items observations
+        | items = items
         , orderedIds = orderedIds
         , hasMore = paginated.hasMore
         , loading = False
@@ -592,15 +1750,21 @@ mergeMatchPage offset paginated state =
         , nextOffset = offset + List.length paginated.items
         , matchEvidence = matchesById
     }
+        |> (\merged -> List.foldl applyCanonicalObservation merged observations)
 
 
 viewObservations : Api.Workspace -> Model -> Html Msg
 viewObservations workspace model =
-    viewObservationsState workspace model.observations
+    viewObservationsStateWithPermission (Permissions.canEditCurrentWorkspace model) workspace model.observations
 
 
 viewObservationsState : Api.Workspace -> ObservationModel -> Html Msg
 viewObservationsState workspace state =
+    viewObservationsStateWithPermission False workspace state
+
+
+viewObservationsStateWithPermission : Bool -> Api.Workspace -> ObservationModel -> Html Msg
+viewObservationsStateWithPermission canEdit workspace state =
     if workspace.workspaceType /= Api.Repository then
         div [ class "empty-state observation-state observation-state-unavailable" ]
             [ h3 [] [ text "Observations unavailable" ]
@@ -609,16 +1773,27 @@ viewObservationsState workspace state =
 
     else
         div [ class "observations-panel" ]
-            [ viewFilters state
-            , div
-                [ classList
-                    [ ( "observation-layout", True )
-                    , ( "observation-layout-with-detail", state.selectedId /= Nothing )
+            [ div
+                ([ class "observation-curation-background" ]
+                    ++ (if canEdit && state.deleteConfirmation /= Nothing then
+                            [ attribute "inert" "", attribute "aria-hidden" "true" ]
+
+                        else
+                            []
+                       )
+                )
+                [ viewFilters state
+                , div
+                    [ classList
+                        [ ( "observation-layout", True )
+                        , ( "observation-layout-with-detail", state.selectedId /= Nothing )
+                        ]
+                    ]
+                    [ viewList state
+                    , viewDetail canEdit state
                     ]
                 ]
-                [ viewList state
-                , viewDetail state
-                ]
+            , viewDeleteConfirmation canEdit state
             ]
 
 
@@ -709,7 +1884,7 @@ viewList state =
         observations =
             state.orderedIds |> List.filterMap (\observationId -> Dict.get observationId state.items)
     in
-    div [ class "entity-list observation-list" ]
+    div [ id "observation-results", class "entity-list observation-list", tabindex -1 ]
         [ if state.loading && List.isEmpty observations then
             div [ class "loading-indicator observation-state observation-state-loading", attribute "role" "status", attribute "aria-live" "polite" ]
                 [ text
@@ -733,8 +1908,24 @@ viewList state =
             Nothing ->
                 if not state.loading && List.isEmpty observations then
                     div [ class "empty-state observation-state observation-state-empty" ]
-                        [ h3 [] [ text (if state.requestMode == ObservationMatchMode then "No matching observations" else "No observations found") ]
-                        , p [] [ text (if state.requestMode == ObservationMatchMode then "Try different concrete repository paths or clear the match." else "Try clearing or changing the exact provenance filters.") ]
+                        [ h3 []
+                            [ text
+                                (if state.requestMode == ObservationMatchMode then
+                                    "No matching observations"
+
+                                 else
+                                    "No observations found"
+                                )
+                            ]
+                        , p []
+                            [ text
+                                (if state.requestMode == ObservationMatchMode then
+                                    "Try different concrete repository paths or clear the match."
+
+                                 else
+                                    "Try clearing or changing the exact provenance filters."
+                                )
+                            ]
                         ]
 
                 else
@@ -809,8 +2000,8 @@ viewObservationRow selectedId evidence observation =
         ]
 
 
-viewDetail : ObservationModel -> Html Msg
-viewDetail state =
+viewDetail : Bool -> ObservationModel -> Html Msg
+viewDetail canEdit state =
     case state.selectedId of
         Nothing ->
             text ""
@@ -831,18 +2022,210 @@ viewDetail state =
                         case state.selectedDetail of
                             Just observation ->
                                 article [ class "card observation-detail-card" ]
-                                    [ p [ class "observation-detail-content" ] [ text observation.content ]
+                                    [ viewDetailContent canEdit observation state.edit
                                     , dl [ class "observation-detail-meta" ]
-                                        [ viewSubjects observation.subjects
+                                        [ viewDetailMeta "Workspace ID" observation.workspaceId "observation-detail-workspace"
+                                        , viewSubjects observation.subjects
                                         , viewDetailMeta "Git SHA" observation.gitSha "observation-detail-sha"
                                         , viewDetailMeta "Created" (formatDate observation.createdAt) ""
                                         , viewDetailMeta "Updated" (formatDate observation.updatedAt) ""
                                         ]
+                                    , if canEdit && state.edit == Nothing then
+                                        div [ class "observation-detail-actions" ]
+                                            [ button [ id "observation-edit", class "btn btn-secondary", type_ "button", onClick StartObservationEdit ] [ text "Edit content" ]
+                                            , button [ id "observation-delete", class "btn btn-danger", type_ "button", onClick OpenObservationDelete ] [ text "Delete observation" ]
+                                            ]
+
+                                      else
+                                        text ""
                                     ]
 
                             Nothing ->
                                 text ""
                 ]
+
+
+viewDetailContent : Bool -> Api.Observation -> Maybe ObservationEditState -> Html Msg
+viewDetailContent canEdit observation maybeEdit =
+    case maybeEdit of
+        Just edit ->
+            if canEdit && edit.observationId == observation.id then
+                let
+                    validationError =
+                        observationContentError edit.draft
+                in
+                div [ class "observation-edit-form" ]
+                    [ label [ class "filter-label", for "observation-edit-content" ] [ text "Observation content" ]
+                    , textarea
+                        [ id "observation-edit-content"
+                        , class "form-input observation-edit-content"
+                        , value edit.draft
+                        , onInput SetObservationDraft
+                        , disabled edit.saving
+                        , attribute "rows" "10"
+                        , attribute "aria-describedby" "observation-edit-help observation-edit-status"
+                        ]
+                        []
+                    , p [ id "observation-edit-help", class "form-help" ] [ text "Only content can be edited. Workspace, subjects, Git SHA, subject order, and timestamps are immutable provenance." ]
+                    , case validationError of
+                        Just message ->
+                            p [ id "observation-edit-status", class "form-error", attribute "role" "alert" ] [ text message ]
+
+                        Nothing ->
+                            if edit.conflict then
+                                div [ id "observation-edit-status", class "observation-edit-conflict", attribute "role" "alert" ]
+                                    [ p []
+                                        [ text
+                                            (Maybe.withDefault
+                                                "This observation changed elsewhere. Your draft is preserved; choose how to continue before saving."
+                                                edit.error
+                                            )
+                                        ]
+                                    , div [ class "observation-conflict-actions" ]
+                                        [ button [ class "btn btn-secondary", type_ "button", onClick ReloadObservationEdit, disabled edit.saving ] [ text "Use latest version" ]
+                                        , button [ class "btn btn-secondary", type_ "button", onClick RebaseObservationEdit, disabled edit.saving ] [ text "Keep my draft" ]
+                                        ]
+                                    ]
+
+                            else
+                                case edit.error of
+                                    Just message ->
+                                        p [ id "observation-edit-status", class "form-error", attribute "role" "alert" ] [ text message ]
+
+                                    Nothing ->
+                                        span [ id "observation-edit-status", attribute "aria-live" "polite" ]
+                                            [ text
+                                                (if edit.saving then
+                                                    "Saving observation..."
+
+                                                 else
+                                                    ""
+                                                )
+                                            ]
+                    , div [ class "observation-edit-actions" ]
+                        [ button
+                            [ class "btn btn-primary"
+                            , type_ "button"
+                            , onClick SaveObservationEdit
+                            , disabled (edit.saving || edit.conflict || validationError /= Nothing || edit.draft == edit.baseContent)
+                            ]
+                            [ text
+                                (if edit.saving then
+                                    "Saving..."
+
+                                 else
+                                    "Save content"
+                                )
+                            ]
+                        , button [ class "btn btn-secondary", type_ "button", onClick CancelObservationEdit, disabled edit.saving ] [ text "Cancel" ]
+                        ]
+                    ]
+
+            else
+                p [ class "observation-detail-content" ] [ text observation.content ]
+
+        Nothing ->
+            p [ class "observation-detail-content" ] [ text observation.content ]
+
+
+viewDeleteConfirmation : Bool -> ObservationModel -> Html Msg
+viewDeleteConfirmation canEdit state =
+    case
+        if canEdit then
+            state.deleteConfirmation
+
+        else
+            Nothing
+    of
+        Nothing ->
+            text ""
+
+        Just confirmation ->
+            div
+                [ class "modal-overlay observation-delete-overlay"
+                , onClick CancelObservationDelete
+                ]
+                [ div
+                    [ id "observation-delete-dialog"
+                    , class "modal delete-confirm-modal observation-delete-confirm"
+                    , attribute "role" "dialog"
+                    , attribute "aria-modal" "true"
+                    , attribute "aria-labelledby" "observation-delete-title"
+                    , attribute "aria-describedby" "observation-delete-description"
+                    , tabindex -1
+                    , deleteDialogKeyDown
+                    , stopPropagationOn "click" (Decode.succeed ( NoOp, True ))
+                    ]
+                    [ h3 [ id "observation-delete-title", class "modal-title" ] [ text "Delete observation permanently?" ]
+                    , p [ id "observation-delete-description", class "delete-confirm-desc" ]
+                        [ text "Delete “"
+                        , strong [] [ text (contentPreview confirmation.targetContent) ]
+                        , text "”? This permanently removes the observation and cannot be undone."
+                        ]
+                    , case confirmation.error of
+                        Just message ->
+                            p [ class "form-error observation-delete-error", attribute "role" "alert" ] [ text message ]
+
+                        Nothing ->
+                            span [ attribute "aria-live" "polite" ]
+                                [ text
+                                    (if confirmation.deleting then
+                                        "Deleting observation..."
+
+                                     else
+                                        ""
+                                    )
+                                ]
+                    , div [ class "modal-actions" ]
+                        [ button [ id "observation-delete-confirm", class "btn btn-danger", type_ "button", onClick ConfirmObservationDelete, disabled confirmation.deleting ]
+                            [ text
+                                (if confirmation.deleting then
+                                    "Deleting..."
+
+                                 else
+                                    "Delete permanently"
+                                )
+                            ]
+                        , button [ id "observation-delete-cancel", class "btn btn-secondary", type_ "button", onClick CancelObservationDelete, disabled confirmation.deleting ] [ text "Cancel" ]
+                        ]
+                    ]
+                ]
+
+
+deleteDialogKeyDown : Attribute Msg
+deleteDialogKeyDown =
+    let
+        targetIdDecoder =
+            Decode.oneOf
+                [ Decode.at [ "target", "id" ] Decode.string
+                , Decode.succeed ""
+                ]
+    in
+    custom "keydown"
+        (Decode.map3
+            (\key shiftKey targetId ->
+                { message = ObservationDeleteDialogKeyDown key shiftKey targetId
+                , stopPropagation = key == "Tab" || key == "Escape"
+                , preventDefault = key == "Tab" || key == "Escape"
+                }
+            )
+            (Decode.field "key" Decode.string)
+            (Decode.oneOf [ Decode.field "shiftKey" Decode.bool, Decode.succeed False ])
+            targetIdDecoder
+        )
+
+
+contentPreview : String -> String
+contentPreview content =
+    let
+        singleLine =
+            content |> String.words |> String.join " " |> String.left 80
+    in
+    if String.length singleLine < String.length (content |> String.words |> String.join " ") then
+        singleLine ++ "…"
+
+    else
+        singleLine
 
 
 viewDetailMeta : String -> String -> String -> Html Msg

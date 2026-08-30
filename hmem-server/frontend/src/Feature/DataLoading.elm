@@ -176,7 +176,8 @@ update msg model =
                             updatedDataLoading =
                                 { currentDataLoading | loadingWorkspaces = False, activeWorkspaceListLoadToken = Nothing }
                         in
-                        addToast Error "Failed to load workspaces"
+                        addToast Error
+                            "Failed to load workspaces"
                             { model | dataLoading = updatedDataLoading }
 
         GotWorkspace expectedWsId token result ->
@@ -197,7 +198,12 @@ update msg model =
                                 dataLoading =
                                     { currentLoading
                                         | loadingWorkspaceData = True
-                                        , pendingWorkspaceLoads = if isRepository then 3 else 2
+                                        , pendingWorkspaceLoads =
+                                            if isRepository then
+                                                3
+
+                                            else
+                                                2
                                     }
 
                                 currentObservations =
@@ -223,7 +229,8 @@ update msg model =
                                     , Api.fetchTasks model.flags.apiUrl expectedWsId (GotTasks expectedWsId (Just token) 0)
                                     ]
                                         ++ (if isRepository then
-                                                [ Api.fetchObservations model.flags.apiUrl (Feature.Observation.listQuery expectedWsId 0 observations)
+                                                [ Api.fetchObservations model.flags.apiUrl
+                                                    (Feature.Observation.listQuery expectedWsId 0 observations)
                                                     (GotObservations expectedWsId (Just token) observations.requestGeneration observations.queryFingerprint 0)
                                                 ]
 
@@ -318,7 +325,8 @@ update msg model =
                             updatedDataLoading =
                                 finishWorkspaceLoad maybeToken currentDataLoading
                         in
-                        addToast Error "Failed to load projects"
+                        addToast Error
+                            "Failed to load projects"
                             { model | dataLoading = updatedDataLoading }
 
         GotTasks wsId maybeToken offset result ->
@@ -454,14 +462,18 @@ update msg model =
 
 observationResponseMatches : Int -> String -> Int -> ObservationModel -> Bool
 observationResponseMatches generation fingerprint offset observations =
-    observations.requestGeneration == generation
-        && observations.queryFingerprint == fingerprint
-        && observations.expectedOffset == Just offset
+    observations.requestGeneration
+        == generation
+        && observations.queryFingerprint
+        == fingerprint
+        && observations.expectedOffset
+        == Just offset
 
 
 listObservationResponseMatches : Int -> String -> Int -> ObservationModel -> Bool
 listObservationResponseMatches generation fingerprint offset observations =
-    observations.requestMode == ObservationListMode
+    observations.requestMode
+        == ObservationListMode
         && observationResponseMatches generation fingerprint offset observations
 
 
@@ -477,9 +489,29 @@ mergeObservationPage offset paginated observations =
 
             else
                 observations.orderedIds ++ List.filter (\observationId -> not (List.member observationId observations.orderedIds)) receivedIds
+
+        pageItems =
+            List.foldl
+                (\observation accumulatedItems ->
+                    Dict.insert observation.id
+                        (Dict.get observation.id observations.items
+                            |> Maybe.map (Feature.Observation.preferNewerObservation observation)
+                            |> Maybe.withDefault observation
+                        )
+                        accumulatedItems
+                )
+                Dict.empty
+                paginated.items
+
+        items =
+            if offset == 0 then
+                pageItems
+
+            else
+                Dict.union pageItems observations.items
     in
     { observations
-        | items = mergePageById offset paginated.items observations.items
+        | items = items
         , orderedIds = orderedIds
         , hasMore = paginated.hasMore
         , loading = False
@@ -487,3 +519,4 @@ mergeObservationPage offset paginated observations =
         , expectedOffset = Nothing
         , nextOffset = offset + List.length paginated.items
     }
+        |> (\merged -> List.foldl Feature.Observation.applyCanonicalObservation merged paginated.items)

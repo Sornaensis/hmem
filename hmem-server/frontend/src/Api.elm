@@ -45,9 +45,9 @@ module Api exposing
     , TaskSearchResult
     , TaskStatus(..)
     , TimelineActor
-    , TimelineBucketCounts
-    , TimelineBucketActionTotals
     , TimelineBucketActionCounts
+    , TimelineBucketActionTotals
+    , TimelineBucketCounts
     , TimelineBucketEntityCounts
     , TimelineBucketSeries
     , TimelineNavigation
@@ -88,6 +88,7 @@ module Api exposing
     , decodeCanonicalTransportScope
     , decodeChangeEvent
     , deleteMemory
+    , deleteObservation
     , deleteProject
     , deleteTask
     , deleteWorkspace
@@ -137,6 +138,7 @@ module Api exposing
     , observationListUrl
     , observationMatchBody
     , observationMatchDecoder
+    , observationUpdateBody
     , paginatedDecoder
     , projectDecoder
     , projectOverviewDecoder
@@ -162,6 +164,7 @@ module Api exposing
     , unlinkProjectMemory
     , unlinkTaskMemory
     , updateMemory
+    , updateObservation
     , updateProject
     , updateTask
     , updateWorkspace
@@ -2443,6 +2446,37 @@ fetchObservation apiUrl observationId toMsg =
     Http.get
         { url = apiUrl ++ "/api/v1/observations/" ++ Url.percentEncode observationId
         , expect = Http.expectJson toMsg observationDecoder
+        }
+
+
+observationUpdateBody : String -> E.Value
+observationUpdateBody content =
+    E.object [ ( "content", E.string content ) ]
+
+
+updateObservation : String -> String -> String -> String -> (Result Http.Error Observation -> msg) -> Cmd msg
+updateObservation apiUrl observationId content requestId toMsg =
+    Http.request
+        { method = "PUT"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/observations/" ++ Url.percentEncode observationId
+        , body = Http.jsonBody (observationUpdateBody content)
+        , expect = Http.expectJson toMsg observationDecoder
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+deleteObservation : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg
+deleteObservation apiUrl observationId requestId toMsg =
+    Http.request
+        { method = "DELETE"
+        , headers = [ Http.header "X-Request-Id" requestId ]
+        , url = apiUrl ++ "/api/v1/observations/" ++ Url.percentEncode observationId
+        , body = Http.emptyBody
+        , expect = Http.expectWhatever toMsg
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 

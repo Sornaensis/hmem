@@ -51,6 +51,7 @@ type Action
     | RefreshReadiness String String
     | RefreshNextTasks String
     | RefreshSearch String
+    | RefreshObservations
     | RefreshCatalogue
     | RefreshGroups
     | RefreshGroupMembers String
@@ -266,6 +267,9 @@ invalidationActions envelope invalidation =
                 if entity == "workspace" then
                     [ RemoveEntity entity identity, ClearWorkspace identity, RefreshSessionAuthorization ]
 
+                else if entity == "observation" then
+                    [ RemoveEntity entity identity, RefreshObservations ]
+
                 else
                     [ RemoveEntity entity identity ]
 
@@ -281,6 +285,9 @@ invalidationActions envelope invalidation =
 
                             _ ->
                                 [ BeginResync ]
+
+                    "observation" ->
+                        [ RefetchEntity entity identity, RefreshObservations ]
 
                     _ ->
                         [ RefetchEntity entity identity ]
@@ -324,7 +331,11 @@ invalidationActions envelope invalidation =
 
         ( Api.WorkspaceScope expected, "collection", [ collection, workspaceId ] ) ->
             if workspaceId == expected && List.member collection [ "projects", "tasks", "observations", "task_dependencies" ] then
-                [ NoAction ]
+                if collection == "observations" then
+                    [ RefreshObservations ]
+
+                else
+                    [ NoAction ]
 
             else
                 [ BeginResync ]
@@ -446,6 +457,9 @@ coalesce actions =
 
                 RefreshSearch workspace ->
                     "search:" ++ workspace
+
+                RefreshObservations ->
+                    "observations"
 
                 RefreshCatalogue ->
                     "catalogue"

@@ -150,7 +150,45 @@ type alias EditingModel =
 type alias ObservationDetailRequest =
     { workspaceId : String
     , observationId : String
+    , sessionEpoch : Int
     , token : Int
+    }
+
+
+type alias ObservationMutationRequest =
+    { workspaceId : String
+    , observationId : String
+    , sessionEpoch : Int
+    , contextToken : Int
+    , requestToken : Int
+    }
+
+
+type alias ObservationEditState =
+    { workspaceId : String
+    , observationId : String
+    , sessionEpoch : Int
+    , contextToken : Int
+    , baseContent : String
+    , baseUpdatedAt : String
+    , draft : String
+    , latestCanonical : Api.Observation
+    , conflict : Bool
+    , saving : Bool
+    , error : Maybe String
+    , activeRequest : Maybe ObservationMutationRequest
+    }
+
+
+type alias ObservationDeleteState =
+    { workspaceId : String
+    , observationId : String
+    , sessionEpoch : Int
+    , contextToken : Int
+    , targetContent : String
+    , deleting : Bool
+    , error : Maybe String
+    , activeRequest : Maybe ObservationMutationRequest
     }
 
 
@@ -178,6 +216,10 @@ type alias ObservationModel =
     , detailError : Maybe String
     , activeDetailRequest : Maybe ObservationDetailRequest
     , nextDetailRequestToken : Int
+    , edit : Maybe ObservationEditState
+    , deleteConfirmation : Maybe ObservationDeleteState
+    , nextCurationContextToken : Int
+    , nextMutationRequestToken : Int
     }
 
 
@@ -588,7 +630,7 @@ type Msg
     | GotSingleMemory (Result Http.Error Api.Memory)
     | GotObservations String (Maybe Int) Int String Int (Result Http.Error (Api.PaginatedResult Api.Observation))
     | GotObservationMatches String Int String Int (Result Http.Error (Api.PaginatedResult Api.ObservationMatch))
-    | GotObservationDetail String String Int (Result Http.Error Api.Observation)
+    | GotObservationDetail String String Int Int (Result Http.Error Api.Observation)
     | GotInitialTaskOverview String Int String (Result Http.Error Api.TaskOverview)
     | GotInitialProjectOverview String Int String (Result Http.Error Api.ProjectOverview)
     | GotWorkspaceTimeline TimelineRequestIdentity TimelineEventsRequest (Result Http.Error (Api.PaginatedResult Api.WorkspaceTimelineEvent))
@@ -638,6 +680,18 @@ type Msg
     | LoadMoreObservations
     | SelectObservation String
     | CopyObservationSubject String
+    | StartObservationEdit
+    | SetObservationDraft String
+    | SaveObservationEdit
+    | CancelObservationEdit
+    | ReloadObservationEdit
+    | RebaseObservationEdit
+    | ObservationUpdated ObservationMutationRequest (Result Http.Error Api.Observation)
+    | OpenObservationDelete
+    | ConfirmObservationDelete
+    | CancelObservationDelete
+    | ObservationDeleteDialogKeyDown String Bool String
+    | ObservationDeleted ObservationMutationRequest (Result Http.Error ())
       -- Inline editing
     | StartEdit String String String String
     | EditInput String

@@ -254,6 +254,7 @@ handleOwned ownedMsg model =
                                         ( model.timeline, Cmd.none )
                         in
                         ( { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin, auditLog = nextAuditLog, timeline = nextTimeline }
+                            |> Feature.Observation.reconcileCurationPermission
                             |> updateLoadingAfterSession expectedWorkspace sessionContext
                         , Cmd.batch [ sessionBootstrapCmd, fetchMembershipsCmd, fetchAuditCmd, fetchTimelineCmd ]
                         )

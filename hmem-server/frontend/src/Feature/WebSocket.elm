@@ -8,8 +8,9 @@ module Feature.WebSocket exposing
 import Api
 import Dict
 import Feature.ChangeStream as ChangeStream
+import Feature.Observation as Observation
 import Feature.Timeline as Timeline
-import Helpers exposing (applyDependencyMutationResult, applyTaskDependencyLinkMutation, beginWorkspaceDataReload)
+import Helpers exposing (applyDependencyMutationResult, applyTaskDependencyLinkMutation, beginWorkspaceDataReload, replaceFragment)
 import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
@@ -160,25 +161,14 @@ update msg model =
             if model.selectedWorkspaceId == Just workspaceId && canonicalGuardIsCurrent guard model then
                 case result of
                     Ok observation ->
-                        let
-                            observations =
-                                model.observations
+                        if observation.id == observationId && observation.workspaceId == workspaceId then
+                            ( { model | observations = Observation.applyCanonicalObservation observation model.observations }, Cmd.none )
 
-                            orderedIds =
-                                if List.member observation.id observations.orderedIds then
-                                    observations.orderedIds
-
-                                else
-                                    observation.id :: observations.orderedIds
-                        in
-                        ( { model | observations = { observations | items = Dict.insert observation.id observation observations.items, orderedIds = orderedIds } }, Cmd.none )
+                        else
+                            canonicalHttpFailure guard (Http.BadBody "Observation identity did not match the canonical request") model
 
                     Err (Http.BadStatus 404) ->
-                        let
-                            observations =
-                                model.observations
-                        in
-                        ( { model | observations = { observations | items = Dict.remove observationId observations.items, orderedIds = List.filter ((/=) observationId) observations.orderedIds } }, Cmd.none )
+                        Observation.reconcileDeletedObservation observationId model
 
                     Err error ->
                         canonicalHttpFailure guard error model
@@ -504,6 +494,36 @@ applyCanonicalSnapshot scope items token model =
                             observations =
                                 withStream.observations
 
+                            selectedWasRemoved =
+                                observations.selectedId
+                                    |> Maybe.map (\observationId -> not (Dict.member observationId snapshot.observations))
+                                    |> Maybe.withDefault False
+
+                            snapshotObservations =
+                                { observations
+                                    | items = snapshot.observations
+                                    , orderedIds = Dict.keys snapshot.observations
+                                    , hasMore = False
+                                    , loading = False
+                                    , error = Nothing
+                                    , detailLoading = False
+                                    , detailError = Nothing
+                                    , activeDetailRequest = Nothing
+                                }
+
+                            reconciledObservations =
+                                case observations.selectedId of
+                                    Just observationId ->
+                                        case Dict.get observationId snapshot.observations of
+                                            Just observation ->
+                                                Observation.applyCanonicalObservation observation snapshotObservations
+
+                                            Nothing ->
+                                                Observation.removeObservation observationId snapshotObservations
+
+                                    Nothing ->
+                                        snapshotObservations
+
                             dependencies =
                                 withStream.dependencies
 
@@ -512,17 +532,31 @@ applyCanonicalSnapshot scope items token model =
 
                             loading =
                                 withStream.dataLoading
+
+                            snapshotModel =
+                                { withStream
+                                    | workspaces = Dict.union snapshot.workspaces withStream.workspaces
+                                    , projects = snapshot.projects
+                                    , tasks = snapshot.tasks
+                                    , observations = reconciledObservations
+                                    , dependencies = { dependencies | taskDependencyLinks = snapshot.dependencies, taskDependencies = Dict.empty, taskReadinessRollups = Dict.empty, projectReadinessRollups = Dict.empty }
+                                    , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
+                                    , dataLoading = { loading | loadingWorkspaceData = False, pendingWorkspaceLoads = 0, activeWorkspaceLoadToken = Nothing, cardHydrationLoaded = True }
+                                }
+
+                            ( dirtyModel, dirtyCmd ) =
+                                Timeline.markDirty snapshotModel
                         in
-                        Timeline.markDirty
-                            { withStream
-                                | workspaces = Dict.union snapshot.workspaces withStream.workspaces
-                                , projects = snapshot.projects
-                                , tasks = snapshot.tasks
-                                , observations = { observations | items = snapshot.observations, orderedIds = Dict.keys snapshot.observations, hasMore = False, loading = False, error = Nothing, selectedDetail = Nothing, detailLoading = False, detailError = Nothing }
-                                , dependencies = { dependencies | taskDependencyLinks = snapshot.dependencies, taskDependencies = Dict.empty, taskReadinessRollups = Dict.empty, projectReadinessRollups = Dict.empty }
-                                , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
-                                , dataLoading = { loading | loadingWorkspaceData = False, pendingWorkspaceLoads = 0, activeWorkspaceLoadToken = Nothing, cardHydrationLoaded = True }
-                            }
+                        ( dirtyModel
+                        , Cmd.batch
+                            [ dirtyCmd
+                            , if selectedWasRemoved then
+                                replaceFragment dirtyModel
+
+                              else
+                                Cmd.none
+                            ]
+                        )
 
 
 beginScopedResync : ChangeStream.Scope -> Model -> ( Model, Cmd Msg )
@@ -635,6 +669,13 @@ applyAction scope action ( model, accumulated ) =
             in
             append Cmd.none { model | search = { search | unifiedResults = Nothing, activeRequest = Nothing } }
 
+        ChangeStream.RefreshObservations ->
+            let
+                ( nextModel, command ) =
+                    Observation.refreshActiveResults model
+            in
+            append command nextModel
+
         ChangeStream.RefreshCatalogue ->
             requestCanonical scope "catalogue" (\guard -> Api.fetchWorkspaces model.flags.apiUrl (CanonicalCatalogueFetched guard)) accumulated model
 
@@ -698,7 +739,7 @@ applyAction scope action ( model, accumulated ) =
                         | workspaces = Dict.remove workspaceId model.workspaces
                         , projects = Dict.empty
                         , tasks = Dict.empty
-                        , observations = { observations | items = Dict.empty, orderedIds = [], selectedDetail = Nothing }
+                        , observations = Observation.clearSelection { observations | items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty }
                         , dependencies = { dependencies | taskDependencies = Dict.empty, taskDependencyLinks = [], taskReadinessRollups = Dict.empty, projectReadinessRollups = Dict.empty }
                         , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
                         , sessionRequestEpoch = model.sessionRequestEpoch + 1
@@ -752,40 +793,42 @@ removeEntity scope entity identity accumulated model =
         removed =
             case entity of
                 "workspace" ->
-                    Just { withGeneration | workspaces = Dict.remove identity withGeneration.workspaces }
+                    Just ( { withGeneration | workspaces = Dict.remove identity withGeneration.workspaces }, Cmd.none )
 
                 "project" ->
-                    Just { withGeneration | projects = Dict.remove identity withGeneration.projects }
+                    Just ( { withGeneration | projects = Dict.remove identity withGeneration.projects }, Cmd.none )
 
                 "task" ->
                     Just
-                        { withGeneration
+                        ( { withGeneration
                             | tasks = Dict.remove identity withGeneration.tasks
                             , dependencies =
                                 { dependencies
                                     | taskDependencies = Dict.remove identity dependencies.taskDependencies
                                     , taskDependencyLinks = List.filter (\link -> link.taskId /= identity && link.dependsOnId /= identity) dependencies.taskDependencyLinks
                                 }
-                        }
+                          }
+                        , Cmd.none
+                        )
 
                 "observation" ->
-                    Just { withGeneration | observations = { observations | items = Dict.remove identity observations.items, orderedIds = List.filter ((/=) identity) observations.orderedIds } }
+                    Just (Observation.reconcileDeletedObservation identity withGeneration)
 
                 "task_dependency" ->
                     case String.split ":" identity of
                         taskId :: dependsOnId :: _ ->
-                            Just { withGeneration | dependencies = { dependencies | taskDependencyLinks = List.filter (\link -> link.taskId /= taskId || link.dependsOnId /= dependsOnId) dependencies.taskDependencyLinks } }
+                            Just ( { withGeneration | dependencies = { dependencies | taskDependencyLinks = List.filter (\link -> link.taskId /= taskId || link.dependsOnId /= dependsOnId) dependencies.taskDependencyLinks } }, Cmd.none )
 
                         _ ->
                             Nothing
 
                 "group" ->
-                    Just { withGeneration | groups = { groups | workspaceGroups = Dict.remove identity groups.workspaceGroups, groupMembers = Dict.remove identity groups.groupMembers } }
+                    Just ( { withGeneration | groups = { groups | workspaceGroups = Dict.remove identity groups.workspaceGroups, groupMembers = Dict.remove identity groups.groupMembers } }, Cmd.none )
 
                 "group_membership" ->
                     case String.split ":" identity of
                         groupId :: workspaceId :: _ ->
-                            Just { withGeneration | groups = { groups | groupMembers = Dict.update groupId (Maybe.map (List.filter ((/=) workspaceId))) groups.groupMembers } }
+                            Just ( { withGeneration | groups = { groups | groupMembers = Dict.update groupId (Maybe.map (List.filter ((/=) workspaceId))) groups.groupMembers } }, Cmd.none )
 
                         _ ->
                             Nothing
@@ -794,8 +837,8 @@ removeEntity scope entity identity accumulated model =
                     Nothing
     in
     case removed of
-        Just nextModel ->
-            ( nextModel, accumulated )
+        Just ( nextModel, command ) ->
+            ( nextModel, Cmd.batch [ accumulated, command ] )
 
         Nothing ->
             let
@@ -1111,7 +1154,19 @@ applyChangeEvent event model =
             beginWorkspaceDataReload False model
 
         Api.EObservation ->
-            beginWorkspaceDataReload False model
+            case event.changeType of
+                Api.Deleted ->
+                    let
+                        ( cleaned, cleanupCmd ) =
+                            Observation.reconcileDeletedObservation event.entityId model
+
+                        ( refreshed, refreshCmd ) =
+                            Observation.refreshActiveResults cleaned
+                    in
+                    ( refreshed, Cmd.batch [ cleanupCmd, refreshCmd ] )
+
+                _ ->
+                    Observation.refreshActiveResults model
 
         Api.EMemoryLink ->
             beginWorkspaceDataReload False model

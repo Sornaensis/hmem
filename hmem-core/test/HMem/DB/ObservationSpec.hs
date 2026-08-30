@@ -82,6 +82,11 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       map (.observation.id) results `shouldBe` [target.id]
       case results of
         [result] -> do
+          result.pathMatches `shouldBe`
+            [ ObservationPathMatch "docs/guide.md" [ObservationSubject SubjectGlob "docs/**"]
+            , ObservationPathMatch "src/ConfigMain.hs" [ObservationSubject SubjectGlob "src/**/Config*.hs"]
+            , ObservationPathMatch "README.md" [ObservationSubject SubjectFile "README.md"]
+            ]
           result.matchedPaths `shouldBe` ["docs/guide.md", "src/ConfigMain.hs", "README.md"]
           result.matchedSubjects `shouldBe`
             [ ObservationSubject SubjectGlob "src/**/Config*.hs"
@@ -101,6 +106,121 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       matchObservationsOverfetch env.pool baseMatchQuery { limit = Just 200 } >>= (\page -> length page `shouldBe` 201)
       listObservationsOverfetch env.pool (observationQuery workspace.id Nothing Nothing Nothing) >>= (\page -> length page `shouldBe` 51)
       listObservationsOverfetch env.pool (observationQuery workspace.id Nothing (Just 200) Nothing) >>= (\page -> length page `shouldBe` 201)
+
+    it "aggregates subject facets over the full filtered workspace set before paging" $ \env -> do
+      workspace <- createTestWorkspace env "observation-subject-facets"
+      otherWorkspace <- createTestWorkspace env "observation-subject-facets-other"
+      mapM_ (\index -> createObservation env.pool CreateObservation
+        { workspaceId = workspace.id
+        , subjects =
+            [ ObservationSubject SubjectFile "src/Shared.hs"
+            , ObservationSubject SubjectFile ("src/Unique" <> T.pack (show index) <> ".hs")
+            ]
+        , gitSha = if index <= (10 :: Int) then alternateSha else canonicalSha
+        , content = if index <= (7 :: Int) then "selected facet" else "ordinary facet"
+        }) [1 .. (55 :: Int)]
+      _ <- createObservation env.pool (newObservation otherWorkspace.id SubjectFile "src/Shared.hs" "isolated")
+      firstPage <- listObservationSubjectFacets env.pool
+        (facetQuery workspace.id Nothing Nothing Nothing (Just 1) (Just 0))
+      map (\facet -> (facet.subject, facet.observationCount)) firstPage `shouldBe`
+        [("src/Shared.hs", 55)]
+      overfetch <- listObservationSubjectFacetsOverfetch env.pool
+        (facetQuery workspace.id Nothing Nothing Nothing (Just 1) (Just 0))
+      length overfetch `shouldBe` 2
+      shaFiltered <- listObservationSubjectFacets env.pool
+        (facetQuery workspace.id (Just SubjectFile) (Just alternateSha) Nothing (Just 1) Nothing)
+      map (\facet -> (facet.subject, facet.observationCount)) shaFiltered `shouldBe` [("src/Shared.hs", 10)]
+      textFiltered <- listObservationSubjectFacets env.pool
+        (facetQuery workspace.id Nothing Nothing (Just "selected") (Just 1) Nothing)
+      map (\facet -> (facet.subject, facet.observationCount)) textFiltered `shouldBe` [("src/Shared.hs", 7)]
+
+    it "orders and pages exact file/glob facet groups deterministically" $ \env -> do
+      workspace <- createTestWorkspace env "observation-subject-facet-order"
+      _ <- createObservation env.pool CreateObservation
+        { workspaceId = workspace.id
+        , subjects =
+            [ ObservationSubject SubjectFile "shared"
+            , ObservationSubject SubjectGlob "shared"
+            , ObservationSubject SubjectFile "b"
+            , ObservationSubject SubjectFile "a"
+            ]
+        , gitSha = canonicalSha, content = "first"
+        }
+      _ <- createObservation env.pool CreateObservation
+        { workspaceId = workspace.id
+        , subjects = [ObservationSubject SubjectFile "shared", ObservationSubject SubjectGlob "shared"]
+        , gitSha = canonicalSha, content = "second"
+        }
+      facets <- listObservationSubjectFacets env.pool (facetQuery workspace.id Nothing Nothing Nothing Nothing Nothing)
+      map (\facet -> (facet.subjectKind, facet.subject, facet.observationCount)) facets `shouldBe`
+        [ (SubjectFile, "shared", 2)
+        , (SubjectGlob, "shared", 2)
+        , (SubjectFile, "a", 1)
+        , (SubjectFile, "b", 1)
+        ]
+      page <- listObservationSubjectFacets env.pool (facetQuery workspace.id Nothing Nothing Nothing (Just 2) (Just 1))
+      map (\facet -> (facet.subjectKind, facet.subject)) page `shouldBe`
+        [(SubjectGlob, "shared"), (SubjectFile, "a")]
+      files <- listObservationSubjectFacets env.pool (facetQuery workspace.id (Just SubjectFile) Nothing Nothing Nothing Nothing)
+      map (.subjectKind) files `shouldSatisfy` all (== SubjectFile)
+
+    it "refreshes facet query membership and recency when content is updated" $ \env -> do
+      workspace <- createTestWorkspace env "observation-subject-facet-update"
+      stable <- createObservation env.pool (newObservation workspace.id SubjectFile "aaa-stable.hs" "needle stable")
+      backdateObservation env stable.id
+      Just backdatedStable <- getObservation env.pool workspace.id stable.id
+      moving <- createObservation env.pool CreateObservation
+        { workspaceId = workspace.id
+        , subjects =
+            [ ObservationSubject SubjectFile "zzz-moving.hs"
+            , ObservationSubject SubjectFile "zzz-shared.hs"
+            ]
+        , gitSha = canonicalSha
+        , content = "ordinary"
+        }
+      facetsBefore <- listObservationSubjectFacets env.pool
+        (facetQuery workspace.id Nothing Nothing (Just "needle") Nothing Nothing)
+      map (.subject) facetsBefore `shouldBe` ["aaa-stable.hs"]
+      Just updated <- updateObservation env.pool workspace.id moving.id (UpdateObservation "needle revised")
+      updated.updatedAt `shouldSatisfy` (> backdatedStable.updatedAt)
+      facetsAfter <- listObservationSubjectFacets env.pool
+        (facetQuery workspace.id Nothing Nothing (Just "needle") Nothing Nothing)
+      map (.subject) facetsAfter `shouldBe` ["zzz-moving.hs", "zzz-shared.hs", "aaa-stable.hs"]
+      map (.latestUpdatedAt) (take 2 facetsAfter) `shouldBe` replicate 2 updated.updatedAt
+      map (.latestUpdatedAt) (drop 2 facetsAfter) `shouldBe` [backdatedStable.updatedAt]
+
+    it "reduces facet counts and removes final groups after hard deletes" $ \env -> do
+      workspace <- createTestWorkspace env "observation-subject-facet-delete"
+      first <- createObservation env.pool CreateObservation
+        { workspaceId = workspace.id
+        , subjects =
+            [ ObservationSubject SubjectFile "src/Shared.hs"
+            , ObservationSubject SubjectFile "src/OnlyFirst.hs"
+            ]
+        , gitSha = canonicalSha
+        , content = "first"
+        }
+      second <- createObservation env.pool CreateObservation
+        { workspaceId = workspace.id
+        , subjects =
+            [ ObservationSubject SubjectFile "src/Shared.hs"
+            , ObservationSubject SubjectFile "src/OnlySecond.hs"
+            ]
+        , gitSha = canonicalSha
+        , content = "second"
+        }
+      facetsBeforeDelete <- listObservationSubjectFacets env.pool
+        (facetQuery workspace.id Nothing Nothing Nothing Nothing Nothing)
+      map (\facet -> (facet.subject, facet.observationCount)) facetsBeforeDelete `shouldContain`
+        [("src/Shared.hs", 2), ("src/OnlyFirst.hs", 1), ("src/OnlySecond.hs", 1)]
+      deleteObservation env.pool workspace.id first.id `shouldReturn` True
+      afterFirst <- listObservationSubjectFacets env.pool
+        (facetQuery workspace.id Nothing Nothing Nothing Nothing Nothing)
+      map (\facet -> (facet.subject, facet.observationCount)) afterFirst `shouldBe`
+        [("src/OnlySecond.hs", 1), ("src/Shared.hs", 1)]
+      deleteObservation env.pool workspace.id second.id `shouldReturn` True
+      listObservationSubjectFacets env.pool
+        (facetQuery workspace.id Nothing Nothing Nothing Nothing Nothing) `shouldReturn` []
 
     it "orders equal-rank FTS ties by recency/id and paginates unranked and ranked lists" $ \env -> do
       workspace <- createTestWorkspace env "observation-query"
@@ -200,6 +320,15 @@ assertRejectedCreate env workspace = do
     Left (DBCheckViolation _) -> pure ()
     other -> expectationFailure $ "Expected DBCheckViolation, got: " <> show other
 
+-- PostgreSQL's now() is fixed for the outer rollback transaction used by this
+-- suite. Backdating one setup row lets the normal update trigger prove that
+-- facet MAX(updated_at) drives recency without weakening production behavior.
+backdateObservation :: TestEnv -> UUID -> IO ()
+backdateObservation env observationId = runSession env.pool $ do
+  Session.sql "ALTER TABLE observations DISABLE TRIGGER trg_observations_updated_at"
+  Session.sql ("UPDATE observations SET updated_at = '2000-01-01T00:00:00Z' WHERE id = '" <> B8.pack (show observationId) <> "'")
+  Session.sql "ALTER TABLE observations ENABLE TRIGGER trg_observations_updated_at"
+
 listIds :: TestEnv -> ObservationQuery -> IO [UUID]
 listIds env = fmap (map (.id)) . listObservations env.pool
 
@@ -235,6 +364,11 @@ similarQuery :: UUID -> Maybe SubjectKind -> Maybe T.Text -> Maybe T.Text -> [Do
 similarQuery workspace kind path sha vector threshold pageLimit pageOffset = SimilarObservationQuery
   { workspaceId = workspace, subjectKind = kind, subject = path, gitSha = sha
   , embedding = vector, minSimilarity = threshold, limit = pageLimit, offset = pageOffset }
+
+facetQuery :: UUID -> Maybe SubjectKind -> Maybe T.Text -> Maybe T.Text -> Maybe Int -> Maybe Int -> ObservationSubjectFacetQuery
+facetQuery workspace kind sha searchTerm pageLimit pageOffset = ObservationSubjectFacetQuery
+  { workspaceId = workspace, subjectKind = kind, gitSha = sha, query = searchTerm
+  , limit = pageLimit, offset = pageOffset }
 
 unitX, unitY :: [Double]
 unitX = 1 : replicate (observationEmbeddingDimensions - 1) 0

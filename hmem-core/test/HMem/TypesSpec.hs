@@ -55,6 +55,11 @@ spec = do
       eitherDecode (encode missingSubjects) `shouldSatisfy` (isLeft :: Either String CreateObservation -> Bool)
       eitherDecode (encode partialLegacyKind) `shouldSatisfy` (isLeft :: Either String CreateObservation -> Bool)
       eitherDecode (encode partialLegacySubject) `shouldSatisfy` (isLeft :: Either String CreateObservation -> Bool)
+  describe "Observation match JSON compatibility" $ do
+    it "decodes legacy uncorrelated evidence without inventing path groups" $
+      eitherDecode (encode legacyMatch) `shouldBe` Right matchValue { pathMatches = [] }
+    it "round-trips canonical path-correlated evidence while retaining legacy arrays" $
+      eitherDecode (encode matchValue) `shouldBe` Right matchValue
   where
     workspace = read "00000000-0000-0000-0000-000000000001" :: UUID
     observationSearch = UnifiedSearchQuery
@@ -63,6 +68,21 @@ spec = do
       , projectStatus = Nothing, taskStatus = Nothing, taskPriority = Nothing, projectId = Nothing }
     savedView = CreateSavedView workspace "view" Nothing "activity" Null
     observedAt = read "2026-01-02 03:04:05 UTC" :: UTCTime
+    observationValue = Observation workspace workspace create.subjects canonicalSha "body" observedAt observedAt
+    matchValue = ObservationMatch
+      { observation = observationValue
+      , pathMatches =
+          [ ObservationPathMatch "src/Main.hs" create.subjects
+          , ObservationPathMatch "src/Other.hs" [ObservationSubject SubjectGlob "src/**/*.hs"]
+          ]
+      , matchedPaths = ["src/Main.hs", "src/Other.hs"]
+      , matchedSubjects = create.subjects
+      }
+    legacyMatch = object
+      [ "observation" .= observationValue
+      , "matched_paths" .= matchValue.matchedPaths
+      , "matched_subjects" .= matchValue.matchedSubjects
+      ]
     searchHit = ObservationSearchHit workspace workspace
       [ObservationSubject SubjectFile "src/Main.hs", ObservationSubject SubjectGlob "src/**/*.hs"]
       "deadbeef" "preview" observedAt

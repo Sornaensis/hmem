@@ -407,6 +407,7 @@ deduplicateObservationMatches = go []
       Nothing -> compactMatch row : go seen rest
     compactMatch row = object (catMaybes
       [ ("observation" .=) . compactObservationSummary <$> field "observation" row
+      , ("path_matches" .=) <$> field "path_matches" row
       , ("matched_paths" .=) <$> field "matched_paths" row
       , ("matched_subjects" .=) <$> field "matched_subjects" row
       ])

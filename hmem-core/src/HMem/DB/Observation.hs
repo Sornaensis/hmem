@@ -5,6 +5,8 @@ module HMem.DB.Observation
   , deleteObservation
   , listObservations
   , listObservationsOverfetch
+  , listObservationSubjectFacets
+  , listObservationSubjectFacetsOverfetch
   , matchObservations
   , matchObservationsOverfetch
   , setObservationEmbedding
@@ -158,6 +160,32 @@ listObservationsUnchecked pool queryValue = do
     , offsetValue
     ) listObservationsStatement
 
+-- | Aggregate exact stored subjects over the full filtered Observation set.
+-- Pagination is applied only after grouping and deterministic ordering.
+listObservationSubjectFacets :: Pool Hasql.Connection -> ObservationSubjectFacetQuery -> IO [ObservationSubjectFacet]
+listObservationSubjectFacets pool queryValue = do
+  validateOrThrow $ validateObservationSubjectFacetQuery queryValue
+  listObservationSubjectFacetsUnchecked pool queryValue
+
+listObservationSubjectFacetsOverfetch :: Pool Hasql.Connection -> ObservationSubjectFacetQuery -> IO [ObservationSubjectFacet]
+listObservationSubjectFacetsOverfetch pool queryValue = do
+  validateOrThrow $ validateObservationSubjectFacetQuery queryValue
+  listObservationSubjectFacetsUnchecked pool queryValue
+    { limit = Just (fromMaybe 50 queryValue.limit + 1) }
+
+listObservationSubjectFacetsUnchecked :: Pool Hasql.Connection -> ObservationSubjectFacetQuery -> IO [ObservationSubjectFacet]
+listObservationSubjectFacetsUnchecked pool queryValue = do
+  let limitValue = fromIntegral (fromMaybe 50 queryValue.limit) :: Int32
+      offsetValue = fromIntegral (fromMaybe 0 queryValue.offset) :: Int32
+  runSession pool $ Session.statement
+    ( queryValue.workspaceId
+    , subjectKindToText <$> queryValue.subjectKind
+    , queryValue.gitSha
+    , queryValue.query
+    , limitValue
+    , offsetValue
+    ) listObservationSubjectFacetsStatement
+
 -- | Match concrete repository-relative paths against stored file and glob
 -- subjects.  The SQL predicate is the scalable counterpart to
 -- 'observationSubjectMatchesPath'; it returns evidence in stable caller and
@@ -208,6 +236,29 @@ listObservationsStatement = Statement.Statement sql encoder (Dec.rowList observa
       <> contramap (\(_,_,_,_,_,f,_) -> f) (Enc.param (Enc.nonNullable Enc.int4))
       <> contramap (\(_,_,_,_,_,_,g) -> g) (Enc.param (Enc.nonNullable Enc.int4))
 
+listObservationSubjectFacetsStatement :: Statement.Statement
+  (UUID, Maybe Text, Maybe Text, Maybe Text, Int32, Int32) [ObservationSubjectFacet]
+listObservationSubjectFacetsStatement = Statement.Statement sql encoder (Dec.rowList observationSubjectFacetDecoder) True
+  where
+    sql = BS8.pack $ unlines
+      [ "SELECT s.subject_kind::text, s.subject, COUNT(DISTINCT o.id)::bigint, MAX(o.updated_at)"
+      , "FROM observations o JOIN observation_subjects s ON s.observation_id = o.id"
+      , "WHERE o.workspace_id = $1"
+      , "  AND ($2::text IS NULL OR s.subject_kind::text = $2)"
+      , "  AND ($3::text IS NULL OR o.git_sha = $3)"
+      , "  AND ($4::text IS NULL OR o.search_vector @@ plainto_tsquery('simple', $4))"
+      , "GROUP BY s.subject_kind, s.subject"
+      , "ORDER BY COUNT(DISTINCT o.id) DESC, MAX(o.updated_at) DESC, s.subject_kind::text ASC, s.subject ASC"
+      , "LIMIT $5 OFFSET $6"
+      ]
+    encoder =
+         contramap (\(a,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,b,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,c,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,d,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,e,_) -> e) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,f) -> f) (Enc.param (Enc.nonNullable Enc.int4))
+
 matchObservationsStatement :: Statement.Statement
   (UUID, Text, Maybe Text, Maybe Text, Maybe Text, Int32, Int32) [ObservationMatch]
 matchObservationsStatement = Statement.Statement sql encoder (Dec.rowList matchObservationDecoder) True
@@ -246,10 +297,15 @@ matchObservationsStatement = Statement.Statement sql encoder (Dec.rowList matchO
       , "), matched AS ("
       , "  SELECT DISTINCT p.id, p.workspace_id, p.git_sha, p.content, p.created_at, p.updated_at, p.search_vector, p.subjects_json,"
       , "    (SELECT jsonb_agg(path ORDER BY path_ordinal) FROM (SELECT DISTINCT path, path_ordinal FROM matched_pairs q WHERE q.id = p.id) paths) AS paths_json,"
-      , "    (SELECT jsonb_agg(jsonb_build_object('subject_kind', subject_kind::text, 'subject', subject) ORDER BY ordinal) FROM (SELECT DISTINCT ordinal, subject_kind, subject FROM matched_pairs q WHERE q.id = p.id) subjects) AS matched_subjects_json"
+      , "    (SELECT jsonb_agg(jsonb_build_object('subject_kind', subject_kind::text, 'subject', subject) ORDER BY ordinal) FROM (SELECT DISTINCT ordinal, subject_kind, subject FROM matched_pairs q WHERE q.id = p.id) subjects) AS matched_subjects_json,"
+      , "    (SELECT jsonb_agg(jsonb_build_object('path', path_group.path, 'matched_subjects', path_group.matched_subjects) ORDER BY path_group.path_ordinal)"
+      , "       FROM (SELECT path_subjects.path, path_subjects.path_ordinal,"
+      , "                    jsonb_agg(jsonb_build_object('subject_kind', path_subjects.subject_kind::text, 'subject', path_subjects.subject) ORDER BY path_subjects.ordinal) AS matched_subjects"
+      , "             FROM (SELECT DISTINCT path, path_ordinal, ordinal, subject_kind, subject FROM matched_pairs q WHERE q.id = p.id) path_subjects"
+      , "             GROUP BY path_subjects.path, path_subjects.path_ordinal) path_group) AS path_matches_json"
       , "  FROM matched_pairs p"
       , ")"
-      , "SELECT id, workspace_id, git_sha, content, created_at, updated_at, subjects_json, paths_json::text, matched_subjects_json::text"
+      , "SELECT id, workspace_id, git_sha, content, created_at, updated_at, subjects_json, paths_json::text, matched_subjects_json::text, path_matches_json::text"
       , "FROM matched"
       , "ORDER BY CASE WHEN $5::text IS NULL THEN 0 ELSE ts_rank(search_vector, plainto_tsquery('simple', $5)) END DESC, updated_at DESC, id DESC"
       , "LIMIT $6 OFFSET $7"
@@ -362,15 +418,27 @@ observationDecoder = do
 similarObservationDecoder :: Dec.Row SimilarObservation
 similarObservationDecoder = SimilarObservation <$> observationDecoder <*> Dec.column (Dec.nonNullable Dec.float8)
 
+observationSubjectFacetDecoder :: Dec.Row ObservationSubjectFacet
+observationSubjectFacetDecoder = do
+  kindText <- Dec.column (Dec.nonNullable Dec.text)
+  kind <- maybe (fail $ "Invalid observation subject kind: " <> T.unpack kindText) pure (subjectKindFromText kindText)
+  ObservationSubjectFacet kind
+    <$> Dec.column (Dec.nonNullable Dec.text)
+    <*> Dec.column (Dec.nonNullable Dec.int8)
+    <*> Dec.column (Dec.nonNullable Dec.timestamptz)
+
 matchObservationDecoder :: Dec.Row ObservationMatch
 matchObservationDecoder = do
   matchedObservation <- observationDecoder
   pathsJson <- Dec.column (Dec.nonNullable Dec.text)
   subjectsValue <- Dec.column (Dec.nonNullable Dec.text)
+  pathMatchesJson <- Dec.column (Dec.nonNullable Dec.text)
   pathsValue <- either (fail . show) pure (eitherDecodeStrict' (TE.encodeUtf8 pathsJson))
   matchedSubjectsValue <- either (fail . show) pure (eitherDecodeStrict' (TE.encodeUtf8 subjectsValue))
+  pathMatchesValue <- either (fail . show) pure (eitherDecodeStrict' (TE.encodeUtf8 pathMatchesJson))
   pure ObservationMatch
     { observation = matchedObservation
+    , pathMatches = pathMatchesValue
     , matchedPaths = pathsValue
     , matchedSubjects = matchedSubjectsValue
     }

@@ -37,6 +37,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/groups/{groupId}/members/{workspaceId}" . _Just . delete %~ fmap tagWorkspaceGroups
   & paths . at "/api/v1/observations" . _Just . get %~ fmap tagObservation
   & paths . at "/api/v1/observations" . _Just . post %~ fmap tagObservation
+  & paths . at "/api/v1/observations/subject-facets" . _Just . get %~ fmap tagObservation
   & paths . at "/api/v1/observations/match" . _Just . post %~ fmap tagObservation
   & paths . at "/api/v1/observations/similar" . _Just . post %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}" . _Just . get %~ fmap tagObservation
@@ -86,6 +87,11 @@ instance ToSchema Observation where
   declareNamedSchema _ = do
     NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @Observation)
     pure $ NamedSchema name (withLegacySubjectProperties schema)
+instance ToSchema ObservationSubjectFacet where
+  declareNamedSchema _ = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ObservationSubjectFacet)
+    pure $ NamedSchema name $ schema
+      & description ?~ "One exact stored subject group identified by the (subject_kind, subject) tuple. observation_count is the distinct Observation count over the complete filtered set before subject-group pagination; latest_updated_at is the newest matching Observation update time."
 instance ToSchema CreateObservation where
   declareNamedSchema _ = pure $ NamedSchema (Just "CreateObservation") $ mempty
     & description ?~ "Create with exactly one non-empty canonical `subjects` array or the complete deprecated legacy `subject_kind` plus `subject` pair. The forms are mutually exclusive; missing or half legacy pairs are rejected. Duplicate canonical subjects are de-duplicated in first-occurrence order. Subjects and Git provenance are immutable after creation."
@@ -101,13 +107,24 @@ instance ToSchema ObservationMatchQuery where
   declareNamedSchema _ = do
     NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ObservationMatchQuery)
     pure $ NamedSchema name $ schema
-      & description ?~ "Match concrete canonical repository-relative paths against stored file and glob subjects. Paths are ORed; optional subject_kind, git_sha, and query filters compose with the match. Input paths never accept globs or touch the repository filesystem. Each Observation appears once; matched_paths follow deduplicated caller path order and matched_subjects follow stored subject order. Results rank by text relevance when query is set, then updated_at DESC and id DESC. Pagination defaults to limit 50 and offset 0; limit is 1..200 and offset is 0..100000. git_sha is an exact immutable lowercase 40-character hexadecimal SHA."
+      & description ?~ "Match concrete canonical repository-relative paths against stored file and glob subjects after repository read authorization for the requested active repository workspace. Paths are ORed; optional subject_kind, git_sha, and query filters compose with the match. The optional full-text query searches Observation content and all stored subject text. Input paths never accept globs or touch the repository filesystem. Each Observation appears once; canonical path_matches follow deduplicated caller path order and each group's matched_subjects follow stored subject order. Results rank by text relevance when query is set, then updated_at DESC and id DESC. Pagination defaults to limit 50 and offset 0; limit is 1..200 and offset is 0..100000. git_sha is an exact immutable lowercase 40-character hexadecimal SHA."
       & properties . at "paths" ?~ Inline pathsSchema
+instance ToSchema ObservationPathMatch where
+  declareNamedSchema _ = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ObservationPathMatch)
+    pure $ NamedSchema name $ schema
+      & description ?~ "Canonical evidence for one deduplicated caller path, with matching stored subjects in their Observation ordinal order."
 instance ToSchema ObservationMatch where
   declareNamedSchema _ = do
     NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ObservationMatch)
     pure $ NamedSchema name $ schema
-      & description ?~ "One matching Observation with evidence. matched_paths are in deduplicated caller path order; matched_subjects are in stored subject order."
+      & description ?~ "One matching Observation with canonical path-correlated evidence. path_matches is canonical. matched_paths and matched_subjects are deprecated compatibility projections that do not express their correlation."
+      & properties . at "matched_paths" ?~ Inline (pathsSchema
+          & deprecated ?~ True
+          & description ?~ "Deprecated compatibility projection of the distinct paths in path_matches, in caller order.")
+      & properties . at "matched_subjects" ?~ Inline (subjectsSchema
+          & deprecated ?~ True
+          & description ?~ "Deprecated compatibility projection of the union of matched stored subjects, in Observation ordinal order.")
 instance ToSchema ObservationMatchRequest where declareNamedSchema _ = declareNamedSchema (Proxy @ObservationMatchQuery)
 instance ToSchema WorkspaceTimelineEvent where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema TimelineActor where declareNamedSchema = genericDeclareNamedSchema timelineActorOpts

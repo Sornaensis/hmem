@@ -1,10 +1,10 @@
 module HMem.Types
   ( jsonOptions, camelToSnake
   , SubjectKind(..), subjectKindToText, subjectKindFromText
-  , ObservationSubject(..), Observation(..), CreateObservation(..), UpdateObservation(..), ObservationQuery(..), SimilarObservationQuery(..), SimilarObservation(..), ObservationMatchQuery(..), ObservationMatch(..)
+  , ObservationSubject(..), Observation(..), CreateObservation(..), UpdateObservation(..), ObservationQuery(..), ObservationSubjectFacetQuery(..), ObservationSubjectFacet(..), SimilarObservationQuery(..), SimilarObservation(..), ObservationMatchQuery(..), ObservationPathMatch(..), ObservationMatch(..)
   , maxObservationSubjectBytes, maxObservationSubjects, maxObservationSubjectBytesTotal, maxObservationContentBytes, observationEmbeddingDimensions
   , ObservationEmbedding(..)
-  , validateCreateObservationInput, validateUpdateObservationInput, validateObservationQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
+  , validateCreateObservationInput, validateUpdateObservationInput, validateObservationQuery, validateObservationSubjectFacetQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
   , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
   , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
   , ProjectStatus(..), Project(..), CreateProject(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..)
@@ -29,6 +29,7 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, Pair)
 import Data.ByteString qualified as BS
 import Data.Char (isAlpha, isHexDigit, isLower, isUpper, toLower)
+import Data.Int (Int64)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -390,6 +391,30 @@ instance ToJSON ObservationQuery where
 instance FromJSON ObservationQuery where
   parseJSON = genericParseJSON jsonOptions
 
+-- | Lists exact stored subjects with counts calculated over the complete
+-- filtered Observation set before subject pagination is applied.
+data ObservationSubjectFacetQuery = ObservationSubjectFacetQuery
+  { workspaceId :: UUID
+  , subjectKind :: Maybe SubjectKind
+  , gitSha      :: Maybe Text
+  , query       :: Maybe Text
+  , limit       :: Maybe Int
+  , offset      :: Maybe Int
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationSubjectFacetQuery where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationSubjectFacetQuery where parseJSON = genericParseJSON jsonOptions
+
+data ObservationSubjectFacet = ObservationSubjectFacet
+  { subjectKind      :: SubjectKind
+  , subject          :: Text
+  , observationCount :: Int64
+  , latestUpdatedAt  :: UTCTime
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationSubjectFacet where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationSubjectFacet where parseJSON = genericParseJSON jsonOptions
+
 -- | Vector search has the same composable exact filters as text search.
 data SimilarObservationQuery = SimilarObservationQuery
   { workspaceId    :: UUID
@@ -433,14 +458,36 @@ data ObservationMatchQuery = ObservationMatchQuery
 instance ToJSON ObservationMatchQuery where toJSON = genericToJSON jsonOptions
 instance FromJSON ObservationMatchQuery where parseJSON = genericParseJSON jsonOptions
 
+-- | Canonical match evidence for one caller-supplied path. Stored subjects
+-- retain their ordinal order within each path group.
+data ObservationPathMatch = ObservationPathMatch
+  { path            :: Text
+  , matchedSubjects :: [ObservationSubject]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationPathMatch where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationPathMatch where parseJSON = genericParseJSON jsonOptions
+
 data ObservationMatch = ObservationMatch
   { observation     :: Observation
+  , pathMatches     :: [ObservationPathMatch]
   , matchedPaths    :: [Text]
   , matchedSubjects :: [ObservationSubject]
   } deriving (Show, Eq, Generic)
 
-instance ToJSON ObservationMatch where toJSON = genericToJSON jsonOptions
-instance FromJSON ObservationMatch where parseJSON = genericParseJSON jsonOptions
+instance ToJSON ObservationMatch where
+  toJSON match = object
+    [ "observation" .= match.observation
+    , "path_matches" .= match.pathMatches
+    , "matched_paths" .= match.matchedPaths
+    , "matched_subjects" .= match.matchedSubjects
+    ]
+instance FromJSON ObservationMatch where
+  parseJSON = withObject "ObservationMatch" $ \o -> ObservationMatch
+    <$> o .: "observation"
+    <*> o .:? "path_matches" .!= []
+    <*> o .: "matched_paths"
+    <*> o .: "matched_subjects"
 
 validateCreateObservationInput :: CreateObservation -> [Text]
 validateCreateObservationInput co =
@@ -457,6 +504,11 @@ validateObservationQuery oq =
   validateObservationPagination oq.limit oq.offset
   <> maybe [] validateObservationSubject oq.subject
   <> maybe [] validateGitSha oq.gitSha
+
+validateObservationSubjectFacetQuery :: ObservationSubjectFacetQuery -> [Text]
+validateObservationSubjectFacetQuery queryValue =
+  validateObservationPagination queryValue.limit queryValue.offset
+  <> maybe [] validateGitSha queryValue.gitSha
 
 validateSimilarObservationQuery :: SimilarObservationQuery -> [Text]
 validateSimilarObservationQuery soq =

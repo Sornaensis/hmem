@@ -121,6 +121,20 @@
             "git_sha": "0123456789abcdef0123456789abcdef01234567",
             "content_preview": "complete observation content"
           },
+          "path_matches": [
+            {
+              "path": "my/src/proj/Main.java",
+              "matched_subjects": [
+                { "subject_kind": "glob", "subject": "my/src/proj/**/*.java" }
+              ]
+            },
+            {
+              "path": "src/HMem/Types.hs",
+              "matched_subjects": [
+                { "subject_kind": "file", "subject": "src/HMem/Types.hs" }
+              ]
+            }
+          ],
           "matched_paths": ["my/src/proj/Main.java", "src/HMem/Types.hs"],
           "matched_subjects": [
             { "subject_kind": "file", "subject": "src/HMem/Types.hs" },

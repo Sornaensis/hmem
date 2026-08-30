@@ -369,7 +369,7 @@ spec = do
         jsonField "has_more" result `shouldBe` Just (Bool True)
         jsonField "returned_count" result `shouldBe` Just (Number 2)
         jsonField "next_offset" result `shouldBe` Just (Number 2)
-        jsonField "items" result `shouldSatisfy` maybe False (arrayFirst (hasFields ["observation", "matched_paths", "matched_subjects"]))
+        jsonField "items" result `shouldSatisfy` maybe False (arrayFirst (hasFields ["observation", "path_matches", "matched_paths", "matched_subjects"]))
       [request] <- readTVarIO requests
       request.requestMethod `shouldBe` methodPost
       request.requestPath `shouldBe` "/api/v1/observations/match"
@@ -395,7 +395,8 @@ spec = do
 
     it "deduplicates match rows and emits no cursor for nonempty-final or empty pages" $ do
       let matchedObservation = object ["id" .= observationId, "subjects" .= observationSubjects, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content_preview" .= ("preview" :: Text)]
-          row = object ["observation" .= matchedObservation, "matched_paths" .= (["src/HMem/Types.hs"] :: [Text]), "matched_subjects" .= observationSubjects]
+          pathEvidence = [object ["path" .= ("src/HMem/Types.hs" :: Text), "matched_subjects" .= observationSubjects]]
+          row = object ["observation" .= matchedObservation, "path_matches" .= pathEvidence, "matched_paths" .= (["src/HMem/Types.hs"] :: [Text]), "matched_subjects" .= observationSubjects]
           page = compactObservationMatches 4 (object ["items" .= [row, row], "has_more" .= True])
           nonemptyFinalPage = compactObservationMatches 6 (object ["items" .= [row], "has_more" .= False])
           finalPage = compactObservationMatches 6 (object ["items" .= ([] :: [Value]), "has_more" .= False])
@@ -876,7 +877,15 @@ responseFor method path rawQuery body
   | otherwise = object []
   where
     observation = object ["id" .= observationId, "workspace_id" .= workspaceId, "subjects" .= observationSubjects, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= ("complete observation content" :: Text), "content_preview" .= ("complete observation content" :: Text)]
-    match = object ["observation" .= observation, "matched_paths" .= (["my/src/proj/Main.java", "src/HMem/Types.hs"] :: [Text]), "matched_subjects" .= observationSubjects]
+    match = object
+      [ "observation" .= observation
+      , "path_matches" .=
+          [ object ["path" .= ("my/src/proj/Main.java" :: Text), "matched_subjects" .= [ObservationSubject SubjectGlob "my/src/proj/**/*.java"]]
+          , object ["path" .= ("src/HMem/Types.hs" :: Text), "matched_subjects" .= [ObservationSubject SubjectFile "src/HMem/Types.hs"]]
+          ]
+      , "matched_paths" .= (["my/src/proj/Main.java", "src/HMem/Types.hs"] :: [Text])
+      , "matched_subjects" .= observationSubjects
+      ]
     task = object ["id" .= observationId, "workspace_id" .= workspaceId, "title" .= ("Task" :: Text), "status" .= ("done" :: Text), "priority" .= (5 :: Int)]
     project = object ["id" .= observationId, "workspace_id" .= workspaceId, "name" .= ("Project" :: Text), "status" .= ("archived" :: Text), "priority" .= (5 :: Int)]
     dependencyMutation :: Text -> Value

@@ -20,8 +20,11 @@ module Api exposing
     , ObservationListQuery
     , ObservationMatch
     , ObservationMatchQuery
+    , ObservationPathMatch
     , ObservationSearchHit
     , ObservationSubject
+    , ObservationSubjectFacet
+    , ObservationSubjectFacetQuery
     , PaginatedResult
     , Project
     , ProjectOverview
@@ -105,6 +108,7 @@ module Api exposing
     , fetchMemoryLinks
     , fetchObservation
     , fetchObservationMatches
+    , fetchObservationSubjectFacets
     , fetchObservations
     , fetchObservationsPage
     , fetchProject
@@ -138,6 +142,8 @@ module Api exposing
     , observationListUrl
     , observationMatchBody
     , observationMatchDecoder
+    , observationSubjectFacetDecoder
+    , observationSubjectFacetsUrl
     , observationUpdateBody
     , paginatedDecoder
     , projectDecoder
@@ -326,6 +332,31 @@ type alias ObservationMatch =
     { observation : Observation
     , matchedPaths : List String
     , matchedSubjects : List ObservationSubject
+    , pathMatches : List ObservationPathMatch
+    }
+
+
+type alias ObservationPathMatch =
+    { path : String
+    , matchedSubjects : List ObservationSubject
+    }
+
+
+type alias ObservationSubjectFacet =
+    { subjectKind : SubjectKind
+    , subject : String
+    , observationCount : Int
+    , latestUpdatedAt : String
+    }
+
+
+type alias ObservationSubjectFacetQuery =
+    { workspaceId : String
+    , subjectKind : Maybe SubjectKind
+    , gitSha : Maybe String
+    , query : Maybe String
+    , limit : Int
+    , offset : Int
     }
 
 
@@ -1318,8 +1349,25 @@ observationMatchDecoder : Decoder ObservationMatch
 observationMatchDecoder =
     D.succeed ObservationMatch
         |> required "observation" observationDecoder
-        |> required "matched_paths" (D.list D.string)
+        |> optional "matched_paths" (D.list D.string) []
+        |> optional "matched_subjects" (D.list observationSubjectDecoder) []
+        |> optional "path_matches" (D.list observationPathMatchDecoder) []
+
+
+observationPathMatchDecoder : Decoder ObservationPathMatch
+observationPathMatchDecoder =
+    D.succeed ObservationPathMatch
+        |> required "path" D.string
         |> required "matched_subjects" (D.list observationSubjectDecoder)
+
+
+observationSubjectFacetDecoder : Decoder ObservationSubjectFacet
+observationSubjectFacetDecoder =
+    D.succeed ObservationSubjectFacet
+        |> required "subject_kind" subjectKindDecoder
+        |> required "subject" D.string
+        |> required "observation_count" D.int
+        |> required "latest_updated_at" D.string
 
 
 workspaceGroupDecoder : Decoder WorkspaceGroup
@@ -2426,6 +2474,33 @@ observationListUrl apiUrl listQuery =
                 |> List.filterMap identity
     in
     apiUrl ++ "/api/v1/observations?" ++ String.join "&" params
+
+
+observationSubjectFacetsUrl : String -> ObservationSubjectFacetQuery -> String
+observationSubjectFacetsUrl apiUrl facetQuery =
+    let
+        optional name maybeValue =
+            maybeValue |> Maybe.map (\value -> name ++ "=" ++ Url.percentEncode value)
+
+        params =
+            [ Just ("workspace_id=" ++ Url.percentEncode facetQuery.workspaceId)
+            , optional "subject_kind" (Maybe.map subjectKindToString facetQuery.subjectKind)
+            , optional "git_sha" facetQuery.gitSha
+            , optional "query" facetQuery.query
+            , Just ("limit=" ++ String.fromInt facetQuery.limit)
+            , Just ("offset=" ++ String.fromInt facetQuery.offset)
+            ]
+                |> List.filterMap identity
+    in
+    apiUrl ++ "/api/v1/observations/subject-facets?" ++ String.join "&" params
+
+
+fetchObservationSubjectFacets : String -> ObservationSubjectFacetQuery -> (Result Http.Error (PaginatedResult ObservationSubjectFacet) -> msg) -> Cmd msg
+fetchObservationSubjectFacets apiUrl facetQuery toMsg =
+    Http.get
+        { url = observationSubjectFacetsUrl apiUrl facetQuery
+        , expect = Http.expectJson toMsg (paginatedDecoder observationSubjectFacetDecoder)
+        }
 
 
 fetchObservations : String -> ObservationListQuery -> (Result Http.Error (PaginatedResult Observation) -> msg) -> Cmd msg

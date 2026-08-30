@@ -1924,6 +1924,45 @@ a:hover {
   min-width: 0;
 }
 
+.observation-mode-navigation {
+  display: grid;
+  gap: 0.625rem;
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--bg-surface);
+}
+
+.observation-mode-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.observation-mode-heading,
+.observation-mode-announcement {
+  margin: 0;
+}
+
+.observation-mode-heading {
+  font-size: 1rem;
+}
+
+.observation-mode-announcement {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
+.observation-mode-button:focus-visible,
+.observation-mode-heading:focus-visible,
+.observation-facet-card:focus-visible,
+.observation-facet-load-more:focus-visible,
+.observation-subject-group-toggle:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+}
+
 #observation-results:focus-visible {
   outline: 2px solid var(--accent-hover);
   outline-offset: 2px;
@@ -1950,6 +1989,18 @@ a:hover {
 
 .observation-filters .filter-label {
   line-height: 1.35;
+}
+
+.observation-filter-mode-help {
+  flex: 1 1 16rem;
+  align-self: center;
+  margin: 0;
+}
+
+.observation-selected-facet-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .observation-filter-input,
@@ -2043,6 +2094,115 @@ textarea.observation-filter-input {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+.observation-facet-rows,
+.observation-subject-group-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+button.observation-facet-card {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.observation-facet-card:hover {
+  border-color: var(--accent-hover);
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.observation-facet-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.625rem;
+}
+
+.observation-path-group {
+  min-width: 0;
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--bg-surface);
+}
+
+.observation-path-heading {
+  margin: 0 0 0.75rem;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.9375rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.observation-path-empty {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.observation-subject-groups {
+  display: grid;
+  gap: 0.625rem;
+}
+
+.observation-subject-group {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  overflow: hidden;
+}
+
+.observation-subject-group-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.625rem;
+  background: var(--bg-elevated);
+}
+
+.observation-subject-group-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.observation-subject-group-toggle .observation-subject {
+  flex: 1 1 auto;
+}
+
+.observation-loaded-count {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.observation-subject-group-cards {
+  padding: 0.75rem;
+}
+
+.observation-match-loading-more {
+  color: var(--text-muted);
 }
 
 button.observation-card {
@@ -2295,6 +2455,10 @@ textarea.observation-edit-content {
     flex-basis: 100%;
     width: 100%;
   }
+
+  .observation-filter-mode-help {
+    flex-basis: 100%;
+  }
 }
 
 @media (max-width: 480px) {
@@ -2321,6 +2485,19 @@ textarea.observation-edit-content {
 
   .observation-load-more {
     width: 100%;
+  }
+
+  .observation-mode-button,
+  .observation-facet-load-more {
+    width: 100%;
+  }
+
+  .observation-subject-group-header {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .observation-subject-group-toggle {
+    flex-wrap: wrap;
   }
 }
 

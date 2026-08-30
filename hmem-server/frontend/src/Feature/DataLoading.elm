@@ -211,7 +211,7 @@ update msg model =
 
                                 observations =
                                     if isRepository then
-                                        Feature.Observation.startReload expectedWsId currentObservations
+                                        Feature.Observation.startReloadForSession model.sessionRequestEpoch expectedWsId currentObservations
 
                                     else
                                         { currentObservations
@@ -425,7 +425,7 @@ update msg model =
                 ( { model | dependencies = updatedDependencies, dataLoading = completedLoading }, Cmd.none )
 
         GotObservations wsId maybeToken generation fingerprint offset result ->
-            if model.selectedWorkspaceId /= Just wsId || not (acceptWorkspaceLoad maybeToken model.dataLoading) || not (listObservationResponseMatches generation fingerprint offset model.observations) then
+            if model.selectedWorkspaceId /= Just wsId || model.observations.requestSessionEpoch /= model.sessionRequestEpoch || not (acceptWorkspaceLoad maybeToken model.dataLoading) || not (listObservationResponseMatches generation fingerprint offset model.observations) then
                 ( model, Cmd.none )
 
             else
@@ -472,8 +472,7 @@ observationResponseMatches generation fingerprint offset observations =
 
 listObservationResponseMatches : Int -> String -> Int -> ObservationModel -> Bool
 listObservationResponseMatches generation fingerprint offset observations =
-    observations.requestMode
-        == ObservationListMode
+    (observations.requestMode == ObservationFlatMode || observations.requestMode == ObservationExactSubjectMode)
         && observationResponseMatches generation fingerprint offset observations
 
 

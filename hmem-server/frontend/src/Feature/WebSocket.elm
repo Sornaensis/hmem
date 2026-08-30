@@ -499,30 +499,8 @@ applyCanonicalSnapshot scope items token model =
                                     |> Maybe.map (\observationId -> not (Dict.member observationId snapshot.observations))
                                     |> Maybe.withDefault False
 
-                            snapshotObservations =
-                                { observations
-                                    | items = snapshot.observations
-                                    , orderedIds = Dict.keys snapshot.observations
-                                    , hasMore = False
-                                    , loading = False
-                                    , error = Nothing
-                                    , detailLoading = False
-                                    , detailError = Nothing
-                                    , activeDetailRequest = Nothing
-                                }
-
                             reconciledObservations =
-                                case observations.selectedId of
-                                    Just observationId ->
-                                        case Dict.get observationId snapshot.observations of
-                                            Just observation ->
-                                                Observation.applyCanonicalObservation observation snapshotObservations
-
-                                            Nothing ->
-                                                Observation.removeObservation observationId snapshotObservations
-
-                                    Nothing ->
-                                        snapshotObservations
+                                reconcileSnapshotObservations snapshot.observations observations
 
                             dependencies =
                                 withStream.dependencies
@@ -546,17 +524,91 @@ applyCanonicalSnapshot scope items token model =
 
                             ( dirtyModel, dirtyCmd ) =
                                 Timeline.markDirty snapshotModel
+
+                            ( refreshedModel, refreshCmd ) =
+                                Observation.refreshActiveResults dirtyModel
                         in
-                        ( dirtyModel
+                        ( refreshedModel
                         , Cmd.batch
                             [ dirtyCmd
+                            , refreshCmd
                             , if selectedWasRemoved then
-                                replaceFragment dirtyModel
+                                replaceFragment refreshedModel
 
                               else
                                 Cmd.none
                             ]
                         )
+
+
+reconcileSnapshotObservations : Dict.Dict String Api.Observation -> ObservationModel -> ObservationModel
+reconcileSnapshotObservations canonicalById observations =
+    let
+        retainedItems =
+            observations.items
+                |> Dict.foldl
+                    (\observationId listed retainedDict ->
+                        canonicalById
+                            |> Dict.get observationId
+                            |> Maybe.map
+                                (\canonical ->
+                                    Dict.insert observationId (Observation.preferNewerObservation canonical listed) retainedDict
+                                )
+                            |> Maybe.withDefault retainedDict
+                    )
+                    Dict.empty
+
+        retainedEvidence =
+            observations.matchEvidence
+                |> Dict.foldl
+                    (\observationId evidence retainedDict ->
+                        canonicalById
+                            |> Dict.get observationId
+                            |> Maybe.map
+                                (\canonical ->
+                                    Dict.insert observationId
+                                        { evidence | observation = Observation.preferNewerObservation canonical evidence.observation }
+                                        retainedDict
+                                )
+                            |> Maybe.withDefault retainedDict
+                    )
+                    Dict.empty
+
+        retained =
+            { observations
+                | items = retainedItems
+                , orderedIds = List.filter (\observationId -> Dict.member observationId retainedItems) observations.orderedIds
+                , matchEvidence = retainedEvidence
+                , detailLoading = False
+                , detailError = Nothing
+                , activeDetailRequest = Nothing
+            }
+    in
+    case observations.selectedId of
+        Just observationId ->
+            case Dict.get observationId canonicalById of
+                Just canonical ->
+                    let
+                        wasCached =
+                            Dict.member observationId retainedItems
+
+                        reconciled =
+                            Observation.applyCanonicalObservation canonical retained
+                    in
+                    if wasCached then
+                        reconciled
+
+                    else
+                        { reconciled
+                            | items = Dict.remove observationId reconciled.items
+                            , orderedIds = List.filter ((/=) observationId) reconciled.orderedIds
+                        }
+
+                Nothing ->
+                    Observation.removeObservation observationId retained
+
+        Nothing ->
+            retained
 
 
 beginScopedResync : ChangeStream.Scope -> Model -> ( Model, Cmd Msg )

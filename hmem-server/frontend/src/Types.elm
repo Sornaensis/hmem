@@ -201,15 +201,30 @@ type alias ObservationModel =
     , query : String
     , subjectKind : Maybe Api.SubjectKind
     , subject : String
+    , selectedFacet : Maybe Api.ObservationSubject
     , gitSha : String
     , requestMode : ObservationRequestMode
     , matchPathsInput : String
+    , matchAppliedPaths : List String
     , matchValidationError : Maybe String
     , matchEvidence : Dict String Api.ObservationMatch
+    , expandedMatchGroups : Dict String Bool
+    , browseReturn : Maybe ObservationBrowseReturn
     , requestGeneration : Int
+    , requestSessionEpoch : Int
     , queryFingerprint : String
     , expectedOffset : Maybe Int
     , nextOffset : Int
+    , facets : Dict String Api.ObservationSubjectFacet
+    , facetKeys : List String
+    , facetHasMore : Bool
+    , facetLoading : Bool
+    , facetError : Maybe String
+    , facetRequestGeneration : Int
+    , facetRequestSessionEpoch : Int
+    , facetFingerprint : String
+    , facetExpectedOffset : Maybe Int
+    , facetNextOffset : Int
     , selectedId : Maybe String
     , selectedDetail : Maybe Api.Observation
     , detailLoading : Bool
@@ -223,8 +238,18 @@ type alias ObservationModel =
     }
 
 
+type alias ObservationBrowseReturn =
+    { requestMode : ObservationRequestMode
+    , subjectKind : Maybe Api.SubjectKind
+    , subject : String
+    , selectedFacet : Maybe Api.ObservationSubject
+    }
+
+
 type ObservationRequestMode
-    = ObservationListMode
+    = ObservationFlatMode
+    | ObservationFacetMode
+    | ObservationExactSubjectMode
     | ObservationMatchMode
 
 
@@ -629,7 +654,8 @@ type Msg
     | GotMemories String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Memory))
     | GotSingleMemory (Result Http.Error Api.Memory)
     | GotObservations String (Maybe Int) Int String Int (Result Http.Error (Api.PaginatedResult Api.Observation))
-    | GotObservationMatches String Int String Int (Result Http.Error (Api.PaginatedResult Api.ObservationMatch))
+    | GotObservationMatches String Int Int String Int (Result Http.Error (Api.PaginatedResult Api.ObservationMatch))
+    | GotObservationSubjectFacets String Int Int String Int (Result Http.Error (Api.PaginatedResult Api.ObservationSubjectFacet))
     | GotObservationDetail String String Int Int (Result Http.Error Api.Observation)
     | GotInitialTaskOverview String Int String (Result Http.Error Api.TaskOverview)
     | GotInitialProjectOverview String Int String (Result Http.Error Api.ProjectOverview)
@@ -674,10 +700,14 @@ type Msg
     | SetObservationSubject String
     | SetObservationGitSha String
     | ApplyObservationFilters
+    | SetObservationBrowseMode ObservationRequestMode
+    | SelectObservationFacet Api.SubjectKind String
     | SetObservationMatchPaths String
     | ApplyObservationMatch
     | ClearObservationMatch
     | LoadMoreObservations
+    | LoadMoreObservationFacets
+    | ToggleObservationMatchGroup String
     | SelectObservation String
     | CopyObservationSubject String
     | StartObservationEdit

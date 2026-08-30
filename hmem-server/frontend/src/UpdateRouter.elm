@@ -113,7 +113,10 @@ update msg model =
         GotObservations _ _ _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
-        GotObservationMatches _ _ _ _ _ ->
+        GotObservationMatches _ _ _ _ _ _ ->
+            Ok (Feature.Observation.update msg model)
+
+        GotObservationSubjectFacets _ _ _ _ _ _ ->
             Ok (Feature.Observation.update msg model)
 
         GotMemories _ _ _ _ ->
@@ -271,6 +274,12 @@ update msg model =
         ApplyObservationFilters ->
             Ok (Feature.Observation.update msg model)
 
+        SetObservationBrowseMode _ ->
+            Ok (Feature.Observation.update msg model)
+
+        SelectObservationFacet _ _ ->
+            Ok (Feature.Observation.update msg model)
+
         SetObservationMatchPaths _ ->
             Ok (Feature.Observation.update msg model)
 
@@ -281,6 +290,12 @@ update msg model =
             Ok (Feature.Observation.update msg model)
 
         LoadMoreObservations ->
+            Ok (Feature.Observation.update msg model)
+
+        LoadMoreObservationFacets ->
+            Ok (Feature.Observation.update msg model)
+
+        ToggleObservationMatchGroup _ ->
             Ok (Feature.Observation.update msg model)
 
         SelectObservation _ ->

@@ -1,15 +1,24 @@
 module Feature.Observation exposing
-    ( applyCanonicalObservation
+    ( ObservationPathGroup
+    , ObservationSubjectGroup
+    , applyCanonicalObservation
     , canLoadMore
     , clearSelection
     , deleteDialogFocusTarget
     , detailResponseMatches
+    , facetKey
+    , facetQuery
+    , facetResponseMatches
+    , groupPathMatches
     , init
     , listQuery
+    , matchGroupKey
     , matchQuery
     , matchResponseMatches
+    , mergeFacetPage
     , mutationResponseMatches
     , normalizeMatchPaths
+    , observationCardDomId
     , observationContentError
     , preferNewerObservation
     , queryFingerprint
@@ -21,6 +30,7 @@ module Feature.Observation exposing
     , selectObservation
     , selectionForTab
     , startReload
+    , startReloadForSession
     , update
     , viewObservations
     , viewObservationsState
@@ -52,15 +62,30 @@ init =
     , query = ""
     , subjectKind = Nothing
     , subject = ""
+    , selectedFacet = Nothing
     , gitSha = ""
-    , requestMode = ObservationListMode
+    , requestMode = ObservationFlatMode
     , matchPathsInput = ""
+    , matchAppliedPaths = []
     , matchValidationError = Nothing
     , matchEvidence = Dict.empty
+    , expandedMatchGroups = Dict.empty
+    , browseReturn = Nothing
     , requestGeneration = 0
+    , requestSessionEpoch = 0
     , queryFingerprint = ""
     , expectedOffset = Nothing
     , nextOffset = 0
+    , facets = Dict.empty
+    , facetKeys = []
+    , facetHasMore = False
+    , facetLoading = False
+    , facetError = Nothing
+    , facetRequestGeneration = 0
+    , facetRequestSessionEpoch = 0
+    , facetFingerprint = ""
+    , facetExpectedOffset = Nothing
+    , facetNextOffset = 0
     , selectedId = Nothing
     , selectedDetail = Nothing
     , detailLoading = False
@@ -112,7 +137,13 @@ update msg model =
             ( updateObservation (\state -> { state | gitSha = value }) model, Cmd.none )
 
         ApplyObservationFilters ->
-            reload model
+            applyObservationFilters model
+
+        SetObservationBrowseMode mode ->
+            switchBrowseMode mode model
+
+        SelectObservationFacet subjectKind subject ->
+            selectFacet subjectKind subject model
 
         SetObservationMatchPaths value ->
             ( updateObservation (\state -> { state | matchPathsInput = value, matchValidationError = Nothing }) model, Cmd.none )
@@ -121,40 +152,51 @@ update msg model =
             matchObservations model
 
         ClearObservationMatch ->
-            reload
-                (updateObservation
-                    (\state ->
-                        { state
-                            | requestMode = ObservationListMode
-                            , matchPathsInput = ""
-                            , matchValidationError = Nothing
-                            , matchEvidence = Dict.empty
-                        }
-                    )
-                    model
-                )
+            restoreBrowseAfterMatch model
 
         LoadMoreObservations ->
             case repositoryWorkspaceId model of
                 Just workspaceId ->
                     if canLoadMore workspaceId model.observations then
                         case model.observations.requestMode of
-                            ObservationListMode ->
+                            ObservationFlatMode ->
                                 fetchPage model.observations.nextOffset model
 
-                            ObservationMatchMode ->
-                                case normalizeMatchPaths model.observations.matchPathsInput of
-                                    Ok paths ->
-                                        fetchMatchPage model.observations.nextOffset paths model
+                            ObservationExactSubjectMode ->
+                                fetchPage model.observations.nextOffset model
 
-                                    Err _ ->
-                                        ( model, Cmd.none )
+                            ObservationFacetMode ->
+                                ( model, Cmd.none )
+
+                            ObservationMatchMode ->
+                                if List.isEmpty model.observations.matchAppliedPaths then
+                                    ( model, Cmd.none )
+
+                                else
+                                    fetchMatchPage model.observations.nextOffset model.observations.matchAppliedPaths model
 
                     else
                         ( model, Cmd.none )
 
                 Nothing ->
                     ( model, Cmd.none )
+
+        LoadMoreObservationFacets ->
+            loadMoreFacets model
+
+        ToggleObservationMatchGroup groupKey ->
+            ( updateObservation
+                (\state ->
+                    { state
+                        | expandedMatchGroups =
+                            Dict.update groupKey
+                                (\current -> Just (not (Maybe.withDefault False current)))
+                                state.expandedMatchGroups
+                    }
+                )
+                model
+            , Cmd.none
+            )
 
         SelectObservation observationId ->
             selectObservation observationId model
@@ -249,8 +291,8 @@ update msg model =
             else
                 ( model, Cmd.none )
 
-        GotObservationMatches workspaceId generation fingerprint offset result ->
-            if model.selectedWorkspaceId /= Just workspaceId || not (matchResponseMatches generation fingerprint offset model.observations) then
+        GotObservationMatches workspaceId sessionEpoch generation fingerprint offset result ->
+            if model.selectedWorkspaceId /= Just workspaceId || model.sessionRequestEpoch /= sessionEpoch || not (matchResponseMatches sessionEpoch generation fingerprint offset model.observations) then
                 ( model, Cmd.none )
 
             else
@@ -260,6 +302,18 @@ update msg model =
 
                     Err _ ->
                         ( updateObservation (\state -> { state | loading = False, error = Just "Failed to match repository files.", expectedOffset = Nothing }) model, Cmd.none )
+
+        GotObservationSubjectFacets workspaceId sessionEpoch generation fingerprint offset result ->
+            if model.selectedWorkspaceId /= Just workspaceId || model.sessionRequestEpoch /= sessionEpoch || not (facetResponseMatches sessionEpoch generation fingerprint offset model.observations) then
+                ( model, Cmd.none )
+
+            else
+                case result of
+                    Ok paginated ->
+                        ( updateObservation (mergeFacetPage offset paginated) model, Cmd.none )
+
+                    Err _ ->
+                        ( updateObservation (\state -> { state | facetLoading = False, facetError = Just "Failed to load shared subjects.", facetExpectedOffset = Nothing }) model, Cmd.none )
 
         _ ->
             ( model, Cmd.none )
@@ -757,42 +811,212 @@ observationContentError content =
         Nothing
 
 
-{-| Reset a result set before issuing page zero. The generation and the complete
-filter fingerprint make late filter responses harmless.
+{-| Compatibility entry point used by workspace bootstrap. Interactive requests
+use `startReloadForSession` so their fingerprint includes the auth epoch.
 -}
 startReload : String -> ObservationModel -> ObservationModel
 startReload workspaceId state =
-    let
-        nextGeneration =
-            state.requestGeneration + 1
+    startReloadForSession state.requestSessionEpoch workspaceId state
 
-        fingerprint =
-            queryFingerprint (listQuery workspaceId 0 state)
-    in
+
+startReloadForSession : Int -> String -> ObservationModel -> ObservationModel
+startReloadForSession sessionEpoch workspaceId state =
+    startResultReload ObservationFlatMode sessionEpoch workspaceId
+        { state
+            | matchPathsInput = ""
+            , matchAppliedPaths = []
+            , selectedFacet = Nothing
+            , matchValidationError = Nothing
+            , matchEvidence = Dict.empty
+            , expandedMatchGroups = Dict.empty
+            , browseReturn = Nothing
+        }
+
+
+startResultReload : ObservationRequestMode -> Int -> String -> ObservationModel -> ObservationModel
+startResultReload mode sessionEpoch workspaceId state =
     { state
         | items = Dict.empty
         , orderedIds = []
         , hasMore = False
         , loading = True
         , error = Nothing
-        , requestGeneration = nextGeneration
-        , queryFingerprint = fingerprint
+        , requestMode = mode
+        , requestGeneration = state.requestGeneration + 1
+        , requestSessionEpoch = sessionEpoch
+        , queryFingerprint = resultFingerprint mode sessionEpoch workspaceId state
         , expectedOffset = Just 0
         , nextOffset = 0
-        , requestMode = ObservationListMode
-        , matchPathsInput = ""
-        , matchValidationError = Nothing
-        , matchEvidence = Dict.empty
+        , matchEvidence =
+            if mode == ObservationMatchMode then
+                state.matchEvidence
+
+            else
+                Dict.empty
     }
 
 
 reload : Model -> ( Model, Cmd Msg )
 reload model =
+    reloadResultMode ObservationFlatMode model
+
+
+applyObservationFilters : Model -> ( Model, Cmd Msg )
+applyObservationFilters model =
+    case model.observations.requestMode of
+        ObservationFacetMode ->
+            reloadFacets model
+
+        ObservationMatchMode ->
+            reloadAppliedMatch model
+
+        ObservationExactSubjectMode ->
+            reloadResultMode ObservationExactSubjectMode model
+
+        ObservationFlatMode ->
+            reloadResultMode ObservationFlatMode model
+
+
+switchBrowseMode : ObservationRequestMode -> Model -> ( Model, Cmd Msg )
+switchBrowseMode mode model =
+    let
+        prepared =
+            updateObservation
+                (\state ->
+                    { state
+                        | requestMode = mode
+                        , subject =
+                            if mode == ObservationFacetMode then
+                                ""
+
+                            else
+                                state.subject
+                        , matchPathsInput =
+                            if mode == ObservationMatchMode then
+                                state.matchPathsInput
+
+                            else
+                                ""
+                        , matchAppliedPaths =
+                            if mode == ObservationMatchMode then
+                                state.matchAppliedPaths
+
+                            else
+                                []
+                        , selectedFacet =
+                            if mode == ObservationExactSubjectMode || mode == ObservationMatchMode then
+                                state.selectedFacet
+
+                            else
+                                Nothing
+                        , matchValidationError = Nothing
+                        , matchEvidence = Dict.empty
+                        , expandedMatchGroups = Dict.empty
+                        , browseReturn = Nothing
+                    }
+                )
+                model
+
+        withFocus ( updated, command ) =
+            ( updated, Cmd.batch [ command, focusElement "observation-mode-heading" ] )
+    in
+    case mode of
+        ObservationFacetMode ->
+            withFocus (reloadFacets prepared)
+
+        ObservationExactSubjectMode ->
+            if prepared.observations.selectedFacet == Nothing then
+                withFocus (reloadResultMode ObservationFlatMode prepared)
+
+            else
+                withFocus (reloadResultMode ObservationExactSubjectMode prepared)
+
+        ObservationMatchMode ->
+            withFocus (matchObservations model)
+
+        ObservationFlatMode ->
+            withFocus (reloadResultMode ObservationFlatMode prepared)
+
+
+selectFacet : Api.SubjectKind -> String -> Model -> ( Model, Cmd Msg )
+selectFacet subjectKind subject model =
+    model
+        |> updateObservation
+            (\state ->
+                { state
+                    | selectedFacet = Just { subjectKind = subjectKind, subject = subject }
+                    , requestMode = ObservationExactSubjectMode
+                    , matchValidationError = Nothing
+                    , matchEvidence = Dict.empty
+                    , expandedMatchGroups = Dict.empty
+                    , browseReturn = Nothing
+                }
+            )
+        |> reloadResultMode ObservationExactSubjectMode
+        |> (\( updated, command ) -> ( updated, Cmd.batch [ command, focusElement "observation-mode-heading" ] ))
+
+
+restoreBrowseAfterMatch : Model -> ( Model, Cmd Msg )
+restoreBrowseAfterMatch model =
+    if List.isEmpty model.observations.matchAppliedPaths then
+        ( updateObservation
+            (\state ->
+                { state
+                    | matchPathsInput = ""
+                    , matchValidationError = Nothing
+                }
+            )
+            model
+        , Cmd.none
+        )
+
+    else
+        let
+            restored =
+                model.observations.browseReturn
+                    |> Maybe.withDefault
+                        { requestMode = ObservationFlatMode
+                        , subjectKind = model.observations.subjectKind
+                        , subject = model.observations.subject
+                        , selectedFacet = model.observations.selectedFacet
+                        }
+
+            prepared =
+                updateObservation
+                    (\state ->
+                        { state
+                            | requestMode = restored.requestMode
+                            , subjectKind = restored.subjectKind
+                            , subject = restored.subject
+                            , selectedFacet = restored.selectedFacet
+                            , matchPathsInput = ""
+                            , matchAppliedPaths = []
+                            , matchValidationError = Nothing
+                            , matchEvidence = Dict.empty
+                            , expandedMatchGroups = Dict.empty
+                            , browseReturn = Nothing
+                        }
+                    )
+                    model
+        in
+        case restored.requestMode of
+            ObservationFacetMode ->
+                reloadFacets prepared
+
+            ObservationExactSubjectMode ->
+                reloadResultMode ObservationExactSubjectMode prepared
+
+            _ ->
+                reloadResultMode ObservationFlatMode prepared
+
+
+reloadResultMode : ObservationRequestMode -> Model -> ( Model, Cmd Msg )
+reloadResultMode mode model =
     case repositoryWorkspaceId model of
         Just workspaceId ->
             let
                 state =
-                    startReload workspaceId model.observations
+                    startResultReload mode model.sessionRequestEpoch workspaceId model.observations
 
                 updated =
                     updateObservation (always state) model
@@ -803,62 +1027,120 @@ reload model =
             ( updateObservation (\state -> { state | loading = False, expectedOffset = Nothing }) model, Cmd.none )
 
 
+reloadFacets : Model -> ( Model, Cmd Msg )
+reloadFacets model =
+    case repositoryWorkspaceId model of
+        Just workspaceId ->
+            let
+                state =
+                    startFacetReload model.sessionRequestEpoch workspaceId model.observations
+
+                updated =
+                    updateObservation (always state) model
+            in
+            fetchFacetPage 0 updated
+
+        Nothing ->
+            ( updateObservation (\state -> { state | facetLoading = False, facetExpectedOffset = Nothing }) model, Cmd.none )
+
+
 refreshActiveResults : Model -> ( Model, Cmd Msg )
 refreshActiveResults model =
     case repositoryWorkspaceId model of
         Just workspaceId ->
             case model.observations.requestMode of
-                ObservationListMode ->
+                ObservationFacetMode ->
                     let
                         state =
-                            startListRefresh workspaceId model.observations
+                            startFacetRefresh model.sessionRequestEpoch workspaceId model.observations
 
                         updated =
                             updateObservation (always state) model
                     in
-                    fetchPage 0 updated
+                    fetchFacetPage 0 updated
 
                 ObservationMatchMode ->
-                    case normalizeMatchPaths model.observations.matchPathsInput of
-                        Ok paths ->
+                    case model.observations.matchAppliedPaths of
+                        (_ :: _) as paths ->
                             let
                                 state =
-                                    startMatchRefresh workspaceId model.observations
+                                    startMatchRefresh model.sessionRequestEpoch workspaceId model.observations
 
                                 updated =
                                     updateObservation (always state) model
                             in
                             fetchMatchPage 0 paths updated
 
-                        Err _ ->
+                        [] ->
                             ( model, Cmd.none )
+
+                mode ->
+                    let
+                        state =
+                            startResultRefresh mode model.sessionRequestEpoch workspaceId model.observations
+
+                        updated =
+                            updateObservation (always state) model
+                    in
+                    fetchPage 0 updated
 
         Nothing ->
             ( model, Cmd.none )
 
 
-startListRefresh : String -> ObservationModel -> ObservationModel
-startListRefresh workspaceId state =
+startResultRefresh : ObservationRequestMode -> Int -> String -> ObservationModel -> ObservationModel
+startResultRefresh mode sessionEpoch workspaceId state =
     { state
         | loading = True
         , error = Nothing
         , requestGeneration = state.requestGeneration + 1
-        , queryFingerprint = queryFingerprint (listQuery workspaceId 0 state)
+        , requestSessionEpoch = sessionEpoch
+        , queryFingerprint = resultFingerprint mode sessionEpoch workspaceId state
         , expectedOffset = Just 0
         , nextOffset = 0
-        , matchEvidence = Dict.empty
     }
 
 
-startMatchRefresh : String -> ObservationModel -> ObservationModel
-startMatchRefresh workspaceId state =
+startMatchRefresh : Int -> String -> ObservationModel -> ObservationModel
+startMatchRefresh sessionEpoch workspaceId state =
     { state
         | loading = True
         , error = Nothing
         , requestGeneration = state.requestGeneration + 1
-        , queryFingerprint = matchFingerprint workspaceId state
+        , requestSessionEpoch = sessionEpoch
+        , queryFingerprint = matchFingerprint sessionEpoch workspaceId state
         , expectedOffset = Just 0
         , nextOffset = 0
+    }
+
+
+startFacetReload : Int -> String -> ObservationModel -> ObservationModel
+startFacetReload sessionEpoch workspaceId state =
+    { state
+        | requestMode = ObservationFacetMode
+        , facets = Dict.empty
+        , facetKeys = []
+        , facetHasMore = False
+        , facetLoading = True
+        , facetError = Nothing
+        , facetRequestGeneration = state.facetRequestGeneration + 1
+        , facetRequestSessionEpoch = sessionEpoch
+        , facetFingerprint = facetFingerprintFor sessionEpoch (facetQuery workspaceId 0 state)
+        , facetExpectedOffset = Just 0
+        , facetNextOffset = 0
+    }
+
+
+startFacetRefresh : Int -> String -> ObservationModel -> ObservationModel
+startFacetRefresh sessionEpoch workspaceId state =
+    { state
+        | facetLoading = True
+        , facetError = Nothing
+        , facetRequestGeneration = state.facetRequestGeneration + 1
+        , facetRequestSessionEpoch = sessionEpoch
+        , facetFingerprint = facetFingerprintFor sessionEpoch (facetQuery workspaceId 0 state)
+        , facetExpectedOffset = Just 0
+        , facetNextOffset = 0
     }
 
 
@@ -883,6 +1165,48 @@ fetchPage offset model =
             ( model, Cmd.none )
 
 
+fetchFacetPage : Int -> Model -> ( Model, Cmd Msg )
+fetchFacetPage offset model =
+    case repositoryWorkspaceId model of
+        Nothing ->
+            ( model, Cmd.none )
+
+        Just workspaceId ->
+            let
+                state =
+                    model.observations
+
+                updated =
+                    updateObservation (\current -> { current | facetLoading = True, facetError = Nothing, facetExpectedOffset = Just offset }) model
+            in
+            ( updated
+            , Api.fetchObservationSubjectFacets model.flags.apiUrl
+                (facetQuery workspaceId offset state)
+                (GotObservationSubjectFacets workspaceId model.sessionRequestEpoch state.facetRequestGeneration state.facetFingerprint offset)
+            )
+
+
+loadMoreFacets : Model -> ( Model, Cmd Msg )
+loadMoreFacets model =
+    case repositoryWorkspaceId model of
+        Just workspaceId ->
+            let
+                state =
+                    model.observations
+
+                currentFingerprint =
+                    facetFingerprintFor state.facetRequestSessionEpoch (facetQuery workspaceId 0 state)
+            in
+            if state.requestMode == ObservationFacetMode && not state.facetLoading && state.facetHasMore && state.facetExpectedOffset == Nothing && currentFingerprint == state.facetFingerprint then
+                fetchFacetPage state.facetNextOffset model
+
+            else
+                ( model, Cmd.none )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
 matchObservations : Model -> ( Model, Cmd Msg )
 matchObservations model =
     case repositoryWorkspaceId model of
@@ -897,12 +1221,29 @@ matchObservations model =
                 Ok paths ->
                     let
                         state =
-                            startMatchReload workspaceId paths model.observations
+                            startMatchReload model.sessionRequestEpoch workspaceId paths model.observations
 
                         updated =
                             updateObservation (always state) model
                     in
                     fetchMatchPage 0 paths updated
+
+
+reloadAppliedMatch : Model -> ( Model, Cmd Msg )
+reloadAppliedMatch model =
+    case ( repositoryWorkspaceId model, model.observations.matchAppliedPaths ) of
+        ( Just workspaceId, (_ :: _) as paths ) ->
+            let
+                state =
+                    startMatchReload model.sessionRequestEpoch workspaceId paths model.observations
+
+                updated =
+                    updateObservation (always state) model
+            in
+            fetchMatchPage 0 paths updated
+
+        _ ->
+            ( model, Cmd.none )
 
 
 fetchMatchPage : Int -> List String -> Model -> ( Model, Cmd Msg )
@@ -922,7 +1263,7 @@ fetchMatchPage offset paths model =
             ( updated
             , Api.fetchObservationMatches model.flags.apiUrl
                 (matchQuery workspaceId paths offset state)
-                (GotObservationMatches workspaceId state.requestGeneration state.queryFingerprint offset)
+                (GotObservationMatches workspaceId model.sessionRequestEpoch state.requestGeneration state.queryFingerprint offset)
             )
 
 
@@ -946,8 +1287,34 @@ repositoryWorkspaceId model =
 listQuery : String -> Int -> ObservationModel -> Api.ObservationListQuery
 listQuery workspaceId offset state =
     { workspaceId = workspaceId
+    , subjectKind =
+        case ( state.requestMode, state.selectedFacet ) of
+            ( ObservationExactSubjectMode, Just selectedFacet ) ->
+                Just selectedFacet.subjectKind
+
+            _ ->
+                state.subjectKind
+    , subject =
+        case ( state.requestMode, state.selectedFacet ) of
+            ( ObservationFlatMode, _ ) ->
+                nonEmpty state.subject
+
+            ( ObservationExactSubjectMode, Just selectedFacet ) ->
+                Just selectedFacet.subject
+
+            _ ->
+                Nothing
+    , gitSha = nonEmpty state.gitSha
+    , query = nonEmpty state.query
+    , limit = 50
+    , offset = offset
+    }
+
+
+facetQuery : String -> Int -> ObservationModel -> Api.ObservationSubjectFacetQuery
+facetQuery workspaceId offset state =
+    { workspaceId = workspaceId
     , subjectKind = state.subjectKind
-    , subject = nonEmpty state.subject
     , gitSha = nonEmpty state.gitSha
     , query = nonEmpty state.query
     , limit = 50
@@ -967,14 +1334,20 @@ matchQuery workspaceId paths offset state =
     }
 
 
-startMatchReload : String -> List String -> ObservationModel -> ObservationModel
-startMatchReload workspaceId paths state =
+startMatchReload : Int -> String -> List String -> ObservationModel -> ObservationModel
+startMatchReload sessionEpoch workspaceId paths state =
     let
-        nextGeneration =
-            state.requestGeneration + 1
+        browseReturn =
+            if state.requestMode == ObservationMatchMode then
+                state.browseReturn
 
-        fingerprint =
-            matchFingerprint workspaceId state
+            else
+                Just
+                    { requestMode = state.requestMode
+                    , subjectKind = state.subjectKind
+                    , subject = state.subject
+                    , selectedFacet = state.selectedFacet
+                    }
     in
     { state
         | items = Dict.empty
@@ -983,10 +1356,14 @@ startMatchReload workspaceId paths state =
         , loading = True
         , error = Nothing
         , requestMode = ObservationMatchMode
+        , matchAppliedPaths = paths
         , matchValidationError = Nothing
         , matchEvidence = Dict.empty
-        , requestGeneration = nextGeneration
-        , queryFingerprint = fingerprint
+        , expandedMatchGroups = Dict.empty
+        , browseReturn = browseReturn
+        , requestGeneration = state.requestGeneration + 1
+        , requestSessionEpoch = sessionEpoch
+        , queryFingerprint = matchFingerprint sessionEpoch workspaceId { state | matchAppliedPaths = paths }
         , expectedOffset = Just 0
         , nextOffset = 0
     }
@@ -1004,15 +1381,40 @@ queryFingerprint query =
         ]
 
 
-matchFingerprint : String -> ObservationModel -> String
-matchFingerprint workspaceId state =
+resultFingerprint : ObservationRequestMode -> Int -> String -> ObservationModel -> String
+resultFingerprint mode sessionEpoch workspaceId state =
+    String.join "\u{001F}"
+        [ modeName mode
+        , String.fromInt sessionEpoch
+        , queryFingerprint (listQuery workspaceId 0 { state | requestMode = mode })
+        ]
+
+
+facetFingerprintFor : Int -> Api.ObservationSubjectFacetQuery -> String
+facetFingerprintFor sessionEpoch query =
+    String.join "\u{001F}"
+        [ "facets"
+        , String.fromInt sessionEpoch
+        , query.workspaceId
+        , query.subjectKind |> Maybe.map Api.subjectKindToString |> Maybe.withDefault ""
+        , query.gitSha |> Maybe.withDefault ""
+        , query.query |> Maybe.withDefault ""
+        , String.fromInt query.limit
+        ]
+
+
+matchFingerprint : Int -> String -> ObservationModel -> String
+matchFingerprint sessionEpoch workspaceId state =
     String.join "\u{001F}"
         [ "match"
+        , String.fromInt sessionEpoch
         , workspaceId
         , state.subjectKind |> Maybe.map Api.subjectKindToString |> Maybe.withDefault ""
         , state.gitSha |> String.trim
         , state.query |> String.trim
-        , state.matchPathsInput
+        , state.matchAppliedPaths
+            |> List.map (\path -> String.fromInt (String.length path) ++ ":" ++ path)
+            |> String.join ""
         , "50"
         ]
 
@@ -1030,11 +1432,42 @@ canLoadMore workspaceId state =
 activeFingerprint : String -> ObservationModel -> String
 activeFingerprint workspaceId state =
     case state.requestMode of
-        ObservationListMode ->
-            queryFingerprint (listQuery workspaceId 0 state)
+        ObservationFlatMode ->
+            resultFingerprint ObservationFlatMode state.requestSessionEpoch workspaceId state
+
+        ObservationExactSubjectMode ->
+            resultFingerprint ObservationExactSubjectMode state.requestSessionEpoch workspaceId state
+
+        ObservationFacetMode ->
+            ""
 
         ObservationMatchMode ->
-            matchFingerprint workspaceId state
+            matchFingerprint state.requestSessionEpoch workspaceId state
+
+
+modeName : ObservationRequestMode -> String
+modeName mode =
+    case mode of
+        ObservationFlatMode ->
+            "flat"
+
+        ObservationFacetMode ->
+            "facets"
+
+        ObservationExactSubjectMode ->
+            "exact"
+
+        ObservationMatchMode ->
+            "match"
+
+
+facetKey : Api.SubjectKind -> String -> String
+facetKey subjectKind subject =
+    let
+        kind =
+            Api.subjectKindToString subjectKind
+    in
+    String.fromInt (String.length kind) ++ ":" ++ kind ++ String.fromInt (String.length subject) ++ ":" ++ subject
 
 
 nonEmpty : String -> Maybe String
@@ -1478,8 +1911,7 @@ sameObservationProvenance left right =
         == right.subject
         && left.gitSha
         == right.gitSha
-        && left.createdAt
-        == right.createdAt
+        && timestampsEquivalent left.createdAt right.createdAt
 
 
 observationIsOlderThan : Api.Observation -> Api.Observation -> Bool
@@ -1677,21 +2109,79 @@ updateObservation fn model =
     { model | observations = fn model.observations }
 
 
-observationResponseMatches : Int -> String -> Int -> ObservationModel -> Bool
-observationResponseMatches generation fingerprint offset state =
+observationResponseMatches : Int -> Int -> String -> Int -> ObservationModel -> Bool
+observationResponseMatches sessionEpoch generation fingerprint offset state =
     state.requestGeneration
         == generation
+        && state.requestSessionEpoch
+        == sessionEpoch
         && state.queryFingerprint
         == fingerprint
         && state.expectedOffset
         == Just offset
 
 
-matchResponseMatches : Int -> String -> Int -> ObservationModel -> Bool
-matchResponseMatches generation fingerprint offset state =
+matchResponseMatches : Int -> Int -> String -> Int -> ObservationModel -> Bool
+matchResponseMatches sessionEpoch generation fingerprint offset state =
     state.requestMode
         == ObservationMatchMode
-        && observationResponseMatches generation fingerprint offset state
+        && observationResponseMatches sessionEpoch generation fingerprint offset state
+
+
+facetResponseMatches : Int -> Int -> String -> Int -> ObservationModel -> Bool
+facetResponseMatches sessionEpoch generation fingerprint offset state =
+    state.requestMode
+        == ObservationFacetMode
+        && state.facetRequestGeneration
+        == generation
+        && state.facetRequestSessionEpoch
+        == sessionEpoch
+        && state.facetFingerprint
+        == fingerprint
+        && state.facetExpectedOffset
+        == Just offset
+
+
+mergeFacetPage : Int -> Api.PaginatedResult Api.ObservationSubjectFacet -> ObservationModel -> ObservationModel
+mergeFacetPage offset paginated state =
+    let
+        baseFacets =
+            if offset == 0 then
+                Dict.empty
+
+            else
+                state.facets
+
+        baseKeys =
+            if offset == 0 then
+                []
+
+            else
+                state.facetKeys
+
+        addFacet facet ( facets, keys ) =
+            let
+                key =
+                    facetKey facet.subjectKind facet.subject
+            in
+            if Dict.member key facets then
+                ( Dict.insert key facet facets, keys )
+
+            else
+                ( Dict.insert key facet facets, keys ++ [ key ] )
+
+        ( mergedFacets, mergedKeys ) =
+            List.foldl addFacet ( baseFacets, baseKeys ) paginated.items
+    in
+    { state
+        | facets = mergedFacets
+        , facetKeys = mergedKeys
+        , facetHasMore = paginated.hasMore
+        , facetLoading = False
+        , facetError = Nothing
+        , facetExpectedOffset = Nothing
+        , facetNextOffset = offset + List.length paginated.items
+    }
 
 
 mergeMatchPage : Int -> Api.PaginatedResult Api.ObservationMatch -> ObservationModel -> ObservationModel
@@ -1753,6 +2243,98 @@ mergeMatchPage offset paginated state =
         |> (\merged -> List.foldl applyCanonicalObservation merged observations)
 
 
+type alias ObservationSubjectGroup =
+    { key : String
+    , subjectKind : Api.SubjectKind
+    , subject : String
+    , observationIds : List String
+    }
+
+
+type alias ObservationPathGroup =
+    { path : String
+    , subjectGroups : List ObservationSubjectGroup
+    }
+
+
+groupPathMatches : List String -> List String -> Dict.Dict String Api.ObservationMatch -> List ObservationPathGroup
+groupPathMatches paths orderedIds evidence =
+    let
+        groupsForPath path =
+            let
+                addObservation observationId groups =
+                    case Dict.get observationId evidence of
+                        Nothing ->
+                            groups
+
+                        Just match ->
+                            match.pathMatches
+                                |> List.filter (\pathMatch -> pathMatch.path == path)
+                                |> List.concatMap .matchedSubjects
+                                |> List.foldl (appendSubjectObservation path observationId) groups
+            in
+            { path = path
+            , subjectGroups = List.foldl addObservation [] orderedIds
+            }
+    in
+    List.map groupsForPath paths
+
+
+appendSubjectObservation : String -> String -> Api.ObservationSubject -> List ObservationSubjectGroup -> List ObservationSubjectGroup
+appendSubjectObservation path observationId matchedSubject groups =
+    let
+        key =
+            matchGroupKey path matchedSubject.subjectKind matchedSubject.subject
+
+        append remaining =
+            case remaining of
+                [] ->
+                    [ { key = key
+                      , subjectKind = matchedSubject.subjectKind
+                      , subject = matchedSubject.subject
+                      , observationIds = [ observationId ]
+                      }
+                    ]
+
+                group :: rest ->
+                    if group.key == key then
+                        { group
+                            | observationIds =
+                                if List.member observationId group.observationIds then
+                                    group.observationIds
+
+                                else
+                                    group.observationIds ++ [ observationId ]
+                        }
+                            :: rest
+
+                    else
+                        group :: append rest
+    in
+    append groups
+
+
+matchGroupKey : String -> Api.SubjectKind -> String -> String
+matchGroupKey path subjectKind subject =
+    String.fromInt (String.length path) ++ ":" ++ path ++ facetKey subjectKind subject
+
+
+observationCardDomId : String -> String -> String
+observationCardDomId context observationId =
+    "observation-card-" ++ domToken context ++ "-" ++ domToken observationId
+
+
+domToken : String -> String
+domToken value =
+    String.fromInt (String.length value)
+        ++ "-"
+        ++ (value
+                |> String.toList
+                |> List.map (Char.toCode >> String.fromInt)
+                |> String.join "-"
+           )
+
+
 viewObservations : Api.Workspace -> Model -> Html Msg
 viewObservations workspace model =
     viewObservationsStateWithPermission (Permissions.canEditCurrentWorkspace model) workspace model.observations
@@ -1782,7 +2364,8 @@ viewObservationsStateWithPermission canEdit workspace state =
                             []
                        )
                 )
-                [ viewFilters state
+                [ viewModeNavigation state
+                , viewFilters state
                 , div
                     [ classList
                         [ ( "observation-layout", True )
@@ -1813,30 +2396,53 @@ viewFilters state =
                 []
             ]
         , div [ class "filter-group observation-filter-group observation-filter-kind" ]
-            [ label [ class "filter-label", for "observation-subject-kind" ] [ text "Subject kind" ]
+            [ label [ class "filter-label", for "observation-subject-kind" ]
+                [ text
+                    (if state.requestMode == ObservationExactSubjectMode then
+                        "Browse/match subject kind"
+
+                     else
+                        "Subject kind"
+                    )
+                ]
             , select [ id "observation-subject-kind", class "filter-select observation-filter-select", onInput SetObservationSubjectKind ]
                 [ option [ value "", selected (state.subjectKind == Nothing) ] [ text "All subjects" ]
                 , option [ value "file", selected (state.subjectKind == Just Api.SubjectFile) ] [ text "Files" ]
                 , option [ value "glob", selected (state.subjectKind == Just Api.SubjectGlob) ] [ text "Globs" ]
                 ]
             ]
-        , div [ class "filter-group observation-filter-group" ]
-            [ label [ class "filter-label", for "observation-subject" ] [ text "Exact subject (list mode; matches any subject)" ]
-            , input
-                [ id "observation-subject"
-                , class "form-input observation-filter-input"
-                , placeholder "Path or glob"
-                , value state.subject
-                , onInput SetObservationSubject
-                , disabled (state.requestMode == ObservationMatchMode)
-                ]
-                []
-            , if state.requestMode == ObservationMatchMode then
-                p [ class "form-help" ] [ text "Exact subject filtering is unavailable while matching files; the match endpoint accepts only kind, Git SHA, and text filters." ]
+        , case state.requestMode of
+            ObservationFlatMode ->
+                div [ class "filter-group observation-filter-group" ]
+                    [ label [ class "filter-label", for "observation-subject" ] [ text "Exact subject" ]
+                    , input
+                        [ id "observation-subject"
+                        , class "form-input observation-filter-input"
+                        , placeholder "Optional file or glob"
+                        , value state.subject
+                        , onInput SetObservationSubject
+                        ]
+                        []
+                    ]
 
-              else
-                text ""
-            ]
+            ObservationExactSubjectMode ->
+                case state.selectedFacet of
+                    Just selectedFacet ->
+                        div [ class "filter-group observation-filter-group observation-selected-facet" ]
+                            [ span [ class "filter-label" ] [ text "Selected shared subject" ]
+                            , strong [ class "observation-selected-facet-value" ]
+                                [ text (subjectKindLabel selectedFacet.subjectKind ++ ": " ++ selectedFacet.subject) ]
+                            , p [ class "form-help" ] [ text "Exact results stay locked to this subject tuple. Browse/match kind changes do not alter it." ]
+                            ]
+
+                    Nothing ->
+                        p [ class "form-error", attribute "role" "alert" ] [ text "No exact shared subject is selected." ]
+
+            ObservationFacetMode ->
+                p [ class "form-help observation-filter-mode-help" ] [ text "Shared subjects ignores the manual exact-subject filter and uses the shared search, kind, and Git SHA filters." ]
+
+            ObservationMatchMode ->
+                p [ class "form-help observation-filter-mode-help" ] [ text "Concrete path matching uses the shared search, kind, and Git SHA filters and ignores manual exact-subject filtering." ]
         , div [ class "filter-group observation-filter-group" ]
             [ label [ class "filter-label", for "observation-git-sha" ] [ text "Git SHA" ]
             , input
@@ -1870,7 +2476,7 @@ viewFilters state =
                     text ""
             ]
         , button [ class "btn btn-secondary observation-match-apply", type_ "button", onClick ApplyObservationMatch, disabled state.loading ] [ text "Match files" ]
-        , if state.requestMode == ObservationMatchMode || not (String.isEmpty state.matchPathsInput) then
+        , if not (List.isEmpty state.matchAppliedPaths) || not (String.isEmpty state.matchPathsInput) then
             button [ class "btn btn-secondary observation-match-clear", type_ "button", onClick ClearObservationMatch, disabled state.loading ] [ text "Clear match" ]
 
           else
@@ -1878,23 +2484,101 @@ viewFilters state =
         ]
 
 
+viewModeNavigation : ObservationModel -> Html Msg
+viewModeNavigation state =
+    let
+        modeButton mode labelText =
+            button
+                [ classList
+                    [ ( "btn", True )
+                    , ( "btn-secondary", state.requestMode /= mode )
+                    , ( "btn-primary", state.requestMode == mode )
+                    , ( "observation-mode-button", True )
+                    ]
+                , type_ "button"
+                , onClick (SetObservationBrowseMode mode)
+                , attribute "aria-pressed"
+                    (if state.requestMode == mode then
+                        "true"
+
+                     else
+                        "false"
+                    )
+                ]
+                [ text labelText ]
+
+        headingText =
+            case state.requestMode of
+                ObservationFlatMode ->
+                    "Flat observations"
+
+                ObservationFacetMode ->
+                    "Shared subjects"
+
+                ObservationExactSubjectMode ->
+                    "Exact subject results"
+
+                ObservationMatchMode ->
+                    "Concrete path matches"
+    in
+    section [ class "observation-mode-navigation", attribute "aria-labelledby" "observation-mode-heading" ]
+        [ div [ class "observation-mode-actions", attribute "role" "group", attribute "aria-label" "Observation browse mode" ]
+            [ modeButton ObservationFlatMode "Flat observations"
+            , modeButton ObservationFacetMode "Shared subjects"
+            ]
+        , h2 [ id "observation-mode-heading", class "observation-mode-heading", tabindex -1 ] [ text headingText ]
+        , p [ class "observation-mode-announcement", attribute "aria-live" "polite" ]
+            [ text
+                (case state.requestMode of
+                    ObservationFacetMode ->
+                        String.fromInt (List.length state.facetKeys) ++ " shared subjects loaded"
+
+                    ObservationMatchMode ->
+                        String.fromInt (List.length state.orderedIds) ++ " matching observations loaded"
+
+                    _ ->
+                        String.fromInt (List.length state.orderedIds) ++ " observations loaded"
+                )
+            ]
+        ]
+
+
 viewList : ObservationModel -> Html Msg
 viewList state =
+    case state.requestMode of
+        ObservationFacetMode ->
+            viewFacetCatalogue state
+
+        ObservationMatchMode ->
+            viewMatchResults state
+
+        ObservationExactSubjectMode ->
+            viewObservationResults "Exact subject observations" "No observations share this exact subject" state
+
+        ObservationFlatMode ->
+            viewObservationResults "Observations" "No observations found" state
+
+
+viewObservationResults : String -> String -> ObservationModel -> Html Msg
+viewObservationResults ariaLabel emptyHeading state =
     let
         observations =
             state.orderedIds |> List.filterMap (\observationId -> Dict.get observationId state.items)
+
+        context =
+            case state.requestMode of
+                ObservationExactSubjectMode ->
+                    state.selectedFacet
+                        |> Maybe.map (\selectedFacet -> "exact:" ++ facetKey selectedFacet.subjectKind selectedFacet.subject)
+                        |> Maybe.withDefault "exact:missing"
+
+                _ ->
+                    "flat"
     in
     div [ id "observation-results", class "entity-list observation-list", tabindex -1 ]
         [ if state.loading && List.isEmpty observations then
             div [ class "loading-indicator observation-state observation-state-loading", attribute "role" "status", attribute "aria-live" "polite" ]
-                [ text
-                    (if state.requestMode == ObservationMatchMode then
-                        "Matching repository files..."
-
-                     else
-                        "Loading observations..."
-                    )
-                ]
+                [ text "Loading observations..." ]
 
           else
             text ""
@@ -1908,29 +2592,13 @@ viewList state =
             Nothing ->
                 if not state.loading && List.isEmpty observations then
                     div [ class "empty-state observation-state observation-state-empty" ]
-                        [ h3 []
-                            [ text
-                                (if state.requestMode == ObservationMatchMode then
-                                    "No matching observations"
-
-                                 else
-                                    "No observations found"
-                                )
-                            ]
-                        , p []
-                            [ text
-                                (if state.requestMode == ObservationMatchMode then
-                                    "Try different concrete repository paths or clear the match."
-
-                                 else
-                                    "Try clearing or changing the exact provenance filters."
-                                )
-                            ]
+                        [ h3 [] [ text emptyHeading ]
+                        , p [] [ text "Try clearing or changing the active provenance filters." ]
                         ]
 
                 else
-                    div [ class "observation-list-rows", attribute "aria-label" "Observations" ]
-                        (List.map (viewObservationRow state.selectedId state.matchEvidence) observations)
+                    div [ class "observation-list-rows", attribute "aria-label" ariaLabel ]
+                        (List.map (viewObservationRow state.selectedId context) observations)
         , if state.hasMore then
             div [ class "observation-pagination" ]
                 [ button [ class "btn btn-secondary observation-load-more", type_ "button", onClick LoadMoreObservations, disabled state.loading ]
@@ -1949,14 +2617,205 @@ viewList state =
         ]
 
 
-viewObservationRow : Maybe String -> Dict.Dict String Api.ObservationMatch -> Api.Observation -> Html Msg
-viewObservationRow selectedId evidence observation =
+viewFacetCatalogue : ObservationModel -> Html Msg
+viewFacetCatalogue state =
+    let
+        facets =
+            state.facetKeys |> List.filterMap (\key -> Dict.get key state.facets)
+    in
+    div [ id "observation-results", class "entity-list observation-list observation-facet-list", tabindex -1 ]
+        [ if state.facetLoading && List.isEmpty facets then
+            div [ class "loading-indicator observation-state observation-state-loading", attribute "role" "status", attribute "aria-live" "polite" ] [ text "Loading shared subjects..." ]
+
+          else
+            text ""
+        , case state.facetError of
+            Just message ->
+                div [ class "empty-state observation-state observation-state-error", attribute "role" "alert" ]
+                    [ h3 [] [ text "Unable to load shared subjects" ]
+                    , p [] [ text message ]
+                    ]
+
+            Nothing ->
+                if not state.facetLoading && List.isEmpty facets then
+                    div [ class "empty-state observation-state observation-state-empty" ]
+                        [ h3 [] [ text "No shared subjects found" ]
+                        , p [] [ text "Try clearing or changing the shared search, kind, or Git SHA filters." ]
+                        ]
+
+                else
+                    div [ class "observation-facet-rows", attribute "aria-label" "Shared subjects" ]
+                        (List.map viewFacet facets)
+        , if state.facetHasMore then
+            div [ class "observation-pagination" ]
+                [ button [ class "btn btn-secondary observation-facet-load-more", type_ "button", onClick LoadMoreObservationFacets, disabled state.facetLoading ]
+                    [ text
+                        (if state.facetLoading then
+                            "Loading..."
+
+                         else
+                            "Load more shared subjects"
+                        )
+                    ]
+                ]
+
+          else
+            text ""
+        ]
+
+
+viewFacet : Api.ObservationSubjectFacet -> Html Msg
+viewFacet facet =
+    button
+        [ id ("observation-facet-" ++ domToken (facetKey facet.subjectKind facet.subject))
+        , class "card observation-facet-card"
+        , type_ "button"
+        , onClick (SelectObservationFacet facet.subjectKind facet.subject)
+        , attribute "aria-label"
+            ("Open " ++ subjectKindLabel facet.subjectKind ++ " subject " ++ facet.subject ++ " with " ++ String.fromInt facet.observationCount ++ " observations")
+        ]
+        [ div [ class "card-header observation-card-header" ]
+            [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel facet.subjectKind) ]
+            , span [ class "observation-subject" ] [ text facet.subject ]
+            ]
+        , div [ class "observation-facet-meta" ]
+            [ strong [] [ text (String.fromInt facet.observationCount ++ " observations") ]
+            , span [ class "card-meta" ] [ text ("Latest update: " ++ formatDate facet.latestUpdatedAt) ]
+            ]
+        ]
+
+
+viewMatchResults : ObservationModel -> Html Msg
+viewMatchResults state =
+    let
+        paths =
+            state.matchAppliedPaths
+
+        pathGroups =
+            groupPathMatches paths state.orderedIds state.matchEvidence
+
+        hasAnyGroups =
+            List.any (not << List.isEmpty << .subjectGroups) pathGroups
+    in
+    div [ id "observation-results", class "entity-list observation-list observation-match-results", tabindex -1 ]
+        [ if state.loading && List.isEmpty state.orderedIds then
+            div [ class "loading-indicator observation-state observation-state-loading", attribute "role" "status", attribute "aria-live" "polite" ] [ text "Matching repository files..." ]
+
+          else
+            text ""
+        , case state.error of
+            Just message ->
+                div [ class "empty-state observation-state observation-state-error", attribute "role" "alert" ]
+                    [ h3 [] [ text "Unable to match repository files" ]
+                    , p [] [ text message ]
+                    ]
+
+            Nothing ->
+                div []
+                    ((if not state.loading && not hasAnyGroups then
+                        [ div [ class "empty-state observation-state observation-state-empty" ]
+                            [ h3 [] [ text "No matching observations" ]
+                            , p [] [ text "Every supplied path is shown below. Try different paths or clear the match." ]
+                            ]
+                        ]
+
+                      else
+                        []
+                     )
+                        ++ List.map (viewPathGroup state) pathGroups
+                    )
+        , if state.loading && not (List.isEmpty state.orderedIds) then
+            p [ class "observation-match-loading-more", attribute "role" "status", attribute "aria-live" "polite" ] [ text "Loading more path matches..." ]
+
+          else
+            text ""
+        , if state.hasMore then
+            div [ class "observation-pagination" ]
+                [ button [ class "btn btn-secondary observation-load-more", type_ "button", onClick LoadMoreObservations, disabled state.loading ]
+                    [ text
+                        (if state.loading then
+                            "Loading..."
+
+                         else
+                            "Load more observations"
+                        )
+                    ]
+                , span [ class "form-help" ] [ text "Counts in path groups are loaded observations, not server totals." ]
+                ]
+
+          else
+            text ""
+        ]
+
+
+viewPathGroup : ObservationModel -> ObservationPathGroup -> Html Msg
+viewPathGroup state pathGroup =
+    section [ class "observation-path-group", attribute "aria-labelledby" ("observation-path-" ++ domToken pathGroup.path) ]
+        [ h3 [ id ("observation-path-" ++ domToken pathGroup.path), class "observation-path-heading" ] [ text pathGroup.path ]
+        , if List.isEmpty pathGroup.subjectGroups then
+            p [ class "observation-path-empty" ] [ text "No loaded matches for this path." ]
+
+          else
+            div [ class "observation-subject-groups" ] (List.map (viewSubjectGroup state pathGroup.path) pathGroup.subjectGroups)
+        ]
+
+
+viewSubjectGroup : ObservationModel -> String -> ObservationSubjectGroup -> Html Msg
+viewSubjectGroup state path group =
+    let
+        expanded =
+            Dict.get group.key state.expandedMatchGroups |> Maybe.withDefault False
+
+        panelId =
+            "observation-group-panel-" ++ domToken group.key
+
+        observations =
+            group.observationIds |> List.filterMap (\observationId -> Dict.get observationId state.items)
+    in
+    section [ class "observation-subject-group" ]
+        [ div [ class "observation-subject-group-header" ]
+            [ button
+                [ class "observation-subject-group-toggle"
+                , type_ "button"
+                , onClick (ToggleObservationMatchGroup group.key)
+                , attribute "aria-expanded"
+                    (if expanded then
+                        "true"
+
+                     else
+                        "false"
+                    )
+                , attribute "aria-controls" panelId
+                ]
+                [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel group.subjectKind) ]
+                , span [ class "observation-subject" ] [ text group.subject ]
+                , span [ class "observation-loaded-count" ] [ text (String.fromInt (List.length group.observationIds) ++ " loaded") ]
+                ]
+            , button
+                [ class "observation-subject-copy"
+                , type_ "button"
+                , onClick (CopyObservationSubject group.subject)
+                , attribute "aria-label" ("Copy matching subject " ++ group.subject)
+                ]
+                [ text "Copy subject" ]
+            ]
+        , if expanded then
+            div [ id panelId, class "observation-subject-group-cards", attribute "aria-label" ("Loaded observations for " ++ group.subject) ]
+                (List.map (viewObservationRow state.selectedId group.key) observations)
+
+          else
+            text ""
+        ]
+
+
+viewObservationRow : Maybe String -> String -> Api.Observation -> Html Msg
+viewObservationRow selectedId context observation =
     let
         isSelected =
             selectedId == Just observation.id
     in
     button
-        [ id ("entity-" ++ observation.id)
+        [ id (observationCardDomId context observation.id)
         , classList
             [ ( "card", True )
             , ( "observation-card", True )
@@ -1982,15 +2841,6 @@ viewObservationRow selectedId evidence observation =
                 text ""
             ]
         , div [ class "card-body observation-summary" ] [ text observation.content ]
-        , case Dict.get observation.id evidence of
-            Just match ->
-                div [ class "observation-match-evidence" ]
-                    [ p [] [ text ("Matched files: " ++ String.join ", " match.matchedPaths) ]
-                    , p [] [ text ("Matching subjects: " ++ String.join ", " (List.map .subject match.matchedSubjects)) ]
-                    ]
-
-            Nothing ->
-                text ""
         , div [ class "card-meta-group observation-card-meta" ]
             [ div [ class "card-meta-row" ]
                 [ span [ class "card-meta observation-sha" ] [ text ("Git SHA: " ++ observation.gitSha) ]

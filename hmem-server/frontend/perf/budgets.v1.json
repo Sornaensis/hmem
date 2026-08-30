@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "environmentPolicy": "timing-and-heap-require-recorded-environment-fingerprint",
+  "large": {
+    "cold": {
+      "maxHttpRequests": 12,
+      "maxFixtureBytes": 2097152,
+      "maxMedianMs": 2000,
+      "maxP95Ms": 3500,
+      "maxEntityOverviewRequests": 0,
+      "requiredCanonicalSnapshotItems": 4951,
+      "requiredCanonicalSnapshotPages": 50
+    },
+    "scaling": {
+      "maxSmallToLargeRequestDelta": 3
+    },
+    "render": {
+      "maxDomNodes": 2500,
+      "maxCollectionRows": 250
+    },
+    "localInteraction": {
+      "maxP95Ms": 100
+    },
+    "directFocus": {
+      "maxP95Ms": 500,
+      "maxRequests": 2,
+      "requireRequested": true,
+      "requireRendered": true
+    },
+    "observationLoadMore": {
+      "maxP95Ms": 500,
+      "maxRequests": 2
+    },
+    "liveBatch": {
+      "frameCount": 50,
+      "maxFollowUpRequests": 12,
+      "maxP95Ms": 500,
+      "allowWholeWorkspaceReload": false,
+      "maxDuplicateRequestsPerRepeatedTarget": 0
+    },
+    "heap": {
+      "maxAttributableBytes": 67108864
+    }
+  }
+}

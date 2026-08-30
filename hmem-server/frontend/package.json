@@ -14,6 +14,9 @@
     "test:timeline-live": "node --test tests-js/timeline-live-refresh.integration.test.js",
     "test:browser:install": "playwright install chromium",
     "test:clean-install": "npm ci && npm run test:browser:install && npm test",
+    "perf:self-check": "node --test --test-isolation=none perf/*.test.mjs",
+    "perf:record": "npm run build && node perf/harness.mjs record --authorize-baseline",
+    "perf:check": "npm run build && node perf/harness.mjs check",
     "preview": "vite preview"
   },
   "devDependencies": {

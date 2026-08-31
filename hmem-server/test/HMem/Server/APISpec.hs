@@ -138,6 +138,145 @@ recordingObservationApp env = do
 
 spec :: Spec
 spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app))) $ do
+  describe "bounded workspace navigation HTTP contract" $ do
+    it "retains matching ancestors, bounds pages, preserves batch order, and focuses an unloaded target" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "navigation-contract"
+      let workspacePath = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
+          navigationPath suffix = workspacePath <> "/navigation" <> suffix
+          projectBody name description = object
+            [ "workspace_id" .= workspace.id, "name" .= (name :: T.Text), "description" .= (description :: T.Text) ]
+      rootResponse <- postJson app "/api/v1/projects" (projectBody "root" "no match")
+      let Just root = decode (responseBody rootResponse) :: Maybe Project
+      childResponse <- postJson app "/api/v1/projects" (object
+        [ "workspace_id" .= workspace.id, "parent_id" .= root.id
+        , "name" .= ("needle-child" :: T.Text), "description" .= ("needle" :: T.Text) ])
+      let Just child = decode (responseBody childResponse) :: Maybe Project
+      rootTaskResponse <- postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "project_id" .= child.id, "title" .= ("root task" :: T.Text)])
+      let Just rootTask = decode (responseBody rootTaskResponse) :: Maybe Task
+      childTaskResponse <- postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "project_id" .= child.id, "parent_id" .= rootTask.id, "title" .= ("child task" :: T.Text)])
+      let Just childTask = decode (responseBody childTaskResponse) :: Maybe Task
+
+      retained <- request app methodGet (navigationPath "?parent_kind=workspace_root&query=needle&project_limit=1&task_limit=1") ""
+      responseStatus retained `shouldBe` status200
+      let Just retainedPage = decode (responseBody retained) :: Maybe NavigationBranchResponse
+      map (.id) retainedPage.projects.items `shouldBe` [root.id]
+      retainedPage.projects.hasMore `shouldBe` False
+      projectBranch <- request app methodGet (navigationPath ("?parent_kind=project&parent_id=" <> Text.encodeUtf8 (T.pack (show root.id)))) ""
+      responseStatus projectBranch `shouldBe` status200
+      taskBranch <- request app methodGet (navigationPath ("?parent_kind=task&parent_id=" <> Text.encodeUtf8 (T.pack (show rootTask.id)))) ""
+      responseStatus taskBranch `shouldBe` status200
+      let Just projectBranchPage = decode (responseBody projectBranch) :: Maybe NavigationBranchResponse
+          Just taskBranchPage = decode (responseBody taskBranch) :: Maybe NavigationBranchResponse
+      map (.id) projectBranchPage.projects.items `shouldBe` [child.id]
+      map (.id) taskBranchPage.tasks.items `shouldBe` [childTask.id]
+
+      invalidCap <- request app methodGet (navigationPath "?parent_kind=workspace_root&project_limit=101") ""
+      responseStatus invalidCap `shouldBe` status400
+      mapM_ (\suffix -> request app methodGet (navigationPath suffix) "" >>= (\response -> responseStatus response `shouldBe` status400))
+        [ "?parent_kind=project"
+        , "?parent_kind=workspace_root&project_offset=-1"
+        , "?parent_kind=workspace_root&task_offset=100001"
+        , "?parent_kind=workspace_root&project_limit=0"
+        ]
+
+      batch <- postJson app (navigationPath "/summaries")
+        (toJSON (NavigationSummariesRequest { projectIds = [child.id, root.id], taskIds = [] }))
+      responseStatus batch `shouldBe` status200
+      let Just batchResponse = decode (responseBody batch) :: Maybe NavigationSummariesResponse
+      map (.id) batchResponse.projects `shouldBe` [child.id, root.id]
+      duplicateBatch <- postJson app (navigationPath "/summaries")
+        (toJSON (NavigationSummariesRequest { projectIds = [child.id, child.id], taskIds = [] }))
+      responseStatus duplicateBatch `shouldBe` status400
+      overCapBatch <- postJson app (navigationPath "/summaries")
+        (toJSON (NavigationSummariesRequest { projectIds = replicate 101 child.id, taskIds = [] }))
+      responseStatus overCapBatch `shouldBe` status400
+      foreignWorkspace <- createTestWorkspace env "navigation-contract-foreign"
+      foreignResponse <- postJson app "/api/v1/projects" (object ["workspace_id" .= foreignWorkspace.id, "name" .= ("foreign" :: T.Text)])
+      let Just foreignProject = decode (responseBody foreignResponse) :: Maybe Project
+      foreignBatch <- postJson app (navigationPath "/summaries")
+        (toJSON (NavigationSummariesRequest { projectIds = [foreignProject.id], taskIds = [] }))
+      responseStatus foreignBatch `shouldBe` status200
+      let Just foreignBatchResponse = decode (responseBody foreignBatch) :: Maybe NavigationSummariesResponse
+      foreignBatchResponse.projects `shouldBe` []
+      foreignBatchResponse.missingProjectIds `shouldBe` [foreignProject.id]
+
+      focus <- request app methodGet
+        (navigationPath ("/focus/project/" <> Text.encodeUtf8 (T.pack (show child.id)))) ""
+      responseStatus focus `shouldBe` status200
+      let Just focusResponse = decode (responseBody focus) :: Maybe NavigationFocusResponse
+      focusResponse.target `shouldBe` NavigationProjectSummary (head batchResponse.projects)
+      focusResponse.ancestors `shouldBe` [NavigationProjectSummary (batchResponse.projects !! 1)]
+      invalidFocusOffset <- request app methodGet
+        (navigationPath ("/focus/project/" <> Text.encodeUtf8 (T.pack (show child.id)) <> "?ancestor_offset=-1")) ""
+      responseStatus invalidFocusOffset `shouldBe` status400
+      foreignFocus <- request app methodGet
+        (navigationPath ("/focus/project/" <> Text.encodeUtf8 (T.pack (show foreignProject.id)))) ""
+      responseStatus foreignFocus `shouldBe` status404
+
+    it "truncates a deep focus response and pages its remaining ancestors" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "navigation-focus-truncation"
+      let workspacePath = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
+          navigationPath suffix = workspacePath <> "/navigation" <> suffix
+          projectBody parent name = object
+            [ "workspace_id" .= workspace.id, "parent_id" .= parent
+            , "name" .= (name :: T.Text) ]
+          createChain parent remaining
+            | remaining == 0 = pure parent
+            | otherwise = do
+                created <- postJson app "/api/v1/projects" (projectBody (Just parent.id) "ancestor")
+                let Just child = decode (responseBody created) :: Maybe Project
+                createChain child (remaining - 1)
+      rootResponse <- postJson app "/api/v1/projects" (projectBody (Nothing :: Maybe UUID) "root")
+      let Just root = decode (responseBody rootResponse) :: Maybe Project
+      target <- createChain root (65 :: Int)
+      firstResponse <- request app methodGet
+        (navigationPath ("/focus/project/" <> Text.encodeUtf8 (T.pack (show target.id)))) ""
+      responseStatus firstResponse `shouldBe` status200
+      let Just firstFocus = decode (responseBody firstResponse) :: Maybe NavigationFocusResponse
+      length firstFocus.ancestors `shouldBe` maxFocusAncestors
+      firstFocus.ancestorsTruncated `shouldBe` True
+      firstFocus.nextAncestorOffset `shouldBe` Just maxFocusAncestors
+      continuationResponse <- request app methodGet
+        (navigationPath ("/focus/project/" <> Text.encodeUtf8 (T.pack (show target.id)) <> "?ancestor_offset=64")) ""
+      responseStatus continuationResponse `shouldBe` status200
+      let Just continuation = decode (responseBody continuationResponse) :: Maybe NavigationFocusResponse
+      length continuation.ancestors `shouldBe` 1
+      continuation.ancestorsTruncated `shouldBe` False
+      continuation.nextAncestorOffset `shouldBe` Nothing
+
+    it "allows deployed readers and denies unauthenticated or outside navigation clients" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "navigation-auth"
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        outsiderId <- createDeployedSandboxUser ctx.deployedEnv False False
+        superadminId <- createDeployedSandboxUser ctx.deployedEnv False True
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+          (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Navigation reader"
+        outsiderToken <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Navigation outsider"
+        superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Navigation superadmin"
+        let authHeader token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            workspacePath = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
+            navigationPath = workspacePath <> "/navigation?parent_kind=workspace_root"
+        created <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/projects" (authHeader superadminToken)
+          (encode (object ["workspace_id" .= workspace.id, "name" .= ("visible" :: T.Text)]))
+        responseStatus created `shouldBe` status200
+        let Just project = decode (responseBody created) :: Maybe Project
+            focusPath = workspacePath <> "/navigation/focus/project/" <> Text.encodeUtf8 (T.pack (show project.id))
+            missingPath = workspacePath <> "/navigation/focus/project/00000000-0000-0000-0000-000000000001"
+        foreignWorkspace <- createTestWorkspace ctx.deployedEnv "navigation-auth-foreign"
+        foreignCreated <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/projects" (authHeader superadminToken)
+          (encode (object ["workspace_id" .= foreignWorkspace.id, "name" .= ("foreign" :: T.Text)]))
+        responseStatus foreignCreated `shouldBe` status200
+        let Just foreignProject = decode (responseBody foreignCreated) :: Maybe Project
+            foreignPath = workspacePath <> "/navigation/focus/project/" <> Text.encodeUtf8 (T.pack (show foreignProject.id))
+        request ctx.deployedApplication methodGet navigationPath "" >>= (\response -> responseStatus response `shouldBe` status401)
+        requestWithHeaders ctx.deployedApplication methodGet navigationPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
+        requestWithHeaders ctx.deployedApplication methodGet navigationPath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodGet focusPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
+        requestWithHeaders ctx.deployedApplication methodGet missingPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status404)
+        requestWithHeaders ctx.deployedApplication methodGet foreignPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status404)
+
   describe "Task dependency HTTP contract" $ do
     it "adds and removes same-workspace dependencies with the frontend paths and payloads" $ \(env, app) -> do
       workspace <- createTestWorkspace env "task-dependency-contract"
@@ -160,6 +299,10 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       overview <- request app methodGet (taskPath dependent.id <> "/overview") ""
       let Just dependencyOverview = decode (responseBody overview) :: Maybe TaskOverview
       map (.id) dependencyOverview.dependencies `shouldBe` [dependency.id]
+      dependencyPage <- request app methodGet (taskPath dependent.id <> "/dependencies?limit=1&offset=0") ""
+      responseStatus dependencyPage `shouldBe` status200
+      invalidDependencyPage <- request app methodGet (taskPath dependent.id <> "/dependencies?limit=101&offset=-1") ""
+      responseStatus invalidDependencyPage `shouldBe` status400
       removed <- requestWithHeaders app methodDelete removePath requestHeaders requestBody
       responseStatus removed `shouldBe` status200
       let Just removeResult = decode (responseBody removed) :: Maybe DependencyMutationResult
@@ -259,6 +402,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       jsonField "resume_token" body `shouldSatisfy` (/= Nothing)
       jsonField "next_page_token" body `shouldBe` Nothing
       jsonField "cursor" body `shouldBe` Nothing
+      jsonField "snapshot_profile" body `shouldBe` Just (String "full_v1")
       -- Retrying a lost start response returns the same materialized first
       -- page/token; the client cannot silently create another snapshot.
       retry <- postJson app "/api/v1/change-stream/resync" start
@@ -268,6 +412,23 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         [ "scope" .= object ["scope" .= ("workspace" :: T.Text), "workspace_id" .= workspace.id]
         , "page_size" .= (21 :: Int), "start_idempotency_key" .= ("canonical-resync-response-loss-key-0001" :: T.Text) ])
       responseStatus pageSizeMismatch `shouldBe` status409
+      profileMismatch <- postJson app "/api/v1/change-stream/resync" (object
+        [ "scope" .= object ["scope" .= ("workspace" :: T.Text), "workspace_id" .= workspace.id]
+        , "page_size" .= (20 :: Int), "snapshot_profile" .= ("workspace_shell_v1" :: T.Text)
+        , "start_idempotency_key" .= ("canonical-resync-response-loss-key-0001" :: T.Text) ])
+      responseStatus profileMismatch `shouldBe` status409
+      shellResponse <- postJson app "/api/v1/change-stream/resync" (object
+        [ "scope" .= object ["scope" .= ("workspace" :: T.Text), "workspace_id" .= workspace.id]
+        , "page_size" .= (20 :: Int), "snapshot_profile" .= ("workspace_shell_v1" :: T.Text)
+        , "start_idempotency_key" .= ("canonical-resync-shell-profile-key-0001" :: T.Text) ])
+      responseStatus shellResponse `shouldBe` status200
+      let Just shellBody = decode (responseBody shellResponse) :: Maybe Value
+      jsonField "snapshot_profile" shellBody `shouldBe` Just (String "workspace_shell_v1")
+      case jsonField "items" shellBody of
+        Just (Array items) -> do
+          length items `shouldBe` 1
+          all (\item -> jsonField "kind" item == Just (String "workspace")) items `shouldBe` True
+        _ -> expectationFailure "expected shell snapshot items"
       weakStartKey <- postJson app "/api/v1/change-stream/resync" (object
         [ "scope" .= object ["scope" .= ("workspace" :: T.Text), "workspace_id" .= workspace.id]
         , "page_size" .= (20 :: Int), "start_idempotency_key" .= ("predictable" :: T.Text) ])
@@ -1075,6 +1236,22 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
             find (\parameter -> jsonField "name" parameter == Just (String parameterName)) (toList parameters)
           enum name = jsonStrings (schema name >>= jsonField "enum")
           embeddingSchema = schema "SimilarObservationQuery" >>= jsonField "properties" >>= jsonField "embedding"
+          navigationFocusAncestors = schema "NavigationFocusResponse" >>= jsonField "properties" >>= jsonField "ancestors"
+          navigationBatchProjects = schema "NavigationSummariesRequest" >>= jsonField "properties" >>= jsonField "project_ids"
+          navigationBatchTasks = schema "NavigationSummariesRequest" >>= jsonField "properties" >>= jsonField "task_ids"
+          navigationBranchPage pageName = schema "NavigationBranchResponse" >>= jsonField "properties" >>= jsonField pageName
+          navigationBranchItemRef pageName = navigationBranchPage pageName >>= jsonField "properties" >>= jsonField "items" >>= jsonField "items" >>= jsonField "$ref"
+          navigationBranchItemMaximum pageName = navigationBranchPage pageName >>= jsonField "properties" >>= jsonField "items" >>= jsonField "maxItems"
+          navigationLimitMaximum parameterName =
+            pathParameter "/api/v1/workspaces/{workspaceId}/navigation" "get" parameterName
+              >>= jsonField "schema" >>= jsonField "maximum"
+          navigationLimitMinimum parameterName =
+            pathParameter "/api/v1/workspaces/{workspaceId}/navigation" "get" parameterName
+              >>= jsonField "schema" >>= jsonField "minimum"
+          parameterMaximum path parameterName =
+            pathParameter path "get" parameterName >>= jsonField "schema" >>= jsonField "maximum"
+          parameterMinimum path parameterName =
+            pathParameter path "get" parameterName >>= jsonField "schema" >>= jsonField "minimum"
           fixedEmbedding = embeddingSchema >>= \embedding -> do
             minimum <- jsonField "minItems" embedding
             maximum <- jsonField "maxItems" embedding
@@ -1215,6 +1392,38 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           length continuationForms `shouldBe` 1
         _ -> expectationFailure "ChangeStreamResyncRequest must use start/continuation oneOf"
       fixedEmbedding `shouldBe` Just (Number 1536, Number 1536)
+      mapM_ (\name -> schema name `shouldSatisfy` isJust)
+         ["NavigationBranchResponse", "NavigationFocusResponse", "NavigationSummariesRequest", "NavigationSummary"]
+      navigationBranchItemRef "projects" `shouldBe` Just (String "#/components/schemas/ProjectCardSummary")
+      navigationBranchItemRef "tasks" `shouldBe` Just (String "#/components/schemas/TaskCardSummary")
+      navigationBranchItemMaximum "projects" `shouldBe` Just (Number 100)
+      navigationBranchItemMaximum "tasks" `shouldBe` Just (Number 100)
+      requiredSchemaFields "NavigationBranchResponse" `shouldBe` Just ["workspace_id", "parent", "projects", "tasks"]
+      (schema "NavigationBranchResponse" >>= jsonField "additionalProperties") `shouldBe` Just (Bool False)
+      (schema "NavigationBranchResponse" >>= jsonField "properties" >>= jsonField "parent" >>= jsonField "$ref") `shouldBe` Just (String "#/components/schemas/NavigationParent")
+      case schema "NavigationSummary" >>= jsonField "oneOf" of
+        Just (Array branches) -> length (toList branches) `shouldBe` 2
+        _ -> expectationFailure "NavigationSummary must use project/task tagged oneOf variants"
+      requiredSchemaFields "NavigationFocusResponse" `shouldBe` Just ["workspace_id", "target", "ancestors", "ancestors_truncated"]
+      (navigationFocusAncestors >>= jsonField "maxItems") `shouldBe` Just (Number 64)
+      (schema "NavigationFocusResponse" >>= jsonField "properties" >>= jsonField "next_ancestor_offset") `shouldSatisfy` isJust
+      requiredSchemaFields "NavigationSummariesRequest" `shouldBe` Just ["project_ids", "task_ids"]
+      (navigationBatchProjects >>= jsonField "maxItems") `shouldBe` Just (Number 100)
+      (navigationBatchTasks >>= jsonField "maxItems") `shouldBe` Just (Number 100)
+      navigationLimitMaximum "project_limit" `shouldBe` Just (Number 100)
+      navigationLimitMaximum "task_limit" `shouldBe` Just (Number 100)
+      navigationLimitMinimum "project_limit" `shouldBe` Just (Number 1)
+      navigationLimitMinimum "task_limit" `shouldBe` Just (Number 1)
+      navigationLimitMaximum "project_offset" `shouldBe` Just (Number 100000)
+      navigationLimitMaximum "task_offset" `shouldBe` Just (Number 100000)
+      navigationLimitMinimum "project_offset" `shouldBe` Just (Number 0)
+      navigationLimitMinimum "task_offset" `shouldBe` Just (Number 0)
+      parameterMaximum "/api/v1/workspaces/{workspaceId}/navigation/focus/{entityType}/{entityId}" "ancestor_offset" `shouldBe` Just (Number 100000)
+      parameterMinimum "/api/v1/workspaces/{workspaceId}/navigation/focus/{entityType}/{entityId}" "ancestor_offset" `shouldBe` Just (Number 0)
+      parameterMaximum "/api/v1/tasks/{taskId}/dependencies" "limit" `shouldBe` Just (Number 100)
+      parameterMaximum "/api/v1/tasks/{taskId}/dependencies" "offset" `shouldBe` Just (Number 100000)
+      parameterMinimum "/api/v1/tasks/{taskId}/dependencies" "limit" `shouldBe` Just (Number 1)
+      parameterMinimum "/api/v1/tasks/{taskId}/dependencies" "offset" `shouldBe` Just (Number 0)
       hasOptionalAuditWorkspace `shouldBe` True
       mapM_ (\legacyPath -> (paths >>= jsonField legacyPath) `shouldBe` Nothing)
         [ "/api/v1/memories", "/api/v1/categories", "/api/v1/cleanup/policies"

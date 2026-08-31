@@ -173,8 +173,26 @@ handleOwned ownedMsg model =
                 case result of
                     Ok sessionContext ->
                         let
+                            sessionReadyModel =
+                                { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin, auditLog = nextAuditLog, timeline = nextTimeline }
+                                    |> Feature.Observation.reconcileCurationPermission
+                                    |> updateLoadingAfterSession expectedWorkspace sessionContext
+                                    |> Feature.DataLoading.prepareRootNavigationRequest expectedWorkspace
+
                             sessionBootstrapCmd =
-                                bootstrapAfterSession expectedWorkspace sessionContext model
+                                bootstrapAfterSession expectedWorkspace sessionContext sessionReadyModel
+
+                            ( focusedModel, focusCmd ) =
+                                case ( expectedWorkspace, sessionReadyModel.page, sessionReadyModel.focus.focusedEntity ) of
+                                    ( Just workspaceId, WorkspacePage currentWorkspaceId, Just ( entityType, entityId ) ) ->
+                                        if workspaceId == currentWorkspaceId && sessionCanReadWorkspace workspaceId sessionContext then
+                                            Feature.DataLoading.beginNavigationFocus workspaceId entityType entityId sessionReadyModel
+
+                                        else
+                                            ( sessionReadyModel, Cmd.none )
+
+                                    _ ->
+                                        ( sessionReadyModel, Cmd.none )
 
                             mMembershipWorkspaceId =
                                 if Permissions.isImplicitLocalSuperadminSession sessionContext then
@@ -253,10 +271,8 @@ handleOwned ownedMsg model =
                                     _ ->
                                         ( model.timeline, Cmd.none )
                         in
-                        ( { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin, auditLog = nextAuditLog, timeline = nextTimeline }
-                            |> Feature.Observation.reconcileCurationPermission
-                            |> updateLoadingAfterSession expectedWorkspace sessionContext
-                        , Cmd.batch [ sessionBootstrapCmd, fetchMembershipsCmd, fetchAuditCmd, fetchTimelineCmd ]
+                        ( focusedModel
+                        , Cmd.batch [ sessionBootstrapCmd, focusCmd, fetchMembershipsCmd, fetchAuditCmd, fetchTimelineCmd ]
                         )
 
                     Err _ ->
@@ -453,6 +469,18 @@ bootstrapAfterSession expectedWorkspace sessionContext model =
                 _ ->
                     ( [], False )
 
+        rootNavigationCmd =
+            case model.page of
+                WorkspacePage currentWsId ->
+                    if expectedWorkspace == Just currentWsId && sessionCanReadWorkspace currentWsId sessionContext then
+                        [ Feature.DataLoading.beginRootNavigation model ]
+
+                    else
+                        []
+
+                _ ->
+                    []
+
         globalStreamCmd =
             if sessionContext.globalPermissions.superadmin then
                 [ Feature.WebSocket.connectCmd model.flags (Just sessionContext) Feature.ChangeStream.Global False ]
@@ -467,7 +495,7 @@ bootstrapAfterSession expectedWorkspace sessionContext model =
             else
                 [ disconnectWebSocket () ]
     in
-    Cmd.batch (globalCmds ++ globalStreamCmd ++ workspaceCmds ++ websocketCmds)
+    Cmd.batch (globalCmds ++ globalStreamCmd ++ workspaceCmds ++ rootNavigationCmd ++ websocketCmds)
 
 
 sessionCanReadWorkspace : String -> Api.SessionContext -> Bool

@@ -3,6 +3,7 @@
 -- over tables: adding a column cannot accidentally make it transport-visible.
 module HMem.Server.Snapshot
   ( materializeSnapshot
+  , materializeSnapshotWithProfile
   ) where
 
 import Data.Aeson (Value)
@@ -14,11 +15,26 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 
 import HMem.DB.ChangeStream (ChangeScope(..))
+import HMem.Types (SnapshotProfile(..))
 
 materializeSnapshot :: ChangeScope -> Session.Session [Value]
-materializeSnapshot = \case
+materializeSnapshot = materializeSnapshotWithProfile FullV1
+
+-- | The shell projection contains only the workspace record.  Navigation and
+-- card data intentionally arrive through bounded HTTP contracts; global
+-- snapshots retain their established full projection because a workspace shell
+-- has no meaning there.
+materializeSnapshotWithProfile :: SnapshotProfile -> ChangeScope -> Session.Session [Value]
+materializeSnapshotWithProfile profile = \case
+  WorkspaceScope workspace | profile == WorkspaceShellV1 -> Session.statement workspace workspaceShellSnapshotStatement
   WorkspaceScope workspace -> Session.statement workspace workspaceSnapshotStatement
   GlobalScope -> Session.statement () globalSnapshotStatement
+
+workspaceShellSnapshotStatement :: Statement.Statement UUID [Value]
+workspaceShellSnapshotStatement = Statement.Statement
+  "SELECT jsonb_build_object('schema_version',1,'kind','workspace','data',jsonb_build_object('id',w.id,'name',w.name,'workspace_type',w.workspace_type::text,'gh_owner',w.gh_owner,'gh_repo',w.gh_repo,'created_at',w.created_at,'updated_at',w.updated_at)) FROM workspaces w WHERE w.id=$1 AND w.deleted_at IS NULL"
+  (Enc.param (Enc.nonNullable Enc.uuid))
+  (Dec.rowList (Dec.column (Dec.nonNullable Dec.jsonb))) True
 
 workspaceSnapshotStatement :: Statement.Statement UUID [Value]
 workspaceSnapshotStatement = Statement.Statement workspaceSnapshotSql

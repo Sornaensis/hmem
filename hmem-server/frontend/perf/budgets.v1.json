@@ -8,8 +8,8 @@
       "maxMedianMs": 2000,
       "maxP95Ms": 3500,
       "maxEntityOverviewRequests": 0,
-      "requiredCanonicalSnapshotItems": 4951,
-      "requiredCanonicalSnapshotPages": 50
+      "requiredCanonicalSnapshotItems": 1,
+      "requiredCanonicalSnapshotPages": 1
     },
     "scaling": {
       "maxSmallToLargeRequestDelta": 3

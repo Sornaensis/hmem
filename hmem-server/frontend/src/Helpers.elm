@@ -559,7 +559,6 @@ taskDependencySummariesForTask model taskId =
 hasTaskDependencyData : Model -> String -> Bool
 hasTaskDependencyData model taskId =
     Dict.member taskId model.dependencies.taskDependencies
-        || model.dataLoading.cardHydrationLoaded
 
 
 applyTaskDependencyLinkMutation : Api.DependencyMutationResult -> List Api.WorkspaceTaskDependencyLink -> List Api.WorkspaceTaskDependencyLink

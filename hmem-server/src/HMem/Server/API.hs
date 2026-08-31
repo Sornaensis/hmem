@@ -14,13 +14,14 @@ module HMem.Server.API
   ) where
 
 import Control.Exception (try)
-import Control.Monad (forM_, when)
+import Control.Monad (forM, forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, Value, object, (.=), ToJSON(..), Result(..))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as AesonKeyMap
 import Data.ByteString.Lazy.Char8 qualified as LBS8
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Pool (Pool, tryWithResource)
 import Data.Text (Text)
@@ -51,7 +52,7 @@ import HMem.DB.Workspace qualified as Workspace
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.AccessTracker (AccessTracker, bufferSize)
 import HMem.Server.WebSocket qualified as WS
-import HMem.Server.Snapshot (materializeSnapshot)
+import HMem.Server.Snapshot (materializeSnapshotWithProfile)
 import HMem.Types
 
 ------------------------------------------------------------------------
@@ -77,6 +78,20 @@ type WorkspaceAPI =
        QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult Workspace)
   :<|> ReqBody '[JSON] CreateWorkspace :> Post '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> Get '[JSON] Workspace
+  :<|> Capture "workspaceId" UUID :> "navigation"
+         :> QueryParam "parent_kind" Text :> QueryParam "parent_id" UUID
+         :> QueryParam "project_limit" Int :> QueryParam "project_offset" Int
+         :> QueryParam "task_limit" Int :> QueryParam "task_offset" Int
+         :> QueryParam "show_only" Text :> QueryParams "project_status" ProjectStatus :> QueryParams "task_status" TaskStatus
+          :> QueryParam "priority_mode" Text :> QueryParam "priority_value" Int :> QueryParam "query" Text
+          :> Description "Returns separately paged direct child Project and Task card summaries. parent_kind is workspace_root, project, or task; project/task require parent_id. The full tree filter DTO includes show_only, project_status, task_status, priority_mode (any/exact/above/below), priority_value, and case-insensitive query; matching descendants retain ancestors. Each page defaults to 50, is capped at 100, and uses deterministic lifecycle-rank, priority DESC, title/name, id ordering."
+         :> Get '[JSON] NavigationBranchResponse
+  :<|> Capture "workspaceId" UUID :> "navigation" :> "focus" :> Capture "entityType" NavigationEntityType :> Capture "entityId" UUID :> QueryParam "ancestor_offset" Int
+         :> Description "Fetches a target card plus a root-to-parent ancestor window for direct links outside the loaded branch. Missing or foreign targets return 404. Ancestors are capped at 64; use next_ancestor_offset as ancestor_offset to continue a truncated chain."
+         :> Get '[JSON] NavigationFocusResponse
+  :<|> Capture "workspaceId" UUID :> "navigation" :> "summaries"
+         :> Description "Revalidates at most 100 unique project_ids/task_ids. Input order is preserved; missing/deleted IDs are reported without disclosing foreign IDs."
+         :> ReqBody '[JSON] NavigationSummariesRequest :> Post '[JSON] NavigationSummariesResponse
   :<|> Capture "workspaceId" UUID :> "timeline" :> "buckets"
          :> QueryParam "since" UTCTime :> QueryParam "until" UTCTime :> QueryParam "bucket" Text
          :> Get '[JSON] WorkspaceTimelineBucketsResponse
@@ -142,8 +157,11 @@ type TaskAPI =
   :<|> ReqBody '[JSON] CreateTask :> Post '[JSON] Task
   :<|> Capture "taskId" UUID :> Get '[JSON] Task
   :<|> Capture "taskId" UUID :> ReqBody '[JSON] UpdateTask :> Put '[JSON] TaskMutationResult
-   :<|> Capture "taskId" UUID :> Delete '[JSON] CascadeResult
-   :<|> Capture "taskId" UUID :> "overview" :> Get '[JSON] TaskOverview
+    :<|> Capture "taskId" UUID :> Delete '[JSON] CascadeResult
+    :<|> Capture "taskId" UUID :> "overview" :> Get '[JSON] TaskOverview
+   :<|> Capture "taskId" UUID :> "dependencies" :> QueryParam "limit" Int :> QueryParam "offset" Int
+          :> Description "Lists dependency card summaries on demand. Pagination defaults to 50, is capped at 100, and orders by lower(name), id."
+          :> Get '[JSON] TaskDependencyPage
    :<|> Capture "taskId" UUID :> "dependencies" :> ReqBody '[JSON] LinkDependency :> Post '[JSON] DependencyMutationResult
    :<|> Capture "taskId" UUID :> "dependencies" :> Capture "dependsOnId" UUID :> Delete '[JSON] DependencyMutationResult
 
@@ -160,6 +178,10 @@ instance FromHttpApiData ProjectStatus where
   parseQueryParam value = maybe (Left "invalid project status") Right (projectStatusFromText value)
 instance FromHttpApiData TaskStatus where
   parseQueryParam value = maybe (Left "invalid task status") Right (taskStatusFromText value)
+instance FromHttpApiData NavigationEntityType where
+  parseUrlPiece "project" = Right NavigationProject
+  parseUrlPiece "task" = Right NavigationTask
+  parseUrlPiece _ = Left "entityType must be project or task"
 instance FromHttpApiData AuditAction where
   parseQueryParam value = maybe (Left "invalid audit action") Right (auditActionFromText value)
 
@@ -316,7 +338,7 @@ health pool tracker = do
                 , "pool" .= object ["active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections] ]
 
 workspaces :: Pool Hasql.Connection -> Server WorkspaceAPI
-workspaces pool = listH :<|> createH :<|> getH :<|> timelineBucketsH :<|> timelineH where
+workspaces pool = listH :<|> createH :<|> getH :<|> navigationH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH where
   listH limit offset = do
     principal <- liftIO currentPrincipal
     -- A caller without a principal cannot observe any workspace, including its names.
@@ -343,6 +365,131 @@ workspaces pool = listH :<|> createH :<|> getH :<|> timelineBucketsH :<|> timeli
     rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
       row <- each workspaceSchema; where_ (row.wsId ==. lit workspaceId &&. activeWorkspace row); pure row
     case rows of (row:_) -> pure Workspace { id = row.wsId, name = row.wsName, ghOwner = row.wsGhOwner, ghRepo = row.wsGhRepo, workspaceType = row.wsType, createdAt = row.wsCreatedAt, updatedAt = row.wsUpdatedAt }; [] -> throwError err404
+  navigationH workspaceId maybeKind maybeParent projectLimit projectOffset taskLimit taskOffset maybeShowOnly projectStatuses taskStatuses maybePriorityMode maybePriorityValue maybeQuery = do
+    requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    parent <- navigationParent maybeKind maybeParent
+    reject (validateNavigationPage projectLimit projectOffset <> validateNavigationPage taskLimit taskOffset)
+    reject (validateNavigationFilter maybeShowOnly maybePriorityMode maybePriorityValue maybeQuery)
+    let filters = NavigationFilter { showOnly = maybeShowOnly, projectStatuses = projectStatuses, taskStatuses = taskStatuses, priorityMode = maybePriorityMode, priorityValue = maybePriorityValue, query = maybeQuery }
+    let projectTake = navigationTake projectLimit
+        projectSkip = navigationOffset projectOffset
+        taskTake = navigationTake taskLimit
+        taskSkip = navigationOffset taskOffset
+    (projectRows, taskRows) <- case parent of
+      NavigationWorkspaceRoot -> do
+        projects <- handleDBErrors $ Project.listFilteredProjectChildren pool workspaceId Nothing filters (projectTake + 1) projectSkip
+        tasks <- if maybeShowOnly == Just "projects" then pure [] else handleDBErrors $ Task.listFilteredTaskChildren pool workspaceId Nothing Nothing filters (taskTake + 1) taskSkip
+        pure (projects, tasks)
+      NavigationProjectBranch projectId -> do
+        project <- projectInWorkspace workspaceId projectId
+        projects <- handleDBErrors $ Project.listFilteredProjectChildren pool workspaceId (Just project.id) filters (projectTake + 1) projectSkip
+        tasks <- if maybeShowOnly == Just "projects" then pure [] else handleDBErrors $ Task.listFilteredTaskChildren pool workspaceId (Just project.id) Nothing filters (taskTake + 1) taskSkip
+        pure (projects, tasks)
+      NavigationTaskBranch taskId -> do
+        task <- taskInWorkspace workspaceId taskId
+        tasks <- if maybeShowOnly == Just "projects" then pure [] else handleDBErrors $ Task.listFilteredTaskChildren pool workspaceId task.projectId (Just task.id) filters (taskTake + 1) taskSkip
+        pure ([], tasks)
+    projectSummaries <- liftIO $ Overview.projectCardSummaries pool (take projectTake projectRows)
+    taskSummaries <- liftIO $ Overview.taskCardSummaries pool (take taskTake taskRows)
+    pure NavigationBranchResponse
+      { workspaceId = workspaceId, parent = parent
+      , projects = NavigationPage { items = projectSummaries, hasMore = length projectRows > projectTake }
+      , tasks = NavigationPage { items = taskSummaries, hasMore = length taskRows > taskTake } }
+  focusH workspaceId entityType entityId maybeAncestorOffset = do
+    requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    reject (validateNavigationPage (Just maxFocusAncestors) maybeAncestorOffset)
+    let ancestorOffset = fromMaybe 0 maybeAncestorOffset
+    (targetSummary, rawAncestors) <- case entityType of
+      NavigationProject -> do
+        project <- projectInWorkspace workspaceId entityId
+        (summary, projectAncestors) <- projectFocusSummaries ancestorOffset workspaceId project
+        pure (NavigationProjectSummary summary, map NavigationProjectSummary projectAncestors)
+      NavigationTask -> do
+        task <- taskInWorkspace workspaceId entityId
+        (summary, projectAncestors, taskAncestors) <- taskFocusSummaries ancestorOffset workspaceId task
+        pure
+          ( NavigationTaskSummary summary
+          , map NavigationProjectSummary projectAncestors ++ map NavigationTaskSummary taskAncestors
+          )
+    let ancestors = drop ancestorOffset rawAncestors
+        truncated = length ancestors > maxFocusAncestors
+    pure NavigationFocusResponse
+      { workspaceId = workspaceId, target = targetSummary, ancestors = take maxFocusAncestors ancestors
+      , ancestorsTruncated = truncated, nextAncestorOffset = if truncated then Just (ancestorOffset + maxFocusAncestors) else Nothing }
+  summariesH workspaceId request = do
+    requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    reject (validateNavigationSummariesRequest request)
+    -- Resolve the whole accepted batch before decorating it; this deliberately
+    -- avoids one entity lookup per invalidation ID.
+    projectRows <- handleDBErrors $ Project.getProjectsByIds pool request.projectIds
+    taskRows <- handleDBErrors $ Task.getTasksByIds pool request.taskIds
+    let projectsById = Map.fromList [ (value.id, value) | value <- projectRows, value.workspaceId == workspaceId ]
+        tasksById = Map.fromList [ (value.id, value) | value <- taskRows, value.workspaceId == workspaceId ]
+        projectsWithMissing = [ maybe (Left projectId) Right (Map.lookup projectId projectsById) | projectId <- request.projectIds ]
+        tasksWithMissing = [ maybe (Left taskId) Right (Map.lookup taskId tasksById) | taskId <- request.taskIds ]
+    projectSummaries <- liftIO $ Overview.projectCardSummaries pool [ value | Right value <- projectsWithMissing ]
+    taskSummaries <- liftIO $ Overview.taskCardSummaries pool [ value | Right value <- tasksWithMissing ]
+    pure NavigationSummariesResponse
+      { -- Decoration is deliberately set-based, but its SQL is free to return
+        -- rows in database order.  Reapply the accepted request order at the
+        -- HTTP boundary so callers can safely associate each result with the
+        -- corresponding invalidation without rebuilding a whole workspace.
+        projects = orderedSummaries request.projectIds projectSummaries
+      , tasks = orderedSummaries request.taskIds taskSummaries
+      , missingProjectIds = [ value | Left value <- projectsWithMissing ], missingTaskIds = [ value | Left value <- tasksWithMissing ] }
+  orderedSummaries ids values =
+    let byId = Map.fromList [ (value.id, value) | value <- values ]
+    in mapMaybe (`Map.lookup` byId) ids
+  navigationParent maybeKind maybeParent = case (maybeKind, maybeParent) of
+    (Just "workspace_root", Nothing) -> pure NavigationWorkspaceRoot
+    (Just "project", Just projectId) -> pure (NavigationProjectBranch projectId)
+    (Just "task", Just taskId) -> pure (NavigationTaskBranch taskId)
+    _ -> throwError (badRequest "validation_error" "parent_kind must be workspace_root without parent_id, or project/task with parent_id")
+  navigationTake value = Prelude.min maxNavigationPageSize (fromMaybe 50 value)
+  navigationOffset value = Prelude.min maxNavigationOffset (fromMaybe 0 value)
+  validateNavigationFilter maybeShowOnly maybePriorityMode maybePriorityValue maybeQuery =
+    [ "show_only must be projects or tasks" | Just value <- [maybeShowOnly], value /= "projects" && value /= "tasks" ]
+    ++ [ "priority_mode must be any, exact, above, or below" | Just value <- [maybePriorityMode], value `notElem` ["any", "exact", "above", "below"] ]
+    ++ [ "priority_value is required for exact, above, or below priority_mode" | Just value <- [maybePriorityMode], value /= "any", maybePriorityValue == Nothing ]
+    ++ [ "priority_value must be between 1 and 10" | Just value <- [maybePriorityValue], value < 1 || value > 10 ]
+    ++ [ "query must not be blank" | Just value <- [maybeQuery], Text.null (Text.strip value) ]
+  projectInWorkspace workspace projectId = do
+    project <- handleDBErrors (Project.getProject pool projectId) >>= maybe (throwError err404) pure
+    if project.workspaceId == workspace then pure project else throwError err404
+  taskInWorkspace workspace taskId = do
+    task <- handleDBErrors (Task.getTask pool taskId) >>= maybe (throwError err404) pure
+    if task.workspaceId == workspace then pure task else throwError err404
+  -- Focus ancestry is deliberately set-wise: the recursive ID walk is one
+  -- query per entity class and all direct counts/readiness rollups are batched.
+  -- This keeps a deep direct link bounded instead of recreating N+1 overview
+  -- hydration for every breadcrumb segment.
+  projectFocusSummaries ancestorOffset workspace project = do
+    ancestorIds <- liftIO $ Project.getProjectAncestorIds pool workspace project.id (ancestorOffset + maxFocusAncestors + 1)
+    rows <- handleDBErrors $ Project.getProjectsByIds pool (project.id : ancestorIds)
+    let byId = Map.fromList [ (value.id, value) | value <- rows, value.workspaceId == workspace ]
+        ordered = mapMaybe (`Map.lookup` byId) (project.id : ancestorIds)
+    summaries <- liftIO $ Overview.projectCardSummaries pool ordered
+    case summaries of
+      targetSummary : ancestorSummaries -> pure (targetSummary, ancestorSummaries)
+      [] -> throwError err404
+  taskFocusSummaries ancestorOffset workspace task = do
+    taskAncestorIds <- liftIO $ Task.getTaskAncestorIds pool workspace task.id (ancestorOffset + maxFocusAncestors + 1)
+    taskRows <- handleDBErrors $ Task.getTasksByIds pool (task.id : taskAncestorIds)
+    let taskById = Map.fromList [ (value.id, value) | value <- taskRows, value.workspaceId == workspace ]
+        orderedTasks = mapMaybe (`Map.lookup` taskById) (task.id : taskAncestorIds)
+    taskSummaries <- liftIO $ Overview.taskCardSummaries pool orderedTasks
+    (targetSummary, taskAncestorSummaries) <- case taskSummaries of
+      targetValue : ancestorValues -> pure (targetValue, ancestorValues)
+      [] -> throwError err404
+    projectAncestorSummaries <- case task.projectId of
+      Nothing -> pure []
+      Just projectId -> do
+        project <- projectInWorkspace workspace projectId
+        ancestorIds <- liftIO $ Project.getProjectAncestorIds pool workspace project.id (ancestorOffset + maxFocusAncestors + 1)
+        projectRows <- handleDBErrors $ Project.getProjectsByIds pool (ancestorIds ++ [project.id])
+        let projectById = Map.fromList [ (value.id, value) | value <- projectRows, value.workspaceId == workspace ]
+        liftIO $ Overview.projectCardSummaries pool (mapMaybe (`Map.lookup` projectById) (ancestorIds ++ [project.id]))
+    pure (targetSummary, projectAncestorSummaries, taskAncestorSummaries)
   timelineBucketsH workspaceId mSince mUntil mBucket = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     since <- requireTimelineBucketParam "since" mSince
@@ -528,7 +675,7 @@ projects pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> over
     handleDBErrors $ Task.listNextTasks pool projectId (fromMaybe False includeBlocked) (fromMaybe 5 limit)
 
 tasks :: Pool Hasql.Connection -> Server TaskAPI
-tasks pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> addDependencyH :<|> removeDependencyH where
+tasks pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> dependenciesH :<|> addDependencyH :<|> removeDependencyH where
   listH workspaceId projectId status priority queryValue limit offset = do
     workspace <- case (workspaceId, projectId) of
       (Just id, _) -> requireWorkspace pool id Auth.WorkspaceRoleRead >> pure id
@@ -558,6 +705,10 @@ tasks pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overvie
   overviewH taskId = do
     _ <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleRead
     handleDBErrors (Overview.getTaskOverview pool taskId) >>= maybe (throwError err404) pure
+  dependenciesH taskId limit offset = do
+    _ <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleRead
+    reject (validateNavigationPage limit offset)
+    handleDBErrors $ Overview.listTaskDependencyPage pool taskId (fromMaybe 50 limit) (fromMaybe 0 offset)
   addDependencyH taskId input = mutateDependency "add" taskId input.dependsOnId Task.addDependencyWithSnapshots
   removeDependencyH taskId dependsOnId = mutateDependency "remove" taskId dependsOnId Task.removeDependencyWithSnapshots
   mutateDependency action taskId dependsOnId mutate = do
@@ -726,6 +877,9 @@ ticket pool state request = do
 resync :: Config.ChangeStreamConfig -> Pool Hasql.Connection -> ChangeStreamResyncRequest -> Handler ChangeStreamResyncResponse
 resync changeStreamConfig pool request = do
   (scope', audience) <- changeStreamIdentity pool request.scope
+  let profile = fromMaybe FullV1 request.snapshotProfile
+  when (profile == WorkspaceShellV1 && request.scope == ChangeStreamGlobal) $
+    throwError (badRequest "validation_error" "workspace_shell_v1 is only valid for workspace scope")
   forM_ request.pageSize $ \pageSize ->
     when (pageSize < 1 || pageSize > 1000) $
       throwError (badRequest "validation_error" "page_size must be between 1 and 1000")
@@ -735,7 +889,7 @@ resync changeStreamConfig pool request = do
       case request.startIdempotencyKey of
         Nothing -> pure (Left ChangeStream.SnapshotOutOfOrder)
         Just startKey -> do
-          begun <- ChangeStream.beginResyncWithStartKey pool (fromIntegral changeStreamConfig.snapshotSessionTtlSeconds) scope' audience startKey pageSize (materializeSnapshot scope')
+          begun <- ChangeStream.beginResyncWithStartKeyAndProfile pool (fromIntegral changeStreamConfig.snapshotSessionTtlSeconds) scope' audience startKey pageSize profile (materializeSnapshotWithProfile profile scope')
           case begun of
             Left err -> pure (Left err)
             Right begin -> ChangeStream.readSnapshotPageWithTtls pool (fromIntegral changeStreamConfig.snapshotSessionTtlSeconds) (fromIntegral changeStreamConfig.resumeTokenTtlSeconds) scope' audience begin.snapshotToken pageSize
@@ -749,6 +903,7 @@ resync changeStreamConfig pool request = do
       typedItems <- traverse decodeSnapshotItem snapshotPage.snapshotPageItems
       pure ChangeStreamResyncResponse
         { items = typedItems
+        , snapshotProfile = snapshotPage.snapshotProfile
         , hasMore = snapshotPage.snapshotPageHasMore
         , nextPageToken = renderSnapshotToken <$> snapshotPage.snapshotNextToken
         , resumeToken = renderResumeToken <$> snapshotPage.snapshotResumeToken

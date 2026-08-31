@@ -64,6 +64,9 @@ update msg model =
         CanonicalProjectOverviewFetched _ _ _ ->
             Ok (Feature.WebSocket.update msg model)
 
+        CanonicalNavigationSummariesFetched _ _ _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
         CanonicalCatalogueFetched _ _ ->
             Ok (Feature.WebSocket.update msg model)
 
@@ -99,6 +102,15 @@ update msg model =
             Ok (Feature.DataLoading.update msg model)
 
         GotWorkspace _ _ _ ->
+            Ok (Feature.DataLoading.update msg model)
+
+        GotRootNavigation _ _ _ _ _ _ _ _ ->
+            Ok (Feature.DataLoading.update msg model)
+
+        GotNavigationBranch _ _ _ _ _ _ _ _ ->
+            Ok (Feature.DataLoading.update msg model)
+
+        GotNavigationFocus _ _ _ _ _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
         GotSessionContext epoch expectedWorkspace result ->
@@ -399,6 +411,9 @@ update msg model =
         ToggleCardExpand _ ->
             Ok (Feature.Cards.update msg model)
 
+        LoadNavigationBranchPage _ _ _ ->
+            Ok (Feature.Cards.update msg model)
+
         -- Tree collapse
         ToggleTreeNode _ ->
             Ok (Feature.Cards.update msg model)
@@ -511,6 +526,12 @@ update msg model =
 
         -- Task dependencies
         GotTaskDependencies _ _ ->
+            Ok (Feature.Dependencies.update msg model)
+
+        GotTaskDependencyPage _ _ _ _ _ _ ->
+            Ok (Feature.Dependencies.update msg model)
+
+        LoadTaskDependencyPage _ ->
             Ok (Feature.Dependencies.update msg model)
 
         GotProjectOverview _ _ ->

@@ -4,11 +4,13 @@ import Api
 import Browser
 import Browser.Navigation as Nav
 import Dict
+import Feature.DataLoading
 import Feature.Observation
 import Feature.Timeline
 import Helpers exposing (localStorageKey, parseFragment, pushUrl)
 import Permissions
 import Ports exposing (disconnectWebSocket, requestLocalStorage)
+import Set
 import Types exposing (..)
 import Url
 import Url.Parser as Parser exposing ((</>), Parser)
@@ -194,8 +196,16 @@ handleUrlChange url model =
 
                     ( finalModel, timelineCmd ) =
                         prepareWorkspaceTimelineFromRoute wsId frag.tab auditModel
+
+                    ( focusedModel, focusCmd ) =
+                        case frag.focus of
+                            Just ( entityType, entityId ) ->
+                                Feature.DataLoading.beginNavigationFocus wsId entityType entityId finalModel
+
+                            Nothing ->
+                                ( finalModel, Cmd.none )
                 in
-                ( finalModel, Cmd.batch [ observationCmd, auditCmd, timelineCmd ] )
+                ( focusedModel, Cmd.batch [ observationCmd, auditCmd, timelineCmd, focusCmd ] )
 
             else
                 let
@@ -216,10 +226,25 @@ handleUrlChange url model =
                         { currentDataLoading
                             | loadingWorkspaceData = True
                             , pendingWorkspaceLoads = 0
-                            , activeWorkspaceLoadToken = Just currentDataLoading.nextWorkspaceLoadToken
-                            , nextWorkspaceLoadToken = currentDataLoading.nextWorkspaceLoadToken + 1
-                            , cardHydrationLoaded = False
-                        }
+                             , activeWorkspaceLoadToken = Just currentDataLoading.nextWorkspaceLoadToken
+                             , nextWorkspaceLoadToken = currentDataLoading.nextWorkspaceLoadToken + 1
+                             , cardHydrationLoaded = False
+                             -- A route workspace switch invalidates every
+                             -- pending focus continuation as well as cached
+                             -- branch/focus keys.  Session epoch validation is
+                             -- the second guard; clearing here prevents an old
+                             -- retry state from suppressing the new request.
+                             , navigationGeneration = currentDataLoading.navigationGeneration + 1
+                             , rootNavigationRequest = Nothing
+                             , loadedNavigationBranches = Dict.empty
+                             , projectCardSummaries = Dict.empty
+                             , taskCardSummaries = Dict.empty
+                             , navigationVisibleProjectIds = Set.empty
+                             , navigationVisibleTaskIds = Set.empty
+                             , navigationVisibilityActive = False
+                             , activeNavigationFocus = Nothing
+                             , navigationFocuses = Dict.empty
+                         }
 
                     currentFocus =
                         model.focus

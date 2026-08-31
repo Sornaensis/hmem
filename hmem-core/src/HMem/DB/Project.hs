@@ -1,6 +1,8 @@
 module HMem.DB.Project
   ( createProject
   , getProject
+  , getProjectsByIds
+  , getProjectAncestorIds
   , updateProject
   , deleteProject
   , deleteProjectCascade
@@ -10,6 +12,8 @@ module HMem.DB.Project
   , purgeProjectCascade
   , listProjects
   , listProjectsWithQuery
+  , listProjectChildren
+  , listFilteredProjectChildren
   ) where
 
 import Control.Exception (throwIO)
@@ -17,9 +21,10 @@ import Control.Monad (when)
 import Data.Aeson (Object, toJSON)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant ((>$<), contramap)
-import Data.Int (Int16)
+import Data.Int (Int16, Int32)
 import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
+import Data.Text (Text)
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
@@ -50,6 +55,25 @@ rowToProject r = Project
   , createdAt   = r.projCreatedAt
   , updatedAt   = r.projUpdatedAt
   }
+
+projectCardRowDecoder :: Dec.Row Project
+projectCardRowDecoder = do
+  projectId <- Dec.column (Dec.nonNullable Dec.uuid)
+  projectWorkspaceId <- Dec.column (Dec.nonNullable Dec.uuid)
+  projectParentId <- Dec.column (Dec.nullable Dec.uuid)
+  projectName <- Dec.column (Dec.nonNullable Dec.text)
+  projectDescription <- Dec.column (Dec.nullable Dec.text)
+  statusText <- Dec.column (Dec.nonNullable Dec.text)
+  projectStatus <- maybe (fail $ "Unexpected project_status_enum value: " <> show statusText) pure (projectStatusFromText statusText)
+  projectPriority <- Dec.column (Dec.nonNullable Dec.int2)
+  projectMetadata <- Dec.column (Dec.nonNullable Dec.jsonb)
+  projectCreatedAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
+  projectUpdatedAt <- Dec.column (Dec.nonNullable Dec.timestamptz)
+  pure Project
+    { id = projectId, workspaceId = projectWorkspaceId, parentId = projectParentId
+    , name = projectName, description = projectDescription, status = projectStatus
+    , priority = fromIntegral projectPriority, metadata = projectMetadata
+    , createdAt = projectCreatedAt, updatedAt = projectUpdatedAt }
 
 projectSubtreeIdsForUpdateStatement :: Statement.Statement UUID [UUID]
 projectSubtreeIdsForUpdateStatement = Statement.Statement sql encoder decoder True
@@ -338,6 +362,19 @@ getProject pool pid = do
     []    -> pure Nothing
     (r:_) -> pure . Just $ rowToProject r
 
+-- | Fetch a bounded caller-supplied set in one statement.  Callers retain
+-- request ordering at their boundary; this query deliberately returns DB order.
+getProjectsByIds :: Pool Hasql.Connection -> [UUID] -> IO [Project]
+getProjectsByIds pool ids
+  | Prelude.null ids = pure []
+  | otherwise = do
+      rows <- runSession pool $ Session.statement () $ run $ select $ do
+        row <- each projectSchema
+        where_ $ in_ row.projId (map lit ids)
+        where_ $ activeProject row
+        pure row
+      pure (map rowToProject rows)
+
 ------------------------------------------------------------------------
 -- Update
 ------------------------------------------------------------------------
@@ -551,15 +588,18 @@ listProjectsWithQuery pool pq = do
     Nothing -> do
       rows <- runSession pool $ Session.statement () $ run $ select $
         limit (fromIntegral lim) $ offset (fromIntegral off) $
-        orderBy (((\row -> row.projPriority) >$< desc) <> ((\row -> row.projName) >$< asc)) $ do
+        -- Offset pagination requires a total order.  The UUID tie breaker keeps
+        -- pages stable when projects share a priority and name.
+        orderBy (((\row -> row.projPriority) >$< desc) <> ((\row -> row.projName) >$< asc) <> ((\row -> row.projId) >$< asc)) $ do
           row <- each projectSchema
           applyFilters row
           pure row
       pure $ map rowToProject rows
+
     Just q -> do
       results <- runSession pool $ Session.statement () $ run $ select $
         limit (fromIntegral lim) $ offset (fromIntegral off) $
-        orderBy (snd >$< desc) $ do
+        orderBy ((snd >$< desc) <> ((\(row, _) -> row.projId) >$< asc)) $ do
           row <- each projectSchema
           applyFilters row
           let config = unsafeCastExpr (lit searchLang) :: Expr PgRegConfig
@@ -569,3 +609,84 @@ listProjectsWithQuery pool pq = do
           let tsRank = function "ts_rank" (tsvec, tsq) :: Expr Double
           pure (row, tsRank)
       pure $ map (rowToProject . fst) results
+
+-- | Return the root-to-parent chain for a project in one bounded recursive
+-- query.  The focus handler decorates this set in one further batch, rather
+-- than issuing a lookup and rollup query for every breadcrumb segment.
+getProjectAncestorIds :: Pool Hasql.Connection -> UUID -> UUID -> Int -> IO [UUID]
+getProjectAncestorIds pool wsId projectId takeN =
+  runSession pool $ Session.statement (wsId, projectId, fromIntegral takeN :: Int32) projectAncestorIdsStatement
+
+projectAncestorIdsStatement :: Statement.Statement (UUID, UUID, Int32) [UUID]
+projectAncestorIdsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE ancestors(id, depth) AS ("
+      , " SELECT parent_id, 0 FROM projects WHERE id=$2 AND workspace_id=$1 AND deleted_at IS NULL AND parent_id IS NOT NULL"
+      , " UNION ALL"
+      , " SELECT parent.parent_id, current.depth + 1 FROM projects parent JOIN ancestors current ON parent.id=current.id"
+      , " WHERE parent.workspace_id=$1 AND parent.deleted_at IS NULL AND parent.parent_id IS NOT NULL"
+      , ") SELECT id FROM ancestors ORDER BY depth DESC LIMIT $3"
+      ]
+    encoder =
+      contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.int4))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
+-- | Bounded direct-child navigation.  This deliberately filters in SQL rather
+-- than loading a workspace and pruning it in the caller.
+listProjectChildren :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Int -> Int -> IO [Project]
+listProjectChildren pool wsId parent lim off = do
+  rows <- runSession pool $ Session.statement () $ run $ select $
+    limit (fromIntegral lim) $ offset (fromIntegral off) $
+      orderBy (((\row -> unsafeCastExpr row.projStatus :: Expr Text) >$< asc) <> ((\row -> row.projPriority) >$< desc) <> ((\row -> row.projName) >$< asc) <> ((\row -> row.projId) >$< asc)) $ do
+        row <- each projectSchema
+        where_ $ activeProject row
+        where_ $ row.projWorkspaceId ==. lit wsId
+        where_ $ row.projParentId ==. lit parent
+        pure row
+  pure $ map rowToProject rows
+
+-- | Tree filtering is evaluated by the database, not by an unbounded client
+-- cache. A matching descendant retains its direct branch ancestor even when
+-- that ancestor itself does not satisfy the status or priority predicate.
+listFilteredProjectChildren :: Pool Hasql.Connection -> UUID -> Maybe UUID -> NavigationFilter -> Int -> Int -> IO [Project]
+listFilteredProjectChildren pool workspace parent selector lim off =
+  runSession pool $ Session.statement
+    ( workspace, parent, map projectStatusToText selector.projectStatuses, map taskStatusToText selector.taskStatuses
+    , selector.priorityMode, selector.priorityValue, selector.query, fromMaybe "all" selector.showOnly, fromIntegral lim :: Int32, fromIntegral off :: Int32 )
+    filteredProjectChildrenStatement
+
+filteredProjectChildrenStatement :: Statement.Statement (UUID, Maybe UUID, [Text], [Text], Maybe Text, Maybe Int, Maybe Text, Text, Int32, Int32) [Project]
+filteredProjectChildrenStatement = Statement.Statement sql encoder (Dec.rowList projectCardRowDecoder) True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE project_tree(root_id,id) AS ("
+      , " SELECT p.id,p.id FROM projects p WHERE p.workspace_id=$1 AND p.parent_id IS NOT DISTINCT FROM $2 AND p.deleted_at IS NULL"
+      , " UNION SELECT tree.root_id,child.id FROM projects child JOIN project_tree tree ON child.parent_id=tree.id WHERE child.deleted_at IS NULL AND child.workspace_id=$1"
+      , "), task_tree(root_id,id) AS ("
+      , " SELECT tree.root_id,t.id FROM project_tree tree JOIN tasks t ON t.project_id=tree.id WHERE t.deleted_at IS NULL AND t.workspace_id=$1"
+      , " UNION SELECT tree.root_id,child.id FROM tasks child JOIN task_tree tree ON child.parent_id=tree.id WHERE child.deleted_at IS NULL"
+      , ") SELECT p.id,p.workspace_id,p.parent_id,p.name,p.description,p.status::text,p.priority,p.metadata,p.created_at,p.updated_at"
+      , " FROM projects p WHERE p.id IN (SELECT DISTINCT root_id FROM project_tree)"
+      -- A branch ancestor remains visible when a descendant matches.  In
+      -- particular, do not apply p's own status/priority before the matching
+      -- disjunction: that made an inactive-looking ancestor hide an otherwise
+      -- visible descendant path.
+      , " AND ((($8 <> 'tasks') AND (((cardinality($3::text[])=0 OR p.status::text=ANY($3)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND p.priority=$6) OR ($5='above' AND p.priority>$6) OR ($5='below' AND p.priority<$6)) AND ($7 IS NULL OR lower(p.name) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(p.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\'))"
+      , " OR EXISTS (SELECT 1 FROM projects descendant WHERE descendant.id IN (SELECT id FROM project_tree WHERE root_id=p.id) AND descendant.deleted_at IS NULL AND (cardinality($3::text[])=0 OR descendant.status::text=ANY($3)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.name) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\'))))"
+      , " OR (($8 <> 'projects') AND EXISTS (SELECT 1 FROM tasks descendant WHERE descendant.id IN (SELECT id FROM task_tree WHERE root_id=p.id) AND descendant.deleted_at IS NULL AND (cardinality($4::text[])=0 OR descendant.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\'))))"
+      , " ORDER BY CASE p.status WHEN 'active'::project_status_enum THEN 0 WHEN 'paused'::project_status_enum THEN 1 WHEN 'completed'::project_status_enum THEN 2 ELSE 3 END, p.priority DESC, lower(p.name),p.id LIMIT $9 OFFSET $10"
+      ]
+    encoder =
+      contramap (\(a,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.uuid)) <>
+      contramap (\(_,_,c,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.text)))) <>
+      contramap (\(_,_,_,d,_,_,_,_,_,_) -> d) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.text)))) <>
+      contramap (\(_,_,_,_,e,_,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,f,_,_,_,_) -> fmap fromIntegral f) (Enc.param (Enc.nullable Enc.int2)) <>
+      contramap (\(_,_,_,_,_,_,g,_,_,_) -> g) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,_,_,h,_,_) -> h) (Enc.param (Enc.nonNullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,_,_,_,i,_) -> i) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,_,_,_,j) -> j) (Enc.param (Enc.nonNullable Enc.int4))

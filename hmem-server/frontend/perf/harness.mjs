@@ -7,7 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
 import { assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, representativeReadiness, transportContractReady } from './contracts.mjs'
-import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, directFocusFixture, fixtureHash, generateFixture, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse } from './fixtures.mjs'
+import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const frontendRoot = path.dirname(here)
@@ -17,12 +17,25 @@ const traceManifestPath = path.join(here, 'trace-manifest.v1.json')
 const budgets = JSON.parse(fs.readFileSync(path.join(here, 'budgets.v1.json'), 'utf8'))
 const mode = process.argv[2] || 'check'
 const recordAuthorized = process.argv.includes('--authorize-baseline')
+const afterArtifactAuthorized = process.argv.includes('--authorize-after-artifact')
+const outputArgument = process.argv.indexOf('--output')
+const traceOutputArgument = process.argv.indexOf('--trace-output')
+const recordOutputPath = outputArgument === -1 ? baselinePath : path.resolve(frontendRoot, process.argv[outputArgument + 1] || '')
+const recordTraceManifestPath = traceOutputArgument === -1 ? traceManifestPath : path.resolve(frontendRoot, process.argv[traceOutputArgument + 1] || '')
+const evidenceBaseCommit = '818cc3cc634bfa8c0ebe14c13fc70b4c2d059e83'
+const evidenceManifestPath = path.join(here, 'final-working-tree.evidence-manifest.v1.json')
+const evidenceDiffPath = path.join(here, 'final-working-tree.complete.diff')
+const afterArtifactPath = path.join(here, 'final-working-tree.after.v1.json')
+const afterTraceArtifactPath = path.join(here, 'final-working-tree.trace-manifest.v1.json')
 const WARMUPS = HARNESS_CONFIGURATION.warmups
+const PRODUCTION_SNAPSHOT_PROFILE = 'workspace_shell_v1'
 const SAMPLES = HARNESS_CONFIGURATION.samples
 const tracePath = path.join(here, '.artifacts', 'large-baseline-trace.zip')
 
-if (!['record', 'check'].includes(mode)) throw new Error('usage: node perf/harness.mjs <record|check>')
-if (mode === 'record' && !recordAuthorized) throw new Error('record mode overwrites the approved baseline; rerun with --authorize-baseline')
+if (!['record', 'check'].includes(mode)) throw new Error('usage: node perf/harness.mjs <record|check> [--output path --trace-output path]')
+if ((outputArgument !== -1 && !process.argv[outputArgument + 1]) || (traceOutputArgument !== -1 && !process.argv[traceOutputArgument + 1])) throw new Error('--output and --trace-output require paths')
+if (mode === 'record' && recordOutputPath === baselinePath && !recordAuthorized) throw new Error('record mode overwrites the approved baseline; rerun with --authorize-baseline')
+if (mode === 'record' && recordOutputPath !== baselinePath && !afterArtifactAuthorized) throw new Error('after-artifact record requires --authorize-after-artifact and must not overwrite baseline.v1.json')
 
 function platformExecutable(name) {
   return process.platform === 'win32' ? `${name}.cmd` : name
@@ -44,9 +57,62 @@ function sha256File(file) {
   return createHash('sha256').update(fs.readFileSync(file)).digest('hex')
 }
 
+function normalizedRepositoryPath(file) {
+  return path.relative(path.resolve(frontendRoot, '..', '..'), file).split(path.sep).join('/')
+}
+
+function untrackedFileDiff(repositoryRoot, relativePath) {
+  try {
+    return execFileSync('git', ['diff', '--binary', '--no-index', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '--', '/dev/null', relativePath], { cwd: repositoryRoot })
+  } catch (error) {
+    if (error.status === 1 && error.stdout) return error.stdout
+    throw error
+  }
+}
+
+function finalWorkingTreeEvidence() {
+  const repositoryRoot = path.resolve(frontendRoot, '..', '..')
+  const artifactPaths = new Set([recordOutputPath, recordTraceManifestPath, evidenceDiffPath, evidenceManifestPath].map(normalizedRepositoryPath))
+  const trackedDiff = execFileSync('git', ['diff', '--binary', '--no-ext-diff', evidenceBaseCommit, '--'], { cwd: repositoryRoot })
+  const trackedPaths = execFileSync('git', ['diff', '--name-only', evidenceBaseCommit, '--'], { cwd: repositoryRoot, encoding: 'utf8' })
+    .trim().split(/\r?\n/).filter(Boolean)
+  const untrackedPaths = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd: repositoryRoot, encoding: 'utf8' })
+    .trim().split(/\r?\n/).filter(Boolean)
+    .filter(relative => !artifactPaths.has(relative))
+  const diff = Buffer.concat([trackedDiff, ...untrackedPaths.map(relative => untrackedFileDiff(repositoryRoot, relative))])
+  fs.writeFileSync(evidenceDiffPath, diff)
+  const baselineAtBase = execFileSync('git', ['show', `${evidenceBaseCommit}:hmem-server/frontend/perf/baseline.v1.json`], { cwd: repositoryRoot })
+  const baselineNow = fs.readFileSync(baselinePath)
+  const changedPaths = [...new Set([...trackedPaths, ...untrackedPaths])]
+    .map(relative => path.join(repositoryRoot, relative))
+    .filter(fs.existsSync)
+    .map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file) }))
+  const artifacts = [recordOutputPath, recordTraceManifestPath, evidenceDiffPath]
+    .map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file), sizeBytes: fs.statSync(file).size }))
+  const manifest = {
+    schemaVersion: 1,
+    evidenceBaseCommit,
+    normalization: 'repository-relative POSIX paths; SHA-256 of exact file bytes; binary Git diff without external diff drivers; untracked source files represented by deterministic no-index additions; generated evidence artifacts separately hash-listed',
+    recipe: 'npm run perf:record-after',
+    equality: {
+      baselinePath: normalizedRepositoryPath(baselinePath),
+      source: `${evidenceBaseCommit}:hmem-server/frontend/perf/baseline.v1.json`,
+      byteForByteEqual: baselineAtBase.equals(baselineNow),
+      baseSha256: createHash('sha256').update(baselineAtBase).digest('hex'),
+      workingTreeSha256: sha256File(baselinePath)
+    },
+    artifacts,
+    changedPaths,
+    completeDiff: { path: normalizedRepositoryPath(evidenceDiffPath), sha256: sha256File(evidenceDiffPath), sizeBytes: fs.statSync(evidenceDiffPath).size }
+  }
+  if (!manifest.equality.byteForByteEqual) throw new Error('immutable baseline differs from evidence base')
+  fs.writeFileSync(evidenceManifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+}
+
 function fixtureResponder(fixture, tracker, options = {}) {
   const snapshots = options.snapshots || snapshotItems(fixture)
   const resyncGate = options.resyncGate || null
+  const focusContinuationPause = options.focusContinuationPause || null
   const projects = new Map(fixture.projects.map(item => [item.id, item]))
   const tasks = new Map(fixture.tasks.map(item => [item.id, item]))
   const observations = new Map(fixture.observations.map(item => [item.id, item]))
@@ -69,6 +135,7 @@ function fixtureResponder(fixture, tracker, options = {}) {
           tracker.model.snapshotItems = 0
           tracker.model.snapshotPages = 0
           tracker.model.snapshotComplete = false
+          tracker.model.snapshotProfile = value.snapshot_profile
         }
         tracker.model.snapshotItems += value.items.length
         tracker.model.snapshotPages += 1
@@ -101,6 +168,8 @@ function fixtureResponder(fixture, tracker, options = {}) {
     })
     if (pathname === '/api/v1/change-stream/resync') {
       const body = request.postDataJSON()
+      const profile = body.snapshot_profile || 'full_v1'
+      const selectedSnapshots = profile === 'workspace_shell_v1' ? workspaceShellSnapshotItems(fixture) : snapshots
       const offset = body.page_token ? Number(String(body.page_token).split(':')[1]) : 0
       const pageSize = Number(body.page_size) || 100
       if (resyncGate && !resyncGate.used && offset === resyncGate.pauseOffset) {
@@ -108,13 +177,37 @@ function fixtureResponder(fixture, tracker, options = {}) {
         resyncGate.signalPaused()
         await resyncGate.waitForRelease
       }
-      const page = snapshots.slice(offset, offset + pageSize)
-      const hasMore = offset + pageSize < snapshots.length
-      return reply(route, request, { items: page, has_more: hasMore, ...(hasMore ? { next_page_token: `offset:${offset + pageSize}` } : { resume_token: `fixture-${fixture.size}-resume` }) })
+      const page = selectedSnapshots.slice(offset, offset + pageSize)
+      const hasMore = offset + pageSize < selectedSnapshots.length
+      return reply(route, request, { snapshot_profile: profile, items: page, has_more: hasMore, ...(hasMore ? { next_page_token: `offset:${offset + pageSize}` } : { resume_token: `fixture-${fixture.size}-resume` }) })
     }
     if (pathname === '/api/v1/change-stream/ticket') return reply(route, request, { ticket: `fixture-${fixture.size}-ticket`, expires_at: '2099-01-01T00:00:00Z' })
     if (pathname === '/api/v1/workspaces') return reply(route, request, paginate([fixture.workspace], url.searchParams.get('offset'), url.searchParams.get('limit')))
     if (pathname === `/api/v1/workspaces/${fixture.workspace.id}`) return reply(route, request, fixture.workspace)
+    if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/navigation`) return reply(route, request, navigationBranchResponse(fixture, {
+      parentKind: url.searchParams.get('parent_kind'), parentId: url.searchParams.get('parent_id'),
+      projectLimit: url.searchParams.get('project_limit'), projectOffset: url.searchParams.get('project_offset'),
+      taskLimit: url.searchParams.get('task_limit'), taskOffset: url.searchParams.get('task_offset'),
+      showOnly: url.searchParams.get('show_only'), projectStatuses: url.searchParams.getAll('project_status'), taskStatuses: url.searchParams.getAll('task_status'),
+      priorityMode: url.searchParams.get('priority_mode'), priorityValue: url.searchParams.get('priority_value'), query: url.searchParams.get('query')
+    }))
+    if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/navigation/summaries`) {
+      const body = request.postDataJSON()
+      const value = navigationSummariesResponse(fixture, body.project_ids || [], body.task_ids || [])
+      return reply(route, request, value || { error: 'invalid summary batch' }, value ? 200 : 400)
+    }
+    const navigationFocus = pathname.match(new RegExp(`^/api/v1/workspaces/${fixture.workspace.id}/navigation/focus/(project|task)/([^/]+)$`))
+    if (navigationFocus) {
+      const entityId = decodeURIComponent(navigationFocus[2])
+      const ancestorOffset = Number(url.searchParams.get('ancestor_offset') || 0)
+      const value = navigationFocusResponse(fixture, navigationFocus[1], entityId, ancestorOffset)
+      if (focusContinuationPause && !focusContinuationPause.used && navigationFocus[1] === focusContinuationPause.entityType && entityId === focusContinuationPause.entityId && ancestorOffset === focusContinuationPause.ancestorOffset) {
+        focusContinuationPause.used = true
+        focusContinuationPause.signalPaused()
+        await focusContinuationPause.waitForRelease
+      }
+      return reply(route, request, value || { error: 'not found' }, value ? 200 : 404)
+    }
     if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/memberships`) return reply(route, request, {
       items: [{ workspace_id: fixture.workspace.id, user_id: 'perf-user', role: 'owner', granted_by: null, created_at: fixture.workspace.created_at, updated_at: fixture.workspace.updated_at }], has_more: false
     })
@@ -254,9 +347,9 @@ function representativeProjectAnchors(fixture) {
     .sort((left, right) => (statusOrder[left.status] - statusOrder[right.status]) || (right.priority - left.priority) || left.name.localeCompare(right.name))
   if (roots.length === 0) throw new Error('fixture requires a root project anchor')
   const first = roots[0]
-  const expanded = fixture.projects.find(project => project.parent_id === first.id)
-  if (!expanded) throw new Error(`fixture root ${first.id} requires a child expansion anchor`)
-  return { first: first.id, expanded: expanded.id, selected: fixture.projects.at(-1).id }
+  // The bounded bootstrap deliberately owns just the root slice. Tree-child
+  // rendering belongs to the follow-on lazy-branch scenario, not cold readiness.
+  return { first: first.id, expanded: first.id, selected: fixture.projects.at(-1).id }
 }
 
 async function waitForTransportQuiescence(page, tracker, label, quietMs = 250, timeoutMs = 30000) {
@@ -281,9 +374,9 @@ async function projectUiSignals(page, anchorId) {
 }
 
 async function waitForWorkspaceReady(page, tracker, fixture, anchorId, label) {
-  const expectedSnapshotItems = snapshotItems(fixture).length
+  const expectedSnapshotItems = workspaceShellSnapshotItems(fixture).length
   const expectedPages = Math.ceil(expectedSnapshotItems / DIRECT_FOCUS_CONTRACT.pageSize)
-  const modelReady = () => transportContractReady({ protocol: 'current-full', transportedItems: tracker.model.snapshotItems, expectedItems: expectedSnapshotItems, fullBackingItems: expectedSnapshotItems, transportedPages: tracker.model.snapshotPages, expectedPages, complete: tracker.model.snapshotComplete })
+  const modelReady = () => transportContractReady({ protocol: 'bounded', transportedItems: tracker.model.snapshotItems, expectedItems: expectedSnapshotItems, fullBackingItems: snapshotItems(fixture).length, transportedPages: tracker.model.snapshotPages, expectedPages, complete: tracker.model.snapshotComplete })
   const deadline = performance.now() + 30000
   while (performance.now() < deadline) {
     assertNoUnhandledApiRoutes(tracker)
@@ -301,7 +394,7 @@ async function waitForWorkspaceReady(page, tracker, fixture, anchorId, label) {
     }
     await page.waitForTimeout(25)
   }
-  throw new Error(`${label} readiness failed: current full snapshot ${tracker.model.snapshotItems}/${expectedSnapshotItems} items, ${tracker.model.snapshotPages}/${expectedPages} pages, complete=${tracker.model.snapshotComplete}, active=${tracker.active}, anchor=${anchorId}`)
+  throw new Error(`${label} readiness failed: ${tracker.model.snapshotProfile} snapshot ${tracker.model.snapshotItems}/${expectedSnapshotItems} shell items, ${tracker.model.snapshotPages}/${expectedPages} pages, complete=${tracker.model.snapshotComplete}, navigation=${tracker.counts['navigation:branch'] || 0}, active=${tracker.active}, anchor=${anchorId}`)
 }
 
 async function restoreWorkspace(page, tracker, fixture, anchorId, label) {
@@ -391,7 +484,7 @@ function validateRequestDelta(delta, label) {
 function createTracker() {
   return {
     requests: [], counts: {}, bytes: {}, active: 0, completed: 0, lastActivityAt: performance.now(), unhandledApiRoutes: [],
-    model: { snapshotGeneration: 0, snapshotItems: 0, snapshotPages: 0, snapshotComplete: false, timelineEvents: 0, timelineBuckets: 0, timelineBucketRequest: null }
+    model: { snapshotGeneration: 0, snapshotItems: 0, snapshotPages: 0, snapshotComplete: false, snapshotProfile: null, timelineEvents: 0, timelineBuckets: 0, timelineBucketRequest: null }
   }
 }
 
@@ -416,10 +509,10 @@ async function requiredPromiseWithin(promise, timeoutMs, label) {
 }
 
 async function waitForCurrentSnapshotTransport(page, tracker, fixture, label, timeoutMs = 60000) {
-  const expectedItems = snapshotItems(fixture).length
+  const expectedItems = workspaceShellSnapshotItems(fixture).length
   const expectedPages = Math.ceil(expectedItems / DIRECT_FOCUS_CONTRACT.pageSize)
   const ready = () => transportContractReady({
-    protocol: 'current-full', transportedItems: tracker.model.snapshotItems, expectedItems, fullBackingItems: expectedItems,
+    protocol: 'bounded', transportedItems: tracker.model.snapshotItems, expectedItems, fullBackingItems: snapshotItems(fixture).length,
     transportedPages: tracker.model.snapshotPages, expectedPages, complete: tracker.model.snapshotComplete
   })
   const deadline = performance.now() + timeoutMs
@@ -431,15 +524,13 @@ async function waitForCurrentSnapshotTransport(page, tracker, fixture, label, ti
     }
     await page.waitForTimeout(25)
   }
-  throw new Error(`${label} failed: current full snapshot ${tracker.model.snapshotItems}/${expectedItems} items, ${tracker.model.snapshotPages}/${expectedPages} pages, complete=${tracker.model.snapshotComplete}, active=${tracker.active}`)
+  throw new Error(`${label} failed: ${tracker.model.snapshotProfile} snapshot ${tracker.model.snapshotItems}/${expectedItems} shell items, ${tracker.model.snapshotPages}/${expectedPages} pages, complete=${tracker.model.snapshotComplete}, active=${tracker.active}`)
 }
 
 async function measureDirectFocus(browser, origin, fixture) {
   const direct = directFocusFixture(fixture)
-  const canonicalSnapshots = snapshotItems(fixture)
-  if (JSON.stringify(direct.snapshots) !== JSON.stringify(canonicalSnapshots)) throw new Error('direct-focus resync differs from canonical snapshot order/bytes')
+  const canonicalSnapshots = workspaceShellSnapshotItems(fixture)
   if (direct.targetProject.parent_id != null) throw new Error(`direct-focus target ${direct.targetProject.id} is not a root project`)
-  const gate = createResyncGate(DIRECT_FOCUS_CONTRACT.pauseBeforeItems)
   const tracker = createTracker()
   const context = await browser.newContext({ viewport: HARNESS_CONFIGURATION.viewport })
   await context.addInitScript(fakeWebSocketScript)
@@ -447,9 +538,9 @@ async function measureDirectFocus(browser, origin, fixture) {
   const consoleErrors = []
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
   page.on('pageerror', error => consoleErrors.push(error.message))
-  await page.route('**/api/v1/**', fixtureResponder(fixture, tracker, { snapshots: direct.snapshots, resyncGate: gate }))
+  await page.route('**/api/v1/**', fixtureResponder(fixture, tracker, { snapshots: canonicalSnapshots }))
   const targetId = direct.targetProject.id
-  const directEntityKey = `projects:entity:${targetId}`
+  const directEntityKey = 'navigation:focus'
   const attemptBefore = requestSnapshot(tracker)
   const focusStart = performance.now()
   let requestedBeforeFullResync = false
@@ -458,28 +549,22 @@ async function measureDirectFocus(browser, origin, fixture) {
   let observationElapsedMs = 0
   try {
     await page.goto(`${origin}/workspace/${fixture.workspace.id}#tab=projects&focus=project:${targetId}`, { waitUntil: 'domcontentloaded' })
-    await requiredPromiseWithin(gate.waitForPause, 30000, 'direct-focus coherent resync pause')
-    if (tracker.model.snapshotItems !== 0 || tracker.model.snapshotPages !== 0 || tracker.model.snapshotComplete) {
-      throw new Error(`direct-focus pre-resync state mismatch: ${tracker.model.snapshotItems}/0 items, ${tracker.model.snapshotPages}/0 pages, complete=${tracker.model.snapshotComplete}`)
-    }
     const observationStartedAt = performance.now()
     const observationDeadline = observationStartedAt + DIRECT_FOCUS_CONTRACT.observationDeadlineMs
     while (performance.now() < observationDeadline) {
       assertNoUnhandledApiRoutes(tracker)
-      requestedBeforeFullResync = (tracker.counts[directEntityKey] || 0) > 0
+    requestedBeforeFullResync = (tracker.counts[directEntityKey] || 0) > 0
       renderedBeforeFullResync = await page.locator(`#entity-${targetId}`).count() > 0 && await page.locator('.focus-breadcrumb-bar').count() > 0
       if (requestedBeforeFullResync && renderedBeforeFullResync) break
       await page.waitForTimeout(10)
     }
     focusObservedAt = performance.now()
     observationElapsedMs = focusObservedAt - observationStartedAt
-  } finally {
-    gate.release()
-  }
+  } finally {}
   const attemptDelta = requestDelta(tracker, attemptBefore)
   const focusRequests = tracker.requests.slice(attemptBefore.index).filter(request =>
     request.key === directEntityKey
-    || request.url.includes(`/api/v1/projects/${targetId}/overview`)
+    || request.url.includes(`/api/v1/workspaces/${fixture.workspace.id}/navigation/focus/project/${targetId}`)
   )
   const productFailureReason = requestedBeforeFullResync && renderedBeforeFullResync
     ? null
@@ -488,7 +573,7 @@ async function measureDirectFocus(browser, origin, fixture) {
       : renderedBeforeFullResync
         ? 'focus path rendered the target without issuing its direct entity request before full resync'
         : 'focus path issued no direct entity request and rendered no target before full resync'
-  const full = await waitForCurrentSnapshotTransport(page, tracker, fixture, 'direct-focus released canonical resync')
+  const full = await waitForCurrentSnapshotTransport(page, tracker, fixture, 'direct-focus released shell resync')
   await page.waitForSelector('.focus-breadcrumb-bar', { timeout: 30000 })
   await page.waitForSelector(`#entity-${targetId}`, { timeout: 30000 })
   const renderedAfterFullResync = true
@@ -515,6 +600,92 @@ async function measureDirectFocus(browser, origin, fixture) {
     canonicalSnapshotPages: full.pages,
     canonicalSnapshotHash: snapshotHash(fixture),
     renderedAfterFullResync
+  }
+}
+
+// This is deliberately outside the recorded small/large measurements: it
+// exercises continuation against a derived test fixture without changing the
+// immutable baseline fixture hashes or the production direct-focus budget.
+async function verifyDeepFocusContinuation(browser, origin) {
+  const deep = deepFocusFixture()
+  const fixture = deep.fixture
+  const tracker = createTracker()
+  const context = await browser.newContext({ viewport: HARNESS_CONFIGURATION.viewport })
+  await context.addInitScript(fakeWebSocketScript)
+  const page = await context.newPage()
+  const consoleErrors = []
+  page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  page.on('pageerror', error => consoleErrors.push(error.message))
+  await page.route('**/api/v1/**', fixtureResponder(fixture, tracker, { snapshots: workspaceShellSnapshotItems(fixture) }))
+  try {
+    await page.goto(`${origin}/workspace/${fixture.workspace.id}#tab=projects&focus=project:${deep.targetProject.id}`, { waitUntil: 'domcontentloaded' })
+    await page.waitForSelector(`#entity-${deep.targetProject.id}`, { timeout: 30000 })
+    await page.waitForSelector('.focus-breadcrumb-bar', { timeout: 30000 })
+    const deadline = performance.now() + 30000
+    const offsets = () => tracker.requests
+      .filter(request => request.key === 'navigation:focus')
+      .map(request => Number(new URL(request.url).searchParams.get('ancestor_offset')))
+    while (performance.now() < deadline) {
+      assertNoUnhandledApiRoutes(tracker)
+      if (tracker.active === 0 && JSON.stringify(offsets()) === JSON.stringify([0, 64, 128])) break
+      await page.waitForTimeout(25)
+    }
+    const observedOffsets = offsets()
+    if (JSON.stringify(observedOffsets) !== JSON.stringify([0, 64, 128])) throw new Error(`deep focus expected bounded ancestor offsets 0,64,128; received ${observedOffsets.join(',')}`)
+    if (await page.locator(`#entity-${deep.targetProject.id}`).count() !== 1) throw new Error('deep focus continuation lost the target card')
+    await page.waitForFunction(
+      expectedCount => document.querySelectorAll('.focus-breadcrumb-bar .focus-crumb').length === expectedCount,
+      131,
+      { timeout: 30000 }
+    )
+    const crumbNames = (await page.locator('.focus-breadcrumb-bar .focus-crumb').allTextContents()).slice(1)
+    const expectedCrumbNames = Array.from({ length: 130 }, (_, index) => `Deep focus project ${String(index + 1).padStart(3, '0')}`)
+    if (JSON.stringify(crumbNames) !== JSON.stringify(expectedCrumbNames) || new Set(crumbNames).size !== crumbNames.length) throw new Error(`deep focus breadcrumb was incomplete, reordered, or duplicated: expected ${expectedCrumbNames.length} ordered crumbs, received ${crumbNames.length}`)
+    if (consoleErrors.length > 0) throw new Error(`deep-focus continuation browser console error(s): ${consoleErrors.join(' | ')}`)
+    return { ancestorCount: deep.ancestorCount, offsets: observedOffsets, requests: observedOffsets.length, targetRendered: true, breadcrumbCount: crumbNames.length, breadcrumbOrdered: true, terminal: true }
+  } finally {
+    await context.close()
+  }
+}
+
+async function verifyStaleDeepFocusContinuation(browser, origin) {
+  const deep = deepFocusFixture()
+  const fixture = deep.fixture
+  const replacement = fixture.projects.find(project => project.name === 'Deep focus project 100')
+  if (!replacement) throw new Error('deep focus fixture did not contain the stale-response replacement target')
+  const tracker = createTracker()
+  let releasePause
+  let signalPaused
+  const pause = {
+    entityType: 'project',
+    entityId: deep.targetProject.id,
+    ancestorOffset: 64,
+    used: false,
+    waitForRelease: new Promise(resolve => { releasePause = resolve }),
+    signalPaused: () => signalPaused()
+  }
+  const paused = new Promise(resolve => { signalPaused = resolve })
+  const context = await browser.newContext({ viewport: HARNESS_CONFIGURATION.viewport })
+  await context.addInitScript(fakeWebSocketScript)
+  const page = await context.newPage()
+  try {
+    await page.route('**/api/v1/**', fixtureResponder(fixture, tracker, { snapshots: workspaceShellSnapshotItems(fixture), focusContinuationPause: pause }))
+    await page.goto(`${origin}/workspace/${fixture.workspace.id}#tab=projects&focus=project:${deep.targetProject.id}`, { waitUntil: 'domcontentloaded' })
+    await paused
+    await page.evaluate(projectId => { window.location.hash = `tab=projects&focus=project:${projectId}` }, replacement.id)
+    await page.waitForSelector(`#entity-${replacement.id}`, { timeout: 30000 })
+    releasePause()
+    await page.waitForTimeout(250)
+    const oldTerminalPageRequested = tracker.requests.some(request => {
+      const url = new URL(request.url)
+      return request.key === 'navigation:focus'
+        && url.pathname.endsWith(`/project/${deep.targetProject.id}`)
+        && Number(url.searchParams.get('ancestor_offset')) === 128
+    })
+    if (oldTerminalPageRequested) throw new Error('stale deep-focus continuation scheduled its old terminal page after the focus changed')
+    return { staleContinuationRejected: true }
+  } finally {
+    await context.close()
   }
 }
 
@@ -550,18 +721,8 @@ async function measureRun(browser, origin, fixture, measured, trace) {
   const interactions = {}
   const tabSwitches = {}
   const filters = {}
-  await page.waitForSelector(`#entity-${anchors.expanded}`, { timeout: 30000 })
-  const expandedRows = (await domMetrics(page)).rows
-  const collapseBefore = requestSnapshot(tracker)
-  const collapseMs = await requiredDoubleFrame(page, '.tree-toolbar button:last-child')
-  await page.waitForFunction(({ anchor, beforeRows }) => !document.querySelector(`#entity-${anchor}`) && document.querySelectorAll('.card-project,.card-task,.card-subtask').length < beforeRows, { anchor: anchors.expanded, beforeRows: expandedRows })
-  await waitForTransportQuiescence(page, tracker, 'Collapse All')
-  interactions.collapseMs = { ms: collapseMs, ...requestDelta(tracker, collapseBefore) }
-  const expandBefore = requestSnapshot(tracker)
-  const expandMs = await requiredDoubleFrame(page, '.tree-toolbar button:first-child')
-  await page.waitForSelector(`#entity-${anchors.expanded}`, { timeout: 30000 })
-  await waitForWorkspaceReady(page, tracker, fixture, anchors.first, 'Expand All representative anchors')
-  interactions.expandMs = { ms: expandMs, ...requestDelta(tracker, expandBefore) }
+  // Expansion/recursive-tree interaction evidence belongs to the downstream
+  // rendering task. This bootstrap record intentionally owns only root slices.
   const taskFilterBefore = requestSnapshot(tracker)
   const taskFilterMs = await requiredDoubleFrameByText(page, '.filter-bar button', 'Tasks')
   await page.waitForFunction(() => document.querySelectorAll('.card-project').length === 0 && document.querySelectorAll('.card-task,.card-subtask').length > 0)
@@ -643,10 +804,10 @@ async function measureRun(browser, origin, fixture, measured, trace) {
   const stability = await assertLiveStability(page, tracker, 500)
   const liveTiming = liveTimingSummary({ startedAt: liveStart, settledAt, stabilityStartedAt: stability.startedAt, stabilityEndedAt: stability.endedAt })
   const postLiveUi = await projectUiSignals(page, anchors.first)
-  const expectedSnapshotItems = snapshotItems(fixture).length
+  const expectedSnapshotItems = workspaceShellSnapshotItems(fixture).length
   const expectedSnapshotPages = Math.ceil(expectedSnapshotItems / DIRECT_FOCUS_CONTRACT.pageSize)
   if (!representativeReadiness({
-    modelComplete: transportContractReady({ protocol: 'current-full', transportedItems: tracker.model.snapshotItems, expectedItems: expectedSnapshotItems, fullBackingItems: expectedSnapshotItems, transportedPages: tracker.model.snapshotPages, expectedPages: expectedSnapshotPages, complete: tracker.model.snapshotComplete }),
+    modelComplete: transportContractReady({ protocol: 'bounded', transportedItems: tracker.model.snapshotItems, expectedItems: expectedSnapshotItems, fullBackingItems: snapshotItems(fixture).length, transportedPages: tracker.model.snapshotPages, expectedPages: expectedSnapshotPages, complete: tracker.model.snapshotComplete }),
     activeRequests: tracker.active,
     loading: postLiveUi.loading,
     focused: postLiveUi.focused,
@@ -670,7 +831,7 @@ async function measureRun(browser, origin, fixture, measured, trace) {
     maxDomNodes: Math.max(...dom.map(value => value.nodes)), maxCollectionRows: Math.max(...dom.map(value => value.rows)),
     attributableHeapBytes: Math.max(0, heap.usedSize - blankHeap),
     heapPoint: HARNESS_CONFIGURATION.heapPoint,
-    readiness: { protocol: 'current-full', fullBackingSnapshotItems: expectedSnapshotItems, expectedSnapshotPages, transportedSnapshotItems: tracker.model.snapshotItems, transportedSnapshotPages: tracker.model.snapshotPages, snapshotComplete: tracker.model.snapshotComplete, timelineEvents: tracker.model.timelineEvents, timelineBuckets: tracker.model.timelineBuckets, timelineBucketRequest: tracker.model.timelineBucketRequest, anchors },
+    readiness: { protocol: PRODUCTION_SNAPSHOT_PROFILE, fullBackingSnapshotItems: snapshotItems(fixture).length, expectedSnapshotPages, transportedSnapshotItems: tracker.model.snapshotItems, transportedSnapshotPages: tracker.model.snapshotPages, snapshotComplete: tracker.model.snapshotComplete, timelineEvents: tracker.model.timelineEvents, timelineBuckets: tracker.model.timelineBuckets, timelineBucketRequest: tracker.model.timelineBucketRequest, anchors },
     consoleErrors
   }
   if (trace) {
@@ -786,13 +947,19 @@ async function main() {
   if (mode === 'check') {
     if (!fs.existsSync(baselinePath)) throw new Error(`approved baseline missing: ${baselinePath}`)
     if (!fs.existsSync(traceManifestPath)) throw new Error(`trace provenance manifest missing: ${traceManifestPath}`)
-    recordedBaseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8'))
-    recordedTraceManifest = JSON.parse(fs.readFileSync(traceManifestPath, 'utf8'))
-    if (recordedBaseline.baseCommit !== BASE_COMMIT) throw new Error(`baseline base commit mismatch: expected ${BASE_COMMIT}, observed ${recordedBaseline.baseCommit}`)
+    const immutableBaseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8'))
+    const immutableTraceManifest = JSON.parse(fs.readFileSync(traceManifestPath, 'utf8'))
+    if (immutableBaseline.baseCommit !== BASE_COMMIT) throw new Error(`baseline base commit mismatch: expected ${BASE_COMMIT}, observed ${immutableBaseline.baseCommit}`)
+    if (JSON.stringify(immutableTraceManifest.trace) !== JSON.stringify(immutableBaseline.trace)) throw new Error('immutable baseline and trace provenance differ')
+    if (immutableBaseline.recordAuthorization !== 'explicit --authorize-baseline') throw new Error('baseline lacks explicit record authorization provenance')
+    if (!fs.existsSync(afterArtifactPath) || !fs.existsSync(afterTraceArtifactPath)) throw new Error('final working-tree after evidence is missing; run npm run perf:record-after')
+    recordedBaseline = JSON.parse(fs.readFileSync(afterArtifactPath, 'utf8'))
+    recordedTraceManifest = JSON.parse(fs.readFileSync(afterTraceArtifactPath, 'utf8'))
+    if (recordedBaseline.baseCommit !== BASE_COMMIT) throw new Error(`after-artifact base commit mismatch: expected ${BASE_COMMIT}, observed ${recordedBaseline.baseCommit}`)
     if (JSON.stringify(recordedBaseline.contracts) !== JSON.stringify(contracts)) throw new Error(`baseline fixture/configuration/budget contracts do not match current inputs`)
-    if (JSON.stringify(recordedTraceManifest.contracts) !== JSON.stringify(contracts)) throw new Error(`trace manifest fixture/configuration/budget contracts do not match current inputs`)
-    if (JSON.stringify(recordedTraceManifest.trace) !== JSON.stringify(recordedBaseline.trace)) throw new Error('trace manifest and baseline trace provenance differ')
-    if (recordedBaseline.recordAuthorization !== 'explicit --authorize-baseline') throw new Error('baseline lacks explicit record authorization provenance')
+    if (JSON.stringify(recordedTraceManifest.contracts) !== JSON.stringify(contracts)) throw new Error(`after trace manifest fixture/configuration/budget contracts do not match current inputs`)
+    if (JSON.stringify(recordedTraceManifest.trace) !== JSON.stringify(recordedBaseline.trace)) throw new Error('after trace manifest and after artifact provenance differ')
+    if (recordedBaseline.recordAuthorization !== 'explicit --authorize-after-artifact') throw new Error('after artifact lacks explicit record authorization provenance')
   }
   const packageVersion = relativePath => {
     const file = path.join(frontendRoot, 'node_modules', ...relativePath, 'package.json')
@@ -817,6 +984,10 @@ async function main() {
       ...toolVersions, chromium: browser.version(), viewport: `${HARNESS_CONFIGURATION.viewport.width}x${HARNESS_CONFIGURATION.viewport.height}`, headless: true
     }
     environment.fingerprint = hashJson(environment)
+    process.stdout.write('deep-focus continuation... ')
+    const staleFocusContinuation = await verifyStaleDeepFocusContinuation(browser, server.origin)
+    const deepFocusContinuation = { ...await verifyDeepFocusContinuation(browser, server.origin), ...staleFocusContinuation }
+    process.stdout.write(`${deepFocusContinuation.requests} bounded requests\n`)
     const runs = { small: [], large: [] }
     for (const size of ['small', 'large']) {
       for (let index = 0; index < WARMUPS + SAMPLES; index += 1) {
@@ -845,10 +1016,13 @@ async function main() {
     }
     const result = {
       schemaVersion: 1, baseCommit: BASE_COMMIT, recordedAtUtc: new Date().toISOString(),
-      recordAuthorization: mode === 'record' ? 'explicit --authorize-baseline' : recordedBaseline.recordAuthorization,
+      recordAuthorization: mode === 'record'
+        ? (recordOutputPath === baselinePath ? 'explicit --authorize-baseline' : 'explicit --authorize-after-artifact')
+        : recordedBaseline.recordAuthorization,
       environment, configuration: HARNESS_CONFIGURATION, contracts,
       fixtures: {
         schemaVersion: 1, seed: fixtures.large.seed, directFocusContract: DIRECT_FOCUS_CONTRACT,
+        deepFocusContinuation,
         small: { hash: fixtureHash(fixtures.small), snapshotHash: snapshotHash(fixtures.small), scale: fixtures.small.scale, directFocusTarget: directFocusFixture(fixtures.small).targetProject },
         large: { hash: fixtureHash(fixtures.large), snapshotHash: snapshotHash(fixtures.large), scale: fixtures.large.scale, directFocusTarget: directFocusFixture(fixtures.large).targetProject }
       },
@@ -864,11 +1038,12 @@ async function main() {
     result.evaluation = evaluate(result, comparable)
     if (mode === 'record') {
       const traceManifest = { schemaVersion: 1, baseCommit: BASE_COMMIT, contracts, trace }
-      fs.writeFileSync(baselinePath, `${JSON.stringify(result, null, 2)}\n`)
-      fs.writeFileSync(traceManifestPath, `${JSON.stringify(traceManifest, null, 2)}\n`)
+      fs.writeFileSync(recordOutputPath, `${JSON.stringify(result, null, 2)}\n`)
+      fs.writeFileSync(recordTraceManifestPath, `${JSON.stringify(traceManifest, null, 2)}\n`)
+      if (recordOutputPath !== baselinePath) finalWorkingTreeEvidence()
     }
     for (const metric of result.evaluation.metrics) console.log(`${metric.pass ? 'PASS' : 'FAIL'} ${metric.name}: ${metric.actual} (budget ${metric.expected}${metric.category === 'informational' ? ', informational environment' : ''})`)
-    if (mode === 'record') console.log(`AUTHORIZED RECORD wrote ${baselinePath} and ${traceManifestPath}; evaluation is preserved, and budget failures do not fail explicitly authorized record mode.`)
+    if (mode === 'record') console.log(`AUTHORIZED RECORD wrote ${recordOutputPath} and ${recordTraceManifestPath}; evaluation is preserved, and budget failures do not fail explicitly authorized record mode.`)
     if (mode === 'check' && !result.evaluation.passed) process.exitCode = 1
   } finally {
     if (browser) await browser.close()

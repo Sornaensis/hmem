@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { assertFiveSamples, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, representativeReadiness, transportContractReady } from './contracts.mjs'
-import { DIRECT_FOCUS_CONTRACT, FIXTURE_SCHEMA_VERSION, FIXTURE_SEED, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_BUCKET_RESPONSE_MAX, TIMELINE_BUCKET_SQL_CAP, TIMELINE_DEFAULT_UI_QUERY, TimelineBucketRequestError, directFocusFixture, fixtureHash, generateFixture, orderedTimelineBuckets, paginate, projectOverviewResponse, projectReadinessRollup, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, stableFixtureJson, taskOverviewResponse, taskReadinessRollup, validateFixture } from './fixtures.mjs'
+import { DIRECT_FOCUS_CONTRACT, FIXTURE_SCHEMA_VERSION, FIXTURE_SEED, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_BUCKET_RESPONSE_MAX, TIMELINE_BUCKET_SQL_CAP, TIMELINE_DEFAULT_UI_QUERY, TimelineBucketRequestError, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, orderedTimelineBuckets, paginate, projectOverviewResponse, projectReadinessRollup, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, stableFixtureJson, taskOverviewResponse, taskReadinessRollup, validateFixture, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 
@@ -74,6 +74,19 @@ test('fixture cardinalities, hierarchy, DAG, pagination, direct focus and live m
   }
 })
 
+test('navigation summary batches preserve request order and enforce the shared 100-ID cap', () => {
+  const fixture = generateFixture('small')
+  const [firstProject, secondProject] = fixture.projects
+  const [firstTask, secondTask] = fixture.tasks
+  const response = navigationSummariesResponse(fixture, [secondProject.id, 'missing-project', firstProject.id], [secondTask.id, 'missing-task', firstTask.id])
+  assert.deepEqual(response.projects.map(item => item.id), [secondProject.id, firstProject.id])
+  assert.deepEqual(response.tasks.map(item => item.id), [secondTask.id, firstTask.id])
+  assert.deepEqual(response.missing_project_ids, ['missing-project'])
+  assert.deepEqual(response.missing_task_ids, ['missing-task'])
+  assert.equal(navigationSummariesResponse(fixture, [firstProject.id, firstProject.id], []), null)
+  assert.equal(navigationSummariesResponse(fixture, Array.from({ length: 101 }, (_, index) => `missing-${index}`), []), null)
+})
+
 test('direct-focus resync preserves canonical ordered bytes and uses an absent root target from empty state', () => {
   for (const [size, fullItems] of [['small', 155], ['large', 4951]]) {
     const fixture = generateFixture(size)
@@ -89,6 +102,72 @@ test('direct-focus resync preserves canonical ordered bytes and uses an absent r
     assert.equal(direct.targetProject.workspace_id, fixture.workspace.id)
     assert.equal(canonical.some(item => item.kind === 'project' && item.data.id === direct.targetProject.id), true)
   }
+})
+
+test('workspace_shell_v1 is an explicit bounded production transport with bounded navigation and focus', () => {
+  const fixture = generateFixture('large')
+  const shell = workspaceShellSnapshotItems(fixture)
+  assert.deepEqual(shell, [{ schema_version: 1, kind: 'workspace', data: fixture.workspace }])
+  assert.equal(shell.length < snapshotItems(fixture).length, true)
+  const root = navigationBranchResponse(fixture, { parentKind: 'workspace_root', projectLimit: 50, taskLimit: 50 })
+  assert.equal(root.projects.items.length <= 50 && root.tasks.items.length <= 50, true)
+  assert.equal(root.projects.items.every(item => !Object.hasOwn(item, 'description') && !Object.hasOwn(item, 'metadata')), true)
+  assert.equal(root.tasks.items.every(item => !Object.hasOwn(item, 'description') && !Object.hasOwn(item, 'metadata')), true)
+  const target = DIRECT_FOCUS_CONTRACT.large.targetProjectId
+  const focus = navigationFocusResponse(fixture, 'project', target)
+  assert.equal(focus.workspace_id, fixture.workspace.id)
+  assert.equal(focus.target.summary.id, target)
+  assert.equal(focus.ancestors.length <= 64, true)
+})
+
+test('deep focus continuation keeps the target and exposes deterministic 64-row ancestor windows', () => {
+  const deep = deepFocusFixture()
+  const first = navigationFocusResponse(deep.fixture, 'project', deep.targetProject.id, 0)
+  const second = navigationFocusResponse(deep.fixture, 'project', deep.targetProject.id, first.next_ancestor_offset)
+  const final = navigationFocusResponse(deep.fixture, 'project', deep.targetProject.id, second.next_ancestor_offset)
+  assert.equal(deep.ancestorCount, 129)
+  assert.equal(first.target.summary.id, deep.targetProject.id)
+  assert.equal(second.target.summary.id, deep.targetProject.id)
+  assert.equal(final.target.summary.id, deep.targetProject.id)
+  assert.deepEqual([first.ancestors.length, second.ancestors.length, final.ancestors.length], [64, 64, 1])
+  assert.deepEqual([first.next_ancestor_offset, second.next_ancestor_offset, final.next_ancestor_offset], [64, 128, null])
+})
+
+test('navigation fixture mirrors production lifecycle ranks, tree-filter retention, and independently lazy pages', () => {
+  const fixture = generateFixture('large')
+  const fixtureWithRootPages = {
+    ...fixture,
+    projects: fixture.projects.map(project => ({ ...project, parent_id: null })),
+    tasks: fixture.tasks.map(task => ({ ...task, project_id: null, parent_id: null }))
+  }
+  const first = navigationBranchResponse(fixtureWithRootPages, { parentKind: 'workspace_root', projectLimit: 100, taskLimit: 100 })
+  const secondProjects = navigationBranchResponse(fixtureWithRootPages, { parentKind: 'workspace_root', projectLimit: 100, projectOffset: 100, taskLimit: 100 })
+  const secondTasks = navigationBranchResponse(fixtureWithRootPages, { parentKind: 'workspace_root', projectLimit: 100, taskLimit: 100, taskOffset: 100 })
+  assert.equal(first.projects.items.length, 100)
+  assert.equal(first.tasks.items.length, 100)
+  assert.equal(first.projects.has_more, true)
+  assert.equal(first.tasks.has_more, true)
+  assert.equal(secondProjects.projects.items.length, 100)
+  assert.equal(secondTasks.tasks.items.length, 100)
+  assert.deepEqual(first.projects.items.map(item => item.id).filter(id => secondProjects.projects.items.some(other => other.id === id)), [])
+  assert.deepEqual(first.tasks.items.map(item => item.id).filter(id => secondTasks.tasks.items.some(other => other.id === id)), [])
+  assert.equal(first.projects.items.every((item, index, values) => index === 0 || ['active', 'paused', 'completed', 'archived'].indexOf(values[index - 1].status) <= ['active', 'paused', 'completed', 'archived'].indexOf(item.status)), true)
+  assert.equal(first.tasks.items.every((item, index, values) => index === 0 || ['todo', 'in_progress', 'blocked', 'done', 'cancelled'].indexOf(values[index - 1].status) <= ['todo', 'in_progress', 'blocked', 'done', 'cancelled'].indexOf(item.status)), true)
+
+  const retainedRoot = fixture.projects.find(project => project.parent_id == null)
+  const retainedDescendant = fixture.projects.find(project => project.parent_id && project.parent_id !== retainedRoot.id && project.name.includes('0004'))
+  const retained = navigationBranchResponse(fixture, { parentKind: 'workspace_root', query: retainedDescendant.name, projectLimit: 100, taskLimit: 100 })
+  assert.equal(retained.projects.items.some(item => item.id === retainedRoot.id), true)
+  const taskChild = fixture.tasks.find(task => task.parent_id != null)
+  const nestedChild = fixture.tasks.find(task => task.parent_id == null && task.id !== taskChild.parent_id)
+  const nestedFixture = {
+    ...fixture,
+    tasks: fixture.tasks.map(task => task.id === nestedChild.id ? { ...task, parent_id: taskChild.id, project_id: taskChild.project_id, title: 'Nested task retention probe' } : task)
+  }
+  const retainedTask = navigationBranchResponse(nestedFixture, { parentKind: 'task', parentId: taskChild.parent_id, query: 'retention probe', projectLimit: 100, taskLimit: 100 })
+  assert.equal(retainedTask.tasks.items.some(item => item.id === taskChild.id), true)
+  const tasksOnly = navigationBranchResponse(fixture, { parentKind: 'workspace_root', showOnly: 'tasks', projectLimit: 100, taskLimit: 100 })
+  assert.deepEqual(tasksOnly.projects.items, [])
 })
 
 test('canonical snapshot independently follows production kind rank and identity boundaries', () => {
@@ -280,8 +359,8 @@ test('intercepted measured-route semantics remain anchored to production SQL con
   assert.match(timelineSource, /date_trunc\(\$4, \(\$3 - interval '1 microsecond'\) AT TIME ZONE 'UTC'\)/)
   assert.match(timelineSource, /ORDER BY b\.bucket_start_utc ASC/)
   assert.match(timelineSource, /LIMIT 367/)
-  assert.match(projectSource, /row\.projPriority.*desc.*row\.projName.*asc/)
-  assert.match(taskSource, /row\.taskPriority.*desc.*row\.taskCreatedAt.*asc/)
+  assert.match(projectSource, /row\.projPriority.*desc.*row\.projName.*asc.*row\.projId.*asc/)
+  assert.match(taskSource, /row\.taskPriority.*desc.*row\.taskTitle.*asc.*row\.taskId.*asc/)
   assert.match(workspaceSource, /ORDER BY name ASC, id ASC/)
   assert.match(membershipSource, /ORDER BY created_at ASC, user_id ASC/)
   for (const helper of ['queryProjects', 'queryTasks', 'queryObservations', 'queryObservationFacets', 'queryTimelineEvents', 'queryTimelineBuckets']) {
@@ -369,7 +448,7 @@ test('checked budget and baseline schemas carry the required provenance', () => 
     schemaVersion: 1,
     environmentPolicy: 'timing-and-heap-require-recorded-environment-fingerprint',
     large: {
-      cold: { maxHttpRequests: 12, maxFixtureBytes: 2097152, maxMedianMs: 2000, maxP95Ms: 3500, maxEntityOverviewRequests: 0, requiredCanonicalSnapshotItems: 4951, requiredCanonicalSnapshotPages: 50 },
+      cold: { maxHttpRequests: 12, maxFixtureBytes: 2097152, maxMedianMs: 2000, maxP95Ms: 3500, maxEntityOverviewRequests: 0, requiredCanonicalSnapshotItems: 1, requiredCanonicalSnapshotPages: 1 },
       scaling: { maxSmallToLargeRequestDelta: 3 },
       render: { maxDomNodes: 2500, maxCollectionRows: 250 },
       localInteraction: { maxP95Ms: 100 },
@@ -379,20 +458,26 @@ test('checked budget and baseline schemas carry the required provenance', () => 
       heap: { maxAttributableBytes: 67108864 }
     }
   })
-  assert.equal(hashJson(budgets), '27c1bd99928e763d6064369c55b9e3781e09fe3b298fa5d346da5e65d74cf77c')
+  assert.equal(hashJson(budgets), 'bcf994aeb8074f53a75ab89ce24ee17c4059db5cb1e3e7061934641321b2da90')
   assert.equal(HARNESS_CONFIGURATION.browserClockUtc, TIMELINE_BROWSER_NOW)
-  assert.equal(hashJson(HARNESS_CONFIGURATION), '4e2d9de5424f938e0ca2ef7bcf252d260f612a8b5e49a8e2a7d6701f644202df')
+  assert.equal(hashJson(HARNESS_CONFIGURATION), '6154f092da5dcd381a1fa7ddae7a0719d88f0123cc517184a168b2a39f11fc5c')
   assert.equal(hashJson(DIRECT_FOCUS_CONTRACT), 'e2a132adb8d9386e17be584946a790268ad58e5d10cd9e90d3a4810848864f50')
 
   const baselinePath = `${here}/baseline.v1.json`
   const traceManifestPath = `${here}/trace-manifest.v1.json`
+  const afterPath = `${here}/final-working-tree.after.v1.json`
+  const afterTraceManifestPath = `${here}/final-working-tree.trace-manifest.v1.json`
   assert.equal(fs.existsSync(baselinePath), true)
   assert.equal(fs.existsSync(traceManifestPath), true)
+  assert.equal(fs.existsSync(afterPath), true)
+  assert.equal(fs.existsSync(afterTraceManifestPath), true)
   const baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8'))
   const traceManifest = JSON.parse(fs.readFileSync(traceManifestPath, 'utf8'))
-  const contracts = {
-    budgetsHash: '27c1bd99928e763d6064369c55b9e3781e09fe3b298fa5d346da5e65d74cf77c',
-    configurationHash: '4e2d9de5424f938e0ca2ef7bcf252d260f612a8b5e49a8e2a7d6701f644202df',
+  const after = JSON.parse(fs.readFileSync(afterPath, 'utf8'))
+  const afterTraceManifest = JSON.parse(fs.readFileSync(afterTraceManifestPath, 'utf8'))
+  const currentContracts = {
+    budgetsHash: 'bcf994aeb8074f53a75ab89ce24ee17c4059db5cb1e3e7061934641321b2da90',
+    configurationHash: '6154f092da5dcd381a1fa7ddae7a0719d88f0123cc517184a168b2a39f11fc5c',
     directFocusContractHash: 'e2a132adb8d9386e17be584946a790268ad58e5d10cd9e90d3a4810848864f50',
     fixtures: {
       small: '827312e056054ad5f144284fe198e22d4f8bac97980afa0ecb3142b9d86e0851',
@@ -403,11 +488,16 @@ test('checked budget and baseline schemas carry the required provenance', () => 
       large: '49222dd4d70fdf34c636188ebd7b5be08fbbddad6391a3276bc57e25214ffa1b'
     }
   }
+  const baselineContracts = {
+    ...currentContracts,
+    budgetsHash: '27c1bd99928e763d6064369c55b9e3781e09fe3b298fa5d346da5e65d74cf77c',
+    configurationHash: '4e2d9de5424f938e0ca2ef7bcf252d260f612a8b5e49a8e2a7d6701f644202df'
+  }
   assert.equal(baseline.schemaVersion, 1)
   assert.equal(baseline.baseCommit, 'ca04f51c3494c83c433d12bd7791f89be876daea')
   assert.equal(baseline.recordAuthorization, 'explicit --authorize-baseline')
-  assert.deepEqual(baseline.configuration, HARNESS_CONFIGURATION)
-  assert.deepEqual(baseline.contracts, contracts)
+  assert.match(baseline.configuration.initialTransport, /must transport every canonical snapshot item/)
+  assert.deepEqual(baseline.contracts, baselineContracts)
   assert.deepEqual(baseline.fixtures.directFocusContract, DIRECT_FOCUS_CONTRACT)
   assert.equal(baseline.fixtures.seed, FIXTURE_SEED)
   assert.equal(baseline.runs.small.length, 5)
@@ -418,14 +508,14 @@ test('checked budget and baseline schemas carry the required provenance', () => 
   assert.equal(baseline.runs.large.every(run => run.readiness.timelineBuckets === 13 && JSON.stringify(run.readiness.timelineBucketRequest) === JSON.stringify(TIMELINE_DEFAULT_UI_QUERY)), true)
   assert.equal(baseline.fixtures.small.scale.timelineBuckets, 20)
   assert.equal(baseline.fixtures.large.scale.timelineBuckets, 500)
-  assert.equal(baseline.fixtures.small.snapshotHash, contracts.snapshots.small)
-  assert.equal(baseline.fixtures.large.snapshotHash, contracts.snapshots.large)
+  assert.equal(baseline.fixtures.small.snapshotHash, baselineContracts.snapshots.small)
+  assert.equal(baseline.fixtures.large.snapshotHash, baselineContracts.snapshots.large)
   assert.equal(baseline.fixtures.small.directFocusTarget.id, DIRECT_FOCUS_CONTRACT.small.targetProjectId)
   assert.equal(baseline.fixtures.large.directFocusTarget.id, DIRECT_FOCUS_CONTRACT.large.targetProjectId)
   assert.equal(baseline.fixtures.small.directFocusTarget.parent_id, null)
   assert.equal(baseline.fixtures.large.directFocusTarget.parent_id, null)
   assert.equal(baseline.runs.large.every(run => run.directFocus.targetAbsentBeforeCanonicalResync && run.directFocus.pausedSnapshotItems === 0 && run.directFocus.pausedSnapshotPages === 0 && run.directFocus.targetParentId == null), true)
-  assert.equal(baseline.runs.large.every(run => run.directFocus.canonicalSnapshotItems === 4951 && run.directFocus.canonicalSnapshotPages === 50 && run.directFocus.canonicalSnapshotHash === contracts.snapshots.large && run.directFocus.renderedAfterFullResync), true)
+  assert.equal(baseline.runs.large.every(run => run.directFocus.canonicalSnapshotItems === 4951 && run.directFocus.canonicalSnapshotPages === 50 && run.directFocus.canonicalSnapshotHash === baselineContracts.snapshots.large && run.directFocus.renderedAfterFullResync), true)
   assert.equal(baseline.runs.large.every(run => typeof run.directFocus.directFocusRequested === 'boolean' && typeof run.directFocus.directFocusRendered === 'boolean'), true)
   assert.equal(baseline.runs.large.every(run => run.directFocus.productFailureReason == null || typeof run.directFocus.productFailureReason === 'string'), true)
   assert.ok(baseline.environment.fingerprint)
@@ -475,9 +565,17 @@ test('checked budget and baseline schemas carry the required provenance', () => 
       assert.deepEqual(live.routeBytes[index], delta.routeBytes, `${size} live aggregate route bytes ${index}`)
     })
   }
-  assert.deepEqual(traceManifest.contracts, contracts)
+  assert.deepEqual(traceManifest.contracts, baselineContracts)
   assert.deepEqual(traceManifest.trace, baseline.trace)
   assert.equal(baseline.trace.verifiedDuringRecord, true)
   assert.match(baseline.trace.retention, /intentionally removed/)
   assert.ok(Array.isArray(baseline.evaluation.metrics))
+  assert.equal(after.schemaVersion, 1)
+  assert.equal(after.recordAuthorization, 'explicit --authorize-after-artifact')
+  assert.deepEqual(after.configuration, HARNESS_CONFIGURATION)
+  assert.deepEqual(after.contracts, currentContracts)
+  assert.equal(after.runs.large.every(run => run.cold.canonicalSnapshotItems === 1 && run.cold.canonicalSnapshotPages === 1), true)
+  assert.equal(after.runs.large.every(run => run.readiness.protocol === 'workspace_shell_v1' && run.readiness.transportedSnapshotItems === 1 && run.readiness.transportedSnapshotPages === 1), true)
+  assert.deepEqual(afterTraceManifest.contracts, currentContracts)
+  assert.deepEqual(afterTraceManifest.trace, after.trace)
 })

@@ -1,6 +1,7 @@
 module Feature.Dependencies exposing
     ( handleEscape
     , init
+    , beginDependencyRefresh
     , update
     , viewTaskDependencies
     )
@@ -12,6 +13,7 @@ import Helpers exposing (..)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
+import Http
 import Json.Decode as Decode
 import Permissions
 import Toast exposing (addToast)
@@ -25,6 +27,11 @@ init =
     , taskReadinessRollups = Dict.empty
     , projectReadinessRollups = Dict.empty
     , addingDependencyFor = Nothing
+    , taskDependencyHasMore = Dict.empty
+    , taskDependencyNextOffset = Dict.empty
+    , taskDependencyLoading = Dict.empty
+    , taskDependencyRequests = Dict.empty
+    , nextTaskDependencyRequestGeneration = 1
     }
 
 
@@ -44,10 +51,111 @@ handleEscape model =
 
 -- UPDATE
 
+applyDependencyPage : String -> Int -> Result Http.Error Api.TaskDependencyPage -> Model -> ( Model, Cmd Msg )
+applyDependencyPage taskId offset result model =
+    case result of
+        Ok page ->
+            let
+                dependenciesModel = model.dependencies
+                existing = if offset == 0 then [] else Dict.get taskId dependenciesModel.taskDependencies |> Maybe.withDefault []
+                ordered =
+                    (existing ++ page.items)
+                        |> List.foldl (\item values -> if List.any (\value -> value.id == item.id) values then values else item :: values) []
+                        |> List.sortBy (\item -> ( String.toLower item.name, item.id ))
+            in
+            ( { model
+                | dependencies =
+                    { dependenciesModel
+                        | taskDependencies = Dict.insert taskId ordered dependenciesModel.taskDependencies
+                        , taskDependencyHasMore = Dict.insert taskId page.hasMore dependenciesModel.taskDependencyHasMore
+                        , taskDependencyNextOffset = Dict.insert taskId (offset + List.length page.items) dependenciesModel.taskDependencyNextOffset
+                        , taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading
+                        , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
+                    }
+              }
+            , Cmd.none
+            )
+
+        Err _ ->
+            let
+                dependenciesModel = model.dependencies
+            in
+            addToast Error "Failed to load task dependencies"
+                { model | dependencies = { dependenciesModel | taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading, taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests } }
+
+
+beginDependencyRefresh : String -> Model -> ( Model, Cmd Msg )
+beginDependencyRefresh taskId model =
+    case model.selectedWorkspaceId of
+        Just workspaceId ->
+            let
+                dependencies = model.dependencies
+                request = { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, offset = 0, generation = dependencies.nextTaskDependencyRequestGeneration }
+                updated =
+                    { dependencies
+                        | taskDependencyLoading = Dict.insert taskId True dependencies.taskDependencyLoading
+                        , taskDependencyRequests = Dict.insert taskId request dependencies.taskDependencyRequests
+                        , nextTaskDependencyRequestGeneration = request.generation + 1
+                    }
+            in
+            ( { model | dependencies = updated }, Api.fetchTaskDependencyPage model.flags.apiUrl taskId 0 (GotTaskDependencyPage taskId workspaceId model.sessionRequestEpoch request.generation 0) )
+
+        Nothing ->
+            ( model, Cmd.none )
+
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        GotTaskDependencyPage taskId workspaceId sessionEpoch generation offset result ->
+            case Dict.get taskId model.dependencies.taskDependencyRequests of
+                Just request ->
+                    if request.workspaceId /= workspaceId || request.sessionEpoch /= sessionEpoch || request.generation /= generation || request.offset /= offset || model.sessionRequestEpoch /= sessionEpoch || model.selectedWorkspaceId /= Just workspaceId then
+                        ( model, Cmd.none )
+
+                    else
+                        applyDependencyPage taskId offset result model
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        LoadTaskDependencyPage taskId ->
+            let
+                dependenciesModel =
+                    model.dependencies
+
+                offset =
+                    Dict.get taskId dependenciesModel.taskDependencyNextOffset
+                        |> Maybe.withDefault 0
+
+                canLoad =
+                    (Dict.get taskId dependenciesModel.taskDependencyHasMore
+                        |> Maybe.withDefault False
+                    )
+                        && not (Dict.get taskId dependenciesModel.taskDependencyLoading |> Maybe.withDefault False)
+            in
+            case model.selectedWorkspaceId of
+                Just workspaceId ->
+                    if canLoad then
+                        let
+                            request = { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, offset = offset, generation = dependenciesModel.nextTaskDependencyRequestGeneration }
+                            updated =
+                                { dependenciesModel
+                                    | taskDependencyLoading = Dict.insert taskId True dependenciesModel.taskDependencyLoading
+                                    , taskDependencyRequests = Dict.insert taskId request dependenciesModel.taskDependencyRequests
+                                    , nextTaskDependencyRequestGeneration = request.generation + 1
+                                }
+                        in
+                        ( { model | dependencies = updated }
+                        , Api.fetchTaskDependencyPage model.flags.apiUrl taskId offset (GotTaskDependencyPage taskId workspaceId model.sessionRequestEpoch request.generation offset)
+                        )
+
+                    else
+                        ( model, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
         GotTaskDependencies taskId result ->
             case result of
                 Ok overview ->
@@ -157,18 +265,18 @@ update msg model =
                         modelWithHydratedLinks =
                             { updatedModel | dependencies = { dependenciesModel | taskDependencyLinks = updatedDependencyLinks } }
 
-                        projectReadinessCmds =
-                            modelWithHydratedLinks.dependencies.projectReadinessRollups
-                                |> Dict.keys
-                                |> List.map (\projectId -> Api.fetchProjectOverview modelWithHydratedLinks.flags.apiUrl projectId (GotProjectOverview projectId))
+                        -- Revalidate only the expanded dependency page that was
+                        -- mutated.  Refreshing every cached overview recreated
+                        -- the unbounded fan-out this contract replaces.
+                        ( revalidatedModel, revalidationCmd ) =
+                            if Dict.member taskId modelWithHydratedLinks.dependencies.taskDependencies then
+                                beginDependencyRefresh taskId modelWithHydratedLinks
 
-                        taskReadinessCmds =
-                            modelWithHydratedLinks.dependencies.taskDependencies
-                                |> Dict.keys
-                                |> List.map (\cachedTaskId -> Api.fetchTaskOverview modelWithHydratedLinks.flags.apiUrl cachedTaskId (GotTaskDependencies cachedTaskId))
+                            else
+                                ( modelWithHydratedLinks, Cmd.none )
                     in
-                    ( modelWithHydratedLinks
-                    , Cmd.batch ([ Api.fetchTaskOverview modelWithHydratedLinks.flags.apiUrl taskId (GotTaskDependencies taskId) ] ++ taskReadinessCmds ++ projectReadinessCmds)
+                    ( revalidatedModel
+                    , revalidationCmd
                     )
 
                 Err _ ->
@@ -203,6 +311,23 @@ viewTaskDependencies model taskId deps =
           else
             div [ class "task-dependencies-list" ]
                 (List.map (viewDependencyItem model taskId) deps)
+        , if Dict.get taskId model.dependencies.taskDependencyHasMore |> Maybe.withDefault False then
+            button
+                [ class "btn-small btn-ghost"
+                , disabled (Dict.get taskId model.dependencies.taskDependencyLoading |> Maybe.withDefault False)
+                , onClick (LoadTaskDependencyPage taskId)
+                ]
+                [ text
+                    (if Dict.get taskId model.dependencies.taskDependencyLoading |> Maybe.withDefault False then
+                        "Loading dependencies…"
+
+                     else
+                        "Load more dependencies"
+                    )
+                ]
+
+          else
+            text ""
         , if Permissions.canEditCurrentWorkspace model then
             div [ class "card-inline-actions" ]
                 [ div [ class "popover-anchor" ]

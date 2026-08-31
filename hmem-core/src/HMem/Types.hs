@@ -7,14 +7,16 @@ module HMem.Types
   , validateCreateObservationInput, validateUpdateObservationInput, validateObservationQuery, validateObservationSubjectFacetQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
   , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
   , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
-  , ProjectStatus(..), Project(..), CreateProject(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..)
-  , TaskDependencySummary(..), TaskOverview(..), TaskReadinessRollup(..)
+  , ProjectStatus(..), Project(..), CreateProject(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..), ProjectCardSummary(..)
+  , TaskDependencySummary(..), TaskDependencyPage(..), TaskOverview(..), TaskReadinessRollup(..), TaskCardSummary(..)
   , TaskStatus(..), Task(..), NextTaskCandidate(..), TaskDependencyAutoBlockSnapshot(..), TaskDependencyStatusChange(..), LinkDependency(..), DependencyMutationResult(..), TaskMutationResult(..), CreateTask(..), UpdateTask(..), TaskListQuery(..)
+  , NavigationParent(..), NavigationFilter(..), NavigationBranchRequest(..), NavigationPage(..), NavigationBranchResponse(..), NavigationEntityType(..), NavigationSummary(..), NavigationFocusResponse(..), NavigationSummariesRequest(..), NavigationSummariesResponse(..)
+  , maxNavigationPageSize, maxNavigationOffset, maxNavigationBatchIds, maxFocusAncestors, validateNavigationPage, validateNavigationSummariesRequest
   , EntitySearchType(..), ObservationSearchHit(..), UnifiedSearchQuery(..), UnifiedSearchResults(..), validateUnifiedSearchQuery
   , ActivityEvent(..), WorkspaceTimelineEvent(..), TimelineActor(..), TimelineProjectContext(..), TimelineTaskContext(..), TimelineStatusTransition(..), TimelineNavigation(..), TimelineBucketCounts(..), TimelineBucketEntityCounts(..), TimelineBucketSeriesCounts(..), TimelineBucketSeries(..), WorkspaceTimelineBucket(..), WorkspaceTimelineBucketsResponse(..)
   , SavedView(..), CreateSavedView(..), UpdateSavedView(..), SavedViewListQuery(..)
   , AuditAction(..), AuditLogEntry(..), AuditLogQuery(..), RevertResult(..), auditActionToText, auditActionFromText
-  , WebSocketTicketRequest(..), WebSocketTicketResponse(..), ChangeStreamScopeRequest(..), ChangeStreamResyncRequest(..), ChangeStreamSnapshotItem(..), ChangeStreamResyncResponse(..), CanonicalWebSocketTicketRequest(..), SessionContext(..), SessionPrincipal(..), SessionGlobalPermissions(..), SessionWorkspaceContext(..), PaginatedResult(..)
+  , WebSocketTicketRequest(..), WebSocketTicketResponse(..), ChangeStreamScopeRequest(..), SnapshotProfile(..), snapshotProfileToText, ChangeStreamResyncRequest(..), ChangeStreamSnapshotItem(..), ChangeStreamResyncResponse(..), CanonicalWebSocketTicketRequest(..), SessionContext(..), SessionPrincipal(..), SessionGlobalPermissions(..), SessionWorkspaceContext(..), PaginatedResult(..)
   , BatchDeleteRequest(..), BatchMoveTasksRequest(..), BatchResult(..), CascadeResult(..), BatchUpdateProjectItem(..), BatchUpdateProjectRequest(..), BatchUpdateTaskItem(..), BatchUpdateTaskRequest(..)
   , validateBatchDeleteRequest, validateBatchMoveTasksRequest, validateBatchUpdateProjectRequest, validateBatchUpdateTaskRequest
   , projectStatusToText, projectStatusFromText, taskStatusToText, taskStatusFromText, workspaceTypeToText, workspaceTypeFromText
@@ -30,6 +32,7 @@ import Data.Aeson.Types (Parser, Pair)
 import Data.ByteString qualified as BS
 import Data.Char (isAlpha, isHexDigit, isLower, isUpper, toLower)
 import Data.Int (Int64)
+import Data.List (nub)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -909,6 +912,18 @@ data ProjectReadinessRollup = ProjectReadinessRollup
 instance ToJSON ProjectReadinessRollup where toJSON = genericToJSON jsonOptions
 instance FromJSON ProjectReadinessRollup where parseJSON = genericParseJSON jsonOptions
 
+-- | The deliberately small project payload used by workspace navigation.  Full
+-- project records (including description and metadata) stay behind the detail
+-- endpoint so opening a large workspace never transfers every entity body.
+data ProjectCardSummary = ProjectCardSummary
+  { id :: UUID, workspaceId :: UUID, parentId :: Maybe UUID, name :: Text
+  , status :: ProjectStatus, priority :: Int, createdAt :: UTCTime, updatedAt :: UTCTime
+  , directProjectCount :: Int, directTaskCount :: Int, hasChildren :: Bool
+  , readinessRollup :: ProjectReadinessRollup
+  } deriving (Show, Eq, Generic)
+instance ToJSON ProjectCardSummary where toJSON = genericToJSON jsonOptions
+instance FromJSON ProjectCardSummary where parseJSON = genericParseJSON jsonOptions
+
 instance ToJSON UpdateProject where
   toJSON up = object $ catMaybes
     [ ("name" .=)     <$> up.name
@@ -1081,11 +1096,150 @@ data TaskReadinessRollup = TaskReadinessRollup
 instance ToJSON TaskReadinessRollup where toJSON = genericToJSON jsonOptions
 instance FromJSON TaskReadinessRollup where parseJSON = genericParseJSON jsonOptions
 
+-- | The task equivalent of 'ProjectCardSummary'.  It contains only data needed
+-- to draw a card and its readiness badge; descriptions, metadata and dependency
+-- names are deliberately fetched on demand.
+data TaskCardSummary = TaskCardSummary
+  { id :: UUID, workspaceId :: UUID, projectId :: Maybe UUID, parentId :: Maybe UUID, title :: Text
+  , status :: TaskStatus, priority :: Int, dueAt :: Maybe UTCTime, completedAt :: Maybe UTCTime
+  , dependencyCount :: Int, createdAt :: UTCTime, updatedAt :: UTCTime
+  , directSubtaskCount :: Int, hasChildren :: Bool, readinessRollup :: TaskReadinessRollup
+  } deriving (Show, Eq, Generic)
+instance ToJSON TaskCardSummary where toJSON = genericToJSON jsonOptions
+instance FromJSON TaskCardSummary where parseJSON = genericParseJSON jsonOptions
+
+-- | Dependency names are not part of a card.  This page is intentionally
+-- independent so expanding a dependency section cannot restart navigation.
+data TaskDependencyPage = TaskDependencyPage
+  { items :: [TaskDependencySummary], hasMore :: Bool } deriving (Show, Eq, Generic)
+instance ToJSON TaskDependencyPage where toJSON = genericToJSON jsonOptions
+instance FromJSON TaskDependencyPage where parseJSON = genericParseJSON jsonOptions
+
 data TaskOverview = TaskOverview
   { task :: Task, dependencies :: [TaskDependencySummary], readinessRollup :: TaskReadinessRollup }
   deriving (Show, Eq, Generic)
 instance ToJSON TaskOverview where toJSON = genericToJSON jsonOptions
 instance FromJSON TaskOverview where parseJSON = genericParseJSON jsonOptions
+
+------------------------------------------------------------------------
+-- Bounded workspace navigation
+------------------------------------------------------------------------
+
+maxNavigationPageSize, maxNavigationOffset, maxNavigationBatchIds, maxFocusAncestors :: Int
+maxNavigationPageSize = 100
+maxNavigationOffset = 100000
+maxNavigationBatchIds = 100
+maxFocusAncestors = 64
+
+-- | A typed branch selector.  Project and task branches are intentionally
+-- distinct: a project branch returns child projects before root tasks, while a
+-- task branch returns only child tasks.
+data NavigationParent
+  = NavigationWorkspaceRoot
+  | NavigationProjectBranch UUID
+  | NavigationTaskBranch UUID
+  deriving (Show, Eq, Generic)
+
+instance ToJSON NavigationParent where
+  toJSON NavigationWorkspaceRoot = object ["kind" .= ("workspace_root" :: Text)]
+  toJSON (NavigationProjectBranch parent) = object ["kind" .= ("project" :: Text), "parent_id" .= parent]
+  toJSON (NavigationTaskBranch parent) = object ["kind" .= ("task" :: Text), "parent_id" .= parent]
+instance FromJSON NavigationParent where
+  parseJSON = withObject "NavigationParent" $ \o -> do
+    kind <- o .: "kind" :: Parser Text
+    case kind of
+      "workspace_root" -> pure NavigationWorkspaceRoot
+      "project" -> NavigationProjectBranch <$> o .: "parent_id"
+      "task" -> NavigationTaskBranch <$> o .: "parent_id"
+      _ -> fail "navigation parent kind must be workspace_root, project, or task"
+
+-- | Filter fields mirror the existing workspace tree semantics.  The API owns
+-- descendant/ancestor matching; clients never need the entire tree to filter.
+data NavigationFilter = NavigationFilter
+  { showOnly :: Maybe Text, projectStatuses :: [ProjectStatus], taskStatuses :: [TaskStatus]
+  -- Keep the priority operator and value distinct.  The UI has exact/above/
+  -- below modes, so reducing it to an equality at this boundary silently
+  -- changed the existing tree-filter semantics.
+  , priorityMode :: Maybe Text, priorityValue :: Maybe Int, query :: Maybe Text
+  } deriving (Show, Eq, Generic)
+instance ToJSON NavigationFilter where toJSON = genericToJSON jsonOptions
+instance FromJSON NavigationFilter where parseJSON = genericParseJSON jsonOptions
+
+data NavigationBranchRequest = NavigationBranchRequest
+  { parent :: NavigationParent, projectLimit :: Maybe Int, projectOffset :: Maybe Int
+  , taskLimit :: Maybe Int, taskOffset :: Maybe Int, filters :: Maybe NavigationFilter
+  } deriving (Show, Eq, Generic)
+instance ToJSON NavigationBranchRequest where toJSON = genericToJSON jsonOptions
+instance FromJSON NavigationBranchRequest where parseJSON = genericParseJSON jsonOptions
+
+data NavigationPage a = NavigationPage { items :: [a], hasMore :: Bool }
+  deriving (Show, Eq, Generic)
+instance ToJSON a => ToJSON (NavigationPage a) where toJSON = genericToJSON jsonOptions
+instance FromJSON a => FromJSON (NavigationPage a) where parseJSON = genericParseJSON jsonOptions
+
+data NavigationBranchResponse = NavigationBranchResponse
+  { workspaceId :: UUID, parent :: NavigationParent
+  , projects :: NavigationPage ProjectCardSummary, tasks :: NavigationPage TaskCardSummary
+  } deriving (Show, Eq, Generic)
+instance ToJSON NavigationBranchResponse where toJSON = genericToJSON jsonOptions
+instance FromJSON NavigationBranchResponse where parseJSON = genericParseJSON jsonOptions
+
+data NavigationEntityType = NavigationProject | NavigationTask deriving (Show, Eq, Generic)
+instance ToJSON NavigationEntityType where
+  toJSON NavigationProject = String "project"
+  toJSON NavigationTask = String "task"
+instance FromJSON NavigationEntityType where
+  parseJSON = withText "NavigationEntityType" $ \case
+    "project" -> pure NavigationProject
+    "task" -> pure NavigationTask
+    _ -> fail "entity_type must be project or task"
+
+data NavigationSummary = NavigationProjectSummary ProjectCardSummary | NavigationTaskSummary TaskCardSummary
+  deriving (Show, Eq, Generic)
+instance ToJSON NavigationSummary where
+  toJSON (NavigationProjectSummary summary) = object ["entity_type" .= NavigationProject, "summary" .= summary]
+  toJSON (NavigationTaskSummary summary) = object ["entity_type" .= NavigationTask, "summary" .= summary]
+instance FromJSON NavigationSummary where
+  parseJSON = withObject "NavigationSummary" $ \o -> do
+    entityType <- o .: "entity_type"
+    case entityType of
+      NavigationProject -> NavigationProjectSummary <$> o .: "summary"
+      NavigationTask -> NavigationTaskSummary <$> o .: "summary"
+
+data NavigationFocusResponse = NavigationFocusResponse
+  { workspaceId :: UUID, target :: NavigationSummary, ancestors :: [NavigationSummary]
+  , ancestorsTruncated :: Bool, nextAncestorOffset :: Maybe Int
+  } deriving (Show, Eq, Generic)
+instance ToJSON NavigationFocusResponse where toJSON = genericToJSON jsonOptions
+instance FromJSON NavigationFocusResponse where parseJSON = genericParseJSON jsonOptions
+
+data NavigationSummariesRequest = NavigationSummariesRequest
+  { projectIds :: [UUID], taskIds :: [UUID] } deriving (Show, Eq, Generic)
+instance ToJSON NavigationSummariesRequest where toJSON = genericToJSON jsonOptions
+instance FromJSON NavigationSummariesRequest where parseJSON = genericParseJSON jsonOptions
+
+data NavigationSummariesResponse = NavigationSummariesResponse
+  { projects :: [ProjectCardSummary], tasks :: [TaskCardSummary]
+  , missingProjectIds :: [UUID], missingTaskIds :: [UUID]
+  } deriving (Show, Eq, Generic)
+instance ToJSON NavigationSummariesResponse where toJSON = genericToJSON jsonOptions
+instance FromJSON NavigationSummariesResponse where parseJSON = genericParseJSON jsonOptions
+
+validateNavigationPage :: Maybe Int -> Maybe Int -> [Text]
+validateNavigationPage maybeLimit maybeOffset =
+  [ "limit must be between 1 and " <> T.pack (show maxNavigationPageSize)
+  | Just value <- [maybeLimit], value < 1 || value > maxNavigationPageSize
+  ] ++
+  [ "offset must be between 0 and " <> T.pack (show maxNavigationOffset)
+  | Just value <- [maybeOffset], value < 0 || value > maxNavigationOffset
+  ]
+
+validateNavigationSummariesRequest :: NavigationSummariesRequest -> [Text]
+validateNavigationSummariesRequest request =
+  let allIds = request.projectIds ++ request.taskIds
+  in [ "at most " <> T.pack (show maxNavigationBatchIds) <> " summary IDs are allowed"
+     | length allIds > maxNavigationBatchIds
+     ] ++ [ "summary IDs must be unique" | length (nub allIds) /= length allIds ]
 
 instance ToJSON UpdateTask where
   toJSON ut = object $ catMaybes
@@ -1580,8 +1734,26 @@ instance FromJSON ChangeStreamScopeRequest where
       "workspace" -> ChangeStreamWorkspace <$> o .: "workspace_id"
       _ -> fail "scope must be workspace or global"
 
+-- | The projection of a durable change-stream snapshot.  The omitted request
+-- field deliberately remains @full_v1@ for compatibility with existing
+-- clients; the bounded workspace shell is an explicit opt-in only.
+data SnapshotProfile = FullV1 | WorkspaceShellV1
+  deriving (Show, Eq, Generic)
+
+snapshotProfileToText :: SnapshotProfile -> Text
+snapshotProfileToText FullV1 = "full_v1"
+snapshotProfileToText WorkspaceShellV1 = "workspace_shell_v1"
+
+instance ToJSON SnapshotProfile where toJSON = String . snapshotProfileToText
+instance FromJSON SnapshotProfile where
+  parseJSON = withText "SnapshotProfile" $ \case
+    "full_v1" -> pure FullV1
+    "workspace_shell_v1" -> pure WorkspaceShellV1
+    _ -> fail "snapshot_profile must be full_v1 or workspace_shell_v1"
+
 data ChangeStreamResyncRequest = ChangeStreamResyncRequest
   { scope :: !ChangeStreamScopeRequest
+  , snapshotProfile :: !(Maybe SnapshotProfile)
   , pageSize :: !(Maybe Int)
   , pageToken :: !(Maybe Text)
   , startIdempotencyKey :: !(Maybe Text)
@@ -1589,7 +1761,7 @@ data ChangeStreamResyncRequest = ChangeStreamResyncRequest
 instance ToJSON ChangeStreamResyncRequest where toJSON = genericToJSON jsonOptions
 instance FromJSON ChangeStreamResyncRequest where
   parseJSON = withObject "ChangeStreamResyncRequest" $ \o -> do
-    request <- ChangeStreamResyncRequest <$> o .: "scope" <*> o .:? "page_size" <*> o .:? "page_token" <*> o .:? "start_idempotency_key"
+    request <- ChangeStreamResyncRequest <$> o .: "scope" <*> o .:? "snapshot_profile" <*> o .:? "page_size" <*> o .:? "page_token" <*> o .:? "start_idempotency_key"
     case request.pageSize of
       Just size | size < 1 || size > 1000 -> fail "page_size must be between 1 and 1000"
       _ -> case (request.pageToken, request.startIdempotencyKey) of
@@ -1597,6 +1769,7 @@ instance FromJSON ChangeStreamResyncRequest where
         (Nothing, Just key) | T.length (T.strip key) < 32 || T.length key > 512 -> fail "start_idempotency_key must be between 32 and 512 characters"
         (Just token, Nothing) | T.null (T.strip token) -> fail "page_token must be nonempty"
         (Just _, Just _) -> fail "start_idempotency_key is only valid when page_token is absent"
+        _ | request.pageToken /= Nothing && request.snapshotProfile /= Nothing -> fail "snapshot_profile is only valid when page_token is absent"
         _ -> pure request
 
 -- | An immutable, allowlisted item in a resync response.  Its `data` field is
@@ -1614,6 +1787,7 @@ instance FromJSON ChangeStreamSnapshotItem where
 
 data ChangeStreamResyncResponse = ChangeStreamResyncResponse
   { items :: ![ChangeStreamSnapshotItem]
+  , snapshotProfile :: !SnapshotProfile
   , hasMore :: !Bool
   , nextPageToken :: !(Maybe Text)
   , resumeToken :: !(Maybe Text)

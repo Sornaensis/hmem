@@ -8,6 +8,7 @@ module Feature.WebSocket exposing
 import Api
 import Dict
 import Feature.ChangeStream as ChangeStream
+import Feature.DataLoading
 import Feature.Observation as Observation
 import Feature.Timeline as Timeline
 import Helpers exposing (applyDependencyMutationResult, applyTaskDependencyLinkMutation, beginWorkspaceDataReload, replaceFragment)
@@ -16,6 +17,8 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
 import Ports exposing (clearChangeStreamScope, connectWebSocket, disconnectChangeStreamScope, wsConnected, wsConnecting, wsConnectionFailed, wsDisconnected, wsMessage)
+import Set
+import String
 import Task
 import Toast exposing (addToast)
 import Types exposing (..)
@@ -247,6 +250,114 @@ update msg model =
             else
                 ( model, Cmd.none )
 
+        CanonicalNavigationSummariesFetched guard workspaceId projectIds taskIds result ->
+            if model.selectedWorkspaceId == Just workspaceId && canonicalGuardIsCurrent guard model then
+                case result of
+                    Ok summaries ->
+                        let
+                            projectIdsMatch =
+                                List.all (\summary -> List.member summary.id projectIds && summary.workspaceId == workspaceId) summaries.projects
+
+                            taskIdsMatch =
+                                List.all (\summary -> List.member summary.id taskIds && summary.workspaceId == workspaceId) summaries.tasks
+
+                            returnedProjectIds =
+                                List.map .id summaries.projects ++ summaries.missingProjectIds
+
+                            returnedTaskIds =
+                                List.map .id summaries.tasks ++ summaries.missingTaskIds
+
+                            complete =
+                                List.sort returnedProjectIds == List.sort projectIds
+                                    && List.sort returnedTaskIds == List.sort taskIds
+                                    && projectIdsMatch
+                                    && taskIdsMatch
+                        in
+                        if complete then
+                            let
+                                merged =
+                                    Feature.DataLoading.mergeNavigationSummaries summaries.projects summaries.tasks model
+
+                                dependencies =
+                                    merged.dependencies
+
+                                loading =
+                                    merged.dataLoading
+
+                                -- Without an active server-owned filter every
+                                -- revalidated existing card remains eligible
+                                -- for the current tree; only missing IDs leave
+                                -- membership. Under a filter, summary payloads
+                                -- cannot safely reproduce descendant-aware
+                                -- matching, so remove invalidated IDs until a
+                                -- fresh bounded branch response re-admits them.
+                                filteredNavigation =
+                                    model.search.filterShowOnly /= ShowAll
+                                        || model.search.filterProjectStatuses /= []
+                                        || model.search.filterTaskStatuses /= []
+                                        || model.search.filterPriority /= AnyPriority
+                                        || String.trim model.search.query /= ""
+
+                                -- A summary endpoint is authoritative about
+                                -- deletion, but not descendant-retained branch
+                                -- membership under filters.  Keep existing
+                                -- cards visible until an authoritative branch
+                                -- replay can decide their filtered placement.
+                                staleProjectIds =
+                                    summaries.missingProjectIds
+
+                                staleTaskIds =
+                                    summaries.missingTaskIds
+
+                                mergedProjects =
+                                    merged.projects
+
+                                mergedTasks =
+                                    merged.tasks
+
+                                updated =
+                                    { merged | projects = List.foldl Dict.remove mergedProjects summaries.missingProjectIds
+                                    , tasks = List.foldl Dict.remove mergedTasks summaries.missingTaskIds
+                                    , dataLoading =
+                                        { loading
+                                            | projectCardSummaries = List.foldl Dict.remove loading.projectCardSummaries summaries.missingProjectIds
+                                            , taskCardSummaries = List.foldl Dict.remove loading.taskCardSummaries summaries.missingTaskIds
+                                        -- A summary response is authoritative for card state,
+                                        -- but not for server-side filtered branch membership.
+                                        -- Under a filtered tree, remove every
+                                        -- invalidated card until the next bounded
+                                        -- branch response re-admits it. This prevents
+                                        -- stale status, priority, search, or parent
+                                        -- membership from surviving a live mutation.
+                                            , navigationVisibleProjectIds = List.foldl Set.remove loading.navigationVisibleProjectIds staleProjectIds
+                                            , navigationVisibleTaskIds = List.foldl Set.remove loading.navigationVisibleTaskIds staleTaskIds
+                                        }
+                                    , dependencies =
+                                        { dependencies
+                                            | projectReadinessRollups = List.foldl Dict.remove dependencies.projectReadinessRollups summaries.missingProjectIds
+                                            , taskReadinessRollups = List.foldl Dict.remove dependencies.taskReadinessRollups summaries.missingTaskIds
+                                        }
+                                    }
+                            in
+                            if filteredNavigation && (not (List.isEmpty projectIds) || not (List.isEmpty taskIds)) then
+                                -- Summary payloads establish card state, but only the
+                                -- bounded branch endpoint owns descendant-aware filtered
+                                -- membership. Reissue its root page so matching cards are
+                                -- re-admitted and moved/nonmatching cards disappear.
+                                Feature.DataLoading.revalidateNavigationForAffectedBranches summaries.projects summaries.tasks updated
+
+                            else
+                                ( updated, Cmd.none )
+
+                        else
+                            canonicalHttpFailure guard (Http.BadBody "Navigation summary response did not match its targeted revalidation request") model
+
+                    Err error ->
+                        canonicalHttpFailure guard error model
+
+            else
+                ( model, Cmd.none )
+
         CanonicalCatalogueFetched guard result ->
             if canonicalGuardIsCurrent guard model then
                 case result of
@@ -383,8 +494,8 @@ applyCanonicalFrame frame model =
         Api.CanonicalScoped apiScope nested ->
             applyScopedFrame (toPolicyScope apiScope) nested model
 
-        Api.CanonicalSnapshot apiScope items token ->
-            applyCanonicalSnapshot (toPolicyScope apiScope) items token model
+        Api.CanonicalSnapshot apiScope items token profile ->
+            applyCanonicalSnapshot (toPolicyScope apiScope) profile items token model
 
         Api.CanonicalBatch apiScope frames ->
             applyScopedFrames (toPolicyScope apiScope) frames model
@@ -444,9 +555,9 @@ applyScopedFrames scope frames model =
     applyActions scope actions updated
 
 
-applyCanonicalSnapshot : ChangeStream.Scope -> List Api.SnapshotItem -> String -> Model -> ( Model, Cmd Msg )
-applyCanonicalSnapshot scope items token model =
-    case ChangeStream.applySnapshot scope items of
+applyCanonicalSnapshot : ChangeStream.Scope -> String -> List Api.SnapshotItem -> String -> Model -> ( Model, Cmd Msg )
+applyCanonicalSnapshot scope profile items token model =
+    case ChangeStream.applySnapshotProfile scope profile items of
         Err _ ->
             beginScopedResync scope model
 
@@ -489,6 +600,28 @@ applyCanonicalSnapshot scope items token model =
                     if model.selectedWorkspaceId /= Just workspaceId then
                         ( model, Cmd.none )
 
+                    else if profile == "workspace_shell_v1" then
+                        -- workspace_shell_v1 carries only the durable root and
+                        -- replay hand-off.  Never replace newer bounded REST
+                        -- branch data with this intentionally sparse snapshot.
+                        let
+                            shellModel =
+                                { withStream | workspaces = Dict.union snapshot.workspaces withStream.workspaces }
+
+                            ( observationModel, observationCmd ) =
+                                Observation.refreshActiveResults shellModel
+                        in
+                        case observationModel.focus.focusedEntity of
+                            Just ( entityType, entityId ) ->
+                                let
+                                    ( focusedModel, focusCmd ) =
+                                        Feature.DataLoading.beginNavigationFocus workspaceId entityType entityId observationModel
+                                in
+                                ( focusedModel, Cmd.batch [ observationCmd, focusCmd ] )
+
+                            Nothing ->
+                                ( observationModel, observationCmd )
+
                     else
                         let
                             observations =
@@ -519,7 +652,7 @@ applyCanonicalSnapshot scope items token model =
                                     , observations = reconciledObservations
                                     , dependencies = { dependencies | taskDependencyLinks = snapshot.dependencies, taskDependencies = Dict.empty, taskReadinessRollups = Dict.empty, projectReadinessRollups = Dict.empty }
                                     , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
-                                    , dataLoading = { loading | loadingWorkspaceData = False, pendingWorkspaceLoads = 0, activeWorkspaceLoadToken = Nothing, cardHydrationLoaded = True }
+                                    , dataLoading = { loading | loadingWorkspaceData = False, pendingWorkspaceLoads = 0, activeWorkspaceLoadToken = Nothing, cardHydrationLoaded = True, navigationVisibilityActive = False }
                                 }
 
                             ( dirtyModel, dirtyCmd ) =
@@ -648,17 +781,48 @@ scopePortValue sessionContext scope =
         scopeFields =
             case scope of
                 ChangeStream.Workspace workspaceId ->
-                    [ ( "scope", Encode.string "workspace" ), ( "workspaceId", Encode.string workspaceId ) ]
+                    [ ( "scope", Encode.string "workspace" )
+                    , ( "workspaceId", Encode.string workspaceId )
+                    , ( "snapshotProfile", Encode.string "workspace_shell_v1" )
+                    ]
 
                 ChangeStream.Global ->
-                    [ ( "scope", Encode.string "global" ) ]
+                    [ ( "scope", Encode.string "global" ), ( "snapshotProfile", Encode.string "full_v1" ) ]
     in
     Encode.object (audienceFields ++ scopeFields)
 
 
 applyActions : ChangeStream.Scope -> List ChangeStream.Action -> Model -> ( Model, Cmd Msg )
 applyActions scope actions model =
-    List.foldl (applyAction scope) ( model, Cmd.none ) actions
+    let
+        navigationTargets =
+            List.filterMap
+                (\action ->
+                    case action of
+                        ChangeStream.RevalidateNavigationSummary entityType entityId ->
+                            Just ( entityType, entityId )
+
+                        _ ->
+                            Nothing
+                )
+                actions
+
+        otherActions =
+            List.filter
+                (\action ->
+                    case action of
+                        ChangeStream.RevalidateNavigationSummary _ _ ->
+                            False
+
+                        _ ->
+                            True
+                )
+                actions
+
+        ( revalidationModel, revalidationCmd ) =
+            requestNavigationSummaryBatches scope navigationTargets model
+    in
+    List.foldl (applyAction scope) ( revalidationModel, revalidationCmd ) otherActions
 
 
 applyAction : ChangeStream.Scope -> ChangeStream.Action -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
@@ -675,18 +839,25 @@ applyAction scope action ( model, accumulated ) =
             removeEntity scope entity identity accumulated model
 
         ChangeStream.RefreshTaskOverview taskId ->
-            requestTaskOverview scope taskId accumulated model
+            let
+                ( next, command ) =
+                    requestNavigationSummaryBatches scope [ ( "task", taskId ) ] model
+            in
+            ( next, Cmd.batch [ accumulated, command ] )
 
         ChangeStream.RefreshReadiness entity identity ->
-            case entity of
-                "task" ->
-                    requestTaskOverview scope identity accumulated model
+            let
+                ( next, command ) =
+                    requestNavigationSummaryBatches scope [ ( entity, identity ) ] model
+            in
+            ( next, Cmd.batch [ accumulated, command ] )
 
-                "project" ->
-                    requestProjectOverview scope ("readiness:project:" ++ identity) identity accumulated model
-
-                _ ->
-                    beginScopedResync scope model
+        ChangeStream.RevalidateNavigationSummary entity identity ->
+            let
+                ( next, command ) =
+                    requestNavigationSummaryBatches scope [ ( entity, identity ) ] model
+            in
+            ( next, Cmd.batch [ accumulated, command ] )
 
         ChangeStream.RefreshNextTasks workspaceId ->
             if model.selectedWorkspaceId == Just workspaceId then
@@ -978,6 +1149,97 @@ requestEntity scope entity identity accumulated model =
                     beginScopedResync scope model
             in
             ( next, Cmd.batch [ accumulated, command ] )
+
+
+requestNavigationSummaryBatches : ChangeStream.Scope -> List ( String, String ) -> Model -> ( Model, Cmd Msg )
+requestNavigationSummaryBatches scope targets model =
+    let
+        -- A summary batch is a revalidation of cards the current bounded
+        -- projection already owns.  Never let an event for an unloaded or
+        -- filtered-out branch populate the tree behind the server filter.
+        loadedTarget ( entityType, entityId ) =
+            case entityType of
+                "project" ->
+                    Set.member entityId model.dataLoading.navigationVisibleProjectIds
+                        || Dict.member entityId model.dataLoading.projectCardSummaries
+
+                "task" ->
+                    Set.member entityId model.dataLoading.navigationVisibleTaskIds
+                        || Dict.member entityId model.dataLoading.taskCardSummaries
+
+                _ ->
+                    False
+
+        uniqueTargets =
+            List.foldl
+                (\target values ->
+                    if List.member target values then
+                        values
+
+                    else
+                        target :: values
+                )
+                []
+                targets
+                |> List.reverse
+                |> List.filter loadedTarget
+
+        chunks remaining =
+            case remaining of
+                [] ->
+                    []
+
+                _ ->
+                    List.take 100 remaining :: chunks (List.drop 100 remaining)
+
+        requestBatch workspaceId batch ( current, accumulated ) =
+            let
+                projectIds =
+                    batch
+                        |> List.filterMap
+                            (\( entityType, entityId ) ->
+                                if entityType == "project" then
+                                    Just entityId
+
+                                else
+                                    Nothing
+                            )
+
+                taskIds =
+                    batch
+                        |> List.filterMap
+                            (\( entityType, entityId ) ->
+                                if entityType == "task" then
+                                    Just entityId
+
+                                else
+                                    Nothing
+                            )
+
+                targetKey =
+                    "navigation-summaries:" ++ String.join "," (List.map (\( entityType, entityId ) -> entityType ++ ":" ++ entityId) batch)
+            in
+            requestCanonical scope targetKey
+                (\guard ->
+                    Api.fetchNavigationSummaries current.flags.apiUrl workspaceId projectIds taskIds
+                        (CanonicalNavigationSummariesFetched guard workspaceId projectIds taskIds)
+                )
+                accumulated
+                current
+    in
+    if List.isEmpty uniqueTargets then
+        ( model, Cmd.none )
+
+    else if List.any (\( entityType, entityId ) -> String.isEmpty entityId || not (List.member entityType [ "project", "task" ])) uniqueTargets then
+        beginScopedResync scope model
+
+    else
+        case scope of
+            ChangeStream.Workspace workspaceId ->
+                List.foldl (requestBatch workspaceId) ( model, Cmd.none ) (chunks uniqueTargets)
+
+            ChangeStream.Global ->
+                beginScopedResync scope model
 
 
 requestTaskOverview : ChangeStream.Scope -> String -> Cmd Msg -> Model -> ( Model, Cmd Msg )

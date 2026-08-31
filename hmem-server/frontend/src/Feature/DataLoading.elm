@@ -1,12 +1,15 @@
-module Feature.DataLoading exposing (acceptWorkspaceLoad, finishWorkspaceLoad, init, listObservationResponseMatches, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, update)
+module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationFocus, beginRootNavigation, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
 import Feature.Observation
 import Helpers exposing (indexBy)
 import Permissions
+import Set
+import String
 import Toast exposing (addToast)
 import Types exposing (..)
+import Url
 
 
 init : DataLoadingModel
@@ -19,7 +22,510 @@ init =
     , activeWorkspaceLoadToken = Nothing
     , nextWorkspaceLoadToken = 1
     , cardHydrationLoaded = False
+    , navigationGeneration = 0
+    , rootNavigationRequest = Nothing
+    , loadedNavigationBranches = Dict.empty
+    , projectCardSummaries = Dict.empty
+    , taskCardSummaries = Dict.empty
+    , navigationVisibleProjectIds = Set.empty
+    , navigationVisibleTaskIds = Set.empty
+    , navigationVisibilityActive = False
+    , activeNavigationFocus = Nothing
+    , navigationFocuses = Dict.empty
     }
+
+
+navigationFilterFingerprint : Model -> String
+navigationFilterFingerprint model =
+    let
+        showOnly =
+            case model.search.filterShowOnly of
+                ShowAll -> "all"
+                ShowProjectsOnly -> "projects"
+                ShowTasksOnly -> "tasks"
+
+        priority =
+            case model.search.filterPriority of
+                AnyPriority -> "any"
+                ExactPriority value -> "exact:" ++ String.fromInt value
+                AbovePriority value -> "above:" ++ String.fromInt value
+                BelowPriority value -> "below:" ++ String.fromInt value
+    in
+    String.join "|" [ showOnly, priority, String.join "," (List.sort model.search.filterProjectStatuses), String.join "," (List.sort model.search.filterTaskStatuses), String.trim model.search.query ]
+
+
+navigationFilterQuery : Model -> String
+navigationFilterQuery model =
+    let
+        showOnly =
+            case model.search.filterShowOnly of
+                ShowAll -> ""
+                ShowProjectsOnly -> "&show_only=projects"
+                ShowTasksOnly -> "&show_only=tasks"
+
+        priority =
+            case model.search.filterPriority of
+                AnyPriority -> "&priority_mode=any"
+                ExactPriority value -> "&priority_mode=exact&priority_value=" ++ String.fromInt value
+                AbovePriority value -> "&priority_mode=above&priority_value=" ++ String.fromInt value
+                BelowPriority value -> "&priority_mode=below&priority_value=" ++ String.fromInt value
+
+        projectStatuses =
+            model.search.filterProjectStatuses |> List.map (\status -> "&project_status=" ++ status) |> String.concat
+
+        taskStatuses =
+            model.search.filterTaskStatuses |> List.map (\status -> "&task_status=" ++ status) |> String.concat
+
+        query =
+            case String.trim model.search.query of
+                "" -> ""
+                value -> "&query=" ++ Url.percentEncode value
+    in
+    showOnly ++ priority ++ projectStatuses ++ taskStatuses ++ query
+
+
+navigationBranchKey : String -> Maybe String -> String
+navigationBranchKey parentKind maybeParentId =
+    parentKind ++ ":" ++ Maybe.withDefault "root" maybeParentId
+
+
+beginNavigationBranch : String -> String -> Maybe String -> Model -> ( Model, Cmd Msg )
+beginNavigationBranch parentKind workspaceId maybeParentId model =
+    let
+        key =
+            navigationBranchKey parentKind maybeParentId
+
+        generation =
+            model.dataLoading.navigationGeneration + 1
+
+        request =
+            { workspaceId = workspaceId
+            , sessionEpoch = model.sessionRequestEpoch
+            , generation = generation
+                , filterFingerprint = navigationFilterFingerprint model
+                , projectOffset = 0
+                , taskOffset = 0
+                , inFlight = True
+                , succeeded = False
+                , projectHasMore = False
+                , taskHasMore = False
+            }
+
+        currentDataLoading =
+            model.dataLoading
+
+        dataLoading =
+            { currentDataLoading
+                | navigationGeneration = generation
+                , loadedNavigationBranches = Dict.insert key request model.dataLoading.loadedNavigationBranches
+            }
+    in
+    ( { model | dataLoading = dataLoading }
+    , Api.fetchNavigationBranch model.flags.apiUrl workspaceId parentKind maybeParentId 0 0 (navigationFilterQuery model)
+        (GotNavigationBranch workspaceId model.sessionRequestEpoch generation key (navigationFilterFingerprint model) 0 0)
+    )
+
+
+{-| Request exactly one following page of a branch.  Project and task pages
+remain independently addressable even though the compact branch response keeps
+both page shapes together.  Existing sibling summaries merge by ID, so the
+unchanged side cannot overwrite a newer branch result.
+-}
+beginNavigationBranchPage : String -> String -> String -> Model -> ( Model, Cmd Msg )
+beginNavigationBranchPage parentKind parentId entityKind model =
+    case ( model.selectedWorkspaceId, Dict.get (navigationBranchKey parentKind (Just parentId)) model.dataLoading.loadedNavigationBranches ) of
+        ( Just workspaceId, Just previous ) ->
+            let
+                canLoad =
+                    not previous.inFlight
+                        && previous.succeeded
+                        && (if entityKind == "project" then previous.projectHasMore else previous.taskHasMore)
+
+                projectOffset =
+                    if entityKind == "project" then
+                        previous.projectOffset + 50
+
+                    else
+                        previous.projectOffset
+
+                taskOffset =
+                    if entityKind == "task" then
+                        previous.taskOffset + 50
+
+                    else
+                        previous.taskOffset
+
+                request =
+                    { previous
+                        | projectOffset = projectOffset
+                        , taskOffset = taskOffset
+                        , inFlight = canLoad
+                        , succeeded = if canLoad then False else previous.succeeded
+                    }
+
+                key =
+                    navigationBranchKey parentKind (Just parentId)
+
+                currentLoading =
+                    model.dataLoading
+            in
+            if canLoad then
+                ( { model
+                    | dataLoading =
+                        { currentLoading
+                            | loadedNavigationBranches = Dict.insert key request currentLoading.loadedNavigationBranches
+                        }
+                  }
+                , Api.fetchNavigationBranch model.flags.apiUrl workspaceId parentKind (Just parentId) projectOffset taskOffset (navigationFilterQuery model)
+                    (GotNavigationBranch workspaceId model.sessionRequestEpoch request.generation key request.filterFingerprint projectOffset taskOffset)
+                )
+
+            else
+                ( model, Cmd.none )
+
+        _ ->
+            ( model, Cmd.none )
+
+
+beginRootNavigation : Model -> Cmd Msg
+beginRootNavigation model =
+    case ( model.selectedWorkspaceId, model.dataLoading.activeWorkspaceLoadToken ) of
+        ( Just workspaceId, Just token ) ->
+            Api.fetchRootNavigation model.flags.apiUrl workspaceId (navigationFilterQuery model)
+                (GotRootNavigation workspaceId model.sessionRequestEpoch (Just token) model.dataLoading.navigationGeneration (navigationFilterFingerprint model) 0 0)
+
+        _ ->
+            Cmd.none
+
+
+{-| Install the exact root-branch guard before AppShell issues bootstrap
+navigation.  The command is dispatched from the session bootstrap, while the
+model transition happens in the session reducer; keeping them paired prevents a
+valid first response from being mistaken for a stale one.
+-}
+prepareRootNavigationRequest : Maybe String -> Model -> Model
+prepareRootNavigationRequest expectedWorkspace model =
+    case ( expectedWorkspace, model.selectedWorkspaceId, model.dataLoading.activeWorkspaceLoadToken ) of
+        ( Just workspaceId, Just selectedWorkspaceId, Just _ ) ->
+            if workspaceId == selectedWorkspaceId then
+                let
+                    loading =
+                        model.dataLoading
+                in
+                { model
+                    | dataLoading =
+                        { loading
+                            | rootNavigationRequest =
+                                Just
+                                    { workspaceId = workspaceId
+                                    , sessionEpoch = model.sessionRequestEpoch
+                                    , generation = loading.navigationGeneration
+                                    , filterFingerprint = navigationFilterFingerprint model
+                                    , projectOffset = 0
+                                    , taskOffset = 0
+                                    , inFlight = True
+                                    , succeeded = False
+                                    , projectHasMore = False
+                                    , taskHasMore = False
+                                    }
+                        , navigationVisibilityActive = True
+                        }
+                }
+
+            else
+                model
+
+        _ ->
+            model
+
+
+reloadNavigationForFilters : Model -> ( Model, Cmd Msg )
+reloadNavigationForFilters model =
+    case model.selectedWorkspaceId of
+        Nothing ->
+            ( model, Cmd.none )
+
+        Just workspaceId ->
+            let
+                current =
+                    model.dataLoading
+
+                generation =
+                    current.navigationGeneration + 1
+
+                resetLoading =
+                    { current
+                        | navigationGeneration = generation
+                        , loadedNavigationBranches = Dict.empty
+                        , projectCardSummaries = Dict.empty
+                        , taskCardSummaries = Dict.empty
+                        , navigationVisibleProjectIds = Set.empty
+                        , navigationVisibleTaskIds = Set.empty
+                        , navigationVisibilityActive = True
+                        , activeNavigationFocus = Nothing
+                        , navigationFocuses = Dict.empty
+                        , rootNavigationRequest =
+                            Just
+                                { workspaceId = workspaceId
+                                , sessionEpoch = model.sessionRequestEpoch
+                                , generation = generation
+                                , filterFingerprint = navigationFilterFingerprint model
+                                , projectOffset = 0
+                                , taskOffset = 0
+                                , inFlight = True
+                                , succeeded = False
+                                , projectHasMore = False
+                                , taskHasMore = False
+                                }
+                    }
+
+                resetModel =
+                    { model | dataLoading = resetLoading }
+            in
+            ( resetModel
+            , Api.fetchRootNavigation model.flags.apiUrl workspaceId (navigationFilterQuery resetModel)
+                (GotRootNavigation workspaceId model.sessionRequestEpoch Nothing generation (navigationFilterFingerprint resetModel) 0 0)
+            )
+
+
+{-| Revalidate a filtered navigation tree after a live card update without
+dropping already-expanded branch membership.  A root response cannot prove a
+descendant branch no longer matches, so clearing those IDs before replay would
+make matching expanded cards disappear permanently.  The pending root request
+still establishes a new generation; branch responses remain authoritative.
+-}
+revalidateNavigationForFilters : Model -> ( Model, Cmd Msg )
+revalidateNavigationForFilters model =
+    revalidateNavigationForAffectedBranches [] [] model
+
+
+{-| In addition to branches the user has already opened, revalidate a changed
+card's new direct owner.  This is essential for a reparent into an unloaded
+branch: the old branch cannot establish membership after the summary has its
+new parent, while the new branch can authoritatively re-admit or remove it.
+-}
+revalidateNavigationForAffectedBranches : List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Model -> ( Model, Cmd Msg )
+revalidateNavigationForAffectedBranches affectedProjects affectedTasks model =
+    let
+        preserved =
+            model.dataLoading
+
+        ( reloaded, command ) =
+            reloadNavigationForFilters model
+
+        loading =
+            reloaded.dataLoading
+
+        preservedModel =
+            { reloaded
+                | dataLoading =
+                    { loading
+                        | projectCardSummaries = preserved.projectCardSummaries
+                        , taskCardSummaries = preserved.taskCardSummaries
+                        , navigationVisibleProjectIds = preserved.navigationVisibleProjectIds
+                        , navigationVisibleTaskIds = preserved.navigationVisibleTaskIds
+                    }
+            }
+
+        ( replayedModel, replayCommands ) =
+            replayLoadedNavigationBranches preserved.loadedNavigationBranches preservedModel
+
+        ( affectedModel, affectedCommands ) =
+            replayAffectedNavigationBranches affectedProjects affectedTasks replayedModel
+    in
+    ( affectedModel, Cmd.batch (command :: replayCommands ++ affectedCommands) )
+
+
+{-| Replay every already-loaded expanded branch with the root's new generation.
+Keeping the old cards visible prevents flicker while the requests are pending;
+each successful response replaces membership for exactly its branch scope.
+-}
+replayLoadedNavigationBranches : Dict.Dict String NavigationBranchState -> Model -> ( Model, List (Cmd Msg) )
+replayLoadedNavigationBranches previousBranches model =
+    case model.selectedWorkspaceId of
+        Nothing ->
+            ( model, [] )
+
+        Just workspaceId ->
+            let
+                generation =
+                    model.dataLoading.navigationGeneration
+
+                fingerprint =
+                    navigationFilterFingerprint model
+
+                replay ( branchKey, previous ) ( currentModel, commands ) =
+                    case String.split ":" branchKey of
+                        [ "project", parentId ] ->
+                            replayBranch workspaceId generation fingerprint "project" parentId previous currentModel commands
+
+                        [ "task", parentId ] ->
+                            replayBranch workspaceId generation fingerprint "task" parentId previous currentModel commands
+
+                        _ ->
+                            ( currentModel, commands )
+            in
+            List.foldl replay ( model, [] ) (Dict.toList previousBranches)
+
+
+replayAffectedNavigationBranches : List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Model -> ( Model, List (Cmd Msg) )
+replayAffectedNavigationBranches affectedProjects affectedTasks model =
+    case model.selectedWorkspaceId of
+        Nothing ->
+            ( model, [] )
+
+        Just workspaceId ->
+            let
+                projectTargets =
+                    affectedProjects
+                        |> List.filterMap (.parentId >> Maybe.map (\parentId -> ( "project", parentId )))
+
+                taskTargets =
+                    affectedTasks
+                        |> List.filterMap
+                            (\summary ->
+                                case ( summary.parentId, summary.projectId ) of
+                                    ( Just parentId, _ ) ->
+                                        Just ( "task", parentId )
+
+                                    ( Nothing, Just projectId ) ->
+                                        Just ( "project", projectId )
+
+                                    _ ->
+                                        Nothing
+                            )
+
+                targets =
+                    Set.fromList (projectTargets ++ taskTargets)
+                        |> Set.toList
+
+                replay target ( currentModel, commands ) =
+                    let
+                        ( parentKind, parentId ) =
+                            target
+
+                        branchKey =
+                            navigationBranchKey parentKind (Just parentId)
+                    in
+                    if Dict.member branchKey currentModel.dataLoading.loadedNavigationBranches then
+                        ( currentModel, commands )
+
+                    else
+                        replayBranch workspaceId currentModel.dataLoading.navigationGeneration (navigationFilterFingerprint currentModel) parentKind parentId initialNavigationBranchState currentModel commands
+            in
+            List.foldl replay ( model, [] ) targets
+
+
+initialNavigationBranchState : NavigationBranchState
+initialNavigationBranchState =
+    { workspaceId = ""
+    , sessionEpoch = 0
+    , generation = 0
+    , filterFingerprint = ""
+    , projectOffset = 0
+    , taskOffset = 0
+    , inFlight = False
+    , succeeded = False
+    , projectHasMore = False
+    , taskHasMore = False
+    }
+
+
+replayBranch : String -> Int -> String -> String -> String -> NavigationBranchState -> Model -> List (Cmd Msg) -> ( Model, List (Cmd Msg) )
+replayBranch workspaceId generation fingerprint parentKind parentId previous model commands =
+    let
+        branchKey =
+            navigationBranchKey parentKind (Just parentId)
+
+        request =
+            { previous
+                | workspaceId = workspaceId
+                , sessionEpoch = model.sessionRequestEpoch
+                , generation = generation
+                , filterFingerprint = fingerprint
+                , projectOffset = 0
+                , taskOffset = 0
+                , inFlight = True
+                , succeeded = False
+                , projectHasMore = False
+                , taskHasMore = False
+            }
+
+        loading =
+            model.dataLoading
+
+        replayed =
+            { model | dataLoading = { loading | loadedNavigationBranches = Dict.insert branchKey request loading.loadedNavigationBranches } }
+
+        command =
+            Api.fetchNavigationBranch model.flags.apiUrl workspaceId parentKind (Just parentId) 0 0 (navigationFilterQuery replayed)
+                (GotNavigationBranch workspaceId model.sessionRequestEpoch generation branchKey fingerprint 0 0)
+    in
+    ( replayed, command :: commands )
+
+
+beginNavigationFocus : String -> String -> String -> Model -> ( Model, Cmd Msg )
+beginNavigationFocus workspaceId entityType entityId model =
+    let
+        alreadyPresent =
+            case entityType of
+                "project" -> Dict.member entityId model.projects
+                "task" -> Dict.member entityId model.tasks
+                _ -> True
+
+        generation =
+            model.dataLoading.navigationGeneration + 1
+
+        requestKey =
+            entityType ++ ":" ++ entityId
+
+        previousRequest =
+            Dict.get requestKey model.dataLoading.navigationFocuses
+
+        requestedAncestorOffset =
+            previousRequest
+                |> Maybe.map .ancestorOffset
+                |> Maybe.withDefault 0
+
+        retryable =
+            previousRequest
+                |> Maybe.map (\previous -> not previous.inFlight && not previous.succeeded)
+                |> Maybe.withDefault False
+
+        request =
+            { workspaceId = workspaceId
+            , sessionEpoch = model.sessionRequestEpoch
+            , generation = generation
+            , filterFingerprint = navigationFilterFingerprint model
+            , entityType = entityType
+            , entityId = entityId
+            , ancestorOffset = requestedAncestorOffset
+            , inFlight = True
+            , succeeded = False
+            }
+
+        currentDataLoading =
+            model.dataLoading
+
+        alreadyInFlight =
+            case currentDataLoading.activeNavigationFocus of
+                Just activeRequest ->
+                    activeRequest.inFlight
+                        && activeRequest.workspaceId == workspaceId
+                        && activeRequest.entityType == entityType
+                        && activeRequest.entityId == entityId
+
+                Nothing ->
+                    False
+    in
+    if (alreadyPresent && not retryable) || alreadyInFlight || (entityType /= "project" && entityType /= "task") then
+        ( model, Cmd.none )
+
+    else
+        ( { model | dataLoading = { currentDataLoading | navigationGeneration = generation, activeNavigationFocus = Just request, navigationFocuses = Dict.insert requestKey request currentDataLoading.navigationFocuses } }
+        , Api.fetchNavigationFocus model.flags.apiUrl workspaceId entityType entityId requestedAncestorOffset
+            (GotNavigationFocus workspaceId model.sessionRequestEpoch generation (navigationFilterFingerprint model) entityType entityId requestedAncestorOffset)
+        )
 
 
 prepareForPageLoad : Page -> DataLoadingModel -> DataLoadingModel
@@ -144,6 +650,148 @@ mergePageById offset items existing =
         Dict.union pageItems existing
 
 
+{-| A navigation response is authoritative for its own direct-child scope.
+Retain details in the entity dictionaries, but replace card summaries and the
+visible membership set so an item that has become nonmatching cannot survive a
+completed filtered replay.
+-}
+replaceNavigationBranchMembershipForKey : String -> Api.NavigationBranchResponse -> Model -> Model
+replaceNavigationBranchMembershipForKey branchKey navigation model =
+    case String.split ":" branchKey of
+        [ parentKind, parentId ] ->
+            replaceNavigationBranchMembership parentKind (Just parentId) navigation model
+
+        _ ->
+            mergeNavigationSummaries navigation.projects.items navigation.tasks.items model
+
+
+replaceNavigationBranchMembership : String -> Maybe String -> Api.NavigationBranchResponse -> Model -> Model
+replaceNavigationBranchMembership parentKind maybeParentId navigation model =
+    let
+        matchesProject summary =
+            case ( parentKind, maybeParentId ) of
+                ( "workspace_root", Nothing ) ->
+                    summary.parentId == Nothing
+
+                ( "project", Just parentId ) ->
+                    summary.parentId == Just parentId
+
+                _ ->
+                    False
+
+        matchesTask summary =
+            case ( parentKind, maybeParentId ) of
+                ( "workspace_root", Nothing ) ->
+                    summary.projectId == Nothing && summary.parentId == Nothing
+
+                ( "project", Just parentId ) ->
+                    summary.projectId == Just parentId && summary.parentId == Nothing
+
+                ( "task", Just parentId ) ->
+                    summary.parentId == Just parentId
+
+                _ ->
+                    False
+
+        loading =
+            model.dataLoading
+
+        pruned =
+            { model
+                | dataLoading =
+                    { loading
+                        | projectCardSummaries = Dict.filter (\_ summary -> not (matchesProject summary)) loading.projectCardSummaries
+                        , taskCardSummaries = Dict.filter (\_ summary -> not (matchesTask summary)) loading.taskCardSummaries
+                        , navigationVisibleProjectIds = Set.filter (\projectId -> Dict.member projectId loading.projectCardSummaries && not (Dict.get projectId loading.projectCardSummaries |> Maybe.map matchesProject |> Maybe.withDefault False)) loading.navigationVisibleProjectIds
+                        , navigationVisibleTaskIds = Set.filter (\taskId -> Dict.member taskId loading.taskCardSummaries && not (Dict.get taskId loading.taskCardSummaries |> Maybe.map matchesTask |> Maybe.withDefault False)) loading.navigationVisibleTaskIds
+                    }
+            }
+    in
+    mergeNavigationSummaries navigation.projects.items navigation.tasks.items pruned
+
+
+mergeNavigationSummaries : List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Model -> Model
+mergeNavigationSummaries projectSummaries taskSummaries model =
+    let
+        dependencies =
+            model.dependencies
+
+        projects =
+            List.foldl
+                (\summary values ->
+                    let
+                        card =
+                            Api.projectFromCardSummary summary
+
+                        merged =
+                            Dict.get summary.id values
+                                |> Maybe.map (\existing -> { card | description = existing.description })
+                                |> Maybe.withDefault card
+                    in
+                    Dict.insert summary.id merged values
+                )
+                model.projects
+                projectSummaries
+
+        tasks =
+            List.foldl
+                (\summary values ->
+                    let
+                        card =
+                            Api.taskFromCardSummary summary
+
+                        merged =
+                            Dict.get summary.id values
+                                |> Maybe.map (\existing -> { card | description = existing.description, memoryLinkCount = existing.memoryLinkCount })
+                                |> Maybe.withDefault card
+                    in
+                    Dict.insert summary.id merged values
+                )
+                model.tasks
+                taskSummaries
+
+        projectReadinessRollups =
+            List.foldl
+                (\summary values -> Dict.insert summary.id summary.readinessRollup values)
+                dependencies.projectReadinessRollups
+                projectSummaries
+
+        taskReadinessRollups =
+            List.foldl
+                (\summary values -> Dict.insert summary.id summary.readinessRollup values)
+                dependencies.taskReadinessRollups
+                taskSummaries
+
+        projectCards =
+            List.foldl (\summary values -> Dict.insert summary.id summary values) model.dataLoading.projectCardSummaries projectSummaries
+
+        taskCards =
+            List.foldl (\summary values -> Dict.insert summary.id summary values) model.dataLoading.taskCardSummaries taskSummaries
+
+        updatedDataLoading =
+            let
+                loading =
+                    model.dataLoading
+            in
+            { loading
+                | projectCardSummaries = projectCards
+                , taskCardSummaries = taskCards
+                , navigationVisibleProjectIds = List.foldl (\summary values -> Set.insert summary.id values) loading.navigationVisibleProjectIds projectSummaries
+                , navigationVisibleTaskIds = List.foldl (\summary values -> Set.insert summary.id values) loading.navigationVisibleTaskIds taskSummaries
+            }
+    in
+    { model
+        | projects = projects
+        , tasks = tasks
+        , dataLoading = updatedDataLoading
+        , dependencies =
+            { dependencies
+                | projectReadinessRollups = projectReadinessRollups
+                , taskReadinessRollups = taskReadinessRollups
+            }
+    }
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
@@ -200,11 +848,24 @@ update msg model =
                                         | loadingWorkspaceData = True
                                         , pendingWorkspaceLoads =
                                             if isRepository then
-                                                3
-
-                                            else
                                                 2
-                                    }
+
+                                             else
+                                                 1
+                                        , rootNavigationRequest =
+                                            Just
+                                                { workspaceId = expectedWsId
+                                                , sessionEpoch = model.sessionRequestEpoch
+                                                , generation = currentLoading.navigationGeneration
+                                                , filterFingerprint = navigationFilterFingerprint model
+                                                , projectOffset = 0
+                                                , taskOffset = 0
+                                                , inFlight = True
+                                                , succeeded = False
+                                                , projectHasMore = False
+                                                , taskHasMore = False
+                                                }
+                                     }
 
                                 currentObservations =
                                     model.observations
@@ -224,10 +885,20 @@ update msg model =
                                             , nextOffset = 0
                                         }
 
+                                rootCommand =
+                                    Api.fetchRootNavigation model.flags.apiUrl expectedWsId (navigationFilterQuery model) (GotRootNavigation expectedWsId model.sessionRequestEpoch (Just token) model.dataLoading.navigationGeneration (navigationFilterFingerprint model) 0 0)
+
+                                focusCommand =
+                                    case model.focus.focusedEntity of
+                                        Just ( entityType, entityId ) ->
+                                            Api.fetchNavigationFocus model.flags.apiUrl expectedWsId entityType entityId 0
+                                                (GotNavigationFocus expectedWsId model.sessionRequestEpoch dataLoading.navigationGeneration (navigationFilterFingerprint model) entityType entityId 0)
+
+                                        Nothing ->
+                                            Cmd.none
+
                                 commands =
-                                    [ Api.fetchProjects model.flags.apiUrl expectedWsId (GotProjects expectedWsId (Just token) 0)
-                                    , Api.fetchTasks model.flags.apiUrl expectedWsId (GotTasks expectedWsId (Just token) 0)
-                                    ]
+                                    [ rootCommand, focusCommand ]
                                         ++ (if isRepository then
                                                 [ Api.fetchObservations model.flags.apiUrl
                                                     (Feature.Observation.listQuery expectedWsId 0 observations)
@@ -239,10 +910,31 @@ update msg model =
                                            )
                             in
                             let
+                                navigationDataLoading =
+                                    case model.focus.focusedEntity of
+                                        Just ( entityType, entityId ) ->
+                                            { dataLoading
+                                                | activeNavigationFocus =
+                                                    Just
+                                                        { workspaceId = expectedWsId
+                                                        , sessionEpoch = model.sessionRequestEpoch
+                                                        , generation = dataLoading.navigationGeneration
+                                                        , filterFingerprint = navigationFilterFingerprint model
+                                                         , entityType = entityType
+                                                         , entityId = entityId
+                                                         , ancestorOffset = 0
+                                                         , inFlight = True
+                                                        , succeeded = False
+                                                        }
+                                            }
+
+                                        Nothing ->
+                                            dataLoading
+
                                 loadedModel =
                                     { model
                                         | workspaces = Dict.insert workspace.id workspace model.workspaces
-                                        , dataLoading = dataLoading
+                                        , dataLoading = navigationDataLoading
                                         , observations = observations
                                     }
 
@@ -277,6 +969,233 @@ update msg model =
                         in
                         addToast Error "Failed to load workspace" { model | dataLoading = updatedLoading }
 
+        GotRootNavigation wsId sessionEpoch maybeToken generation fingerprint projectOffset taskOffset result ->
+            let
+                valid =
+                    case model.dataLoading.rootNavigationRequest of
+                        Just request ->
+                            model.selectedWorkspaceId == Just wsId
+                                && model.sessionRequestEpoch == sessionEpoch
+                                && request.workspaceId == wsId
+                                && request.sessionEpoch == sessionEpoch
+                                && request.generation == generation
+                                && request.filterFingerprint == fingerprint
+                                && request.projectOffset == projectOffset
+                                && request.taskOffset == taskOffset
+                                && acceptWorkspaceLoad maybeToken model.dataLoading
+
+                        Nothing ->
+                            False
+            in
+            if not valid then
+                ( model, Cmd.none )
+
+            else
+                case result of
+                    Ok navigation ->
+                        if navigation.workspaceId /= wsId then
+                            ( model, Cmd.none )
+
+                        else
+                            let
+                                updatedModel =
+                                    replaceNavigationBranchMembership "workspace_root" Nothing navigation model
+                                        |> (\next ->
+                                                let
+                                                    mergedLoading =
+                                                        next.dataLoading
+
+                                                    rootBranchLoading =
+                                                        { mergedLoading
+                                                            | loadedNavigationBranches =
+                                                                Dict.insert (navigationBranchKey "workspace_root" Nothing)
+                                                                    { workspaceId = wsId, sessionEpoch = sessionEpoch, generation = generation, filterFingerprint = fingerprint, projectOffset = projectOffset, taskOffset = taskOffset, inFlight = False, succeeded = True, projectHasMore = navigation.projects.hasMore, taskHasMore = navigation.tasks.hasMore }
+                                                                    mergedLoading.loadedNavigationBranches
+                                                            , rootNavigationRequest =
+                                                                mergedLoading.rootNavigationRequest
+                                                                    |> Maybe.map (\request -> { request | inFlight = False, succeeded = True, projectHasMore = navigation.projects.hasMore, taskHasMore = navigation.tasks.hasMore })
+                                                        }
+                                                in
+                                                { next | dataLoading = finishWorkspaceLoad maybeToken rootBranchLoading }
+                                           )
+                            in
+                            ( updatedModel, Cmd.none )
+
+                    Err _ ->
+                        addToast Error "Failed to load workspace navigation"
+                            { model | dataLoading = finishWorkspaceLoad maybeToken model.dataLoading }
+
+        GotNavigationBranch wsId sessionEpoch generation branchKey fingerprint projectOffset taskOffset result ->
+            let
+                currentDataLoading =
+                    model.dataLoading
+
+                expected =
+                    Dict.get branchKey model.dataLoading.loadedNavigationBranches
+
+                valid =
+                    case expected of
+                        Just request ->
+                            model.selectedWorkspaceId == Just wsId
+                                && model.sessionRequestEpoch == sessionEpoch
+                                && request.workspaceId == wsId
+                                && request.sessionEpoch == sessionEpoch
+                                && request.generation == generation
+                                && request.filterFingerprint == fingerprint
+                                && request.projectOffset == projectOffset
+                                && request.taskOffset == taskOffset
+
+                        Nothing ->
+                            False
+            in
+            if not valid then
+                ( model, Cmd.none )
+
+            else
+                case result of
+                    Ok navigation ->
+                        if navigation.workspaceId /= wsId then
+                            ( model, Cmd.none )
+
+                        else
+                            ( (if projectOffset == 0 && taskOffset == 0 then
+                                    replaceNavigationBranchMembershipForKey branchKey navigation model
+
+                               else
+                                    mergeNavigationSummaries navigation.projects.items navigation.tasks.items model
+                              )
+                                |> (\next ->
+                                    let
+                                        mergedLoading =
+                                            next.dataLoading
+                                    in
+                                    { next
+                                        | dataLoading =
+                                            { mergedLoading
+                                                | loadedNavigationBranches =
+                                                    Dict.update branchKey (Maybe.map (\request -> { request | inFlight = False, succeeded = True, projectHasMore = navigation.projects.hasMore, taskHasMore = navigation.tasks.hasMore })) mergedLoading.loadedNavigationBranches
+                                            }
+                                    }
+                                   )
+                             , Cmd.none
+                             )
+
+                    Err _ ->
+                        addToast Error "Failed to load workspace branch"
+                            { model
+                                | dataLoading =
+                                    { currentDataLoading
+                                        | loadedNavigationBranches =
+                                            Dict.update branchKey (Maybe.map (\request -> { request | inFlight = False, succeeded = False })) currentDataLoading.loadedNavigationBranches
+                                    }
+                            }
+
+        GotNavigationFocus wsId sessionEpoch generation fingerprint entityType entityId ancestorOffset result ->
+            let
+                valid =
+                    case model.dataLoading.activeNavigationFocus of
+                        Just request ->
+                            model.selectedWorkspaceId == Just wsId
+                                && model.sessionRequestEpoch == sessionEpoch
+                                && request.workspaceId == wsId
+                                && request.sessionEpoch == sessionEpoch
+                                && request.generation == generation
+                                && request.filterFingerprint == fingerprint
+                                 && request.entityType == entityType
+                                 && request.entityId == entityId
+                                 && request.ancestorOffset == ancestorOffset
+
+                        Nothing ->
+                            False
+
+                mergeSummary summary currentModel =
+                    case summary of
+                        Api.NavigationProjectSummary project ->
+                            mergeNavigationSummaries [ project ] [] currentModel
+
+                        Api.NavigationTaskSummary task ->
+                            mergeNavigationSummaries [] [ task ] currentModel
+            in
+            if not valid then
+                ( model, Cmd.none )
+
+            else
+                case result of
+                    Ok focus ->
+                        if focus.workspaceId /= wsId then
+                            ( model, Cmd.none )
+
+                        else if focus.ancestorsTruncated /= (focus.nextAncestorOffset /= Nothing) then
+                            ( model, Cmd.none )
+
+                        else
+                            let
+                                merged =
+                                    List.foldl mergeSummary (mergeSummary focus.target model) focus.ancestors
+
+                                mergedLoading =
+                                    merged.dataLoading
+
+                                requestKey =
+                                    entityType ++ ":" ++ entityId
+
+                                completeFocus =
+                                    { merged
+                                        | dataLoading =
+                                            { mergedLoading
+                                                | activeNavigationFocus = Nothing
+                                                , navigationFocuses = Dict.update requestKey (Maybe.map (\request -> { request | inFlight = False, succeeded = True })) mergedLoading.navigationFocuses
+                                            }
+                                    }
+                            in
+                            case focus.nextAncestorOffset of
+                                Just nextAncestorOffset ->
+                                    if nextAncestorOffset <= ancestorOffset then
+                                        ( model, Cmd.none )
+
+                                    else
+                                        let
+                                            continuation =
+                                                { workspaceId = wsId
+                                                , sessionEpoch = sessionEpoch
+                                                , generation = generation
+                                                , filterFingerprint = fingerprint
+                                                , entityType = entityType
+                                                , entityId = entityId
+                                                , ancestorOffset = nextAncestorOffset
+                                                , inFlight = True
+                                                , succeeded = False
+                                                }
+
+                                            continuedLoading =
+                                                { mergedLoading
+                                                    | activeNavigationFocus = Just continuation
+                                                    , navigationFocuses = Dict.insert requestKey continuation mergedLoading.navigationFocuses
+                                                }
+                                        in
+                                        ( { merged | dataLoading = continuedLoading }
+                                        , Api.fetchNavigationFocus model.flags.apiUrl wsId entityType entityId nextAncestorOffset
+                                            (GotNavigationFocus wsId sessionEpoch generation fingerprint entityType entityId nextAncestorOffset)
+                                        )
+
+                                Nothing ->
+                                    ( completeFocus, Cmd.none )
+
+                    Err _ ->
+                        let
+                            currentDataLoading =
+                                model.dataLoading
+                        in
+                        ( { model
+                            | dataLoading =
+                                { currentDataLoading
+                                    | activeNavigationFocus = Nothing
+                                    , navigationFocuses = Dict.update (entityType ++ ":" ++ entityId) (Maybe.map (\request -> { request | inFlight = False, succeeded = False })) currentDataLoading.navigationFocuses
+                                }
+                          }
+                        , Cmd.none
+                        )
+
         GotProjects wsId maybeToken offset result ->
             if model.selectedWorkspaceId /= Just wsId then
                 ( model, Cmd.none )
@@ -294,28 +1213,11 @@ update msg model =
                             modelWithPage =
                                 { model | projects = updatedProjects }
                         in
-                        case nextPageOffset offset paginated of
-                            Just nextOffset ->
-                                ( modelWithPage
-                                , Api.fetchProjectsPage model.flags.apiUrl wsId nextOffset (GotProjects wsId maybeToken nextOffset)
-                                )
-
-                            Nothing ->
-                                let
-                                    completedLoading =
-                                        finishWorkspaceLoad maybeToken model.dataLoading
-
-                                    projectIds =
-                                        Dict.keys updatedProjects
-
-                                    updatedDataLoading =
-                                        addInitialHydrationWork maybeToken (List.length projectIds) completedLoading
-                                in
-                                ( { modelWithPage | dataLoading = updatedDataLoading }
-                                , projectIds
-                                    |> List.map (\projectId -> Api.fetchProjectOverview model.flags.apiUrl projectId (GotInitialProjectOverview wsId (Maybe.withDefault -1 maybeToken) projectId))
-                                    |> Cmd.batch
-                                )
+                        -- Workspace entry is deliberately a single capped page.
+                        -- Branches and full card detail are loaded on demand;
+                        -- never recursively walk the entire workspace or fan
+                        -- out one overview request per entity during bootstrap.
+                        ( { modelWithPage | dataLoading = finishWorkspaceLoad maybeToken model.dataLoading }, Cmd.none )
 
                     Err _ ->
                         let
@@ -346,28 +1248,9 @@ update msg model =
                             modelWithPage =
                                 { model | tasks = updatedTasks }
                         in
-                        case nextPageOffset offset paginated of
-                            Just nextOffset ->
-                                ( modelWithPage
-                                , Api.fetchTasksPage model.flags.apiUrl wsId nextOffset (GotTasks wsId maybeToken nextOffset)
-                                )
-
-                            Nothing ->
-                                let
-                                    completedLoading =
-                                        finishWorkspaceLoad maybeToken model.dataLoading
-
-                                    taskIds =
-                                        Dict.keys updatedTasks
-
-                                    updatedDataLoading =
-                                        addInitialHydrationWork maybeToken (List.length taskIds) completedLoading
-                                in
-                                ( { modelWithPage | dataLoading = updatedDataLoading }
-                                , taskIds
-                                    |> List.map (\taskId -> Api.fetchTaskOverview model.flags.apiUrl taskId (GotInitialTaskOverview wsId (Maybe.withDefault -1 maybeToken) taskId))
-                                    |> Cmd.batch
-                                )
+                        -- See project page above: keep initial task data bounded
+                        -- and leave dependency/readiness detail to explicit use.
+                        ( { modelWithPage | dataLoading = finishWorkspaceLoad maybeToken model.dataLoading }, Cmd.none )
 
                     Err _ ->
                         let

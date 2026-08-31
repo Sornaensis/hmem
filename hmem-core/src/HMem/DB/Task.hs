@@ -1,6 +1,8 @@
 module HMem.DB.Task
   ( createTask
   , getTask
+  , getTasksByIds
+  , getTaskAncestorIds
   , updateTask
   , updateTaskWithDependencySnapshots
   , updateTaskBatch
@@ -13,6 +15,8 @@ module HMem.DB.Task
   , listTasks
   , listTasksWithQuery
   , listTasksByWorkspace
+  , listTaskChildren
+  , listFilteredTaskChildren
   , listNextTasks
   , enrichTaskCounts
   , dependencyAutoBlockSnapshots
@@ -848,6 +852,42 @@ getTask pool tid = do
       enriched <- enrichTaskCounts pool [rowToTask r]
       pure $ listToMaybe enriched
 
+-- | The navigation revalidation endpoint needs a set-based read before the
+-- equally set-based count and readiness decoration in Overview.
+getTasksByIds :: Pool Hasql.Connection -> [UUID] -> IO [Task]
+getTasksByIds pool ids
+  | Prelude.null ids = pure []
+  | otherwise = do
+      rows <- runSession pool $ Session.statement () $ run $ select $ do
+        row <- each taskSchema
+        where_ $ in_ row.taskId (map lit ids)
+        where_ $ activeTask row
+        pure row
+      enrichTaskCounts pool (map rowToTask rows)
+
+-- | Root-to-parent task chain for direct focus.  This is intentionally a
+-- single recursive read; callers then decorate all returned tasks together.
+getTaskAncestorIds :: Pool Hasql.Connection -> UUID -> UUID -> Int -> IO [UUID]
+getTaskAncestorIds pool wsId taskId takeN =
+  runSession pool $ Session.statement (wsId, taskId, fromIntegral takeN :: Int32) taskAncestorIdsStatement
+
+taskAncestorIdsStatement :: Statement.Statement (UUID, UUID, Int32) [UUID]
+taskAncestorIdsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE ancestors(id, depth) AS ("
+      , " SELECT parent_id, 0 FROM tasks WHERE id=$2 AND workspace_id=$1 AND deleted_at IS NULL AND parent_id IS NOT NULL"
+      , " UNION ALL"
+      , " SELECT parent.parent_id, current.depth + 1 FROM tasks parent JOIN ancestors current ON parent.id=current.id"
+      , " WHERE parent.workspace_id=$1 AND parent.deleted_at IS NULL AND parent.parent_id IS NOT NULL"
+      , ") SELECT id FROM ancestors ORDER BY depth DESC LIMIT $3"
+      ]
+    encoder =
+      contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.int4))
+    decoder = Dec.rowList (Dec.column (Dec.nonNullable Dec.uuid))
+
 ------------------------------------------------------------------------
 -- Update
 ------------------------------------------------------------------------
@@ -1166,7 +1206,9 @@ listTasksWithQuery pool tq = do
     Nothing -> do
       rows <- runSession pool $ Session.statement () $ run $ select $
         limit (fromIntegral lim) $ offset (fromIntegral off) $
-        orderBy (((\row -> row.taskPriority) >$< desc) <> ((\row -> row.taskCreatedAt) >$< asc)) $ do
+        -- Preserve the legacy priority/created-at ordering, with an ID tie
+        -- breaker so offset pages cannot duplicate or omit equal rows.
+        orderBy (((\row -> row.taskPriority) >$< desc) <> ((\row -> row.taskCreatedAt) >$< asc) <> ((\row -> row.taskId) >$< asc)) $ do
           row <- each taskSchema
           applyFilters row
           pure row
@@ -1174,7 +1216,7 @@ listTasksWithQuery pool tq = do
     Just q -> do
       results <- runSession pool $ Session.statement () $ run $ select $
         limit (fromIntegral lim) $ offset (fromIntegral off) $
-        orderBy (snd >$< desc) $ do
+        orderBy ((snd >$< desc) <> ((\(row, _) -> row.taskId) >$< asc)) $ do
           row <- each taskSchema
           applyFilters row
           let config = unsafeCastExpr (lit searchLang) :: Expr PgRegConfig
@@ -1209,6 +1251,56 @@ listTasksByWorkspace pool wsId mstatus mprojId mlimit moffset =
     , limit = mlimit
     , offset = moffset
     }
+
+-- | Bounded direct-child navigation.  The project selector is separate from
+-- the task-parent selector because a project branch renders only its root
+-- tasks, while a task branch renders child tasks.
+listTaskChildren :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Maybe UUID -> Int -> Int -> IO [Task]
+listTaskChildren pool wsId maybeProject maybeParent lim off = do
+  rows <- runSession pool $ Session.statement () $ run $ select $
+    limit (fromIntegral lim) $ offset (fromIntegral off) $
+      orderBy (((\row -> unsafeCastExpr row.taskStatus :: Expr Text) >$< asc) <> ((\row -> row.taskPriority) >$< desc) <> ((\row -> row.taskTitle) >$< asc) <> ((\row -> row.taskId) >$< asc)) $ do
+        row <- each taskSchema
+        where_ $ activeTask row
+        where_ $ row.taskWorkspaceId ==. lit wsId
+        where_ $ row.taskProjectId ==. lit maybeProject
+        where_ $ row.taskParentId ==. lit maybeParent
+        pure row
+  enrichTaskCounts pool $ map rowToTask rows
+
+-- | Bounded task-branch filtering with descendant retention.  The recursive
+-- selector stays scoped to the supplied workspace/project branch, so a filter
+-- never needs a client-side whole-workspace graph.
+listFilteredTaskChildren :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Maybe UUID -> NavigationFilter -> Int -> Int -> IO [Task]
+listFilteredTaskChildren pool workspace maybeProject maybeParent selector lim off = do
+  rows <- runSession pool $ Session.statement
+    ( workspace, maybeProject, maybeParent, map taskStatusToText selector.taskStatuses, selector.priorityMode, selector.priorityValue, selector.query
+    , fromIntegral lim :: Int32, fromIntegral off :: Int32 ) filteredTaskChildrenStatement
+  enrichTaskCounts pool rows
+
+filteredTaskChildrenStatement :: Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32) [Task]
+filteredTaskChildrenStatement = Statement.Statement sql encoder (Dec.rowList rawTaskRowDecoder) True
+  where
+    sql = BS8.pack $ unlines
+      [ "WITH RECURSIVE task_tree(root_id,id) AS ("
+      , " SELECT t.id,t.id FROM tasks t WHERE t.workspace_id=$1 AND t.project_id IS NOT DISTINCT FROM $2 AND t.parent_id IS NOT DISTINCT FROM $3 AND t.deleted_at IS NULL"
+      , " UNION SELECT tree.root_id,child.id FROM tasks child JOIN task_tree tree ON child.parent_id=tree.id WHERE child.deleted_at IS NULL AND child.workspace_id=$1"
+      , ") SELECT t.id,t.workspace_id,t.project_id,t.parent_id,t.title,t.description,t.status::text,t.priority,t.metadata,t.due_at,t.completed_at,t.created_at,t.updated_at"
+      , " FROM tasks t WHERE t.id IN (SELECT DISTINCT root_id FROM task_tree) AND ("
+      , " (cardinality($4::text[])=0 OR t.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND t.priority=$6) OR ($5='above' AND t.priority>$6) OR ($5='below' AND t.priority<$6)) AND ($7 IS NULL OR lower(t.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(t.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')"
+      , " OR EXISTS (SELECT 1 FROM tasks descendant WHERE descendant.id IN (SELECT id FROM task_tree WHERE root_id=t.id) AND descendant.deleted_at IS NULL AND (cardinality($4::text[])=0 OR descendant.status::text=ANY($4)) AND ($5 IS NULL OR $5='any' OR ($5='exact' AND descendant.priority=$6) OR ($5='above' AND descendant.priority>$6) OR ($5='below' AND descendant.priority<$6)) AND ($7 IS NULL OR lower(descendant.title) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\' OR lower(coalesce(descendant.description,'')) LIKE '%' || replace(replace(replace(lower($7), E'\\\\', E'\\\\\\\\'), '%', E'\\\\%'), '_', E'\\\\_') || '%' ESCAPE E'\\\\')))"
+      , " ORDER BY CASE t.status WHEN 'todo'::task_status_enum THEN 0 WHEN 'in_progress'::task_status_enum THEN 1 WHEN 'blocked'::task_status_enum THEN 2 WHEN 'done'::task_status_enum THEN 3 ELSE 4 END, t.priority DESC, lower(t.title),t.id LIMIT $8 OFFSET $9"
+      ]
+    encoder =
+      contramap (\(a,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.uuid)) <>
+      contramap (\(_,_,c,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.uuid)) <>
+      contramap (\(_,_,_,d,_,_,_,_,_) -> d) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.text)))) <>
+      contramap (\(_,_,_,_,e,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,f,_,_,_) -> fmap fromIntegral f) (Enc.param (Enc.nullable Enc.int2)) <>
+      contramap (\(_,_,_,_,_,_,g,_,_) -> g) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,_,_,h,_) -> h) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,_,_,i) -> i) (Enc.param (Enc.nonNullable Enc.int4))
 
 -- | Return the next actionable tasks for a project subtree.
 --

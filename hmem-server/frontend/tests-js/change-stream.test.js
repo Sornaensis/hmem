@@ -67,14 +67,14 @@ test('resync accumulates every page before ticketing and keeps snapshot material
     onSnapshot: (_scope, _workspace, snapshot) => snapshots.push(snapshot),
     fetchImpl: async (_url, options) => {
       const body = JSON.parse(options.body); requests.push(body)
-      if (body.start_idempotency_key) return { ok: true, status: 200, json: async () => ({ items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], has_more: true, next_page_token: 'page-2' }) }
-      if (body.page_token) return { ok: true, status: 200, json: async () => ({ items: [{ schema_version: 1, kind: 'project', data: { id: 'p', workspace_id: 'a' } }], has_more: false, resume_token: 'opaque-resume' }) }
+      if (body.start_idempotency_key) return { ok: true, status: 200, json: async () => ({ snapshot_profile: 'workspace_shell_v1', items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], has_more: true, next_page_token: 'page-2' }) }
+      if (body.page_token) return { ok: true, status: 200, json: async () => ({ snapshot_profile: 'workspace_shell_v1', items: [], has_more: false, resume_token: 'opaque-resume' }) }
       return { ok: true, status: 200, json: async () => ({ ticket: 'one-use-ticket' }) }
     }, setTimer: () => 0, clearTimer: () => {}
   })
   manager.connect({ audienceId: 'actor', scope: 'workspace', workspaceId: 'a' }); await new Promise(resolve => setTimeout(resolve, 0))
   assert.deepEqual(requests.map(request => request.page_token || (request.start_idempotency_key ? 'start' : 'ticket')), ['start', 'page-2', 'ticket'])
-  assert.deepEqual(snapshots, [{ items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }, { schema_version: 1, kind: 'project', data: { id: 'p', workspace_id: 'a' } }], resumeToken: 'opaque-resume' }])
+  assert.deepEqual(snapshots, [{ items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], resumeToken: 'opaque-resume', snapshotProfile: 'workspace_shell_v1' }])
   assert.equal(sockets.length, 1)
   assert.deepEqual(readCheckpoint(s, 'actor', 'workspace', 'a'), { resumeToken: 'opaque-resume', eventIds: [] })
 })
@@ -189,13 +189,13 @@ test('audience replacement makes every old async continuation inert', async () =
   manager.connect({ audienceId: 'actor-a', scope: 'workspace', workspaceId: 'a' })
   manager.connect({ audienceId: 'actor-b', scope: 'workspace', workspaceId: 'a' })
   assert.equal(pending.length, 2); assert.equal(pending[0].options.signal.aborted, true)
-  pending[0].resolve({ ok: true, status: 200, json: async () => ({ items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], has_more: false, resume_token: 'old-token' }) })
-  pending[1].resolve({ ok: true, status: 200, json: async () => ({ items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], has_more: false, resume_token: 'new-token' }) })
+  pending[0].resolve({ ok: true, status: 200, json: async () => ({ snapshot_profile: 'workspace_shell_v1', items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], has_more: false, resume_token: 'old-token' }) })
+  pending[1].resolve({ ok: true, status: 200, json: async () => ({ snapshot_profile: 'workspace_shell_v1', items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], has_more: false, resume_token: 'new-token' }) })
   await new Promise(resolve => setTimeout(resolve, 0))
   assert.equal(pending.length, 3)
   pending[2].resolve({ ok: true, status: 200, json: async () => ({ ticket: 'new-ticket' }) })
   await new Promise(resolve => setTimeout(resolve, 0))
-  assert.deepEqual(snapshots, [{ items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], resumeToken: 'new-token' }])
+  assert.deepEqual(snapshots, [{ items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], resumeToken: 'new-token', snapshotProfile: 'workspace_shell_v1' }])
   assert.equal(readCheckpoint(s, 'actor-a', 'workspace', 'a'), null)
   assert.deepEqual(readCheckpoint(s, 'actor-b', 'workspace', 'a'), { resumeToken: 'new-token', eventIds: [] })
   assert.equal(sockets.length, 1); assert.match(sockets[0].url, /ticket=new-ticket/)
@@ -259,8 +259,8 @@ test('resync retries preserve each page body and continuation token byte-for-byt
       if (url.endsWith('/change-stream/ticket')) return { ok: true, status: 200, json: async () => ({ ticket: 'ticket' }) }
       bodies.push(options.body); resyncAttempt += 1
       if (resyncAttempt === 1 || resyncAttempt === 3) return { ok: false, status: 500 }
-      if (resyncAttempt === 2) return { ok: true, status: 200, json: async () => ({ items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], has_more: true, next_page_token: 'continuation' }) }
-      return { ok: true, status: 200, json: async () => ({ items: [], has_more: false, resume_token: 'resume' }) }
+      if (resyncAttempt === 2) return { ok: true, status: 200, json: async () => ({ snapshot_profile: 'workspace_shell_v1', items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], has_more: true, next_page_token: 'continuation' }) }
+      return { ok: true, status: 200, json: async () => ({ snapshot_profile: 'workspace_shell_v1', items: [], has_more: false, resume_token: 'resume' }) }
     },
     setTimer: (fn, milliseconds) => { delays.push(milliseconds); queueMicrotask(fn); return delays.length }, clearTimer: () => {}
   })

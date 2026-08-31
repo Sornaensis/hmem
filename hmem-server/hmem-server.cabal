@@ -37,6 +37,7 @@ data-files:
     migrations/V021__observation_subject_sets.sql
     migrations/V022__change_stream_outbox.sql
     migrations/V023__change_stream_snapshot_bindings.sql
+    migrations/V024__change_stream_snapshot_profiles.sql
 
 library
   exposed-modules:

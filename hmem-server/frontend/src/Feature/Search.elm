@@ -16,6 +16,7 @@ module Feature.Search exposing
     )
 
 import Api
+import Feature.DataLoading
 import Feature.Observation
 import Dict
 import Helpers exposing (replaceFragment, saveFiltersCmd, scrollToElement, taskStatusBadgeClass, taskStatusDisplayText, taskStatusTitle)
@@ -74,6 +75,15 @@ type alias SearchResultPresentation =
     }
 
 
+reloadNavigation : Model -> ( Model, Cmd Msg )
+reloadNavigation model =
+    let
+        ( updated, navigationCmd ) =
+            Feature.DataLoading.reloadNavigationForFilters model
+    in
+    ( updated, Cmd.batch [ saveFiltersCmd updated, navigationCmd ] )
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
@@ -95,7 +105,7 @@ update msg model =
                 newModel =
                     { model | search = updatedSearch }
             in
-            ( newModel, saveFiltersCmd newModel )
+            reloadNavigation newModel
 
         SubmitSearch ->
             let
@@ -201,7 +211,7 @@ update msg model =
                 newModel =
                     { model | search = { searchModel | filterShowOnly = show } }
             in
-            ( newModel, saveFiltersCmd newModel )
+            reloadNavigation newModel
 
         SetFilterPriority pri ->
             let
@@ -211,7 +221,7 @@ update msg model =
                 newModel =
                     { model | search = { searchModel | filterPriority = pri } }
             in
-            ( newModel, saveFiltersCmd newModel )
+            reloadNavigation newModel
 
         ToggleFilterProjectStatus status ->
             let
@@ -228,7 +238,7 @@ update msg model =
                 newModel =
                     { model | search = { searchModel | filterProjectStatuses = newStatuses } }
             in
-            ( newModel, saveFiltersCmd newModel )
+            reloadNavigation newModel
 
         ToggleFilterTaskStatus status ->
             let
@@ -245,7 +255,7 @@ update msg model =
                 newModel =
                     { model | search = { searchModel | filterTaskStatuses = newStatuses } }
             in
-            ( newModel, saveFiltersCmd newModel )
+            reloadNavigation newModel
 
         ToggleFilterMemoryType mtype ->
             let

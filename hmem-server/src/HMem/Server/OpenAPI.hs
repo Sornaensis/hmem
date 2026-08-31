@@ -6,7 +6,7 @@
 -- endpoints cannot accidentally survive in generated documentation.
 module HMem.Server.OpenAPI (openApiSpec) where
 
-import Control.Lens ((&), (.~), (%~), (?~), at, _Just)
+import Control.Lens ((&), (.~), (%~), (?~), (^.), at, traversed, _Just)
 import Data.Aeson (Value)
 import Data.HashMap.Strict.InsOrd qualified as InsOrdMap
 import Data.HashSet.InsOrd qualified as InsOrdSet
@@ -46,10 +46,29 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/observations/{observationId}/embedding" . _Just . put %~ fmap tagObservation
   & paths . at "/api/v1/workspaces/{workspaceId}/timeline" . _Just . get %~ fmap tagTimeline
   & paths . at "/api/v1/workspaces/{workspaceId}/timeline/buckets" . _Just . get %~ fmap tagTimeline
+  & paths . at "/api/v1/workspaces/{workspaceId}/navigation" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
+  & paths . at "/api/v1/workspaces/{workspaceId}/navigation/focus/{entityType}/{entityId}" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
+  & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   where
     tagObservation operation = operation & tags .~ InsOrdSet.singleton "Observations"
     tagWorkspaceGroups operation = operation & tags .~ InsOrdSet.singleton "Workspace Groups"
     tagTimeline operation = operation & tags .~ InsOrdSet.singleton "Timeline"
+
+capNavigationParameter parameterRef = case parameterRef of
+  Inline parameter
+    | parameter ^. name `elem` ["project_limit", "task_limit", "limit"] ->
+        Inline (parameter & schema %~ fmap capNavigationLimitSchema)
+    | parameter ^. name `elem` ["project_offset", "task_offset", "ancestor_offset", "offset"] ->
+        Inline (parameter & schema %~ fmap capNavigationOffsetSchema)
+  _ -> parameterRef
+
+capNavigationLimitSchema schemaRef = case schemaRef of
+  Inline limitSchema -> Inline (limitSchema & minimum_ ?~ 1 & maximum_ ?~ fromIntegral maxNavigationPageSize)
+  _ -> schemaRef
+
+capNavigationOffsetSchema schemaRef = case schemaRef of
+  Inline offsetSchema -> Inline (offsetSchema & minimum_ ?~ 0 & maximum_ ?~ fromIntegral maxNavigationOffset)
+  _ -> schemaRef
 
 opts :: SchemaOptions
 opts = defaultSchemaOptions { fieldLabelModifier = camelToSnake }
@@ -70,6 +89,8 @@ instance ToSchema ProjectStatus where declareNamedSchema _ = pure $ NamedSchema 
 instance ToParamSchema ProjectStatus where toParamSchema _ = mempty & type_ ?~ OpenApiString
 instance ToSchema TaskStatus where declareNamedSchema _ = pure $ NamedSchema (Just "TaskStatus") (mempty & type_ ?~ OpenApiString & enum_ ?~ ["todo", "in_progress", "blocked", "done", "cancelled"])
 instance ToParamSchema TaskStatus where toParamSchema _ = mempty & type_ ?~ OpenApiString
+instance ToSchema NavigationEntityType where declareNamedSchema _ = pure $ NamedSchema (Just "NavigationEntityType") (mempty & type_ ?~ OpenApiString & enum_ ?~ ["project", "task"])
+instance ToParamSchema NavigationEntityType where toParamSchema _ = mempty & type_ ?~ OpenApiString & enum_ ?~ ["project", "task"]
 instance ToSchema AuditAction where declareNamedSchema _ = pure $ NamedSchema (Just "AuditAction") (mempty & type_ ?~ OpenApiString & enum_ ?~ ["create", "update", "delete"])
 instance ToParamSchema AuditAction where toParamSchema _ = mempty & type_ ?~ OpenApiString
 instance ToSchema WorkspaceType where declareNamedSchema _ = pure $ NamedSchema (Just "WorkspaceType") (mempty & type_ ?~ OpenApiString & enum_ ?~ ["repository", "planning", "personal", "organization"])
@@ -233,6 +254,104 @@ instance ToSchema CreateProject where declareNamedSchema = genericDeclareNamedSc
 instance ToSchema UpdateProject where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CascadeResult where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ProjectOverview where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ProjectCardSummary where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TaskCardSummary where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema TaskDependencyPage where
+  declareNamedSchema _ = do
+    item <- declareSchemaRef (Proxy @TaskDependencySummary)
+    pure $ NamedSchema (Just "TaskDependencyPage") $ mempty
+      & type_ ?~ OpenApiObject
+      & description ?~ "A bounded dependency-summary page. items are ordered by lower(name), id and contain at most 100 entries."
+      & properties . at "items" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject item & maxItems ?~ fromIntegral maxNavigationPageSize)
+      & properties . at "has_more" ?~ Inline (mempty & type_ ?~ OpenApiBoolean)
+      & required .~ ["items", "has_more"]
+      & additionalProperties ?~ AdditionalPropertiesAllowed False
+
+uuidSchema :: Schema
+uuidSchema = mempty & type_ ?~ OpenApiString & format ?~ "uuid"
+
+uuidArrayLike :: Referenced Schema -> Int -> Schema
+uuidArrayLike item maximum = mempty
+  & type_ ?~ OpenApiArray
+  & items ?~ OpenApiItemsObject item
+  & maxItems ?~ fromIntegral maximum
+
+instance ToSchema NavigationParent where
+  declareNamedSchema _ = pure $ NamedSchema (Just "NavigationParent") $ mempty
+    & type_ ?~ OpenApiObject
+    & description ?~ "Typed branch selector. workspace_root omits parent_id; project and task require a UUID parent_id."
+    & properties . at "kind" ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["workspace_root", "project", "task"])
+    & properties . at "parent_id" ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "uuid")
+    & required .~ ["kind"]
+instance ToSchema NavigationFilter where
+  declareNamedSchema _ = pure $ NamedSchema (Just "NavigationFilter") $ mempty
+    & type_ ?~ OpenApiObject
+    & description ?~ "Server-owned tree filter; matching descendants retain their ancestors. priority_mode is any, exact, above, or below; priority_value is required except for any."
+    & properties . at "show_only" ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["projects", "tasks"])
+    & properties . at "project_statuses" ?~ Inline (mempty & type_ ?~ OpenApiArray)
+    & properties . at "task_statuses" ?~ Inline (mempty & type_ ?~ OpenApiArray)
+    & properties . at "priority_mode" ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["any", "exact", "above", "below"])
+    & properties . at "priority_value" ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 1 & maximum_ ?~ 10)
+    & properties . at "query" ?~ Inline (mempty & type_ ?~ OpenApiString & minLength ?~ 1)
+instance ToSchema NavigationBranchRequest where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema a => ToSchema (NavigationPage a) where
+  declareNamedSchema _ = do
+    item <- declareSchemaRef (Proxy @a)
+    NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @(NavigationPage a))
+    pure $ NamedSchema name $
+      schema
+        & properties . at "items" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject item & maxItems ?~ fromIntegral maxNavigationPageSize)
+instance ToSchema NavigationBranchResponse where
+  declareNamedSchema _ = do
+    projectItem <- declareSchemaRef (Proxy @ProjectCardSummary)
+    taskItem <- declareSchemaRef (Proxy @TaskCardSummary)
+    parent <- declareSchemaRef (Proxy @NavigationParent)
+    pure $ NamedSchema (Just "NavigationBranchResponse") $ mempty
+      & type_ ?~ OpenApiObject
+      & properties . at "workspace_id" ?~ Inline uuidSchema
+      & properties . at "parent" ?~ parent
+      -- Do not reference the polymorphic NavigationPage component here: OpenAPI
+      -- component names erase its type parameter.  These inline pages retain the
+      -- distinct ProjectCardSummary/TaskCardSummary item contracts.
+      & properties . at "projects" ?~ Inline (navigationPageSchema projectItem)
+      & properties . at "tasks" ?~ Inline (navigationPageSchema taskItem)
+      & required .~ ["workspace_id", "parent", "projects", "tasks"]
+      & additionalProperties ?~ AdditionalPropertiesAllowed False
+
+navigationPageSchema :: Referenced Schema -> Schema
+navigationPageSchema item = mempty
+  & type_ ?~ OpenApiObject
+  & properties . at "items" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject item & maxItems ?~ fromIntegral maxNavigationPageSize)
+  & properties . at "has_more" ?~ Inline (mempty & type_ ?~ OpenApiBoolean)
+  & required .~ ["items", "has_more"]
+  & additionalProperties ?~ AdditionalPropertiesAllowed False
+instance ToSchema NavigationSummary where
+  declareNamedSchema _ = do
+    projectSummary <- declareSchemaRef (Proxy @ProjectCardSummary)
+    taskSummary <- declareSchemaRef (Proxy @TaskCardSummary)
+    pure $ NamedSchema (Just "NavigationSummary") $ mempty
+      & description ?~ "Tagged card summary. entity_type selects whether summary is a ProjectCardSummary or TaskCardSummary."
+      & oneOf ?~ [Inline (navigationProjectSummarySchema projectSummary), Inline (navigationTaskSummarySchema taskSummary)]
+instance ToSchema NavigationFocusResponse where
+  declareNamedSchema _ = do
+    summary <- declareSchemaRef (Proxy @NavigationSummary)
+    pure $ NamedSchema (Just "NavigationFocusResponse") $ mempty
+      & type_ ?~ OpenApiObject
+      & description ?~ "A bounded direct-link response. ancestors are root-to-parent order and never exceed 64; next_ancestor_offset is present only when the chain was truncated."
+      & properties . at "workspace_id" ?~ Inline uuidSchema
+      & properties . at "target" ?~ summary
+      & properties . at "ancestors" ?~ Inline (uuidArrayLike summary 64)
+      & properties . at "ancestors_truncated" ?~ Inline (mempty & type_ ?~ OpenApiBoolean)
+      & properties . at "next_ancestor_offset" ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 0 & maximum_ ?~ fromIntegral maxNavigationOffset)
+      & required .~ ["workspace_id", "target", "ancestors", "ancestors_truncated"]
+instance ToSchema NavigationSummariesRequest where
+  declareNamedSchema _ = pure $ NamedSchema (Just "NavigationSummariesRequest") $ mempty
+    & type_ ?~ OpenApiObject
+    & description ?~ "Bounded targeted revalidation. project_ids and task_ids are each ordered UUID lists; their combined total is at most 100 and duplicates are rejected."
+    & properties . at "project_ids" ?~ Inline (uuidArrayLike (Inline uuidSchema) maxNavigationBatchIds)
+    & properties . at "task_ids" ?~ Inline (uuidArrayLike (Inline uuidSchema) maxNavigationBatchIds)
+    & required .~ ["project_ids", "task_ids"]
+instance ToSchema NavigationSummariesResponse where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ProjectReadinessRollup where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema NextTaskCandidate where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema Task where declareNamedSchema = genericDeclareNamedSchema opts
@@ -253,6 +372,8 @@ instance ToSchema WebSocketTicketRequest where declareNamedSchema = genericDecla
 instance ToSchema WebSocketTicketResponse where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ChangeStreamScopeRequest where
   declareNamedSchema _ = pure $ NamedSchema (Just "ChangeStreamScopeRequest") changeStreamScopeSchema
+instance ToSchema SnapshotProfile where
+  declareNamedSchema _ = pure $ NamedSchema (Just "SnapshotProfile") (mempty & type_ ?~ OpenApiString & enum_ ?~ ["full_v1", "workspace_shell_v1"] & description ?~ "full_v1 is the backward-compatible default. workspace_shell_v1 is an explicit workspace-only bounded projection and is immutable for a snapshot session.")
 instance ToSchema ChangeStreamResyncRequest where
   declareNamedSchema _ = pure $ NamedSchema (Just "ChangeStreamResyncRequest") changeStreamResyncSchema
 instance ToSchema ChangeStreamSnapshotItem where declareNamedSchema = genericDeclareNamedSchema changeStreamItemOpts
@@ -297,6 +418,27 @@ workspaceScopeSchema = mempty
   & required .~ ["scope", "workspace_id"]
   & additionalProperties ?~ AdditionalPropertiesAllowed False
 
+-- The JSON representation is tagged at the outer object, rather than merely
+-- documenting an unconstrained `summary` field.  Generated clients must be
+-- able to tell which card shape accompanies each entity_type.
+navigationProjectSummarySchema :: Referenced Schema -> Schema
+navigationProjectSummarySchema projectSummary = mempty
+  & type_ ?~ OpenApiObject
+  & properties .~ InsOrdMap.fromList
+      [ ("entity_type", Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["project"]))
+      , ("summary", projectSummary) ]
+  & required .~ ["entity_type", "summary"]
+  & additionalProperties ?~ AdditionalPropertiesAllowed False
+
+navigationTaskSummarySchema :: Referenced Schema -> Schema
+navigationTaskSummarySchema taskSummary = mempty
+  & type_ ?~ OpenApiObject
+  & properties .~ InsOrdMap.fromList
+      [ ("entity_type", Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["task"]))
+      , ("summary", taskSummary) ]
+  & required .~ ["entity_type", "summary"]
+  & additionalProperties ?~ AdditionalPropertiesAllowed False
+
 changeStreamResyncSchema :: Schema
 changeStreamResyncSchema = mempty
   & description ?~ "Exactly one resync form: a start uses a client-generated, high-entropy start_idempotency_key of at least 32 characters; a continuation uses page_token. Page size is immutable after the start."
@@ -309,7 +451,7 @@ changeStreamSharedProperties = InsOrdMap.fromList
 resyncStartSchema :: Schema
 resyncStartSchema = mempty
   & type_ ?~ OpenApiObject
-  & properties .~ InsOrdMap.insert "start_idempotency_key" (Inline (mempty & type_ ?~ OpenApiString & minLength ?~ 32 & maxLength ?~ 512)) changeStreamSharedProperties
+  & properties .~ InsOrdMap.insert "start_idempotency_key" (Inline (mempty & type_ ?~ OpenApiString & minLength ?~ 32 & maxLength ?~ 512)) (InsOrdMap.insert "snapshot_profile" (Ref (Reference "#/components/schemas/SnapshotProfile")) changeStreamSharedProperties)
   & required .~ ["scope", "start_idempotency_key"]
   & additionalProperties ?~ AdditionalPropertiesAllowed False
 

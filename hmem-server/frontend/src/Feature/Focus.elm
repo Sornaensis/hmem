@@ -2,6 +2,7 @@ module Feature.Focus exposing (auditReturnContext, buildProjectBreadcrumb, build
 
 import Api
 import Dict
+import Feature.DataLoading
 import Helpers exposing (buildFragment, pushUrl, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -171,8 +172,11 @@ update msg model =
                             }
                         , search = updatedSearch
                     }
+
+                ( requestedModel, requestCmd ) =
+                    requestMissingFocus entityType entityId newModel
             in
-            ( newModel, replaceFragment newModel )
+            ( requestedModel, Cmd.batch [ replaceFragment requestedModel, requestCmd ] )
 
         FocusEntityKeepForward entityType entityId ->
             let
@@ -246,6 +250,36 @@ update msg model =
             ( newModel, replaceFragment newModel )
 
         _ ->
+            ( model, Cmd.none )
+
+
+{-| Focus links can target an entity outside the bounded root/branch cache.
+Only an absent project or task uses the direct-focus route; an already loaded
+card must not issue an unnecessary duplicate request.
+-}
+requestMissingFocus : String -> String -> Model -> ( Model, Cmd Msg )
+requestMissingFocus entityType entityId model =
+    let
+        missing =
+            case entityType of
+                "project" ->
+                    not (Dict.member entityId model.projects)
+
+                "task" ->
+                    not (Dict.member entityId model.tasks)
+
+                _ ->
+                    False
+    in
+    case model.selectedWorkspaceId of
+        Just workspaceId ->
+            if missing then
+                Feature.DataLoading.beginNavigationFocus workspaceId entityType entityId model
+
+            else
+                ( model, Cmd.none )
+
+        Nothing ->
             ( model, Cmd.none )
 
 

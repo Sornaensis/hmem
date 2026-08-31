@@ -506,7 +506,7 @@ const canonicalStreams = createChangeStreamManager({
   },
   onSnapshot: function (scope, workspaceId, snapshot) {
     clearCanonicalFrameBatch(scope, workspaceId)
-    if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'snapshot', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, items: snapshot.items, resume_token: snapshot.resumeToken }))
+    if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'snapshot', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, items: snapshot.items, resume_token: snapshot.resumeToken, snapshot_profile: snapshot.snapshotProfile }))
   },
   onFrame: function (scope, workspaceId, frame) {
     let parsedFrame = null
@@ -530,6 +530,7 @@ app.ports.connectWebSocket.subscribe(function (config) {
     audienceId: config.audienceId,
     scope: config.scope,
     workspaceId: streamWorkspaceId,
+    snapshotProfile: config.snapshotProfile,
     headers: { ...authHeaderObject(), ...csrfHeaderObject() }
   })
 })

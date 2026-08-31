@@ -11,10 +11,10 @@ export const HARNESS_CONFIGURATION = Object.freeze({
   samples: 5,
   browserClockUtc: '2026-08-30T12:00:00Z',
   percentile: 'nearest-rank p95: sorted[ceil(0.95*n)-1]; with five samples p95 is the maximum',
-  scenarioIsolation: 'cold/tab/live measurements use one full-snapshot workspace session with deterministic unfiltered/unfocused restoration; direct focus uses a fresh focus-first session with an empty state while the untouched canonical resync is paused before its first response; rendered cardinality is measured, never a readiness prerequisite',
-  initialTransport: 'the current change-stream resync protocol must transport every canonical snapshot item (155 small, 4,951 large) over every requested page; bounded transport support is dormant unless production invokes a real bounded protocol',
+  scenarioIsolation: 'cold/tab/live measurements use production workspace_shell_v1 plus one bounded root-navigation page with deterministic unfiltered/unfocused restoration; direct focus uses a fresh focus-first shell session; rendered cardinality is measured, never a readiness prerequisite',
+  initialTransport: 'production workspace bootstrap explicitly requests workspace_shell_v1, transports only its authorized workspace root, then loads one capped navigation branch; the immutable full snapshot remains a legacy compatibility fixture only',
   routeFidelity: 'snapshot kind-rank/identity ordering; capped list pagination; Project/Task DTO and overview ordering; Observation simple-lexeme AND/rank/subject/facet ordering; Timeline event ordering and day/week/month/quarter UTC bucket range aggregation/caps are frozen against production source anchors',
-  directFocus: 'navigate a root-project focus first while the byte/order-identical canonical resync is paused before page one; observe direct lookup/render for 750ms, record stable product failure booleans, then release and verify the complete current snapshot',
+  directFocus: 'navigate a project focus first from an empty shell state; observe one bounded navigation-focus lookup and render for 750ms without requiring legacy full resync',
   liveTiming: 'settle ends after the dispatched checkpoint turn, completion of every follow-up that actually started (zero is valid), transport idle, representative UI anchor, and two paints; a separate 500ms stability window must observe no late request',
   heapPoint: 'after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs'
 })
@@ -50,6 +50,9 @@ export function perfApiRouteKey(input, method = 'GET') {
   if (is(['GET'], /^\/api\/v1\/workspaces\/[^/]+\/timeline\/buckets$/)) return 'timeline:buckets'
   if (is(['GET'], /^\/api\/v1\/workspaces\/[^/]+\/timeline$/)) return 'timeline:events'
   if (is(['GET'], /^\/api\/v1\/workspaces\/[^/]+\/memberships$/)) return 'workspaces:memberships'
+  if (is(['GET'], /^\/api\/v1\/workspaces\/[^/]+\/navigation\/focus\/(project|task)\/[^/]+$/)) return 'navigation:focus'
+  if (is(['GET'], /^\/api\/v1\/workspaces\/[^/]+\/navigation$/)) return 'navigation:branch'
+  if (is(['POST'], /^\/api\/v1\/workspaces\/[^/]+\/navigation\/summaries$/)) return 'navigation:summaries'
   if (is(['GET'], /^\/api\/v1\/workspaces\/[^/]+$/)) return 'workspaces:entity'
   if (is(['GET'], /^\/api\/v1\/projects$/)) return 'projects:list'
   if (is(['GET'], /^\/api\/v1\/projects\/[^/]+\/overview$/)) return 'projects:overview'

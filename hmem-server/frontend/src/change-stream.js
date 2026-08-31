@@ -4,6 +4,8 @@
  * behaviour executable under node:test as well as in the browser. */
 export const STORAGE_VERSION = 1
 export const MAX_EVENT_IDS = 128
+export const FULL_SNAPSHOT_PROFILE = 'full_v1'
+export const WORKSPACE_SHELL_SNAPSHOT_PROFILE = 'workspace_shell_v1'
 const MAX_RETRIES = 6
 const SNAPSHOT_KINDS = new Set(['workspace', 'workspace_group', 'project', 'task', 'task_dependency', 'observation'])
 
@@ -199,7 +201,9 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
   }
   function validSnapshotItem(entry, item) {
     if (!item || item.schema_version !== 1 || !SNAPSHOT_KINDS.has(item.kind) || !item.data || typeof item.data !== 'object' || Array.isArray(item.data)) return false
-    const allowed = entry.scope === 'global'
+    const allowed = entry.snapshotProfile === WORKSPACE_SHELL_SNAPSHOT_PROFILE
+      ? entry.scope === 'workspace' && item.kind === 'workspace'
+      : entry.scope === 'global'
       ? item.kind === 'workspace' || item.kind === 'workspace_group'
       : ['workspace', 'project', 'task', 'task_dependency', 'observation'].includes(item.kind)
     if (!allowed) return false
@@ -220,14 +224,14 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
     // replacement is wired through the snapshot port, but this preserves the
     // server's atomic snapshot/replay hand-off at the transport boundary.
     for (let attempts = 0; attempts < 256; attempts += 1) {
-      const body = pageToken ? { scope: canonicalTicketBody(entry.scope, entry.workspaceId, 'x').scope, page_token: pageToken } : { scope: canonicalTicketBody(entry.scope, entry.workspaceId, 'x').scope, page_size: 100, start_idempotency_key: startKey }
+      const body = pageToken ? { scope: canonicalTicketBody(entry.scope, entry.workspaceId, 'x').scope, page_token: pageToken } : { scope: canonicalTicketBody(entry.scope, entry.workspaceId, 'x').scope, snapshot_profile: entry.snapshotProfile, page_size: 100, start_idempotency_key: startKey }
       const response = await postResyncPage(entry, generation, body)
       if (response.status === 409) throw new Error('resync_required')
       throwForAuthorization(response.status)
       if (!response.ok) throw new Error(`resync_${response.status}`)
       const page = await response.json()
       if (!isCurrent(entry, generation)) throw cancelled()
-      if (!page || !Array.isArray(page.items) || page.items.some(item => !validSnapshotItem(entry, item)) || typeof page.has_more !== 'boolean') throw new Error('invalid_snapshot')
+      if (!page || page.snapshot_profile !== entry.snapshotProfile || !Array.isArray(page.items) || page.items.some(item => !validSnapshotItem(entry, item)) || typeof page.has_more !== 'boolean') throw new Error('invalid_snapshot')
       if (page.has_more) {
         if (typeof page.next_page_token !== 'string' || !page.next_page_token || pageTokens.has(page.next_page_token) || page.resume_token != null) throw new Error('invalid_snapshot')
         items.push(...page.items)
@@ -246,7 +250,7 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
     // The Elm port delivery is synchronous.  Emitting the fully accumulated
     // snapshot before requesting a ticket prevents replay from racing a
     // partial model replacement.
-    onSnapshot(entry.scope, entry.workspaceId, { items, resumeToken })
+    onSnapshot(entry.scope, entry.workspaceId, { items, resumeToken, snapshotProfile: entry.snapshotProfile })
     if (!isCurrent(entry, generation)) throw cancelled()
     writeCheckpoint(storage, entry.audienceId, entry.scope, entry.workspaceId, resumeToken, [])
   }
@@ -314,7 +318,7 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
     }
   }
   return {
-    connect({ audienceId, scope, workspaceId = null, resumeToken, headers = {} }) {
+    connect({ audienceId, scope, workspaceId = null, resumeToken, headers = {}, snapshotProfile }) {
       if (typeof audienceId !== 'string' || !audienceId) throw new Error('audience id required')
       if (scope !== 'global' && (!workspaceId || typeof workspaceId !== 'string')) throw new Error('workspace scope requires workspaceId')
       const entryKey = key(scope, workspaceId)
@@ -327,7 +331,9 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
       // A new manager has a new Elm model, so a stored token cannot replace the
       // canonical snapshot that seeds that model.  Explicit resumeToken is only
       // safe for a caller that retained its corresponding projections.
-      const entry = { audienceId, scope, workspaceId, resumeToken: resumeToken || null, eventIds: resumeToken && storageValue ? storageValue.eventIds : [], headers, generation: 0, attempt: 0, socket: null, timer: null, abortController: null, closedByControl: false }
+      const resolvedProfile = snapshotProfile || (scope === 'workspace' ? WORKSPACE_SHELL_SNAPSHOT_PROFILE : FULL_SNAPSHOT_PROFILE)
+      if ((scope === 'global' && resolvedProfile !== FULL_SNAPSHOT_PROFILE) || ![FULL_SNAPSHOT_PROFILE, WORKSPACE_SHELL_SNAPSHOT_PROFILE].includes(resolvedProfile)) throw new Error('invalid snapshot profile')
+      const entry = { audienceId, scope, workspaceId, resumeToken: resumeToken || null, eventIds: resumeToken && storageValue ? storageValue.eventIds : [], headers, snapshotProfile: resolvedProfile, generation: 0, attempt: 0, socket: null, timer: null, abortController: null, closedByControl: false }
       if (!entry.resumeToken) { onState(scope, workspaceId, 'resyncing') }
       if (old) stop(old)
       sockets.set(entryKey, entry); const generation = ++entry.generation

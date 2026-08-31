@@ -7,6 +7,7 @@ import Dict exposing (Dict)
 import Feature.ChangeStream
 import Http
 import Json.Encode as Encode
+import Set exposing (Set)
 import Time
 import Url
 
@@ -110,6 +111,46 @@ type alias DataLoadingModel =
     , activeWorkspaceLoadToken : Maybe Int
     , nextWorkspaceLoadToken : Int
     , cardHydrationLoaded : Bool
+    , navigationGeneration : Int
+    , rootNavigationRequest : Maybe NavigationBranchState
+    , loadedNavigationBranches : Dict String NavigationBranchState
+    , projectCardSummaries : Dict String Api.ProjectCardSummary
+    , taskCardSummaries : Dict String Api.TaskCardSummary
+    -- The bounded navigation API is authoritative for which cached cards are
+    -- currently visible. Entity dictionaries may also contain detail/focus
+    -- cache entries, so they cannot by themselves drive filtered tree output.
+    , navigationVisibleProjectIds : Set String
+    , navigationVisibleTaskIds : Set String
+    , navigationVisibilityActive : Bool
+    , activeNavigationFocus : Maybe NavigationFocusRequest
+    , navigationFocuses : Dict String NavigationFocusRequest
+    }
+
+
+type alias NavigationBranchState =
+    { workspaceId : String
+    , sessionEpoch : Int
+    , generation : Int
+    , filterFingerprint : String
+    , projectOffset : Int
+    , taskOffset : Int
+    , inFlight : Bool
+    , succeeded : Bool
+    , projectHasMore : Bool
+    , taskHasMore : Bool
+    }
+
+
+type alias NavigationFocusRequest =
+    { workspaceId : String
+    , sessionEpoch : Int
+    , generation : Int
+    , filterFingerprint : String
+    , entityType : String
+    , entityId : String
+    , ancestorOffset : Int
+    , inFlight : Bool
+    , succeeded : Bool
     }
 
 
@@ -267,6 +308,19 @@ type alias DependenciesModel =
     , taskReadinessRollups : Dict String Api.TaskReadinessRollup
     , projectReadinessRollups : Dict String Api.ProjectReadinessRollup
     , addingDependencyFor : Maybe AddDependencyState
+    , taskDependencyHasMore : Dict String Bool
+    , taskDependencyNextOffset : Dict String Int
+    , taskDependencyLoading : Dict String Bool
+    , taskDependencyRequests : Dict String DependencyPageRequest
+    , nextTaskDependencyRequestGeneration : Int
+    }
+
+
+type alias DependencyPageRequest =
+    { workspaceId : String
+    , sessionEpoch : Int
+    , offset : Int
+    , generation : Int
     }
 
 
@@ -635,6 +689,7 @@ type Msg
     | CanonicalObservationFetched CanonicalRequestGuard String String (Result Http.Error Api.Observation)
     | CanonicalTaskOverviewFetched CanonicalRequestGuard String (Result Http.Error Api.TaskOverview)
     | CanonicalProjectOverviewFetched CanonicalRequestGuard String (Result Http.Error Api.ProjectOverview)
+    | CanonicalNavigationSummariesFetched CanonicalRequestGuard String (List String) (List String) (Result Http.Error Api.NavigationSummariesResponse)
     | CanonicalCatalogueFetched CanonicalRequestGuard (Result Http.Error (Api.PaginatedResult Api.Workspace))
     | CanonicalGroupsFetched CanonicalRequestGuard (Result Http.Error (Api.PaginatedResult Api.WorkspaceGroup))
     | CanonicalGroupMembersFetched CanonicalRequestGuard String (Result Http.Error (List String))
@@ -648,6 +703,10 @@ type Msg
       -- HTTP responses
     | GotWorkspaces Int (Result Http.Error (Api.PaginatedResult Api.Workspace))
     | GotWorkspace String Int (Result Http.Error Api.Workspace)
+    | GotRootNavigation String Int (Maybe Int) Int String Int Int (Result Http.Error Api.NavigationBranchResponse)
+    | GotNavigationBranch String Int Int String String Int Int (Result Http.Error Api.NavigationBranchResponse)
+    | LoadNavigationBranchPage String String String
+    | GotNavigationFocus String Int Int String String String Int (Result Http.Error Api.NavigationFocusResponse)
     | GotSessionContext Int (Maybe String) (Result Http.Error Api.SessionContext)
     | GotProjects String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Project))
     | GotTasks String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Task))
@@ -764,6 +823,8 @@ type Msg
     | CancelLinkEntity
       -- Task dependencies
     | GotTaskDependencies String (Result Http.Error Api.TaskOverview)
+    | GotTaskDependencyPage String String Int Int Int (Result Http.Error Api.TaskDependencyPage)
+    | LoadTaskDependencyPage String
     | GotProjectOverview String (Result Http.Error Api.ProjectOverview)
     | GotProjectNextTasks String (Result Http.Error (List Api.NextTaskCandidate))
     | GotProjectNextTaskDiagnostics String (Result Http.Error (List Api.NextTaskCandidate))

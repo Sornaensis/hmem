@@ -22,6 +22,15 @@ spec = do
     it "accepts observation views and rejects legacy memory views" $ do
       validateCreateSavedViewInput savedView { entityType = "observation_search" } `shouldBe` []
       validateCreateSavedViewInput savedView { entityType = "memory_search" } `shouldSatisfy` (not . null)
+  describe "Bounded navigation validation" $ do
+    it "enforces limit, offset, and combined unique summary-batch caps" $ do
+      validateNavigationPage (Just 1) (Just 0) `shouldBe` []
+      validateNavigationPage (Just 0) Nothing `shouldSatisfy` (not . null)
+      validateNavigationPage (Just (maxNavigationPageSize + 1)) Nothing `shouldSatisfy` (not . null)
+      validateNavigationPage Nothing (Just (-1)) `shouldSatisfy` (not . null)
+      validateNavigationPage Nothing (Just (maxNavigationOffset + 1)) `shouldSatisfy` (not . null)
+      validateNavigationSummariesRequest (NavigationSummariesRequest (replicate maxNavigationBatchIds workspace) []) `shouldSatisfy` (not . null)
+      validateNavigationSummariesRequest (NavigationSummariesRequest (replicate (maxNavigationBatchIds + 1) workspace) []) `shouldSatisfy` (not . null)
   describe "Observation subject glob matching" $ do
     mapM_ assertCorpus observationSubjectMatchCorpus
     it "rejects non-canonical paths and embedded recursive globs" $ do

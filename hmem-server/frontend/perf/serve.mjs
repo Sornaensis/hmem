@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { TIMELINE_BROWSER_NOW, generateFixture, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotItems, taskOverviewResponse } from './fixtures.mjs'
+import { TIMELINE_BROWSER_NOW, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotItems, taskOverviewResponse, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const frontendRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const staticRoot = path.resolve(frontendRoot, '..', 'static')
@@ -38,15 +38,34 @@ async function api(request, response, url) {
   })
   if (pathname === '/api/v1/change-stream/resync') {
     const requestBody = await body(request)
+    const profile = requestBody.snapshot_profile || 'full_v1'
+    const selectedSnapshots = profile === 'workspace_shell_v1' ? workspaceShellSnapshotItems(fixture) : snapshots
     const offset = requestBody.page_token ? Number(String(requestBody.page_token).split(':')[1]) : 0
     const pageSize = Number(requestBody.page_size) || 100
-    const items = snapshots.slice(offset, offset + pageSize)
-    const hasMore = offset + pageSize < snapshots.length
-    return json(response, { items, has_more: hasMore, ...(hasMore ? { next_page_token: `offset:${offset + pageSize}` } : { resume_token: 'manual-resume' }) })
+    const items = selectedSnapshots.slice(offset, offset + pageSize)
+    const hasMore = offset + pageSize < selectedSnapshots.length
+    return json(response, { snapshot_profile: profile, items, has_more: hasMore, ...(hasMore ? { next_page_token: `offset:${offset + pageSize}` } : { resume_token: 'manual-resume' }) })
   }
   if (pathname === '/api/v1/change-stream/ticket') return json(response, { ticket: 'manual-ticket', expires_at: '2099-01-01T00:00:00Z' })
   if (pathname === '/api/v1/workspaces') return json(response, paginate([fixture.workspace], url.searchParams.get('offset'), url.searchParams.get('limit')))
   if (pathname === `/api/v1/workspaces/${fixture.workspace.id}`) return json(response, fixture.workspace)
+  if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/navigation`) return json(response, navigationBranchResponse(fixture, {
+    parentKind: url.searchParams.get('parent_kind'), parentId: url.searchParams.get('parent_id'),
+    projectLimit: url.searchParams.get('project_limit'), projectOffset: url.searchParams.get('project_offset'),
+    taskLimit: url.searchParams.get('task_limit'), taskOffset: url.searchParams.get('task_offset'),
+    showOnly: url.searchParams.get('show_only'), projectStatuses: url.searchParams.getAll('project_status'), taskStatuses: url.searchParams.getAll('task_status'),
+    priorityMode: url.searchParams.get('priority_mode'), priorityValue: url.searchParams.get('priority_value'), query: url.searchParams.get('query')
+  }))
+  if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/navigation/summaries`) {
+    const requestBody = await body(request)
+    const value = navigationSummariesResponse(fixture, requestBody.project_ids || [], requestBody.task_ids || [])
+    return json(response, value || { error: 'invalid summary batch' }, value ? 200 : 400)
+  }
+  const navigationFocus = pathname.match(new RegExp(`^/api/v1/workspaces/${fixture.workspace.id}/navigation/focus/(project|task)/([^/]+)$`))
+  if (navigationFocus) {
+    const value = navigationFocusResponse(fixture, navigationFocus[1], decodeURIComponent(navigationFocus[2]), url.searchParams.get('ancestor_offset'))
+    return json(response, value || { error: 'not found' }, value ? 200 : 404)
+  }
   if (pathname.endsWith('/memberships')) return json(response, { items: [{ workspace_id: fixture.workspace.id, user_id: 'perf-user', role: 'owner', granted_by: null, created_at: fixture.workspace.created_at, updated_at: fixture.workspace.updated_at }], has_more: false })
   if (pathname === '/api/v1/projects') return json(response, queryProjects(fixture, { status: url.searchParams.get('status'), offset: url.searchParams.get('offset'), limit: url.searchParams.get('limit') }))
   if (pathname === '/api/v1/tasks') return json(response, queryTasks(fixture, { projectId: url.searchParams.get('project_id'), status: url.searchParams.get('status'), priority: url.searchParams.get('priority'), offset: url.searchParams.get('offset'), limit: url.searchParams.get('limit') }))

@@ -71,6 +71,30 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
             readSnapshotPage env.pool scope audience next 17 1 `shouldReturn` Right terminalPage
           _ -> expectationFailure (show terminal)
       _ -> expectationFailure (show first)
+  it "keeps full and shell snapshot profiles distinct across idempotent retries" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-snapshot-profile"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "snapshot-profile-audience"
+        shellKey = "snapshot-profile-shell-key"
+        legacyKey = "snapshot-profile-legacy-key"
+    shellBegin <- beginResyncWithStartKeyAndProfile env.pool 60 scope audience shellKey 10 WorkspaceShellV1 (pure [String "shell"])
+    shell <- case shellBegin of
+      Right value -> pure value
+      Left err -> expectationFailure (show err) >> fail "unreachable"
+    shellPage <- readSnapshotPageWithStoredTtls env.pool 60 60 scope audience shell.snapshotToken
+    case shellPage of
+      Right SnapshotPage { snapshotPageItems = [String "shell"], snapshotPageHasMore = False, snapshotNextToken = Nothing, snapshotResumeToken = Just _, snapshotProfile = WorkspaceShellV1 } -> pure ()
+      other -> expectationFailure (show other)
+    beginResyncWithStartKeyAndProfile env.pool 60 scope audience shellKey 10 FullV1 (pure [String "full"])
+      `shouldReturn` Left SnapshotOutOfOrder
+    legacyBegin <- beginResyncWithStartKey env.pool 60 scope audience legacyKey 10 (pure [String "legacy"])
+    legacy <- case legacyBegin of
+      Right value -> pure value
+      Left err -> expectationFailure (show err) >> fail "unreachable"
+    legacyPage <- readSnapshotPageWithStoredTtls env.pool 60 60 scope audience legacy.snapshotToken
+    case legacyPage of
+      Right SnapshotPage { snapshotPageItems = [String "legacy"], snapshotPageHasMore = False, snapshotNextToken = Nothing, snapshotResumeToken = Just _, snapshotProfile = FullV1 } -> pure ()
+      other -> expectationFailure (show other)
   it "denies expired sessions and removes their materialized items" $ \env -> do
     workspace <- createTestWorkspace env "change-stream-expiry"
     let scope = WorkspaceScope workspace.id

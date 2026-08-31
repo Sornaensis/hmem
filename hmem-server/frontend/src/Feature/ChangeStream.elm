@@ -1,4 +1,4 @@
-module Feature.ChangeStream exposing (Action(..), RequestGuard, Scope(..), Snapshot, State, acceptEvent, applySnapshot, coalesce, init, reduceFrame, reduceFrames, requestGuardMatches, scopeKey)
+module Feature.ChangeStream exposing (Action(..), RequestGuard, Scope(..), Snapshot, State, acceptEvent, applySnapshot, applySnapshotProfile, coalesce, init, reduceFrame, reduceFrames, requestGuardMatches, scopeKey)
 
 {-| Pure canonical-stream policy. Effects remain in `Feature.WebSocket`; this
 module gives it one fail-closed place for scope matching, bounded de-duplication
@@ -49,6 +49,7 @@ type Action
     | RemoveEntity String String
     | RefreshTaskOverview String
     | RefreshReadiness String String
+    | RevalidateNavigationSummary String String
     | RefreshNextTasks String
     | RefreshSearch String
     | RefreshObservations
@@ -169,7 +170,7 @@ reduceFrame frame state =
         Api.CanonicalScoped _ _ ->
             ( { state | live = False }, [ BeginResync ] )
 
-        Api.CanonicalSnapshot _ _ _ ->
+        Api.CanonicalSnapshot _ _ _ _ ->
             ( { state | live = False }, [ BeginResync ] )
 
         Api.CanonicalBatch _ _ ->
@@ -289,6 +290,12 @@ invalidationActions envelope invalidation =
                     "observation" ->
                         [ RefetchEntity entity identity, RefreshObservations ]
 
+                    "project" ->
+                        [ RevalidateNavigationSummary entity identity ]
+
+                    "task" ->
+                        [ RevalidateNavigationSummary entity identity ]
+
                     _ ->
                         [ RefetchEntity entity identity ]
     in
@@ -307,10 +314,10 @@ invalidationActions envelope invalidation =
                         taskId ++ ":" ++ dependsOnId
                 in
                 if envelope.entityAction == "deleted" && primaryEntity == "task_dependency" && envelope.entityId == identity then
-                    [ RemoveEntity "task_dependency" identity, RefreshTaskOverview taskId ]
+                    [ RemoveEntity "task_dependency" identity, RevalidateNavigationSummary "task" taskId ]
 
                 else
-                    [ RefreshTaskOverview taskId ]
+                    [ RevalidateNavigationSummary "task" taskId ]
 
             else
                 [ BeginResync ]
@@ -374,10 +381,10 @@ invalidationActions envelope invalidation =
         ( Api.WorkspaceScope _, "readiness", [ entity, identity ] ) ->
             case entity of
                 "task" ->
-                    [ RefreshTaskOverview identity ]
+                    [ RevalidateNavigationSummary entity identity ]
 
                 "project" ->
-                    [ RefreshReadiness entity identity ]
+                    [ RevalidateNavigationSummary entity identity ]
 
                 _ ->
                     [ BeginResync ]
@@ -451,6 +458,9 @@ coalesce actions =
 
                     else
                         "readiness:" ++ kind ++ ":" ++ identity
+
+                RevalidateNavigationSummary kind identity ->
+                    "navigation-summary:" ++ kind ++ ":" ++ identity
 
                 RefreshNextTasks workspace ->
                     "next:" ++ workspace
@@ -583,15 +593,27 @@ coalesce actions =
 
 
 applySnapshot : Scope -> List Api.SnapshotItem -> Result String Snapshot
-applySnapshot scope items =
+applySnapshot scope =
+    applySnapshotProfile scope "full_v1"
+
+
+applySnapshotProfile : Scope -> String -> List Api.SnapshotItem -> Result String Snapshot
+applySnapshotProfile scope profile items =
     let
         permitted kind =
             case scope of
                 Workspace _ ->
-                    List.member kind [ "workspace", "project", "task", "task_dependency", "observation" ]
+                    if profile == "workspace_shell_v1" then
+                        kind == "workspace"
+
+                    else if profile == "full_v1" then
+                        List.member kind [ "workspace", "project", "task", "task_dependency", "observation" ]
+
+                    else
+                        False
 
                 Global ->
-                    List.member kind [ "workspace", "workspace_group" ]
+                    profile == "full_v1" && List.member kind [ "workspace", "workspace_group" ]
 
         insertUnique identity value dictionary =
             if String.isEmpty identity || Dict.member identity dictionary then

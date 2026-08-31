@@ -14,6 +14,12 @@ module Api exposing
     , LinkedMemorySummary
     , Memory
     , MemoryLink
+    , NavigationBranchResponse
+    , NavigationFocusResponse
+    , NavigationSummariesResponse
+    , NavigationSummary(..)
+    , ProjectCardSummary
+    , TaskCardSummary
     , MemoryType(..)
     , NextTaskCandidate
     , Observation
@@ -42,6 +48,7 @@ module Api exposing
     , Task
     , TaskDependencyStatusChange
     , TaskDependencySummary
+    , TaskDependencyPage
     , TaskMutationResult
     , TaskOverview
     , TaskReadinessRollup
@@ -117,10 +124,15 @@ module Api exposing
     , fetchProjectOverview
     , fetchProjects
     , fetchProjectsPage
+    , fetchRootNavigation
+    , fetchNavigationBranch
+    , fetchNavigationFocus
+    , fetchNavigationSummaries
     , fetchSessionContext
     , fetchTask
     , fetchTaskMemories
     , fetchTaskOverview
+    , fetchTaskDependencyPage
     , fetchTasks
     , fetchTasksPage
     , fetchWorkspace
@@ -138,6 +150,12 @@ module Api exposing
     , memoryTypeFromString
     , memoryTypeToString
     , nextTaskCandidateDecoder
+    , navigationBranchDecoder
+    , navigationBranchUrl
+    , navigationFocusDecoder
+    , navigationFocusUrl
+    , navigationSummariesBody
+    , navigationSummariesDecoder
     , observationDecoder
     , observationListUrl
     , observationMatchBody
@@ -161,11 +179,15 @@ module Api exposing
     , subjectKindFromString
     , subjectKindToString
     , taskDecoder
+    , taskDependencyPageDecoder
+    , taskDependencyPageUrl
     , taskMutationResultDecoder
     , taskOverviewDecoder
     , taskStatusFromString
     , taskStatusOrder
     , taskStatusToString
+    , projectFromCardSummary
+    , taskFromCardSummary
     , unifiedSearch
     , unlinkProjectMemory
     , unlinkTaskMemory
@@ -233,6 +255,107 @@ type alias Task =
     , memoryLinkCount : Int
     , createdAt : String
     , updatedAt : String
+    }
+
+
+type alias ProjectCardSummary =
+    { id : String
+    , workspaceId : String
+    , parentId : Maybe String
+    , name : String
+    , status : ProjectStatus
+    , priority : Int
+    , createdAt : String
+    , updatedAt : String
+    , directProjectCount : Int
+    , directTaskCount : Int
+    , hasChildren : Bool
+    , readinessRollup : ProjectReadinessRollup
+    }
+
+
+type alias TaskCardSummary =
+    { id : String
+    , workspaceId : String
+    , projectId : Maybe String
+    , parentId : Maybe String
+    , title : String
+    , status : TaskStatus
+    , priority : Int
+    , dueAt : Maybe String
+    , completedAt : Maybe String
+    , dependencyCount : Int
+    , createdAt : String
+    , updatedAt : String
+    , directSubtaskCount : Int
+    , hasChildren : Bool
+    , readinessRollup : TaskReadinessRollup
+    }
+
+
+-- Navigation is intentionally a card contract.  Existing card rendering still
+-- accepts Project/Task, so materialise only the legacy optional fields with
+-- inert defaults; detail endpoints replace those fields when the user opens a
+-- card instead of making bootstrap fetch every entity body.
+projectFromCardSummary : ProjectCardSummary -> Project
+projectFromCardSummary summary =
+    { id = summary.id
+    , workspaceId = summary.workspaceId
+    , parentId = summary.parentId
+    , name = summary.name
+    , description = Nothing
+    , status = summary.status
+    , priority = summary.priority
+    , createdAt = summary.createdAt
+    , updatedAt = summary.updatedAt
+    }
+
+
+taskFromCardSummary : TaskCardSummary -> Task
+taskFromCardSummary summary =
+    { id = summary.id
+    , workspaceId = summary.workspaceId
+    , projectId = summary.projectId
+    , parentId = summary.parentId
+    , title = summary.title
+    , description = Nothing
+    , status = summary.status
+    , priority = summary.priority
+    , dueAt = summary.dueAt
+    , completedAt = summary.completedAt
+    , dependencyCount = summary.dependencyCount
+    , memoryLinkCount = 0
+    , createdAt = summary.createdAt
+    , updatedAt = summary.updatedAt
+    }
+
+
+type alias NavigationBranchResponse =
+    { workspaceId : String
+    , projects : PaginatedResult ProjectCardSummary
+    , tasks : PaginatedResult TaskCardSummary
+    }
+
+
+type NavigationSummary
+    = NavigationProjectSummary ProjectCardSummary
+    | NavigationTaskSummary TaskCardSummary
+
+
+type alias NavigationFocusResponse =
+    { workspaceId : String
+    , target : NavigationSummary
+    , ancestors : List NavigationSummary
+    , ancestorsTruncated : Bool
+    , nextAncestorOffset : Maybe Int
+    }
+
+
+type alias NavigationSummariesResponse =
+    { projects : List ProjectCardSummary
+    , tasks : List TaskCardSummary
+    , missingProjectIds : List String
+    , missingTaskIds : List String
     }
 
 
@@ -408,6 +531,12 @@ type alias MemoryLink =
 type alias TaskDependencySummary =
     { id : String
     , name : String
+    }
+
+
+type alias TaskDependencyPage =
+    { items : List TaskDependencySummary
+    , hasMore : Bool
     }
 
 
@@ -1197,6 +1326,119 @@ taskDecoder =
         |> required "updated_at" D.string
 
 
+navigationBranchDecoder : Decoder NavigationBranchResponse
+navigationBranchDecoder =
+    D.succeed NavigationBranchResponse
+        |> required "workspace_id" D.string
+        |> required "projects" (boundedPaginatedDecoder 100 projectCardSummaryDecoder)
+        |> required "tasks" (boundedPaginatedDecoder 100 taskCardSummaryDecoder)
+
+
+navigationSummaryDecoder : Decoder NavigationSummary
+navigationSummaryDecoder =
+    D.field "entity_type" D.string
+        |> D.andThen
+            (\entityType ->
+                case entityType of
+                    "project" ->
+                        D.field "summary" projectCardSummaryDecoder |> D.map NavigationProjectSummary
+
+                    "task" ->
+                        D.field "summary" taskCardSummaryDecoder |> D.map NavigationTaskSummary
+
+                    _ ->
+                        D.fail "unknown navigation summary entity_type"
+            )
+
+
+navigationFocusDecoder : Decoder NavigationFocusResponse
+navigationFocusDecoder =
+    D.succeed NavigationFocusResponse
+        |> required "workspace_id" D.string
+        |> required "target" navigationSummaryDecoder
+        |> required "ancestors" (boundedListDecoder 64 navigationSummaryDecoder)
+        |> required "ancestors_truncated" D.bool
+        |> optional "next_ancestor_offset" (D.nullable D.int) Nothing
+        |> D.andThen
+            (\response ->
+                let
+                    summaryWorkspace summary =
+                        case summary of
+                            NavigationProjectSummary project ->
+                                project.workspaceId
+
+                            NavigationTaskSummary task ->
+                                task.workspaceId
+                in
+                if summaryWorkspace response.target /= response.workspaceId || List.any (\summary -> summaryWorkspace summary /= response.workspaceId) response.ancestors || (response.ancestorsTruncated /= (response.nextAncestorOffset /= Nothing)) then
+                    D.fail "navigation focus response has inconsistent workspace or truncation state"
+
+                else
+                    D.succeed response
+            )
+
+
+navigationSummariesDecoder : Decoder NavigationSummariesResponse
+navigationSummariesDecoder =
+    D.map4 NavigationSummariesResponse
+        (D.field "projects" (D.list projectCardSummaryDecoder))
+        (D.field "tasks" (D.list taskCardSummaryDecoder))
+        (D.field "missing_project_ids" (D.list D.string))
+        (D.field "missing_task_ids" (D.list D.string))
+        |> D.andThen
+            (\response ->
+                let
+                    ids =
+                        List.map .id response.projects
+                            ++ List.map .id response.tasks
+                            ++ response.missingProjectIds
+                            ++ response.missingTaskIds
+                in
+                if List.length ids <= 100 && List.length ids == List.length (List.sort ids |> List.foldl (\value unique -> if List.member value unique then unique else value :: unique) []) then
+                    D.succeed response
+
+                else
+                    D.fail "navigation summaries response exceeded its bounded unique ID contract"
+            )
+
+
+projectCardSummaryDecoder : Decoder ProjectCardSummary
+projectCardSummaryDecoder =
+    D.succeed ProjectCardSummary
+        |> required "id" D.string
+        |> required "workspace_id" D.string
+        |> optional "parent_id" (D.nullable D.string) Nothing
+        |> required "name" D.string
+        |> required "status" projectStatusDecoder
+        |> required "priority" D.int
+        |> required "created_at" D.string
+        |> required "updated_at" D.string
+        |> required "direct_project_count" D.int
+        |> required "direct_task_count" D.int
+        |> required "has_children" D.bool
+        |> required "readiness_rollup" projectReadinessRollupDecoder
+
+
+taskCardSummaryDecoder : Decoder TaskCardSummary
+taskCardSummaryDecoder =
+    D.succeed TaskCardSummary
+        |> required "id" D.string
+        |> required "workspace_id" D.string
+        |> optional "project_id" (D.nullable D.string) Nothing
+        |> optional "parent_id" (D.nullable D.string) Nothing
+        |> required "title" D.string
+        |> required "status" taskStatusDecoder
+        |> required "priority" D.int
+        |> optional "due_at" (D.nullable D.string) Nothing
+        |> optional "completed_at" (D.nullable D.string) Nothing
+        |> required "dependency_count" D.int
+        |> required "created_at" D.string
+        |> required "updated_at" D.string
+        |> required "direct_subtask_count" D.int
+        |> required "has_children" D.bool
+        |> required "readiness_rollup" taskReadinessRollupDecoder
+
+
 nextTaskCandidateDecoder : Decoder NextTaskCandidate
 nextTaskCandidateDecoder =
     D.succeed NextTaskCandidate
@@ -1790,7 +2032,7 @@ type CanonicalFrame
     | CanonicalAccessRevoked (Maybe String)
     | CanonicalResyncRequired
     | CanonicalScoped ChangeStreamScope CanonicalFrame
-    | CanonicalSnapshot ChangeStreamScope (List SnapshotItem) String
+    | CanonicalSnapshot ChangeStreamScope (List SnapshotItem) String String
     | CanonicalBatch ChangeStreamScope (List CanonicalFrame)
 
 
@@ -1798,6 +2040,19 @@ type alias SnapshotItem =
     { kind : String
     , data : D.Value
     }
+
+
+snapshotProfileDecoder : Decoder String
+snapshotProfileDecoder =
+    D.string
+        |> D.andThen
+            (\profile ->
+                if profile == "full_v1" || profile == "workspace_shell_v1" then
+                    D.succeed profile
+
+                else
+                    D.fail "unknown snapshot_profile"
+            )
 
 
 type alias ResyncPage =
@@ -2059,10 +2314,15 @@ canonicalTransportDecoder =
                                         (D.field "frames" (nonEmptyListDecoder canonicalWireFrameDecoder))
 
                                 "snapshot" ->
-                                    D.map3 CanonicalSnapshot
+                                    D.map4 CanonicalSnapshot
                                         (D.field "scope" scopeDecoder)
                                         (D.field "items" (D.list snapshotItemDecoder))
                                         (D.field "resume_token" nonEmptyStringDecoder)
+                                        -- Older persisted local transport messages predate the
+                                        -- profile field.  They remain full_v1-compatible; new
+                                        -- shell messages must carry and validate an explicit
+                                        -- profile, so sparse payloads are never inferred.
+                                        (D.oneOf [ D.field "snapshot_profile" snapshotProfileDecoder, D.succeed "full_v1" ])
 
                                 _ ->
                                     D.fail "unknown change-stream transport message"
@@ -2398,10 +2658,73 @@ fetchProjects apiUrl wsId toMsg =
     fetchProjectsPage apiUrl wsId 0 toMsg
 
 
+fetchRootNavigation : String -> String -> String -> (Result Http.Error NavigationBranchResponse -> msg) -> Cmd msg
+fetchRootNavigation apiUrl wsId filterQuery toMsg =
+    fetchNavigationBranch apiUrl wsId "workspace_root" Nothing 0 0 filterQuery toMsg
+
+
+fetchNavigationBranch : String -> String -> String -> Maybe String -> Int -> Int -> String -> (Result Http.Error NavigationBranchResponse -> msg) -> Cmd msg
+fetchNavigationBranch apiUrl wsId parentKind maybeParentId projectOffset taskOffset filterQuery toMsg =
+    Http.get
+        { url = navigationBranchUrl apiUrl wsId parentKind maybeParentId projectOffset taskOffset filterQuery
+        , expect = Http.expectJson toMsg navigationBranchDecoder
+        }
+
+
+navigationBranchUrl : String -> String -> String -> Maybe String -> Int -> Int -> String -> String
+navigationBranchUrl apiUrl wsId parentKind maybeParentId projectOffset taskOffset filterQuery =
+    apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/navigation?parent_kind=" ++ parentKind ++ (maybeParentId |> Maybe.map (\parentId -> "&parent_id=" ++ parentId) |> Maybe.withDefault "") ++ "&project_limit=50&project_offset=" ++ String.fromInt projectOffset ++ "&task_limit=50&task_offset=" ++ String.fromInt taskOffset ++ filterQuery
+
+
+fetchNavigationFocus : String -> String -> String -> String -> Int -> (Result Http.Error NavigationFocusResponse -> msg) -> Cmd msg
+fetchNavigationFocus apiUrl wsId entityType entityId ancestorOffset toMsg =
+    Http.get
+        { url = navigationFocusUrl apiUrl wsId entityType entityId ancestorOffset
+        , expect = Http.expectJson toMsg navigationFocusDecoder
+        }
+
+
+navigationFocusUrl : String -> String -> String -> String -> Int -> String
+navigationFocusUrl apiUrl wsId entityType entityId ancestorOffset =
+    apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/navigation/focus/" ++ entityType ++ "/" ++ entityId ++ "?ancestor_offset=" ++ String.fromInt ancestorOffset
+
+
+fetchNavigationSummaries : String -> String -> List String -> List String -> (Result Http.Error NavigationSummariesResponse -> msg) -> Cmd msg
+fetchNavigationSummaries apiUrl wsId projectIds taskIds toMsg =
+    case navigationSummariesBody projectIds taskIds of
+        Nothing ->
+            Cmd.none
+
+        Just body ->
+            Http.post
+                { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/navigation/summaries"
+                , body = Http.jsonBody body
+                , expect = Http.expectJson toMsg navigationSummariesDecoder
+                }
+
+
+navigationSummariesBody : List String -> List String -> Maybe E.Value
+navigationSummariesBody projectIds taskIds =
+    let
+        ids =
+            projectIds ++ taskIds
+    in
+    if List.length ids > 100 || List.length ids /= List.length (List.sort ids |> List.foldl (\value unique -> if List.member value unique then unique else value :: unique) []) then
+        Nothing
+
+    else
+        Just
+            (E.object
+                [ ( "project_ids", E.list E.string projectIds )
+                , ( "task_ids", E.list E.string taskIds )
+                ]
+            )
+
+
 fetchProjectsPage : String -> String -> Int -> (Result Http.Error (PaginatedResult Project) -> msg) -> Cmd msg
 fetchProjectsPage apiUrl wsId offset toMsg =
     Http.get
-        { url = apiUrl ++ "/api/v1/projects?workspace_id=" ++ wsId ++ "&limit=200&offset=" ++ String.fromInt offset
+        { url = apiUrl ++ "/api/v1/projects?workspace_id=" ++ wsId ++ "&limit=100&offset=" ++ String.fromInt offset
         , expect = Http.expectJson toMsg (paginatedDecoder projectDecoder)
         }
 
@@ -2422,7 +2745,7 @@ fetchTasks apiUrl wsId toMsg =
 fetchTasksPage : String -> String -> Int -> (Result Http.Error (PaginatedResult Task) -> msg) -> Cmd msg
 fetchTasksPage apiUrl wsId offset toMsg =
     Http.get
-        { url = apiUrl ++ "/api/v1/tasks?workspace_id=" ++ wsId ++ "&limit=200&offset=" ++ String.fromInt offset
+        { url = apiUrl ++ "/api/v1/tasks?workspace_id=" ++ wsId ++ "&limit=100&offset=" ++ String.fromInt offset
         , expect = Http.expectJson toMsg (paginatedDecoder taskDecoder)
         }
 
@@ -2998,6 +3321,19 @@ fetchTaskOverview apiUrl taskId toMsg =
         }
 
 
+fetchTaskDependencyPage : String -> String -> Int -> (Result Http.Error TaskDependencyPage -> msg) -> Cmd msg
+fetchTaskDependencyPage apiUrl taskId offset toMsg =
+    Http.get
+        { url = taskDependencyPageUrl apiUrl taskId offset
+        , expect = Http.expectJson toMsg taskDependencyPageDecoder
+        }
+
+
+taskDependencyPageUrl : String -> String -> Int -> String
+taskDependencyPageUrl apiUrl taskId offset =
+    apiUrl ++ "/api/v1/tasks/" ++ taskId ++ "/dependencies?limit=50&offset=" ++ String.fromInt offset
+
+
 fetchProjectOverview : String -> String -> (Result Http.Error ProjectOverview -> msg) -> Cmd msg
 fetchProjectOverview apiUrl projectId toMsg =
     Http.get
@@ -3053,6 +3389,33 @@ taskDependencySummaryDecoder =
     D.succeed TaskDependencySummary
         |> required "id" D.string
         |> required "name" D.string
+
+
+taskDependencyPageDecoder : Decoder TaskDependencyPage
+taskDependencyPageDecoder =
+    D.succeed TaskDependencyPage
+        |> required "items" (boundedListDecoder 100 taskDependencySummaryDecoder)
+        |> required "has_more" D.bool
+
+
+boundedListDecoder : Int -> Decoder a -> Decoder (List a)
+boundedListDecoder maximum itemDecoder =
+    D.list itemDecoder
+        |> D.andThen
+            (\items ->
+                if List.length items <= maximum then
+                    D.succeed items
+
+                else
+                    D.fail "response exceeded its bounded list contract"
+            )
+
+
+boundedPaginatedDecoder : Int -> Decoder a -> Decoder (PaginatedResult a)
+boundedPaginatedDecoder maximum itemDecoder =
+    D.succeed PaginatedResult
+        |> required "items" (boundedListDecoder maximum itemDecoder)
+        |> required "has_more" D.bool
 
 
 workspaceProjectMemoryLinkDecoder : Decoder WorkspaceProjectMemoryLink

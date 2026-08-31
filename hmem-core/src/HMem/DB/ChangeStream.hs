@@ -4,7 +4,7 @@
 module HMem.DB.ChangeStream
   ( ChangeScope(..), ChangeAudience(..), SnapshotToken(..), ResumeToken(..)
   , ChangeStreamError(..), OutboxRecord(..), SnapshotBegin(..), SnapshotPage(..), ReplayPage(..)
-  , beginResync, beginResyncWithStartKey, readSnapshotPage, readSnapshotPageWithTtl, readSnapshotPageWithTtls, readSnapshotPageWithStoredTtls, validateCanonicalResumeToken, replayAndRotateResumeToken, replayUnacknowledgedResumeToken, replacementResumeToken, acknowledgeReplayPage, rebaseResumeTokenAfterHidden
+  , beginResync, beginResyncWithStartKey, beginResyncWithStartKeyAndProfile, readSnapshotPage, readSnapshotPageWithTtl, readSnapshotPageWithTtls, readSnapshotPageWithStoredTtls, validateCanonicalResumeToken, replayAndRotateResumeToken, replayUnacknowledgedResumeToken, replacementResumeToken, acknowledgeReplayPage, rebaseResumeTokenAfterHidden
   , listOutboxAfter, listOutboxScopes, pruneOutboxBefore, cleanupChangeStream
   ) where
 
@@ -30,6 +30,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 
 import HMem.DB.Pool (DBException(..), runSerializableTransaction, runSession, runTransaction)
+import HMem.Types (SnapshotProfile(..), snapshotProfileToText)
 
 data ChangeScope = WorkspaceScope !UUID | GlobalScope deriving stock (Show, Eq, Ord)
 
@@ -51,6 +52,7 @@ data SnapshotBegin = SnapshotBegin
 data SnapshotPage = SnapshotPage
   { snapshotPageItems :: ![Value], snapshotPageHasMore :: !Bool
   , snapshotNextToken :: !(Maybe SnapshotToken), snapshotResumeToken :: !(Maybe ResumeToken)
+  , snapshotProfile :: !SnapshotProfile
   } deriving stock (Show, Eq)
 data ReplayPage = ReplayPage
   { replayPageRecords :: ![OutboxRecord], replayPageResumeToken :: !ResumeToken
@@ -85,7 +87,7 @@ validateCanonicalResumeToken pool scope audience token = runTransaction pool $ d
 beginResync :: Pool Hasql.Connection -> NominalDiffTime -> ChangeScope -> ChangeAudience
   -> Session.Session [Value] -> IO (Either ChangeStreamError SnapshotBegin)
 beginResync pool ttl scope audience materialize =
-  beginResyncInternal pool ttl scope audience Nothing Nothing materialize
+  beginResyncInternal pool ttl scope audience Nothing Nothing FullV1 materialize
 
 -- | Public starts bind an opaque client retry key and requested page size to
 -- one durable session. Retrying the same start after response loss returns the
@@ -93,11 +95,18 @@ beginResync pool ttl scope audience materialize =
 beginResyncWithStartKey :: Pool Hasql.Connection -> NominalDiffTime -> ChangeScope -> ChangeAudience
   -> Text -> Int -> Session.Session [Value] -> IO (Either ChangeStreamError SnapshotBegin)
 beginResyncWithStartKey pool ttl scope audience startKey pageSize materialize =
-  beginResyncInternal pool ttl scope audience (Just (tokenHash startKey)) (Just pageSize) materialize
+  beginResyncWithStartKeyAndProfile pool ttl scope audience startKey pageSize FullV1 materialize
+
+-- | The requested projection is durable session geometry.  A retry with the
+-- same start key must not turn a full snapshot into a shell, or vice versa.
+beginResyncWithStartKeyAndProfile :: Pool Hasql.Connection -> NominalDiffTime -> ChangeScope -> ChangeAudience
+  -> Text -> Int -> SnapshotProfile -> Session.Session [Value] -> IO (Either ChangeStreamError SnapshotBegin)
+beginResyncWithStartKeyAndProfile pool ttl scope audience startKey pageSize profile materialize =
+  beginResyncInternal pool ttl scope audience (Just (tokenHash startKey)) (Just pageSize) profile materialize
 
 beginResyncInternal :: Pool Hasql.Connection -> NominalDiffTime -> ChangeScope -> ChangeAudience
-  -> Maybe ByteString -> Maybe Int -> Session.Session [Value] -> IO (Either ChangeStreamError SnapshotBegin)
-beginResyncInternal pool ttl scope audience startHash pageSize materialize = do
+  -> Maybe ByteString -> Maybe Int -> SnapshotProfile -> Session.Session [Value] -> IO (Either ChangeStreamError SnapshotBegin)
+beginResyncInternal pool ttl scope audience startHash pageSize profile materialize = do
   freshSessionHash <- tokenHash <$> newOpaque "hmem_snapshot_session_v1_"
   (retrySerializable 3 $ do
     let createSnapshot sessionHash epoch watermark = do
@@ -106,7 +115,7 @@ beginResyncInternal pool ttl scope audience startHash pageSize materialize = do
           -- TTL begins after the snapshot is fully materialized. A slow
           -- materializer must not return an already-expired bearer.
           now <- Session.statement () databaseClockStatement
-          Session.statement (sessionHash, scopeName scope, scopeWorkspace scope, audienceKind audience, audienceKey audience, audienceUser audience, epoch, watermark, addUTCTime ttl now, tokenHash raw.unSnapshotToken, fmap fromIntegral pageSize, startHash) insertSnapshotSessionStatement
+          Session.statement (sessionHash, scopeName scope, scopeWorkspace scope, audienceKind audience, audienceKey audience, audienceUser audience, epoch, watermark, addUTCTime ttl now, tokenHash raw.unSnapshotToken, fmap fromIntegral pageSize, snapshotProfileToText profile, startHash) insertSnapshotSessionStatement
           Session.statement (tokenHash raw.unSnapshotToken, sessionHash, 0) insertSnapshotPageTokenStatement
           forM_ (zip [0 :: Int64 ..] items) $ \(ordinal, item) ->
             Session.statement (sessionHash, ordinal, item) insertSnapshotItemStatement
@@ -125,8 +134,8 @@ beginResyncInternal pool ttl scope audience startHash pageSize materialize = do
             Nothing -> pure Nothing
             Just keyHash -> Session.statement (keyHash, scopeName scope, scopeWorkspace scope, audienceKind audience, audienceKey audience, audienceUser audience) lookupIdempotentStartStatement
           case existing of
-            Just (sessionHash, existingEpoch, existingWatermark, expires, storedPageSize)
-              | expires > now && storedPageSize /= fmap fromIntegral pageSize -> pure (Left SnapshotOutOfOrder)
+            Just (sessionHash, existingEpoch, existingWatermark, expires, storedPageSize, storedProfile)
+              | expires > now && (storedPageSize /= fmap fromIntegral pageSize || storedProfile /= snapshotProfileToText profile) -> pure (Left SnapshotOutOfOrder)
               | expires > now -> pure (Right (SnapshotBegin (snapshotTokenForSession sessionHash) existingWatermark existingEpoch))
               | otherwise -> do
                   -- Expired retry state must not permanently reserve an opaque
@@ -219,8 +228,8 @@ cachedSnapshotPage :: StoredSnapshot -> SnapshotToken -> Int64 -> Session.Sessio
 cachedSnapshotPage session token endOrdinal = do
   page <- Session.statement (session.snapshotHash, session.snapshotPageStart, endOrdinal) snapshotRangeStatement
   if session.snapshotPageTerminal
-    then pure $ Right $ SnapshotPage page False Nothing (Just (ResumeToken (resumeForSnapshot token.unSnapshotToken)))
-    else pure $ Right $ SnapshotPage page True (Just (nextSnapshotToken token)) Nothing
+    then pure $ Right $ SnapshotPage page False Nothing (Just (ResumeToken (resumeForSnapshot token.unSnapshotToken))) session.snapshotStoredProfile
+    else pure $ Right $ SnapshotPage page True (Just (nextSnapshotToken token)) Nothing session.snapshotStoredProfile
 
 materializeSnapshotPage :: UTCTime -> NominalDiffTime -> Int64 -> StoredSnapshot -> SnapshotToken -> Int32
   -> Session.Session (Either ChangeStreamError SnapshotPage)
@@ -233,13 +242,13 @@ materializeSnapshotPage now ttl epoch session token limit = do
     let next = nextSnapshotToken token
     Session.statement (pageHash, endOrdinal, session.snapshotHash) advanceSnapshotPageStatement
     Session.statement (tokenHash next.unSnapshotToken, session.snapshotHash, endOrdinal) insertSnapshotPageTokenStatement
-    pure $ Right $ SnapshotPage page True (Just next) Nothing
+    pure $ Right $ SnapshotPage page True (Just next) Nothing session.snapshotStoredProfile
   else do
     let resume = ResumeToken (resumeForSnapshot token.unSnapshotToken)
     Session.statement (tokenHash resume.unResumeToken, session.snapshotStoredScope, session.snapshotStoredWorkspace, session.snapshotStoredAudienceKind, session.snapshotStoredAudienceKey, session.snapshotStoredAudienceUser, epoch, session.snapshotWatermark, addUTCTime ttl now, Just session.snapshotHash) insertResumeStatement
     Session.statement (pageHash, endOrdinal, session.snapshotHash) terminalSnapshotPageStatement
     Session.statement (tokenHash resume.unResumeToken, session.snapshotHash) terminalSnapshotStatement
-    pure $ Right $ SnapshotPage page False Nothing (Just resume)
+    pure $ Right $ SnapshotPage page False Nothing (Just resume) session.snapshotStoredProfile
 
 -- | A replay response and its replacement bearer are one transaction: the old
 -- token is locked, scanned through a fixed high-water mark, then superseded
@@ -391,7 +400,11 @@ data StoredSnapshot = StoredSnapshot
   { snapshotStoredScope :: !Text, snapshotStoredWorkspace :: !(Maybe UUID)
   , snapshotStoredAudienceKind :: !Text, snapshotStoredAudienceKey :: !Text, snapshotStoredAudienceUser :: !(Maybe UUID)
   , snapshotEpoch :: !Int64, snapshotWatermark :: !Int64, snapshotExpires :: !UTCTime
-  , snapshotHash :: !ByteString, snapshotPageStart :: !Int64, snapshotPageEnd :: !(Maybe Int64), snapshotPageTerminal :: !Bool, snapshotPageSize :: !(Maybe Int32) }
+  , snapshotHash :: !ByteString, snapshotPageStart :: !Int64, snapshotPageEnd :: !(Maybe Int64), snapshotPageTerminal :: !Bool, snapshotPageSize :: !(Maybe Int32), snapshotStoredProfile :: !SnapshotProfile }
+
+decodeSnapshotProfile :: Text -> SnapshotProfile
+decodeSnapshotProfile "workspace_shell_v1" = WorkspaceShellV1
+decodeSnapshotProfile _ = FullV1
 sameSession :: ChangeScope -> ChangeAudience -> StoredSnapshot -> Bool
 sameSession scope audience s =
   s.snapshotStoredScope == scopeName scope
@@ -488,29 +501,29 @@ authorizeStatement = Statement.Statement
   "SELECT CASE WHEN $4 THEN true WHEN $1 = 'global' THEN EXISTS (SELECT 1 FROM users WHERE id = $3 AND disabled_at IS NULL AND is_superadmin) ELSE EXISTS (SELECT 1 FROM users u JOIN workspaces w ON w.id = $2 WHERE u.id = $3 AND u.disabled_at IS NULL AND w.deleted_at IS NULL AND (u.is_superadmin OR EXISTS (SELECT 1 FROM workspace_memberships wm WHERE wm.workspace_id = w.id AND wm.user_id = u.id))) END"
   (contramap (\(a,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,b,_,_) -> b) (Enc.param (Enc.nullable Enc.uuid)) <> contramap (\(_,_,c,_) -> c) (Enc.param (Enc.nullable Enc.uuid)) <> contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nonNullable Enc.bool)))
   (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True
-insertSnapshotSessionStatement :: Statement.Statement (ByteString, Text, Maybe UUID, Text, Text, Maybe UUID, Int64, Int64, UTCTime, ByteString, Maybe Int32, Maybe ByteString) ()
+insertSnapshotSessionStatement :: Statement.Statement (ByteString, Text, Maybe UUID, Text, Text, Maybe UUID, Int64, Int64, UTCTime, ByteString, Maybe Int32, Text, Maybe ByteString) ()
 insertSnapshotSessionStatement = Statement.Statement
-  "INSERT INTO change_stream_snapshot_sessions(session_hash, scope, workspace_id, audience_kind, audience_key, audience_user_id, authorization_epoch, high_watermark, expires_at, page_token_hash, page_size, start_idempotency_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)"
-  (contramap (\(a,_,_,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.bytea)) <> contramap (\(_,b,_,_,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,c,_,_,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.uuid)) <> contramap (\(_,_,_,d,_,_,_,_,_,_,_,_) -> d) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,_,_,e,_,_,_,_,_,_,_) -> e) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,_,_,_,f,_,_,_,_,_,_) -> f) (Enc.param (Enc.nullable Enc.uuid)) <> contramap (\(_,_,_,_,_,_,g,_,_,_,_,_) -> g) (Enc.param (Enc.nonNullable Enc.int8)) <> contramap (\(_,_,_,_,_,_,_,h,_,_,_,_) -> h) (Enc.param (Enc.nonNullable Enc.int8)) <> contramap (\(_,_,_,_,_,_,_,_,i,_,_,_) -> i) (Enc.param (Enc.nonNullable Enc.timestamptz)) <> contramap (\(_,_,_,_,_,_,_,_,_,j,_,_) -> j) (Enc.param (Enc.nonNullable Enc.bytea)) <> contramap (\(_,_,_,_,_,_,_,_,_,_,k,_) -> k) (Enc.param (Enc.nullable Enc.int4)) <> contramap (\(_,_,_,_,_,_,_,_,_,_,_,l) -> l) (Enc.param (Enc.nullable Enc.bytea))) Dec.noResult True
+  "INSERT INTO change_stream_snapshot_sessions(session_hash, scope, workspace_id, audience_kind, audience_key, audience_user_id, authorization_epoch, high_watermark, expires_at, page_token_hash, page_size, snapshot_profile, start_idempotency_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)"
+  (contramap (\(a,_,_,_,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.bytea)) <> contramap (\(_,b,_,_,_,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,c,_,_,_,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.uuid)) <> contramap (\(_,_,_,d,_,_,_,_,_,_,_,_,_) -> d) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,_,_,e,_,_,_,_,_,_,_,_) -> e) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,_,_,_,f,_,_,_,_,_,_,_) -> f) (Enc.param (Enc.nullable Enc.uuid)) <> contramap (\(_,_,_,_,_,_,g,_,_,_,_,_,_) -> g) (Enc.param (Enc.nonNullable Enc.int8)) <> contramap (\(_,_,_,_,_,_,_,h,_,_,_,_,_) -> h) (Enc.param (Enc.nonNullable Enc.int8)) <> contramap (\(_,_,_,_,_,_,_,_,i,_,_,_,_) -> i) (Enc.param (Enc.nonNullable Enc.timestamptz)) <> contramap (\(_,_,_,_,_,_,_,_,_,j,_,_,_) -> j) (Enc.param (Enc.nonNullable Enc.bytea)) <> contramap (\(_,_,_,_,_,_,_,_,_,_,k,_,_) -> k) (Enc.param (Enc.nullable Enc.int4)) <> contramap (\(_,_,_,_,_,_,_,_,_,_,_,l,_) -> l) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,_,_,_,_,_,_,_,_,_,_,m) -> m) (Enc.param (Enc.nullable Enc.bytea))) Dec.noResult True
 insertSnapshotItemStatement :: Statement.Statement (ByteString, Int64, Value) ()
 insertSnapshotItemStatement = Statement.Statement "INSERT INTO change_stream_snapshot_items(session_hash, ordinal, item) VALUES ($1,$2,$3)"
   (contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.bytea)) <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.int8)) <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.jsonb))) Dec.noResult True
 lookupSnapshotStatement :: Statement.Statement ByteString (Maybe StoredSnapshot)
 lookupSnapshotStatement = Statement.Statement
-  "SELECT s.scope, s.workspace_id, s.audience_kind, s.audience_key, s.audience_user_id, s.authorization_epoch, s.high_watermark, s.expires_at, s.session_hash, p.start_ordinal, p.end_ordinal, p.terminal, s.page_size FROM change_stream_snapshot_page_tokens p JOIN change_stream_snapshot_sessions s ON s.session_hash = p.session_hash WHERE p.token_hash = $1 FOR UPDATE OF s, p"
+  "SELECT s.scope, s.workspace_id, s.audience_kind, s.audience_key, s.audience_user_id, s.authorization_epoch, s.high_watermark, s.expires_at, s.session_hash, p.start_ordinal, p.end_ordinal, p.terminal, s.page_size, s.snapshot_profile FROM change_stream_snapshot_page_tokens p JOIN change_stream_snapshot_sessions s ON s.session_hash = p.session_hash WHERE p.token_hash = $1 FOR UPDATE OF s, p"
   (Enc.param (Enc.nonNullable Enc.bytea))
-  (Dec.rowMaybe (StoredSnapshot <$> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nullable Dec.uuid) <*> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nullable Dec.uuid) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.timestamptz) <*> Dec.column (Dec.nonNullable Dec.bytea) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.bool) <*> Dec.column (Dec.nullable Dec.int4))) True
+  (Dec.rowMaybe (StoredSnapshot <$> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nullable Dec.uuid) <*> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nullable Dec.uuid) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.timestamptz) <*> Dec.column (Dec.nonNullable Dec.bytea) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.bool) <*> Dec.column (Dec.nullable Dec.int4) <*> (decodeSnapshotProfile <$> Dec.column (Dec.nonNullable Dec.text)))) True
 lookupSnapshotIdentityStatement :: Statement.Statement ByteString (Maybe StoredSnapshot)
 lookupSnapshotIdentityStatement = Statement.Statement
-  "SELECT s.scope, s.workspace_id, s.audience_kind, s.audience_key, s.audience_user_id, s.authorization_epoch, s.high_watermark, s.expires_at, s.session_hash, p.start_ordinal, p.end_ordinal, p.terminal, s.page_size FROM change_stream_snapshot_page_tokens p JOIN change_stream_snapshot_sessions s ON s.session_hash = p.session_hash WHERE p.token_hash = $1"
+  "SELECT s.scope, s.workspace_id, s.audience_kind, s.audience_key, s.audience_user_id, s.authorization_epoch, s.high_watermark, s.expires_at, s.session_hash, p.start_ordinal, p.end_ordinal, p.terminal, s.page_size, s.snapshot_profile FROM change_stream_snapshot_page_tokens p JOIN change_stream_snapshot_sessions s ON s.session_hash = p.session_hash WHERE p.token_hash = $1"
   (Enc.param (Enc.nonNullable Enc.bytea))
-  (Dec.rowMaybe (StoredSnapshot <$> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nullable Dec.uuid) <*> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nullable Dec.uuid) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.timestamptz) <*> Dec.column (Dec.nonNullable Dec.bytea) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.bool) <*> Dec.column (Dec.nullable Dec.int4))) True
+  (Dec.rowMaybe (StoredSnapshot <$> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nullable Dec.uuid) <*> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nonNullable Dec.text) <*> Dec.column (Dec.nullable Dec.uuid) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.timestamptz) <*> Dec.column (Dec.nonNullable Dec.bytea) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.bool) <*> Dec.column (Dec.nullable Dec.int4) <*> (decodeSnapshotProfile <$> Dec.column (Dec.nonNullable Dec.text)))) True
 
-lookupIdempotentStartStatement :: Statement.Statement (ByteString, Text, Maybe UUID, Text, Text, Maybe UUID) (Maybe (ByteString, Int64, Int64, UTCTime, Maybe Int32))
+lookupIdempotentStartStatement :: Statement.Statement (ByteString, Text, Maybe UUID, Text, Text, Maybe UUID) (Maybe (ByteString, Int64, Int64, UTCTime, Maybe Int32, Text))
 lookupIdempotentStartStatement = Statement.Statement
-  "SELECT session_hash, authorization_epoch, high_watermark, expires_at, page_size FROM change_stream_snapshot_sessions WHERE start_idempotency_hash=$1 AND scope=$2 AND workspace_id IS NOT DISTINCT FROM $3 AND audience_kind=$4 AND audience_key=$5 AND audience_user_id IS NOT DISTINCT FROM $6 FOR UPDATE"
+  "SELECT session_hash, authorization_epoch, high_watermark, expires_at, page_size, snapshot_profile FROM change_stream_snapshot_sessions WHERE start_idempotency_hash=$1 AND scope=$2 AND workspace_id IS NOT DISTINCT FROM $3 AND audience_kind=$4 AND audience_key=$5 AND audience_user_id IS NOT DISTINCT FROM $6 FOR UPDATE"
   (contramap (\(a,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.bytea)) <> contramap (\(_,b,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,c,_,_,_) -> c) (Enc.param (Enc.nullable Enc.uuid)) <> contramap (\(_,_,_,d,_,_) -> d) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,_,_,e,_) -> e) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,_,_,_,f) -> f) (Enc.param (Enc.nullable Enc.uuid)))
-  (Dec.rowMaybe ((,,,,) <$> Dec.column (Dec.nonNullable Dec.bytea) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.timestamptz) <*> Dec.column (Dec.nullable Dec.int4))) True
+  (Dec.rowMaybe ((,,,,,) <$> Dec.column (Dec.nonNullable Dec.bytea) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.timestamptz) <*> Dec.column (Dec.nullable Dec.int4) <*> Dec.column (Dec.nonNullable Dec.text))) True
 deleteSnapshotSessionStatement :: Statement.Statement ByteString ()
 deleteSnapshotSessionStatement = Statement.Statement
   "DELETE FROM change_stream_snapshot_sessions WHERE session_hash = $1"

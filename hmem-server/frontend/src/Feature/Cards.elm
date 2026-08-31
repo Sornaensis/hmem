@@ -25,6 +25,7 @@ module Feature.Cards exposing
 import Api
 import Char
 import Dict
+import Feature.DataLoading
 import Feature.AuditLog
 import Feature.Dependencies
 import Feature.DragDrop
@@ -38,6 +39,7 @@ import Html.Events exposing (..)
 import Html.Keyed as Keyed
 import Json.Decode as Decode
 import Ports exposing (copyToClipboard)
+import Set
 import Toast exposing (addToast)
 import Types exposing (..)
 
@@ -108,16 +110,43 @@ update msg model =
                 newExpanded =
                     not current
 
-                fetchDepCmd =
-                    if newExpanded && Dict.member cardId model.tasks && not (hasTaskDependencyData model cardId) then
-                        Api.fetchTaskOverview model.flags.apiUrl cardId (GotTaskDependencies cardId)
+                branchKind =
+                    if Dict.member cardId model.projects then
+                        Just "project"
+
+                    else if Dict.member cardId model.tasks then
+                        Just "task"
 
                     else
-                        Cmd.none
+                        Nothing
 
-                fetchProjectOverviewCmd =
-                    if newExpanded && Dict.member cardId model.projects && Dict.get cardId model.dependencies.projectReadinessRollups == Nothing && not model.dataLoading.cardHydrationLoaded then
-                        Api.fetchProjectOverview model.flags.apiUrl cardId (GotProjectOverview cardId)
+                branchKey =
+                    branchKind |> Maybe.map (\kind -> kind ++ ":" ++ cardId)
+
+                shouldFetchBranch =
+                    newExpanded
+                        && (branchKey
+                                |> Maybe.map
+                                    (\key ->
+                                        case Dict.get key model.dataLoading.loadedNavigationBranches of
+                                            Nothing ->
+                                                True
+
+                                            Just state ->
+                                                not state.inFlight && not state.succeeded
+                                    )
+                                |> Maybe.withDefault False
+                           )
+
+                fetchDepCmd =
+                    if newExpanded && Dict.member cardId model.tasks && not (hasTaskDependencyData model cardId) then
+                        case model.selectedWorkspaceId of
+                            Just workspaceId ->
+                                Api.fetchTaskDependencyPage model.flags.apiUrl cardId 0
+                                    (GotTaskDependencyPage cardId workspaceId model.sessionRequestEpoch model.dependencies.nextTaskDependencyRequestGeneration 0)
+
+                            Nothing ->
+                                Cmd.none
 
                     else
                         Cmd.none
@@ -167,18 +196,62 @@ update msg model =
                                 model.cards.projectNextTaskDiagnosticsErrors
                     }
 
+                updatedDependencies =
+                    if newExpanded && Dict.member cardId model.tasks && not (hasTaskDependencyData model cardId) then
+                        let
+                            dependencies =
+                                model.dependencies
+                        in
+                        case model.selectedWorkspaceId of
+                            Just workspaceId ->
+                                let
+                                    request =
+                                        { workspaceId = workspaceId
+                                        , sessionEpoch = model.sessionRequestEpoch
+                                        , offset = 0
+                                        , generation = dependencies.nextTaskDependencyRequestGeneration
+                                        }
+                                in
+                                { dependencies
+                                    | taskDependencyLoading = Dict.insert cardId True dependencies.taskDependencyLoading
+                                    , taskDependencyRequests = Dict.insert cardId request dependencies.taskDependencyRequests
+                                    , nextTaskDependencyRequestGeneration = request.generation + 1
+                                }
+
+                            Nothing ->
+                                dependencies
+
+                    else
+                        model.dependencies
+
                 currentEditing =
                     model.editing
 
                 updatedEditing =
                     { currentEditing | editState = Nothing }
             in
-            ( { model
-                | cards = updatedCards
-                , editing = updatedEditing
-              }
-            , Cmd.batch [ fetchDepCmd, fetchProjectOverviewCmd, fetchProjectNextTasksCmd ]
+            let
+                updatedModel =
+                    { model | cards = updatedCards, editing = updatedEditing, dependencies = updatedDependencies }
+
+                ( branchModel, branchCmd ) =
+                    if shouldFetchBranch then
+                        case ( branchKind, model.selectedWorkspaceId ) of
+                            ( Just kind, Just workspaceId ) ->
+                                Feature.DataLoading.beginNavigationBranch kind workspaceId (Just cardId) updatedModel
+
+                            _ ->
+                                ( updatedModel, Cmd.none )
+
+                    else
+                        ( updatedModel, Cmd.none )
+            in
+            ( branchModel
+            , Cmd.batch [ fetchDepCmd, fetchProjectNextTasksCmd, branchCmd ]
             )
+
+        LoadNavigationBranchPage parentKind parentId entityKind ->
+            Feature.DataLoading.beginNavigationBranchPage parentKind parentId entityKind model
 
         RefreshProjectNextTasks projectId ->
             let
@@ -271,8 +344,45 @@ update msg model =
                     updateCardsModel
                         (\records -> { records | collapsedNodes = Dict.insert nodeId (not current) records.collapsedNodes })
                         model
+
+                -- A branch is loaded only when a node is opened and no
+                -- response (successful or in-flight) exists for that branch.
+                -- The DataLoading merge is ID based, so this never discards
+                -- cards returned by a sibling branch.
+                ( branchModel, loadBranch ) =
+                    if current then
+                        case model.selectedWorkspaceId of
+                            Just workspaceId ->
+                                if String.startsWith "proj-" nodeId then
+                                    let
+                                        projectId = String.dropLeft 5 nodeId
+                                    in
+                                    if Dict.member ("project:" ++ projectId) model.dataLoading.loadedNavigationBranches then
+                                        ( newModel, Cmd.none )
+
+                                    else
+                                        Feature.DataLoading.beginNavigationBranch "project" workspaceId (Just projectId) newModel
+
+                                else if String.startsWith "task-" nodeId then
+                                    let
+                                        taskId = String.dropLeft 5 nodeId
+                                    in
+                                    if Dict.member ("task:" ++ taskId) model.dataLoading.loadedNavigationBranches then
+                                        ( newModel, Cmd.none )
+
+                                    else
+                                        Feature.DataLoading.beginNavigationBranch "task" workspaceId (Just taskId) newModel
+
+                                else
+                                    ( newModel, Cmd.none )
+
+                            Nothing ->
+                                ( newModel, Cmd.none )
+
+                    else
+                        ( newModel, Cmd.none )
             in
-            ( newModel, saveFiltersCmd newModel )
+            ( branchModel, Cmd.batch [ saveFiltersCmd branchModel, loadBranch ] )
 
         ExpandAllNodes ->
             let
@@ -921,11 +1031,13 @@ viewProjectsTree wsId model =
             model.projects
                 |> Dict.values
                 |> List.filter (\p -> p.workspaceId == wsId)
+                |> List.filter (\p -> not model.dataLoading.navigationVisibilityActive || Set.member p.id model.dataLoading.navigationVisibleProjectIds)
 
         wsTasks =
             model.tasks
                 |> Dict.values
                 |> List.filter (\t -> t.workspaceId == wsId)
+                |> List.filter (\t -> not model.dataLoading.navigationVisibilityActive || Set.member t.id model.dataLoading.navigationVisibleTaskIds)
 
         query =
             String.toLower (String.trim model.search.query)
@@ -935,6 +1047,13 @@ viewProjectsTree wsId model =
 
         hasTreeCriteria =
             treeCriteriaActive query model
+
+        {- Navigation is filtered by the server because a card summary does not
+           carry descriptions or unloaded descendants.  Re-evaluating the
+           predicate locally would hide a retained ancestor/deep description
+           match.  Legacy/full data keeps the old client-side behaviour. -}
+        applyLocalTreeCriteria =
+            hasTreeCriteria && not model.dataLoading.navigationVisibilityActive
 
         projectStatusGate =
             projectPassesStatusFilter model
@@ -986,7 +1105,7 @@ viewProjectsTree wsId model =
 
                                 visibleRootTasks =
                                     rootTasks
-                                        |> (if hasTreeCriteria then
+                                        |> (if applyLocalTreeCriteria then
                                                 visibleTaskTreeForCriteria query hasSearch taskPassesFilters wsTasks
 
                                             else
@@ -1004,7 +1123,7 @@ viewProjectsTree wsId model =
 
                                 visibleRootProjects =
                                     rootProjects
-                                        |> (if hasTreeCriteria then
+                                        |> (if applyLocalTreeCriteria then
                                                 List.filter (projectTreeMatchesCriteria query hasSearch projectStatusGate wsProjects wsTasks projectPassesFilters taskPassesFilters)
 
                                             else
@@ -1018,7 +1137,7 @@ viewProjectsTree wsId model =
 
                                 visibleOrphans =
                                     orphanTasks
-                                        |> (if hasTreeCriteria then
+                                        |> (if applyLocalTreeCriteria then
                                                 visibleTaskTreeForCriteria query hasSearch taskPassesFilters wsTasks
 
                                             else
@@ -1045,7 +1164,7 @@ viewProjectsTree wsId model =
                 [ ( "empty-state"
                   , div [ class "empty-state" ]
                         [ text
-                            (if hasTreeCriteria then
+                            (if applyLocalTreeCriteria then
                                 "No projects or tasks match the current filters."
 
                              else
@@ -1076,6 +1195,9 @@ viewProjectNode allProjects model depth project hasSearch query =
         hasTreeCriteria =
             treeCriteriaActive query model
 
+        applyLocalTreeCriteria =
+            hasTreeCriteria && not model.dataLoading.navigationVisibilityActive
+
         projectStatusGate =
             projectPassesStatusFilter model
 
@@ -1092,7 +1214,7 @@ viewProjectNode allProjects model depth project hasSearch query =
 
         visibleChildren =
             children
-                |> (if hasTreeCriteria then
+                |> (if applyLocalTreeCriteria then
                         List.filter (projectTreeMatchesCriteria query hasSearch projectStatusGate allProjects allTasks projectPassesFilters taskPassesFilters)
 
                     else
@@ -1100,7 +1222,11 @@ viewProjectNode allProjects model depth project hasSearch query =
                    )
 
         hasChildren =
-            not (List.isEmpty children)
+            (Dict.get project.id model.dataLoading.projectCardSummaries
+                |> Maybe.map .hasChildren
+                |> Maybe.withDefault False
+            )
+                || not (List.isEmpty children)
 
         collapsed =
             isCollapsed model ("proj-" ++ project.id)
@@ -1113,7 +1239,7 @@ viewProjectNode allProjects model depth project hasSearch query =
 
         visibleTasks =
             projectTasks
-                |> (if hasTreeCriteria then
+                |> (if applyLocalTreeCriteria then
                         visibleTaskTreeForCriteria query hasSearch taskPassesFilters allTasks
 
                     else
@@ -1347,9 +1473,11 @@ viewProjectNode allProjects model depth project hasSearch query =
                               )
                             ]
 
-                        else
-                            []
+                         else
+                             []
                        )
+                    ++ viewBranchLoadMore model "project" project.id "project"
+                    ++ viewBranchLoadMore model "project" project.id "task"
                 )
 
           else
@@ -1669,9 +1797,14 @@ viewTaskCard showProject model task =
                 |> Maybe.map .name
 
         hasChildren =
-            model.tasks
-                |> Dict.values
-                |> List.any (\t -> t.parentId == Just task.id)
+            (Dict.get task.id model.dataLoading.taskCardSummaries
+                |> Maybe.map .hasChildren
+                |> Maybe.withDefault False
+            )
+                || (model.tasks
+                        |> Dict.values
+                        |> List.any (\t -> t.parentId == Just task.id)
+               )
 
         collapsed =
             isCollapsed model ("task-" ++ task.id)
@@ -1737,11 +1870,14 @@ viewTaskCard showProject model task =
         hasTreeCriteria =
             treeCriteriaActive query model
 
+        applyLocalTreeCriteria =
+            hasTreeCriteria && not model.dataLoading.navigationVisibilityActive
+
         taskPassesFilters =
             taskPassesCurrentFilters model
 
         shownForMatchingSubtask =
-            hasTreeCriteria && taskShownForMatchingDescendant query hasSearch taskPassesFilters allTasks task
+            applyLocalTreeCriteria && taskShownForMatchingDescendant query hasSearch taskPassesFilters allTasks task
 
         openDescendantTaskCount =
             childTasksForTask
@@ -1954,7 +2090,7 @@ viewTaskCard showProject model task =
             let
                 childTasks =
                     childTasksForTask
-                        |> (if hasTreeCriteria then
+                        |> (if applyLocalTreeCriteria then
                                 visibleTaskTreeForCriteria query hasSearch taskPassesFilters allTasks
 
                             else
@@ -1963,11 +2099,62 @@ viewTaskCard showProject model task =
                         |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
             in
             Keyed.node "div" [ class "tree-children" ]
-                (viewTasksWithZones model "task-subtasks" task.projectId (Just task.id) childTasks)
+                (viewTasksWithZones model "task-subtasks" task.projectId (Just task.id) childTasks
+                    ++ viewBranchLoadMore model "task" task.id "task"
+                )
 
           else
             text ""
         ]
+
+
+{-| A branch page is loaded only after an explicit user action.  The server
+caps every response at 100, while the browser asks for 50 to keep the rendered
+tree bounded for the next task. -}
+viewBranchLoadMore : Model -> String -> String -> String -> List ( String, Html Msg )
+viewBranchLoadMore model parentKind parentId entityKind =
+    let
+        state =
+            Dict.get (parentKind ++ ":" ++ parentId) model.dataLoading.loadedNavigationBranches
+
+        hasMore =
+            state
+                |> Maybe.map
+                    (\value ->
+                        if entityKind == "project" then
+                            value.projectHasMore
+
+                        else
+                            value.taskHasMore
+                    )
+                |> Maybe.withDefault False
+
+        loading =
+            state |> Maybe.map .inFlight |> Maybe.withDefault False
+    in
+    if hasMore || loading then
+        [ ( "load-more-" ++ entityKind ++ "-" ++ parentId
+          , button
+                [ class "navigation-load-more"
+                , disabled loading
+                , onClick (LoadNavigationBranchPage parentKind parentId entityKind)
+                ]
+                [ text
+                    (if loading then
+                        "Loading more…"
+
+                     else if entityKind == "project" then
+                        "Load more projects"
+
+                     else
+                        "Load more tasks"
+                    )
+                ]
+          )
+        ]
+
+    else
+        []
 
 
 viewDeleteConfirmModal : Model -> Html Msg

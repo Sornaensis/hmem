@@ -344,6 +344,87 @@ function compareTimestampDesc(left, right) {
   return compareText(right, left)
 }
 
+// Keep the perf transport's navigation projection in lockstep with the SQL
+// ordering in HMem.DB.Project/Task.  Alphabetical lifecycle ordering looks
+// plausible for this deterministic fixture but does not exercise the actual
+// offset-page contract.
+const PROJECT_STATUS_RANK = new Map([['active', 0], ['paused', 1], ['completed', 2]])
+const TASK_STATUS_RANK = new Map([['todo', 0], ['in_progress', 1], ['blocked', 2], ['done', 3]])
+
+function projectStatusRank(status) {
+  return PROJECT_STATUS_RANK.get(status) ?? 3
+}
+
+function taskStatusRank(status) {
+  return TASK_STATUS_RANK.get(status) ?? 4
+}
+
+function navigationPage(items, offset, limit) {
+  const safeOffset = Math.min(100000, Math.max(0, Number(offset) || 0))
+  const safeLimit = Math.min(100, Math.max(1, Number(limit) || 50))
+  return { items: items.slice(safeOffset, safeOffset + safeLimit), has_more: safeOffset + safeLimit < items.length }
+}
+
+function navigationTextMatches(entity, query, fields) {
+  const needle = String(query || '').trim().toLowerCase()
+  return needle === '' || fields.some(field => String(entity[field] || '').toLowerCase().includes(needle))
+}
+
+function priorityMatches(entity, mode, value) {
+  if (mode == null || mode === 'any') return true
+  const expected = Number(value)
+  return Number.isInteger(expected)
+    && ((mode === 'exact' && entity.priority === expected)
+      || (mode === 'above' && entity.priority > expected)
+      || (mode === 'below' && entity.priority < expected))
+}
+
+function statusMatches(entity, statuses) {
+  return !Array.isArray(statuses) || statuses.length === 0 || statuses.includes(entity.status)
+}
+
+function projectFilterMatches(project, filters) {
+  return statusMatches(project, filters.projectStatuses)
+    && priorityMatches(project, filters.priorityMode, filters.priorityValue)
+    && navigationTextMatches(project, filters.query, ['name', 'description'])
+}
+
+function taskFilterMatches(task, filters) {
+  return statusMatches(task, filters.taskStatuses)
+    && priorityMatches(task, filters.priorityMode, filters.priorityValue)
+    && navigationTextMatches(task, filters.query, ['title', 'description'])
+}
+
+function descendantProjects(fixture, projectId) {
+  const ids = new Set(descendantIds(fixture.projects, projectId))
+  return fixture.projects.filter(project => ids.has(project.id))
+}
+
+function descendantProjectTasks(fixture, projectId) {
+  const projectIds = new Set(descendantIds(fixture.projects, projectId))
+  const rootIds = fixture.tasks.filter(task => task.project_id != null && projectIds.has(task.project_id)).map(task => task.id)
+  const ids = new Set(rootIds.flatMap(taskId => descendantIds(fixture.tasks, taskId)))
+  return fixture.tasks.filter(task => ids.has(task.id))
+}
+
+function projectBranchMatches(fixture, project, filters) {
+  // The SQL has an outer project lifecycle/priority gate before descendant
+  // retention; preserve that subtlety here.
+  if (!statusMatches(project, filters.projectStatuses) || !priorityMatches(project, filters.priorityMode, filters.priorityValue)) return false
+  const showOnly = filters.showOnly || 'all'
+  const projectMatch = showOnly !== 'tasks'
+    && descendantProjects(fixture, project.id).some(candidate => projectFilterMatches(candidate, filters))
+  const taskMatch = showOnly !== 'projects'
+    && descendantProjectTasks(fixture, project.id).some(candidate => taskFilterMatches(candidate, filters))
+  return projectMatch || taskMatch
+}
+
+function taskBranchMatches(fixture, task, filters) {
+  return descendantIds(fixture.tasks, task.id)
+    .map(id => fixture.tasks.find(candidate => candidate.id === id))
+    .some(candidate => candidate && taskFilterMatches(candidate, filters))
+}
+
 export function queryProjects(fixture, options = {}) {
   let values = fixture.projects
   if (options.status) values = values.filter(project => project.status === options.status)
@@ -546,6 +627,101 @@ export function snapshotItems(fixture) {
   )
 }
 
+// The production bounded bootstrap explicitly requests this profile.  Keep the
+// full snapshot helper above untouched: baseline.v1.json records the historical
+// full_v1 behaviour and must remain comparable evidence.
+export function workspaceShellSnapshotItems(fixture) {
+  return [{ schema_version: 1, kind: 'workspace', data: fixture.workspace }]
+}
+
+function projectCardSummary(fixture, project) {
+  const directProjects = fixture.projects.filter(candidate => candidate.parent_id === project.id).length
+  const directTasks = fixture.tasks.filter(candidate => candidate.project_id === project.id && candidate.parent_id == null).length
+  return {
+    id: project.id, workspace_id: project.workspace_id, parent_id: project.parent_id, name: project.name,
+    status: project.status, priority: project.priority, created_at: project.created_at, updated_at: project.updated_at,
+    direct_project_count: directProjects, direct_task_count: directTasks, has_children: directProjects + directTasks > 0,
+    readiness_rollup: projectReadinessRollup(fixture, project.id)
+  }
+}
+
+function taskCardSummary(fixture, task) {
+  const directSubtasks = fixture.tasks.filter(candidate => candidate.parent_id === task.id).length
+  return {
+    id: task.id, workspace_id: task.workspace_id, project_id: task.project_id, parent_id: task.parent_id, title: task.title,
+    status: task.status, priority: task.priority, due_at: task.due_at, completed_at: task.completed_at,
+    dependency_count: task.dependency_count, created_at: task.created_at, updated_at: task.updated_at,
+    direct_subtask_count: directSubtasks, has_children: directSubtasks > 0, readiness_rollup: taskReadinessRollup(fixture, task.id)
+  }
+}
+
+export function navigationBranchResponse(fixture, options = {}) {
+  const parentKind = options.parentKind || 'workspace_root'
+  const parentId = options.parentId || null
+  const projectLimit = Math.min(100, Math.max(1, Number(options.projectLimit) || 50))
+  const taskLimit = Math.min(100, Math.max(1, Number(options.taskLimit) || 50))
+  const projectOffset = Math.max(0, Number(options.projectOffset) || 0)
+  const taskOffset = Math.max(0, Number(options.taskOffset) || 0)
+  const filters = {
+    showOnly: options.showOnly || 'all',
+    projectStatuses: options.projectStatuses || [],
+    taskStatuses: options.taskStatuses || [],
+    priorityMode: options.priorityMode || 'any',
+    priorityValue: options.priorityValue,
+    query: options.query || null
+  }
+  const projectChildren = parentKind === 'task' || filters.showOnly === 'tasks' ? [] : fixture.projects
+    .filter(project => project.parent_id === parentId && projectBranchMatches(fixture, project, filters))
+  const taskChildren = filters.showOnly === 'projects' ? [] : parentKind === 'project'
+    ? fixture.tasks.filter(task => task.project_id === parentId && task.parent_id == null)
+    : parentKind === 'task'
+      ? fixture.tasks.filter(task => task.parent_id === parentId)
+      : fixture.tasks.filter(task => task.project_id == null && task.parent_id == null)
+  const filteredTaskChildren = taskChildren.filter(task => taskBranchMatches(fixture, task, filters))
+  const projectOrder = [...projectChildren].sort((a, b) => projectStatusRank(a.status) - projectStatusRank(b.status) || (b.priority - a.priority) || compareText(a.name.toLowerCase(), b.name.toLowerCase()) || compareText(a.id, b.id))
+  const taskOrder = [...filteredTaskChildren].sort((a, b) => taskStatusRank(a.status) - taskStatusRank(b.status) || (b.priority - a.priority) || compareText(a.title.toLowerCase(), b.title.toLowerCase()) || compareText(a.id, b.id))
+  return {
+    workspace_id: fixture.workspace.id,
+    parent: parentKind === 'workspace_root' ? { kind: 'workspace_root' } : { kind: parentKind, parent_id: parentId },
+    projects: navigationPage(projectOrder.map(project => projectCardSummary(fixture, project)), projectOffset, projectLimit),
+    tasks: navigationPage(taskOrder.map(task => taskCardSummary(fixture, task)), taskOffset, taskLimit)
+  }
+}
+
+export function navigationFocusResponse(fixture, entityType, entityId, ancestorOffset = 0) {
+  const target = entityType === 'project' ? fixture.projects.find(item => item.id === entityId) : fixture.tasks.find(item => item.id === entityId)
+  if (!target) return null
+  const projectById = new Map(fixture.projects.map(item => [item.id, item]))
+  const taskById = new Map(fixture.tasks.map(item => [item.id, item]))
+  const ancestors = []
+  const appendProject = project => { if (project.parent_id) appendProject(projectById.get(project.parent_id)); ancestors.push({ entity_type: 'project', summary: projectCardSummary(fixture, project) }) }
+  if (entityType === 'project' && target.parent_id) appendProject(projectById.get(target.parent_id))
+  if (entityType === 'task') {
+    const appendTask = task => { if (task.parent_id) appendTask(taskById.get(task.parent_id)); else if (task.project_id) appendProject(projectById.get(task.project_id)); ancestors.push({ entity_type: 'task', summary: taskCardSummary(fixture, task) }) }
+    if (target.parent_id) appendTask(taskById.get(target.parent_id)); else if (target.project_id) appendProject(projectById.get(target.project_id))
+  }
+  const offset = Number(ancestorOffset)
+  if (!Number.isInteger(offset) || offset < 0 || offset > 100000) return null
+  const page = ancestors.slice(offset, offset + 64)
+  const hasMore = offset + page.length < ancestors.length
+  return { workspace_id: fixture.workspace.id, target: { entity_type: entityType, summary: entityType === 'project' ? projectCardSummary(fixture, target) : taskCardSummary(fixture, target) }, ancestors: page, ancestors_truncated: hasMore, next_ancestor_offset: hasMore ? offset + page.length : null }
+}
+
+export function navigationSummariesResponse(fixture, projectIds = [], taskIds = []) {
+  const allIds = [...projectIds, ...taskIds]
+  if (allIds.length > 100 || new Set(allIds).size !== allIds.length) return null
+  const projects = new Map(fixture.projects.map(item => [item.id, item]))
+  const tasks = new Map(fixture.tasks.map(item => [item.id, item]))
+  const selectedProjects = projectIds.flatMap(id => projects.has(id) ? [projectCardSummary(fixture, projects.get(id))] : [])
+  const selectedTasks = taskIds.flatMap(id => tasks.has(id) ? [taskCardSummary(fixture, tasks.get(id))] : [])
+  return {
+    projects: selectedProjects,
+    tasks: selectedTasks,
+    missing_project_ids: projectIds.filter(id => !projects.has(id)),
+    missing_task_ids: taskIds.filter(id => !tasks.has(id))
+  }
+}
+
 export function snapshotHash(fixture) {
   return createHash('sha256').update(JSON.stringify(snapshotItems(fixture))).digest('hex')
 }
@@ -566,6 +742,26 @@ export function directFocusFixture(fixture) {
   const targetProject = fixture.projects.find(project => project.id === contract.targetProjectId)
   if (!targetProject) throw new Error(`${fixture.size} fixture requires direct-focus target ${contract.targetProjectId}`)
   return { snapshots: snapshotItems(fixture), targetProject }
+}
+
+// Test-only transport fixture for the client continuation path.  It derives
+// from the immutable small fixture rather than changing either recorded
+// baseline fixture or its canonical snapshot hash.
+export function deepFocusFixture() {
+  const fixture = generateFixture('small')
+  const chain = Array.from({ length: 130 }, (_, index) => ({
+    id: `21000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    workspace_id: fixture.workspace.id,
+    parent_id: index === 0 ? null : `21000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+    name: `Deep focus project ${String(index + 1).padStart(3, '0')}`,
+    description: null,
+    status: 'active',
+    priority: 5,
+    metadata: {},
+    created_at: timestamp(10000 + index),
+    updated_at: timestamp(11000 + index)
+  }))
+  return { fixture: { ...fixture, projects: [...fixture.projects, ...chain] }, targetProject: chain[chain.length - 1], ancestorCount: chain.length - 1 }
 }
 
 export function validateFixture(fixture) {

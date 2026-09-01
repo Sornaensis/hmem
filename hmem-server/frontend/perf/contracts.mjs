@@ -96,6 +96,16 @@ export function renderBudgetEvaluation({ nodes, rows }, { maxDomNodes, maxCollec
   return { nodesPass, rowsPass, passed: nodesPass && rowsPass }
 }
 
+export function renderMaximum(states) {
+  if (!Array.isArray(states) || states.length === 0 || states.some(state => !Number.isInteger(state?.nodes) || state.nodes < 0 || !Number.isInteger(state?.rows) || state.rows < 0)) {
+    throw new Error('render maximum requires non-empty DOM/row measurements')
+  }
+  return {
+    nodes: Math.max(...states.map(state => state.nodes)),
+    rows: Math.max(...states.map(state => state.rows))
+  }
+}
+
 export function liveTimingSummary({ startedAt, settledAt, stabilityStartedAt, stabilityEndedAt }) {
   const values = [startedAt, settledAt, stabilityStartedAt, stabilityEndedAt]
   if (values.some(value => !Number.isFinite(value)) || settledAt < startedAt || stabilityStartedAt < settledAt || stabilityEndedAt < stabilityStartedAt) {

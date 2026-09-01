@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
-import { assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -24,7 +24,13 @@ const traceOutputArgument = process.argv.indexOf('--trace-output')
 // changing the approved baseline or the default compatibility record.
 const evidenceBaseCommit = process.env.HMEM_EVIDENCE_BASE_COMMIT || '818cc3cc634bfa8c0ebe14c13fc70b4c2d059e83'
 const TASK_2503_BASE_COMMIT = '04fd7ba26b1a63b5f1c601939b046ef2fe5f51d6'
-const evidenceRevision = evidenceBaseCommit === TASK_2503_BASE_COMMIT ? 'v2' : 'v1'
+const TASK_755_BASE_COMMIT = '1bdbe3d071d1fbbb994bc515841103adedff77ec'
+const evidenceTasks = new Map([
+  [TASK_2503_BASE_COMMIT, { revision: 'v2', taskId: '2503e08f-ff82-4f2c-adff-24e14fec8299' }],
+  [TASK_755_BASE_COMMIT, { revision: 'v3', taskId: '755a7286-6da5-494e-9b9b-fa1edd43d0b0' }]
+])
+const evidenceTask = evidenceTasks.get(evidenceBaseCommit) || null
+const evidenceRevision = evidenceTask?.revision || 'v1'
 const legacyAfterArtifactPath = path.join(here, 'final-working-tree.after.v1.json')
 const legacyAfterTraceArtifactPath = path.join(here, 'final-working-tree.trace-manifest.v1.json')
 const evidenceManifestPath = path.join(here, `final-working-tree.evidence-manifest.${evidenceRevision}.json`)
@@ -36,8 +42,8 @@ const requestedRecordOutputPath = outputArgument === -1 ? baselinePath : path.re
 const requestedRecordTraceManifestPath = traceOutputArgument === -1 ? traceManifestPath : path.resolve(frontendRoot, process.argv[traceOutputArgument + 1] || '')
 // Keep the v1 package command usable for the previous task while preventing it
 // from recreating v1 evidence when the 04fd review subject is selected.
-const recordOutputPath = evidenceRevision === 'v2' && requestedRecordOutputPath === legacyAfterArtifactPath ? afterArtifactPath : requestedRecordOutputPath
-const recordTraceManifestPath = evidenceRevision === 'v2' && requestedRecordTraceManifestPath === legacyAfterTraceArtifactPath ? afterTraceArtifactPath : requestedRecordTraceManifestPath
+const recordOutputPath = evidenceTask && requestedRecordOutputPath === legacyAfterArtifactPath ? afterArtifactPath : requestedRecordOutputPath
+const recordTraceManifestPath = evidenceTask && requestedRecordTraceManifestPath === legacyAfterTraceArtifactPath ? afterTraceArtifactPath : requestedRecordTraceManifestPath
 const WARMUPS = HARNESS_CONFIGURATION.warmups
 const PRODUCTION_SNAPSHOT_PROFILE = 'workspace_shell_v1'
 const SAMPLES = HARNESS_CONFIGURATION.samples
@@ -65,7 +71,7 @@ function requiredCommandVersion(label, command, args) {
 }
 
 function runTaskEvidencePrerequisites() {
-  if (mode !== 'record' || evidenceRevision !== 'v2' || !afterArtifactAuthorized) return
+  if (mode !== 'record' || !evidenceTask || !afterArtifactAuthorized) return
   const command = platformExecutable('npm')
   const executable = process.platform === 'win32' && command.toLowerCase().endsWith('.cmd') ? (process.env.ComSpec || 'cmd.exe') : command
   const parameters = executable === command ? ['run', 'perf:self-check'] : ['/d', '/s', '/c', command, 'run', 'perf:self-check']
@@ -94,19 +100,18 @@ function finalWorkingTreeEvidence() {
   // Review subjects deliberately exclude generated evidence from their source
   // patch. Retain v1 alongside v2 here so a historical artifact cannot leak
   // into the 04fd complete diff merely because it remains untracked locally.
-  const artifactPaths = new Set([
-    legacyAfterArtifactPath,
-    legacyAfterTraceArtifactPath,
-    path.join(here, 'final-working-tree.evidence-manifest.v1.json'),
-    afterArtifactPath,
-    afterTraceArtifactPath,
-    evidenceManifestPath,
-    evidenceDiffPath,
-    validationRecordPath
-  ].map(normalizedRepositoryPath))
-  const trackedDiff = execFileSync('git', ['diff', '--binary', '--no-ext-diff', evidenceBaseCommit, '--'], { cwd: repositoryRoot })
+  const artifactPaths = new Set(['v1', 'v2', 'v3'].flatMap(revision => [
+    path.join(here, `final-working-tree.after.${revision}.json`),
+    path.join(here, `final-working-tree.trace-manifest.${revision}.json`),
+    path.join(here, `final-working-tree.evidence-manifest.${revision}.json`),
+    path.join(here, `final-working-tree.validation-record.${revision}.json`)
+  ]).concat([evidenceDiffPath]).map(normalizedRepositoryPath))
   const trackedPaths = execFileSync('git', ['diff', '--name-only', evidenceBaseCommit, '--'], { cwd: repositoryRoot, encoding: 'utf8' })
     .trim().split(/\r?\n/).filter(Boolean)
+    .filter(relative => !artifactPaths.has(relative))
+  const trackedDiff = trackedPaths.length === 0
+    ? Buffer.alloc(0)
+    : execFileSync('git', ['diff', '--binary', '--no-ext-diff', evidenceBaseCommit, '--', ...trackedPaths], { cwd: repositoryRoot })
   const untrackedPaths = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd: repositoryRoot, encoding: 'utf8' })
     .trim().split(/\r?\n/).filter(Boolean)
     .filter(relative => !artifactPaths.has(relative))
@@ -121,14 +126,14 @@ function finalWorkingTreeEvidence() {
   // `check` has no record CLI output arguments, so its final manifest refresh
   // must still hash the selected task-local after artifacts rather than the
   // immutable baseline inputs.
-  const evidenceRecordPath = evidenceRevision === 'v2' ? afterArtifactPath : recordOutputPath
-  const evidenceTracePath = evidenceRevision === 'v2' ? afterTraceArtifactPath : recordTraceManifestPath
+  const evidenceRecordPath = evidenceTask ? afterArtifactPath : recordOutputPath
+  const evidenceTracePath = evidenceTask ? afterTraceArtifactPath : recordTraceManifestPath
   const artifacts = [evidenceRecordPath, evidenceTracePath, evidenceDiffPath]
     .concat(fs.existsSync(validationRecordPath) ? [validationRecordPath] : [])
     .map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file), sizeBytes: fs.statSync(file).size }))
   const manifest = {
     schemaVersion: 1,
-    taskId: evidenceRevision === 'v2' ? '2503e08f-ff82-4f2c-adff-24e14fec8299' : null,
+    taskId: evidenceTask?.taskId || null,
     evidenceBaseCommit,
     normalization: 'repository-relative POSIX paths; SHA-256 of exact file bytes; binary Git diff without external diff drivers; untracked source files represented by deterministic no-index additions; generated evidence artifacts separately hash-listed',
     recipe: `HMEM_EVIDENCE_BASE_COMMIT=${evidenceBaseCommit} npm run perf:record-after`,
@@ -496,6 +501,78 @@ function requestDelta(tracker, before) {
   }
 }
 
+function assertSingleCappedBranchRequest(tracker, before, workspaceId, parentId, label) {
+  const requests = tracker.requests.slice(before.index).filter(request => request.key === 'navigation:branch')
+  if (requests.length !== 1) throw new Error(`${label} expected exactly one bounded navigation-branch request, observed ${requests.length}`)
+  const url = new URL(requests[0].url)
+  const expectedPath = `/api/v1/workspaces/${workspaceId}/navigation`
+  if (url.pathname !== expectedPath
+    || url.searchParams.get('parent_kind') !== 'project'
+    || url.searchParams.get('parent_id') !== parentId
+    || url.searchParams.get('project_offset') !== '0'
+    || url.searchParams.get('task_offset') !== '0'
+    || url.searchParams.get('project_limit') !== '50'
+    || url.searchParams.get('task_limit') !== '50') {
+    throw new Error(`${label} used an unexpected navigation-branch request: ${requests[0].url}`)
+  }
+  return requests[0]
+}
+
+async function measureLargeBranchExpandCollapse(page, tracker, fixture, anchorId) {
+  const expectedBranch = navigationBranchResponse(fixture, {
+    parentKind: 'project', parentId: anchorId, projectLimit: 50, taskLimit: 50
+  })
+  const descendants = [...expectedBranch.projects.items, ...expectedBranch.tasks.items]
+  if (descendants.length === 0 || descendants.length > 100
+    || expectedBranch.projects.items.length > 50 || expectedBranch.tasks.items.length > 50) {
+    throw new Error('large expand/collapse fixture requires one non-empty, 50-item-capped project branch')
+  }
+  const descendantId = descendants[0].id
+  const toggleSelector = `#entity-${anchorId} .tree-toggle`
+  const toggle = page.locator(toggleSelector)
+  if (await toggle.count() !== 1) throw new Error(`large expand/collapse expected one root toggle, observed ${await toggle.count()}`)
+
+  // Bootstrap renders roots open but deliberately does not hydrate children.
+  // Close once to create the user-visible lazy-load state; this preparatory
+  // transition must remain local and cannot recursively fetch a branch.
+  const prepareBefore = requestSnapshot(tracker)
+  await toggle.click()
+  await page.waitForFunction(selector => document.querySelector(selector)?.textContent.trim() === '\u25b6', toggleSelector)
+  await waitForTransportQuiescence(page, tracker, 'large branch collapse preparation')
+  if (requestDelta(tracker, prepareBefore).count !== 0) throw new Error('collapsing an unloaded large branch issued a request')
+
+  const collapsedDom = await domMetrics(page)
+  const expandBefore = requestSnapshot(tracker)
+  const expandMs = await requiredDoubleFrame(page, toggleSelector)
+  await page.waitForFunction(id => Boolean(document.querySelector(`#entity-${id}`)), descendantId, { timeout: 30000 })
+  await waitForTransportQuiescence(page, tracker, 'large branch expansion')
+  assertSingleCappedBranchRequest(tracker, expandBefore, fixture.workspace.id, anchorId, 'large branch expansion')
+  const expandedDom = await domMetrics(page)
+  if (expandedDom.rows <= collapsedDom.rows) throw new Error(`large branch expansion did not add rendered rows (${collapsedDom.rows} -> ${expandedDom.rows})`)
+  const expand = {
+    ms: expandMs,
+    ...requestDelta(tracker, expandBefore),
+    branch: { parentId: anchorId, descendantId, projectItems: expectedBranch.projects.items.length, taskItems: expectedBranch.tasks.items.length },
+    dom: { before: collapsedDom, after: expandedDom }
+  }
+
+  const collapseBefore = requestSnapshot(tracker)
+  const collapseMs = await requiredDoubleFrame(page, toggleSelector)
+  await page.waitForFunction(id => !document.querySelector(`#entity-${id}`), descendantId, { timeout: 30000 })
+  await waitForTransportQuiescence(page, tracker, 'large branch collapse')
+  const collapseDelta = requestDelta(tracker, collapseBefore)
+  if (collapseDelta.count !== 0) throw new Error(`collapsing a loaded large branch issued ${collapseDelta.count} request(s)`)
+  const recollapsedDom = await domMetrics(page)
+  if (recollapsedDom.rows >= expandedDom.rows) throw new Error(`large branch collapse retained descendant rows (${expandedDom.rows} -> ${recollapsedDom.rows})`)
+  const collapse = {
+    ms: collapseMs,
+    ...collapseDelta,
+    branch: { parentId: anchorId, descendantId, descendantUnmounted: true },
+    dom: { before: expandedDom, after: recollapsedDom }
+  }
+  return { expand, collapse }
+}
+
 function validateRequestDelta(delta, label) {
   if (delta == null || typeof delta !== 'object') throw new Error(`${label} request delta must be an object`)
   const fields = Object.keys(delta).sort()
@@ -759,8 +836,13 @@ async function measureRun(browser, origin, fixture, measured, trace) {
   const interactions = {}
   const tabSwitches = {}
   const filters = {}
-  // Expansion/recursive-tree interaction evidence belongs to the downstream
-  // rendering task. This bootstrap record intentionally owns only root slices.
+  if (fixture.size === 'large') {
+    const branchInteractions = await measureLargeBranchExpandCollapse(page, tracker, fixture, anchors.expanded)
+    interactions.branchExpandMs = branchInteractions.expand
+    interactions.branchCollapseMs = branchInteractions.collapse
+    dom.push({ tab: 'large-branch-expanded', ...branchInteractions.expand.dom.after })
+    dom.push({ tab: 'large-branch-collapsed', ...branchInteractions.collapse.dom.after })
+  }
   const taskFilterBefore = requestSnapshot(tracker)
   const taskFilterMs = await requiredDoubleFrameByText(page, '.filter-bar button', 'Tasks')
   await page.waitForFunction(() => document.querySelectorAll('.card-project').length === 0 && document.querySelectorAll('.card-task,.card-subtask').length > 0)
@@ -864,9 +946,10 @@ async function measureRun(browser, origin, fixture, measured, trace) {
   await cdp.send('HeapProfiler.collectGarbage')
   const heap = await cdp.send('Runtime.getHeapUsage')
   assertNoUnhandledApiRoutes(tracker)
+  const renderMaximums = renderMaximum(dom)
   const result = {
     fixture: fixture.size, measured, cold, tabSwitches, filters, interactions, observationLoadMore, directFocus, liveBatch, dom,
-    maxDomNodes: Math.max(...dom.map(value => value.nodes)), maxCollectionRows: Math.max(...dom.map(value => value.rows)),
+    maxDomNodes: renderMaximums.nodes, maxCollectionRows: renderMaximums.rows,
     attributableHeapBytes: Math.max(0, heap.usedSize - blankHeap),
     heapPoint: HARNESS_CONFIGURATION.heapPoint,
     readiness: { protocol: PRODUCTION_SNAPSHOT_PROFILE, fullBackingSnapshotItems: snapshotItems(fixture).length, expectedSnapshotPages, transportedSnapshotItems: tracker.model.snapshotItems, transportedSnapshotPages: tracker.model.snapshotPages, snapshotComplete: tracker.model.snapshotComplete, timelineEvents: tracker.model.timelineEvents, timelineBuckets: tracker.model.timelineBuckets, timelineBucketRequest: tracker.model.timelineBucketRequest, anchors },
@@ -1086,7 +1169,7 @@ async function main() {
     for (const metric of result.evaluation.metrics) console.log(`${metric.pass ? 'PASS' : 'FAIL'} ${metric.name}: ${metric.actual} (budget ${metric.expected}${metric.category === 'informational' ? ', informational environment' : ''})`)
     if (mode === 'record') console.log(`AUTHORIZED RECORD wrote ${recordOutputPath} and ${recordTraceManifestPath}; evaluation is preserved, and budget failures do not fail explicitly authorized record mode.`)
     if (mode === 'check' && !result.evaluation.passed) process.exitCode = 1
-    if (mode === 'check' && evidenceRevision === 'v2' && result.evaluation.passed && fs.existsSync(validationRecordPath)) finalWorkingTreeEvidence()
+    if (mode === 'check' && evidenceTask && result.evaluation.passed && fs.existsSync(validationRecordPath)) finalWorkingTreeEvidence()
   } finally {
     if (browser) await browser.close()
     await new Promise(resolve => server.server.close(resolve))

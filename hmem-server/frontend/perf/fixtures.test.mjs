@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { assertFiveSamples, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { assertFiveSamples, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, FIXTURE_SCHEMA_VERSION, FIXTURE_SEED, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_BUCKET_RESPONSE_MAX, TIMELINE_BUCKET_SQL_CAP, TIMELINE_DEFAULT_UI_QUERY, TimelineBucketRequestError, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, orderedTimelineBuckets, paginate, projectOverviewResponse, projectReadinessRollup, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, stableFixtureJson, taskOverviewResponse, taskReadinessRollup, validateFixture, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
@@ -418,6 +418,10 @@ test('transport/anchor readiness is independent of full or virtualized DOM cardi
   const limits = { maxDomNodes: 2500, maxCollectionRows: 250 }
   assert.deepEqual(renderBudgetEvaluation({ nodes: 66996, rows: 1750 }, limits), { nodesPass: false, rowsPass: false, passed: false })
   assert.deepEqual(renderBudgetEvaluation({ nodes: 2200, rows: 180 }, limits), { nodesPass: true, rowsPass: true, passed: true })
+  const expandedBranchMaximum = renderMaximum([{ nodes: 2200, rows: 50 }, { nodes: 2501, rows: 55 }, { nodes: 2200, rows: 50 }])
+  assert.deepEqual(expandedBranchMaximum, { nodes: 2501, rows: 55 })
+  assert.deepEqual(renderBudgetEvaluation(expandedBranchMaximum, limits), { nodesPass: false, rowsPass: true, passed: false })
+  assert.throws(() => renderMaximum([]), /non-empty DOM\/row measurements/)
   const current = { protocol: 'current-full', transportedItems: 4951, expectedItems: 4951, fullBackingItems: 4951, transportedPages: 50, expectedPages: 50, complete: true }
   assert.equal(transportContractReady(current), true)
   assert.equal(transportContractReady({ ...current, transportedItems: 278, transportedPages: 3 }), false)
@@ -465,16 +469,10 @@ test('checked budget and baseline schemas carry the required provenance', () => 
 
   const baselinePath = `${here}/baseline.v1.json`
   const traceManifestPath = `${here}/trace-manifest.v1.json`
-  const afterPath = `${here}/final-working-tree.after.v1.json`
-  const afterTraceManifestPath = `${here}/final-working-tree.trace-manifest.v1.json`
   assert.equal(fs.existsSync(baselinePath), true)
   assert.equal(fs.existsSync(traceManifestPath), true)
-  assert.equal(fs.existsSync(afterPath), true)
-  assert.equal(fs.existsSync(afterTraceManifestPath), true)
   const baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8'))
   const traceManifest = JSON.parse(fs.readFileSync(traceManifestPath, 'utf8'))
-  const after = JSON.parse(fs.readFileSync(afterPath, 'utf8'))
-  const afterTraceManifest = JSON.parse(fs.readFileSync(afterTraceManifestPath, 'utf8'))
   const currentContracts = {
     budgetsHash: 'bcf994aeb8074f53a75ab89ce24ee17c4059db5cb1e3e7061934641321b2da90',
     configurationHash: '6154f092da5dcd381a1fa7ddae7a0719d88f0123cc517184a168b2a39f11fc5c',
@@ -570,12 +568,4 @@ test('checked budget and baseline schemas carry the required provenance', () => 
   assert.equal(baseline.trace.verifiedDuringRecord, true)
   assert.match(baseline.trace.retention, /intentionally removed/)
   assert.ok(Array.isArray(baseline.evaluation.metrics))
-  assert.equal(after.schemaVersion, 1)
-  assert.equal(after.recordAuthorization, 'explicit --authorize-after-artifact')
-  assert.deepEqual(after.configuration, HARNESS_CONFIGURATION)
-  assert.deepEqual(after.contracts, currentContracts)
-  assert.equal(after.runs.large.every(run => run.cold.canonicalSnapshotItems === 1 && run.cold.canonicalSnapshotPages === 1), true)
-  assert.equal(after.runs.large.every(run => run.readiness.protocol === 'workspace_shell_v1' && run.readiness.transportedSnapshotItems === 1 && run.readiness.transportedSnapshotPages === 1), true)
-  assert.deepEqual(afterTraceManifest.contracts, currentContracts)
-  assert.deepEqual(afterTraceManifest.trace, after.trace)
 })

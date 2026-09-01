@@ -622,11 +622,12 @@ spec = do
               runSession pool $ Session.sql "DELETE FROM observations WHERE id = '00000000-0000-0000-0000-000000000023'"
               runSession pool $ Session.sql "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN EXECUTE format('UPDATE observations SET embedding = %L::vector WHERE id = %L', '[' || repeat('0,', 1535) || '1]', '00000000-0000-0000-0000-000000000021'); END IF; END $$"
               runSession pool $ Session.sql "UPDATE observations SET content = 'recursive provenance revised' WHERE id = '00000000-0000-0000-0000-000000000021'"
-              runSession pool $ Session.sql "CREATE TEMP TABLE v021_fixture_before AS SELECT id, created_at, updated_at FROM observations WHERE id = '00000000-0000-0000-0000-000000000021'"
+              runSession pool $ Session.sql "CREATE TABLE v021_fixture_before AS SELECT id, created_at, updated_at FROM observations WHERE id = '00000000-0000-0000-0000-000000000021'"
               Migration.runMigrations pool v21 >>= (\result -> result.failed `shouldBe` Nothing)
               runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'observations' AND column_name IN ('subject_kind', 'subject'))") `shouldReturn` True
               runSession pool (queryBool "SELECT EXISTS (SELECT 1 FROM observation_subjects s JOIN observations o ON o.id = s.observation_id WHERE o.id = '00000000-0000-0000-0000-000000000021' AND s.subject_kind = 'glob' AND s.subject = 'src/**/*.hs' AND s.ordinal = 0 AND o.content = 'recursive provenance revised')") `shouldReturn` True
               runSession pool (queryBool "SELECT o.created_at = f.created_at AND o.updated_at = f.updated_at FROM observations o JOIN v021_fixture_before f ON f.id = o.id") `shouldReturn` True
+              runSession pool $ Session.sql "DROP TABLE v021_fixture_before"
               runSession pool (queryBool "SELECT (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000021' AND action = 'create') = 1") `shouldReturn` True
               runSession pool (queryBool "SELECT (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000021' AND action = 'update') = 1") `shouldReturn` True
               runSession pool (queryBool "SELECT (SELECT count(*) FROM audit_log WHERE entity_type = 'observation' AND entity_id = '00000000-0000-0000-0000-000000000021' AND action = 'create' AND new_values->'subjects' = '[{\"subject\": \"src/**/*.hs\", \"subject_kind\": \"glob\"}]'::jsonb AND new_values->>'subject_kind' = 'glob' AND new_values->>'subject' = 'src/**/*.hs') = 1") `shouldReturn` True

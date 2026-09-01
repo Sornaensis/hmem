@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "taskId": "755a7286-6da5-494e-9b9b-fa1edd43d0b0",
+  "evidenceBaseCommit": "1bdbe3d071d1fbbb994bc515841103adedff77ec",
+  "commands": [
+    {
+      "command": "npm test",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T19:52:54.081Z",
+      "finishedAtUtc": "2026-09-01T19:53:03.664Z",
+      "durationMs": 9582
+    },
+    {
+      "command": "npm run build",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T19:53:03.664Z",
+      "finishedAtUtc": "2026-09-01T19:53:07.551Z",
+      "durationMs": 3887
+    },
+    {
+      "command": "npm run perf:self-check",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T19:53:07.551Z",
+      "finishedAtUtc": "2026-09-01T19:53:13.841Z",
+      "durationMs": 6290
+    },
+    {
+      "command": "stack test hmem-core:hmem-core-test",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T19:53:13.841Z",
+      "finishedAtUtc": "2026-09-01T19:56:02.418Z",
+      "durationMs": 168577
+    },
+    {
+      "command": "stack test hmem-server:hmem-server-test",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T19:56:02.418Z",
+      "finishedAtUtc": "2026-09-01T19:59:16.707Z",
+      "durationMs": 194290
+    },
+    {
+      "command": "HMEM_EVIDENCE_BASE_COMMIT=1bdbe3d npm run perf:record-after",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T19:59:16.707Z",
+      "finishedAtUtc": "2026-09-01T20:00:49.799Z",
+      "durationMs": 93091
+    },
+    {
+      "command": "HMEM_EVIDENCE_BASE_COMMIT=1bdbe3d npm run perf:check",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T20:00:49.799Z",
+      "finishedAtUtc": "2026-09-01T20:02:25.019Z",
+      "durationMs": 95221
+    }
+  ],
+  "passed": true,
+  "summary": {
+    "commandCount": 7,
+    "totalDurationMs": 570938
+  }
+}

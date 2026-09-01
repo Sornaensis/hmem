@@ -397,8 +397,10 @@ spec = describe "canonical change-stream loopback" $ do
       -- The harness configuration permits a 24-hour bearer, but this resume
       -- bearer was minted earlier with a sub-second lifetime. Its reconnect
       -- ticket must retain that stored expiry rather than a fresh config TTL.
-      resume <- terminalResumeWithTtl ctx 0.8 scope audience
-      threadDelay 350000
+      -- A two-second stored expiry leaves handshake headroom while proving
+      -- reconnect does not refresh the 24-hour harness configuration.
+      resume <- terminalResumeWithTtl ctx 2.0 scope audience
+      threadDelay 250000
       validated <- validateCanonicalResumeToken ctx.deployedEnv.pool scope audience resume
       expiresAt <- either (fail . show) pure validated
       issued <- createCanonicalTicketWithExpiry ctx.deployedWSState expiresAt principal scope resume

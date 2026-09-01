@@ -1,5 +1,7 @@
 module Feature.Cards exposing
-    ( NextTaskCardAction
+    ( CardTreeProjection
+    , NextTaskCardAction
+    , cardTreeProjection
     , cascadeDeleteFailureFallback
     , cascadeDeletePreview
     , cascadeDeleteSuccessMessage
@@ -8,6 +10,7 @@ module Feature.Cards exposing
     , nextTaskCardActions
     , nextTaskRationale
     , noReadyNextTaskMessage
+    , presentationWindow
     , focusClickIntervalTriggers
     , projectCascadePreview
     , projectCompletionBlockerReason
@@ -253,6 +256,9 @@ update msg model =
         LoadNavigationBranchPage parentKind parentId entityKind ->
             Feature.DataLoading.beginNavigationBranchPage parentKind parentId entityKind model
 
+        ShowPreviousNavigationBranchPage parentKind parentId entityKind ->
+            Feature.DataLoading.beginNavigationBranchPreviousPage parentKind parentId entityKind model
+
         RefreshProjectNextTasks projectId ->
             let
                 currentCards =
@@ -344,6 +350,7 @@ update msg model =
                     updateCardsModel
                         (\records -> { records | collapsedNodes = Dict.insert nodeId (not current) records.collapsedNodes })
                         model
+                        |> Feature.DataLoading.resetNavigationPresentations
 
                 -- A branch is loaded only when a node is opened and no
                 -- response (successful or in-flight) exists for that branch.
@@ -388,6 +395,7 @@ update msg model =
             let
                 newModel =
                     updateCardsModel (\records -> { records | collapsedNodes = Dict.empty }) model
+                        |> Feature.DataLoading.resetNavigationPresentations
             in
             ( newModel, saveFiltersCmd newModel )
 
@@ -409,6 +417,7 @@ update msg model =
 
                 newModel =
                     updateCardsModel (\records -> { records | collapsedNodes = Dict.fromList (projectNodes ++ taskNodes) }) model
+                        |> Feature.DataLoading.resetNavigationPresentations
             in
             ( newModel, saveFiltersCmd newModel )
 
@@ -850,14 +859,13 @@ isOpenTaskStatus status =
     status == Api.Todo || status == Api.InProgress || status == Api.Blocked
 
 
-projectAndAncestorsAreOpen : List Api.Project -> String -> Bool
-projectAndAncestorsAreOpen allProjects projectId =
-    case List.filter (\project -> project.id == projectId) allProjects |> List.head of
+projectAndAncestorsAreOpenIndexed : Dict.Dict String Api.Project -> String -> Bool
+projectAndAncestorsAreOpenIndexed projectsById projectId =
+    case Dict.get projectId projectsById of
         Just project ->
             isOpenProjectStatus project.status
                 && (case project.parentId of
-                        Just parentId ->
-                            projectAndAncestorsAreOpen allProjects parentId
+                        Just parentId -> projectAndAncestorsAreOpenIndexed projectsById parentId
 
                         Nothing ->
                             True
@@ -867,11 +875,11 @@ projectAndAncestorsAreOpen allProjects projectId =
             True
 
 
-hasDoneTaskAncestor : List Api.Task -> Api.Task -> Bool
-hasDoneTaskAncestor allTasks task =
-    case task.parentId |> Maybe.andThen (\parentId -> List.filter (\candidate -> candidate.id == parentId) allTasks |> List.head) of
+hasDoneTaskAncestorIndexed : Dict.Dict String Api.Task -> Api.Task -> Bool
+hasDoneTaskAncestorIndexed tasksById task =
+    case task.parentId |> Maybe.andThen (\parentId -> Dict.get parentId tasksById) of
         Just parent ->
-            parent.status == Api.Done || hasDoneTaskAncestor allTasks parent
+            parent.status == Api.Done || hasDoneTaskAncestorIndexed tasksById parent
 
         Nothing ->
             False
@@ -944,13 +952,23 @@ ensureTaskStatusOption currentStatus statuses =
         currentStatus :: statuses
 
 
-directOpenDependencyCountForTask : Model -> String -> Int
-directOpenDependencyCountForTask model taskId =
-    model.dependencies.taskDependencyLinks
-        |> List.filter (\link -> link.taskId == taskId)
-        |> List.filterMap (\link -> Dict.get link.dependsOnId model.tasks)
-        |> List.filter (\dependency -> isOpenTaskStatus dependency.status)
-        |> List.length
+directOpenDependencyCounts : Dict.Dict String Api.Task -> List Api.WorkspaceTaskDependencyLink -> Dict.Dict String Int
+directOpenDependencyCounts tasksById links =
+    links
+        |> List.foldl
+            (\link counts ->
+                case Dict.get link.dependsOnId tasksById of
+                    Just dependency ->
+                        if isOpenTaskStatus dependency.status then
+                            Dict.update link.taskId (Maybe.withDefault 0 >> (+) 1 >> Just) counts
+
+                        else
+                            counts
+
+                    Nothing ->
+                        counts
+            )
+            Dict.empty
 
 
 onFocusClick : String -> String -> Attribute Msg
@@ -1024,20 +1042,306 @@ viewCompletionGateNote reason =
 -- VIEW
 
 
+type alias CardTreeProjection =
+    { projects : List Api.Project
+    , tasks : List Api.Task
+    , projectsById : Dict.Dict String Api.Project
+    , tasksById : Dict.Dict String Api.Task
+    , projectChildren : Dict.Dict String (List Api.Project)
+    , projectTasks : Dict.Dict String (List Api.Task)
+    , taskChildren : Dict.Dict String (List Api.Task)
+    , projectRollups : Dict.Dict String Api.ProjectReadinessRollup
+    , taskRollups : Dict.Dict String Api.TaskReadinessRollup
+    , projectAllowsOpenChildren : Dict.Dict String Bool
+    , taskHasDoneAncestor : Dict.Dict String Bool
+    , taskDirectOpenDependencyCounts : Dict.Dict String Int
+    , projectCriteriaMatches : Set.Set String
+    , taskCriteriaMatches : Set.Set String
+    }
+
+
+orderedProjects : List Api.Project -> List Api.Project
+orderedProjects =
+    List.sortBy (\project -> ( Api.projectStatusOrder project.status, negate project.priority, String.toLower project.name ))
+
+
+orderedTasks : List Api.Task -> List Api.Task
+orderedTasks =
+    List.sortBy (\task -> ( Api.taskStatusOrder task.status, negate task.priority, String.toLower task.title ))
+
+
+cardTreeProjection : String -> Model -> CardTreeProjection
+cardTreeProjection workspaceId model =
+    let
+        focusedProjectId =
+            model.focus.focusedEntity
+                |> Maybe.andThen (\( kind, entityId ) -> if kind == "project" then Just entityId else Nothing)
+
+        focusedTaskId =
+            model.focus.focusedEntity
+                |> Maybe.andThen (\( kind, entityId ) -> if kind == "task" then Just entityId else Nothing)
+
+        projectIds =
+            if model.dataLoading.navigationVisibilityActive then
+                model.dataLoading.navigationVisibleProjectIds
+                    |> Set.union (focusedProjectId |> Maybe.map Set.singleton |> Maybe.withDefault Set.empty)
+
+            else
+                -- Legacy/full snapshots remain supported, but the bounded
+                -- shell path never walks the raw dictionary to discover
+                -- presentation membership.
+                model.projects |> Dict.keys |> Set.fromList
+
+        taskIds =
+            if model.dataLoading.navigationVisibilityActive then
+                model.dataLoading.navigationVisibleTaskIds
+                    |> Set.union (focusedTaskId |> Maybe.map Set.singleton |> Maybe.withDefault Set.empty)
+
+            else
+                model.tasks |> Dict.keys |> Set.fromList
+
+        projects =
+            projectIds
+                |> Set.toList
+                |> List.filterMap (\projectId -> Dict.get projectId model.projects)
+                |> List.filter (\project -> project.workspaceId == workspaceId)
+                |> orderedProjects
+
+        tasks =
+            taskIds
+                |> Set.toList
+                |> List.filterMap (\taskId -> Dict.get taskId model.tasks)
+                |> List.filter (\task -> task.workspaceId == workspaceId)
+                |> orderedTasks
+
+        addProject project index =
+            case project.parentId of
+                Just parentId -> Dict.update parentId (Maybe.withDefault [] >> (\items -> project :: items) >> Just) index
+                Nothing -> index
+
+        addTask task ( byProject, byParent ) =
+            let
+                nextByProject =
+                    case ( task.projectId, task.parentId ) of
+                        ( Just projectId, Nothing ) -> Dict.update projectId (Maybe.withDefault [] >> (\items -> task :: items) >> Just) byProject
+                        _ -> byProject
+
+                nextByParent =
+                    case task.parentId of
+                        Just parentId -> Dict.update parentId (Maybe.withDefault [] >> (\items -> task :: items) >> Just) byParent
+                        Nothing -> byParent
+            in
+            ( nextByProject, nextByParent )
+
+        taskIndexes =
+            List.foldl addTask ( Dict.empty, Dict.empty ) tasks
+
+        projectChildren =
+            List.foldl addProject Dict.empty projects
+                |> Dict.map (\_ -> List.reverse)
+
+        projectTasks =
+            Tuple.first taskIndexes
+                |> Dict.map (\_ -> List.reverse)
+
+        taskChildren =
+            Tuple.second taskIndexes
+                |> Dict.map (\_ -> List.reverse)
+
+        projectsById =
+            indexBy .id projects
+
+        tasksById =
+            indexBy .id tasks
+
+        projectAllowsOpenChildren =
+            projectAncestorOpenIndex projectsById projects
+
+        taskHasDoneAncestor =
+            taskDoneAncestorIndex tasksById tasks
+
+        taskDirectOpenDependencyCounts =
+            directOpenDependencyCounts tasksById model.dependencies.taskDependencyLinks
+
+        query =
+            String.toLower (String.trim model.search.query)
+
+        hasSearch =
+            not (String.isEmpty query)
+
+        taskCriteriaMatches =
+            if treeCriteriaActive query model && not model.dataLoading.navigationVisibilityActive then
+                tasks
+                    |> List.filter (taskTreeMatchesIndexed query hasSearch (taskPassesCurrentFilters model) taskChildren)
+                    |> List.map .id
+                    |> Set.fromList
+
+            else
+                Set.empty
+
+        projectCriteriaMatches =
+            if treeCriteriaActive query model && not model.dataLoading.navigationVisibilityActive then
+                projects
+                    |> List.filter
+                        (projectTreeMatchesIndexed
+                            query
+                            hasSearch
+                            (projectPassesStatusFilter model)
+                            (projectPassesCurrentFilters model)
+                            projectChildren
+                            projectTasks
+                            taskCriteriaMatches
+                        )
+                    |> List.map .id
+                    |> Set.fromList
+
+            else
+                Set.empty
+    in
+    { projects = projects
+    , tasks = tasks
+    , projectsById = projectsById
+    , tasksById = tasksById
+    , projectChildren = projectChildren
+    , projectTasks = projectTasks
+    , taskChildren = taskChildren
+    , projectRollups = model.dependencies.projectReadinessRollups
+    , taskRollups = model.dependencies.taskReadinessRollups
+    , projectAllowsOpenChildren = projectAllowsOpenChildren
+    , taskHasDoneAncestor = taskHasDoneAncestor
+    , taskDirectOpenDependencyCounts = taskDirectOpenDependencyCounts
+    , projectCriteriaMatches = projectCriteriaMatches
+    , taskCriteriaMatches = taskCriteriaMatches
+    }
+
+
+{-| Resolve ancestry once per projection.  A wide/deep visible tree otherwise
+repeatedly walked the same parents for every rendered card.  The `visiting`
+set makes malformed cyclic cached data fail closed without recursing forever.
+-}
+projectAncestorOpenIndex : Dict.Dict String Api.Project -> List Api.Project -> Dict.Dict String Bool
+projectAncestorOpenIndex projectsById projects =
+    let
+        resolve projectId visiting cache =
+            case Dict.get projectId cache of
+                Just value ->
+                    ( value, cache )
+
+                Nothing ->
+                    if Set.member projectId visiting then
+                        ( False, Dict.insert projectId False cache )
+
+                    else
+                        case Dict.get projectId projectsById of
+                            Nothing ->
+                                ( True, cache )
+
+                            Just project ->
+                                let
+                                    ( parentOpen, afterParent ) =
+                                        case project.parentId of
+                                            Just parentId ->
+                                                resolve parentId (Set.insert projectId visiting) cache
+
+                                            Nothing ->
+                                                ( True, cache )
+
+                                    open =
+                                        isOpenProjectStatus project.status && parentOpen
+                                in
+                                ( open, Dict.insert projectId open afterParent )
+    in
+    projects
+        |> List.foldl
+            (\project cache ->
+                resolve project.id Set.empty cache
+                    |> Tuple.second
+            )
+            Dict.empty
+
+
+taskDoneAncestorIndex : Dict.Dict String Api.Task -> List Api.Task -> Dict.Dict String Bool
+taskDoneAncestorIndex tasksById tasks =
+    let
+        resolve taskId visiting cache =
+            case Dict.get taskId cache of
+                Just value ->
+                    ( value, cache )
+
+                Nothing ->
+                    if Set.member taskId visiting then
+                        ( True, Dict.insert taskId True cache )
+
+                    else
+                        case Dict.get taskId tasksById of
+                            Nothing ->
+                                ( False, cache )
+
+                            Just task ->
+                                let
+                                    ( ancestorDone, afterParent ) =
+                                        case task.parentId of
+                                            Just parentId ->
+                                                case Dict.get parentId tasksById of
+                                                    Just parent ->
+                                                        if parent.status == Api.Done then
+                                                            ( True, cache )
+
+                                                        else
+                                                            resolve parentId (Set.insert taskId visiting) cache
+
+                                                    Nothing ->
+                                                        ( False, cache )
+
+                                            Nothing ->
+                                                ( False, cache )
+                                in
+                                ( ancestorDone, Dict.insert taskId ancestorDone afterParent )
+    in
+    tasks
+        |> List.foldl
+            (\task cache ->
+                resolve task.id Set.empty cache
+                    |> Tuple.second
+            )
+            Dict.empty
+
+
+taskTreeMatchesIndexed : String -> Bool -> (Api.Task -> Bool) -> Dict.Dict String (List Api.Task) -> Api.Task -> Bool
+taskTreeMatchesIndexed query hasSearch taskFilter children task =
+    taskMatchesActiveCriteria query hasSearch taskFilter task
+        || (Dict.get task.id children
+                |> Maybe.withDefault []
+                |> List.any (taskTreeMatchesIndexed query hasSearch taskFilter children)
+           )
+
+
+projectTreeMatchesIndexed : String -> Bool -> (Api.Project -> Bool) -> (Api.Project -> Bool) -> Dict.Dict String (List Api.Project) -> Dict.Dict String (List Api.Task) -> Set.Set String -> Api.Project -> Bool
+projectTreeMatchesIndexed query hasSearch projectStatusGate projectFilter children projectTasks matchingTaskIds project =
+    projectStatusGate project
+        && (projectMatchesActiveCriteria query hasSearch projectFilter project
+                || (Dict.get project.id children
+                        |> Maybe.withDefault []
+                        |> List.any (projectTreeMatchesIndexed query hasSearch projectStatusGate projectFilter children projectTasks matchingTaskIds)
+                   )
+                || (Dict.get project.id projectTasks
+                        |> Maybe.withDefault []
+                        |> List.any (\task -> Set.member task.id matchingTaskIds)
+                   )
+           )
+
+
 viewProjectsTree : String -> Model -> Html Msg
 viewProjectsTree wsId model =
     let
+        projection =
+            cardTreeProjection wsId model
+
         wsProjects =
-            model.projects
-                |> Dict.values
-                |> List.filter (\p -> p.workspaceId == wsId)
-                |> List.filter (\p -> not model.dataLoading.navigationVisibilityActive || Set.member p.id model.dataLoading.navigationVisibleProjectIds)
+            projection.projects
 
         wsTasks =
-            model.tasks
-                |> Dict.values
-                |> List.filter (\t -> t.workspaceId == wsId)
-                |> List.filter (\t -> not model.dataLoading.navigationVisibilityActive || Set.member t.id model.dataLoading.navigationVisibleTaskIds)
+            projection.tasks
 
         query =
             String.toLower (String.trim model.search.query)
@@ -1081,7 +1385,7 @@ viewProjectsTree wsId model =
                 Just ( "project", projId ) ->
                     case Dict.get projId model.projects of
                         Just proj ->
-                            [ ( projId, viewProjectNode wsProjects model 0 proj hasSearch query ) ]
+                            [ ( projId, viewProjectNode projection model 0 proj hasSearch query ) ]
 
                         Nothing ->
                             []
@@ -1089,7 +1393,7 @@ viewProjectsTree wsId model =
                 Just ( "task", taskId ) ->
                     case Dict.get taskId model.tasks of
                         Just task ->
-                            [ ( taskId, viewFocusedTaskNode model task ) ]
+                            [ ( taskId, viewFocusedTaskNode projection model task ) ]
 
                         Nothing ->
                             []
@@ -1104,15 +1408,16 @@ viewProjectsTree wsId model =
                                         |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
 
                                 visibleRootTasks =
-                                    rootTasks
-                                        |> (if applyLocalTreeCriteria then
-                                                visibleTaskTreeForCriteria query hasSearch taskPassesFilters wsTasks
+                                     rootTasks
+                                         |> (if applyLocalTreeCriteria then
+                                                List.filter (\task -> Set.member task.id projection.taskCriteriaMatches)
 
                                             else
                                                 identity
                                            )
                             in
-                            List.map (\t -> ( t.id, viewTaskCard False model t )) visibleRootTasks
+                            List.map (\t -> ( t.id, viewTaskCard projection False model t )) (rootPresentationWindow "task" .id (pinnedTaskIds model) model visibleRootTasks)
+                                ++ viewRootLoadMore model "task" .id (pinnedTaskIds model) visibleRootTasks
 
                         _ ->
                             let
@@ -1122,9 +1427,9 @@ viewProjectsTree wsId model =
                                         |> List.sortBy (\p -> ( Api.projectStatusOrder p.status, negate p.priority, String.toLower p.name ))
 
                                 visibleRootProjects =
-                                    rootProjects
-                                        |> (if applyLocalTreeCriteria then
-                                                List.filter (projectTreeMatchesCriteria query hasSearch projectStatusGate wsProjects wsTasks projectPassesFilters taskPassesFilters)
+                                     rootProjects
+                                         |> (if applyLocalTreeCriteria then
+                                                List.filter (\project -> Set.member project.id projection.projectCriteriaMatches)
 
                                             else
                                                 identity
@@ -1136,27 +1441,34 @@ viewProjectsTree wsId model =
                                         |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
 
                                 visibleOrphans =
-                                    orphanTasks
-                                        |> (if applyLocalTreeCriteria then
-                                                visibleTaskTreeForCriteria query hasSearch taskPassesFilters wsTasks
+                                     orphanTasks
+                                         |> (if applyLocalTreeCriteria then
+                                                List.filter (\task -> Set.member task.id projection.taskCriteriaMatches)
 
                                             else
                                                 identity
                                            )
                             in
-                            viewProjectsWithZones model (\p -> viewProjectNode wsProjects model 0 p hasSearch query) Nothing visibleRootProjects
+                            viewProjectsWithZones model (\p -> viewProjectNode projection model 0 p hasSearch query) Nothing (rootPresentationWindow "project" .id (pinnedProjectIds model) model visibleRootProjects)
                                 ++ (if model.search.filterShowOnly /= ShowProjectsOnly && not (List.isEmpty visibleOrphans) then
                                         [ ( "orphan-tasks-section"
                                           , div [ class "orphan-tasks-section" ]
                                                 [ div [ class "orphan-tasks-header" ] [ text "Unassigned Tasks" ]
                                                 , Keyed.node "div" [ class "tree-tasks" ]
-                                                    (viewTasksWithZones model "orphan" Nothing Nothing visibleOrphans)
+                                                    (viewTasksWithZones projection model "orphan" Nothing Nothing (rootPresentationWindow "task" .id (pinnedTaskIds model) model visibleOrphans))
                                                 ]
                                           )
                                         ]
 
                                     else
                                         []
+                                   )
+                                ++ viewRootLoadMore model "project" .id (pinnedProjectIds model) visibleRootProjects
+                                ++ (if model.search.filterShowOnly == ShowProjectsOnly then
+                                        []
+
+                                    else
+                                        viewRootLoadMore model "task" .id (pinnedTaskIds model) visibleOrphans
                                    )
 
         contentWithEmptyState =
@@ -1186,12 +1498,9 @@ viewProjectsTree wsId model =
         )
 
 
-viewProjectNode : List Api.Project -> Model -> Int -> Api.Project -> Bool -> String -> Html Msg
-viewProjectNode allProjects model depth project hasSearch query =
+viewProjectNode : CardTreeProjection -> Model -> Int -> Api.Project -> Bool -> String -> Html Msg
+viewProjectNode projection model depth project hasSearch query =
     let
-        allTasks =
-            Dict.values model.tasks
-
         hasTreeCriteria =
             treeCriteriaActive query model
 
@@ -1208,18 +1517,19 @@ viewProjectNode allProjects model depth project hasSearch query =
             taskPassesCurrentFilters model
 
         children =
-            allProjects
-                |> List.filter (\p -> p.parentId == Just project.id)
+            Dict.get project.id projection.projectChildren
+                |> Maybe.withDefault []
                 |> List.sortBy (\p -> ( Api.projectStatusOrder p.status, negate p.priority, String.toLower p.name ))
 
         visibleChildren =
             children
                 |> (if applyLocalTreeCriteria then
-                        List.filter (projectTreeMatchesCriteria query hasSearch projectStatusGate allProjects allTasks projectPassesFilters taskPassesFilters)
+                        List.filter (\child -> Set.member child.id projection.projectCriteriaMatches)
 
                     else
                         identity
                    )
+                |> branchPresentationWindow "project" project.id "project" .id (pinnedProjectIds model) model
 
         hasChildren =
             (Dict.get project.id model.dataLoading.projectCardSummaries
@@ -1232,56 +1542,38 @@ viewProjectNode allProjects model depth project hasSearch query =
             isCollapsed model ("proj-" ++ project.id)
 
         projectTasks =
-            model.tasks
-                |> Dict.values
-                |> List.filter (\t -> t.projectId == Just project.id && t.parentId == Nothing)
+            Dict.get project.id projection.projectTasks
+                |> Maybe.withDefault []
                 |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
 
         visibleTasks =
             projectTasks
                 |> (if applyLocalTreeCriteria then
-                        visibleTaskTreeForCriteria query hasSearch taskPassesFilters allTasks
+                        List.filter (\task -> Set.member task.id projection.taskCriteriaMatches)
 
                     else
                         identity
                    )
+                |> branchPresentationWindow "project" project.id "task" .id (pinnedTaskIds model) model
 
         maybeProjectRollup =
-            projectReadinessRollupForProject model project.id
+            Dict.get project.id projection.projectRollups
 
-        projectSubtreeIds =
-            collectDescendantProjectIds allProjects project.id
+        localProjectAggregate =
+            case maybeProjectRollup of
+                Just rollup ->
+                    { openProjects = rollup.openProjectCount, openTasks = rollup.openTaskCount }
 
-        localOpenSubprojectCount =
-            allProjects
-                |> List.filter (\p -> p.id /= project.id && List.member p.id projectSubtreeIds && isOpenProjectStatus p.status)
-                |> List.length
+                Nothing ->
+                    { openProjects = 0
+                    , openTasks = 0
+                    }
 
         openSubprojectCount =
-            maybeProjectRollup
-                |> Maybe.map .openProjectCount
-                |> Maybe.withDefault localOpenSubprojectCount
-
-        projectTaskTreeIds =
-            model.tasks
-                |> Dict.values
-                |> List.filter
-                    (\t ->
-                        t.projectId
-                            |> Maybe.map (\pid -> List.member pid projectSubtreeIds)
-                            |> Maybe.withDefault False
-                    )
-                |> List.concatMap (\t -> collectDescendantTaskIds (Dict.values model.tasks) t.id)
+            localProjectAggregate.openProjects
 
         openProjectTaskCount =
-            maybeProjectRollup
-                |> Maybe.map .openTaskCount
-                |> Maybe.withDefault
-                    (model.tasks
-                        |> Dict.values
-                        |> List.filter (\t -> isOpenTaskStatus t.status && List.member t.id projectTaskTreeIds)
-                        |> List.length
-                    )
+            localProjectAggregate.openTasks
 
         completionBlockerReason =
             projectCompletionBlockerReason openSubprojectCount openProjectTaskCount
@@ -1294,7 +1586,8 @@ viewProjectNode allProjects model depth project hasSearch query =
                 Nothing
 
         projectAllowsOpenChildren =
-            projectAndAncestorsAreOpen allProjects project.id
+            Dict.get project.id projection.projectAllowsOpenChildren
+                |> Maybe.withDefault True
 
         projectCreateChildReason =
             "Reopen this project before adding active child projects or open tasks."
@@ -1338,48 +1631,30 @@ viewProjectNode allProjects model depth project hasSearch query =
                     ]
                 ]
             , let
-                isProjectRemaining p =
-                    p.status == Api.ProjActive || p.status == Api.ProjPaused
-
-                isTaskRemaining t =
-                    t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked
-
-                allDescendantProjectIds =
-                    collectDescendantProjectIds allProjects project.id
-
-                allDescendantProjects =
-                    allProjects
-                        |> List.filter (\p -> p.id /= project.id && List.member p.id allDescendantProjectIds)
-
                 remainingSubprojects =
                     maybeProjectRollup
                         |> Maybe.map .openProjectCount
-                        |> Maybe.withDefault (List.filter isProjectRemaining allDescendantProjects |> List.length)
+                        |> Maybe.withDefault 0
 
                 completedSubprojects =
                     maybeProjectRollup
                         |> Maybe.map .closedProjectCount
-                        |> Maybe.withDefault (List.length allDescendantProjects - remainingSubprojects)
-
-                allProjectTasks =
-                    model.tasks
-                        |> Dict.values
-                        |> List.filter (\t -> List.member t.id projectTaskTreeIds)
+                        |> Maybe.withDefault 0
 
                 remainingTasks =
                     maybeProjectRollup
                         |> Maybe.map .openTaskCount
-                        |> Maybe.withDefault (List.filter isTaskRemaining allProjectTasks |> List.length)
+                        |> Maybe.withDefault 0
 
                 completedTasks =
                     maybeProjectRollup
                         |> Maybe.map (\rollup -> rollup.doneTaskCount + rollup.cancelledTaskCount)
-                        |> Maybe.withDefault (List.length allProjectTasks - remainingTasks)
+                        |> Maybe.withDefault 0
 
                 dependencyBlockedTasks =
                     maybeProjectRollup
                         |> Maybe.map .dependencyBlockedTaskCount
-                        |> Maybe.withDefault (allProjectTasks |> List.filter (\t -> t.status == Api.Blocked) |> List.length)
+                        |> Maybe.withDefault 0
 
                 openDependencyCount =
                     maybeProjectRollup
@@ -1422,7 +1697,7 @@ viewProjectNode allProjects model depth project hasSearch query =
                     ]
                 , if isExpanded model project.id then
                     div [ class "card-extras" ]
-                        [ viewProjectNextTasksPanel model project
+                        [ viewProjectNextTasksPanel projection model project
                         , Feature.AuditLog.viewEntityHistory model "project" project.id
                         ]
 
@@ -1465,19 +1740,19 @@ viewProjectNode allProjects model depth project hasSearch query =
             ]
         , if not collapsed then
             Keyed.node "div" [ class "tree-children" ]
-                (viewProjectsWithZones model (\c -> viewProjectNode allProjects model (depth + 1) c hasSearch query) (Just project.id) visibleChildren
+                (viewProjectsWithZones model (\c -> viewProjectNode projection model (depth + 1) c hasSearch query) (Just project.id) visibleChildren
                     ++ (if not (List.isEmpty visibleTasks) then
                             [ ( "project-tasks-" ++ project.id
                               , Keyed.node "div" [ class "tree-tasks", style "margin-left" "20px" ]
-                                    (viewTasksWithZones model "project-tasks" (Just project.id) Nothing visibleTasks)
+                                    (viewTasksWithZones projection model "project-tasks" (Just project.id) Nothing visibleTasks)
                               )
                             ]
 
                          else
                              []
                        )
-                    ++ viewBranchLoadMore model "project" project.id "project"
-                    ++ viewBranchLoadMore model "project" project.id "task"
+                    ++ viewBranchLoadMore model "project" project.id "project" .id (pinnedProjectIds model) children
+                    ++ viewBranchLoadMore model "project" project.id "task" .id (pinnedTaskIds model) projectTasks
                 )
 
           else
@@ -1485,8 +1760,8 @@ viewProjectNode allProjects model depth project hasSearch query =
         ]
 
 
-viewProjectNextTasksPanel : Model -> Api.Project -> Html Msg
-viewProjectNextTasksPanel model project =
+viewProjectNextTasksPanel : CardTreeProjection -> Model -> Api.Project -> Html Msg
+viewProjectNextTasksPanel projection model project =
     let
         candidates =
             Dict.get project.id model.cards.projectNextTasks
@@ -1509,7 +1784,7 @@ viewProjectNextTasksPanel model project =
             Dict.get project.id model.cards.projectNextTaskDiagnosticsErrors
 
         waitingSubtasks =
-            waitingSubtasksForProject model project
+            waitingSubtasksForProject projection project
 
         candidateViews =
             candidates
@@ -1683,28 +1958,18 @@ nextTaskRationale candidate =
         "Ready to start."
 
 
-waitingSubtasksForProject : Model -> Api.Project -> List Api.Task
-waitingSubtasksForProject model project =
+waitingSubtasksForProject : CardTreeProjection -> Api.Project -> List Api.Task
+waitingSubtasksForProject projection project =
     let
-        projectIds =
-            collectDescendantProjectIds (Dict.values model.projects) project.id
-
-        allTasks =
-            Dict.values model.tasks
-
-        tasksById =
-            model.tasks
-
         parentNotInProgress parentId =
-            Dict.get parentId model.tasks
+            Dict.get parentId projection.tasksById
                 |> Maybe.map (\parent -> parent.status /= Api.InProgress)
                 |> Maybe.withDefault True
     in
-    allTasks
+    (Dict.get project.id projection.projectTasks |> Maybe.withDefault [])
         |> List.filter
             (\task ->
                 isOpenTaskStatus task.status
-                    && taskInProjectTree projectIds tasksById task
                     && (case task.parentId of
                             Just parentId ->
                                 parentNotInProgress parentId
@@ -1781,15 +2046,15 @@ noReadyNextTaskMessage waitingSubtasks blockedDiagnostics diagnosticsLoading =
         "No ready tasks found. Start parent tasks, then resolve any remaining blockers, to make waiting subtasks actionable."
 
 
-viewFocusedTaskNode : Model -> Api.Task -> Html Msg
-viewFocusedTaskNode model task =
+viewFocusedTaskNode : CardTreeProjection -> Model -> Api.Task -> Html Msg
+viewFocusedTaskNode projection model task =
     div [ class "tree-node" ]
-        [ viewTaskCard False model task
+        [ viewTaskCard projection False model task
         ]
 
 
-viewTaskCard : Bool -> Model -> Api.Task -> Html Msg
-viewTaskCard showProject model task =
+viewTaskCard : CardTreeProjection -> Bool -> Model -> Api.Task -> Html Msg
+viewTaskCard projection showProject model task =
     let
         projectName =
             task.projectId
@@ -1801,10 +2066,7 @@ viewTaskCard showProject model task =
                 |> Maybe.map .hasChildren
                 |> Maybe.withDefault False
             )
-                || (model.tasks
-                        |> Dict.values
-                        |> List.any (\t -> t.parentId == Just task.id)
-               )
+                || not (List.isEmpty (Dict.get task.id projection.taskChildren |> Maybe.withDefault []))
 
         collapsed =
             isCollapsed model ("task-" ++ task.id)
@@ -1837,15 +2099,12 @@ viewTaskCard showProject model task =
             else
                 "card-task"
 
-        allTasks =
-            Dict.values model.tasks
-
         childTasksForTask =
-            allTasks
-                |> List.filter (\t -> t.parentId == Just task.id)
+            Dict.get task.id projection.taskChildren
+                |> Maybe.withDefault []
 
         maybeRollup =
-            taskReadinessRollupForTask model task.id
+            Dict.get task.id projection.taskRollups
 
         openDependencyCount =
             maybeRollup
@@ -1853,7 +2112,8 @@ viewTaskCard showProject model task =
                 |> Maybe.withDefault 0
 
         directOpenDependencyCount =
-            directOpenDependencyCountForTask model task.id
+            Dict.get task.id projection.taskDirectOpenDependencyCounts
+                |> Maybe.withDefault 0
 
         dependencyBlockedForStatusOptions =
             directOpenDependencyCount > 0
@@ -1877,12 +2137,12 @@ viewTaskCard showProject model task =
             taskPassesCurrentFilters model
 
         shownForMatchingSubtask =
-            applyLocalTreeCriteria && taskShownForMatchingDescendant query hasSearch taskPassesFilters allTasks task
+            applyLocalTreeCriteria
+                && Set.member task.id projection.taskCriteriaMatches
+                && not (taskMatchesActiveCriteria query hasSearch taskPassesFilters task)
 
         openDescendantTaskCount =
-            childTasksForTask
-                |> List.filter (\t -> isOpenTaskStatus t.status)
-                |> List.length
+            maybeRollup |> Maybe.map .openSubtaskCount |> Maybe.withDefault 0
 
         completionBlockerReason =
             taskCompletionBlockerReason openDescendantTaskCount
@@ -1892,11 +2152,15 @@ viewTaskCard showProject model task =
 
         taskProjectAllowsOpenTasks =
             task.projectId
-                |> Maybe.map (projectAndAncestorsAreOpen (Dict.values model.projects))
+                |> Maybe.andThen (\projectId -> Dict.get projectId projection.projectAllowsOpenChildren)
                 |> Maybe.withDefault True
 
+        taskHasCompletedAncestor =
+            Dict.get task.id projection.taskHasDoneAncestor
+                |> Maybe.withDefault False
+
         taskAllowsOpenChildren =
-            not isSubtask && task.status /= Api.Done && not (hasDoneTaskAncestor allTasks task) && taskProjectAllowsOpenTasks
+            not isSubtask && task.status /= Api.Done && not taskHasCompletedAncestor && taskProjectAllowsOpenTasks
 
         taskCreateChildReason =
             if isSubtask then
@@ -1905,7 +2169,7 @@ viewTaskCard showProject model task =
             else if task.status == Api.Done then
                 "Reopen this task before adding open subtasks."
 
-            else if hasDoneTaskAncestor allTasks task then
+            else if taskHasCompletedAncestor then
                 "Reopen the parent task before adding open subtasks."
 
             else
@@ -2091,16 +2355,17 @@ viewTaskCard showProject model task =
                 childTasks =
                     childTasksForTask
                         |> (if applyLocalTreeCriteria then
-                                visibleTaskTreeForCriteria query hasSearch taskPassesFilters allTasks
+                                List.filter (\child -> Set.member child.id projection.taskCriteriaMatches)
 
                             else
                                 identity
                            )
                         |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
+                        |> branchPresentationWindow "task" task.id "task" .id (pinnedTaskIds model) model
             in
             Keyed.node "div" [ class "tree-children" ]
-                (viewTasksWithZones model "task-subtasks" task.projectId (Just task.id) childTasks
-                    ++ viewBranchLoadMore model "task" task.id "task"
+                (viewTasksWithZones projection model "task-subtasks" task.projectId (Just task.id) childTasks
+                    ++ viewBranchLoadMore model "task" task.id "task" .id (pinnedTaskIds model) childTasksForTask
                 )
 
           else
@@ -2111,13 +2376,13 @@ viewTaskCard showProject model task =
 {-| A branch page is loaded only after an explicit user action.  The server
 caps every response at 100, while the browser asks for 50 to keep the rendered
 tree bounded for the next task. -}
-viewBranchLoadMore : Model -> String -> String -> String -> List ( String, Html Msg )
-viewBranchLoadMore model parentKind parentId entityKind =
+viewBranchLoadMore : Model -> String -> String -> String -> (a -> String) -> Set.Set String -> List a -> List ( String, Html Msg )
+viewBranchLoadMore model parentKind parentId entityKind identify pinned cachedValues =
     let
         state =
             Dict.get (parentKind ++ ":" ++ parentId) model.dataLoading.loadedNavigationBranches
 
-        hasMore =
+        transportHasMore =
             state
                 |> Maybe.map
                     (\value ->
@@ -2129,12 +2394,44 @@ viewBranchLoadMore model parentKind parentId entityKind =
                     )
                 |> Maybe.withDefault False
 
+        presentationOffset =
+            Dict.get (parentKind ++ ":" ++ parentId) model.dataLoading.navigationPresentations
+                |> Maybe.map
+                    (\value -> if entityKind == "project" then value.projectOffset else value.taskOffset)
+                |> Maybe.withDefault 0
+
+        ordinaryCachedCount =
+            cachedValues
+                |> List.filter (identify >> (\entityId -> not (Set.member entityId pinned)))
+                |> List.length
+
+        ordinaryCapacity =
+            presentationOrdinaryCapacity (List.length cachedValues - ordinaryCachedCount)
+
+        hasMore =
+            transportHasMore
+                || presentationOffset + ordinaryCapacity < ordinaryCachedCount
+                || (state |> Maybe.map (.succeeded >> not) |> Maybe.withDefault False)
+
         loading =
             state |> Maybe.map .inFlight |> Maybe.withDefault False
     in
-    if hasMore || loading then
-        [ ( "load-more-" ++ entityKind ++ "-" ++ parentId
+    (if presentationOffset > 0 then
+        [ ( "show-previous-" ++ entityKind ++ "-" ++ parentId
           , button
+                [ class "navigation-load-more"
+                , onClick (ShowPreviousNavigationBranchPage parentKind parentId entityKind)
+                ]
+                [ text ("Show previous " ++ entityKind ++ "s") ]
+          )
+        ]
+
+     else
+        []
+    )
+        ++ (if hasMore || loading then
+                [ ( "load-more-" ++ entityKind ++ "-" ++ parentId
+           , button
                 [ class "navigation-load-more"
                 , disabled loading
                 , onClick (LoadNavigationBranchPage parentKind parentId entityKind)
@@ -2150,11 +2447,267 @@ viewBranchLoadMore model parentKind parentId entityKind =
                         "Load more tasks"
                     )
                 ]
+                  )
+                ]
+
+            else
+                []
+           )
+
+
+editTarget : Model -> Maybe ( String, String )
+editTarget model =
+    case model.editing.editState of
+        Just (EditingField state) ->
+            Just ( state.entityType, state.entityId )
+
+        Nothing ->
+            Nothing
+
+
+taskPathIds : Model -> String -> Set.Set String
+taskPathIds model taskId =
+    let
+        climb current seen =
+            if Set.member current seen then
+                seen
+
+            else
+                case Dict.get current model.tasks of
+                    Just task ->
+                        case task.parentId of
+                            Just parentId ->
+                                climb parentId (Set.insert current seen)
+
+                            Nothing ->
+                                Set.insert current seen
+
+                    Nothing ->
+                        seen
+    in
+    climb taskId Set.empty
+
+
+projectPathIds : Model -> String -> Set.Set String
+projectPathIds model projectId =
+    let
+        climb current seen =
+            if Set.member current seen then
+                seen
+
+            else
+                case Dict.get current model.projects of
+                    Just project ->
+                        case project.parentId of
+                            Just parentId ->
+                                climb parentId (Set.insert current seen)
+
+                            Nothing ->
+                                Set.insert current seen
+
+                    Nothing ->
+                        seen
+    in
+    climb projectId Set.empty
+
+
+pinnedTaskIds : Model -> Set.Set String
+pinnedTaskIds model =
+    let
+        focused =
+            model.focus.focusedEntity
+                |> Maybe.andThen (\( kind, entityId ) -> if kind == "task" then Just entityId else Nothing)
+
+        edited =
+            editTarget model
+                |> Maybe.andThen (\( kind, entityId ) -> if kind == "task" then Just entityId else Nothing)
+
+        inlineParent =
+            case model.editing.inlineCreate of
+                Just (InlineCreateTask state) ->
+                    state.parentId
+
+                _ ->
+                    Nothing
+    in
+    [ focused, edited, inlineParent ]
+        |> List.filterMap identity
+        |> List.foldl (\entityId pins -> Set.union pins (taskPathIds model entityId)) Set.empty
+
+
+pinnedProjectIds : Model -> Set.Set String
+pinnedProjectIds model =
+    let
+        focusedProject =
+            model.focus.focusedEntity
+                |> Maybe.andThen (\( kind, entityId ) -> if kind == "project" then Just entityId else Nothing)
+
+        editedProject =
+            editTarget model
+                |> Maybe.andThen (\( kind, entityId ) -> if kind == "project" then Just entityId else Nothing)
+
+        inlineProject =
+            case model.editing.inlineCreate of
+                Just (InlineCreateProject state) ->
+                    state.parentId
+
+                Just (InlineCreateTask state) ->
+                    state.projectId
+
+                _ ->
+                    Nothing
+
+        taskProjects =
+            pinnedTaskIds model
+                |> Set.toList
+                |> List.filterMap (\taskId -> Dict.get taskId model.tasks |> Maybe.andThen .projectId)
+    in
+    focusedProject :: editedProject :: inlineProject :: List.map Just taskProjects
+        |> List.filterMap identity
+        |> List.foldl (\projectId pins -> Set.union pins (projectPathIds model projectId)) Set.empty
+
+
+{-| Data pages stay cached for interaction and drag/drop, but one card
+presentation window is capped at 25 items so repeatedly loading navigation
+pages cannot grow the mounted DOM without bound. Pinned focus/edit paths stay
+mounted while the remainder of the window remains reversible. -}
+presentationWindow : (a -> String) -> Set.Set String -> Int -> List a -> List a
+presentationWindow identify pinned offset values =
+    let
+        pinnedValues =
+            values
+                |> List.filter (identify >> (\entityId -> Set.member entityId pinned))
+
+        ordinaryCapacity =
+            presentationOrdinaryCapacity (List.length pinnedValues)
+
+        ordinaryPageValues =
+            values
+                |> List.filter (\value -> not (Set.member (identify value) pinned))
+                |> List.drop offset
+                |> List.take ordinaryCapacity
+
+        selectedIds =
+            ordinaryPageValues
+                |> List.map identify
+                |> Set.fromList
+                |> Set.union pinned
+    in
+    -- Preserve the server's deterministic ordering across ordinary and pinned
+    -- rows.  The cursor counts only ordinary rows, so a breadcrumb never
+    -- displaces an unseen card from a later page.
+    values
+        |> List.filter (identify >> (\entityId -> Set.member entityId selectedIds))
+
+
+rootPresentationWindow : String -> (a -> String) -> Set.Set String -> Model -> List a -> List a
+rootPresentationWindow entityKind identify pinned model values =
+    let
+        offset =
+            model.dataLoading.rootNavigationPresentation
+                |> Maybe.map
+                    (\state ->
+                        if entityKind == "project" then
+                            state.projectOffset
+
+                        else
+                            state.taskOffset
+                    )
+                |> Maybe.withDefault 0
+    in
+    presentationWindow identify pinned offset values
+
+
+branchPresentationWindow : String -> String -> String -> (a -> String) -> Set.Set String -> Model -> List a -> List a
+branchPresentationWindow parentKind parentId entityKind identify pinned model values =
+    let
+        offset =
+            Dict.get (parentKind ++ ":" ++ parentId) model.dataLoading.navigationPresentations
+                |> Maybe.map
+                    (\state ->
+                        if entityKind == "project" then
+                            state.projectOffset
+
+                        else
+                            state.taskOffset
+                    )
+                |> Maybe.withDefault 0
+    in
+    presentationWindow identify pinned offset values
+
+
+viewRootLoadMore : Model -> String -> (a -> String) -> Set.Set String -> List a -> List ( String, Html Msg )
+viewRootLoadMore model entityKind identify pinned cachedValues =
+    let
+        root =
+            model.dataLoading.rootNavigationRequest
+
+        transportHasMore =
+            root
+                |> Maybe.map
+                    (\state ->
+                        if entityKind == "project" then
+                            state.projectHasMore
+
+                        else
+                            state.taskHasMore
+                    )
+                |> Maybe.withDefault False
+
+        presentationOffset =
+            model.dataLoading.rootNavigationPresentation
+                |> Maybe.map
+                    (\state ->
+                        if entityKind == "project" then state.projectOffset else state.taskOffset
+                    )
+                |> Maybe.withDefault 0
+
+        ordinaryCachedCount =
+            cachedValues
+                |> List.filter (identify >> (\entityId -> not (Set.member entityId pinned)))
+                |> List.length
+
+        ordinaryCapacity =
+            presentationOrdinaryCapacity (List.length cachedValues - ordinaryCachedCount)
+
+        hasMore =
+            transportHasMore
+                || presentationOffset + ordinaryCapacity < ordinaryCachedCount
+                || (root |> Maybe.map (.succeeded >> not) |> Maybe.withDefault False)
+
+        loading =
+            root |> Maybe.map .inFlight |> Maybe.withDefault False
+    in
+    (if presentationOffset > 0 then
+        [ ( "root-show-previous-" ++ entityKind
+          , button [ class "navigation-load-more", onClick (ShowPreviousRootNavigationPage entityKind) ] [ text ("Show previous " ++ entityKind ++ "s") ]
           )
         ]
 
-    else
+     else
         []
+    )
+        ++ (if hasMore || loading then
+                [ ( "root-load-more-" ++ entityKind
+           , button
+                [ class "navigation-load-more"
+                , disabled loading
+                , onClick (LoadRootNavigationPage entityKind)
+                ]
+                [ text
+                    (if loading then
+                        "Loading..."
+
+                     else
+                        "Load more " ++ entityKind ++ "s"
+                    )
+                ]
+                  )
+                ]
+
+            else
+                []
+           )
 
 
 viewDeleteConfirmModal : Model -> Html Msg
@@ -2402,11 +2955,11 @@ viewDropZone model zone =
                 text ""
 
 
-viewTasksWithZones : Model -> String -> Maybe String -> Maybe String -> List Api.Task -> List ( String, Html Msg )
-viewTasksWithZones model zoneType projectId parentTaskId tasks =
+viewTasksWithZones : CardTreeProjection -> Model -> String -> Maybe String -> Maybe String -> List Api.Task -> List ( String, Html Msg )
+viewTasksWithZones projection model zoneType projectId parentTaskId tasks =
     case model.dragDrop.dragging of
         Nothing ->
-            List.map (\t -> ( t.id, viewTaskCard False model t )) tasks
+            List.map (\t -> ( t.id, viewTaskCard projection False model t )) tasks
 
         Just _ ->
             let
@@ -2425,7 +2978,7 @@ viewTasksWithZones model zoneType projectId parentTaskId tasks =
 
                         t :: rest ->
                             ( "dz-" ++ zoneType ++ "-" ++ String.fromInt idx, viewDropZone model (makeZone prevPri (Just t.priority)) )
-                                :: ( t.id, viewTaskCard False model t )
+                                :: ( t.id, viewTaskCard projection False model t )
                                 :: go rest (idx + 1) (Just t.priority)
             in
             go tasks 0 Nothing

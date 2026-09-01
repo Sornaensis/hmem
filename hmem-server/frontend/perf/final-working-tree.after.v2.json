@@ -1,0 +1,5661 @@
+{
+  "schemaVersion": 1,
+  "baseCommit": "ca04f51c3494c83c433d12bd7791f89be876daea",
+  "recordedAtUtc": "2026-09-01T14:19:23.787Z",
+  "recordAuthorization": "explicit --authorize-after-artifact",
+  "environment": {
+    "os": "Windows_NT 10.0.26200 x64",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K (24 logical)",
+    "ramBytes": 68207595520,
+    "node": "v24.15.0",
+    "npm": "11.12.1",
+    "elm": "0.19.1",
+    "vite": "5.4.21",
+    "playwright": "1.62.1",
+    "chromium": "151.0.7922.34",
+    "viewport": "1440x1000",
+    "headless": true,
+    "fingerprint": "b424ad40a20ea99cb8f9bd27a064ace3e7a02041d892b912cda89f218ff9dcf9"
+  },
+  "configuration": {
+    "schemaVersion": 1,
+    "buildCommand": "npm run build",
+    "buildMode": "production",
+    "transport": "Playwright-intercepted HTTP and canonical WebSocket",
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    },
+    "warmups": 2,
+    "samples": 5,
+    "browserClockUtc": "2026-08-30T12:00:00Z",
+    "percentile": "nearest-rank p95: sorted[ceil(0.95*n)-1]; with five samples p95 is the maximum",
+    "scenarioIsolation": "cold/tab/live measurements use production workspace_shell_v1 plus one bounded root-navigation page with deterministic unfiltered/unfocused restoration; direct focus uses a fresh focus-first shell session; rendered cardinality is measured, never a readiness prerequisite",
+    "initialTransport": "production workspace bootstrap explicitly requests workspace_shell_v1, transports only its authorized workspace root, then loads one capped navigation branch; the immutable full snapshot remains a legacy compatibility fixture only",
+    "routeFidelity": "snapshot kind-rank/identity ordering; capped list pagination; Project/Task DTO and overview ordering; Observation simple-lexeme AND/rank/subject/facet ordering; Timeline event ordering and day/week/month/quarter UTC bucket range aggregation/caps are frozen against production source anchors",
+    "directFocus": "navigate a project focus first from an empty shell state; observe one bounded navigation-focus lookup and render for 750ms without requiring legacy full resync",
+    "liveTiming": "settle ends after the dispatched checkpoint turn, completion of every follow-up that actually started (zero is valid), transport idle, representative UI anchor, and two paints; a separate 500ms stability window must observe no late request",
+    "heapPoint": "after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs"
+  },
+  "contracts": {
+    "budgetsHash": "bcf994aeb8074f53a75ab89ce24ee17c4059db5cb1e3e7061934641321b2da90",
+    "configurationHash": "6154f092da5dcd381a1fa7ddae7a0719d88f0123cc517184a168b2a39f11fc5c",
+    "directFocusContractHash": "e2a132adb8d9386e17be584946a790268ad58e5d10cd9e90d3a4810848864f50",
+    "fixtures": {
+      "small": "827312e056054ad5f144284fe198e22d4f8bac97980afa0ecb3142b9d86e0851",
+      "large": "1ae208983d613c84b9a96500c477615c0b3e27686ff08f03bb20f15f99b35a08"
+    },
+    "snapshots": {
+      "small": "c49d1b7d57cd229cae0835e26604f9c526d20be2d6fda4cf1094cf16394ff5f0",
+      "large": "49222dd4d70fdf34c636188ebd7b5be08fbbddad6391a3276bc57e25214ffa1b"
+    }
+  },
+  "fixtures": {
+    "schemaVersion": 1,
+    "seed": "hmem-large-workspace-v1",
+    "directFocusContract": {
+      "pageSize": 100,
+      "observationDeadlineMs": 750,
+      "pauseBeforeItems": 0,
+      "small": {
+        "targetProjectId": "20000000-0000-4000-8000-000000000009"
+      },
+      "large": {
+        "targetProjectId": "20000000-0000-4000-8000-000000000249"
+      }
+    },
+    "deepFocusContinuation": {
+      "ancestorCount": 129,
+      "offsets": [
+        0,
+        64,
+        128
+      ],
+      "requests": 3,
+      "targetRendered": true,
+      "breadcrumbCount": 130,
+      "breadcrumbOrdered": true,
+      "terminal": true,
+      "staleContinuationRejected": true
+    },
+    "small": {
+      "hash": "827312e056054ad5f144284fe198e22d4f8bac97980afa0ecb3142b9d86e0851",
+      "snapshotHash": "c49d1b7d57cd229cae0835e26604f9c526d20be2d6fda4cf1094cf16394ff5f0",
+      "scale": {
+        "projects": 10,
+        "projectLevels": 2,
+        "topTasks": 40,
+        "subtasks": 20,
+        "dependencies": 24,
+        "observations": 60,
+        "timelineEvents": 40,
+        "timelineBuckets": 20,
+        "liveFrames": 50
+      },
+      "directFocusTarget": {
+        "id": "20000000-0000-4000-8000-000000000009",
+        "workspace_id": "10000000-0000-4000-8000-000000000001",
+        "parent_id": null,
+        "name": "Project 0009 level 1",
+        "description": null,
+        "status": "active",
+        "priority": 9,
+        "metadata": {},
+        "created_at": "2025-01-01T08:02:00.000Z",
+        "updated_at": "2025-01-01T08:04:00.000Z"
+      }
+    },
+    "large": {
+      "hash": "1ae208983d613c84b9a96500c477615c0b3e27686ff08f03bb20f15f99b35a08",
+      "snapshotHash": "49222dd4d70fdf34c636188ebd7b5be08fbbddad6391a3276bc57e25214ffa1b",
+      "scale": {
+        "projects": 250,
+        "projectLevels": 4,
+        "topTasks": 1000,
+        "subtasks": 500,
+        "dependencies": 1200,
+        "observations": 2000,
+        "timelineEvents": 1000,
+        "timelineBuckets": 500,
+        "liveFrames": 50
+      },
+      "directFocusTarget": {
+        "id": "20000000-0000-4000-8000-000000000249",
+        "workspace_id": "10000000-0000-4000-8000-000000000002",
+        "parent_id": null,
+        "name": "Project 0249 level 1",
+        "description": null,
+        "status": "active",
+        "priority": 9,
+        "metadata": {},
+        "created_at": "2025-01-01T09:22:00.000Z",
+        "updated_at": "2025-01-01T09:24:00.000Z"
+      }
+    }
+  },
+  "runs": {
+    "small": [
+      {
+        "fixture": "small",
+        "measured": true,
+        "cold": {
+          "ms": 346.78879999999845,
+          "requests": 7,
+          "bytes": 35107,
+          "routeCounts": {
+            "session": 1,
+            "change-stream:resync": 1,
+            "workspaces:memberships": 1,
+            "navigation:branch": 1,
+            "workspaces:list": 1,
+            "observations:list": 1,
+            "change-stream:ticket": 1
+          },
+          "routeBytes": {
+            "session": 351,
+            "change-stream:resync": 396,
+            "workspaces:memberships": 219,
+            "navigation:branch": 5337,
+            "workspaces:list": 271,
+            "observations:list": 28464,
+            "change-stream:ticket": 69
+          },
+          "entityOverviewRequests": 0,
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1
+        },
+        "tabSwitches": {
+          "observations": {
+            "ms": 30.600000143051147,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "timeline": {
+            "ms": 38.5,
+            "count": 2,
+            "bytes": 31292,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 22788,
+              "timeline:buckets": 8504
+            }
+          },
+          "projects": {
+            "ms": 31.799999952316284,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "filters": {
+          "observations": {
+            "ms": 27.700000047683716,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationReset": {
+            "ms": 29.09999990463257,
+            "count": 1,
+            "bytes": 28464,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28464
+            }
+          }
+        },
+        "interactions": {
+          "taskFilterMs": {
+            "ms": 31.40000009536743,
+            "count": 1,
+            "bytes": 2496,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 2496
+            }
+          },
+          "taskFilterResetMs": {
+            "ms": 31.299999952316284,
+            "count": 1,
+            "bytes": 5337,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 5337
+            }
+          },
+          "observationsTabMs": {
+            "ms": 30.600000143051147,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "observationFilterMs": {
+            "ms": 27.700000047683716,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationFilterResetMs": {
+            "ms": 29.09999990463257,
+            "count": 1,
+            "bytes": 28464,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28464
+            }
+          },
+          "timelineTabMs": {
+            "ms": 38.5,
+            "count": 2,
+            "bytes": 31292,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 22788,
+              "timeline:buckets": 8504
+            }
+          },
+          "projectsTabMs": {
+            "ms": 31.799999952316284,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "observationLoadMore": {
+          "ms": 332.21000000000095,
+          "count": 1,
+          "bytes": 5589,
+          "routes": {
+            "observations:list": 1
+          },
+          "routeBytes": {
+            "observations:list": 5589
+          }
+        },
+        "directFocus": {
+          "ms": 84.09929999999986,
+          "observationDeadlineMs": 750,
+          "observationElapsedMs": 50.191899999999805,
+          "targetAbsentBeforeCanonicalResync": true,
+          "targetId": "20000000-0000-4000-8000-000000000009",
+          "targetParentId": null,
+          "pausedSnapshotItems": 0,
+          "pausedSnapshotPages": 0,
+          "directFocusRequested": true,
+          "directFocusRendered": true,
+          "productFailureReason": null,
+          "entityLookupRequests": 1,
+          "count": 1,
+          "focusRequestRoutes": {
+            "navigation:focus": 1
+          },
+          "attemptRouteDelta": {
+            "count": 8,
+            "bytes": 35845,
+            "routes": {
+              "session": 1,
+              "change-stream:resync": 1,
+              "workspaces:memberships": 1,
+              "navigation:focus": 1,
+              "navigation:branch": 1,
+              "workspaces:list": 1,
+              "observations:list": 1,
+              "change-stream:ticket": 1
+            },
+            "routeBytes": {
+              "session": 351,
+              "change-stream:resync": 396,
+              "workspaces:memberships": 219,
+              "navigation:focus": 738,
+              "navigation:branch": 5337,
+              "workspaces:list": 271,
+              "observations:list": 28464,
+              "change-stream:ticket": 69
+            }
+          },
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1,
+          "canonicalSnapshotHash": "c49d1b7d57cd229cae0835e26604f9c526d20be2d6fda4cf1094cf16394ff5f0",
+          "renderedAfterFullResync": true
+        },
+        "liveBatch": {
+          "frames": 50,
+          "sockets": 1,
+          "ms": 49.204499999999825,
+          "stabilityMs": 517.6849000000002,
+          "stabilityRequests": 0,
+          "count": 13,
+          "bytes": 11094,
+          "routes": {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+            "navigation:summaries": 1
+          },
+          "routeBytes": {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+            "navigation:summaries": 3506
+          },
+          "requests": 13,
+          "duplicateRequests": 0,
+          "wholeWorkspaceReload": false
+        },
+        "dom": [
+          {
+            "tab": "projects",
+            "nodes": 466,
+            "rows": 9,
+            "projects": 5,
+            "tasks": 4,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "observations",
+            "nodes": 614,
+            "rows": 50,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 50,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "timeline",
+            "nodes": 1741,
+            "rows": 79,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 0,
+            "timelineEvents": 40,
+            "timelineRows": 39
+          },
+          {
+            "tab": "post-live-projects",
+            "nodes": 466,
+            "rows": 9,
+            "projects": 5,
+            "tasks": 4,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          }
+        ],
+        "maxDomNodes": 1741,
+        "maxCollectionRows": 79,
+        "attributableHeapBytes": 4452796,
+        "heapPoint": "after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs",
+        "readiness": {
+          "protocol": "workspace_shell_v1",
+          "fullBackingSnapshotItems": 155,
+          "expectedSnapshotPages": 1,
+          "transportedSnapshotItems": 1,
+          "transportedSnapshotPages": 1,
+          "snapshotComplete": true,
+          "timelineEvents": 40,
+          "timelineBuckets": 13,
+          "timelineBucketRequest": {
+            "since": "2026-06-01T00:00:00Z",
+            "until": "2026-08-31T00:00:00Z",
+            "bucket": "week"
+          },
+          "anchors": {
+            "first": "20000000-0000-4000-8000-000000000009",
+            "expanded": "20000000-0000-4000-8000-000000000009",
+            "selected": "20000000-0000-4000-8000-000000000010"
+          }
+        },
+        "consoleErrors": []
+      },
+      {
+        "fixture": "small",
+        "measured": true,
+        "cold": {
+          "ms": 332.3818999999985,
+          "requests": 7,
+          "bytes": 35107,
+          "routeCounts": {
+            "session": 1,
+            "change-stream:resync": 1,
+            "workspaces:memberships": 1,
+            "navigation:branch": 1,
+            "workspaces:list": 1,
+            "observations:list": 1,
+            "change-stream:ticket": 1
+          },
+          "routeBytes": {
+            "session": 351,
+            "change-stream:resync": 396,
+            "workspaces:memberships": 219,
+            "navigation:branch": 5337,
+            "workspaces:list": 271,
+            "observations:list": 28464,
+            "change-stream:ticket": 69
+          },
+          "entityOverviewRequests": 0,
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1
+        },
+        "tabSwitches": {
+          "observations": {
+            "ms": 31.200000047683716,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "timeline": {
+            "ms": 36.799999952316284,
+            "count": 2,
+            "bytes": 31292,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 22788,
+              "timeline:buckets": 8504
+            }
+          },
+          "projects": {
+            "ms": 31.90000009536743,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "filters": {
+          "observations": {
+            "ms": 26.09999990463257,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationReset": {
+            "ms": 29.299999952316284,
+            "count": 1,
+            "bytes": 28464,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28464
+            }
+          }
+        },
+        "interactions": {
+          "taskFilterMs": {
+            "ms": 31.59999990463257,
+            "count": 1,
+            "bytes": 2496,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 2496
+            }
+          },
+          "taskFilterResetMs": {
+            "ms": 32.59999990463257,
+            "count": 1,
+            "bytes": 5337,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 5337
+            }
+          },
+          "observationsTabMs": {
+            "ms": 31.200000047683716,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "observationFilterMs": {
+            "ms": 26.09999990463257,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationFilterResetMs": {
+            "ms": 29.299999952316284,
+            "count": 1,
+            "bytes": 28464,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28464
+            }
+          },
+          "timelineTabMs": {
+            "ms": 36.799999952316284,
+            "count": 2,
+            "bytes": 31292,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 22788,
+              "timeline:buckets": 8504
+            }
+          },
+          "projectsTabMs": {
+            "ms": 31.90000009536743,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "observationLoadMore": {
+          "ms": 332.4858000000004,
+          "count": 1,
+          "bytes": 5589,
+          "routes": {
+            "observations:list": 1
+          },
+          "routeBytes": {
+            "observations:list": 5589
+          }
+        },
+        "directFocus": {
+          "ms": 87.14429999999993,
+          "observationDeadlineMs": 750,
+          "observationElapsedMs": 52.39229999999952,
+          "targetAbsentBeforeCanonicalResync": true,
+          "targetId": "20000000-0000-4000-8000-000000000009",
+          "targetParentId": null,
+          "pausedSnapshotItems": 0,
+          "pausedSnapshotPages": 0,
+          "directFocusRequested": true,
+          "directFocusRendered": true,
+          "productFailureReason": null,
+          "entityLookupRequests": 1,
+          "count": 1,
+          "focusRequestRoutes": {
+            "navigation:focus": 1
+          },
+          "attemptRouteDelta": {
+            "count": 8,
+            "bytes": 35845,
+            "routes": {
+              "session": 1,
+              "change-stream:resync": 1,
+              "workspaces:memberships": 1,
+              "navigation:focus": 1,
+              "navigation:branch": 1,
+              "workspaces:list": 1,
+              "observations:list": 1,
+              "change-stream:ticket": 1
+            },
+            "routeBytes": {
+              "session": 351,
+              "change-stream:resync": 396,
+              "workspaces:memberships": 219,
+              "navigation:focus": 738,
+              "navigation:branch": 5337,
+              "workspaces:list": 271,
+              "observations:list": 28464,
+              "change-stream:ticket": 69
+            }
+          },
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1,
+          "canonicalSnapshotHash": "c49d1b7d57cd229cae0835e26604f9c526d20be2d6fda4cf1094cf16394ff5f0",
+          "renderedAfterFullResync": true
+        },
+        "liveBatch": {
+          "frames": 50,
+          "sockets": 1,
+          "ms": 49.68989999999758,
+          "stabilityMs": 516.0421999999999,
+          "stabilityRequests": 0,
+          "count": 13,
+          "bytes": 11094,
+          "routes": {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+            "navigation:summaries": 1
+          },
+          "routeBytes": {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+            "navigation:summaries": 3506
+          },
+          "requests": 13,
+          "duplicateRequests": 0,
+          "wholeWorkspaceReload": false
+        },
+        "dom": [
+          {
+            "tab": "projects",
+            "nodes": 466,
+            "rows": 9,
+            "projects": 5,
+            "tasks": 4,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "observations",
+            "nodes": 614,
+            "rows": 50,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 50,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "timeline",
+            "nodes": 1741,
+            "rows": 79,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 0,
+            "timelineEvents": 40,
+            "timelineRows": 39
+          },
+          {
+            "tab": "post-live-projects",
+            "nodes": 466,
+            "rows": 9,
+            "projects": 5,
+            "tasks": 4,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          }
+        ],
+        "maxDomNodes": 1741,
+        "maxCollectionRows": 79,
+        "attributableHeapBytes": 4418416,
+        "heapPoint": "after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs",
+        "readiness": {
+          "protocol": "workspace_shell_v1",
+          "fullBackingSnapshotItems": 155,
+          "expectedSnapshotPages": 1,
+          "transportedSnapshotItems": 1,
+          "transportedSnapshotPages": 1,
+          "snapshotComplete": true,
+          "timelineEvents": 40,
+          "timelineBuckets": 13,
+          "timelineBucketRequest": {
+            "since": "2026-06-01T00:00:00Z",
+            "until": "2026-08-31T00:00:00Z",
+            "bucket": "week"
+          },
+          "anchors": {
+            "first": "20000000-0000-4000-8000-000000000009",
+            "expanded": "20000000-0000-4000-8000-000000000009",
+            "selected": "20000000-0000-4000-8000-000000000010"
+          }
+        },
+        "consoleErrors": []
+      },
+      {
+        "fixture": "small",
+        "measured": true,
+        "cold": {
+          "ms": 342.8842999999979,
+          "requests": 7,
+          "bytes": 35107,
+          "routeCounts": {
+            "session": 1,
+            "change-stream:resync": 1,
+            "workspaces:memberships": 1,
+            "navigation:branch": 1,
+            "workspaces:list": 1,
+            "observations:list": 1,
+            "change-stream:ticket": 1
+          },
+          "routeBytes": {
+            "session": 351,
+            "change-stream:resync": 396,
+            "workspaces:memberships": 219,
+            "navigation:branch": 5337,
+            "workspaces:list": 271,
+            "observations:list": 28464,
+            "change-stream:ticket": 69
+          },
+          "entityOverviewRequests": 0,
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1
+        },
+        "tabSwitches": {
+          "observations": {
+            "ms": 31.5,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "timeline": {
+            "ms": 38.799999952316284,
+            "count": 2,
+            "bytes": 31292,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 22788,
+              "timeline:buckets": 8504
+            }
+          },
+          "projects": {
+            "ms": 32.10000014305115,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "filters": {
+          "observations": {
+            "ms": 27.700000047683716,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationReset": {
+            "ms": 29.5,
+            "count": 1,
+            "bytes": 28464,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28464
+            }
+          }
+        },
+        "interactions": {
+          "taskFilterMs": {
+            "ms": 30.899999856948853,
+            "count": 1,
+            "bytes": 2496,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 2496
+            }
+          },
+          "taskFilterResetMs": {
+            "ms": 32.10000014305115,
+            "count": 1,
+            "bytes": 5337,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 5337
+            }
+          },
+          "observationsTabMs": {
+            "ms": 31.5,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "observationFilterMs": {
+            "ms": 27.700000047683716,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationFilterResetMs": {
+            "ms": 29.5,
+            "count": 1,
+            "bytes": 28464,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28464
+            }
+          },
+          "timelineTabMs": {
+            "ms": 38.799999952316284,
+            "count": 2,
+            "bytes": 31292,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 22788,
+              "timeline:buckets": 8504
+            }
+          },
+          "projectsTabMs": {
+            "ms": 32.10000014305115,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "observationLoadMore": {
+          "ms": 298.48070000000007,
+          "count": 1,
+          "bytes": 5589,
+          "routes": {
+            "observations:list": 1
+          },
+          "routeBytes": {
+            "observations:list": 5589
+          }
+        },
+        "directFocus": {
+          "ms": 85.39530000000013,
+          "observationDeadlineMs": 750,
+          "observationElapsedMs": 50.58060000000114,
+          "targetAbsentBeforeCanonicalResync": true,
+          "targetId": "20000000-0000-4000-8000-000000000009",
+          "targetParentId": null,
+          "pausedSnapshotItems": 0,
+          "pausedSnapshotPages": 0,
+          "directFocusRequested": true,
+          "directFocusRendered": true,
+          "productFailureReason": null,
+          "entityLookupRequests": 1,
+          "count": 1,
+          "focusRequestRoutes": {
+            "navigation:focus": 1
+          },
+          "attemptRouteDelta": {
+            "count": 8,
+            "bytes": 35845,
+            "routes": {
+              "session": 1,
+              "change-stream:resync": 1,
+              "workspaces:memberships": 1,
+              "navigation:focus": 1,
+              "navigation:branch": 1,
+              "workspaces:list": 1,
+              "observations:list": 1,
+              "change-stream:ticket": 1
+            },
+            "routeBytes": {
+              "session": 351,
+              "change-stream:resync": 396,
+              "workspaces:memberships": 219,
+              "navigation:focus": 738,
+              "navigation:branch": 5337,
+              "workspaces:list": 271,
+              "observations:list": 28464,
+              "change-stream:ticket": 69
+            }
+          },
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1,
+          "canonicalSnapshotHash": "c49d1b7d57cd229cae0835e26604f9c526d20be2d6fda4cf1094cf16394ff5f0",
+          "renderedAfterFullResync": true
+        },
+        "liveBatch": {
+          "frames": 50,
+          "sockets": 1,
+          "ms": 49.68210000000181,
+          "stabilityMs": 531.9812999999995,
+          "stabilityRequests": 0,
+          "count": 13,
+          "bytes": 11094,
+          "routes": {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+            "navigation:summaries": 1
+          },
+          "routeBytes": {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+            "navigation:summaries": 3506
+          },
+          "requests": 13,
+          "duplicateRequests": 0,
+          "wholeWorkspaceReload": false
+        },
+        "dom": [
+          {
+            "tab": "projects",
+            "nodes": 466,
+            "rows": 9,
+            "projects": 5,
+            "tasks": 4,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "observations",
+            "nodes": 614,
+            "rows": 50,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 50,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "timeline",
+            "nodes": 1741,
+            "rows": 79,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 0,
+            "timelineEvents": 40,
+            "timelineRows": 39
+          },
+          {
+            "tab": "post-live-projects",
+            "nodes": 466,
+            "rows": 9,
+            "projects": 5,
+            "tasks": 4,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          }
+        ],
+        "maxDomNodes": 1741,
+        "maxCollectionRows": 79,
+        "attributableHeapBytes": 4431144,
+        "heapPoint": "after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs",
+        "readiness": {
+          "protocol": "workspace_shell_v1",
+          "fullBackingSnapshotItems": 155,
+          "expectedSnapshotPages": 1,
+          "transportedSnapshotItems": 1,
+          "transportedSnapshotPages": 1,
+          "snapshotComplete": true,
+          "timelineEvents": 40,
+          "timelineBuckets": 13,
+          "timelineBucketRequest": {
+            "since": "2026-06-01T00:00:00Z",
+            "until": "2026-08-31T00:00:00Z",
+            "bucket": "week"
+          },
+          "anchors": {
+            "first": "20000000-0000-4000-8000-000000000009",
+            "expanded": "20000000-0000-4000-8000-000000000009",
+            "selected": "20000000-0000-4000-8000-000000000010"
+          }
+        },
+        "consoleErrors": []
+      },
+      {
+        "fixture": "small",
+        "measured": true,
+        "cold": {
+          "ms": 329.96800000000076,
+          "requests": 7,
+          "bytes": 35107,
+          "routeCounts": {
+            "session": 1,
+            "change-stream:resync": 1,
+            "workspaces:memberships": 1,
+            "navigation:branch": 1,
+            "workspaces:list": 1,
+            "observations:list": 1,
+            "change-stream:ticket": 1
+          },
+          "routeBytes": {
+            "session": 351,
+            "change-stream:resync": 396,
+            "workspaces:memberships": 219,
+            "navigation:branch": 5337,
+            "workspaces:list": 271,
+            "observations:list": 28464,
+            "change-stream:ticket": 69
+          },
+          "entityOverviewRequests": 0,
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1
+        },
+        "tabSwitches": {
+          "observations": {
+            "ms": 31.799999952316284,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "timeline": {
+            "ms": 36.59999990463257,
+            "count": 2,
+            "bytes": 31292,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 22788,
+              "timeline:buckets": 8504
+            }
+          },
+          "projects": {
+            "ms": 31.399999856948853,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "filters": {
+          "observations": {
+            "ms": 26.09999990463257,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationReset": {
+            "ms": 28.700000047683716,
+            "count": 1,
+            "bytes": 28464,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28464
+            }
+          }
+        },
+        "interactions": {
+          "taskFilterMs": {
+            "ms": 30.40000009536743,
+            "count": 1,
+            "bytes": 2496,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 2496
+            }
+          },
+          "taskFilterResetMs": {
+            "ms": 32.09999990463257,
+            "count": 1,
+            "bytes": 5337,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 5337
+            }
+          },
+          "observationsTabMs": {
+            "ms": 31.799999952316284,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "observationFilterMs": {
+            "ms": 26.09999990463257,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationFilterResetMs": {
+            "ms": 28.700000047683716,
+            "count": 1,
+            "bytes": 28464,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28464
+            }
+          },
+          "timelineTabMs": {
+            "ms": 36.59999990463257,
+            "count": 2,
+            "bytes": 31292,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 22788,
+              "timeline:buckets": 8504
+            }
+          },
+          "projectsTabMs": {
+            "ms": 31.399999856948853,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "observationLoadMore": {
+          "ms": 333.351200000001,
+          "count": 1,
+          "bytes": 5589,
+          "routes": {
+            "observations:list": 1
+          },
+          "routeBytes": {
+            "observations:list": 5589
+          }
+        },
+        "directFocus": {
+          "ms": 90.07920000000013,
+          "observationDeadlineMs": 750,
+          "observationElapsedMs": 53.386899999997695,
+          "targetAbsentBeforeCanonicalResync": true,
+          "targetId": "20000000-0000-4000-8000-000000000009",
+          "targetParentId": null,
+          "pausedSnapshotItems": 0,
+          "pausedSnapshotPages": 0,
+          "directFocusRequested": true,
+          "directFocusRendered": true,
+          "productFailureReason": null,
+          "entityLookupRequests": 1,
+          "count": 1,
+          "focusRequestRoutes": {
+            "navigation:focus": 1
+          },
+          "attemptRouteDelta": {
+            "count": 8,
+            "bytes": 35845,
+            "routes": {
+              "session": 1,
+              "change-stream:resync": 1,
+              "workspaces:memberships": 1,
+              "navigation:focus": 1,
+              "navigation:branch": 1,
+              "workspaces:list": 1,
+              "observations:list": 1,
+              "change-stream:ticket": 1
+            },
+            "routeBytes": {
+              "session": 351,
+              "change-stream:resync": 396,
+              "workspaces:memberships": 219,
+              "navigation:focus": 738,
+              "navigation:branch": 5337,
+              "workspaces:list": 271,
+              "observations:list": 28464,
+              "change-stream:ticket": 69
+            }
+          },
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1,
+          "canonicalSnapshotHash": "c49d1b7d57cd229cae0835e26604f9c526d20be2d6fda4cf1094cf16394ff5f0",
+          "renderedAfterFullResync": true
+        },
+        "liveBatch": {
+          "frames": 50,
+          "sockets": 1,
+          "ms": 49.03809999999794,
+          "stabilityMs": 516.3967000000011,
+          "stabilityRequests": 0,
+          "count": 13,
+          "bytes": 11094,
+          "routes": {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+            "navigation:summaries": 1
+          },
+          "routeBytes": {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+            "navigation:summaries": 3506
+          },
+          "requests": 13,
+          "duplicateRequests": 0,
+          "wholeWorkspaceReload": false
+        },
+        "dom": [
+          {
+            "tab": "projects",
+            "nodes": 466,
+            "rows": 9,
+            "projects": 5,
+            "tasks": 4,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "observations",
+            "nodes": 614,
+            "rows": 50,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 50,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "timeline",
+            "nodes": 1741,
+            "rows": 79,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 0,
+            "timelineEvents": 40,
+            "timelineRows": 39
+          },
+          {
+            "tab": "post-live-projects",
+            "nodes": 466,
+            "rows": 9,
+            "projects": 5,
+            "tasks": 4,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          }
+        ],
+        "maxDomNodes": 1741,
+        "maxCollectionRows": 79,
+        "attributableHeapBytes": 4429460,
+        "heapPoint": "after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs",
+        "readiness": {
+          "protocol": "workspace_shell_v1",
+          "fullBackingSnapshotItems": 155,
+          "expectedSnapshotPages": 1,
+          "transportedSnapshotItems": 1,
+          "transportedSnapshotPages": 1,
+          "snapshotComplete": true,
+          "timelineEvents": 40,
+          "timelineBuckets": 13,
+          "timelineBucketRequest": {
+            "since": "2026-06-01T00:00:00Z",
+            "until": "2026-08-31T00:00:00Z",
+            "bucket": "week"
+          },
+          "anchors": {
+            "first": "20000000-0000-4000-8000-000000000009",
+            "expanded": "20000000-0000-4000-8000-000000000009",
+            "selected": "20000000-0000-4000-8000-000000000010"
+          }
+        },
+        "consoleErrors": []
+      },
+      {
+        "fixture": "small",
+        "measured": true,
+        "cold": {
+          "ms": 333.27470000000176,
+          "requests": 7,
+          "bytes": 35107,
+          "routeCounts": {
+            "session": 1,
+            "change-stream:resync": 1,
+            "workspaces:memberships": 1,
+            "navigation:branch": 1,
+            "workspaces:list": 1,
+            "observations:list": 1,
+            "change-stream:ticket": 1
+          },
+          "routeBytes": {
+            "session": 351,
+            "change-stream:resync": 396,
+            "workspaces:memberships": 219,
+            "navigation:branch": 5337,
+            "workspaces:list": 271,
+            "observations:list": 28464,
+            "change-stream:ticket": 69
+          },
+          "entityOverviewRequests": 0,
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1
+        },
+        "tabSwitches": {
+          "observations": {
+            "ms": 30.200000047683716,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "timeline": {
+            "ms": 37.80000019073486,
+            "count": 2,
+            "bytes": 31292,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 22788,
+              "timeline:buckets": 8504
+            }
+          },
+          "projects": {
+            "ms": 32.89999985694885,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "filters": {
+          "observations": {
+            "ms": 26.90000009536743,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationReset": {
+            "ms": 29.600000143051147,
+            "count": 1,
+            "bytes": 28464,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28464
+            }
+          }
+        },
+        "interactions": {
+          "taskFilterMs": {
+            "ms": 31.200000047683716,
+            "count": 1,
+            "bytes": 2496,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 2496
+            }
+          },
+          "taskFilterResetMs": {
+            "ms": 32.10000014305115,
+            "count": 1,
+            "bytes": 5337,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 5337
+            }
+          },
+          "observationsTabMs": {
+            "ms": 30.200000047683716,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "observationFilterMs": {
+            "ms": 26.90000009536743,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationFilterResetMs": {
+            "ms": 29.600000143051147,
+            "count": 1,
+            "bytes": 28464,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28464
+            }
+          },
+          "timelineTabMs": {
+            "ms": 37.80000019073486,
+            "count": 2,
+            "bytes": 31292,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 22788,
+              "timeline:buckets": 8504
+            }
+          },
+          "projectsTabMs": {
+            "ms": 32.89999985694885,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "observationLoadMore": {
+          "ms": 297.9186000000009,
+          "count": 1,
+          "bytes": 5589,
+          "routes": {
+            "observations:list": 1
+          },
+          "routeBytes": {
+            "observations:list": 5589
+          }
+        },
+        "directFocus": {
+          "ms": 95.76589999999851,
+          "observationDeadlineMs": 750,
+          "observationElapsedMs": 60.83849999999802,
+          "targetAbsentBeforeCanonicalResync": true,
+          "targetId": "20000000-0000-4000-8000-000000000009",
+          "targetParentId": null,
+          "pausedSnapshotItems": 0,
+          "pausedSnapshotPages": 0,
+          "directFocusRequested": true,
+          "directFocusRendered": true,
+          "productFailureReason": null,
+          "entityLookupRequests": 1,
+          "count": 1,
+          "focusRequestRoutes": {
+            "navigation:focus": 1
+          },
+          "attemptRouteDelta": {
+            "count": 8,
+            "bytes": 35845,
+            "routes": {
+              "session": 1,
+              "change-stream:resync": 1,
+              "workspaces:memberships": 1,
+              "navigation:focus": 1,
+              "navigation:branch": 1,
+              "workspaces:list": 1,
+              "observations:list": 1,
+              "change-stream:ticket": 1
+            },
+            "routeBytes": {
+              "session": 351,
+              "change-stream:resync": 396,
+              "workspaces:memberships": 219,
+              "navigation:focus": 738,
+              "navigation:branch": 5337,
+              "workspaces:list": 271,
+              "observations:list": 28464,
+              "change-stream:ticket": 69
+            }
+          },
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1,
+          "canonicalSnapshotHash": "c49d1b7d57cd229cae0835e26604f9c526d20be2d6fda4cf1094cf16394ff5f0",
+          "renderedAfterFullResync": true
+        },
+        "liveBatch": {
+          "frames": 50,
+          "sockets": 1,
+          "ms": 48.96099999999933,
+          "stabilityMs": 516.9232000000011,
+          "stabilityRequests": 0,
+          "count": 13,
+          "bytes": 11094,
+          "routes": {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+            "navigation:summaries": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 1
+          },
+          "routeBytes": {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+            "navigation:summaries": 3506,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 634
+          },
+          "requests": 13,
+          "duplicateRequests": 0,
+          "wholeWorkspaceReload": false
+        },
+        "dom": [
+          {
+            "tab": "projects",
+            "nodes": 466,
+            "rows": 9,
+            "projects": 5,
+            "tasks": 4,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "observations",
+            "nodes": 614,
+            "rows": 50,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 50,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "timeline",
+            "nodes": 1741,
+            "rows": 79,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 0,
+            "timelineEvents": 40,
+            "timelineRows": 39
+          },
+          {
+            "tab": "post-live-projects",
+            "nodes": 466,
+            "rows": 9,
+            "projects": 5,
+            "tasks": 4,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          }
+        ],
+        "maxDomNodes": 1741,
+        "maxCollectionRows": 79,
+        "attributableHeapBytes": 4428796,
+        "heapPoint": "after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs",
+        "readiness": {
+          "protocol": "workspace_shell_v1",
+          "fullBackingSnapshotItems": 155,
+          "expectedSnapshotPages": 1,
+          "transportedSnapshotItems": 1,
+          "transportedSnapshotPages": 1,
+          "snapshotComplete": true,
+          "timelineEvents": 40,
+          "timelineBuckets": 13,
+          "timelineBucketRequest": {
+            "since": "2026-06-01T00:00:00Z",
+            "until": "2026-08-31T00:00:00Z",
+            "bucket": "week"
+          },
+          "anchors": {
+            "first": "20000000-0000-4000-8000-000000000009",
+            "expanded": "20000000-0000-4000-8000-000000000009",
+            "selected": "20000000-0000-4000-8000-000000000010"
+          }
+        },
+        "consoleErrors": []
+      }
+    ],
+    "large": [
+      {
+        "fixture": "large",
+        "measured": true,
+        "cold": {
+          "ms": 445.4001999999964,
+          "requests": 7,
+          "bytes": 87299,
+          "routeCounts": {
+            "session": 1,
+            "change-stream:resync": 1,
+            "workspaces:memberships": 1,
+            "navigation:branch": 1,
+            "workspaces:list": 1,
+            "observations:list": 1,
+            "change-stream:ticket": 1
+          },
+          "routeBytes": {
+            "session": 351,
+            "change-stream:resync": 396,
+            "workspaces:memberships": 219,
+            "navigation:branch": 57663,
+            "workspaces:list": 271,
+            "observations:list": 28330,
+            "change-stream:ticket": 69
+          },
+          "entityOverviewRequests": 0,
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1
+        },
+        "tabSwitches": {
+          "observations": {
+            "ms": 28.699999809265137,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "timeline": {
+            "ms": 38.10000014305115,
+            "count": 2,
+            "bytes": 37153,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 28649,
+              "timeline:buckets": 8504
+            }
+          },
+          "projects": {
+            "ms": 31,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "filters": {
+          "observations": {
+            "ms": 27.09999990463257,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationReset": {
+            "ms": 28.399999856948853,
+            "count": 1,
+            "bytes": 28330,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28330
+            }
+          }
+        },
+        "interactions": {
+          "taskFilterMs": {
+            "ms": 30.800000190734863,
+            "count": 1,
+            "bytes": 29267,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 29267
+            }
+          },
+          "taskFilterResetMs": {
+            "ms": 33.09999990463257,
+            "count": 1,
+            "bytes": 57663,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 57663
+            }
+          },
+          "observationsTabMs": {
+            "ms": 28.699999809265137,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "observationFilterMs": {
+            "ms": 27.09999990463257,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationFilterResetMs": {
+            "ms": 28.399999856948853,
+            "count": 1,
+            "bytes": 28330,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28330
+            }
+          },
+          "timelineTabMs": {
+            "ms": 38.10000014305115,
+            "count": 2,
+            "bytes": 37153,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 28649,
+              "timeline:buckets": 8504
+            }
+          },
+          "projectsTabMs": {
+            "ms": 31,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "observationLoadMore": {
+          "ms": 332.02350000000297,
+          "count": 1,
+          "bytes": 28440,
+          "routes": {
+            "observations:list": 1
+          },
+          "routeBytes": {
+            "observations:list": 28440
+          }
+        },
+        "directFocus": {
+          "ms": 183.524599999997,
+          "observationDeadlineMs": 750,
+          "observationElapsedMs": 148.49639999999636,
+          "targetAbsentBeforeCanonicalResync": true,
+          "targetId": "20000000-0000-4000-8000-000000000249",
+          "targetParentId": null,
+          "pausedSnapshotItems": 0,
+          "pausedSnapshotPages": 0,
+          "directFocusRequested": true,
+          "directFocusRendered": true,
+          "productFailureReason": null,
+          "entityLookupRequests": 1,
+          "count": 1,
+          "focusRequestRoutes": {
+            "navigation:focus": 1
+          },
+          "attemptRouteDelta": {
+            "count": 8,
+            "bytes": 88037,
+            "routes": {
+              "session": 1,
+              "change-stream:resync": 1,
+              "workspaces:memberships": 1,
+              "navigation:focus": 1,
+              "navigation:branch": 1,
+              "workspaces:list": 1,
+              "observations:list": 1,
+              "change-stream:ticket": 1
+            },
+            "routeBytes": {
+              "session": 351,
+              "change-stream:resync": 396,
+              "workspaces:memberships": 219,
+              "navigation:focus": 738,
+              "navigation:branch": 57663,
+              "workspaces:list": 271,
+              "observations:list": 28330,
+              "change-stream:ticket": 69
+            }
+          },
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1,
+          "canonicalSnapshotHash": "49222dd4d70fdf34c636188ebd7b5be08fbbddad6391a3276bc57e25214ffa1b",
+          "renderedAfterFullResync": true
+        },
+        "liveBatch": {
+          "frames": 50,
+          "sockets": 1,
+          "ms": 49.114800000003015,
+          "stabilityMs": 533.3126000000047,
+          "stabilityRequests": 0,
+          "count": 1,
+          "bytes": 2368,
+          "routes": {
+            "navigation:summaries": 1
+          },
+          "routeBytes": {
+            "navigation:summaries": 2368
+          },
+          "requests": 1,
+          "duplicateRequests": 0,
+          "wholeWorkspaceReload": false
+        },
+        "dom": [
+          {
+            "tab": "projects",
+            "nodes": 2077,
+            "rows": 50,
+            "projects": 25,
+            "tasks": 25,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "observations",
+            "nodes": 614,
+            "rows": 50,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 50,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "timeline",
+            "nodes": 1913,
+            "rows": 89,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 0,
+            "timelineEvents": 50,
+            "timelineRows": 39
+          },
+          {
+            "tab": "post-live-projects",
+            "nodes": 2077,
+            "rows": 50,
+            "projects": 25,
+            "tasks": 25,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          }
+        ],
+        "maxDomNodes": 2077,
+        "maxCollectionRows": 89,
+        "attributableHeapBytes": 5158348,
+        "heapPoint": "after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs",
+        "readiness": {
+          "protocol": "workspace_shell_v1",
+          "fullBackingSnapshotItems": 4951,
+          "expectedSnapshotPages": 1,
+          "transportedSnapshotItems": 1,
+          "transportedSnapshotPages": 1,
+          "snapshotComplete": true,
+          "timelineEvents": 50,
+          "timelineBuckets": 13,
+          "timelineBucketRequest": {
+            "since": "2026-06-01T00:00:00Z",
+            "until": "2026-08-31T00:00:00Z",
+            "bucket": "week"
+          },
+          "anchors": {
+            "first": "20000000-0000-4000-8000-000000000009",
+            "expanded": "20000000-0000-4000-8000-000000000009",
+            "selected": "20000000-0000-4000-8000-000000000250"
+          }
+        },
+        "consoleErrors": []
+      },
+      {
+        "fixture": "large",
+        "measured": true,
+        "cold": {
+          "ms": 424.3721000000005,
+          "requests": 7,
+          "bytes": 87299,
+          "routeCounts": {
+            "session": 1,
+            "change-stream:resync": 1,
+            "workspaces:memberships": 1,
+            "navigation:branch": 1,
+            "workspaces:list": 1,
+            "observations:list": 1,
+            "change-stream:ticket": 1
+          },
+          "routeBytes": {
+            "session": 351,
+            "change-stream:resync": 396,
+            "workspaces:memberships": 219,
+            "navigation:branch": 57663,
+            "workspaces:list": 271,
+            "observations:list": 28330,
+            "change-stream:ticket": 69
+          },
+          "entityOverviewRequests": 0,
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1
+        },
+        "tabSwitches": {
+          "observations": {
+            "ms": 31,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "timeline": {
+            "ms": 36.200000047683716,
+            "count": 2,
+            "bytes": 37153,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 28649,
+              "timeline:buckets": 8504
+            }
+          },
+          "projects": {
+            "ms": 32.40000009536743,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "filters": {
+          "observations": {
+            "ms": 28.40000009536743,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationReset": {
+            "ms": 31.200000047683716,
+            "count": 1,
+            "bytes": 28330,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28330
+            }
+          }
+        },
+        "interactions": {
+          "taskFilterMs": {
+            "ms": 31.200000047683716,
+            "count": 1,
+            "bytes": 29267,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 29267
+            }
+          },
+          "taskFilterResetMs": {
+            "ms": 33,
+            "count": 1,
+            "bytes": 57663,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 57663
+            }
+          },
+          "observationsTabMs": {
+            "ms": 31,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "observationFilterMs": {
+            "ms": 28.40000009536743,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationFilterResetMs": {
+            "ms": 31.200000047683716,
+            "count": 1,
+            "bytes": 28330,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28330
+            }
+          },
+          "timelineTabMs": {
+            "ms": 36.200000047683716,
+            "count": 2,
+            "bytes": 37153,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 28649,
+              "timeline:buckets": 8504
+            }
+          },
+          "projectsTabMs": {
+            "ms": 32.40000009536743,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "observationLoadMore": {
+          "ms": 299.4174999999959,
+          "count": 1,
+          "bytes": 28440,
+          "routes": {
+            "observations:list": 1
+          },
+          "routeBytes": {
+            "observations:list": 28440
+          }
+        },
+        "directFocus": {
+          "ms": 185.72239999999874,
+          "observationDeadlineMs": 750,
+          "observationElapsedMs": 153.58239999999932,
+          "targetAbsentBeforeCanonicalResync": true,
+          "targetId": "20000000-0000-4000-8000-000000000249",
+          "targetParentId": null,
+          "pausedSnapshotItems": 0,
+          "pausedSnapshotPages": 0,
+          "directFocusRequested": true,
+          "directFocusRendered": true,
+          "productFailureReason": null,
+          "entityLookupRequests": 1,
+          "count": 1,
+          "focusRequestRoutes": {
+            "navigation:focus": 1
+          },
+          "attemptRouteDelta": {
+            "count": 8,
+            "bytes": 88037,
+            "routes": {
+              "session": 1,
+              "change-stream:resync": 1,
+              "workspaces:memberships": 1,
+              "navigation:focus": 1,
+              "navigation:branch": 1,
+              "workspaces:list": 1,
+              "observations:list": 1,
+              "change-stream:ticket": 1
+            },
+            "routeBytes": {
+              "session": 351,
+              "change-stream:resync": 396,
+              "workspaces:memberships": 219,
+              "navigation:focus": 738,
+              "navigation:branch": 57663,
+              "workspaces:list": 271,
+              "observations:list": 28330,
+              "change-stream:ticket": 69
+            }
+          },
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1,
+          "canonicalSnapshotHash": "49222dd4d70fdf34c636188ebd7b5be08fbbddad6391a3276bc57e25214ffa1b",
+          "renderedAfterFullResync": true
+        },
+        "liveBatch": {
+          "frames": 50,
+          "sockets": 1,
+          "ms": 48.34880000000703,
+          "stabilityMs": 516.8069000000032,
+          "stabilityRequests": 0,
+          "count": 1,
+          "bytes": 2368,
+          "routes": {
+            "navigation:summaries": 1
+          },
+          "routeBytes": {
+            "navigation:summaries": 2368
+          },
+          "requests": 1,
+          "duplicateRequests": 0,
+          "wholeWorkspaceReload": false
+        },
+        "dom": [
+          {
+            "tab": "projects",
+            "nodes": 2077,
+            "rows": 50,
+            "projects": 25,
+            "tasks": 25,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "observations",
+            "nodes": 614,
+            "rows": 50,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 50,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "timeline",
+            "nodes": 1913,
+            "rows": 89,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 0,
+            "timelineEvents": 50,
+            "timelineRows": 39
+          },
+          {
+            "tab": "post-live-projects",
+            "nodes": 2077,
+            "rows": 50,
+            "projects": 25,
+            "tasks": 25,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          }
+        ],
+        "maxDomNodes": 2077,
+        "maxCollectionRows": 89,
+        "attributableHeapBytes": 5231708,
+        "heapPoint": "after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs",
+        "readiness": {
+          "protocol": "workspace_shell_v1",
+          "fullBackingSnapshotItems": 4951,
+          "expectedSnapshotPages": 1,
+          "transportedSnapshotItems": 1,
+          "transportedSnapshotPages": 1,
+          "snapshotComplete": true,
+          "timelineEvents": 50,
+          "timelineBuckets": 13,
+          "timelineBucketRequest": {
+            "since": "2026-06-01T00:00:00Z",
+            "until": "2026-08-31T00:00:00Z",
+            "bucket": "week"
+          },
+          "anchors": {
+            "first": "20000000-0000-4000-8000-000000000009",
+            "expanded": "20000000-0000-4000-8000-000000000009",
+            "selected": "20000000-0000-4000-8000-000000000250"
+          }
+        },
+        "consoleErrors": []
+      },
+      {
+        "fixture": "large",
+        "measured": true,
+        "cold": {
+          "ms": 422.34419999999955,
+          "requests": 7,
+          "bytes": 87299,
+          "routeCounts": {
+            "session": 1,
+            "change-stream:resync": 1,
+            "workspaces:memberships": 1,
+            "navigation:branch": 1,
+            "workspaces:list": 1,
+            "observations:list": 1,
+            "change-stream:ticket": 1
+          },
+          "routeBytes": {
+            "session": 351,
+            "change-stream:resync": 396,
+            "workspaces:memberships": 219,
+            "navigation:branch": 57663,
+            "workspaces:list": 271,
+            "observations:list": 28330,
+            "change-stream:ticket": 69
+          },
+          "entityOverviewRequests": 0,
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1
+        },
+        "tabSwitches": {
+          "observations": {
+            "ms": 29.90000009536743,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "timeline": {
+            "ms": 38.40000009536743,
+            "count": 2,
+            "bytes": 37153,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 28649,
+              "timeline:buckets": 8504
+            }
+          },
+          "projects": {
+            "ms": 32.10000014305115,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "filters": {
+          "observations": {
+            "ms": 27.799999952316284,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationReset": {
+            "ms": 30.200000047683716,
+            "count": 1,
+            "bytes": 28330,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28330
+            }
+          }
+        },
+        "interactions": {
+          "taskFilterMs": {
+            "ms": 32.59999990463257,
+            "count": 1,
+            "bytes": 29267,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 29267
+            }
+          },
+          "taskFilterResetMs": {
+            "ms": 31.59999990463257,
+            "count": 1,
+            "bytes": 57663,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 57663
+            }
+          },
+          "observationsTabMs": {
+            "ms": 29.90000009536743,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "observationFilterMs": {
+            "ms": 27.799999952316284,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationFilterResetMs": {
+            "ms": 30.200000047683716,
+            "count": 1,
+            "bytes": 28330,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28330
+            }
+          },
+          "timelineTabMs": {
+            "ms": 38.40000009536743,
+            "count": 2,
+            "bytes": 37153,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 28649,
+              "timeline:buckets": 8504
+            }
+          },
+          "projectsTabMs": {
+            "ms": 32.10000014305115,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "observationLoadMore": {
+          "ms": 298.4088000000047,
+          "count": 1,
+          "bytes": 28440,
+          "routes": {
+            "observations:list": 1
+          },
+          "routeBytes": {
+            "observations:list": 28440
+          }
+        },
+        "directFocus": {
+          "ms": 201.26410000000033,
+          "observationDeadlineMs": 750,
+          "observationElapsedMs": 164.2289000000019,
+          "targetAbsentBeforeCanonicalResync": true,
+          "targetId": "20000000-0000-4000-8000-000000000249",
+          "targetParentId": null,
+          "pausedSnapshotItems": 0,
+          "pausedSnapshotPages": 0,
+          "directFocusRequested": true,
+          "directFocusRendered": true,
+          "productFailureReason": null,
+          "entityLookupRequests": 1,
+          "count": 1,
+          "focusRequestRoutes": {
+            "navigation:focus": 1
+          },
+          "attemptRouteDelta": {
+            "count": 8,
+            "bytes": 88037,
+            "routes": {
+              "session": 1,
+              "change-stream:resync": 1,
+              "workspaces:memberships": 1,
+              "navigation:focus": 1,
+              "navigation:branch": 1,
+              "workspaces:list": 1,
+              "observations:list": 1,
+              "change-stream:ticket": 1
+            },
+            "routeBytes": {
+              "session": 351,
+              "change-stream:resync": 396,
+              "workspaces:memberships": 219,
+              "navigation:focus": 738,
+              "navigation:branch": 57663,
+              "workspaces:list": 271,
+              "observations:list": 28330,
+              "change-stream:ticket": 69
+            }
+          },
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1,
+          "canonicalSnapshotHash": "49222dd4d70fdf34c636188ebd7b5be08fbbddad6391a3276bc57e25214ffa1b",
+          "renderedAfterFullResync": true
+        },
+        "liveBatch": {
+          "frames": 50,
+          "sockets": 1,
+          "ms": 48.09629999999743,
+          "stabilityMs": 517.145199999999,
+          "stabilityRequests": 0,
+          "count": 1,
+          "bytes": 2368,
+          "routes": {
+            "navigation:summaries": 1
+          },
+          "routeBytes": {
+            "navigation:summaries": 2368
+          },
+          "requests": 1,
+          "duplicateRequests": 0,
+          "wholeWorkspaceReload": false
+        },
+        "dom": [
+          {
+            "tab": "projects",
+            "nodes": 2077,
+            "rows": 50,
+            "projects": 25,
+            "tasks": 25,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "observations",
+            "nodes": 614,
+            "rows": 50,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 50,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "timeline",
+            "nodes": 1913,
+            "rows": 89,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 0,
+            "timelineEvents": 50,
+            "timelineRows": 39
+          },
+          {
+            "tab": "post-live-projects",
+            "nodes": 2077,
+            "rows": 50,
+            "projects": 25,
+            "tasks": 25,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          }
+        ],
+        "maxDomNodes": 2077,
+        "maxCollectionRows": 89,
+        "attributableHeapBytes": 5226956,
+        "heapPoint": "after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs",
+        "readiness": {
+          "protocol": "workspace_shell_v1",
+          "fullBackingSnapshotItems": 4951,
+          "expectedSnapshotPages": 1,
+          "transportedSnapshotItems": 1,
+          "transportedSnapshotPages": 1,
+          "snapshotComplete": true,
+          "timelineEvents": 50,
+          "timelineBuckets": 13,
+          "timelineBucketRequest": {
+            "since": "2026-06-01T00:00:00Z",
+            "until": "2026-08-31T00:00:00Z",
+            "bucket": "week"
+          },
+          "anchors": {
+            "first": "20000000-0000-4000-8000-000000000009",
+            "expanded": "20000000-0000-4000-8000-000000000009",
+            "selected": "20000000-0000-4000-8000-000000000250"
+          }
+        },
+        "consoleErrors": []
+      },
+      {
+        "fixture": "large",
+        "measured": true,
+        "cold": {
+          "ms": 436.45210000000225,
+          "requests": 7,
+          "bytes": 87299,
+          "routeCounts": {
+            "session": 1,
+            "change-stream:resync": 1,
+            "workspaces:memberships": 1,
+            "navigation:branch": 1,
+            "workspaces:list": 1,
+            "observations:list": 1,
+            "change-stream:ticket": 1
+          },
+          "routeBytes": {
+            "session": 351,
+            "change-stream:resync": 396,
+            "workspaces:memberships": 219,
+            "navigation:branch": 57663,
+            "workspaces:list": 271,
+            "observations:list": 28330,
+            "change-stream:ticket": 69
+          },
+          "entityOverviewRequests": 0,
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1
+        },
+        "tabSwitches": {
+          "observations": {
+            "ms": 30.59999990463257,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "timeline": {
+            "ms": 37.40000009536743,
+            "count": 2,
+            "bytes": 37153,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 28649,
+              "timeline:buckets": 8504
+            }
+          },
+          "projects": {
+            "ms": 32.90000009536743,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "filters": {
+          "observations": {
+            "ms": 27.600000143051147,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationReset": {
+            "ms": 31.59999990463257,
+            "count": 1,
+            "bytes": 28330,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28330
+            }
+          }
+        },
+        "interactions": {
+          "taskFilterMs": {
+            "ms": 30.399999856948853,
+            "count": 1,
+            "bytes": 29267,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 29267
+            }
+          },
+          "taskFilterResetMs": {
+            "ms": 32,
+            "count": 1,
+            "bytes": 57663,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 57663
+            }
+          },
+          "observationsTabMs": {
+            "ms": 30.59999990463257,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "observationFilterMs": {
+            "ms": 27.600000143051147,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationFilterResetMs": {
+            "ms": 31.59999990463257,
+            "count": 1,
+            "bytes": 28330,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28330
+            }
+          },
+          "timelineTabMs": {
+            "ms": 37.40000009536743,
+            "count": 2,
+            "bytes": 37153,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 28649,
+              "timeline:buckets": 8504
+            }
+          },
+          "projectsTabMs": {
+            "ms": 32.90000009536743,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "observationLoadMore": {
+          "ms": 298.90499999999884,
+          "count": 1,
+          "bytes": 28440,
+          "routes": {
+            "observations:list": 1
+          },
+          "routeBytes": {
+            "observations:list": 28440
+          }
+        },
+        "directFocus": {
+          "ms": 182.94290000000183,
+          "observationDeadlineMs": 750,
+          "observationElapsedMs": 148.5332000000053,
+          "targetAbsentBeforeCanonicalResync": true,
+          "targetId": "20000000-0000-4000-8000-000000000249",
+          "targetParentId": null,
+          "pausedSnapshotItems": 0,
+          "pausedSnapshotPages": 0,
+          "directFocusRequested": true,
+          "directFocusRendered": true,
+          "productFailureReason": null,
+          "entityLookupRequests": 1,
+          "count": 1,
+          "focusRequestRoutes": {
+            "navigation:focus": 1
+          },
+          "attemptRouteDelta": {
+            "count": 8,
+            "bytes": 88037,
+            "routes": {
+              "session": 1,
+              "change-stream:resync": 1,
+              "workspaces:memberships": 1,
+              "navigation:focus": 1,
+              "navigation:branch": 1,
+              "workspaces:list": 1,
+              "observations:list": 1,
+              "change-stream:ticket": 1
+            },
+            "routeBytes": {
+              "session": 351,
+              "change-stream:resync": 396,
+              "workspaces:memberships": 219,
+              "navigation:focus": 738,
+              "navigation:branch": 57663,
+              "workspaces:list": 271,
+              "observations:list": 28330,
+              "change-stream:ticket": 69
+            }
+          },
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1,
+          "canonicalSnapshotHash": "49222dd4d70fdf34c636188ebd7b5be08fbbddad6391a3276bc57e25214ffa1b",
+          "renderedAfterFullResync": true
+        },
+        "liveBatch": {
+          "frames": 50,
+          "sockets": 1,
+          "ms": 47.14849999999569,
+          "stabilityMs": 518.1926000000021,
+          "stabilityRequests": 0,
+          "count": 1,
+          "bytes": 2368,
+          "routes": {
+            "navigation:summaries": 1
+          },
+          "routeBytes": {
+            "navigation:summaries": 2368
+          },
+          "requests": 1,
+          "duplicateRequests": 0,
+          "wholeWorkspaceReload": false
+        },
+        "dom": [
+          {
+            "tab": "projects",
+            "nodes": 2077,
+            "rows": 50,
+            "projects": 25,
+            "tasks": 25,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "observations",
+            "nodes": 614,
+            "rows": 50,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 50,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "timeline",
+            "nodes": 1913,
+            "rows": 89,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 0,
+            "timelineEvents": 50,
+            "timelineRows": 39
+          },
+          {
+            "tab": "post-live-projects",
+            "nodes": 2077,
+            "rows": 50,
+            "projects": 25,
+            "tasks": 25,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          }
+        ],
+        "maxDomNodes": 2077,
+        "maxCollectionRows": 89,
+        "attributableHeapBytes": 5200068,
+        "heapPoint": "after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs",
+        "readiness": {
+          "protocol": "workspace_shell_v1",
+          "fullBackingSnapshotItems": 4951,
+          "expectedSnapshotPages": 1,
+          "transportedSnapshotItems": 1,
+          "transportedSnapshotPages": 1,
+          "snapshotComplete": true,
+          "timelineEvents": 50,
+          "timelineBuckets": 13,
+          "timelineBucketRequest": {
+            "since": "2026-06-01T00:00:00Z",
+            "until": "2026-08-31T00:00:00Z",
+            "bucket": "week"
+          },
+          "anchors": {
+            "first": "20000000-0000-4000-8000-000000000009",
+            "expanded": "20000000-0000-4000-8000-000000000009",
+            "selected": "20000000-0000-4000-8000-000000000250"
+          }
+        },
+        "consoleErrors": []
+      },
+      {
+        "fixture": "large",
+        "measured": true,
+        "cold": {
+          "ms": 443.963499999998,
+          "requests": 7,
+          "bytes": 87299,
+          "routeCounts": {
+            "session": 1,
+            "change-stream:resync": 1,
+            "workspaces:memberships": 1,
+            "navigation:branch": 1,
+            "workspaces:list": 1,
+            "observations:list": 1,
+            "change-stream:ticket": 1
+          },
+          "routeBytes": {
+            "session": 351,
+            "change-stream:resync": 396,
+            "workspaces:memberships": 219,
+            "navigation:branch": 57663,
+            "workspaces:list": 271,
+            "observations:list": 28330,
+            "change-stream:ticket": 69
+          },
+          "entityOverviewRequests": 0,
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1
+        },
+        "tabSwitches": {
+          "observations": {
+            "ms": 22.5,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "timeline": {
+            "ms": 36.10000014305115,
+            "count": 2,
+            "bytes": 37153,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 28649,
+              "timeline:buckets": 8504
+            }
+          },
+          "projects": {
+            "ms": 30.299999952316284,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "filters": {
+          "observations": {
+            "ms": 17.600000143051147,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationReset": {
+            "ms": 27.299999952316284,
+            "count": 1,
+            "bytes": 28330,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28330
+            }
+          }
+        },
+        "interactions": {
+          "taskFilterMs": {
+            "ms": 17.59999990463257,
+            "count": 1,
+            "bytes": 29267,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 29267
+            }
+          },
+          "taskFilterResetMs": {
+            "ms": 30.299999952316284,
+            "count": 1,
+            "bytes": 57663,
+            "routes": {
+              "navigation:branch": 1
+            },
+            "routeBytes": {
+              "navigation:branch": 57663
+            }
+          },
+          "observationsTabMs": {
+            "ms": 22.5,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          },
+          "observationFilterMs": {
+            "ms": 17.600000143051147,
+            "count": 1,
+            "bytes": 525,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 525
+            }
+          },
+          "observationFilterResetMs": {
+            "ms": 27.299999952316284,
+            "count": 1,
+            "bytes": 28330,
+            "routes": {
+              "observations:list": 1
+            },
+            "routeBytes": {
+              "observations:list": 28330
+            }
+          },
+          "timelineTabMs": {
+            "ms": 36.10000014305115,
+            "count": 2,
+            "bytes": 37153,
+            "routes": {
+              "timeline:events": 1,
+              "timeline:buckets": 1
+            },
+            "routeBytes": {
+              "timeline:events": 28649,
+              "timeline:buckets": 8504
+            }
+          },
+          "projectsTabMs": {
+            "ms": 30.299999952316284,
+            "count": 0,
+            "bytes": 0,
+            "routes": {},
+            "routeBytes": {}
+          }
+        },
+        "observationLoadMore": {
+          "ms": 330.35579999999754,
+          "count": 1,
+          "bytes": 28440,
+          "routes": {
+            "observations:list": 1
+          },
+          "routeBytes": {
+            "observations:list": 28440
+          }
+        },
+        "directFocus": {
+          "ms": 186.24289999999746,
+          "observationDeadlineMs": 750,
+          "observationElapsedMs": 151.5830999999962,
+          "targetAbsentBeforeCanonicalResync": true,
+          "targetId": "20000000-0000-4000-8000-000000000249",
+          "targetParentId": null,
+          "pausedSnapshotItems": 0,
+          "pausedSnapshotPages": 0,
+          "directFocusRequested": true,
+          "directFocusRendered": true,
+          "productFailureReason": null,
+          "entityLookupRequests": 1,
+          "count": 1,
+          "focusRequestRoutes": {
+            "navigation:focus": 1
+          },
+          "attemptRouteDelta": {
+            "count": 8,
+            "bytes": 88037,
+            "routes": {
+              "session": 1,
+              "change-stream:resync": 1,
+              "workspaces:memberships": 1,
+              "navigation:focus": 1,
+              "navigation:branch": 1,
+              "workspaces:list": 1,
+              "observations:list": 1,
+              "change-stream:ticket": 1
+            },
+            "routeBytes": {
+              "session": 351,
+              "change-stream:resync": 396,
+              "workspaces:memberships": 219,
+              "navigation:focus": 738,
+              "navigation:branch": 57663,
+              "workspaces:list": 271,
+              "observations:list": 28330,
+              "change-stream:ticket": 69
+            }
+          },
+          "canonicalSnapshotItems": 1,
+          "canonicalSnapshotPages": 1,
+          "canonicalSnapshotHash": "49222dd4d70fdf34c636188ebd7b5be08fbbddad6391a3276bc57e25214ffa1b",
+          "renderedAfterFullResync": true
+        },
+        "liveBatch": {
+          "frames": 50,
+          "sockets": 1,
+          "ms": 60.841999999996915,
+          "stabilityMs": 516.5305999999982,
+          "stabilityRequests": 0,
+          "count": 1,
+          "bytes": 2368,
+          "routes": {
+            "navigation:summaries": 1
+          },
+          "routeBytes": {
+            "navigation:summaries": 2368
+          },
+          "requests": 1,
+          "duplicateRequests": 0,
+          "wholeWorkspaceReload": false
+        },
+        "dom": [
+          {
+            "tab": "projects",
+            "nodes": 2077,
+            "rows": 50,
+            "projects": 25,
+            "tasks": 25,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "observations",
+            "nodes": 614,
+            "rows": 50,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 50,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          },
+          {
+            "tab": "timeline",
+            "nodes": 1913,
+            "rows": 89,
+            "projects": 0,
+            "tasks": 0,
+            "observations": 0,
+            "timelineEvents": 50,
+            "timelineRows": 39
+          },
+          {
+            "tab": "post-live-projects",
+            "nodes": 2077,
+            "rows": 50,
+            "projects": 25,
+            "tasks": 25,
+            "observations": 0,
+            "timelineEvents": 0,
+            "timelineRows": 0
+          }
+        ],
+        "maxDomNodes": 2077,
+        "maxCollectionRows": 89,
+        "attributableHeapBytes": 6645376,
+        "heapPoint": "after the 50-frame live batch settles and its untimed stability assertion, Projects is unfiltered and unfocused with complete intercepted-model transport and representative anchors, then Chromium garbage collection runs",
+        "readiness": {
+          "protocol": "workspace_shell_v1",
+          "fullBackingSnapshotItems": 4951,
+          "expectedSnapshotPages": 1,
+          "transportedSnapshotItems": 1,
+          "transportedSnapshotPages": 1,
+          "snapshotComplete": true,
+          "timelineEvents": 50,
+          "timelineBuckets": 13,
+          "timelineBucketRequest": {
+            "since": "2026-06-01T00:00:00Z",
+            "until": "2026-08-31T00:00:00Z",
+            "bucket": "week"
+          },
+          "anchors": {
+            "first": "20000000-0000-4000-8000-000000000009",
+            "expanded": "20000000-0000-4000-8000-000000000009",
+            "selected": "20000000-0000-4000-8000-000000000250"
+          }
+        },
+        "consoleErrors": []
+      }
+    ]
+  },
+  "aggregates": {
+    "small": {
+      "cold": {
+        "rawMs": [
+          346.78879999999845,
+          332.3818999999985,
+          342.8842999999979,
+          329.96800000000076,
+          333.27470000000176
+        ],
+        "medianMs": 333.27470000000176,
+        "p95Ms": 346.78879999999845,
+        "requestCounts": [
+          7,
+          7,
+          7,
+          7,
+          7
+        ],
+        "fixtureBytes": [
+          35107,
+          35107,
+          35107,
+          35107,
+          35107
+        ],
+        "entityOverviewRequests": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "canonicalSnapshotItems": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "canonicalSnapshotPages": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "render": {
+        "maxDomNodes": 1741,
+        "maxCollectionRows": 79
+      },
+      "localInteractions": {
+        "scenarios": {
+          "observationFilterMs": {
+            "rawMs": [
+              27.700000047683716,
+              26.09999990463257,
+              27.700000047683716,
+              26.09999990463257,
+              26.90000009536743
+            ],
+            "medianMs": 26.90000009536743,
+            "p95Ms": 27.700000047683716,
+            "requestDeltas": [
+              {
+                "count": 1,
+                "bytes": 525,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 525
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 525,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 525
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 525,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 525
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 525,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 525
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 525,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 525
+                }
+              }
+            ],
+            "requestCounts": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ],
+            "fixtureBytes": [
+              525,
+              525,
+              525,
+              525,
+              525
+            ],
+            "routeCounts": [
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              }
+            ],
+            "routeBytes": [
+              {
+                "observations:list": 525
+              },
+              {
+                "observations:list": 525
+              },
+              {
+                "observations:list": 525
+              },
+              {
+                "observations:list": 525
+              },
+              {
+                "observations:list": 525
+              }
+            ]
+          },
+          "observationFilterResetMs": {
+            "rawMs": [
+              29.09999990463257,
+              29.299999952316284,
+              29.5,
+              28.700000047683716,
+              29.600000143051147
+            ],
+            "medianMs": 29.299999952316284,
+            "p95Ms": 29.600000143051147,
+            "requestDeltas": [
+              {
+                "count": 1,
+                "bytes": 28464,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 28464
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 28464,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 28464
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 28464,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 28464
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 28464,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 28464
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 28464,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 28464
+                }
+              }
+            ],
+            "requestCounts": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ],
+            "fixtureBytes": [
+              28464,
+              28464,
+              28464,
+              28464,
+              28464
+            ],
+            "routeCounts": [
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              }
+            ],
+            "routeBytes": [
+              {
+                "observations:list": 28464
+              },
+              {
+                "observations:list": 28464
+              },
+              {
+                "observations:list": 28464
+              },
+              {
+                "observations:list": 28464
+              },
+              {
+                "observations:list": 28464
+              }
+            ]
+          },
+          "observationsTabMs": {
+            "rawMs": [
+              30.600000143051147,
+              31.200000047683716,
+              31.5,
+              31.799999952316284,
+              30.200000047683716
+            ],
+            "medianMs": 31.200000047683716,
+            "p95Ms": 31.799999952316284,
+            "requestDeltas": [
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              }
+            ],
+            "requestCounts": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fixtureBytes": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "routeCounts": [
+              {},
+              {},
+              {},
+              {},
+              {}
+            ],
+            "routeBytes": [
+              {},
+              {},
+              {},
+              {},
+              {}
+            ]
+          },
+          "projectsTabMs": {
+            "rawMs": [
+              31.799999952316284,
+              31.90000009536743,
+              32.10000014305115,
+              31.399999856948853,
+              32.89999985694885
+            ],
+            "medianMs": 31.90000009536743,
+            "p95Ms": 32.89999985694885,
+            "requestDeltas": [
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              }
+            ],
+            "requestCounts": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fixtureBytes": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "routeCounts": [
+              {},
+              {},
+              {},
+              {},
+              {}
+            ],
+            "routeBytes": [
+              {},
+              {},
+              {},
+              {},
+              {}
+            ]
+          },
+          "taskFilterMs": {
+            "rawMs": [
+              31.40000009536743,
+              31.59999990463257,
+              30.899999856948853,
+              30.40000009536743,
+              31.200000047683716
+            ],
+            "medianMs": 31.200000047683716,
+            "p95Ms": 31.59999990463257,
+            "requestDeltas": [
+              {
+                "count": 1,
+                "bytes": 2496,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 2496
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 2496,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 2496
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 2496,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 2496
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 2496,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 2496
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 2496,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 2496
+                }
+              }
+            ],
+            "requestCounts": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ],
+            "fixtureBytes": [
+              2496,
+              2496,
+              2496,
+              2496,
+              2496
+            ],
+            "routeCounts": [
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              }
+            ],
+            "routeBytes": [
+              {
+                "navigation:branch": 2496
+              },
+              {
+                "navigation:branch": 2496
+              },
+              {
+                "navigation:branch": 2496
+              },
+              {
+                "navigation:branch": 2496
+              },
+              {
+                "navigation:branch": 2496
+              }
+            ]
+          },
+          "taskFilterResetMs": {
+            "rawMs": [
+              31.299999952316284,
+              32.59999990463257,
+              32.10000014305115,
+              32.09999990463257,
+              32.10000014305115
+            ],
+            "medianMs": 32.10000014305115,
+            "p95Ms": 32.59999990463257,
+            "requestDeltas": [
+              {
+                "count": 1,
+                "bytes": 5337,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 5337
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 5337,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 5337
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 5337,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 5337
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 5337,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 5337
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 5337,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 5337
+                }
+              }
+            ],
+            "requestCounts": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ],
+            "fixtureBytes": [
+              5337,
+              5337,
+              5337,
+              5337,
+              5337
+            ],
+            "routeCounts": [
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              }
+            ],
+            "routeBytes": [
+              {
+                "navigation:branch": 5337
+              },
+              {
+                "navigation:branch": 5337
+              },
+              {
+                "navigation:branch": 5337
+              },
+              {
+                "navigation:branch": 5337
+              },
+              {
+                "navigation:branch": 5337
+              }
+            ]
+          },
+          "timelineTabMs": {
+            "rawMs": [
+              38.5,
+              36.799999952316284,
+              38.799999952316284,
+              36.59999990463257,
+              37.80000019073486
+            ],
+            "medianMs": 37.80000019073486,
+            "p95Ms": 38.799999952316284,
+            "requestDeltas": [
+              {
+                "count": 2,
+                "bytes": 31292,
+                "routes": {
+                  "timeline:events": 1,
+                  "timeline:buckets": 1
+                },
+                "routeBytes": {
+                  "timeline:events": 22788,
+                  "timeline:buckets": 8504
+                }
+              },
+              {
+                "count": 2,
+                "bytes": 31292,
+                "routes": {
+                  "timeline:events": 1,
+                  "timeline:buckets": 1
+                },
+                "routeBytes": {
+                  "timeline:events": 22788,
+                  "timeline:buckets": 8504
+                }
+              },
+              {
+                "count": 2,
+                "bytes": 31292,
+                "routes": {
+                  "timeline:events": 1,
+                  "timeline:buckets": 1
+                },
+                "routeBytes": {
+                  "timeline:events": 22788,
+                  "timeline:buckets": 8504
+                }
+              },
+              {
+                "count": 2,
+                "bytes": 31292,
+                "routes": {
+                  "timeline:events": 1,
+                  "timeline:buckets": 1
+                },
+                "routeBytes": {
+                  "timeline:events": 22788,
+                  "timeline:buckets": 8504
+                }
+              },
+              {
+                "count": 2,
+                "bytes": 31292,
+                "routes": {
+                  "timeline:events": 1,
+                  "timeline:buckets": 1
+                },
+                "routeBytes": {
+                  "timeline:events": 22788,
+                  "timeline:buckets": 8504
+                }
+              }
+            ],
+            "requestCounts": [
+              2,
+              2,
+              2,
+              2,
+              2
+            ],
+            "fixtureBytes": [
+              31292,
+              31292,
+              31292,
+              31292,
+              31292
+            ],
+            "routeCounts": [
+              {
+                "timeline:events": 1,
+                "timeline:buckets": 1
+              },
+              {
+                "timeline:events": 1,
+                "timeline:buckets": 1
+              },
+              {
+                "timeline:events": 1,
+                "timeline:buckets": 1
+              },
+              {
+                "timeline:events": 1,
+                "timeline:buckets": 1
+              },
+              {
+                "timeline:events": 1,
+                "timeline:buckets": 1
+              }
+            ],
+            "routeBytes": [
+              {
+                "timeline:events": 22788,
+                "timeline:buckets": 8504
+              },
+              {
+                "timeline:events": 22788,
+                "timeline:buckets": 8504
+              },
+              {
+                "timeline:events": 22788,
+                "timeline:buckets": 8504
+              },
+              {
+                "timeline:events": 22788,
+                "timeline:buckets": 8504
+              },
+              {
+                "timeline:events": 22788,
+                "timeline:buckets": 8504
+              }
+            ]
+          }
+        },
+        "worstP95Ms": 38.799999952316284
+      },
+      "directFocus": {
+        "rawMs": [
+          84.09929999999986,
+          87.14429999999993,
+          85.39530000000013,
+          90.07920000000013,
+          95.76589999999851
+        ],
+        "medianMs": 87.14429999999993,
+        "p95Ms": 95.76589999999851,
+        "requestCounts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "entityLookupRequests": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "requested": [
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "rendered": [
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "failureReasons": [
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "observationLoadMore": {
+        "rawMs": [
+          332.21000000000095,
+          332.4858000000004,
+          298.48070000000007,
+          333.351200000001,
+          297.9186000000009
+        ],
+        "medianMs": 332.21000000000095,
+        "p95Ms": 333.351200000001,
+        "requestCounts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "liveBatch": {
+        "rawMs": [
+          49.204499999999825,
+          49.68989999999758,
+          49.68210000000181,
+          49.03809999999794,
+          48.96099999999933
+        ],
+        "medianMs": 49.204499999999825,
+        "p95Ms": 49.68989999999758,
+        "requestDeltas": [
+          {
+            "count": 13,
+            "bytes": 11094,
+            "routes": {
+              "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+              "navigation:summaries": 1
+            },
+            "routeBytes": {
+              "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+              "navigation:summaries": 3506
+            }
+          },
+          {
+            "count": 13,
+            "bytes": 11094,
+            "routes": {
+              "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+              "navigation:summaries": 1
+            },
+            "routeBytes": {
+              "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+              "navigation:summaries": 3506
+            }
+          },
+          {
+            "count": 13,
+            "bytes": 11094,
+            "routes": {
+              "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+              "navigation:summaries": 1
+            },
+            "routeBytes": {
+              "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+              "navigation:summaries": 3506
+            }
+          },
+          {
+            "count": 13,
+            "bytes": 11094,
+            "routes": {
+              "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+              "navigation:summaries": 1
+            },
+            "routeBytes": {
+              "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+              "navigation:summaries": 3506
+            }
+          },
+          {
+            "count": 13,
+            "bytes": 11094,
+            "routes": {
+              "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+              "navigation:summaries": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+              "observations:entity:40000000-0000-4000-8000-000000000036": 1
+            },
+            "routeBytes": {
+              "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+              "navigation:summaries": 3506,
+              "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+              "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+              "observations:entity:40000000-0000-4000-8000-000000000036": 634
+            }
+          }
+        ],
+        "requestCounts": [
+          13,
+          13,
+          13,
+          13,
+          13
+        ],
+        "fixtureBytes": [
+          11094,
+          11094,
+          11094,
+          11094,
+          11094
+        ],
+        "routeCounts": [
+          {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+            "navigation:summaries": 1
+          },
+          {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+            "navigation:summaries": 1
+          },
+          {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+            "navigation:summaries": 1
+          },
+          {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 1,
+            "navigation:summaries": 1
+          },
+          {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 1,
+            "navigation:summaries": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 1,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 1
+          }
+        ],
+        "routeBytes": [
+          {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+            "navigation:summaries": 3506
+          },
+          {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+            "navigation:summaries": 3506
+          },
+          {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+            "navigation:summaries": 3506
+          },
+          {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 634,
+            "navigation:summaries": 3506
+          },
+          {
+            "observations:entity:40000000-0000-4000-8000-000000000018": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000045": 634,
+            "navigation:summaries": 3506,
+            "observations:entity:40000000-0000-4000-8000-000000000012": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000039": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000033": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000060": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000027": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000054": 629,
+            "observations:entity:40000000-0000-4000-8000-000000000048": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000015": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000042": 634,
+            "observations:entity:40000000-0000-4000-8000-000000000036": 634
+          }
+        ],
+        "duplicateRequests": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "wholeWorkspaceReload": false
+      },
+      "heap": {
+        "values": [
+          4452796,
+          4418416,
+          4431144,
+          4429460,
+          4428796
+        ],
+        "maxAttributableBytes": 4452796
+      },
+      "consoleErrors": []
+    },
+    "large": {
+      "cold": {
+        "rawMs": [
+          445.4001999999964,
+          424.3721000000005,
+          422.34419999999955,
+          436.45210000000225,
+          443.963499999998
+        ],
+        "medianMs": 436.45210000000225,
+        "p95Ms": 445.4001999999964,
+        "requestCounts": [
+          7,
+          7,
+          7,
+          7,
+          7
+        ],
+        "fixtureBytes": [
+          87299,
+          87299,
+          87299,
+          87299,
+          87299
+        ],
+        "entityOverviewRequests": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "canonicalSnapshotItems": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "canonicalSnapshotPages": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "render": {
+        "maxDomNodes": 2077,
+        "maxCollectionRows": 89
+      },
+      "localInteractions": {
+        "scenarios": {
+          "observationFilterMs": {
+            "rawMs": [
+              27.09999990463257,
+              28.40000009536743,
+              27.799999952316284,
+              27.600000143051147,
+              17.600000143051147
+            ],
+            "medianMs": 27.600000143051147,
+            "p95Ms": 28.40000009536743,
+            "requestDeltas": [
+              {
+                "count": 1,
+                "bytes": 525,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 525
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 525,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 525
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 525,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 525
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 525,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 525
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 525,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 525
+                }
+              }
+            ],
+            "requestCounts": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ],
+            "fixtureBytes": [
+              525,
+              525,
+              525,
+              525,
+              525
+            ],
+            "routeCounts": [
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              }
+            ],
+            "routeBytes": [
+              {
+                "observations:list": 525
+              },
+              {
+                "observations:list": 525
+              },
+              {
+                "observations:list": 525
+              },
+              {
+                "observations:list": 525
+              },
+              {
+                "observations:list": 525
+              }
+            ]
+          },
+          "observationFilterResetMs": {
+            "rawMs": [
+              28.399999856948853,
+              31.200000047683716,
+              30.200000047683716,
+              31.59999990463257,
+              27.299999952316284
+            ],
+            "medianMs": 30.200000047683716,
+            "p95Ms": 31.59999990463257,
+            "requestDeltas": [
+              {
+                "count": 1,
+                "bytes": 28330,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 28330
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 28330,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 28330
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 28330,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 28330
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 28330,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 28330
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 28330,
+                "routes": {
+                  "observations:list": 1
+                },
+                "routeBytes": {
+                  "observations:list": 28330
+                }
+              }
+            ],
+            "requestCounts": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ],
+            "fixtureBytes": [
+              28330,
+              28330,
+              28330,
+              28330,
+              28330
+            ],
+            "routeCounts": [
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              },
+              {
+                "observations:list": 1
+              }
+            ],
+            "routeBytes": [
+              {
+                "observations:list": 28330
+              },
+              {
+                "observations:list": 28330
+              },
+              {
+                "observations:list": 28330
+              },
+              {
+                "observations:list": 28330
+              },
+              {
+                "observations:list": 28330
+              }
+            ]
+          },
+          "observationsTabMs": {
+            "rawMs": [
+              28.699999809265137,
+              31,
+              29.90000009536743,
+              30.59999990463257,
+              22.5
+            ],
+            "medianMs": 29.90000009536743,
+            "p95Ms": 31,
+            "requestDeltas": [
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              }
+            ],
+            "requestCounts": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fixtureBytes": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "routeCounts": [
+              {},
+              {},
+              {},
+              {},
+              {}
+            ],
+            "routeBytes": [
+              {},
+              {},
+              {},
+              {},
+              {}
+            ]
+          },
+          "projectsTabMs": {
+            "rawMs": [
+              31,
+              32.40000009536743,
+              32.10000014305115,
+              32.90000009536743,
+              30.299999952316284
+            ],
+            "medianMs": 32.10000014305115,
+            "p95Ms": 32.90000009536743,
+            "requestDeltas": [
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              },
+              {
+                "count": 0,
+                "bytes": 0,
+                "routes": {},
+                "routeBytes": {}
+              }
+            ],
+            "requestCounts": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "fixtureBytes": [
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "routeCounts": [
+              {},
+              {},
+              {},
+              {},
+              {}
+            ],
+            "routeBytes": [
+              {},
+              {},
+              {},
+              {},
+              {}
+            ]
+          },
+          "taskFilterMs": {
+            "rawMs": [
+              30.800000190734863,
+              31.200000047683716,
+              32.59999990463257,
+              30.399999856948853,
+              17.59999990463257
+            ],
+            "medianMs": 30.800000190734863,
+            "p95Ms": 32.59999990463257,
+            "requestDeltas": [
+              {
+                "count": 1,
+                "bytes": 29267,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 29267
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 29267,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 29267
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 29267,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 29267
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 29267,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 29267
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 29267,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 29267
+                }
+              }
+            ],
+            "requestCounts": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ],
+            "fixtureBytes": [
+              29267,
+              29267,
+              29267,
+              29267,
+              29267
+            ],
+            "routeCounts": [
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              }
+            ],
+            "routeBytes": [
+              {
+                "navigation:branch": 29267
+              },
+              {
+                "navigation:branch": 29267
+              },
+              {
+                "navigation:branch": 29267
+              },
+              {
+                "navigation:branch": 29267
+              },
+              {
+                "navigation:branch": 29267
+              }
+            ]
+          },
+          "taskFilterResetMs": {
+            "rawMs": [
+              33.09999990463257,
+              33,
+              31.59999990463257,
+              32,
+              30.299999952316284
+            ],
+            "medianMs": 32,
+            "p95Ms": 33.09999990463257,
+            "requestDeltas": [
+              {
+                "count": 1,
+                "bytes": 57663,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 57663
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 57663,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 57663
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 57663,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 57663
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 57663,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 57663
+                }
+              },
+              {
+                "count": 1,
+                "bytes": 57663,
+                "routes": {
+                  "navigation:branch": 1
+                },
+                "routeBytes": {
+                  "navigation:branch": 57663
+                }
+              }
+            ],
+            "requestCounts": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ],
+            "fixtureBytes": [
+              57663,
+              57663,
+              57663,
+              57663,
+              57663
+            ],
+            "routeCounts": [
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              },
+              {
+                "navigation:branch": 1
+              }
+            ],
+            "routeBytes": [
+              {
+                "navigation:branch": 57663
+              },
+              {
+                "navigation:branch": 57663
+              },
+              {
+                "navigation:branch": 57663
+              },
+              {
+                "navigation:branch": 57663
+              },
+              {
+                "navigation:branch": 57663
+              }
+            ]
+          },
+          "timelineTabMs": {
+            "rawMs": [
+              38.10000014305115,
+              36.200000047683716,
+              38.40000009536743,
+              37.40000009536743,
+              36.10000014305115
+            ],
+            "medianMs": 37.40000009536743,
+            "p95Ms": 38.40000009536743,
+            "requestDeltas": [
+              {
+                "count": 2,
+                "bytes": 37153,
+                "routes": {
+                  "timeline:events": 1,
+                  "timeline:buckets": 1
+                },
+                "routeBytes": {
+                  "timeline:events": 28649,
+                  "timeline:buckets": 8504
+                }
+              },
+              {
+                "count": 2,
+                "bytes": 37153,
+                "routes": {
+                  "timeline:events": 1,
+                  "timeline:buckets": 1
+                },
+                "routeBytes": {
+                  "timeline:events": 28649,
+                  "timeline:buckets": 8504
+                }
+              },
+              {
+                "count": 2,
+                "bytes": 37153,
+                "routes": {
+                  "timeline:events": 1,
+                  "timeline:buckets": 1
+                },
+                "routeBytes": {
+                  "timeline:events": 28649,
+                  "timeline:buckets": 8504
+                }
+              },
+              {
+                "count": 2,
+                "bytes": 37153,
+                "routes": {
+                  "timeline:events": 1,
+                  "timeline:buckets": 1
+                },
+                "routeBytes": {
+                  "timeline:events": 28649,
+                  "timeline:buckets": 8504
+                }
+              },
+              {
+                "count": 2,
+                "bytes": 37153,
+                "routes": {
+                  "timeline:events": 1,
+                  "timeline:buckets": 1
+                },
+                "routeBytes": {
+                  "timeline:events": 28649,
+                  "timeline:buckets": 8504
+                }
+              }
+            ],
+            "requestCounts": [
+              2,
+              2,
+              2,
+              2,
+              2
+            ],
+            "fixtureBytes": [
+              37153,
+              37153,
+              37153,
+              37153,
+              37153
+            ],
+            "routeCounts": [
+              {
+                "timeline:events": 1,
+                "timeline:buckets": 1
+              },
+              {
+                "timeline:events": 1,
+                "timeline:buckets": 1
+              },
+              {
+                "timeline:events": 1,
+                "timeline:buckets": 1
+              },
+              {
+                "timeline:events": 1,
+                "timeline:buckets": 1
+              },
+              {
+                "timeline:events": 1,
+                "timeline:buckets": 1
+              }
+            ],
+            "routeBytes": [
+              {
+                "timeline:events": 28649,
+                "timeline:buckets": 8504
+              },
+              {
+                "timeline:events": 28649,
+                "timeline:buckets": 8504
+              },
+              {
+                "timeline:events": 28649,
+                "timeline:buckets": 8504
+              },
+              {
+                "timeline:events": 28649,
+                "timeline:buckets": 8504
+              },
+              {
+                "timeline:events": 28649,
+                "timeline:buckets": 8504
+              }
+            ]
+          }
+        },
+        "worstP95Ms": 38.40000009536743
+      },
+      "directFocus": {
+        "rawMs": [
+          183.524599999997,
+          185.72239999999874,
+          201.26410000000033,
+          182.94290000000183,
+          186.24289999999746
+        ],
+        "medianMs": 185.72239999999874,
+        "p95Ms": 201.26410000000033,
+        "requestCounts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "entityLookupRequests": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "requested": [
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "rendered": [
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "failureReasons": [
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      },
+      "observationLoadMore": {
+        "rawMs": [
+          332.02350000000297,
+          299.4174999999959,
+          298.4088000000047,
+          298.90499999999884,
+          330.35579999999754
+        ],
+        "medianMs": 299.4174999999959,
+        "p95Ms": 332.02350000000297,
+        "requestCounts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "liveBatch": {
+        "rawMs": [
+          49.114800000003015,
+          48.34880000000703,
+          48.09629999999743,
+          47.14849999999569,
+          60.841999999996915
+        ],
+        "medianMs": 48.34880000000703,
+        "p95Ms": 60.841999999996915,
+        "requestDeltas": [
+          {
+            "count": 1,
+            "bytes": 2368,
+            "routes": {
+              "navigation:summaries": 1
+            },
+            "routeBytes": {
+              "navigation:summaries": 2368
+            }
+          },
+          {
+            "count": 1,
+            "bytes": 2368,
+            "routes": {
+              "navigation:summaries": 1
+            },
+            "routeBytes": {
+              "navigation:summaries": 2368
+            }
+          },
+          {
+            "count": 1,
+            "bytes": 2368,
+            "routes": {
+              "navigation:summaries": 1
+            },
+            "routeBytes": {
+              "navigation:summaries": 2368
+            }
+          },
+          {
+            "count": 1,
+            "bytes": 2368,
+            "routes": {
+              "navigation:summaries": 1
+            },
+            "routeBytes": {
+              "navigation:summaries": 2368
+            }
+          },
+          {
+            "count": 1,
+            "bytes": 2368,
+            "routes": {
+              "navigation:summaries": 1
+            },
+            "routeBytes": {
+              "navigation:summaries": 2368
+            }
+          }
+        ],
+        "requestCounts": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "fixtureBytes": [
+          2368,
+          2368,
+          2368,
+          2368,
+          2368
+        ],
+        "routeCounts": [
+          {
+            "navigation:summaries": 1
+          },
+          {
+            "navigation:summaries": 1
+          },
+          {
+            "navigation:summaries": 1
+          },
+          {
+            "navigation:summaries": 1
+          },
+          {
+            "navigation:summaries": 1
+          }
+        ],
+        "routeBytes": [
+          {
+            "navigation:summaries": 2368
+          },
+          {
+            "navigation:summaries": 2368
+          },
+          {
+            "navigation:summaries": 2368
+          },
+          {
+            "navigation:summaries": 2368
+          },
+          {
+            "navigation:summaries": 2368
+          }
+        ],
+        "duplicateRequests": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "wholeWorkspaceReload": false
+      },
+      "heap": {
+        "values": [
+          5158348,
+          5231708,
+          5226956,
+          5200068,
+          6645376
+        ],
+        "maxAttributableBytes": 6645376
+      },
+      "consoleErrors": []
+    }
+  },
+  "trace": {
+    "logicalName": "large measured sample 5/5 Playwright trace",
+    "sha256": "8b140e434c979d6c347d97ed324c67cb4448e2574b330596987a93c7a93efd7f",
+    "sizeBytes": 3904368,
+    "capturedRun": "large sample 5/5 after two warmups",
+    "verifiedDuringRecord": true,
+    "retention": "generated under ignored perf/.artifacts, intentionally removed after record/check; this versioned manifest retains verified provenance and does not claim the opaque archive is available"
+  },
+  "hotspots": [
+    {
+      "downstreamTask": "bd2eba73-6e33-4bc1-8a45-3b024c662343",
+      "evidence": [
+        "src/Feature/DataLoading.elm:297 recursive 200-row project paging then per-project overview fan-out",
+        "src/Feature/DataLoading.elm:349 recursive 200-row task paging then per-task overview fan-out",
+        "canonical resync snapshot pages are counted by change-stream:resync"
+      ]
+    },
+    {
+      "downstreamTask": "2503e08f-ff82-4f2c-adff-24e14fec8299",
+      "evidence": [
+        "Projects/Observations/Timeline DOM and input-to-next-paint measurements",
+        "50-frame canonical mixed/repeated-target request coalescing and settle measurement"
+      ]
+    }
+  ],
+  "evaluation": {
+    "comparableEnvironment": true,
+    "passed": true,
+    "metrics": [
+      {
+        "name": "cold HTTP requests",
+        "actual": 7,
+        "expected": 12,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "cold fixture bytes",
+        "actual": 87299,
+        "expected": 2097152,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "entity overview requests",
+        "actual": 0,
+        "expected": 0,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "canonical snapshot items",
+        "actual": 1,
+        "expected": 1,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "canonical snapshot pages",
+        "actual": 1,
+        "expected": 1,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "small-to-large request delta",
+        "actual": 0,
+        "expected": 3,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "DOM nodes",
+        "actual": 2077,
+        "expected": 2500,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "rendered collection rows/cards",
+        "actual": 89,
+        "expected": 250,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "direct focus requests",
+        "actual": 1,
+        "expected": 2,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "direct focus requested",
+        "actual": true,
+        "expected": true,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "direct focus rendered",
+        "actual": true,
+        "expected": true,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "Observation load-more requests",
+        "actual": 1,
+        "expected": 2,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "live follow-up requests",
+        "actual": 1,
+        "expected": 12,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "live whole-workspace reload",
+        "actual": false,
+        "expected": false,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "live repeated-target duplicate requests",
+        "actual": 0,
+        "expected": 0,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "browser console errors",
+        "actual": 0,
+        "expected": 0,
+        "pass": true,
+        "category": "exact"
+      },
+      {
+        "name": "local interaction observationFilterMs p95 ms",
+        "actual": 28.40000009536743,
+        "expected": 100,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "local interaction observationFilterResetMs p95 ms",
+        "actual": 31.59999990463257,
+        "expected": 100,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "local interaction observationsTabMs p95 ms",
+        "actual": 31,
+        "expected": 100,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "local interaction projectsTabMs p95 ms",
+        "actual": 32.90000009536743,
+        "expected": 100,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "local interaction taskFilterMs p95 ms",
+        "actual": 32.59999990463257,
+        "expected": 100,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "local interaction taskFilterResetMs p95 ms",
+        "actual": 33.09999990463257,
+        "expected": 100,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "local interaction timelineTabMs p95 ms",
+        "actual": 38.40000009536743,
+        "expected": 100,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "cold median ms",
+        "actual": 436.45210000000225,
+        "expected": 2000,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "cold p95 ms",
+        "actual": 445.4001999999964,
+        "expected": 3500,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "local interaction worst p95 ms",
+        "actual": 38.40000009536743,
+        "expected": 100,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "direct focus p95 ms",
+        "actual": 201.26410000000033,
+        "expected": 500,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "Observation load-more p95 ms",
+        "actual": 332.02350000000297,
+        "expected": 500,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "live batch p95 ms",
+        "actual": 60.841999999996915,
+        "expected": 500,
+        "pass": true,
+        "category": "pinned-environment"
+      },
+      {
+        "name": "attributable heap bytes",
+        "actual": 6645376,
+        "expected": 67108864,
+        "pass": true,
+        "category": "pinned-environment"
+      }
+    ]
+  }
+}

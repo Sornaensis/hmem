@@ -414,6 +414,15 @@ update msg model =
         LoadNavigationBranchPage _ _ _ ->
             Ok (Feature.Cards.update msg model)
 
+        ShowPreviousNavigationBranchPage _ _ _ ->
+            Ok (Feature.Cards.update msg model)
+
+        LoadRootNavigationPage _ ->
+            Ok (Feature.DataLoading.update msg model)
+
+        ShowPreviousRootNavigationPage _ ->
+            Ok (Feature.DataLoading.update msg model)
+
         -- Tree collapse
         ToggleTreeNode _ ->
             Ok (Feature.Cards.update msg model)

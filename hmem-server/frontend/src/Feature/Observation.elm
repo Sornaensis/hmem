@@ -2,6 +2,7 @@ module Feature.Observation exposing
     ( ObservationPathGroup
     , ObservationSubjectGroup
     , applyCanonicalObservation
+    , applyAuthoritativeObservation
     , canLoadMore
     , clearSelection
     , deleteDialogFocusTarget
@@ -11,6 +12,8 @@ module Feature.Observation exposing
     , facetResponseMatches
     , groupPathMatches
     , init
+    , isLoadedOrSelected
+    , markResultsStale
     , listQuery
     , matchGroupKey
     , matchQuery
@@ -58,6 +61,7 @@ init =
     , orderedIds = []
     , hasMore = False
     , loading = False
+    , resultsStale = False
     , error = Nothing
     , query = ""
     , subjectKind = Nothing
@@ -840,6 +844,7 @@ startResultReload mode sessionEpoch workspaceId state =
         , orderedIds = []
         , hasMore = False
         , loading = True
+        , resultsStale = False
         , error = Nothing
         , requestMode = mode
         , requestGeneration = state.requestGeneration + 1
@@ -1092,6 +1097,7 @@ startResultRefresh : ObservationRequestMode -> Int -> String -> ObservationModel
 startResultRefresh mode sessionEpoch workspaceId state =
     { state
         | loading = True
+        , resultsStale = False
         , error = Nothing
         , requestGeneration = state.requestGeneration + 1
         , requestSessionEpoch = sessionEpoch
@@ -1105,6 +1111,7 @@ startMatchRefresh : Int -> String -> ObservationModel -> ObservationModel
 startMatchRefresh sessionEpoch workspaceId state =
     { state
         | loading = True
+        , resultsStale = False
         , error = Nothing
         , requestGeneration = state.requestGeneration + 1
         , requestSessionEpoch = sessionEpoch
@@ -1134,7 +1141,8 @@ startFacetReload sessionEpoch workspaceId state =
 startFacetRefresh : Int -> String -> ObservationModel -> ObservationModel
 startFacetRefresh sessionEpoch workspaceId state =
     { state
-        | facetLoading = True
+        | resultsStale = False
+        , facetLoading = True
         , facetError = Nothing
         , facetRequestGeneration = state.facetRequestGeneration + 1
         , facetRequestSessionEpoch = sessionEpoch
@@ -1968,12 +1976,115 @@ applyCanonicalObservation candidate state =
 
             else
                 state.edit
+
+        matchEvidence =
+            Dict.update accepted.id
+                (Maybe.map (\evidence -> { evidence | observation = accepted }))
+                state.matchEvidence
+
+        resultsStale =
+            -- A canonical entity response does not carry the active flat,
+            -- facet, exact-subject, or match membership proof.  Keep any row
+            -- the active page already owns, preserve selected detail, and ask
+            -- for an explicit bounded refresh instead of silently admitting a
+            -- selected/detail-only row to the current result set.
+            True
     in
     { state
-        | items = Dict.insert accepted.id accepted state.items
+        | items =
+            if Dict.member accepted.id state.items then
+                Dict.insert accepted.id accepted state.items
+
+            else
+                state.items
         , selectedDetail = selectedDetail
         , edit = edit
+        , matchEvidence = matchEvidence
+        , resultsStale = resultsStale
     }
+
+
+{-| A list, exact-subject, or match response is authoritative for its own
+membership page.  It must still respect a newer local/detail version and edit
+drafts, but unlike an entity invalidation it is evidence that the active
+results are fresh.  Keeping this separate from `applyCanonicalObservation`
+prevents a successful explicit refresh from immediately becoming stale again.
+-}
+applyAuthoritativeObservation : Api.Observation -> ObservationModel -> ObservationModel
+applyAuthoritativeObservation candidate state =
+    let
+        existing =
+            case ( Dict.get candidate.id state.items, state.selectedDetail ) of
+                ( Just listed, Just detail ) ->
+                    if detail.id == candidate.id then
+                        Just (preferNewerObservation detail listed)
+
+                    else
+                        Just listed
+
+                ( Just listed, Nothing ) ->
+                    Just listed
+
+                ( Nothing, Just detail ) ->
+                    if detail.id == candidate.id then
+                        Just detail
+
+                    else
+                        Nothing
+
+                _ ->
+                    Nothing
+
+        accepted =
+            existing
+                |> Maybe.map (preferNewerObservation candidate)
+                |> Maybe.withDefault candidate
+
+        acceptedCandidate =
+            accepted == candidate
+
+        selectedDetail =
+            if state.selectedId == Just candidate.id then
+                Just accepted
+
+            else
+                state.selectedDetail
+
+        edit =
+            if acceptedCandidate then
+                reconcileEditWithCanonical accepted state.edit
+
+            else
+                state.edit
+
+        matchEvidence =
+            Dict.update accepted.id
+                (Maybe.map (\evidence -> { evidence | observation = accepted }))
+                state.matchEvidence
+    in
+    { state
+        | items =
+            if Dict.member accepted.id state.items then
+                Dict.insert accepted.id accepted state.items
+
+            else
+                state.items
+        , selectedDetail = selectedDetail
+        , edit = edit
+        , matchEvidence = matchEvidence
+    }
+
+
+isLoadedOrSelected : String -> ObservationModel -> Bool
+isLoadedOrSelected observationId state =
+    Dict.member observationId state.items
+        || state.selectedId == Just observationId
+        || Maybe.map .id state.selectedDetail == Just observationId
+
+
+markResultsStale : ObservationModel -> ObservationModel
+markResultsStale state =
+    { state | resultsStale = True }
 
 
 reconcileEditWithCanonical : Api.Observation -> Maybe ObservationEditState -> Maybe ObservationEditState
@@ -2052,6 +2163,7 @@ removeObservation observationId state =
 
             else
                 state.activeDetailRequest
+        , resultsStale = state.resultsStale || state.requestMode == ObservationFacetMode
         , edit =
             state.edit
                 |> Maybe.andThen
@@ -2181,6 +2293,7 @@ mergeFacetPage offset paginated state =
         , facetError = Nothing
         , facetExpectedOffset = Nothing
         , facetNextOffset = offset + List.length paginated.items
+        , resultsStale = if offset == 0 then False else state.resultsStale
     }
 
 
@@ -2239,8 +2352,9 @@ mergeMatchPage offset paginated state =
         , expectedOffset = Nothing
         , nextOffset = offset + List.length paginated.items
         , matchEvidence = matchesById
+        , resultsStale = if offset == 0 then False else state.resultsStale
     }
-        |> (\merged -> List.foldl applyCanonicalObservation merged observations)
+        |> (\merged -> List.foldl applyAuthoritativeObservation merged observations)
 
 
 type alias ObservationSubjectGroup =
@@ -2576,7 +2690,8 @@ viewObservationResults ariaLabel emptyHeading state =
                     "flat"
     in
     div [ id "observation-results", class "entity-list observation-list", tabindex -1 ]
-        [ if state.loading && List.isEmpty observations then
+        [ viewStaleResultsNotice state
+        , if state.loading && List.isEmpty observations then
             div [ class "loading-indicator observation-state observation-state-loading", attribute "role" "status", attribute "aria-live" "polite" ]
                 [ text "Loading observations..." ]
 
@@ -2617,6 +2732,18 @@ viewObservationResults ariaLabel emptyHeading state =
         ]
 
 
+viewStaleResultsNotice : ObservationModel -> Html Msg
+viewStaleResultsNotice state =
+    if state.resultsStale then
+        div [ class "observation-state observation-state-stale", attribute "role" "status" ]
+            [ text "Results may have changed."
+            , button [ class "btn btn-secondary", type_ "button", onClick ApplyObservationFilters, disabled (state.loading || state.facetLoading) ] [ text "Refresh results" ]
+            ]
+
+    else
+        text ""
+
+
 viewFacetCatalogue : ObservationModel -> Html Msg
 viewFacetCatalogue state =
     let
@@ -2624,7 +2751,8 @@ viewFacetCatalogue state =
             state.facetKeys |> List.filterMap (\key -> Dict.get key state.facets)
     in
     div [ id "observation-results", class "entity-list observation-list observation-facet-list", tabindex -1 ]
-        [ if state.facetLoading && List.isEmpty facets then
+        [ viewStaleResultsNotice state
+        , if state.facetLoading && List.isEmpty facets then
             div [ class "loading-indicator observation-state observation-state-loading", attribute "role" "status", attribute "aria-live" "polite" ] [ text "Loading shared subjects..." ]
 
           else
@@ -2698,7 +2826,8 @@ viewMatchResults state =
             List.any (not << List.isEmpty << .subjectGroups) pathGroups
     in
     div [ id "observation-results", class "entity-list observation-list observation-match-results", tabindex -1 ]
-        [ if state.loading && List.isEmpty state.orderedIds then
+        [ viewStaleResultsNotice state
+        , if state.loading && List.isEmpty state.orderedIds then
             div [ class "loading-indicator observation-state observation-state-loading", attribute "role" "status", attribute "aria-live" "polite" ] [ text "Matching repository files..." ]
 
           else

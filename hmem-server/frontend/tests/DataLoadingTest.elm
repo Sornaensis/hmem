@@ -7,6 +7,7 @@ import Expect
 import Feature.DataLoading as DataLoading
 import Feature.Dependencies as Dependencies
 import Feature.WebSocket as WebSocket
+import Http
 import Set
 import String
 import Test exposing (Test, describe, test)
@@ -79,6 +80,600 @@ suite =
                     ( Dict.member "stale-root" updated.dataLoading.projectCardSummaries
                     , updated.dataLoading.rootNavigationRequest |> Maybe.map .succeeded |> Maybe.withDefault False
                     )
+        , test "root presentation paging advances one bounded offset and retains prior cached membership" <|
+            \_ ->
+                let
+                    prepared =
+                        DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
+
+                    ( firstPage, _ ) =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "root-one" Nothing ], hasMore = True }, tasks = { items = [], hasMore = False } })
+                            )
+                            prepared
+
+                    ( cachedWindow, _ ) =
+                        DataLoading.update (LoadRootNavigationPage "project") firstPage
+
+                    ( requested, _ ) =
+                        DataLoading.update (LoadRootNavigationPage "project") cachedWindow
+
+                    stale =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId requested.sessionRequestEpoch Nothing requested.dataLoading.navigationGeneration filterFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "stale-root-page" Nothing ], hasMore = False }, tasks = { items = [], hasMore = False } })
+                            )
+                            requested
+                            |> Tuple.first
+
+                    ( completed, _ ) =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId requested.sessionRequestEpoch Nothing requested.dataLoading.navigationGeneration filterFingerprint 50 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "root-two" Nothing ], hasMore = False }, tasks = { items = [], hasMore = False } })
+                            )
+                            requested
+                in
+                Expect.equal
+                    { offset = Just 50, first = True, second = True, staleRejected = False, complete = True }
+                    { offset = requested.dataLoading.rootNavigationRequest |> Maybe.map .projectOffset
+                    , first = Dict.member "root-one" completed.dataLoading.projectCardSummaries
+                    , second = Dict.member "root-two" completed.dataLoading.projectCardSummaries
+                    , staleRejected = Dict.member "stale-root-page" stale.dataLoading.projectCardSummaries
+                    , complete = completed.dataLoading.rootNavigationRequest |> Maybe.map .succeeded |> Maybe.withDefault False
+                    }
+        , test "root navigation retry keeps its failed cursor and cached membership" <|
+            \_ ->
+                let
+                    prepared =
+                        DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
+
+                    ( firstPage, _ ) =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "retained" Nothing ], hasMore = True }, tasks = { items = [], hasMore = False } })
+                            )
+                            prepared
+
+                    ( requested, _ ) =
+                        DataLoading.update (LoadRootNavigationPage "project") firstPage
+
+                    failed =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId requested.sessionRequestEpoch Nothing requested.dataLoading.navigationGeneration filterFingerprint 50 0 (Err (Http.BadUrl "fixture failure")))
+                            requested
+                            |> Tuple.first
+
+                    retried =
+                        DataLoading.update (LoadRootNavigationPage "project") failed |> Tuple.first
+                in
+                Expect.equal
+                    { retriedProjectOffset = Just 50, retriedTaskOffset = Just 0, inFlight = True, retained = True }
+                    { retriedProjectOffset = retried.dataLoading.rootNavigationRequest |> Maybe.map .projectOffset
+                    , retriedTaskOffset = retried.dataLoading.rootNavigationRequest |> Maybe.map .taskOffset
+                    , inFlight = retried.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False
+                     , retained = Dict.member "retained" retried.dataLoading.projectCardSummaries
+                     }
+        , test "task presentation windows use their own root and branch cursors for next, previous, and retry" <|
+            \_ ->
+                let
+                    prepared =
+                        DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
+
+                    ( rootFirst, _ ) =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ task "root-task-0" Nothing ], hasMore = True } })
+                            )
+                            prepared
+
+                    ( rootCached, _ ) =
+                        DataLoading.update (LoadRootNavigationPage "task") rootFirst
+
+                    ( rootRequested, _ ) =
+                        DataLoading.update (LoadRootNavigationPage "task") rootCached
+
+                    rootFailed =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId rootRequested.sessionRequestEpoch Nothing rootRequested.dataLoading.navigationGeneration filterFingerprint 0 50 (Err (Http.BadUrl "task root retry")))
+                            rootRequested
+                            |> Tuple.first
+
+                    rootRetried =
+                        DataLoading.update (LoadRootNavigationPage "task") rootFailed |> Tuple.first
+
+                    rootPrevious =
+                        DataLoading.update (ShowPreviousRootNavigationPage "task") rootRetried |> Tuple.first
+
+                    ( branchInitial, _ ) =
+                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+
+                    branchFingerprint =
+                        Dict.get "project:parent" branchInitial.dataLoading.loadedNavigationBranches
+                            |> Maybe.map .filterFingerprint
+                            |> Maybe.withDefault ""
+
+                    ( branchFirst, _ ) =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchInitial.sessionRequestEpoch branchInitial.dataLoading.navigationGeneration "project:parent" branchFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ task "branch-task-0" Nothing ], hasMore = True } })
+                            )
+                            branchInitial
+
+                    ( branchCached, _ ) =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchFirst
+
+                    ( branchRequested, _ ) =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchCached
+
+                    branchFailed =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchRequested.sessionRequestEpoch branchRequested.dataLoading.navigationGeneration "project:parent" branchFingerprint 0 50 (Err (Http.BadUrl "task branch retry")))
+                            branchRequested
+                            |> Tuple.first
+
+                    branchRetried =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchFailed |> Tuple.first
+
+                    branchPrevious =
+                        DataLoading.beginNavigationBranchPreviousPage "project" "parent" "task" branchRetried |> Tuple.first
+                in
+                Expect.equal
+                    { rootRetryOffset = Just 50
+                    , rootProjectUntouched = Just 0
+                    , rootPreviousOffset = Just 0
+                    , branchRetryOffset = Just 50
+                    , branchProjectUntouched = Just 0
+                    , branchPreviousOffset = Just 0
+                    , rootRetained = True
+                    , branchRetained = True
+                    }
+                    { rootRetryOffset = rootRetried.dataLoading.rootNavigationRequest |> Maybe.map .taskOffset
+                    , rootProjectUntouched = rootRetried.dataLoading.rootNavigationRequest |> Maybe.map .projectOffset
+                    , rootPreviousOffset = rootPrevious.dataLoading.rootNavigationPresentation |> Maybe.map .taskOffset
+                    , branchRetryOffset = Dict.get "project:parent" branchRetried.dataLoading.loadedNavigationBranches |> Maybe.map .taskOffset
+                    , branchProjectUntouched = Dict.get "project:parent" branchRetried.dataLoading.loadedNavigationBranches |> Maybe.map .projectOffset
+                    , branchPreviousOffset = Dict.get "project:parent" branchPrevious.dataLoading.navigationPresentations |> Maybe.map .taskOffset
+                    , rootRetained = Dict.member "root-task-0" rootRetried.dataLoading.taskCardSummaries
+                    , branchRetained = Dict.member "branch-task-0" branchRetried.dataLoading.taskCardSummaries
+                    }
+        , test "project transport pages retry their real offset-50 request and retain reversible root and branch cursors" <|
+            \_ ->
+                let
+                    prepared =
+                        DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
+
+                    ( rootFirst, _ ) =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-0" Nothing ], hasMore = True }, tasks = { items = [], hasMore = False } })
+                            )
+                            prepared
+
+                    rootCached =
+                        DataLoading.update (LoadRootNavigationPage "project") rootFirst |> Tuple.first
+
+                    rootRequested =
+                        DataLoading.update (LoadRootNavigationPage "project") rootCached |> Tuple.first
+
+                    rootFailed =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId rootRequested.sessionRequestEpoch Nothing rootRequested.dataLoading.navigationGeneration filterFingerprint 50 0 (Err (Http.BadUrl "root project retry")))
+                            rootRequested
+                            |> Tuple.first
+
+                    rootRetried =
+                        DataLoading.update (LoadRootNavigationPage "project") rootFailed |> Tuple.first
+
+                    rootPrevious =
+                        DataLoading.update (ShowPreviousRootNavigationPage "project") rootRetried |> Tuple.first
+
+                    ( branchInitial, _ ) =
+                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+
+                    fingerprint =
+                        Dict.get "project:parent" branchInitial.dataLoading.loadedNavigationBranches
+                            |> Maybe.map .filterFingerprint
+                            |> Maybe.withDefault ""
+
+                    ( branchFirst, _ ) =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchInitial.sessionRequestEpoch branchInitial.dataLoading.navigationGeneration "project:parent" fingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-0" (Just "parent") ], hasMore = True }, tasks = { items = [], hasMore = False } })
+                            )
+                            branchInitial
+
+                    branchCached =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchFirst |> Tuple.first
+
+                    branchRequested =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchCached |> Tuple.first
+
+                    branchFailed =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchRequested.sessionRequestEpoch branchRequested.dataLoading.navigationGeneration "project:parent" fingerprint 50 0 (Err (Http.BadUrl "branch project retry")))
+                            branchRequested
+                            |> Tuple.first
+
+                    branchRetried =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchFailed |> Tuple.first
+
+                    branchPrevious =
+                        DataLoading.beginNavigationBranchPreviousPage "project" "parent" "project" branchRetried |> Tuple.first
+
+                    projectOffset current =
+                        current.dataLoading.rootNavigationRequest |> Maybe.map .projectOffset
+
+                    branchOffset current =
+                        Dict.get "project:parent" current.dataLoading.loadedNavigationBranches |> Maybe.map .projectOffset
+
+                    branchPresentationOffset current =
+                        Dict.get "project:parent" current.dataLoading.navigationPresentations |> Maybe.map .projectOffset
+                in
+                Expect.equal
+                    { rootRequested = Just 50, rootRetried = Just 50, rootPrevious = Just 0, branchRequested = Just 50, branchRetried = Just 50, branchPrevious = Just 0, rootCached = True, branchCached = True }
+                    { rootRequested = projectOffset rootRequested
+                    , rootRetried = projectOffset rootRetried
+                    , rootPrevious = rootPrevious.dataLoading.rootNavigationPresentation |> Maybe.map .projectOffset
+                    , branchRequested = branchOffset branchRequested
+                    , branchRetried = branchOffset branchRetried
+                    , branchPrevious = branchPresentationOffset branchPrevious
+                    , rootCached = Dict.member "root-project-0" rootRetried.dataLoading.projectCardSummaries
+                    , branchCached = Dict.member "branch-project-0" branchRetried.dataLoading.projectCardSummaries
+                    }
+        , test "root and branch project/task controls stop immediately at exact cached terminal pages" <|
+            \_ ->
+                let
+                    rootPrepared =
+                        DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
+
+                    rootFingerprint =
+                        rootPrepared.dataLoading.rootNavigationRequest |> Maybe.map .filterFingerprint |> Maybe.withDefault ""
+
+                    exactProjects =
+                        List.range 1 25 |> List.map (\number -> project ("root-project-" ++ String.fromInt number) Nothing)
+
+                    exactTasks =
+                        List.range 1 25 |> List.map (\number -> task ("root-task-" ++ String.fromInt number) Nothing)
+
+                    rootLoaded =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId rootPrepared.sessionRequestEpoch (Just 1) rootPrepared.dataLoading.navigationGeneration rootFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = exactProjects, hasMore = False }, tasks = { items = exactTasks, hasMore = False } })
+                            )
+                            rootPrepared
+                            |> Tuple.first
+
+                    rootProjectTerminal =
+                        DataLoading.update (LoadRootNavigationPage "project") rootLoaded |> Tuple.first
+
+                    rootTaskTerminal =
+                        DataLoading.update (LoadRootNavigationPage "task") rootProjectTerminal |> Tuple.first
+
+                    ( branchInitial, _ ) =
+                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+
+                    branchFingerprint =
+                        Dict.get "project:parent" branchInitial.dataLoading.loadedNavigationBranches |> Maybe.map .filterFingerprint |> Maybe.withDefault ""
+
+                    branchLoaded =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchInitial.sessionRequestEpoch branchInitial.dataLoading.navigationGeneration "project:parent" branchFingerprint 0 0
+                                (Ok
+                                    { workspaceId = workspaceId
+                                    , projects = { items = List.range 1 25 |> List.map (\number -> project ("branch-project-" ++ String.fromInt number) (Just "parent")), hasMore = False }
+                                    , tasks = { items = List.range 1 25 |> List.map (\number -> task ("branch-task-" ++ String.fromInt number) Nothing), hasMore = False }
+                                    }
+                                )
+                            )
+                            branchInitial
+                            |> Tuple.first
+
+                    branchProjectTerminal =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchLoaded |> Tuple.first
+
+                    branchTaskTerminal =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchProjectTerminal |> Tuple.first
+
+                    rootOffsets current =
+                        current.dataLoading.rootNavigationPresentation
+                            |> Maybe.map (\value -> ( value.projectOffset, value.taskOffset ))
+
+                    branchOffsets current =
+                        Dict.get "project:parent" current.dataLoading.navigationPresentations
+                            |> Maybe.map (\value -> ( value.projectOffset, value.taskOffset ))
+                in
+                Expect.equal
+                    { root = Just ( 0, 0 ), branch = Just ( 0, 0 ), rootProjects = 25, rootTasks = 25, branchProjects = 25, branchTasks = 25 }
+                    { root = rootOffsets rootTaskTerminal
+                    , branch = branchOffsets branchTaskTerminal
+                    , rootProjects = rootTaskTerminal.dataLoading.rootNavigationRequest |> Maybe.map .projectCardCount |> Maybe.withDefault 0
+                    , rootTasks = rootTaskTerminal.dataLoading.rootNavigationRequest |> Maybe.map .taskCardCount |> Maybe.withDefault 0
+                    , branchProjects = Dict.get "project:parent" branchTaskTerminal.dataLoading.loadedNavigationBranches |> Maybe.map .projectCardCount |> Maybe.withDefault 0
+                    , branchTasks = Dict.get "project:parent" branchTaskTerminal.dataLoading.loadedNavigationBranches |> Maybe.map .taskCardCount |> Maybe.withDefault 0
+                    }
+        , test "root and branch retain the final partial cached window before requesting continuation" <|
+            \_ ->
+                let
+                    rootPrepared =
+                        DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
+
+                    rootFingerprint =
+                        rootPrepared.dataLoading.rootNavigationRequest |> Maybe.map .filterFingerprint |> Maybe.withDefault ""
+
+                    rootLoaded =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId rootPrepared.sessionRequestEpoch (Just 1) rootPrepared.dataLoading.navigationGeneration rootFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = List.range 1 51 |> List.map (\number -> project ("root-" ++ String.fromInt number) Nothing), hasMore = True }, tasks = { items = [], hasMore = False } })
+                            )
+                            rootPrepared
+                            |> Tuple.first
+
+                    rootAt25 =
+                        DataLoading.update (LoadRootNavigationPage "project") rootLoaded |> Tuple.first
+
+                    rootAt50 =
+                        DataLoading.update (LoadRootNavigationPage "project") rootAt25 |> Tuple.first
+
+                    rootContinuation =
+                        DataLoading.update (LoadRootNavigationPage "project") rootAt50 |> Tuple.first
+
+                    ( branchInitial, _ ) =
+                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+
+                    branchFingerprint =
+                        Dict.get "project:parent" branchInitial.dataLoading.loadedNavigationBranches |> Maybe.map .filterFingerprint |> Maybe.withDefault ""
+
+                    branchLoaded =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchInitial.sessionRequestEpoch branchInitial.dataLoading.navigationGeneration "project:parent" branchFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = List.range 1 51 |> List.map (\number -> project ("branch-" ++ String.fromInt number) (Just "parent")), hasMore = True }, tasks = { items = [], hasMore = False } })
+                            )
+                            branchInitial
+                            |> Tuple.first
+
+                    branchAt25 =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchLoaded |> Tuple.first
+
+                    branchAt50 =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchAt25 |> Tuple.first
+
+                    branchContinuation =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchAt50 |> Tuple.first
+
+                    rootState current =
+                        current.dataLoading.rootNavigationRequest
+                            |> Maybe.map (\request -> ( request.projectOffset, request.inFlight ))
+
+                    rootPresentation current =
+                        current.dataLoading.rootNavigationPresentation |> Maybe.map .projectOffset
+
+                    branchState current =
+                        Dict.get "project:parent" current.dataLoading.loadedNavigationBranches
+                            |> Maybe.map (\request -> ( request.projectOffset, request.inFlight ))
+
+                    branchPresentation current =
+                        Dict.get "project:parent" current.dataLoading.navigationPresentations |> Maybe.map .projectOffset
+                in
+                Expect.equal
+                    { rootAt25 = ( Just 25, Just ( 0, False ) )
+                    , rootAt50 = ( Just 50, Just ( 0, False ) )
+                    , rootContinuation = ( Just 51, Just ( 50, True ) )
+                    , branchAt25 = ( Just 25, Just ( 0, False ) )
+                    , branchAt50 = ( Just 50, Just ( 0, False ) )
+                    , branchContinuation = ( Just 51, Just ( 50, True ) )
+                    }
+                    { rootAt25 = ( rootPresentation rootAt25, rootState rootAt25 )
+                    , rootAt50 = ( rootPresentation rootAt50, rootState rootAt50 )
+                    , rootContinuation = ( rootPresentation rootContinuation, rootState rootContinuation )
+                    , branchAt25 = ( branchPresentation branchAt25, branchState branchAt25 )
+                    , branchAt50 = ( branchPresentation branchAt50, branchState branchAt50 )
+                    , branchContinuation = ( branchPresentation branchContinuation, branchState branchContinuation )
+                    }
+        , test "accepted root and branch transport pages dedupe sibling payloads across project-task alternation" <|
+            \_ ->
+                let
+                    rootPrepared =
+                        DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
+
+                    rootFingerprint =
+                        rootPrepared.dataLoading.rootNavigationRequest |> Maybe.map .filterFingerprint |> Maybe.withDefault ""
+
+                    rootInitial =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId rootPrepared.sessionRequestEpoch (Just 1) rootPrepared.dataLoading.navigationGeneration rootFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-0" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-0" Nothing ], hasMore = True } })
+                            )
+                            rootPrepared
+                            |> Tuple.first
+
+                    rootProjectRequest =
+                        DataLoading.update (LoadRootNavigationPage "project") rootInitial |> Tuple.first
+
+                    rootProjectOffset =
+                        rootProjectRequest.dataLoading.rootNavigationRequest |> Maybe.map .projectOffset |> Maybe.withDefault -1
+
+                    rootProjectAccepted =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId rootProjectRequest.sessionRequestEpoch Nothing rootProjectRequest.dataLoading.navigationGeneration rootFingerprint rootProjectOffset 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-50" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-0" Nothing ], hasMore = True } })
+                            )
+                            rootProjectRequest
+                            |> Tuple.first
+
+                    rootDuplicateIgnored =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId rootProjectAccepted.sessionRequestEpoch Nothing rootProjectAccepted.dataLoading.navigationGeneration rootFingerprint rootProjectOffset 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-50" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-0" Nothing ], hasMore = True } })
+                            )
+                            rootProjectAccepted
+                            |> Tuple.first
+
+                    rootTaskRequest =
+                        DataLoading.update (LoadRootNavigationPage "task") rootDuplicateIgnored |> Tuple.first
+
+                    rootTaskOffset =
+                        rootTaskRequest.dataLoading.rootNavigationRequest |> Maybe.map .taskOffset |> Maybe.withDefault -1
+
+                    rootTaskAccepted =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId rootTaskRequest.sessionRequestEpoch Nothing rootTaskRequest.dataLoading.navigationGeneration rootFingerprint rootProjectOffset rootTaskOffset
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-50" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-50" Nothing ], hasMore = True } })
+                            )
+                            rootTaskRequest
+                            |> Tuple.first
+
+                    rootProjectAgainRequest =
+                        DataLoading.update (LoadRootNavigationPage "project") rootTaskAccepted |> Tuple.first
+
+                    rootProjectAgainOffset =
+                        rootProjectAgainRequest.dataLoading.rootNavigationRequest |> Maybe.map .projectOffset |> Maybe.withDefault -1
+
+                    rootProjectAgainAccepted =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId rootProjectAgainRequest.sessionRequestEpoch Nothing rootProjectAgainRequest.dataLoading.navigationGeneration rootFingerprint rootProjectAgainOffset rootTaskOffset
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-100" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-50" Nothing ], hasMore = True } })
+                            )
+                            rootProjectAgainRequest
+                            |> Tuple.first
+
+                    rootTaskAgainRequest =
+                        DataLoading.update (LoadRootNavigationPage "task") rootProjectAgainAccepted |> Tuple.first
+
+                    rootTaskAgainOffset =
+                        rootTaskAgainRequest.dataLoading.rootNavigationRequest |> Maybe.map .taskOffset |> Maybe.withDefault -1
+
+                    rootTaskAgainAccepted =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId rootTaskAgainRequest.sessionRequestEpoch Nothing rootTaskAgainRequest.dataLoading.navigationGeneration rootFingerprint rootProjectAgainOffset rootTaskAgainOffset
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-100" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-100" Nothing ], hasMore = True } })
+                            )
+                            rootTaskAgainRequest
+                            |> Tuple.first
+
+                    ( branchInitial, _ ) =
+                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+
+                    branchFingerprint =
+                        Dict.get "project:parent" branchInitial.dataLoading.loadedNavigationBranches |> Maybe.map .filterFingerprint |> Maybe.withDefault ""
+
+                    branchLoaded =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchInitial.sessionRequestEpoch branchInitial.dataLoading.navigationGeneration "project:parent" branchFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-0" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-0" Nothing ], hasMore = True } })
+                            )
+                            branchInitial
+                            |> Tuple.first
+
+                    branchProjectRequest =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchLoaded |> Tuple.first
+
+                    branchProjectOffset =
+                        Dict.get "project:parent" branchProjectRequest.dataLoading.loadedNavigationBranches |> Maybe.map .projectOffset |> Maybe.withDefault -1
+
+                    branchProjectAccepted =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchProjectRequest.sessionRequestEpoch branchProjectRequest.dataLoading.navigationGeneration "project:parent" branchFingerprint branchProjectOffset 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-50" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-0" Nothing ], hasMore = True } })
+                            )
+                            branchProjectRequest
+                            |> Tuple.first
+
+                    branchDuplicateIgnored =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchProjectAccepted.sessionRequestEpoch branchProjectAccepted.dataLoading.navigationGeneration "project:parent" branchFingerprint branchProjectOffset 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-50" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-0" Nothing ], hasMore = True } })
+                            )
+                            branchProjectAccepted
+                            |> Tuple.first
+
+                    branchTaskRequest =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchDuplicateIgnored |> Tuple.first
+
+                    branchTaskOffset =
+                        Dict.get "project:parent" branchTaskRequest.dataLoading.loadedNavigationBranches |> Maybe.map .taskOffset |> Maybe.withDefault -1
+
+                    branchTaskAccepted =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchTaskRequest.sessionRequestEpoch branchTaskRequest.dataLoading.navigationGeneration "project:parent" branchFingerprint branchProjectOffset branchTaskOffset
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-50" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-50" Nothing ], hasMore = True } })
+                            )
+                            branchTaskRequest
+                            |> Tuple.first
+
+                    branchProjectAgainRequest =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchTaskAccepted |> Tuple.first
+
+                    branchProjectAgainOffset =
+                        Dict.get "project:parent" branchProjectAgainRequest.dataLoading.loadedNavigationBranches |> Maybe.map .projectOffset |> Maybe.withDefault -1
+
+                    branchProjectAgainAccepted =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchProjectAgainRequest.sessionRequestEpoch branchProjectAgainRequest.dataLoading.navigationGeneration "project:parent" branchFingerprint branchProjectAgainOffset branchTaskOffset
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-100" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-50" Nothing ], hasMore = True } })
+                            )
+                            branchProjectAgainRequest
+                            |> Tuple.first
+
+                    branchTaskAgainRequest =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchProjectAgainAccepted |> Tuple.first
+
+                    branchTaskAgainOffset =
+                        Dict.get "project:parent" branchTaskAgainRequest.dataLoading.loadedNavigationBranches |> Maybe.map .taskOffset |> Maybe.withDefault -1
+
+                    branchTaskAgainAccepted =
+                        DataLoading.update
+                            (GotNavigationBranch workspaceId branchTaskAgainRequest.sessionRequestEpoch branchTaskAgainRequest.dataLoading.navigationGeneration "project:parent" branchFingerprint branchProjectAgainOffset branchTaskAgainOffset
+                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-100" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-100" Nothing ], hasMore = True } })
+                            )
+                            branchTaskAgainRequest
+                            |> Tuple.first
+
+                    counts current =
+                        current.dataLoading.rootNavigationRequest
+                            |> Maybe.map
+                                (\state ->
+                                    { projects = state.projectCardCount
+                                    , tasks = state.taskCardCount
+                                    , projectOffset = state.projectOffset
+                                    , taskOffset = state.taskOffset
+                                    }
+                                )
+
+                    branchCounts current =
+                        Dict.get "project:parent" current.dataLoading.loadedNavigationBranches
+                            |> Maybe.map
+                                (\state ->
+                                    { projects = state.projectCardCount
+                                    , tasks = state.taskCardCount
+                                    , projectOffset = state.projectOffset
+                                    , taskOffset = state.taskOffset
+                                    }
+                                )
+                in
+                Expect.equal
+                    { rootAfterProject = Just { projects = 2, tasks = 1, projectOffset = 50, taskOffset = 0 }
+                    , rootAfterDuplicate = Just { projects = 2, tasks = 1, projectOffset = 50, taskOffset = 0 }
+                    , rootAfterTask = Just { projects = 2, tasks = 2, projectOffset = 50, taskOffset = 50 }
+                    , rootAfterProjectAgain = Just { projects = 3, tasks = 2, projectOffset = 100, taskOffset = 50 }
+                    , rootAfterTaskAgain = Just { projects = 3, tasks = 3, projectOffset = 100, taskOffset = 100 }
+                    , branchAfterProject = Just { projects = 2, tasks = 1, projectOffset = 50, taskOffset = 0 }
+                    , branchAfterDuplicate = Just { projects = 2, tasks = 1, projectOffset = 50, taskOffset = 0 }
+                    , branchAfterTask = Just { projects = 2, tasks = 2, projectOffset = 50, taskOffset = 50 }
+                    , branchAfterProjectAgain = Just { projects = 3, tasks = 2, projectOffset = 100, taskOffset = 50 }
+                    , branchAfterTaskAgain = Just { projects = 3, tasks = 3, projectOffset = 100, taskOffset = 100 }
+                    }
+                    { rootAfterProject = counts rootProjectAccepted
+                    , rootAfterDuplicate = counts rootDuplicateIgnored
+                    , rootAfterTask = counts rootTaskAccepted
+                    , rootAfterProjectAgain = counts rootProjectAgainAccepted
+                    , rootAfterTaskAgain = counts rootTaskAgainAccepted
+                    , branchAfterProject = branchCounts branchProjectAccepted
+                    , branchAfterDuplicate = branchCounts branchDuplicateIgnored
+                    , branchAfterTask = branchCounts branchTaskAccepted
+                    , branchAfterProjectAgain = branchCounts branchProjectAgainAccepted
+                    , branchAfterTaskAgain = branchCounts branchTaskAgainAccepted
+                    }
         , test "branch and next-page navigation reject every stale key dimension" <|
             \_ ->
                 let
@@ -100,8 +695,11 @@ suite =
                             (GotNavigationBranch workspaceId branchRequest.sessionRequestEpoch branchRequest.dataLoading.navigationGeneration "project:parent" filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [ project "page-one" (Just "parent") ], hasMore = True }, tasks = { items = [], hasMore = False } }))
                             branchRequest
 
-                    ( pageRequest, _ ) =
+                    ( cachedWindow, _ ) =
                         DataLoading.beginNavigationBranchPage "project" "parent" "project" firstPage
+
+                    ( pageRequest, _ ) =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "project" cachedWindow
 
                     stalePageMessages =
                         [ GotNavigationBranch "other-workspace" pageRequest.sessionRequestEpoch pageRequest.dataLoading.navigationGeneration "project:parent" filterFingerprint 50 0 (Ok staleResponse)
@@ -394,7 +992,7 @@ suite =
                     , rootApplied = completed.dataLoading.rootNavigationRequest |> Maybe.map .succeeded |> Maybe.withDefault False
                     , branchApplied = Dict.get "project:parent" completed.dataLoading.loadedNavigationBranches |> Maybe.map .succeeded |> Maybe.withDefault False
                     }
-        , test "successful branch page 50 merges and deduplicates earlier project and task pages" <|
+        , test "successful branch presentation pages merge and deduplicate earlier project and task pages" <|
             \_ ->
                 let
                     seeded =
@@ -415,8 +1013,11 @@ suite =
                             )
                             initialRequest
 
-                    ( projectPageRequest, _ ) =
+                    ( projectCachedWindow, _ ) =
                         DataLoading.beginNavigationBranchPage "project" "parent" "project" firstPage
+
+                    ( projectPageRequest, _ ) =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "project" projectCachedWindow
 
                     projectPageFingerprint =
                         Dict.get "project:parent" projectPageRequest.dataLoading.loadedNavigationBranches
@@ -430,8 +1031,11 @@ suite =
                             )
                             projectPageRequest
 
-                    ( taskPageRequest, _ ) =
+                    ( taskCachedWindow, _ ) =
                         DataLoading.beginNavigationBranchPage "project" "parent" "task" projectPage
+
+                    ( taskPageRequest, _ ) =
+                        DataLoading.beginNavigationBranchPage "project" "parent" "task" taskCachedWindow
 
                     taskPageFingerprint =
                         Dict.get "project:parent" taskPageRequest.dataLoading.loadedNavigationBranches

@@ -18,6 +18,7 @@
     "perf:record": "npm run build && node perf/harness.mjs record --authorize-baseline",
     "perf:record-after": "npm run build && node perf/harness.mjs record --output perf/final-working-tree.after.v1.json --trace-output perf/final-working-tree.trace-manifest.v1.json --authorize-after-artifact",
     "perf:check": "npm run build && node perf/harness.mjs check",
+    "perf:freeze-v2": "node perf/freeze-v2.mjs",
     "preview": "vite preview"
   },
   "devDependencies": {

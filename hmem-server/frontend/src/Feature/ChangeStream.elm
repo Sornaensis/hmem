@@ -269,7 +269,7 @@ invalidationActions envelope invalidation =
                     [ RemoveEntity entity identity, ClearWorkspace identity, RefreshSessionAuthorization ]
 
                 else if entity == "observation" then
-                    [ RemoveEntity entity identity, RefreshObservations ]
+                    [ RemoveEntity entity identity ]
 
                 else
                     [ RemoveEntity entity identity ]
@@ -288,7 +288,7 @@ invalidationActions envelope invalidation =
                                 [ BeginResync ]
 
                     "observation" ->
-                        [ RefetchEntity entity identity, RefreshObservations ]
+                        [ RefetchEntity entity identity ]
 
                     "project" ->
                         [ RevalidateNavigationSummary entity identity ]
@@ -339,7 +339,7 @@ invalidationActions envelope invalidation =
         ( Api.WorkspaceScope expected, "collection", [ collection, workspaceId ] ) ->
             if workspaceId == expected && List.member collection [ "projects", "tasks", "observations", "task_dependencies" ] then
                 if collection == "observations" then
-                    [ RefreshObservations ]
+                    []
 
                 else
                     [ NoAction ]

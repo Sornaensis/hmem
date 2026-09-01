@@ -13,6 +13,23 @@ import Task as ElmTask
 import Types exposing (..)
 
 
+presentationWindowSize : Int
+presentationWindowSize =
+    25
+
+
+presentationMaxPinned : Int
+presentationMaxPinned =
+    presentationWindowSize - 1
+
+
+{-| A card presentation always reserves one ordinary row.  Focus/edit pins are
+local to a branch, but can never consume the cursor's entire page. -}
+presentationOrdinaryCapacity : Int -> Int
+presentationOrdinaryCapacity pinCount =
+    Basics.max 1 (presentationWindowSize - Basics.min presentationMaxPinned pinCount)
+
+
 
 -- FRAGMENT / URL
 

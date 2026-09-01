@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "taskId": "2503e08f-ff82-4f2c-adff-24e14fec8299",
+  "evidenceBaseCommit": "04fd7ba26b1a63b5f1c601939b046ef2fe5f51d6",
+  "normalization": "repository-relative POSIX paths; SHA-256 of exact file bytes; binary Git diff without external diff drivers; untracked source files represented by deterministic no-index additions; generated evidence artifacts separately hash-listed",
+  "recipe": "HMEM_EVIDENCE_BASE_COMMIT=04fd7ba26b1a63b5f1c601939b046ef2fe5f51d6 npm run perf:record-after",
+  "equality": {
+    "baselinePath": "hmem-server/frontend/perf/baseline.v1.json",
+    "source": "04fd7ba26b1a63b5f1c601939b046ef2fe5f51d6:hmem-server/frontend/perf/baseline.v1.json",
+    "byteForByteEqual": true,
+    "baseSha256": "6e4a25edff09fa046dd931449dbcb2e8d666d1900454cf7420fcd834a5b47d14",
+    "workingTreeSha256": "6e4a25edff09fa046dd931449dbcb2e8d666d1900454cf7420fcd834a5b47d14"
+  },
+  "artifacts": [
+    {
+      "path": "hmem-server/frontend/perf/final-working-tree.after.v2.json",
+      "sha256": "8c5bb288af77c6d683dc62d29a6dc90891be975b27963b125c65f3713aa76fa8",
+      "sizeBytes": 174566
+    },
+    {
+      "path": "hmem-server/frontend/perf/final-working-tree.trace-manifest.v2.json",
+      "sha256": "7f8a11b6a93e3da49e2085f15b51f45211053fe4b9313e3caf0705feb28049d3",
+      "sizeBytes": 1253
+    },
+    {
+      "path": "hmem-server/frontend/perf/final-working-tree.complete.diff",
+      "sha256": "6530e2b17a0c436bd3fbfb4b00e521ab5d037078c47f1c38c8fdea0ae08ad1a4",
+      "sizeBytes": 200841
+    },
+    {
+      "path": "hmem-server/frontend/perf/final-working-tree.validation-record.v2.json",
+      "sha256": "0c3bdb3a06f916179f36c4ef045809862071889623a6bad9834555fd0e56b437",
+      "sizeBytes": 1319
+    }
+  ],
+  "changedPaths": [
+    {
+      "path": "hmem-server/frontend/package.json",
+      "sha256": "487e5efebce7dffc1e3e548f9fb51a6ce17a8f2e25b5e6e7d0938ac9cbd4570f"
+    },
+    {
+      "path": "hmem-server/frontend/perf/harness.mjs",
+      "sha256": "00024d1444ad9c4e04afa049709e56b9116f726df896a5f18bcb7a45782ede9b"
+    },
+    {
+      "path": "hmem-server/frontend/src/Feature/Cards.elm",
+      "sha256": "c94798407a6c2677fc08bcb22dbfae78935ca99b442ba794db3dcc42bcd37991"
+    },
+    {
+      "path": "hmem-server/frontend/src/Feature/ChangeStream.elm",
+      "sha256": "66c8ff0375bdfe767b6c0929f8ce6ea1ee0f25dec8dc6695fc7842789f94c656"
+    },
+    {
+      "path": "hmem-server/frontend/src/Feature/DataLoading.elm",
+      "sha256": "b2f01e8374017fba7991895cff4dfea0c0868460b601afc0c995867ad4a069e6"
+    },
+    {
+      "path": "hmem-server/frontend/src/Feature/Focus.elm",
+      "sha256": "484987a0cb846123d56dd05d3924e88cf31dee40a694a762950f02ef9bd61263"
+    },
+    {
+      "path": "hmem-server/frontend/src/Feature/Observation.elm",
+      "sha256": "28cb6dafb04246f51926fce8df3891871311d2c3a6c3564f9ead55c6d3214f1b"
+    },
+    {
+      "path": "hmem-server/frontend/src/Feature/WebSocket.elm",
+      "sha256": "f7f9da8b05cebdcb33a1e66492c96dcd9372d63bb50f9f4ea6e42c0965e2e562"
+    },
+    {
+      "path": "hmem-server/frontend/src/Helpers.elm",
+      "sha256": "aa88064795841430eda49e9a24b65216c1bc2632db419b1f15ae09091828b19c"
+    },
+    {
+      "path": "hmem-server/frontend/src/Types.elm",
+      "sha256": "de45b1fcb0127e87c5c6b60d72ca1917d1580131d6eed1eeca20292235b984f7"
+    },
+    {
+      "path": "hmem-server/frontend/src/UpdateRouter.elm",
+      "sha256": "d7cd6ffc287eb9579c1e6a1780c670632519f35006a6cb8f5fbe8c0cd1df9e1a"
+    },
+    {
+      "path": "hmem-server/frontend/tests/CardsFocusNavigationTest.elm",
+      "sha256": "9fb599b4b5e09ecee4649be7a610a6d24987fe0bf1d558770a3ad9336b9ea6f6"
+    },
+    {
+      "path": "hmem-server/frontend/tests/ChangeStreamTest.elm",
+      "sha256": "4f39faf0cfc502ea56a5647e4b66d22a8c7fe3444a745abee2adba282dee4426"
+    },
+    {
+      "path": "hmem-server/frontend/tests/DataLoadingTest.elm",
+      "sha256": "c3a060f9a71591c5d3c81ffff9af53b300e26f00d1ed9a42f436b1bc5eb99f63"
+    },
+    {
+      "path": "hmem-server/frontend/tests/ObservationTest.elm",
+      "sha256": "f056be3ec6d23ec31e01c81b051b9811cfce1e7e87da76651dbbbf81aa48a830"
+    },
+    {
+      "path": "hmem-server/frontend/perf/freeze-v2.mjs",
+      "sha256": "c44df582714e77b76a1356c10b77b05e5e3bbf8441bce89d063e08ceceda66a0"
+    }
+  ],
+  "completeDiff": {
+    "path": "hmem-server/frontend/perf/final-working-tree.complete.diff",
+    "sha256": "6530e2b17a0c436bd3fbfb4b00e521ab5d037078c47f1c38c8fdea0ae08ad1a4",
+    "sizeBytes": 200841
+  }
+}

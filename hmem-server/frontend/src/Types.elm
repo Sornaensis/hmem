@@ -114,6 +114,8 @@ type alias DataLoadingModel =
     , navigationGeneration : Int
     , rootNavigationRequest : Maybe NavigationBranchState
     , loadedNavigationBranches : Dict String NavigationBranchState
+    , rootNavigationPresentation : Maybe NavigationPresentationState
+    , navigationPresentations : Dict String NavigationPresentationState
     , projectCardSummaries : Dict String Api.ProjectCardSummary
     , taskCardSummaries : Dict String Api.TaskCardSummary
     -- The bounded navigation API is authoritative for which cached cards are
@@ -138,6 +140,23 @@ type alias NavigationBranchState =
     , succeeded : Bool
     , projectHasMore : Bool
     , taskHasMore : Bool
+    , projectCardCount : Int
+    , taskCardCount : Int
+    , projectRequestPending : Bool
+    , taskRequestPending : Bool
+    }
+
+
+{-| Presentation cursors are deliberately independent from transport cursors.
+The server continues returning bounded 50-item data pages, while the UI moves
+through cached 25-card windows without refetching overlapping data. -}
+type alias NavigationPresentationState =
+    { workspaceId : String
+    , sessionEpoch : Int
+    , generation : Int
+    , filterFingerprint : String
+    , projectOffset : Int
+    , taskOffset : Int
     }
 
 
@@ -238,6 +257,7 @@ type alias ObservationModel =
     , orderedIds : List String
     , hasMore : Bool
     , loading : Bool
+    , resultsStale : Bool
     , error : Maybe String
     , query : String
     , subjectKind : Maybe Api.SubjectKind
@@ -706,6 +726,9 @@ type Msg
     | GotRootNavigation String Int (Maybe Int) Int String Int Int (Result Http.Error Api.NavigationBranchResponse)
     | GotNavigationBranch String Int Int String String Int Int (Result Http.Error Api.NavigationBranchResponse)
     | LoadNavigationBranchPage String String String
+    | ShowPreviousNavigationBranchPage String String String
+    | LoadRootNavigationPage String
+    | ShowPreviousRootNavigationPage String
     | GotNavigationFocus String Int Int String String String Int (Result Http.Error Api.NavigationFocusResponse)
     | GotSessionContext Int (Maybe String) (Result Http.Error Api.SessionContext)
     | GotProjects String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Project))

@@ -1,9 +1,9 @@
-module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationFocus, beginRootNavigation, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
 import Feature.Observation
-import Helpers exposing (indexBy)
+import Helpers exposing (indexBy, presentationOrdinaryCapacity)
 import Permissions
 import Set
 import String
@@ -25,6 +25,8 @@ init =
     , navigationGeneration = 0
     , rootNavigationRequest = Nothing
     , loadedNavigationBranches = Dict.empty
+    , rootNavigationPresentation = Nothing
+    , navigationPresentations = Dict.empty
     , projectCardSummaries = Dict.empty
     , taskCardSummaries = Dict.empty
     , navigationVisibleProjectIds = Set.empty
@@ -109,6 +111,10 @@ beginNavigationBranch parentKind workspaceId maybeParentId model =
                 , succeeded = False
                 , projectHasMore = False
                 , taskHasMore = False
+                , projectCardCount = 0
+                , taskCardCount = 0
+                , projectRequestPending = True
+                , taskRequestPending = True
             }
 
         currentDataLoading =
@@ -118,6 +124,7 @@ beginNavigationBranch parentKind workspaceId maybeParentId model =
             { currentDataLoading
                 | navigationGeneration = generation
                 , loadedNavigationBranches = Dict.insert key request model.dataLoading.loadedNavigationBranches
+                , navigationPresentations = Dict.insert key (initialPresentation request) model.dataLoading.navigationPresentations
             }
     in
     ( { model | dataLoading = dataLoading }
@@ -126,31 +133,317 @@ beginNavigationBranch parentKind workspaceId maybeParentId model =
     )
 
 
-{-| Request exactly one following page of a branch.  Project and task pages
-remain independently addressable even though the compact branch response keeps
-both page shapes together.  Existing sibling summaries merge by ID, so the
-unchanged side cannot overwrite a newer branch result.
--}
+transportPageSize : Int
+transportPageSize =
+    50
+
+
+initialPresentation : NavigationBranchState -> NavigationPresentationState
+initialPresentation request =
+    { workspaceId = request.workspaceId
+    , sessionEpoch = request.sessionEpoch
+    , generation = request.generation
+    , filterFingerprint = request.filterFingerprint
+    , projectOffset = 0
+    , taskOffset = 0
+    }
+
+
+{-| Focus and collapse can change the pinned-path capacity.  Presentation
+cursors count ordinary cards, so discard only those reversible cursors when
+that capacity changes; cached transport membership and its stale guards remain
+untouched. -}
+resetNavigationPresentations : Model -> Model
+resetNavigationPresentations model =
+    let
+        loading =
+            model.dataLoading
+    in
+    { model
+        | dataLoading =
+            { loading
+                | rootNavigationPresentation = loading.rootNavigationRequest |> Maybe.map initialPresentation
+                , navigationPresentations = Dict.map (\_ request -> initialPresentation request) loading.loadedNavigationBranches
+            }
+    }
+
+
+presentationFor : NavigationBranchState -> Maybe NavigationPresentationState -> NavigationPresentationState
+presentationFor request maybePresentation =
+    case maybePresentation of
+        Just presentation ->
+            if presentation.workspaceId == request.workspaceId && presentation.sessionEpoch == request.sessionEpoch && presentation.generation == request.generation && presentation.filterFingerprint == request.filterFingerprint then
+                presentation
+
+            else
+                initialPresentation request
+
+        Nothing ->
+            initialPresentation request
+
+
+presentationPinnedIds : String -> Model -> Set.Set String
+presentationPinnedIds entityKind model =
+    let
+        editTarget =
+            case model.editing.editState of
+                Just (EditingField state) ->
+                    Just ( state.entityType, state.entityId )
+
+                Nothing ->
+                    Nothing
+
+        taskPath taskId =
+            let
+                climb current seen =
+                    if Set.member current seen then
+                        seen
+
+                    else
+                        case Dict.get current model.tasks of
+                            Just task ->
+                                climb (Maybe.withDefault "" task.parentId) (Set.insert current seen)
+
+                            Nothing ->
+                                seen
+            in
+            climb taskId Set.empty
+
+        projectPath projectId =
+            let
+                climb current seen =
+                    if Set.member current seen then
+                        seen
+
+                    else
+                        case Dict.get current model.projects of
+                            Just project ->
+                                climb (Maybe.withDefault "" project.parentId) (Set.insert current seen)
+
+                            Nothing ->
+                                seen
+            in
+            climb projectId Set.empty
+
+        focused =
+            model.focus.focusedEntity
+
+        edited =
+            editTarget
+
+        inline =
+            case model.editing.inlineCreate of
+                Just (InlineCreateProject state) ->
+                    Just ( "project", Maybe.withDefault "" state.parentId )
+
+                Just (InlineCreateTask state) ->
+                    if entityKind == "project" then
+                        Maybe.map (Tuple.pair "project") state.projectId
+
+                    else
+                        Maybe.map (Tuple.pair "task") state.parentId
+
+                Just (InlineCreateMemory _) ->
+                    Nothing
+
+                Nothing ->
+                    Nothing
+
+        roots =
+            [ focused, edited, inline ]
+                |> List.filterMap identity
+    in
+    roots
+        |> List.foldl
+            (\( kind, entityId ) pinned ->
+                if String.isEmpty entityId then
+                    pinned
+
+                else if entityKind == "task" then
+                    if kind == "task" then
+                        Set.union pinned (taskPath entityId)
+
+                    else
+                        pinned
+
+                else if kind == "project" then
+                    Set.union pinned (projectPath entityId)
+
+                else
+                    model.tasks
+                        |> Dict.get entityId
+                        |> Maybe.andThen .projectId
+                        |> Maybe.map projectPath
+                        |> Maybe.map (Set.union pinned)
+                        |> Maybe.withDefault pinned
+            )
+            Set.empty
+
+
+localPresentationPinnedIds : Maybe ( String, String ) -> String -> Model -> Set.Set String
+localPresentationPinnedIds maybeParent entityKind model =
+    let
+        workspaceId =
+            Maybe.withDefault "" model.selectedWorkspaceId
+
+        isVisible entityId =
+            not model.dataLoading.navigationVisibilityActive
+                || (if entityKind == "project" then
+                        Set.member entityId model.dataLoading.navigationVisibleProjectIds
+
+                    else
+                        Set.member entityId model.dataLoading.navigationVisibleTaskIds
+                   )
+
+        isLocalPinned entityId =
+            if entityKind == "project" then
+                Dict.get entityId model.projects
+                    |> Maybe.map
+                        (\project ->
+                            isVisible entityId
+                                && project.workspaceId == workspaceId
+                                && (case maybeParent of
+                                        Just ( "project", parentId ) ->
+                                            project.parentId == Just parentId
+
+                                        _ ->
+                                            project.parentId == Nothing
+                                   )
+                        )
+                    |> Maybe.withDefault False
+
+            else
+                Dict.get entityId model.tasks
+                    |> Maybe.map
+                        (\task ->
+                            isVisible entityId
+                                && task.workspaceId == workspaceId
+                                && (case maybeParent of
+                                        Just ( "project", parentId ) ->
+                                            task.projectId == Just parentId && task.parentId == Nothing
+
+                                        Just ( "task", parentId ) ->
+                                            task.parentId == Just parentId
+
+                                        _ ->
+                                            task.parentId == Nothing
+                                   )
+                        )
+                    |> Maybe.withDefault False
+
+    in
+    presentationPinnedIds entityKind model
+        |> Set.filter isLocalPinned
+
+
+presentationCapacity : String -> Maybe ( String, String ) -> String -> Model -> Int
+presentationCapacity _ maybeParent entityKind model =
+    localPresentationPinnedIds maybeParent entityKind model
+        |> Set.size
+        |> presentationOrdinaryCapacity
+
+
+cachedOrdinaryCount : Maybe ( String, String ) -> String -> Model -> NavigationBranchState -> Int
+cachedOrdinaryCount maybeParent entityKind model transport =
+    Basics.max 0
+        ((if entityKind == "project" then transport.projectCardCount else transport.taskCardCount)
+            - (localPresentationPinnedIds maybeParent entityKind model |> Set.size)
+        )
+
+
+advancePresentation : String -> Maybe ( String, String ) -> String -> Model -> NavigationBranchState -> NavigationPresentationState -> NavigationPresentationState
+advancePresentation parentKind maybeParent entityKind model transport presentation =
+    let
+        capacity =
+            presentationCapacity parentKind maybeParent entityKind model
+
+        nextOffset currentOffset =
+            Basics.min (currentOffset + capacity) (cachedOrdinaryCount maybeParent entityKind model transport)
+    in
+    if entityKind == "project" then
+        { presentation | projectOffset = nextOffset presentation.projectOffset }
+
+    else
+        { presentation | taskOffset = nextOffset presentation.taskOffset }
+
+
+retreatPresentation : String -> Maybe ( String, String ) -> String -> Model -> NavigationPresentationState -> NavigationPresentationState
+retreatPresentation parentKind maybeParent entityKind model presentation =
+    if entityKind == "project" then
+        { presentation | projectOffset = max 0 (presentation.projectOffset - presentationCapacity parentKind maybeParent entityKind model) }
+
+    else
+        { presentation | taskOffset = max 0 (presentation.taskOffset - presentationCapacity parentKind maybeParent entityKind model) }
+
+
+presentationNeedsTransport : String -> Maybe ( String, String ) -> String -> Model -> NavigationPresentationState -> NavigationBranchState -> Bool
+presentationNeedsTransport _ maybeParent entityKind model presentation transport =
+    let
+        presentationOffset =
+            if entityKind == "project" then
+                presentation.projectOffset
+
+            else
+                presentation.taskOffset
+
+        cachedOrdinaryEnd =
+            cachedOrdinaryCount maybeParent entityKind model transport
+    in
+    presentationOffset >= cachedOrdinaryEnd
+
+
+{-| Advance one presentation window.  A new network page is requested only
+when that window leaves the cached transport page; retries retain the same
+transport offsets and identity guard. -}
 beginNavigationBranchPage : String -> String -> String -> Model -> ( Model, Cmd Msg )
 beginNavigationBranchPage parentKind parentId entityKind model =
     case ( model.selectedWorkspaceId, Dict.get (navigationBranchKey parentKind (Just parentId)) model.dataLoading.loadedNavigationBranches ) of
         ( Just workspaceId, Just previous ) ->
             let
+                key =
+                    navigationBranchKey parentKind (Just parentId)
+
+                previousPresentation =
+                    presentationFor previous (Dict.get key model.dataLoading.navigationPresentations)
+
+                retrying =
+                    not previous.succeeded
+
+                nextPresentation =
+                    if retrying then
+                        previousPresentation
+
+                    else
+                        advancePresentation parentKind (Just ( parentKind, parentId )) entityKind model previous previousPresentation
+
+                hasMore =
+                    if entityKind == "project" then previous.projectHasMore else previous.taskHasMore
+
+                needsTransport =
+                    retrying || presentationNeedsTransport parentKind (Just ( parentKind, parentId )) entityKind model nextPresentation previous
+
+                canAdvance =
+                    not previous.inFlight && (retrying || not needsTransport || hasMore)
+
                 canLoad =
-                    not previous.inFlight
-                        && previous.succeeded
-                        && (if entityKind == "project" then previous.projectHasMore else previous.taskHasMore)
+                    canAdvance && needsTransport
 
                 projectOffset =
-                    if entityKind == "project" then
-                        previous.projectOffset + 50
+                    if retrying then
+                        previous.projectOffset
+
+                    else if entityKind == "project" && canLoad then
+                        previous.projectOffset + transportPageSize
 
                     else
                         previous.projectOffset
 
                 taskOffset =
-                    if entityKind == "task" then
-                        previous.taskOffset + 50
+                    if retrying then
+                        previous.taskOffset
+
+                    else if entityKind == "task" && canLoad then
+                        previous.taskOffset + transportPageSize
 
                     else
                         previous.taskOffset
@@ -161,19 +454,22 @@ beginNavigationBranchPage parentKind parentId entityKind model =
                         , taskOffset = taskOffset
                         , inFlight = canLoad
                         , succeeded = if canLoad then False else previous.succeeded
+                        , projectRequestPending = if canLoad then (if retrying then previous.projectRequestPending else entityKind == "project") else previous.projectRequestPending
+                        , taskRequestPending = if canLoad then (if retrying then previous.taskRequestPending else entityKind == "task") else previous.taskRequestPending
                     }
-
-                key =
-                    navigationBranchKey parentKind (Just parentId)
 
                 currentLoading =
                     model.dataLoading
             in
-            if canLoad then
+            if not canAdvance then
+                ( model, Cmd.none )
+
+            else if canLoad then
                 ( { model
                     | dataLoading =
                         { currentLoading
                             | loadedNavigationBranches = Dict.insert key request currentLoading.loadedNavigationBranches
+                            , navigationPresentations = Dict.insert key nextPresentation currentLoading.navigationPresentations
                         }
                   }
                 , Api.fetchNavigationBranch model.flags.apiUrl workspaceId parentKind (Just parentId) projectOffset taskOffset (navigationFilterQuery model)
@@ -181,9 +477,37 @@ beginNavigationBranchPage parentKind parentId entityKind model =
                 )
 
             else
-                ( model, Cmd.none )
+                ( { model | dataLoading = { currentLoading | navigationPresentations = Dict.insert key nextPresentation currentLoading.navigationPresentations } }, Cmd.none )
 
         _ ->
+            ( model, Cmd.none )
+
+
+beginNavigationBranchPreviousPage : String -> String -> String -> Model -> ( Model, Cmd Msg )
+beginNavigationBranchPreviousPage parentKind parentId entityKind model =
+    let
+        key =
+            navigationBranchKey parentKind (Just parentId)
+    in
+    case Dict.get key model.dataLoading.loadedNavigationBranches of
+        Just request ->
+            let
+                previous =
+                    presentationFor request (Dict.get key model.dataLoading.navigationPresentations)
+
+                loading =
+                    model.dataLoading
+            in
+            ( { model
+                | dataLoading =
+                    { loading
+                        | navigationPresentations = Dict.insert key (retreatPresentation parentKind (Just ( parentKind, parentId )) entityKind model previous) model.dataLoading.navigationPresentations
+                    }
+              }
+            , Cmd.none
+            )
+
+        Nothing ->
             ( model, Cmd.none )
 
 
@@ -196,6 +520,103 @@ beginRootNavigation model =
 
         _ ->
             Cmd.none
+
+
+{-| Root presentation is also independent from its transport cursor. -}
+beginRootNavigationPage : String -> Model -> ( Model, Cmd Msg )
+beginRootNavigationPage entityKind model =
+    case ( model.selectedWorkspaceId, model.dataLoading.rootNavigationRequest ) of
+        ( Just workspaceId, Just previous ) ->
+            let
+                previousPresentation =
+                    presentationFor previous model.dataLoading.rootNavigationPresentation
+
+                retrying =
+                    not previous.succeeded
+
+                nextPresentation =
+                    if retrying then
+                        previousPresentation
+
+                    else
+                        advancePresentation "root" Nothing entityKind model previous previousPresentation
+
+                hasMore =
+                    if entityKind == "project" then previous.projectHasMore else previous.taskHasMore
+
+                needsTransport =
+                    retrying || presentationNeedsTransport "root" Nothing entityKind model nextPresentation previous
+
+                canAdvance =
+                    not previous.inFlight && (retrying || not needsTransport || hasMore)
+
+                canLoad =
+                    canAdvance && needsTransport
+
+                projectOffset =
+                    if retrying then
+                        previous.projectOffset
+
+                    else if entityKind == "project" && canLoad then
+                        previous.projectOffset + transportPageSize
+
+                    else
+                        previous.projectOffset
+
+                taskOffset =
+                    if retrying then
+                        previous.taskOffset
+
+                    else if entityKind == "task" && canLoad then
+                        previous.taskOffset + transportPageSize
+
+                    else
+                        previous.taskOffset
+
+                request =
+                    { previous
+                        | projectOffset = projectOffset
+                        , taskOffset = taskOffset
+                        , inFlight = canLoad
+                        , succeeded = if canLoad then False else previous.succeeded
+                        , projectRequestPending = if canLoad then (if retrying then previous.projectRequestPending else entityKind == "project") else previous.projectRequestPending
+                        , taskRequestPending = if canLoad then (if retrying then previous.taskRequestPending else entityKind == "task") else previous.taskRequestPending
+                    }
+
+                loading =
+                    model.dataLoading
+            in
+            if not canAdvance then
+                ( model, Cmd.none )
+
+            else if canLoad then
+                ( { model | dataLoading = { loading | rootNavigationRequest = Just request, rootNavigationPresentation = Just nextPresentation } }
+                , Api.fetchRootNavigation model.flags.apiUrl workspaceId (navigationFilterQuery model)
+                    (GotRootNavigation workspaceId model.sessionRequestEpoch Nothing request.generation request.filterFingerprint projectOffset taskOffset)
+                )
+
+            else
+                ( { model | dataLoading = { loading | rootNavigationPresentation = Just nextPresentation } }, Cmd.none )
+
+        _ ->
+            ( model, Cmd.none )
+
+
+beginRootNavigationPreviousPage : String -> Model -> ( Model, Cmd Msg )
+beginRootNavigationPreviousPage entityKind model =
+    case model.dataLoading.rootNavigationRequest of
+        Just request ->
+            let
+                previous =
+                    presentationFor request model.dataLoading.rootNavigationPresentation
+
+                loading =
+                    model.dataLoading
+            in
+            ( { model | dataLoading = { loading | rootNavigationPresentation = Just (retreatPresentation "root" Nothing entityKind model previous) } }, Cmd.none )
+
+        Nothing ->
+            ( model, Cmd.none )
 
 
 {-| Install the exact root-branch guard before AppShell issues bootstrap
@@ -214,21 +635,28 @@ prepareRootNavigationRequest expectedWorkspace model =
                 in
                 { model
                     | dataLoading =
+                        let
+                            request =
+                                { workspaceId = workspaceId
+                                , sessionEpoch = model.sessionRequestEpoch
+                                , generation = loading.navigationGeneration
+                                , filterFingerprint = navigationFilterFingerprint model
+                                , projectOffset = 0
+                                , taskOffset = 0
+                                , inFlight = True
+                                , succeeded = False
+                                , projectHasMore = False
+                                , taskHasMore = False
+                                , projectCardCount = 0
+                                , taskCardCount = 0
+                                , projectRequestPending = True
+                                , taskRequestPending = True
+                                }
+                        in
                         { loading
-                            | rootNavigationRequest =
-                                Just
-                                    { workspaceId = workspaceId
-                                    , sessionEpoch = model.sessionRequestEpoch
-                                    , generation = loading.navigationGeneration
-                                    , filterFingerprint = navigationFilterFingerprint model
-                                    , projectOffset = 0
-                                    , taskOffset = 0
-                                    , inFlight = True
-                                    , succeeded = False
-                                    , projectHasMore = False
-                                    , taskHasMore = False
-                                    }
-                        , navigationVisibilityActive = True
+                            | rootNavigationRequest = Just request
+                            , rootNavigationPresentation = Just (initialPresentation request)
+                            , navigationVisibilityActive = True
                         }
                 }
 
@@ -257,6 +685,8 @@ reloadNavigationForFilters model =
                     { current
                         | navigationGeneration = generation
                         , loadedNavigationBranches = Dict.empty
+                        , rootNavigationPresentation = Nothing
+                        , navigationPresentations = Dict.empty
                         , projectCardSummaries = Dict.empty
                         , taskCardSummaries = Dict.empty
                         , navigationVisibleProjectIds = Set.empty
@@ -276,6 +706,10 @@ reloadNavigationForFilters model =
                                 , succeeded = False
                                 , projectHasMore = False
                                 , taskHasMore = False
+                                , projectCardCount = 0
+                                , taskCardCount = 0
+                                , projectRequestPending = True
+                                , taskRequestPending = True
                                 }
                     }
 
@@ -428,6 +862,10 @@ initialNavigationBranchState =
     , succeeded = False
     , projectHasMore = False
     , taskHasMore = False
+    , projectCardCount = 0
+    , taskCardCount = 0
+    , projectRequestPending = False
+    , taskRequestPending = False
     }
 
 
@@ -449,13 +887,23 @@ replayBranch workspaceId generation fingerprint parentKind parentId previous mod
                 , succeeded = False
                 , projectHasMore = False
                 , taskHasMore = False
+                , projectCardCount = 0
+                , taskCardCount = 0
+                , projectRequestPending = True
+                , taskRequestPending = True
             }
 
         loading =
             model.dataLoading
 
         replayed =
-            { model | dataLoading = { loading | loadedNavigationBranches = Dict.insert branchKey request loading.loadedNavigationBranches } }
+            { model
+                | dataLoading =
+                    { loading
+                        | loadedNavigationBranches = Dict.insert branchKey request loading.loadedNavigationBranches
+                        , navigationPresentations = Dict.insert branchKey (initialPresentation request) loading.navigationPresentations
+                    }
+            }
 
         command =
             Api.fetchNavigationBranch model.flags.apiUrl workspaceId parentKind (Just parentId) 0 0 (navigationFilterQuery replayed)
@@ -795,6 +1243,12 @@ mergeNavigationSummaries projectSummaries taskSummaries model =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        LoadRootNavigationPage entityKind ->
+            beginRootNavigationPage entityKind model
+
+        ShowPreviousRootNavigationPage entityKind ->
+            beginRootNavigationPreviousPage entityKind model
+
         GotWorkspaces token result ->
             if model.auth.status /= AuthReady || model.dataLoading.activeWorkspaceListLoadToken /= Just token then
                 ( model, Cmd.none )
@@ -852,9 +1306,9 @@ update msg model =
 
                                              else
                                                  1
-                                        , rootNavigationRequest =
-                                            Just
-                                                { workspaceId = expectedWsId
+                                         , rootNavigationRequest =
+                                             Just
+                                                 { workspaceId = expectedWsId
                                                 , sessionEpoch = model.sessionRequestEpoch
                                                 , generation = currentLoading.navigationGeneration
                                                 , filterFingerprint = navigationFilterFingerprint model
@@ -863,8 +1317,21 @@ update msg model =
                                                 , inFlight = True
                                                 , succeeded = False
                                                 , projectHasMore = False
-                                                , taskHasMore = False
-                                                }
+                                                 , taskHasMore = False
+                                                 , projectCardCount = 0
+                                                 , taskCardCount = 0
+                                                 , projectRequestPending = True
+                                                 , taskRequestPending = True
+                                                 }
+                                         , rootNavigationPresentation =
+                                             Just
+                                                 { workspaceId = expectedWsId
+                                                 , sessionEpoch = model.sessionRequestEpoch
+                                                 , generation = currentLoading.navigationGeneration
+                                                 , filterFingerprint = navigationFilterFingerprint model
+                                                 , projectOffset = 0
+                                                 , taskOffset = 0
+                                                 }
                                      }
 
                                 currentObservations =
@@ -982,6 +1449,7 @@ update msg model =
                                 && request.filterFingerprint == fingerprint
                                 && request.projectOffset == projectOffset
                                 && request.taskOffset == taskOffset
+                                && request.inFlight
                                 && acceptWorkspaceLoad maybeToken model.dataLoading
 
                         Nothing ->
@@ -999,7 +1467,12 @@ update msg model =
                         else
                             let
                                 updatedModel =
-                                    replaceNavigationBranchMembership "workspace_root" Nothing navigation model
+                                    (if projectOffset == 0 && taskOffset == 0 then
+                                        replaceNavigationBranchMembership "workspace_root" Nothing navigation model
+
+                                     else
+                                        mergeNavigationSummaries navigation.projects.items navigation.tasks.items model
+                                    )
                                         |> (\next ->
                                                 let
                                                     mergedLoading =
@@ -1009,11 +1482,83 @@ update msg model =
                                                         { mergedLoading
                                                             | loadedNavigationBranches =
                                                                 Dict.insert (navigationBranchKey "workspace_root" Nothing)
-                                                                    { workspaceId = wsId, sessionEpoch = sessionEpoch, generation = generation, filterFingerprint = fingerprint, projectOffset = projectOffset, taskOffset = taskOffset, inFlight = False, succeeded = True, projectHasMore = navigation.projects.hasMore, taskHasMore = navigation.tasks.hasMore }
+                                                                    { workspaceId = wsId
+                                                                    , sessionEpoch = sessionEpoch
+                                                                    , generation = generation
+                                                                    , filterFingerprint = fingerprint
+                                                                    , projectOffset = projectOffset
+                                                                    , taskOffset = taskOffset
+                                                                    , inFlight = False
+                                                                    , succeeded = True
+                                                                    , projectHasMore = navigation.projects.hasMore
+                                                                    , taskHasMore = navigation.tasks.hasMore
+                                                                    , projectCardCount =
+                                                                        if projectOffset == 0 && taskOffset == 0 then
+                                                                            List.length navigation.projects.items
+
+                                                                        else
+                                                                            mergedLoading.rootNavigationRequest
+                                                                                |> Maybe.map
+                                                                                    (\request ->
+                                                                                        if request.projectRequestPending then
+                                                                                            request.projectCardCount + List.length navigation.projects.items
+
+                                                                                        else
+                                                                                            request.projectCardCount
+                                                                                    )
+                                                                                |> Maybe.withDefault 0
+                                                                    , taskCardCount =
+                                                                        if projectOffset == 0 && taskOffset == 0 then
+                                                                            List.length navigation.tasks.items
+
+                                                                        else
+                                                                            mergedLoading.rootNavigationRequest
+                                                                                |> Maybe.map
+                                                                                    (\request ->
+                                                                                        if request.taskRequestPending then
+                                                                                            request.taskCardCount + List.length navigation.tasks.items
+
+                                                                                        else
+                                                                                            request.taskCardCount
+                                                                                    )
+                                                                                |> Maybe.withDefault 0
+                                                                    , projectRequestPending = False
+                                                                    , taskRequestPending = False
+                                                                    }
                                                                     mergedLoading.loadedNavigationBranches
                                                             , rootNavigationRequest =
                                                                 mergedLoading.rootNavigationRequest
-                                                                    |> Maybe.map (\request -> { request | inFlight = False, succeeded = True, projectHasMore = navigation.projects.hasMore, taskHasMore = navigation.tasks.hasMore })
+                                                                    |> Maybe.map
+                                                                        (\request ->
+                                                                            { request
+                                                                                | inFlight = False
+                                                                                , succeeded = True
+                                                                                , projectHasMore = navigation.projects.hasMore
+                                                                                , taskHasMore = navigation.tasks.hasMore
+                                                                                , projectCardCount =
+                                                                                    if projectOffset == 0 && taskOffset == 0 then
+                                                                                        List.length navigation.projects.items
+
+                                                                                    else
+                                                                                        if request.projectRequestPending then
+                                                                                            request.projectCardCount + List.length navigation.projects.items
+
+                                                                                        else
+                                                                                            request.projectCardCount
+                                                                                , taskCardCount =
+                                                                                    if projectOffset == 0 && taskOffset == 0 then
+                                                                                        List.length navigation.tasks.items
+
+                                                                                    else
+                                                                                        if request.taskRequestPending then
+                                                                                            request.taskCardCount + List.length navigation.tasks.items
+
+                                                                                        else
+                                                                                            request.taskCardCount
+                                                                                , projectRequestPending = False
+                                                                                , taskRequestPending = False
+                                                                            }
+                                                                        )
                                                         }
                                                 in
                                                 { next | dataLoading = finishWorkspaceLoad maybeToken rootBranchLoading }
@@ -1023,7 +1568,18 @@ update msg model =
 
                     Err _ ->
                         addToast Error "Failed to load workspace navigation"
-                            { model | dataLoading = finishWorkspaceLoad maybeToken model.dataLoading }
+                            { model
+                                | dataLoading =
+                                    model.dataLoading
+                                        |> finishWorkspaceLoad maybeToken
+                                        |> (\loading ->
+                                                { loading
+                                                    | rootNavigationRequest =
+                                                        loading.rootNavigationRequest
+                                                            |> Maybe.map (\request -> { request | inFlight = False, succeeded = False })
+                                                }
+                                           )
+                            }
 
         GotNavigationBranch wsId sessionEpoch generation branchKey fingerprint projectOffset taskOffset result ->
             let
@@ -1044,6 +1600,7 @@ update msg model =
                                 && request.filterFingerprint == fingerprint
                                 && request.projectOffset == projectOffset
                                 && request.taskOffset == taskOffset
+                                && request.inFlight
 
                         Nothing ->
                             False
@@ -1073,7 +1630,40 @@ update msg model =
                                         | dataLoading =
                                             { mergedLoading
                                                 | loadedNavigationBranches =
-                                                    Dict.update branchKey (Maybe.map (\request -> { request | inFlight = False, succeeded = True, projectHasMore = navigation.projects.hasMore, taskHasMore = navigation.tasks.hasMore })) mergedLoading.loadedNavigationBranches
+                                                    Dict.update branchKey
+                                                        (Maybe.map
+                                                            (\request ->
+                                                                { request
+                                                                    | inFlight = False
+                                                                    , succeeded = True
+                                                                    , projectHasMore = navigation.projects.hasMore
+                                                                    , taskHasMore = navigation.tasks.hasMore
+                                                                    , projectCardCount =
+                                                                        if projectOffset == 0 && taskOffset == 0 then
+                                                                            List.length navigation.projects.items
+
+                                                                        else
+                                                                            if request.projectRequestPending then
+                                                                                request.projectCardCount + List.length navigation.projects.items
+
+                                                                            else
+                                                                                request.projectCardCount
+                                                                    , taskCardCount =
+                                                                        if projectOffset == 0 && taskOffset == 0 then
+                                                                            List.length navigation.tasks.items
+
+                                                                        else
+                                                                            if request.taskRequestPending then
+                                                                                request.taskCardCount + List.length navigation.tasks.items
+
+                                                                            else
+                                                                                request.taskCardCount
+                                                                    , projectRequestPending = False
+                                                                    , taskRequestPending = False
+                                                                }
+                                                            )
+                                                        )
+                                                        mergedLoading.loadedNavigationBranches
                                             }
                                     }
                                    )
@@ -1400,5 +1990,6 @@ mergeObservationPage offset paginated observations =
         , error = Nothing
         , expectedOffset = Nothing
         , nextOffset = offset + List.length paginated.items
+        , resultsStale = if offset == 0 then False else observations.resultsStale
     }
-        |> (\merged -> List.foldl Feature.Observation.applyCanonicalObservation merged paginated.items)
+        |> (\merged -> List.foldl Feature.Observation.applyAuthoritativeObservation merged paginated.items)

@@ -1035,7 +1035,11 @@ removeEntity scope entity identity accumulated model =
                         )
 
                 "observation" ->
-                    Just (Observation.reconcileDeletedObservation identity withGeneration)
+                    if scopeMatchesSelectedWorkspace scope withGeneration then
+                        Just (Observation.reconcileDeletedObservation identity withGeneration)
+
+                    else
+                        Just ( withGeneration, Cmd.none )
 
                 "task_dependency" ->
                     case String.split ":" identity of
@@ -1129,7 +1133,14 @@ requestEntity scope entity identity accumulated model =
             requestCanonical scope ("entity:task:" ++ identity) (\guard -> Api.fetchTask model.flags.apiUrl identity (CanonicalTaskFetched guard identity)) accumulated model
 
         "observation" ->
-            requestCanonical scope ("entity:observation:" ++ identity) (\guard -> Api.fetchObservation model.flags.apiUrl identity (CanonicalObservationFetched guard (model.selectedWorkspaceId |> Maybe.withDefault "") identity)) accumulated model
+            if scopeMatchesSelectedWorkspace scope model && Observation.isLoadedOrSelected identity model.observations then
+                requestCanonical scope ("entity:observation:" ++ identity) (\guard -> Api.fetchObservation model.flags.apiUrl identity (CanonicalObservationFetched guard (model.selectedWorkspaceId |> Maybe.withDefault "") identity)) accumulated model
+
+            else if scopeMatchesSelectedWorkspace scope model then
+                ( { model | observations = Observation.markResultsStale model.observations }, accumulated )
+
+            else
+                ( model, accumulated )
 
         "task_dependency" ->
             case String.split ":" identity of
@@ -1149,6 +1160,16 @@ requestEntity scope entity identity accumulated model =
                     beginScopedResync scope model
             in
             ( next, Cmd.batch [ accumulated, command ] )
+
+
+scopeMatchesSelectedWorkspace : ChangeStream.Scope -> Model -> Bool
+scopeMatchesSelectedWorkspace scope model =
+    case scope of
+        ChangeStream.Workspace workspaceId ->
+            model.selectedWorkspaceId == Just workspaceId
+
+        ChangeStream.Global ->
+            False
 
 
 requestNavigationSummaryBatches : ChangeStream.Scope -> List ( String, String ) -> Model -> ( Model, Cmd Msg )

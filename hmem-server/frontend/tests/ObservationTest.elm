@@ -34,6 +34,61 @@ suite =
                         [ Ok ( Api.SubjectFile, "src/Main.elm", fullSha )
                         , Ok ( Api.SubjectGlob, "src/**/*.elm", fullSha )
                         ]
+        , test "foreign live observations mark the bounded collection stale without changing membership" <|
+            \_ ->
+                let
+                    loaded =
+                        fixtureObservation "loaded" "2026-01-01T00:00:00Z"
+
+                    initialState =
+                        Feature.Observation.init
+
+                    initial =
+                        { initialState | items = Dict.singleton loaded.id loaded, orderedIds = [ loaded.id ] }
+
+                    stale =
+                        Feature.Observation.markResultsStale initial
+
+                    view =
+                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) stale |> Query.fromHtml
+                in
+                Expect.all
+                    [ \_ -> Feature.Observation.isLoadedOrSelected "loaded" stale |> Expect.equal True
+                    , \_ -> Feature.Observation.isLoadedOrSelected "foreign" stale |> Expect.equal False
+                    , \_ -> ( stale.resultsStale, stale.orderedIds ) |> Expect.equal ( True, [ "loaded" ] )
+                    , \_ -> view |> Query.has [ Selector.text "Results may have changed.", Selector.text "Refresh results" ]
+                    ]
+                    ()
+        , test "canonical selected detail never admits an unproven row to flat, facet, exact, or match membership" <|
+            \_ ->
+                let
+                    selected =
+                        fixtureObservation "selected-only" "2026-01-01T00:00:00Z"
+
+                    canonical =
+                        { selected | content = "new canonical detail", updatedAt = "2026-01-01T00:00:01Z" }
+
+                    apply mode =
+                        let
+                            initial =
+                                Feature.Observation.init
+                        in
+                        Feature.Observation.applyCanonicalObservation canonical
+                            { initial
+                                | requestMode = mode
+                                , selectedId = Just selected.id
+                                , selectedDetail = Just selected
+                            }
+
+                    states =
+                        [ ObservationFlatMode, ObservationFacetMode, ObservationExactSubjectMode, ObservationMatchMode ]
+                            |> List.map apply
+                in
+                Expect.all
+                    [ \_ -> states |> List.all (\state -> Dict.isEmpty state.items && (state.selectedDetail |> Maybe.map .content) == Just "new canonical detail" && state.resultsStale) |> Expect.equal True
+                    , \_ -> states |> List.all (\state -> state.orderedIds == [] && state.selectedId == Just selected.id) |> Expect.equal True
+                    ]
+                    ()
         , test "rejects malformed observation payloads" <|
             \_ ->
                 Decode.decodeString Api.observationDecoder "{\"id\":\"observation-1\"}"
@@ -364,12 +419,42 @@ suite =
                     , draft = Just "local draft"
                     , conflict = Just True
                     , latest = Just "after refresh"
+                    , stale = False
                     }
                     { detail = merged.selectedDetail |> Maybe.map .content
                     , listed = Dict.get latest.id merged.items |> Maybe.map .content
                     , draft = merged.edit |> Maybe.map .draft
                     , conflict = merged.edit |> Maybe.map .conflict
                     , latest = merged.edit |> Maybe.map (.latestCanonical >> .content)
+                    , stale = merged.resultsStale
+                    }
+        , test "an authoritative refresh clears stale state while a facet delete keeps its aggregate page explicitly stale" <|
+            \_ ->
+                let
+                    observation =
+                        fixtureObservation "facet-delete" "2026-01-01T00:00:00Z"
+
+                    selected =
+                        selectedObservationState observation
+
+                    staleSelected =
+                        { selected | resultsStale = True }
+
+                    listed =
+                        Feature.DataLoading.mergeObservationPage 0
+                            { items = [ observation ], hasMore = False }
+                            staleSelected
+
+                    facetDeleted =
+                        Feature.Observation.removeObservation observation.id
+                            { listed | requestMode = ObservationFacetMode }
+                in
+                Expect.equal
+                    { refreshIsFresh = False, deleteIsStale = True, removed = True, selectionCleared = True }
+                    { refreshIsFresh = listed.resultsStale
+                    , deleteIsStale = facetDeleted.resultsStale
+                    , removed = Dict.member observation.id facetDeleted.items |> not
+                    , selectionCleared = facetDeleted.selectedId == Nothing && facetDeleted.selectedDetail == Nothing
                     }
         , test "delete confirmation is modal, named, permanent, and keyboard-addressable" <|
             \_ ->

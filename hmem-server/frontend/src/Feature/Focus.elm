@@ -172,6 +172,7 @@ update msg model =
                             }
                         , search = updatedSearch
                     }
+                        |> Feature.DataLoading.resetNavigationPresentations
 
                 ( requestedModel, requestCmd ) =
                     requestMissingFocus entityType entityId newModel
@@ -204,6 +205,7 @@ update msg model =
                         | focus = { focusModel | focusedEntity = Just entry, returnContext = Nothing }
                         , search = updatedSearch
                     }
+                        |> Feature.DataLoading.resetNavigationPresentations
             in
             ( newModel, replaceFragment newModel )
 
@@ -227,6 +229,7 @@ update msg model =
                                 , returnContext = Nothing
                             }
                     }
+                        |> Feature.DataLoading.resetNavigationPresentations
             in
             ( newModel, replaceFragment newModel )
 
@@ -246,6 +249,7 @@ update msg model =
                                 , returnContext = Nothing
                             }
                     }
+                        |> Feature.DataLoading.resetNavigationPresentations
             in
             ( newModel, replaceFragment newModel )
 

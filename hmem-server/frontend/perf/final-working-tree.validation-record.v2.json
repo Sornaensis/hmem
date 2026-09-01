@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "taskId": "2503e08f-ff82-4f2c-adff-24e14fec8299",
+  "evidenceBaseCommit": "04fd7ba26b1a63b5f1c601939b046ef2fe5f51d6",
+  "commands": [
+    {
+      "command": "npm test",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T14:18:01.015Z",
+      "finishedAtUtc": "2026-09-01T14:18:11.353Z",
+      "durationMs": 10337
+    },
+    {
+      "command": "npm run build",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T14:18:11.353Z",
+      "finishedAtUtc": "2026-09-01T14:18:15.960Z",
+      "durationMs": 4607
+    },
+    {
+      "command": "npm run perf:self-check",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T14:18:15.960Z",
+      "finishedAtUtc": "2026-09-01T14:18:21.755Z",
+      "durationMs": 5795
+    },
+    {
+      "command": "HMEM_EVIDENCE_BASE_COMMIT=04fd7ba npm run perf:record-after",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T14:18:21.755Z",
+      "finishedAtUtc": "2026-09-01T14:19:25.114Z",
+      "durationMs": 63359
+    },
+    {
+      "command": "HMEM_EVIDENCE_BASE_COMMIT=04fd7ba npm run perf:check",
+      "exitCode": 0,
+      "startedAtUtc": "2026-09-01T14:19:25.114Z",
+      "finishedAtUtc": "2026-09-01T14:20:34.944Z",
+      "durationMs": 69830
+    }
+  ],
+  "passed": true,
+  "summary": {
+    "commandCount": 5,
+    "totalDurationMs": 153928
+  }
+}

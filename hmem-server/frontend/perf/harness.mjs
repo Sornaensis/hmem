@@ -20,13 +20,24 @@ const recordAuthorized = process.argv.includes('--authorize-baseline')
 const afterArtifactAuthorized = process.argv.includes('--authorize-after-artifact')
 const outputArgument = process.argv.indexOf('--output')
 const traceOutputArgument = process.argv.indexOf('--trace-output')
-const recordOutputPath = outputArgument === -1 ? baselinePath : path.resolve(frontendRoot, process.argv[outputArgument + 1] || '')
-const recordTraceManifestPath = traceOutputArgument === -1 ? traceManifestPath : path.resolve(frontendRoot, process.argv[traceOutputArgument + 1] || '')
-const evidenceBaseCommit = '818cc3cc634bfa8c0ebe14c13fc70b4c2d059e83'
-const evidenceManifestPath = path.join(here, 'final-working-tree.evidence-manifest.v1.json')
+// A task-local evidence run can name its immutable review base without
+// changing the approved baseline or the default compatibility record.
+const evidenceBaseCommit = process.env.HMEM_EVIDENCE_BASE_COMMIT || '818cc3cc634bfa8c0ebe14c13fc70b4c2d059e83'
+const TASK_2503_BASE_COMMIT = '04fd7ba26b1a63b5f1c601939b046ef2fe5f51d6'
+const evidenceRevision = evidenceBaseCommit === TASK_2503_BASE_COMMIT ? 'v2' : 'v1'
+const legacyAfterArtifactPath = path.join(here, 'final-working-tree.after.v1.json')
+const legacyAfterTraceArtifactPath = path.join(here, 'final-working-tree.trace-manifest.v1.json')
+const evidenceManifestPath = path.join(here, `final-working-tree.evidence-manifest.${evidenceRevision}.json`)
 const evidenceDiffPath = path.join(here, 'final-working-tree.complete.diff')
-const afterArtifactPath = path.join(here, 'final-working-tree.after.v1.json')
-const afterTraceArtifactPath = path.join(here, 'final-working-tree.trace-manifest.v1.json')
+const validationRecordPath = path.join(here, `final-working-tree.validation-record.${evidenceRevision}.json`)
+const afterArtifactPath = path.join(here, `final-working-tree.after.${evidenceRevision}.json`)
+const afterTraceArtifactPath = path.join(here, `final-working-tree.trace-manifest.${evidenceRevision}.json`)
+const requestedRecordOutputPath = outputArgument === -1 ? baselinePath : path.resolve(frontendRoot, process.argv[outputArgument + 1] || '')
+const requestedRecordTraceManifestPath = traceOutputArgument === -1 ? traceManifestPath : path.resolve(frontendRoot, process.argv[traceOutputArgument + 1] || '')
+// Keep the v1 package command usable for the previous task while preventing it
+// from recreating v1 evidence when the 04fd review subject is selected.
+const recordOutputPath = evidenceRevision === 'v2' && requestedRecordOutputPath === legacyAfterArtifactPath ? afterArtifactPath : requestedRecordOutputPath
+const recordTraceManifestPath = evidenceRevision === 'v2' && requestedRecordTraceManifestPath === legacyAfterTraceArtifactPath ? afterTraceArtifactPath : requestedRecordTraceManifestPath
 const WARMUPS = HARNESS_CONFIGURATION.warmups
 const PRODUCTION_SNAPSHOT_PROFILE = 'workspace_shell_v1'
 const SAMPLES = HARNESS_CONFIGURATION.samples
@@ -53,6 +64,14 @@ function requiredCommandVersion(label, command, args) {
   }
 }
 
+function runTaskEvidencePrerequisites() {
+  if (mode !== 'record' || evidenceRevision !== 'v2' || !afterArtifactAuthorized) return
+  const command = platformExecutable('npm')
+  const executable = process.platform === 'win32' && command.toLowerCase().endsWith('.cmd') ? (process.env.ComSpec || 'cmd.exe') : command
+  const parameters = executable === command ? ['run', 'perf:self-check'] : ['/d', '/s', '/c', command, 'run', 'perf:self-check']
+  execFileSync(executable, parameters, { cwd: frontendRoot, stdio: 'inherit' })
+}
+
 function sha256File(file) {
   return createHash('sha256').update(fs.readFileSync(file)).digest('hex')
 }
@@ -72,7 +91,19 @@ function untrackedFileDiff(repositoryRoot, relativePath) {
 
 function finalWorkingTreeEvidence() {
   const repositoryRoot = path.resolve(frontendRoot, '..', '..')
-  const artifactPaths = new Set([recordOutputPath, recordTraceManifestPath, evidenceDiffPath, evidenceManifestPath].map(normalizedRepositoryPath))
+  // Review subjects deliberately exclude generated evidence from their source
+  // patch. Retain v1 alongside v2 here so a historical artifact cannot leak
+  // into the 04fd complete diff merely because it remains untracked locally.
+  const artifactPaths = new Set([
+    legacyAfterArtifactPath,
+    legacyAfterTraceArtifactPath,
+    path.join(here, 'final-working-tree.evidence-manifest.v1.json'),
+    afterArtifactPath,
+    afterTraceArtifactPath,
+    evidenceManifestPath,
+    evidenceDiffPath,
+    validationRecordPath
+  ].map(normalizedRepositoryPath))
   const trackedDiff = execFileSync('git', ['diff', '--binary', '--no-ext-diff', evidenceBaseCommit, '--'], { cwd: repositoryRoot })
   const trackedPaths = execFileSync('git', ['diff', '--name-only', evidenceBaseCommit, '--'], { cwd: repositoryRoot, encoding: 'utf8' })
     .trim().split(/\r?\n/).filter(Boolean)
@@ -87,13 +118,20 @@ function finalWorkingTreeEvidence() {
     .map(relative => path.join(repositoryRoot, relative))
     .filter(fs.existsSync)
     .map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file) }))
-  const artifacts = [recordOutputPath, recordTraceManifestPath, evidenceDiffPath]
+  // `check` has no record CLI output arguments, so its final manifest refresh
+  // must still hash the selected task-local after artifacts rather than the
+  // immutable baseline inputs.
+  const evidenceRecordPath = evidenceRevision === 'v2' ? afterArtifactPath : recordOutputPath
+  const evidenceTracePath = evidenceRevision === 'v2' ? afterTraceArtifactPath : recordTraceManifestPath
+  const artifacts = [evidenceRecordPath, evidenceTracePath, evidenceDiffPath]
+    .concat(fs.existsSync(validationRecordPath) ? [validationRecordPath] : [])
     .map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file), sizeBytes: fs.statSync(file).size }))
   const manifest = {
     schemaVersion: 1,
+    taskId: evidenceRevision === 'v2' ? '2503e08f-ff82-4f2c-adff-24e14fec8299' : null,
     evidenceBaseCommit,
     normalization: 'repository-relative POSIX paths; SHA-256 of exact file bytes; binary Git diff without external diff drivers; untracked source files represented by deterministic no-index additions; generated evidence artifacts separately hash-listed',
-    recipe: 'npm run perf:record-after',
+    recipe: `HMEM_EVIDENCE_BASE_COMMIT=${evidenceBaseCommit} npm run perf:record-after`,
     equality: {
       baselinePath: normalizedRepositoryPath(baselinePath),
       source: `${evidenceBaseCommit}:hmem-server/frontend/perf/baseline.v1.json`,
@@ -933,6 +971,9 @@ function evaluate(result, comparableEnvironment = true) {
 }
 
 async function main() {
+  // The final v2 write is deliberately last: its fixture/self-check validation
+  // must succeed before any review artifact is replaced.
+  runTaskEvidencePrerequisites()
   if (!fs.existsSync(path.join(staticRoot, 'index.html'))) throw new Error(`production build missing at ${staticRoot}; run npm run build first`)
   const fixtures = { small: generateFixture('small'), large: generateFixture('large') }
   const contracts = {
@@ -1045,6 +1086,7 @@ async function main() {
     for (const metric of result.evaluation.metrics) console.log(`${metric.pass ? 'PASS' : 'FAIL'} ${metric.name}: ${metric.actual} (budget ${metric.expected}${metric.category === 'informational' ? ', informational environment' : ''})`)
     if (mode === 'record') console.log(`AUTHORIZED RECORD wrote ${recordOutputPath} and ${recordTraceManifestPath}; evaluation is preserved, and budget failures do not fail explicitly authorized record mode.`)
     if (mode === 'check' && !result.evaluation.passed) process.exitCode = 1
+    if (mode === 'check' && evidenceRevision === 'v2' && result.evaluation.passed && fs.existsSync(validationRecordPath)) finalWorkingTreeEvidence()
   } finally {
     if (browser) await browser.close()
     await new Promise(resolve => server.server.close(resolve))

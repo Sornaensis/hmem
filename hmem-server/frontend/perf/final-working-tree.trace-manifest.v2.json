@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "baseCommit": "ca04f51c3494c83c433d12bd7791f89be876daea",
+  "contracts": {
+    "budgetsHash": "bcf994aeb8074f53a75ab89ce24ee17c4059db5cb1e3e7061934641321b2da90",
+    "configurationHash": "6154f092da5dcd381a1fa7ddae7a0719d88f0123cc517184a168b2a39f11fc5c",
+    "directFocusContractHash": "e2a132adb8d9386e17be584946a790268ad58e5d10cd9e90d3a4810848864f50",
+    "fixtures": {
+      "small": "827312e056054ad5f144284fe198e22d4f8bac97980afa0ecb3142b9d86e0851",
+      "large": "1ae208983d613c84b9a96500c477615c0b3e27686ff08f03bb20f15f99b35a08"
+    },
+    "snapshots": {
+      "small": "c49d1b7d57cd229cae0835e26604f9c526d20be2d6fda4cf1094cf16394ff5f0",
+      "large": "49222dd4d70fdf34c636188ebd7b5be08fbbddad6391a3276bc57e25214ffa1b"
+    }
+  },
+  "trace": {
+    "logicalName": "large measured sample 5/5 Playwright trace",
+    "sha256": "8b140e434c979d6c347d97ed324c67cb4448e2574b330596987a93c7a93efd7f",
+    "sizeBytes": 3904368,
+    "capturedRun": "large sample 5/5 after two warmups",
+    "verifiedDuringRecord": true,
+    "retention": "generated under ignored perf/.artifacts, intentionally removed after record/check; this versioned manifest retains verified provenance and does not claim the opaque archive is available"
+  }
+}

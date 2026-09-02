@@ -525,7 +525,56 @@ applyDependencyStatusChanges changes model =
 
 applyDependencyMutationResult : Api.DependencyMutationResult -> Model -> Model
 applyDependencyMutationResult result model =
-    applyDependencyStatusChanges result.affectedTasks model
+    let
+        modelAfterStatusChanges =
+            applyDependencyStatusChangesPreservingDependencyCount result.taskId result.affectedTasks model
+
+        dependenciesBefore =
+            modelAfterStatusChanges.dependencies
+
+        dependencyKnownBefore =
+            taskDependencyIsKnown result dependenciesBefore
+
+        dependenciesAfter =
+            { dependenciesBefore
+                | taskDependencyLinks = applyTaskDependencyLinkMutation result dependenciesBefore.taskDependencyLinks
+                , taskDependencies = applyTaskDependencySummaryMutation result modelAfterStatusChanges.tasks dependenciesBefore
+            }
+
+        dependencyKnownAfter =
+            taskDependencyIsKnown result dependenciesAfter
+
+        dependencyCountDelta =
+            if dependencyKnownAfter == dependencyKnownBefore then
+                0
+
+            else if dependencyKnownAfter then
+                1
+
+            else
+                -1
+
+    in
+    updateTaskDependencyCount result.taskId dependencyCountDelta
+        { modelAfterStatusChanges | dependencies = dependenciesAfter }
+
+
+applyDependencyStatusChangesPreservingDependencyCount : String -> List Api.TaskDependencyStatusChange -> Model -> Model
+applyDependencyStatusChangesPreservingDependencyCount taskId changes model =
+    let
+        preserveDependencyCount task =
+            if task.id == taskId then
+                case Dict.get taskId model.tasks of
+                    Just currentTask ->
+                        { task | dependencyCount = currentTask.dependencyCount }
+
+                    Nothing ->
+                        task
+
+            else
+                task
+    in
+    insertTasks (List.map (.task >> preserveDependencyCount) changes) model
 
 
 applyTaskMutationResult : Api.TaskMutationResult -> Model -> Model
@@ -597,6 +646,96 @@ applyTaskDependencyLinkMutation result links =
 
         _ ->
             links
+
+
+applyTaskDependencySummaryMutation : Api.DependencyMutationResult -> Dict String Api.Task -> DependenciesModel -> Dict String (List Api.TaskDependencySummary)
+applyTaskDependencySummaryMutation result tasks dependencies =
+    case Dict.get result.taskId dependencies.taskDependencies of
+        Nothing ->
+            let
+                existing =
+                    dependencies.taskDependencyLinks
+                        |> List.filter (\link -> link.taskId == result.taskId)
+                        |> List.filterMap
+                            (\link ->
+                                Dict.get link.dependsOnId tasks
+                                    |> Maybe.map (\task -> { id = task.id, name = task.title })
+                            )
+            in
+            case ( result.action, Dict.get result.dependsOnId tasks ) of
+                ( "add", Just task ) ->
+                    Dict.insert result.taskId
+                        ((existing ++ [ { id = task.id, name = task.title } ])
+                            |> List.foldl (\summary values -> if List.any (\value -> value.id == summary.id) values then values else summary :: values) []
+                            |> List.sortBy (\summary -> ( String.toLower summary.name, summary.id ))
+                        )
+                        dependencies.taskDependencies
+
+                _ ->
+                    dependencies.taskDependencies
+
+        Just existing ->
+            let
+                sameSummary summary =
+                    summary.id == result.dependsOnId
+
+                updated =
+                    case result.action of
+                        "add" ->
+                            case Dict.get result.dependsOnId tasks of
+                                Just task ->
+                                    if List.any sameSummary existing then
+                                        existing
+
+                                    else
+                                        (existing ++ [ { id = task.id, name = task.title } ])
+                                            |> List.sortBy (\summary -> ( String.toLower summary.name, summary.id ))
+
+                                Nothing ->
+                                    existing
+
+                        "remove" ->
+                            List.filter (not << sameSummary) existing
+
+                        _ ->
+                            existing
+            in
+            Dict.insert result.taskId updated dependencies.taskDependencies
+
+
+taskDependencyIsKnown : Api.DependencyMutationResult -> DependenciesModel -> Bool
+taskDependencyIsKnown result dependencies =
+    let
+        sameLink link =
+            link.taskId == result.taskId && link.dependsOnId == result.dependsOnId
+
+        sameSummary summary =
+            summary.id == result.dependsOnId
+    in
+    List.any sameLink dependencies.taskDependencyLinks
+        || (Dict.get result.taskId dependencies.taskDependencies
+                |> Maybe.map (List.any sameSummary)
+                |> Maybe.withDefault False
+           )
+
+
+updateTaskDependencyCount : String -> Int -> Model -> Model
+updateTaskDependencyCount taskId delta model =
+    if delta == 0 then
+        model
+
+    else
+        case Dict.get taskId model.tasks of
+            Just task ->
+                { model
+                    | tasks =
+                        Dict.insert taskId
+                            { task | dependencyCount = Basics.max 0 (task.dependencyCount + delta) }
+                            model.tasks
+                }
+
+            Nothing ->
+                model
 
 
 taskReadinessRollupForTask : Model -> String -> Maybe Api.TaskReadinessRollup

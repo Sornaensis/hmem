@@ -57,7 +57,12 @@ applyDependencyPage taskId offset result model =
         Ok page ->
             let
                 dependenciesModel = model.dependencies
-                existing = if offset == 0 then [] else Dict.get taskId dependenciesModel.taskDependencies |> Maybe.withDefault []
+                existing =
+                    if offset == 0 && not page.hasMore then
+                        []
+
+                    else
+                        Dict.get taskId dependenciesModel.taskDependencies |> Maybe.withDefault []
                 ordered =
                     (existing ++ page.items)
                         |> List.foldl (\item values -> if List.any (\value -> value.id == item.id) values then values else item :: values) []
@@ -256,24 +261,11 @@ update msg model =
                         updatedModel =
                             applyDependencyMutationResult mutationResult model
 
-                        dependenciesModel =
-                            updatedModel.dependencies
-
-                        updatedDependencyLinks =
-                            applyTaskDependencyLinkMutation mutationResult dependenciesModel.taskDependencyLinks
-
-                        modelWithHydratedLinks =
-                            { updatedModel | dependencies = { dependenciesModel | taskDependencyLinks = updatedDependencyLinks } }
-
-                        -- Revalidate only the expanded dependency page that was
-                        -- mutated.  Refreshing every cached overview recreated
-                        -- the unbounded fan-out this contract replaces.
+                        -- Revalidate only the mutated task's offset-zero page.
+                        -- The request correlation guards stale responses, while
+                        -- the reconciled local state remains visible on failure.
                         ( revalidatedModel, revalidationCmd ) =
-                            if Dict.member taskId modelWithHydratedLinks.dependencies.taskDependencies then
-                                beginDependencyRefresh taskId modelWithHydratedLinks
-
-                            else
-                                ( modelWithHydratedLinks, Cmd.none )
+                            beginDependencyRefresh taskId updatedModel
                     in
                     ( revalidatedModel
                     , revalidationCmd

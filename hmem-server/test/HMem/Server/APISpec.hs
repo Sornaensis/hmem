@@ -1125,6 +1125,95 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         requestWithHeaders ctx.deployedApplication methodGet facetsPath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
         requestWithHeaders ctx.deployedApplication methodGet facetsPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
 
+    it "enforces the deployed Observation curation lifecycle across authorization, validation, and hard deletion" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "observation-curation-release"
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        editorId <- createDeployedSandboxUser ctx.deployedEnv False False
+        outsiderId <- createDeployedSandboxUser ctx.deployedEnv False False
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+          (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+          (Auth.UpsertWorkspaceMembership editorId Auth.WorkspaceRoleEdit) Nothing
+        readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Observation curation reader"
+        editorToken <- issueDeployedSandboxPAT ctx.deployedEnv editorId "Observation curation editor"
+        outsiderToken <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Observation curation outsider"
+        let authHeader token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            workspaceText = Text.encodeUtf8 (T.pack (show workspace.id))
+            subjectsValue = [ObservationSubject SubjectFile "src/Curation.hs", ObservationSubject SubjectGlob "src/**/*.hs"]
+            createInput = object
+              [ "workspace_id" .= workspace.id, "subjects" .= subjectsValue
+              , "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text)
+              , "content" .= ("curation baseline" :: T.Text) ]
+            workspaceListPath = "/api/v1/observations?workspace_id=" <> workspaceText
+            listPath = workspaceListPath <> "&subject_kind=file&subject=src/Curation.hs"
+            facetsPath = "/api/v1/observations/subject-facets?workspace_id=" <> workspaceText <> "&subject_kind=file"
+            matchInput = encode (object ["workspace_id" .= workspace.id, "paths" .= (["src/Curation.hs"] :: [T.Text])])
+        createdResponse <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations" (authHeader editorToken) (encode createInput)
+        responseStatus createdResponse `shouldBe` status200
+        let Just created = decode (responseBody createdResponse) :: Maybe Observation
+            observationPath = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))
+            getWith token = requestWithHeaders ctx.deployedApplication methodGet observationPath (authHeader token) ""
+            updateWith token payload = requestWithHeaders ctx.deployedApplication methodPut observationPath (authHeader token) (encode payload)
+            deleteWith token = requestWithHeaders ctx.deployedApplication methodDelete observationPath (authHeader token) ""
+        backdateObservation ctx.deployedEnv created.id
+        beforeResponse <- getWith editorToken
+        responseStatus beforeResponse `shouldBe` status200
+        let Just before = decode (responseBody beforeResponse) :: Maybe Observation
+
+        requestWithHeaders ctx.deployedApplication methodGet listPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
+        getWith readerToken >>= (\response -> responseStatus response `shouldBe` status200)
+        requestWithHeaders ctx.deployedApplication methodGet facetsPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
+        requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations/match" (authHeader readerToken) matchInput >>= (\response -> responseStatus response `shouldBe` status200)
+        updateWith readerToken (object ["content" .= ("reader denied" :: T.Text)]) >>= (\response -> responseStatus response `shouldBe` status403)
+        deleteWith readerToken >>= (\response -> responseStatus response `shouldBe` status403)
+
+        requestWithHeaders ctx.deployedApplication methodGet listPath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
+        getWith outsiderToken >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodGet facetsPath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations/match" (authHeader outsiderToken) matchInput >>= (\response -> responseStatus response `shouldBe` status403)
+        updateWith outsiderToken (object ["content" .= ("outsider denied" :: T.Text)]) >>= (\response -> responseStatus response `shouldBe` status403)
+        deleteWith outsiderToken >>= (\response -> responseStatus response `shouldBe` status403)
+
+        let rejectedUpdates =
+              [ object ["content" .= ("  \n\t  " :: T.Text)]
+              , object ["content" .= T.replicate (256 * 1024 + 1) ("é" :: T.Text)]
+              , object ["content" .= ("immutable rejected" :: T.Text), "git_sha" .= ("different" :: T.Text)]
+              ]
+        forM_ rejectedUpdates $ \payload -> do
+          rejected <- updateWith editorToken payload
+          responseStatus rejected `shouldBe` status400
+          unchangedResponse <- getWith editorToken
+          let Just unchanged = decode (responseBody unchangedResponse) :: Maybe Observation
+          unchanged `shouldBe` before
+
+        updatedResponse <- updateWith editorToken (object ["content" .= ("curation revised" :: T.Text)])
+        responseStatus updatedResponse `shouldBe` status200
+        let Just updated = decode (responseBody updatedResponse) :: Maybe Observation
+        updated.content `shouldBe` "curation revised"
+        updated.workspaceId `shouldBe` before.workspaceId
+        updated.subjects `shouldBe` before.subjects
+        updated.gitSha `shouldBe` before.gitSha
+        updated.createdAt `shouldBe` before.createdAt
+        updated.updatedAt `shouldSatisfy` (> before.updatedAt)
+
+        deleteWith editorToken >>= (\response -> responseStatus response `shouldBe` status200)
+        getWith editorToken >>= (\response -> responseStatus response `shouldBe` status404)
+        updateWith editorToken (object ["content" .= ("deleted" :: T.Text)]) >>= (\response -> responseStatus response `shouldBe` status404)
+        deleteWith editorToken >>= (\response -> responseStatus response `shouldBe` status404)
+        unfilteredResponse <- requestWithHeaders ctx.deployedApplication methodGet workspaceListPath (authHeader editorToken) ""
+        let Just unfiltered = decode (responseBody unfilteredResponse) :: Maybe (PaginatedResult Observation)
+        map (.id) unfiltered.items `shouldNotContain` [created.id]
+        listedResponse <- requestWithHeaders ctx.deployedApplication methodGet listPath (authHeader editorToken) ""
+        let Just listed = decode (responseBody listedResponse) :: Maybe (PaginatedResult Observation)
+        listed.items `shouldBe` []
+        facetsResponse <- requestWithHeaders ctx.deployedApplication methodGet facetsPath (authHeader editorToken) ""
+        let Just facets = decode (responseBody facetsResponse) :: Maybe (PaginatedResult ObservationSubjectFacet)
+        facets.items `shouldBe` []
+        matchesResponse <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations/match" (authHeader editorToken) matchInput
+        let Just matches = decode (responseBody matchesResponse) :: Maybe (PaginatedResult ObservationMatch)
+        matches.items `shouldBe` []
+
     it "rejects planning and deleted workspaces through every Observation-bearing HTTP surface" $ \(env, app) -> do
       planningResponse <- postJson app "/api/v1/workspaces" (object
         [ "name" .= ("observation-planning" :: T.Text), "workspace_type" .= ("planning" :: T.Text) ])

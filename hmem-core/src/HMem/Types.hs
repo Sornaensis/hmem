@@ -29,6 +29,7 @@ import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, Pair)
+import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.Char (isAlpha, isHexDigit, isLower, isUpper, toLower)
 import Data.Int (Int64)
@@ -163,7 +164,7 @@ validateCreateWorkspaceInput cw =
 
 validateUpdateWorkspaceInput :: UpdateWorkspace -> [Text]
 validateUpdateWorkspaceInput uw =
-  maybe [] (validateRequiredText "name" maxNameBytes) uw.name
+  validateRequiredText "name" maxNameBytes uw.name
 
 validateCreateProjectInput :: CreateProject -> [Text]
 validateCreateProjectInput cp =
@@ -814,26 +815,20 @@ instance ToJSON CreateWorkspace where
 instance FromJSON CreateWorkspace where
   parseJSON  = genericParseJSON jsonOptions
 
-data UpdateWorkspace = UpdateWorkspace
-  { name          :: Maybe Text
-  , workspaceType :: Maybe WorkspaceType
-  , ghOwner       :: FieldUpdate Text
-  , ghRepo        :: FieldUpdate Text
+-- | Workspace updates deliberately expose only the display name.  Workspace
+-- identity, type, GitHub binding, and membership are managed by their own
+-- contracts and must never be writable through a rename request.
+newtype UpdateWorkspace = UpdateWorkspace
+  { name :: Text
   } deriving (Show, Eq, Generic)
 
 instance ToJSON UpdateWorkspace where
-  toJSON uw = object $ catMaybes
-    [ ("name" .=)           <$> uw.name
-    , ("workspace_type" .=) <$> uw.workspaceType
-    , fieldUpdatePair "gh_owner" uw.ghOwner
-    , fieldUpdatePair "gh_repo" uw.ghRepo
-    ]
+  toJSON uw = object ["name" .= uw.name]
 instance FromJSON UpdateWorkspace where
-  parseJSON = withObject "UpdateWorkspace" $ \o -> UpdateWorkspace
-    <$> o .:? "name"
-    <*> o .:? "workspace_type"
-    <*> parseFieldUpdate o "gh_owner"
-    <*> parseFieldUpdate o "gh_repo"
+  parseJSON = withObject "UpdateWorkspace" $ \o -> do
+    let unexpected = filter (/= "name") (Key.toText <$> KM.keys o)
+    unless (null unexpected) $ fail $ "UpdateWorkspace accepts only name; unexpected fields: " <> show unexpected
+    UpdateWorkspace <$> o .: "name"
 
 data WorkspaceTaskDependencyLink = WorkspaceTaskDependencyLink
   { taskId :: UUID, dependsOnId :: UUID } deriving (Show, Eq, Generic)

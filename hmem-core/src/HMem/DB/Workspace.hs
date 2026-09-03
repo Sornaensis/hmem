@@ -1,11 +1,15 @@
 module HMem.DB.Workspace
   ( listActiveWorkspaces
   , listVisibleWorkspaces
+  , renameWorkspace
   ) where
 
+import Control.Exception (throwIO)
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32)
 import Data.Pool (Pool)
+import Data.Text (Text)
+import Data.Text qualified as T
 import Data.UUID (UUID)
 import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as Dec
@@ -13,8 +17,8 @@ import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 
-import HMem.DB.Pool (runSession)
-import HMem.Types (Workspace(..), workspaceTypeFromText)
+import HMem.DB.Pool (DBException(..), runSession)
+import HMem.Types (UpdateWorkspace(..), Workspace(..), validateUpdateWorkspaceInput, workspaceTypeFromText)
 
 listActiveWorkspaces :: Pool Hasql.Connection -> Int -> Int -> IO [Workspace]
 listActiveWorkspaces pool limitRows offsetRows =
@@ -23,6 +27,16 @@ listActiveWorkspaces pool limitRows offsetRows =
 listVisibleWorkspaces :: Pool Hasql.Connection -> UUID -> Int -> Int -> IO [Workspace]
 listVisibleWorkspaces pool userId limitRows offsetRows =
   runSession pool $ Session.statement (userId, toInt32 limitRows, toInt32 offsetRows) listVisibleWorkspacesStatement
+
+-- | Rename an active workspace and return its canonical row.  Validation lives
+-- here as well as at the HTTP boundary so alternate callers cannot bypass the
+-- name-only invariant.
+renameWorkspace :: Pool Hasql.Connection -> UUID -> UpdateWorkspace -> IO (Maybe Workspace)
+renameWorkspace pool workspaceId input = do
+  case validateUpdateWorkspaceInput input of
+    [] -> pure ()
+    errors -> throwIO $ DBCheckViolation (T.intercalate "; " errors)
+  runSession pool $ Session.statement (workspaceId, input.name) renameWorkspaceStatement
 
 toInt32 :: Int -> Int32
 toInt32 = fromIntegral
@@ -77,3 +91,12 @@ listVisibleWorkspacesStatement = Statement.Statement sql encoder decoder True
       contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.int4)) <>
       contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.int4))
     decoder = Dec.rowList workspaceRowDecoder
+
+renameWorkspaceStatement :: Statement.Statement (UUID, Text) (Maybe Workspace)
+renameWorkspaceStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "UPDATE workspaces SET name = $2 WHERE id = $1 AND deleted_at IS NULL RETURNING id, name, workspace_type::text, gh_owner, gh_repo, created_at, updated_at"
+    encoder =
+      contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap snd (Enc.param (Enc.nonNullable Enc.text))
+    decoder = Dec.rowMaybe workspaceRowDecoder

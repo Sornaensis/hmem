@@ -33,6 +33,7 @@ import Test.Hspec
 
 import HMem.Config qualified as Config
 import HMem.DB.Auth qualified as Auth
+import HMem.DB.Audit qualified as Audit
 import HMem.DB.ChangeStream (ChangeScope(..), ChangeAudience(..), ResumeToken(..), ReplayPage(..), OutboxRecord(..), listOutboxAfter, replayAndRotateResumeToken)
 import HMem.DB.Pool qualified as DBPool
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
@@ -61,11 +62,20 @@ requestWithHeaders app method path headers body = runSession (srequest (SRequest
 postJson :: Application -> BS.ByteString -> Value -> IO SResponse
 postJson app path = request app methodPost path . encode
 
+putJson :: Application -> BS.ByteString -> Value -> IO SResponse
+putJson app path = request app methodPut path . encode
+
 responseStatus :: SResponse -> Network.HTTP.Types.Status
 responseStatus SResponse { simpleStatus = status } = status
 
 responseBody :: SResponse -> LBS.ByteString
 responseBody SResponse { simpleBody = body } = body
+
+expectValidationError :: SResponse -> Expectation
+expectValidationError response = do
+  responseStatus response `shouldBe` status400
+  let decoded = decode (responseBody response) :: Maybe Value
+  (decoded >>= jsonField "error") `shouldBe` Just (String "validation_error")
 
 jsonField :: T.Text -> Value -> Maybe Value
 jsonField fieldName (Object fields) = KeyMap.lookup (Key.fromText fieldName) fields
@@ -326,6 +336,93 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       add dependent.id >>= (\response -> responseStatus response `shouldBe` status400)
       add otherDependency.id >>= (\response -> responseStatus response `shouldBe` status400)
       add (read "00000000-0000-0000-0000-000000000001" :: UUID) >>= (\response -> responseStatus response `shouldBe` status404)
+
+  describe "Workspace rename HTTP contract" $ do
+    it "persists an authorized name-only rename, permits duplicates, and rejects invalid or inactive targets" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "workspace-rename-api"
+      duplicate <- createTestWorkspace env "workspace-rename-duplicate"
+      let path workspaceId = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspaceId))
+      renamedResponse <- putJson app (path workspace.id) (object ["name" .= duplicate.name])
+      responseStatus renamedResponse `shouldBe` status200
+      let Just renamed = decode (responseBody renamedResponse) :: Maybe Workspace
+      renamed.id `shouldBe` workspace.id
+      renamed.name `shouldBe` duplicate.name
+      renamed.workspaceType `shouldBe` workspace.workspaceType
+      renamed.ghOwner `shouldBe` workspace.ghOwner
+      renamed.ghRepo `shouldBe` workspace.ghRepo
+      reloadedResponse <- request app methodGet (path workspace.id) ""
+      responseStatus reloadedResponse `shouldBe` status200
+      let Just reloaded = decode (responseBody reloadedResponse) :: Maybe Workspace
+      reloaded `shouldBe` renamed
+      listedResponse <- request app methodGet "/api/v1/workspaces" ""
+      responseStatus listedResponse `shouldBe` status200
+      let Just listed = decode (responseBody listedResponse) :: Maybe (PaginatedResult Workspace)
+      find ((== workspace.id) . (.id)) listed.items `shouldBe` Just renamed
+      mapM_ (\payload -> putJson app (path workspace.id) payload >>= expectValidationError)
+        [ object []
+        , object ["name" .= ("   " :: T.Text)]
+        , object ["name" .= (42 :: Int)]
+        , object ["name" .= ("still no" :: T.Text), "workspace_type" .= ("personal" :: T.Text)]
+        , object ["name" .= T.replicate 1025 "x"]
+        ]
+      unchangedResponse <- request app methodGet (path workspace.id) ""
+      let Just unchanged = decode (responseBody unchangedResponse) :: Maybe Workspace
+      unchanged `shouldBe` renamed
+      putJson app "/api/v1/workspaces/00000000-0000-0000-0000-000000000001" (object ["name" .= ("missing" :: T.Text)])
+        >>= (\response -> responseStatus response `shouldBe` status404)
+      markWorkspaceDeleted env workspace.id
+      putJson app (path workspace.id) (object ["name" .= ("deleted" :: T.Text)])
+        >>= (\response -> responseStatus response `shouldBe` status404)
+
+    it "requires edit permission and records the deployed actor and request id" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "workspace-rename-auth-audit"
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        editorId <- createDeployedSandboxUser ctx.deployedEnv False False
+        outsiderId <- createDeployedSandboxUser ctx.deployedEnv False False
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+          (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+          (Auth.UpsertWorkspaceMembership editorId Auth.WorkspaceRoleEdit) Nothing
+        readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Workspace rename reader"
+        editorToken <- issueDeployedSandboxPAT ctx.deployedEnv editorId "Workspace rename editor"
+        outsiderToken <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Workspace rename outsider"
+        let path = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id))
+            headers :: IssuedAccessToken -> [Header]
+            headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            rename token name = requestWithHeaders ctx.deployedApplication methodPut path (headers token) (encode (object ["name" .= (name :: T.Text)]))
+            rawRename requestHeaders raw = requestWithHeaders ctx.deployedApplication methodPut path requestHeaders raw
+            latestCursor scope = do
+              records <- listOutboxAfter ctx.deployedEnv.pool scope 0 100
+              pure $ case reverse records of
+                record:_ -> record.outboxCursor
+                [] -> 0
+        auditBefore <- Audit.getAuditByEntity ctx.deployedEnv.pool "workspace" (T.pack (show workspace.id)) (Just 100)
+        workspaceCursor <- latestCursor (WorkspaceScope workspace.id)
+        globalCursor <- latestCursor GlobalScope
+        rawRename [] "{" >>= (\response -> responseStatus response `shouldBe` status401)
+        rawRename (headers readerToken) "{" >>= (\response -> responseStatus response `shouldBe` status403)
+        rawRename (headers outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodPut "/api/v1/workspaces/00000000-0000-0000-0000-000000000001" (headers editorToken) "{"
+          >>= (\response -> responseStatus response `shouldBe` status403)
+        rawRename (headers editorToken) "{" >>= expectValidationError
+        rawRename (headers editorToken) "" >>= expectValidationError
+        auditAfterFailures <- Audit.getAuditByEntity ctx.deployedEnv.pool "workspace" (T.pack (show workspace.id)) (Just 100)
+        auditAfterFailures `shouldBe` auditBefore
+        listOutboxAfter ctx.deployedEnv.pool (WorkspaceScope workspace.id) workspaceCursor 10 `shouldReturn` []
+        listOutboxAfter ctx.deployedEnv.pool GlobalScope globalCursor 10 `shouldReturn` []
+        renamed <- requestWithHeaders ctx.deployedApplication methodPut path
+          (headers editorToken <> [("X-Request-Id", "workspace-rename-audit-request")])
+          (encode (object ["name" .= ("editor accepted" :: T.Text)]))
+        responseStatus renamed `shouldBe` status200
+        audits <- Audit.getAuditByEntity ctx.deployedEnv.pool "workspace" (T.pack (show workspace.id)) (Just 10)
+        let matching = filter (\entry -> entry.action == AuditUpdate && entry.requestId == Just "workspace-rename-audit-request") audits
+        case matching of
+          [entry] -> do
+            entry.requestId `shouldBe` Just "workspace-rename-audit-request"
+            entry.actorType `shouldBe` Just "bot"
+            entry.actorId `shouldSatisfy` isJust
+          _ -> expectationFailure "expected exactly one audit row for the workspace rename request"
 
   describe "Workspace Groups HTTP contract" $ do
     it "creates, lists, views, deletes, and manages active workspace members" $ \(env, app) -> do
@@ -1331,6 +1428,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           navigationBranchPage pageName = schema "NavigationBranchResponse" >>= jsonField "properties" >>= jsonField pageName
           navigationBranchItemRef pageName = navigationBranchPage pageName >>= jsonField "properties" >>= jsonField "items" >>= jsonField "items" >>= jsonField "$ref"
           navigationBranchItemMaximum pageName = navigationBranchPage pageName >>= jsonField "properties" >>= jsonField "items" >>= jsonField "maxItems"
+          workspaceRenameResponses = jsonPath ["paths", "/api/v1/workspaces/{workspaceId}", "put", "responses"] document
           navigationLimitMaximum parameterName =
             pathParameter "/api/v1/workspaces/{workspaceId}/navigation" "get" parameterName
               >>= jsonField "schema" >>= jsonField "maximum"
@@ -1513,6 +1611,11 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       parameterMaximum "/api/v1/tasks/{taskId}/dependencies" "offset" `shouldBe` Just (Number 100000)
       parameterMinimum "/api/v1/tasks/{taskId}/dependencies" "limit" `shouldBe` Just (Number 1)
       parameterMinimum "/api/v1/tasks/{taskId}/dependencies" "offset" `shouldBe` Just (Number 0)
+      schema "UpdateWorkspace" `shouldSatisfy` isJust
+      requiredSchemaFields "UpdateWorkspace" `shouldBe` Just ["name"]
+      (schema "UpdateWorkspace" >>= jsonField "additionalProperties") `shouldBe` Just (Bool False)
+      mapM_ (\status -> (workspaceRenameResponses >>= jsonField status) `shouldSatisfy` isJust)
+        ["400", "401", "403", "404"]
       hasOptionalAuditWorkspace `shouldBe` True
       mapM_ (\legacyPath -> (paths >>= jsonField legacyPath) `shouldBe` Nothing)
         [ "/api/v1/memories", "/api/v1/categories", "/api/v1/cleanup/policies"

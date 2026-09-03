@@ -28,6 +28,18 @@ suite =
                 , ChangeStream.reduceFrame (Api.CanonicalChange wrong) state |> Tuple.second
                 ]
                     |> Expect.equal [ [ ChangeStream.RevalidateNavigationSummary "task" "t", ChangeStream.RefreshTimeline ], [], [] ]
+        , test "workspace-scoped rename refetches the canonical workspace" <|
+            \_ ->
+                let
+                    state =
+                        ChangeStream.init (ChangeStream.Workspace "w") []
+
+                    event =
+                        { eventId = "rename", scope = Api.WorkspaceScope "w", workspaceId = Just "w", entityType = "workspace", entityId = "w", entityAction = "updated", invalidations = [ { kind = "entity", target = "workspace:w" } ] }
+                in
+                ChangeStream.reduceFrame (Api.CanonicalChange event) state
+                    |> Tuple.second
+                    |> Expect.equal [ ChangeStream.RefetchEntity "workspace" "w" ]
         , test "checkpoint becomes live without mutation actions" <|
             \_ ->
                 let

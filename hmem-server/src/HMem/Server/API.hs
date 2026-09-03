@@ -1,3 +1,5 @@
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
@@ -9,6 +11,7 @@ module HMem.Server.API
   , ObservationEmbedding(..)
   , CreateObservationRequest(..)
   , ObservationMatchRequest(..)
+  , UpdateWorkspaceRequest(..)
   , server
   , serverWithChangeStream
   ) where
@@ -20,6 +23,7 @@ import Data.Aeson (FromJSON, Value, object, (.=), ToJSON(..), Result(..))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as AesonKeyMap
+import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, mapMaybe)
@@ -31,6 +35,7 @@ import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
+import Network.HTTP.Media ((//))
 import Rel8 hiding (Delete)
 import Servant
 import System.IO (stderr)
@@ -78,6 +83,7 @@ type WorkspaceAPI =
        QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult Workspace)
   :<|> ReqBody '[JSON] CreateWorkspace :> Post '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> Get '[JSON] Workspace
+  :<|> Capture "workspaceId" UUID :> ReqBody '[TolerantJSON] UpdateWorkspaceRequest :> Put '[JSON] Workspace
   :<|> Capture "workspaceId" UUID :> "navigation"
          :> QueryParam "parent_kind" Text :> QueryParam "parent_id" UUID
          :> QueryParam "project_limit" Int :> QueryParam "project_offset" Int
@@ -209,6 +215,22 @@ badRequest kind message = err400 { errBody = Aeson.encode (object ["error" .= ki
 
 newtype CreateObservationRequest = CreateObservationRequest (Either Text CreateObservation)
 newtype ObservationMatchRequest = ObservationMatchRequest (Either Text ObservationMatchQuery)
+newtype UpdateWorkspaceRequest = UpdateWorkspaceRequest (Either Text UpdateWorkspace)
+
+-- Keep malformed bytes as a validation result so workspace authorization and
+-- not-found privacy run before the caller sees a body error.
+data TolerantJSON
+
+instance Accept TolerantJSON where
+  contentType _ = "application" // "json"
+
+instance MimeUnrender TolerantJSON UpdateWorkspaceRequest where
+  mimeUnrender _ body = Right $ UpdateWorkspaceRequest $
+    case Aeson.eitherDecode body of
+      Left message -> Left (Text.pack message)
+      Right value -> case Aeson.fromJSON value of
+        Aeson.Error message -> Left (Text.pack message)
+        Aeson.Success parsed -> Right parsed
 
 instance FromJSON CreateObservationRequest where
   parseJSON value = pure $ CreateObservationRequest $ case Aeson.fromJSON value of
@@ -245,6 +267,37 @@ requireWorkspace pool workspaceId role = do
     where_ $ activeWorkspace row
     pure row.wsId
   case rows of [] -> throwError err404; _ -> pure ()
+
+-- | The workspace rename proxy is a public mutation boundary.  Unlike most
+-- older endpoints, it promises a structured error body to its REST and MCP
+-- callers.  Keep the authorization-first ordering identical to
+-- 'requireWorkspace': a caller without edit access must not learn whether a
+-- workspace identifier exists, while an authorized caller gets a stable
+-- inactive/missing response.
+requireWorkspaceRename :: Pool Hasql.Connection -> UUID -> Handler ()
+requireWorkspaceRename pool workspaceId = do
+  principal <- liftIO currentPrincipal
+  authorized <- liftIO $ Auth.authorizeWorkspace pool principal workspaceId Auth.WorkspaceRoleEdit
+  either (throwError . workspaceRenameAuthError) pure authorized
+  rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
+    row <- each workspaceSchema
+    where_ $ row.wsId ==. lit workspaceId
+    where_ $ activeWorkspace row
+    pure row.wsId
+  case rows of [] -> throwError workspaceRenameNotFound; _ -> pure ()
+
+workspaceRenameAuthError :: Auth.AuthorizationError -> ServerError
+workspaceRenameAuthError = \case
+  Auth.MissingPrincipal -> workspaceRenameError err401 "unauthorized" "Authentication is required."
+  Auth.EntityScopeNotFound{} -> workspaceRenameNotFound
+  _ -> workspaceRenameError err403 "forbidden" "Workspace edit permission is required."
+
+workspaceRenameNotFound :: ServerError
+workspaceRenameNotFound = workspaceRenameError err404 "not_found" "Workspace not found."
+
+workspaceRenameError :: ServerError -> Text -> Text -> ServerError
+workspaceRenameError status kind message =
+  status { errBody = Aeson.encode (object ["error" .= kind, "message" .= message]) }
 
 -- | Observation operations are valid only while their repository workspace is
 -- active.  This is intentionally stricter than generic workspace auth.
@@ -338,7 +391,7 @@ health pool tracker = do
                 , "pool" .= object ["active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections] ]
 
 workspaces :: Pool Hasql.Connection -> Server WorkspaceAPI
-workspaces pool = listH :<|> createH :<|> getH :<|> navigationH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH where
+workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> navigationH :<|> focusH :<|> summariesH :<|> timelineBucketsH :<|> timelineH where
   listH limit offset = do
     principal <- liftIO currentPrincipal
     -- A caller without a principal cannot observe any workspace, including its names.
@@ -365,6 +418,11 @@ workspaces pool = listH :<|> createH :<|> getH :<|> navigationH :<|> focusH :<|>
     rows <- handleDBErrors $ runSession pool $ Session.statement () $ run $ select $ do
       row <- each workspaceSchema; where_ (row.wsId ==. lit workspaceId &&. activeWorkspace row); pure row
     case rows of (row:_) -> pure Workspace { id = row.wsId, name = row.wsName, ghOwner = row.wsGhOwner, ghRepo = row.wsGhRepo, workspaceType = row.wsType, createdAt = row.wsCreatedAt, updatedAt = row.wsUpdatedAt }; [] -> throwError err404
+  updateH workspaceId (UpdateWorkspaceRequest requestBody) = do
+    requireWorkspaceRename pool workspaceId
+    input <- decodeRequest requestBody
+    reject (validateUpdateWorkspaceInput input)
+    handleDBErrors (Workspace.renameWorkspace pool workspaceId input) >>= maybe (throwError workspaceRenameNotFound) pure
   navigationH workspaceId maybeKind maybeParent projectLimit projectOffset taskLimit taskOffset maybeShowOnly projectStatuses taskStatuses maybePriorityMode maybePriorityValue maybeQuery = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     parent <- navigationParent maybeKind maybeParent

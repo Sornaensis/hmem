@@ -15,7 +15,7 @@ import Data.Proxy (Proxy(..))
 import Data.Text (Text)
 import Servant.OpenApi (toOpenApi)
 
-import HMem.Server.API (HMemAPI, CreateObservationRequest, ObservationMatchRequest)
+import HMem.Server.API (HMemAPI, CreateObservationRequest, ObservationMatchRequest, UpdateWorkspaceRequest)
 import HMem.Types
 
 openApiSpec :: OpenApi
@@ -44,6 +44,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/observations/{observationId}" . _Just . put %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}" . _Just . delete %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}/embedding" . _Just . put %~ fmap tagObservation
+  & paths . at "/api/v1/workspaces/{workspaceId}" . _Just . put %~ fmap tagWorkspaceRename
   & paths . at "/api/v1/workspaces/{workspaceId}/timeline" . _Just . get %~ fmap tagTimeline
   & paths . at "/api/v1/workspaces/{workspaceId}/timeline/buckets" . _Just . get %~ fmap tagTimeline
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
@@ -53,6 +54,17 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
     tagObservation operation = operation & tags .~ InsOrdSet.singleton "Observations"
     tagWorkspaceGroups operation = operation & tags .~ InsOrdSet.singleton "Workspace Groups"
     tagTimeline operation = operation & tags .~ InsOrdSet.singleton "Timeline"
+    tagWorkspaceRename operation = operation
+      & tags .~ InsOrdSet.singleton "Workspaces"
+      & description ?~ "Renames an active workspace. The request body accepts only name; malformed, unauthenticated, forbidden, and missing requests return the standard 400, 401, 403, and 404 responses."
+      & responses %~ (<> workspaceRenameErrors)
+
+    workspaceRenameErrors = Responses Nothing $ InsOrdMap.fromList
+      [ (400, Inline (mempty & description .~ "Validation error. The JSON body must be an object with exactly one string name field whose value is non-blank and no more than 1024 bytes."))
+      , (401, Inline (mempty & description .~ "Unauthenticated."))
+      , (403, Inline (mempty & description .~ "Forbidden for the requested workspace."))
+      , (404, Inline (mempty & description .~ "The active workspace was not found."))
+      ]
 
 capNavigationParameter parameterRef = case parameterRef of
   Inline parameter
@@ -94,6 +106,10 @@ instance ToParamSchema NavigationEntityType where toParamSchema _ = mempty & typ
 instance ToSchema AuditAction where declareNamedSchema _ = pure $ NamedSchema (Just "AuditAction") (mempty & type_ ?~ OpenApiString & enum_ ?~ ["create", "update", "delete"])
 instance ToParamSchema AuditAction where toParamSchema _ = mempty & type_ ?~ OpenApiString
 instance ToSchema WorkspaceType where declareNamedSchema _ = pure $ NamedSchema (Just "WorkspaceType") (mempty & type_ ?~ OpenApiString & enum_ ?~ ["repository", "planning", "personal", "organization"])
+instance ToSchema UpdateWorkspace where
+  declareNamedSchema _ = pure $ NamedSchema (Just "UpdateWorkspace")
+    (mempty & type_ ?~ OpenApiObject & required .~ ["name"] & properties .~ InsOrdMap.fromList [("name", Inline (mempty & type_ ?~ OpenApiString))] & additionalProperties ?~ AdditionalPropertiesAllowed False)
+instance ToSchema UpdateWorkspaceRequest where declareNamedSchema _ = declareNamedSchema (Proxy @UpdateWorkspace)
 
 instance ToSchema ObservationEmbedding where
   declareNamedSchema _ = pure $ NamedSchema (Just "ObservationEmbedding") embeddingSchema

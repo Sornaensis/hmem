@@ -14,6 +14,10 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
 import Data.UUID qualified as UUID
+import Hasql.Decoders qualified as Dec
+import Hasql.Encoders qualified as Enc
+import Hasql.Session qualified as Session
+import Hasql.Statement qualified as Statement
 import Network.HTTP.Types (Header, methodGet, methodPost, parseQuery, status200)
 import Network.HTTP.Types qualified as HTTP
 import Network.Wai (Application, defaultRequest)
@@ -28,7 +32,9 @@ import HMem.Config qualified as Config
 import HMem.DB.Auth qualified as Auth
 import HMem.DB.ChangeStream
 import HMem.DB.Pool (runSession)
+import HMem.DB.Pool qualified as DBPool
 import HMem.DB.Project qualified as Project
+import HMem.DB.Workspace qualified as WorkspaceDB
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
@@ -37,7 +43,7 @@ import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
 import HMem.Server.Snapshot (materializeSnapshot)
 import HMem.Server.WebSocket (createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, dispatchCanonicalOutbox, handleCanonicalDispatchFailure)
-import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateWorkspaceGroup(..), Project(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
+import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateWorkspaceGroup(..), Project(..), UpdateWorkspace(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
 
 spec :: Spec
 spec = describe "canonical change-stream loopback" $ do
@@ -97,6 +103,97 @@ spec = describe "canonical change-stream loopback" $ do
         frame <- awaitFrame received
         frameType frame `shouldBe` Just "checkpoint"
         wait client
+
+  it "publishes one committed rename to workspace then global scope and suppresses no-ops" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "canonical-workspace-rename"
+      let workspaceScope = WorkspaceScope workspace.id
+          cursorFor scope = do
+            existing <- listOutboxAfter ctx.deployedEnv.pool scope 0 100
+            pure $ maybe 0 (.outboxCursor) (safeLast existing)
+      workspaceBefore <- cursorFor workspaceScope
+      globalBefore <- cursorFor GlobalScope
+      renamed <- WorkspaceDB.renameWorkspace ctx.deployedEnv.pool workspace.id (UpdateWorkspace "canonical-workspace-renamed")
+      renamed `shouldSatisfy` isJust
+      workspaceRecords <- listOutboxAfter ctx.deployedEnv.pool workspaceScope workspaceBefore 10
+      globalRecords <- listOutboxAfter ctx.deployedEnv.pool GlobalScope globalBefore 10
+      length workspaceRecords `shouldBe` 1
+      length globalRecords `shouldBe` 1
+      let [workspaceRecord] = workspaceRecords
+          [globalRecord] = globalRecords
+      workspaceRecord.outboxCursor `shouldSatisfy` (< globalRecord.outboxCursor)
+      let transactionId record = jsonField "transaction" record.outboxEnvelope >>= jsonField "id"
+      transactionId workspaceRecord `shouldSatisfy` isJust
+      transactionId workspaceRecord `shouldBe` transactionId globalRecord
+      mapM_ (\record -> do
+        (jsonField "entity" record.outboxEnvelope >>= jsonField "type") `shouldBe` Just (String "workspace")
+        (jsonField "entity" record.outboxEnvelope >>= jsonField "id") `shouldBe` Just (String $ UUID.toText workspace.id)
+        (jsonField "entity" record.outboxEnvelope >>= jsonField "action") `shouldBe` Just (String "updated")) [workspaceRecord, globalRecord]
+      workspaceNoopCursor <- cursorFor workspaceScope
+      globalNoopCursor <- cursorFor GlobalScope
+      _ <- WorkspaceDB.renameWorkspace ctx.deployedEnv.pool workspace.id (UpdateWorkspace "canonical-workspace-renamed")
+      listOutboxAfter ctx.deployedEnv.pool workspaceScope workspaceNoopCursor 10 `shouldReturn` []
+      listOutboxAfter ctx.deployedEnv.pool GlobalScope globalNoopCursor 10 `shouldReturn` []
+      workspaceRollbackCursor <- cursorFor workspaceScope
+      globalRollbackCursor <- cursorFor GlobalScope
+      rollbackResult <- DBPool.withConn ctx.deployedEnv.pool $ \connection ->
+        Session.run
+          (Session.sql "BEGIN" >> Session.statement workspace.id rollbackRenameStatement >> Session.sql "ROLLBACK")
+          connection
+      case rollbackResult of
+        Left err -> expectationFailure $ "Failed to roll back workspace rename: " <> show err
+        Right () -> pure ()
+      listOutboxAfter ctx.deployedEnv.pool workspaceScope workspaceRollbackCursor 10 `shouldReturn` []
+      listOutboxAfter ctx.deployedEnv.pool GlobalScope globalRollbackCursor 10 `shouldReturn` []
+
+  it "replays a committed rename and converges two edit-role clients without leaking to another workspace" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "rename-convergence"
+      otherWorkspace <- createTestWorkspace ctx.deployedEnv "rename-convergence-other"
+      editorOne <- createDeployedSandboxUser ctx.deployedEnv False False
+      editorTwo <- createDeployedSandboxUser ctx.deployedEnv False False
+      unrelated <- createDeployedSandboxUser ctx.deployedEnv False False
+      let scope = WorkspaceScope workspace.id
+          audience userId = AuthenticatedAudience (UUID.toText userId) userId
+          grantEdit userId = Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+            (Auth.UpsertWorkspaceMembership userId Auth.WorkspaceRoleEdit) Nothing
+          principal userId = Principal
+            { actorType = ActorUser, actorId = UUID.toText userId, actorLabel = "rename editor"
+            , authority = PrincipalGrantUser userId }
+      _ <- grantEdit editorOne
+      _ <- grantEdit editorTwo
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool otherWorkspace.id
+        (Auth.UpsertWorkspaceMembership unrelated Auth.WorkspaceRoleEdit) Nothing
+      replayResume <- terminalResume ctx scope (audience editorOne)
+      firstTicket <- canonicalTicketFor ctx (principal editorOne) scope (audience editorOne)
+      secondTicket <- canonicalTicketFor ctx (principal editorTwo) scope (audience editorTwo)
+      unrelatedTicket <- canonicalTicketFor ctx (principal unrelated) (WorkspaceScope otherWorkspace.id) (audience unrelated)
+      before <- do
+        records <- listOutboxAfter ctx.deployedEnv.pool scope 0 100
+        pure $ maybe 0 (.outboxCursor) (safeLast records)
+      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+        firstClient <- startOneFrameClient port firstTicket.ticket
+        secondClient <- startOneFrameClient port secondTicket.ticket
+        unrelatedClient <- startOneFrameClient port unrelatedTicket.ticket
+        mapM_ (awaitFrame . (.clientInitial)) [firstClient, secondClient, unrelatedClient]
+        _ <- WorkspaceDB.renameWorkspace ctx.deployedEnv.pool workspace.id (UpdateWorkspace "rename converged")
+        records <- listOutboxAfter ctx.deployedEnv.pool scope before 10
+        record <- case records of
+          [value] -> pure value
+          _ -> fail "expected exactly one workspace-scoped rename event"
+        replayed <- replayAndRotateResumeToken ctx.deployedEnv.pool 60 scope (audience editorOne) replayResume 10
+        case replayed of
+          Right ReplayPage { replayPageRecords = [replayedRecord] } ->
+            replayedRecord.outboxEventId `shouldBe` record.outboxEventId
+          other -> expectationFailure $ "expected the committed rename in replay: " <> show other
+        dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [record]
+        firstFrame <- awaitFrame firstClient.clientObserved
+        secondFrame <- awaitFrame secondClient.clientObserved
+        mapM_ (assertChangeIdentity record workspace.id) [firstFrame, secondFrame]
+        threadDelay 100000
+        tryTakeMVar unrelatedClient.clientObserved `shouldReturn` Nothing
+        cancel unrelatedClient.clientWorker
+        mapM_ (wait . (.clientWorker)) [firstClient, secondClient]
 
   it "replays then remains live with ordered cursor-free frames" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -610,6 +707,15 @@ latestOutbox ctx scope = do
   case reverse records of
     record:_ -> pure record
     [] -> fail "expected a committed outbox record"
+
+safeLast :: [a] -> Maybe a
+safeLast [] = Nothing
+safeLast xs = Just (last xs)
+
+rollbackRenameStatement :: Statement.Statement UUID.UUID ()
+rollbackRenameStatement = Statement.Statement
+  "UPDATE workspaces SET name = 'rolled-back-workspace-rename' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
 
 canonicalTicketFor :: DeployedSandboxApp -> Principal -> ChangeScope -> ChangeAudience -> IO WebSocketTicketResponse
 canonicalTicketFor ctx principal scope audience = do

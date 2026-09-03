@@ -1,5 +1,6 @@
 module Feature.Editing exposing
     ( clearForTabSwitch
+    , hasProtectedWorkspaceRename
     , handleEscape
     , init
     , MemoryTargetOption
@@ -9,6 +10,7 @@ module Feature.Editing exposing
     , memoryTargetOptionsForWorkspace
     , selectedMemoryTargetValueFrom
     , onKeyDown
+    , shouldSaveOnBlur
     , update
     , viewCreateFormModal
     , viewEditableText
@@ -229,20 +231,29 @@ decodeMemoryTargetValue target =
 
 
 clearForTabSwitch : Model -> Model
-clearForTabSwitch =
+clearForTabSwitch model =
     updateEditingModel
         (\ed ->
             { ed
                 | createForm = Nothing
-                , editState = Nothing
+                , editState =
+                    if hasProtectedWorkspaceRename model then
+                        ed.editState
+
+                    else
+                        Nothing
                 , inlineCreate = Nothing
             }
         )
+        model
 
 
 handleEscape : Model -> Maybe Model
 handleEscape model =
-    if model.editing.inlineCreate /= Nothing then
+    if hasProtectedWorkspaceRename model then
+        Nothing
+
+    else if model.editing.inlineCreate /= Nothing then
         Just (updateEditingModel (\ed -> { ed | inlineCreate = Nothing }) model)
 
     else if model.editing.editState /= Nothing then
@@ -265,10 +276,23 @@ update msg model =
                 editingModel =
                     model.editing
 
+                isPending =
+                    case editingModel.editState of
+                        Just (EditingField state) ->
+                            state.requestId /= Nothing
+
+                        Nothing ->
+                            False
+
                 ( baseModel, saveCmd ) =
                     case editingModel.editState of
                         Just (EditingField state) ->
-                            if state.value /= state.original then
+                            if state.requestId /= Nothing || state.error /= Nothing then
+                                -- A response is correlated with this edit state.  Replacing
+                                -- it would discard the only place that can apply the result.
+                                ( model, Cmd.none )
+
+                            else if state.value /= state.original then
                                 let
                                     ( trackedModel, requestId, clearCmd ) =
                                         beginTrackedMutation [ state.entityId ] model
@@ -281,7 +305,11 @@ update msg model =
                         Nothing ->
                             ( model, Cmd.none )
             in
-            ( updateEditingModel
+            if isPending || hasProtectedWorkspaceRename model then
+                ( model, Cmd.none )
+
+            else
+                ( updateEditingModel
                 (\ed ->
                     { ed
                         | editState =
@@ -292,13 +320,16 @@ update msg model =
                                     , field = field
                                     , value = currentValue
                                     , original = currentValue
+                                    , requestId = Nothing
+                                    , workspaceGeneration = Nothing
+                                    , error = Nothing
                                     }
                                 )
                     }
                 )
-                baseModel
-            , Cmd.batch [ saveCmd, focusElement (editElementId entityId field) ]
-            )
+                    baseModel
+                , Cmd.batch [ saveCmd, focusElement (editElementId entityId field) ]
+                )
 
         EditInput newValue ->
             case model.editing.editState of
@@ -312,15 +343,39 @@ update msg model =
             case model.editing.editState of
                 Just (EditingField state) ->
                     if state.entityId == saveEntityId && state.field == saveField then
-                        if state.value == state.original then
+                        if state.requestId /= Nothing then
+                            ( model, Cmd.none )
+
+                        else if state.value == state.original then
                             ( updateEditingModel (\ed -> { ed | editState = Nothing }) model, Cmd.none )
 
                         else
                             let
                                 ( trackedModel, requestId, clearCmd ) =
-                                    beginTrackedMutation [ state.entityId ] (updateEditingModel (\ed -> { ed | editState = Nothing }) model)
+                                    beginTrackedMutation [ state.entityId ] model
+
+                                savingModel =
+                                    if state.entityType == "workspace" then
+                                        updateEditingModel
+                                            (\ed ->
+                                                { ed
+                                                    | editState =
+                                                        Just
+                                                            (EditingField
+                                                                { state
+                                                                    | requestId = Just requestId
+                                                                    , workspaceGeneration = Just (workspaceTargetGeneration state.entityId trackedModel)
+                                                                    , error = Nothing
+                                                                }
+                                                            )
+                                                }
+                                            )
+                                            trackedModel
+
+                                    else
+                                        updateEditingModel (\ed -> { ed | editState = Nothing }) trackedModel
                             in
-                            ( trackedModel, Cmd.batch [ clearCmd, saveEditCmd model.flags.apiUrl (Just requestId) state ] )
+                            ( savingModel, Cmd.batch [ clearCmd, saveEditCmd model.flags.apiUrl (Just requestId) state ] )
 
                     else
                         -- Editing state has moved to a different field; don't clear it
@@ -559,22 +614,6 @@ update msg model =
         -- Expand and edit (composite)
         ExpandAndEdit cardId entityType entityId field currentValue ->
             let
-                ( baseModel, saveCmd ) =
-                    case model.editing.editState of
-                        Just (EditingField state) ->
-                            if state.value /= state.original then
-                                let
-                                    ( trackedModel, requestId, clearCmd ) =
-                                        beginTrackedMutation [ state.entityId ] model
-                                in
-                                ( trackedModel, Cmd.batch [ clearCmd, saveEditCmd model.flags.apiUrl (Just requestId) state ] )
-
-                            else
-                                ( model, Cmd.none )
-
-                        Nothing ->
-                            ( model, Cmd.none )
-
                 fetchDepCmd =
                     if Dict.member cardId model.tasks && not (Dict.member cardId model.dependencies.taskDependencies) then
                         Api.fetchTaskOverview model.flags.apiUrl cardId (GotTaskDependencies cardId)
@@ -595,26 +634,50 @@ update msg model =
                 updatedCards =
                     { currentCards | expandedCards = Dict.insert cardId True model.cards.expandedCards }
             in
-            ( { baseModel
-                | cards = updatedCards
-              }
-                |> updateEditingModel
-                    (\ed ->
-                        { ed
-                            | editState =
-                                Just
-                                    (EditingField
-                                        { entityType = entityType
-                                        , entityId = entityId
-                                        , field = field
-                                        , value = currentValue
-                                        , original = currentValue
-                                        }
-                                    )
-                        }
-                    )
-            , Cmd.batch [ saveCmd, focusElement (editElementId entityId field), fetchDepCmd, fetchProjectOverviewCmd ]
-            )
+            if hasProtectedWorkspaceRename model then
+                ( { model | cards = updatedCards }, Cmd.batch [ fetchDepCmd, fetchProjectOverviewCmd ] )
+
+            else
+                let
+                    ( baseModel, saveCmd ) =
+                        case model.editing.editState of
+                            Just (EditingField state) ->
+                                if state.value /= state.original then
+                                    let
+                                        ( trackedModel, requestId, clearCmd ) =
+                                            beginTrackedMutation [ state.entityId ] model
+                                    in
+                                    ( trackedModel, Cmd.batch [ clearCmd, saveEditCmd model.flags.apiUrl (Just requestId) state ] )
+
+                                else
+                                    ( model, Cmd.none )
+
+                            Nothing ->
+                                ( model, Cmd.none )
+                in
+                ( { baseModel
+                    | cards = updatedCards
+                  }
+                    |> updateEditingModel
+                        (\ed ->
+                            { ed
+                                | editState =
+                                    Just
+                                        (EditingField
+                                            { entityType = entityType
+                                            , entityId = entityId
+                                            , field = field
+                                            , value = currentValue
+                                            , original = currentValue
+                                            , requestId = Nothing
+                                            , workspaceGeneration = Nothing
+                                            , error = Nothing
+                                            }
+                                        )
+                            }
+                        )
+                , Cmd.batch [ saveCmd, focusElement (editElementId entityId field), fetchDepCmd, fetchProjectOverviewCmd ]
+                )
 
         _ ->
             ( model, Cmd.none )
@@ -627,6 +690,24 @@ update msg model =
 updateEditingModel : (EditingModel -> EditingModel) -> Model -> Model
 updateEditingModel fn model =
     { model | editing = fn model.editing }
+
+
+hasProtectedWorkspaceRename : Model -> Bool
+hasProtectedWorkspaceRename model =
+    case model.editing.editState of
+        Just (EditingField state) ->
+            state.entityType == "workspace" && (state.requestId /= Nothing || state.error /= Nothing)
+
+        Nothing ->
+            False
+
+
+workspaceTargetGeneration : String -> Model -> Int
+workspaceTargetGeneration workspaceId model =
+    Dict.get
+        ("workspace:" ++ workspaceId ++ "|entity:workspace:" ++ workspaceId)
+        model.webSocket.targetGenerations
+        |> Maybe.withDefault 0
 
 
 nonEmptyMaybe : String -> Maybe String
@@ -658,7 +739,7 @@ workspaceTypeFromString raw =
             Api.Repository
 
 
-saveEditCmd : String -> Maybe String -> { entityType : String, entityId : String, field : String, value : String, original : String } -> Cmd Msg
+saveEditCmd : String -> Maybe String -> { entityType : String, entityId : String, field : String, value : String, original : String, requestId : Maybe String, workspaceGeneration : Maybe Int, error : Maybe String } -> Cmd Msg
 saveEditCmd apiUrl maybeRequestId state =
     let
         fields =
@@ -673,10 +754,12 @@ saveEditCmd apiUrl maybeRequestId state =
     in
     case state.entityType of
         "workspace" ->
-            Api.updateWorkspace apiUrl
-                state.entityId
-                fields
-                WorkspaceUpdated
+            case maybeRequestId of
+                Just requestId ->
+                    Api.updateWorkspace apiUrl state.entityId state.value requestId (WorkspaceUpdated requestId)
+
+                Nothing ->
+                    Cmd.none
 
         "project" ->
             Api.updateProject apiUrl
@@ -726,25 +809,59 @@ viewEditableText model entityType entityId field currentValue =
     else
         case editingValue model entityId field of
             Just val ->
-                input
-                    [ class "inline-edit-input"
-                    , value val
-                    , onInput EditInput
-                    , onBlur (SaveEdit entityId field)
-                    , onKeyDown
-                        (\keyCode ->
-                            if keyCode == 13 then
-                                SaveEdit entityId field
+                let
+                    pending =
+                        case model.editing.editState of
+                            Just (EditingField state) -> state.requestId /= Nothing
+                            Nothing -> False
 
-                            else if keyCode == 27 then
-                                CancelEdit
+                    errorView =
+                        case model.editing.editState of
+                            Just (EditingField state) ->
+                                case state.error of
+                                    Just message ->
+                                        div [ class "inline-edit-error" ]
+                                            [ text message
+                                            , button [ type_ "button", onClick (SaveEdit entityId field) ] [ text "Retry" ]
+                                            , button [ type_ "button", onClick CancelEdit ] [ text "Cancel" ]
+                                            ]
 
-                            else
-                                NoOp
+                                    Nothing -> text ""
+
+                            Nothing -> text ""
+
+                    maybeError =
+                        case model.editing.editState of
+                            Just (EditingField state) ->
+                                state.error
+
+                            Nothing ->
+                                Nothing
+
+                    blurSaveAttributes =
+                        if shouldSaveOnBlur pending maybeError then
+                            [ onBlur (SaveEdit entityId field) ]
+
+                        else
+                            []
+                in
+                div [ class "inline-edit" ]
+                    [ input
+                        ([ class "inline-edit-input"
+                         , value val
+                         , onInput EditInput
+                         , disabled pending
+                         , onKeyDown
+                            (\keyCode ->
+                                if keyCode == 13 then SaveEdit entityId field else if keyCode == 27 then CancelEdit else NoOp
+                            )
+                         , Html.Attributes.id (editElementId entityId field)
+                         ]
+                            ++ blurSaveAttributes
                         )
-                    , Html.Attributes.id (editElementId entityId field)
+                        []
+                    , errorView
                     ]
-                    []
 
             Nothing ->
                 span
@@ -760,6 +877,11 @@ viewEditableText model entityType entityId field currentValue =
                             currentValue
                         )
                     ]
+
+
+shouldSaveOnBlur : Bool -> Maybe String -> Bool
+shouldSaveOnBlur pending maybeError =
+    not pending && maybeError == Nothing
 
 
 viewMarkdownContent : String -> Html Msg

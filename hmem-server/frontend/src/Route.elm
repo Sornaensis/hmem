@@ -5,6 +5,7 @@ import Browser
 import Browser.Navigation as Nav
 import Dict
 import Feature.DataLoading
+import Feature.Editing
 import Feature.Observation
 import Feature.Timeline
 import Helpers exposing (localStorageKey, parseFragment, pushUrl)
@@ -135,7 +136,12 @@ handleUrlChange url model =
                     updatedEditing =
                         { currentEditing
                             | createForm = Nothing
-                            , editState = Nothing
+                            , editState =
+                                if Feature.Editing.hasProtectedWorkspaceRename model then
+                                    currentEditing.editState
+
+                                else
+                                    Nothing
                             , inlineCreate = Nothing
                         }
 
@@ -173,7 +179,7 @@ handleUrlChange url model =
                             , memory = updatedMemory
                             , search = updatedSearch
                         }
-                            |> clearRouteConfirmations
+                            |> clearRouteConfirmations True
 
                     ( observationModel, observationCmd ) =
                         if frag.tab == ObservationsTab then
@@ -372,7 +378,7 @@ handleUrlChange url model =
                     , auditLog = updatedAuditLog
                     , timeline = updatedTimeline
                   }
-                    |> clearRouteConfirmations
+                    |> clearRouteConfirmations False
                 , Cmd.batch
                     [ Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (model.sessionRequestEpoch + 1) (Just wsId))
                     , requestLocalStorage (localStorageKey wsId)
@@ -445,7 +451,7 @@ handleUrlChange url model =
                 , auditLog = updatedAuditLog
                 , focus = updatedFocus
               }
-                |> clearRouteConfirmations
+                |> clearRouteConfirmations False
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext (model.sessionRequestEpoch + 1) Nothing)
                 , disconnectWebSocket ()
@@ -461,7 +467,7 @@ handleUrlChange url model =
                     { currentFocus | returnContext = Nothing }
             in
             ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }, focus = updatedFocus }
-                |> clearRouteConfirmations
+                |> clearRouteConfirmations False
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext (model.sessionRequestEpoch + 1) Nothing)
                 , disconnectWebSocket ()
@@ -564,8 +570,8 @@ expandedEntriesForReturnContext context =
             Dict.empty
 
 
-clearRouteConfirmations : Model -> Model
-clearRouteConfirmations model =
+clearRouteConfirmations : Bool -> Model -> Model
+clearRouteConfirmations preserveProtectedWorkspaceRename model =
     let
         currentEditing =
             model.editing
@@ -589,7 +595,17 @@ clearRouteConfirmations model =
             model.workspaceAdmin
     in
     { model
-        | editing = { currentEditing | editState = Nothing, createForm = Nothing, inlineCreate = Nothing }
+        | editing =
+            { currentEditing
+                | editState =
+                    if preserveProtectedWorkspaceRename && Feature.Editing.hasProtectedWorkspaceRename model then
+                        currentEditing.editState
+
+                    else
+                        Nothing
+                , createForm = Nothing
+                , inlineCreate = Nothing
+            }
         , memory = { currentMemory | linkingMemoryFor = Nothing, linkingEntityFor = Nothing }
         , dependencies = { currentDependencies | addingDependencyFor = Nothing }
         , cards = { currentCards | deleteConfirmation = Nothing, lastFocusClick = Nothing }

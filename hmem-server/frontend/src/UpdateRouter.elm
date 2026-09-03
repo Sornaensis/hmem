@@ -210,7 +210,7 @@ update msg model =
         MemoryUpdated _ ->
             Ok (Feature.Mutations.update msg model)
 
-        WorkspaceUpdated _ ->
+        WorkspaceUpdated _ _ ->
             Ok (Feature.Mutations.update msg model)
 
         WorkspaceCreated _ ->

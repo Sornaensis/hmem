@@ -2569,18 +2569,14 @@ createWorkspace apiUrl name workspaceType mGhOwner mGhRepo requestId toMsg =
         }
 
 
-updateWorkspace : String -> String -> List ( String, E.Value ) -> (Result Http.Error Workspace -> msg) -> Cmd msg
-updateWorkspace apiUrl wsId fields toMsg =
-    let
-        headers =
-            requestIdHeaders fields
-    in
+updateWorkspace : String -> String -> String -> String -> (Result ApiError Workspace -> msg) -> Cmd msg
+updateWorkspace apiUrl wsId name requestId toMsg =
     Http.request
         { method = "PUT"
-        , headers = headers
+        , headers = [ Http.header "X-Request-Id" requestId ]
         , url = apiUrl ++ "/api/v1/workspaces/" ++ wsId
-        , body = Http.jsonBody (E.object fields)
-        , expect = Http.expectJson toMsg workspaceDecoder
+        , body = Http.jsonBody (E.object [ ( "name", E.string name ) ])
+        , expect = expectJsonWithApiError workspaceDecoder toMsg
         , timeout = Nothing
         , tracker = Nothing
         }

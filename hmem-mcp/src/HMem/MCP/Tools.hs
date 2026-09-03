@@ -31,6 +31,8 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
+import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUIDv4
 import System.Environment (lookupEnv)
 import Network.HTTP.Client
 import Network.HTTP.Types (HeaderName)
@@ -48,6 +50,7 @@ toolDefinitions =
   , tool "get_workspace" "Get the active workspace context UUID, if any." (schema [] [])
   , tool "workspace_list" "List registered workspaces." (schema ["limit" .= prop "integer" "Maximum results (default 50)"] [])
   , tool "workspace_register" "Register a workspace." (schema ["name" .= prop "string" "Workspace name", "workspace_type" .= enumProp "Workspace type" ["repository", "planning", "personal", "organization"]] ["name"])
+  , tool "workspace_update" "Rename a workspace. Only its display name is mutable." (strictSchema ["workspace_id" .= prop "string" "Workspace UUID", "name" .= prop "string" "New workspace display name"] ["workspace_id", "name"])
   , tool "search" "Search observations, projects, and tasks. An Observation is a durable, non-obvious repository insight tied to file or glob subjects; subject_kind, subject, and git_sha are exact provenance filters." (schema
       [ "query" .= prop "string" "Optional full-text query"
       , "entity_types" .= arrayEnum "Entity types (default: observation, project, task)" ["observation", "project", "task"]
@@ -132,6 +135,7 @@ toolDefinitions =
   where
     tool name description inputSchema = object ["name" .= (name :: Text), "description" .= (description :: Text), "inputSchema" .= inputSchema]
     schema properties required = object ["type" .= ("object" :: Text), "properties" .= object properties, "required" .= (required :: [Text])]
+    strictSchema properties required = object ["type" .= ("object" :: Text), "properties" .= object properties, "required" .= (required :: [Text]), "additionalProperties" .= False]
     prop typ description = object ["type" .= (typ :: Text), "description" .= (description :: Text)]
     nullableProp description = object ["description" .= (description :: Text), "anyOf" .= [object ["type" .= ("string" :: Text)], object ["type" .= ("null" :: Text)]]]
     enumProp description choices = object ["type" .= ("string" :: Text), "description" .= (description :: Text), "enum" .= (choices :: [Text])]
@@ -149,6 +153,7 @@ data ToolCall
   | ObservationSimilar SimilarObservationQuery
   | WorkspaceList (Maybe Int)
   | WorkspaceRegister CreateWorkspace
+  | WorkspaceUpdate UUID UpdateWorkspace
   | UnifiedSearch UnifiedSearchQuery
   | ProjectCreate CreateProject
   | ProjectUpdate UUID UpdateProject
@@ -180,6 +185,7 @@ parseToolCall name args = case name of
   "observation_similar" -> ObservationSimilar <$> parse args
   "workspace_list" -> WorkspaceList <$> optional "limit"
   "workspace_register" -> WorkspaceRegister <$> parse args
+  "workspace_update" -> WorkspaceUpdate <$> required "workspace_id" <*> parseWorkspaceUpdate args
   "search" -> UnifiedSearch <$> parse args
   "project_create" -> ProjectCreate <$> parse args
   "project_update" -> ProjectUpdate <$> required "project_id" <*> parse args
@@ -211,6 +217,12 @@ parseUpdateObservation = parseEither $ withObject "observation_update" $ \o -> d
   if null unexpected then pure (UpdateObservation contentValue)
   else fail ("observation_update accepts only observation_id and content; unexpected fields: " <> show unexpected)
 
+parseWorkspaceUpdate :: Value -> Either String UpdateWorkspace
+parseWorkspaceUpdate = parseEither $ withObject "workspace_update" $ \o -> do
+  let unexpected = filter (`notElem` ["workspace_id", "name"]) (Key.toText <$> KM.keys o)
+  if null unexpected then UpdateWorkspace <$> o .: "name"
+  else fail ("workspace_update accepts only workspace_id and name; unexpected fields: " <> show unexpected)
+
 -- | Core accepts the deprecated singleton form during the compatibility window.
 -- The MCP registry advertises only @subjects@, but parsing retains the legacy
 -- form so existing agents do not fail abruptly. Core parsing rejects mixed and
@@ -235,6 +247,11 @@ validateToolCall call = case call of
   ObservationSetEmbedding _ (ObservationEmbedding values) -> checked (validateEmbedding values) call
   ObservationSimilar input -> checked (validateSimilarObservationQuery input) call
   WorkspaceRegister input -> checked (validateCreateWorkspaceInput input) call
+  -- The rename endpoint deliberately authorizes before decoding/validating its
+  -- body so malformed names cannot disclose workspace existence to callers
+  -- without edit access.  Forward name values unchanged and let that
+  -- authoritative endpoint return its structured 400 response.
+  WorkspaceUpdate _ _ -> Right call
   UnifiedSearch input -> checked (validateUnifiedSearchQuery input) call
   ProjectCreate input -> checked (validateCreateProjectInput input) call
   ProjectUpdate _ input -> checked (validateUpdateProjectInput input) call
@@ -278,6 +295,7 @@ execute manager base apiKey = \case
   ObservationSimilar input@(SimilarObservationQuery _ _ _ _ _ _ limit offset) -> request manager base apiKey "POST" "/api/v1/observations/similar" (Just (encode input)) (compactSimilarObservations (fromMaybe 50 limit) (fromMaybe 0 offset))
   WorkspaceList limit -> request manager base apiKey "GET" ("/api/v1/workspaces" <> query [("limit", show <$> limit)]) Nothing compactWorkspaceList
   WorkspaceRegister input -> request manager base apiKey "POST" "/api/v1/workspaces" (Just (encode input)) (mutationAck "created" "workspace" . compactWorkspaceSummary)
+  WorkspaceUpdate workspaceId input -> request manager base apiKey "PUT" ("/api/v1/workspaces/" <> uuidPath workspaceId) (Just (encode input)) (mutationAck "updated" "workspace" . compactWorkspaceSummary)
   UnifiedSearch input -> request manager base apiKey "POST" "/api/v1/search" (Just (encode input)) compactSearchResults
   ProjectCreate input -> request manager base apiKey "POST" "/api/v1/projects" (Just (encode input)) (mutationAck "created" "project" . compactProjectSummary)
   ProjectUpdate pid input -> request manager base apiKey "PUT" ("/api/v1/projects/" <> uuidPath pid) (Just (encode input)) (mutationAck "updated" "project" . compactProjectSummary)
@@ -317,8 +335,9 @@ noContentRequest manager base apiKey method path body acknowledgement = do
   outcome <- try $ do
     initial <- parseRequest (base <> path)
     provenance <- mcpProvenanceHeaders
+    requestId <- UUIDv4.nextRandom
     let auth = maybe [] (\token -> [("Authorization", TE.encodeUtf8 ("Bearer " <> token))]) apiKey
-        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : provenance <> auth, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
+        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : ("X-Request-Id", TE.encodeUtf8 (UUID.toText requestId)) : provenance <> auth, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
     response <- httpLbs requestValue manager
     if statusCode (responseStatus response) >= 200 && statusCode (responseStatus response) < 300
       then pure (Right ())
@@ -334,8 +353,9 @@ rawRequest manager base apiKey method path body = do
   outcome <- try $ do
     initial <- parseRequest (base <> path)
     provenance <- mcpProvenanceHeaders
+    requestId <- UUIDv4.nextRandom
     let auth = maybe [] (\token -> [("Authorization", TE.encodeUtf8 ("Bearer " <> token))]) apiKey
-        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : provenance <> auth, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
+        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : ("X-Request-Id", TE.encodeUtf8 (UUID.toText requestId)) : provenance <> auth, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
     response <- httpLbs requestValue manager
     if statusCode (responseStatus response) >= 200 && statusCode (responseStatus response) < 300
       then case eitherDecode (responseBody response) of
@@ -540,4 +560,10 @@ mcpError :: Text -> Value
 mcpError message = object ["content" .= [object ["type" .= ("text" :: Text), "text" .= message]], "isError" .= True]
 
 httpError :: Int -> BL.ByteString -> Value
-httpError code body = mcpError ("[HTTP_" <> T.pack (show code) <> "] " <> T.take 1000 (TE.decodeUtf8With (\_ _ -> Just '?') (BL.toStrict body)))
+httpError code body =
+  mcpError ("[HTTP_" <> T.pack (show code) <> "] " <> structuredMessage)
+  where
+    fallback = T.take 1000 (TE.decodeUtf8With (\_ _ -> Just '?') (BL.toStrict body))
+    structuredMessage = case eitherDecode body of
+      Right value -> fromMaybe fallback (textField "message" value)
+      Left _ -> fallback

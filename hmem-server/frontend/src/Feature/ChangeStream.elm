@@ -214,7 +214,7 @@ validEnvelope envelope =
         entityMatches =
             case envelope.scope of
                 Api.WorkspaceScope _ ->
-                    List.member envelope.entityType [ "project", "task", "observation", "task_dependency", "workspace_group_membership", "workspace_membership" ]
+                    List.member envelope.entityType [ "workspace", "project", "task", "observation", "task_dependency", "workspace_group_membership", "workspace_membership" ]
 
                 Api.GlobalScope ->
                     List.member envelope.entityType [ "workspace", "workspace_group" ]
@@ -300,6 +300,13 @@ invalidationActions envelope invalidation =
                         [ RefetchEntity entity identity ]
     in
     case ( envelope.scope, invalidation.kind, parts ) of
+        ( Api.WorkspaceScope expected, "entity", [ "workspace", workspaceId ] ) ->
+            if expected == workspaceId && not (String.isEmpty workspaceId) then
+                entityAction "workspace" workspaceId
+
+            else
+                [ BeginResync ]
+
         ( Api.WorkspaceScope _, "entity", [ entity, identity ] ) ->
             if not (String.isEmpty identity) && List.member entity [ "project", "task", "observation" ] then
                 entityAction entity identity

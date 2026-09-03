@@ -187,18 +187,62 @@ update msg model =
                 Err _ ->
                     addToast Error "Failed to update memory" model
 
-        WorkspaceUpdated result ->
+        WorkspaceUpdated requestId result ->
             case result of
                 Ok ws ->
-                    let
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation ws.id
-                                { model | workspaces = Dict.insert ws.id ws model.workspaces }
-                    in
-                    ( trackedModel, trackCmd )
+                    case model.editing.editState of
+                        Just (EditingField state) ->
+                            if state.entityType == "workspace" && state.entityId == ws.id && state.requestId == Just requestId then
+                                if workspaceGenerationIsCurrent state ws.id model then
+                                    let
+                                        currentEditing =
+                                            model.editing
 
-                Err _ ->
-                    addToast Error "Failed to update workspace" model
+                                        updatedEditing =
+                                            { currentEditing | editState = Nothing }
+
+                                        ( trackedModel, trackCmd ) =
+                                            trackLocalMutation ws.id
+                                                { model
+                                                    | workspaces = Dict.insert ws.id ws model.workspaces
+                                                    , editing = updatedEditing
+                                                }
+                                    in
+                                    ( trackedModel, trackCmd )
+
+                                else
+                                    -- A newer canonical refetch is already in flight. Its
+                                    -- response owns the dictionary, so retire this local edit.
+                                    let
+                                        currentEditing =
+                                            model.editing
+                                    in
+                                    ( { model | editing = { currentEditing | editState = Nothing } }, Cmd.none )
+
+                            else
+                                ( model, Cmd.none )
+
+                        Nothing ->
+                            ( model, Cmd.none )
+
+                Err err ->
+                    case model.editing.editState of
+                        Just (EditingField state) ->
+                            if state.entityType == "workspace" && state.requestId == Just requestId then
+                                let
+                                    message = Api.apiErrorToUserMessage "Failed to update workspace" err
+                                    currentEditing = model.editing
+                                    restoredEditing = { currentEditing | editState = Just (EditingField { state | requestId = Nothing, workspaceGeneration = Nothing, error = Just message }) }
+                                    restored =
+                                        { model | editing = restoredEditing }
+                                in
+                                addToast Error message restored
+
+                            else
+                                ( model, Cmd.none )
+
+                        Nothing ->
+                            ( model, Cmd.none )
 
         ClearPendingMutation entityId ->
             ( updateMutationsModel
@@ -250,6 +294,21 @@ refreshReadinessCaches model =
 updateMutationsModel : (MutationsModel -> MutationsModel) -> Model -> Model
 updateMutationsModel fn model =
     { model | mutations = fn model.mutations }
+
+
+workspaceGenerationIsCurrent : { a | workspaceGeneration : Maybe Int } -> String -> Model -> Bool
+workspaceGenerationIsCurrent state workspaceId model =
+    case state.workspaceGeneration of
+        Just submittedGeneration ->
+            submittedGeneration
+                == (Dict.get
+                        ("workspace:" ++ workspaceId ++ "|entity:workspace:" ++ workspaceId)
+                        model.webSocket.targetGenerations
+                        |> Maybe.withDefault 0
+                   )
+
+        Nothing ->
+            False
 
 
 memoryCreationTargetEntityId : EditingModel -> Maybe String

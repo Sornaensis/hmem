@@ -632,6 +632,9 @@ type EditState
         , field : String
         , value : String
         , original : String
+        , requestId : Maybe String
+        , workspaceGeneration : Maybe Int
+        , error : Maybe String
         }
 
 
@@ -754,7 +757,7 @@ type Msg
     | ProjectUpdated (Result Api.ApiError Api.Project)
     | TaskUpdated (Result Api.ApiError Api.TaskMutationResult)
     | MemoryUpdated (Result Http.Error Api.Memory)
-    | WorkspaceUpdated (Result Http.Error Api.Workspace)
+    | WorkspaceUpdated String (Result Api.ApiError Api.Workspace)
     | WorkspaceCreated (Result Http.Error Api.Workspace)
     | WorkspaceDeleted String (Result Http.Error ())
     | WorkspacePurged String (Result Http.Error ())

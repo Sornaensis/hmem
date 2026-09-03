@@ -7,6 +7,7 @@ import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Foldable (toList)
 import Data.List (sort)
@@ -15,7 +16,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.UUID (UUID)
 import Network.HTTP.Client (Manager, closeManager, defaultManagerSettings, newManager)
-import Network.HTTP.Types (methodDelete, methodGet, methodPost, methodPut, status200, status204, status400, status401, status403, status404, status409, status500, statusCode)
+import Network.HTTP.Types (Status, methodDelete, methodGet, methodPost, methodPut, status200, status204, status400, status401, status403, status404, status409, status500, statusCode)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
 import System.Directory (doesFileExist)
@@ -25,6 +26,7 @@ import Test.Hspec
 import HMem.Config qualified as Config
 import HMem.DB.ChangeStream (ChangeScope(..), OutboxRecord(..), listOutboxAfter)
 import HMem.DB.Pool qualified as DBPool
+import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), createTestWorkspace, withTestEnv)
 import HMem.MCP.Server (handleStdioLine)
 import HMem.MCP.Tools
@@ -36,6 +38,48 @@ import HMem.Types (CreateObservation(..), ObservationSubject(..), SubjectKind(..
 
 spec :: Spec
 spec = do
+  describe "Workspace rename MCP registry" $ do
+    it "advertises a strict name-only workspace_update call" $ do
+      toolNames `shouldContain` ["workspace_update"]
+      schemaProperties "workspace_update" `shouldBe` ["name", "workspace_id"]
+      schemaRequired "workspace_update" `shouldBe` ["workspace_id", "name"]
+      schemaAdditionalProperties "workspace_update" `shouldBe` Just (Bool False)
+      parseToolCall "workspace_update" (object ["workspace_id" .= workspaceId, "name" .= ("Renamed" :: Text)]) `shouldSatisfy` isRight
+      parseToolCall "workspace_update" (object ["workspace_id" .= workspaceId, "name" .= ("Renamed" :: Text), "workspace_type" .= ("repository" :: Text)]) `shouldSatisfy` isLeft
+    it "forwards a strict PUT body and correlated request id" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        result <- call manager base "workspace_update" (object ["workspace_id" .= workspaceId, "name" .= ("Renamed" :: Text)])
+        jsonField "action" result `shouldBe` Just (String "updated")
+        jsonField "summary" result `shouldSatisfy` maybe False (hasFields ["id", "name"])
+      [request] <- readTVarIO requests
+      request.requestMethod `shouldBe` methodPut
+      request.requestPath `shouldBe` "/api/v1/workspaces/11111111-2222-3333-4444-555555555555"
+      decode request.requestBody `shouldBe` Just (object ["name" .= ("Renamed" :: Text)])
+      request.requestId `shouldSatisfy` maybe False (not . BS.null)
+    it "defers workspace name validation to the authorized REST boundary" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base ->
+        forM_ ["   ", T.replicate 1025 "x"] $ \workspaceName -> do
+          response <- handleToolCall manager base Nothing (object ["name" .= ("workspace_update" :: Text), "arguments" .= object ["workspace_id" .= workspaceId, "name" .= workspaceName]])
+          response `shouldNotSatisfy` isMcpError
+      readTVarIO requests >>= \observed -> length observed `shouldBe` 2
+    it "surfaces structured workspace REST 400, 403, and 404 messages as MCP errors" $
+      forM_ [(status400, "Workspace name cannot be blank."), (status403, "Workspace edit permission is required."), (status404, "Workspace not found.")] $ \(status, message) ->
+        withWorkspaceStructuredStatusMock status message $ \manager base -> do
+          response <- handleToolCall manager base Nothing (object ["name" .= ("workspace_update" :: Text), "arguments" .= object ["workspace_id" .= workspaceId, "name" .= ("Valid workspace name" :: Text)]])
+          response `shouldSatisfy` isMcpError
+          response `shouldSatisfy` contains ("[HTTP_" <> T.pack (show (statusCode status)) <> "] " <> message)
+    it "returns stable errors through the real deployed-mode application proxy" $
+      forM_ renameProxyErrorCases $ \(principal, useMissingWorkspace, workspaceName, expected) ->
+        withRenameProxyApp principal $ \workspaceId' manager base -> do
+          let targetWorkspaceId = if useMissingWorkspace then missingWorkspaceId else workspaceId'
+          response <- handleToolCall manager base Nothing (object
+            [ "name" .= ("workspace_update" :: Text)
+            , "arguments" .= object ["workspace_id" .= targetWorkspaceId, "name" .= workspaceName]
+            ])
+          response `shouldSatisfy` isMcpError
+          response `shouldSatisfy` contains expected
   describe "Observation MCP registry" $ do
     it "advertises and parses every Observation capability, with no removed memory, link, or context tools" $ do
       toolNames `shouldContain` ["observation_create", "observation_get", "observation_update", "observation_list", "observation_match", "observation_delete", "observation_set_embedding", "observation_similar"]
@@ -328,7 +372,7 @@ spec = do
         result <- call manager base "search" (object ["workspace_id" .= workspaceId, "entity_types" .= (["observation"] :: [Text]), "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha])
         jsonField "observations" result `shouldSatisfy` maybe False (arrayFirst (hasFields ["id", "subject_kind", "subject", "git_sha", "content_preview"]))
         result `shouldSatisfy` not . contains "linked_memories"
-      [RequestInfo _ _ _ body _ _ _] <- readTVarIO requests
+      [RequestInfo _ _ _ body _ _ _ _] <- readTVarIO requests
       decode body `shouldSatisfy` maybe False (\value -> hasFields ["subject_kind", "subject", "git_sha"] value)
 
     it "forwards list filters and gives an exact next offset only when the server reports another page" $ do
@@ -580,6 +624,7 @@ toolSamples :: [(Text, Value)]
 toolSamples =
   [ ("workspace_list", object [])
   , ("workspace_register", object ["name" .= ("Repository" :: Text)])
+  , ("workspace_update", object ["workspace_id" .= workspaceId, "name" .= ("Renamed workspace" :: Text)])
   , ("search", object ["workspace_id" .= workspaceId, "entity_types" .= (["observation"] :: [Text]), "offset" .= (0 :: Int)])
   , ("observation_create", observationArguments)
   , ("observation_get", object ["observation_id" .= observationId])
@@ -623,6 +668,11 @@ schemaRequired :: Text -> [Text]
 schemaRequired name = case [schema | Object tool <- toolDefinitions, KM.lookup "name" tool == Just (String name), Just schema <- [KM.lookup "inputSchema" tool]] of
   Object schema : _ -> case KM.lookup "required" schema of Just (Array fields) -> [field | String field <- toList fields]; _ -> []
   _ -> []
+
+schemaAdditionalProperties :: Text -> Maybe Value
+schemaAdditionalProperties name = case [schema | Object tool <- toolDefinitions, KM.lookup "name" tool == Just (String name), Just schema <- [KM.lookup "inputSchema" tool]] of
+  Object schema : _ -> KM.lookup "additionalProperties" schema
+  _ -> Nothing
 
 toolDescription :: Text -> Maybe Text
 toolDescription name = case [description | Object tool <- toolDefinitions, KM.lookup "name" tool == Just (String name), Just (String description) <- [KM.lookup "description" tool]] of description : _ -> Just description; [] -> Nothing
@@ -776,6 +826,7 @@ data RequestInfo = RequestInfo
   , authorization :: Maybe ByteString
   , requestChangeCause :: Maybe ByteString
   , requestMcpProvenance :: Maybe ByteString
+  , requestId :: Maybe ByteString
   }
 
 withMock :: TVar [RequestInfo] -> (Manager -> String -> IO a) -> IO a
@@ -811,6 +862,54 @@ trustedMcpConfig =
         }
     }
 
+-- These cases use the complete WAI application in deployed mode, not a
+-- hand-written JSON mock.  The injected principals model the three distinct
+-- authorization outcomes while keeping the MCP HTTP proxy as the client
+-- under test.
+renameProxyErrorCases :: [(Principal, Bool, Text, Text)]
+renameProxyErrorCases =
+  [ (renameSuperadmin, False, "   ", "[HTTP_400] name must not be empty")
+  , (renameUnprivileged, False, "authorized-shape", "[HTTP_403] Workspace edit permission is required.")
+  , (renameSuperadmin, True, "authorized-shape", "[HTTP_404] Workspace not found.")
+  ]
+
+renameSuperadmin, renameUnprivileged :: Principal
+renameSuperadmin = Principal
+  { actorType = ActorBot
+  , actorId = "rename-proxy-superadmin"
+  , actorLabel = "Rename proxy superadmin"
+  , authority = PrincipalSyntheticLocalSuperadmin
+  }
+renameUnprivileged = Principal
+  { actorType = ActorBot
+  , actorId = "rename-proxy-unprivileged"
+  , actorLabel = "Rename proxy unprivileged"
+  , authority = PrincipalNoAuthority
+  }
+
+missingWorkspaceId :: UUID
+missingWorkspaceId = read "00000000-0000-0000-0000-000000000001"
+
+withRenameProxyApp :: Principal -> (UUID -> Manager -> String -> IO a) -> IO a
+withRenameProxyApp principal action =
+  withTestEnv $ \env -> do
+    tracker <- newAccessTracker env.pool 3600
+    wsState <- newWSState
+    let cfg = Config.defaultConfig
+          { Config.auth = Config.defaultConfig.auth
+              { Config.mode = Config.AuthModeDeployed
+              , Config.enabled = False
+              }
+          }
+        asPrincipal application request respond =
+          withPrincipalContext (Just principal) (application request respond)
+    app <- mkAppWithChangeStream cfg.changeStream asPrincipal cfg.auth cfg.cors cfg.rateLimit
+      env.pool tracker wsState Nothing True
+    workspace <- createTestWorkspace env "workspace-rename-mcp-proxy-errors"
+    testWithApplication (pure app) $ \port ->
+      bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+        action workspace.id manager ("http://127.0.0.1:" <> show port)
+
 withEnvironment :: String -> String -> IO a -> IO a
 withEnvironment name value = bracket acquire restore . const
   where
@@ -824,7 +923,7 @@ withEnvironment name value = bracket acquire restore . const
 mockApp :: TVar [RequestInfo] -> Wai.Application
 mockApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
   case request.requestMethod of
     method | method == methodDelete && "/dependencies/" `T.isInfixOf` TE.decodeUtf8 request.rawPathInfo -> respond $ Wai.responseLBS status200 [("Content-Type", "application/json")] (encode (responseFor request.requestMethod request.rawPathInfo request.rawQueryString body))
     method | method == methodDelete -> respond $ Wai.responseLBS status204 [] ""
@@ -844,10 +943,20 @@ withStatusMock requests action = testWithApplication (pure (statusApp requests))
   bracket (newManager defaultManagerSettings) closeManager $ \manager ->
     action manager ("http://127.0.0.1:" <> show port)
 
+withWorkspaceStructuredStatusMock :: Status -> Text -> (Manager -> String -> IO a) -> IO a
+withWorkspaceStructuredStatusMock status message action =
+  testWithApplication (pure (workspaceStructuredStatusApp status message)) $ \port ->
+    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+      action manager ("http://127.0.0.1:" <> show port)
+
+workspaceStructuredStatusApp :: Status -> Text -> Wai.Application
+workspaceStructuredStatusApp status message _ respond =
+  respond $ Wai.responseLBS status [("Content-Type", "application/json")] (encode (object ["error" .= ("workspace_error" :: Text), "message" .= message]))
+
 statusApp :: TVar [RequestInfo] -> Wai.Application
 statusApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
   let status
         | request.rawPathInfo == "/api/v1/observations/match" = status500
         | request.rawPathInfo == "/api/v1/observations/similar" = status400
@@ -869,6 +978,7 @@ responseFor method path rawQuery body
   | method == methodPost && path == "/api/v1/observations" = observation
   | method == methodPost && path == "/api/v1/projects" = project
   | method == methodPost && path == "/api/v1/tasks" = task
+  | method == methodPut && path == "/api/v1/workspaces/11111111-2222-3333-4444-555555555555" = object ["id" .= workspaceId, "name" .= ("Renamed" :: Text), "workspace_type" .= ("repository" :: Text)]
   | path == "/api/v1/observations" && "offset=2" `T.isInfixOf` TE.decodeUtf8 rawQuery = object ["items" .= [observation], "has_more" .= False]
   | path == "/api/v1/observations" = object ["items" .= [observation, observation], "has_more" .= True]
   | path == "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" = observation

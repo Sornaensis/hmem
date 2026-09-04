@@ -52,6 +52,7 @@ library
       HMem.Server.ChangeStream
       HMem.Server.CtlMigrate
       HMem.Server.CtlPaths
+      HMem.Server.CtlPgvector
       HMem.Server.Event
       HMem.Server.Logging
       HMem.Server.LogRotation
@@ -395,6 +396,7 @@ test-suite hmem-server-test
       HMem.Server.ChangeStreamSpec
       HMem.Server.CtlMigrateSpec
       HMem.Server.CtlPathsSpec
+      HMem.Server.CtlPgvectorSpec
       HMem.Server.DeployedSandboxSpec
       HMem.Server.KeycloakHarness
       HMem.Server.KeycloakHarnessSpec

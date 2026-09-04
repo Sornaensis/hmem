@@ -71,6 +71,9 @@ spec = describe "hmem-ctl pgvector CLI" $ do
       helpText `shouldSatisfy` isInfixOf "1 = connection"
       helpText `shouldSatisfy` isInfixOf "2 = status completed successfully"
       helpText `shouldSatisfy` isInfixOf "status is read-only"
+      helpText `shouldSatisfy` isInfixOf "cannot install the PostgreSQL pgvector package"
+      helpText `shouldSatisfy` isInfixOf "replay hmem migrations"
+      helpText `shouldSatisfy` isInfixOf "schedule a change window"
 
   describe "dispatch and rendering" $ do
     it "dispatches status without invoking enable and reports exact human fields" $ do

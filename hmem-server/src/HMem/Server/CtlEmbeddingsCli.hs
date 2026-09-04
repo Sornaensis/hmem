@@ -95,6 +95,10 @@ embeddingsCommandInfo wrap = info
       , "exit 0 means every record applied or was already satisfied;"
       , "exit 1 means setup/I/O/capability failure; exit 2 means one or more records were rejected."
       , "hmem never invokes an embedding provider."
+      , "The external producer must return exactly 1536 finite numbers from one consistent"
+      , "model revision, preprocessing, and vector space for both stored and query vectors."
+      , "Content edits clear embeddings; export missing rows to retry, or use export --all"
+      , "when replacing the embedding model for the complete corpus."
       ])
   )
 

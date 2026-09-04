@@ -414,6 +414,7 @@ test-suite hmem-server-test
       HMem.Server.KeycloakHarnessSpec
       HMem.Server.LocalSandboxSpec
       HMem.Server.LogRotationSpec
+      HMem.Server.PgvectorEmbeddingWorkflowSpec
       HMem.Server.TestHarness
       SpecHook
       Paths_hmem_server

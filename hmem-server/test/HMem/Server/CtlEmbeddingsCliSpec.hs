@@ -59,6 +59,10 @@ spec = describe "hmem-ctl embeddings CLI" $ do
       helpText `shouldSatisfy` isInfixOf "commits each"
       helpText `shouldSatisfy` isInfixOf "record independently"
       helpText `shouldSatisfy` isInfixOf "never invokes an embedding"
+      helpText `shouldSatisfy` isInfixOf "exactly 1536 finite numbers"
+      helpText `shouldSatisfy` isInfixOf "model revision, preprocessing, and vector space"
+      helpText `shouldSatisfy` isInfixOf "Content edits clear embeddings"
+      helpText `shouldSatisfy` isInfixOf "export --all"
       helpText `shouldSatisfy` isInfixOf "exit 2"
 
   describe "stream dispatch, rendering, and exit behavior" $ do

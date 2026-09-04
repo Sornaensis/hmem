@@ -89,6 +89,9 @@ pgvectorCommandInfo wrap = info
       , "1 = connection, inspection, refusal, permission, or provisioning error;"
       , "2 = status completed successfully but the configured database is not ready."
       , "status is read-only; enable performs only the reported pgvector schema changes."
+      , "enable cannot install the PostgreSQL pgvector package or replay hmem migrations."
+      , "Provisioning is atomic, but schema/index work can block Observation writes;"
+      , "take a backup and schedule a change window before enabling a production database."
       ])
   )
 

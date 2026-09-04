@@ -345,30 +345,67 @@ docker compose --profile admin run --rm migrate
 If migration validation fails, check the `postgres` and one-shot `migrate` logs
 before restarting the app.
 
-### V020 destructive migration warning
-
-**Back up before applying V020.** V020 permanently deletes all legacy Memory rows and their content-bearing audit history; it does not convert or export that data and cannot be rolled back. Schedule a change window, preserve any data you must retain outside hmem before the migration, and upgrade every REST, MCP, and web UI client first. Old Memory-era clients are incompatible with the Observation-only contract after V020.
-
 ## pgvector optionality
 
-The default `postgres:17-bookworm` image does not provide pgvector. hmem remains
-usable without it: full-text search, tasks, projects, auth, and the web UI work,
-while embedding/similarity endpoints return unavailable responses and the server
-logs `pgvector: not installed (similarity search disabled)`.
+The default `postgres:17-bookworm` image does not provide the pgvector package.
+hmem remains usable without it: Observations, full-text search, tasks, projects,
+auth, REST/MCP non-vector operations, and the web UI continue to work. Embedding
+and similarity operations report that the optional capability is unavailable.
 
-For new deployments that need embedding similarity, set the image before the
-first migration:
+The PostgreSQL package/control file and the extension/schema in an individual
+database are separate layers. To use similarity with the Compose database,
+select a PostgreSQL image that contains pgvector for the same PostgreSQL major
+version, then start or recreate the `postgres` service while retaining its
+volume. For the example Compose version:
 
 ```env
 POSTGRES_IMAGE=pgvector/pgvector:pg17
 ```
 
-Then run `docker compose up --build`. When pgvector is installed, V020 adds `observations.embedding` and its vector index; without the extension, neither is created.
+Inspect the configured database before making a change:
 
-If you already initialized the database without pgvector, changing the postgres
-image later is not enough because the initial migration has already been marked
-applied. Use a fresh volume for new data, or apply an operator-reviewed database
-change that adds the extension, embedding column, and index.
+```bash
+docker compose up -d postgres
+docker compose run --rm hmem hmem-ctl pgvector status
+```
+
+A not-ready status exits 2 and provides a `next action`. If the package is
+available and the reported state is safely provisionable, back up a production
+database, schedule a change window, and run:
+
+```bash
+docker compose run --rm hmem hmem-ctl pgvector enable
+docker compose run --rm hmem hmem-ctl pgvector status
+```
+
+`enable` uses the database selected by the normal hmem container configuration.
+It cannot install pgvector into a PostgreSQL image or host, start/stop an
+externally managed server, or replay hmem migrations. It installs the database
+extension when needed and atomically adds and verifies the nullable
+`vector(1536)` Observation column and exact HNSW cosine index. A repeat run is a
+verified no-op. Its regular schema and index creation can block Observation
+writes until the transaction commits, so size the maintenance window for the
+existing table and load.
+
+The configured database role must be permitted to create the extension and
+alter `public.observations`. Incompatible existing extensions, tables, columns,
+or indexes are reported as drift and are not dropped or rewritten. Review the
+reported object and PostgreSQL logs, repair it under normal operator change
+control, then rerun status/enable. A failed or refused transaction commits no
+partial hmem pgvector changes.
+
+For externally managed PostgreSQL, its administrator owns package installation,
+server lifecycle, backups, and database privileges. Point hmem's container
+configuration at that database and run the same `hmem-ctl pgvector` commands in
+the hmem container; they do not invoke native process management. Native Windows
+installations likewise operate on the database selected by normal hmem
+configuration.
+
+pgvector stores, indexes, and compares vectors; it does not make embeddings, and
+hmem does not invoke a model. See
+[pgvector and embedding operations](database.md#pgvector-and-embedding-operations)
+for the external-producer, NDJSON backfill/refresh, REST, MCP, and model-change
+workflow.
 
 ## Healthchecks, logs, and persistence
 
@@ -489,9 +526,17 @@ started against an unmigrated or different database.
 
 ### `pgvector extension is not installed`
 
-This is expected with the default postgres image. Use `POSTGRES_IMAGE=pgvector/pgvector:pg17`
-for new deployments that require embedding similarity, or leave similarity
-features disabled.
+This is expected with the default PostgreSQL image and hmem remains usable
+without vector features. Diagnose the package and database layers explicitly:
+
+```bash
+docker compose run --rm hmem hmem-ctl pgvector status
+```
+
+If it reports `package_missing`, select/install a matching pgvector-enabled
+PostgreSQL package or image first. If the package is available, follow the
+reported `next action` and use `hmem-ctl pgvector enable`; do not recreate a
+data volume merely to add this optional capability.
 
 ### Healthcheck is unhealthy
 

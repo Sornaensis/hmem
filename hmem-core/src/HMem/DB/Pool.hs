@@ -85,7 +85,7 @@ data DBException
   = DBUniqueViolation Text
   | DBForeignKeyViolation Text
   | DBCheckViolation Text
-  | DBCycleDetected Text
+  | DBTaskDependencyCycle Text
   | DBLifecycleViolation Text Text (Maybe Text) (Maybe Text)
   | DBStatementTimeout
   | DBSerializationFailure
@@ -111,7 +111,7 @@ classifyError sessErr = classifyCmd cmdErr
       | sqlstate == "23505" = DBUniqueViolation (decode msg)
       | sqlstate == "23503" = DBForeignKeyViolation (decode msg)
       | sqlstate == "23514" = DBCheckViolation (decode msg)
-      | sqlstate == "P0001" = DBCycleDetected (decode msg)
+      | sqlstate == "HD301" = DBTaskDependencyCycle (decode msg)
        | sqlstate == "57014" = DBStatementTimeout
        | sqlstate == "40001" = DBSerializationFailure
        | sqlstate == "HM501" = DBResyncUnauthorized

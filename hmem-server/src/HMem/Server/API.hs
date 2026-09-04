@@ -11,6 +11,7 @@ module HMem.Server.API
   , ObservationEmbedding(..)
   , CreateObservationRequest(..)
   , ObservationMatchRequest(..)
+  , LinkDependencyRequest(..)
   , UpdateWorkspaceRequest(..)
   , server
   , serverWithChangeStream
@@ -168,7 +169,7 @@ type TaskAPI =
    :<|> Capture "taskId" UUID :> "dependencies" :> QueryParam "limit" Int :> QueryParam "offset" Int
           :> Description "Lists dependency card summaries on demand. Pagination defaults to 50, is capped at 100, and orders by lower(name), id."
           :> Get '[JSON] TaskDependencyPage
-   :<|> Capture "taskId" UUID :> "dependencies" :> ReqBody '[JSON] LinkDependency :> Post '[JSON] DependencyMutationResult
+   :<|> Capture "taskId" UUID :> "dependencies" :> ReqBody '[TolerantJSON] LinkDependencyRequest :> Post '[JSON] DependencyMutationResult
    :<|> Capture "taskId" UUID :> "dependencies" :> Capture "dependsOnId" UUID :> Delete '[JSON] DependencyMutationResult
 
 type AuditAPI =
@@ -206,6 +207,10 @@ handleDBErrors action = do
         DBUniqueViolation{} -> badRequest "conflict" "Resource already exists"
         DBForeignKeyViolation{} -> badRequest "invalid_reference" "Referenced resource does not exist"
         DBCheckViolation{} -> badRequest "invalid_request" "Request violates a data constraint"
+        -- The task-dependency trigger is the authoritative cycle guard. Its
+        -- rejection is a caller-correctable graph validation error, not an
+        -- unexpected database failure.
+        DBTaskDependencyCycle{} -> badRequest "dependency_cycle" "Task dependency would create a cycle"
         DBCapabilityUnavailable{} -> err503 { errBody = Aeson.encode (object ["error" .= ("capability_unavailable" :: Text), "message" .= ("pgvector embedding support is unavailable" :: Text)]) }
         DBStatementTimeout -> err504 { errBody = Aeson.encode (object ["error" .= ("timeout" :: Text)]) }
         _ -> err500 { errBody = Aeson.encode (object ["error" .= ("internal" :: Text)]) }
@@ -215,6 +220,7 @@ badRequest kind message = err400 { errBody = Aeson.encode (object ["error" .= ki
 
 newtype CreateObservationRequest = CreateObservationRequest (Either Text CreateObservation)
 newtype ObservationMatchRequest = ObservationMatchRequest (Either Text ObservationMatchQuery)
+newtype LinkDependencyRequest = LinkDependencyRequest (Either Text LinkDependency)
 newtype UpdateWorkspaceRequest = UpdateWorkspaceRequest (Either Text UpdateWorkspace)
 
 -- Keep malformed bytes as a validation result so workspace authorization and
@@ -226,6 +232,14 @@ instance Accept TolerantJSON where
 
 instance MimeUnrender TolerantJSON UpdateWorkspaceRequest where
   mimeUnrender _ body = Right $ UpdateWorkspaceRequest $
+    case Aeson.eitherDecode body of
+      Left message -> Left (Text.pack message)
+      Right value -> case Aeson.fromJSON value of
+        Aeson.Error message -> Left (Text.pack message)
+        Aeson.Success parsed -> Right parsed
+
+instance MimeUnrender TolerantJSON LinkDependencyRequest where
+  mimeUnrender _ body = Right $ LinkDependencyRequest $
     case Aeson.eitherDecode body of
       Left message -> Left (Text.pack message)
       Right value -> case Aeson.fromJSON value of
@@ -767,10 +781,15 @@ tasks pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overvie
     _ <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleRead
     reject (validateNavigationPage limit offset)
     handleDBErrors $ Overview.listTaskDependencyPage pool taskId (fromMaybe 50 limit) (fromMaybe 0 offset)
-  addDependencyH taskId input = mutateDependency "add" taskId input.dependsOnId Task.addDependencyWithSnapshots
+  addDependencyH taskId (LinkDependencyRequest requestBody) = do
+    taskWorkspace <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleEdit
+    input <- decodeRequest requestBody
+    mutateDependencyForTask "add" taskId taskWorkspace input.dependsOnId Task.addDependencyWithSnapshots
   removeDependencyH taskId dependsOnId = mutateDependency "remove" taskId dependsOnId Task.removeDependencyWithSnapshots
   mutateDependency action taskId dependsOnId mutate = do
     taskWorkspace <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleEdit
+    mutateDependencyForTask action taskId taskWorkspace dependsOnId mutate
+  mutateDependencyForTask action taskId taskWorkspace dependsOnId mutate = do
     dependencyWorkspace <- requireEntity pool Auth.EntityTask dependsOnId Auth.WorkspaceRoleRead
     when (taskId == dependsOnId) $ reject ["a task cannot depend on itself"]
     when (taskWorkspace /= dependencyWorkspace) $ reject ["task dependencies must belong to the same workspace"]

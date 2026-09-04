@@ -39,6 +39,7 @@ data-files:
     migrations/V023__change_stream_snapshot_bindings.sql
     migrations/V024__change_stream_snapshot_profiles.sql
     migrations/V025__workspace_rename_change_stream.sql
+    migrations/V026__task_dependency_cycle_sqlstate.sql
 
 library
   exposed-modules:

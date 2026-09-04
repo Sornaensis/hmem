@@ -344,7 +344,7 @@ BEGIN
     )
     SELECT 1 FROM chain WHERE id = NEW.task_id
   ) THEN
-    RAISE EXCEPTION 'Cycle detected in task dependencies';
+    RAISE EXCEPTION 'Cycle detected in task dependencies' USING ERRCODE = 'HD301';
   END IF;
   RETURN NEW;
 END;

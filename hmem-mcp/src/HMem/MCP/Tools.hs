@@ -561,9 +561,16 @@ mcpError message = object ["content" .= [object ["type" .= ("text" :: Text), "te
 
 httpError :: Int -> BL.ByteString -> Value
 httpError code body =
-  mcpError ("[HTTP_" <> T.pack (show code) <> "] " <> structuredMessage)
+  mcpError ("[HTTP_" <> T.pack (show code) <> "] " <> structuredMessage <> structuredPayload)
   where
     fallback = T.take 1000 (TE.decodeUtf8With (\_ _ -> Just '?') (BL.toStrict body))
-    structuredMessage = case eitherDecode body of
+    decodedPayload = eitherDecode body :: Either String Value
+    structuredMessage = case decodedPayload of
       Right value -> fromMaybe fallback (textField "message" value)
       Left _ -> fallback
+    -- MCP tool results carry text content, so retain the server's complete
+    -- structured error payload alongside the HTTP status instead of reducing
+    -- a machine-readable REST error to an opaque message.
+    structuredPayload = case decodedPayload of
+      Right value -> "\n" <> TE.decodeUtf8 (BL.toStrict (encode value))
+      Left _ -> ""

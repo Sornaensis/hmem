@@ -203,6 +203,18 @@ spec = do
       removeRequest.requestPath `shouldBe` "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/dependencies/11111111-2222-3333-4444-555555555555"
       jsonRpcRequest.requestPath `shouldBe` "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/dependencies"
 
+    it "preserves structured dependency-cycle errors through the MCP and JSON-RPC bridges" $
+      withDependencyCycleMock $ \manager base -> do
+        let arguments = object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("add" :: Text)]
+        response <- handleToolCall manager base Nothing (object ["name" .= ("task_dependency" :: Text), "arguments" .= arguments])
+        response `shouldSatisfy` isMcpError
+        response `shouldSatisfy` contains "[HTTP_400] Task dependency would create a cycle"
+        response `shouldSatisfy` contains "dependency_cycle"
+        initialized <- newTVarIO True
+        workspaceContext <- newTVarIO Nothing
+        jsonRpcToolCall manager base initialized workspaceContext "task_dependency" arguments
+          >>= (`shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "dependency_cycle" value))
+
     it "keeps the advertised registry parser and dispatch reachability in lockstep" $ do
       sort toolNames `shouldBe` sort (serverOwnedTools <> map fst toolSamples)
       mapM_ (\(name, arguments) -> parseToolCall name arguments `shouldSatisfy` isRight) toolSamples
@@ -948,6 +960,16 @@ withWorkspaceStructuredStatusMock status message action =
   testWithApplication (pure (workspaceStructuredStatusApp status message)) $ \port ->
     bracket (newManager defaultManagerSettings) closeManager $ \manager ->
       action manager ("http://127.0.0.1:" <> show port)
+
+withDependencyCycleMock :: (Manager -> String -> IO a) -> IO a
+withDependencyCycleMock action =
+  testWithApplication (pure dependencyCycleApp) $ \port ->
+    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+      action manager ("http://127.0.0.1:" <> show port)
+
+dependencyCycleApp :: Wai.Application
+dependencyCycleApp _ respond = respond $ Wai.responseLBS status400 [("Content-Type", "application/json")]
+  (encode (object ["error" .= ("dependency_cycle" :: Text), "message" .= ("Task dependency would create a cycle" :: Text)]))
 
 workspaceStructuredStatusApp :: Status -> Text -> Wai.Application
 workspaceStructuredStatusApp status message _ respond =

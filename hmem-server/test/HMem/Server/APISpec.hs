@@ -2,7 +2,7 @@ module HMem.Server.APISpec (spec) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (poll, wait, withAsync)
-import Control.Exception (onException)
+import Control.Exception (bracket_, onException)
 import Control.Monad (forM_, void)
 import Data.Aeson (Value(..), decode, encode, object, toJSON, (.=))
 import Data.Aeson.Key qualified as Key
@@ -336,6 +336,90 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       add dependent.id >>= (\response -> responseStatus response `shouldBe` status400)
       add otherDependency.id >>= (\response -> responseStatus response `shouldBe` status400)
       add (read "00000000-0000-0000-0000-000000000001" :: UUID) >>= (\response -> responseStatus response `shouldBe` status404)
+
+    it "returns a structured dependency_cycle error without changing a multi-hop graph" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "task-dependency-cycle"
+      let create title = postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "title" .= (title :: T.Text)])
+          taskPath taskId = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show taskId))
+          add taskId dependencyId = postJson app (taskPath taskId <> "/dependencies") (object ["depends_on_id" .= dependencyId])
+          overview taskId = do
+            response <- request app methodGet (taskPath taskId <> "/overview") ""
+            responseStatus response `shouldBe` status200
+            case decode (responseBody response) :: Maybe TaskOverview of
+              Just value -> pure value
+              Nothing -> expectationFailure "expected task overview response" >> fail "unreachable"
+      responseA <- create "A"
+      responseB <- create "B"
+      responseC <- create "C"
+      let Just taskA = decode (responseBody responseA) :: Maybe Task
+          Just taskB = decode (responseBody responseB) :: Maybe Task
+          Just taskC = decode (responseBody responseC) :: Maybe Task
+      add taskA.id taskB.id >>= (\response -> responseStatus response `shouldBe` status200)
+      add taskB.id taskC.id >>= (\response -> responseStatus response `shouldBe` status200)
+      before <- mapM overview [taskA.id, taskB.id, taskC.id]
+      rejected <- add taskC.id taskA.id
+      responseStatus rejected `shouldBe` status400
+      let Just errorBody = decode (responseBody rejected) :: Maybe Value
+      jsonField "error" errorBody `shouldBe` Just (String "dependency_cycle")
+      jsonField "message" errorBody `shouldBe` Just (String "Task dependency would create a cycle")
+      after <- mapM overview [taskA.id, taskB.id, taskC.id]
+      after `shouldBe` before
+
+    it "does not translate unrelated generic P0001 failures as dependency cycles" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "task-dependency-generic-p0001"
+      let create title = postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "title" .= (title :: T.Text)])
+          taskPath taskId = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show taskId))
+      targetResponse <- create "target"
+      dependencyResponse <- create "dependency"
+      let Just target = decode (responseBody targetResponse) :: Maybe Task
+          Just dependency = decode (responseBody dependencyResponse) :: Maybe Task
+          runCycleTriggerSql = DBPool.runSession env.pool . Session.sql
+      bracket_
+        (runCycleTriggerSql "CREATE OR REPLACE FUNCTION hmem_check_task_dep_cycle() RETURNS TRIGGER AS $$ BEGIN RAISE EXCEPTION 'unrelated generic failure'; END; $$ LANGUAGE plpgsql;")
+        (runCycleTriggerSql "CREATE OR REPLACE FUNCTION hmem_check_task_dep_cycle() RETURNS TRIGGER AS $$ BEGIN IF EXISTS (WITH RECURSIVE chain AS (SELECT depends_on_id AS id FROM task_dependencies WHERE task_id = NEW.depends_on_id UNION ALL SELECT td.depends_on_id FROM task_dependencies td JOIN chain c ON td.task_id = c.id) SELECT 1 FROM chain WHERE id = NEW.task_id) THEN RAISE EXCEPTION 'Cycle detected in task dependencies' USING ERRCODE = 'HD301'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql;")
+        $ do
+          rejected <- postJson app (taskPath target.id <> "/dependencies") (object ["depends_on_id" .= dependency.id])
+          responseStatus rejected `shouldBe` Network.HTTP.Types.status500
+          let Just errorBody = decode (responseBody rejected) :: Maybe Value
+          jsonField "error" errorBody `shouldBe` Just (String "internal")
+      added <- postJson app (taskPath target.id <> "/dependencies") (object ["depends_on_id" .= dependency.id])
+      responseStatus added `shouldBe` status200
+
+    it "authorizes dependency targets before decoding or disclosing dependency validation" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "task-dependency-auth-target"
+        foreignWorkspace <- createTestWorkspace ctx.deployedEnv "task-dependency-auth-foreign"
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        editorId <- createDeployedSandboxUser ctx.deployedEnv False False
+        superadminId <- createDeployedSandboxUser ctx.deployedEnv False True
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+          (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+          (Auth.UpsertWorkspaceMembership editorId Auth.WorkspaceRoleEdit) Nothing
+        readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Dependency reader"
+        editorToken <- issueDeployedSandboxPAT ctx.deployedEnv editorId "Dependency editor"
+        superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Dependency superadmin"
+        let headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            create workspaceId title = requestWithHeaders ctx.deployedApplication methodPost "/api/v1/tasks" (headers superadminToken)
+              (encode (object ["workspace_id" .= workspaceId, "title" .= (title :: T.Text)]))
+            taskPath taskId = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show taskId))
+            addRaw taskId requestHeaders body = requestWithHeaders ctx.deployedApplication methodPost (taskPath taskId <> "/dependencies") requestHeaders body
+        targetResponse <- create workspace.id "target"
+        foreignResponse <- create foreignWorkspace.id "foreign"
+        let Just target = decode (responseBody targetResponse) :: Maybe Task
+            Just foreignTask = decode (responseBody foreignResponse) :: Maybe Task
+            malformed = "{"
+            selfBody = encode (object ["depends_on_id" .= target.id])
+            crossBody = encode (object ["depends_on_id" .= foreignTask.id])
+        addRaw target.id [] malformed >>= (\response -> responseStatus response `shouldBe` status401)
+        addRaw target.id (headers readerToken) malformed >>= (\response -> responseStatus response `shouldBe` status403)
+        addRaw target.id (headers readerToken) selfBody >>= (\response -> responseStatus response `shouldBe` status403)
+        addRaw target.id (headers readerToken) crossBody >>= (\response -> responseStatus response `shouldBe` status403)
+        addRaw (read "00000000-0000-0000-0000-000000000001" :: UUID) (headers editorToken) malformed
+          >>= (\response -> responseStatus response `shouldBe` status404)
+        addRaw target.id (headers editorToken) malformed >>= expectValidationError
+        addRaw target.id (headers editorToken) selfBody >>= (\response -> responseStatus response `shouldBe` status400)
+        addRaw target.id (headers editorToken) crossBody >>= (\response -> responseStatus response `shouldBe` status403)
 
   describe "Workspace rename HTTP contract" $ do
     it "persists an authorized name-only rename, permits duplicates, and rejects invalid or inactive targets" $ \(env, app) -> do
@@ -1425,6 +1509,13 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           navigationFocusAncestors = schema "NavigationFocusResponse" >>= jsonField "properties" >>= jsonField "ancestors"
           navigationBatchProjects = schema "NavigationSummariesRequest" >>= jsonField "properties" >>= jsonField "project_ids"
           navigationBatchTasks = schema "NavigationSummariesRequest" >>= jsonField "properties" >>= jsonField "task_ids"
+          dependencyAddResponses = jsonPath ["paths", "/api/v1/tasks/{taskId}/dependencies", "post", "responses"] document
+          dependencyRemoveResponses = jsonPath ["paths", "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}", "delete", "responses"] document
+          dependencyAddDescription = operationDescription "/api/v1/tasks/{taskId}/dependencies" "post"
+          dependencyRemoveDescription = operationDescription "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}" "delete"
+          hasDependencyCycleDescription = maybe False $ \value -> case value of
+            String text -> "dependency_cycle" `T.isInfixOf` text
+            _ -> False
           navigationBranchPage pageName = schema "NavigationBranchResponse" >>= jsonField "properties" >>= jsonField pageName
           navigationBranchItemRef pageName = navigationBranchPage pageName >>= jsonField "properties" >>= jsonField "items" >>= jsonField "items" >>= jsonField "$ref"
           navigationBranchItemMaximum pageName = navigationBranchPage pageName >>= jsonField "properties" >>= jsonField "items" >>= jsonField "maxItems"
@@ -1611,6 +1702,10 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       parameterMaximum "/api/v1/tasks/{taskId}/dependencies" "offset" `shouldBe` Just (Number 100000)
       parameterMinimum "/api/v1/tasks/{taskId}/dependencies" "limit" `shouldBe` Just (Number 1)
       parameterMinimum "/api/v1/tasks/{taskId}/dependencies" "offset" `shouldBe` Just (Number 0)
+      mapM_ (\responses -> (responses >>= jsonField "400") `shouldSatisfy` isJust)
+         [dependencyAddResponses, dependencyRemoveResponses]
+      dependencyAddDescription `shouldSatisfy` hasDependencyCycleDescription
+      dependencyRemoveDescription `shouldNotSatisfy` hasDependencyCycleDescription
       schema "UpdateWorkspace" `shouldSatisfy` isJust
       requiredSchemaFields "UpdateWorkspace" `shouldBe` Just ["name"]
       (schema "UpdateWorkspace" >>= jsonField "additionalProperties") `shouldBe` Just (Bool False)

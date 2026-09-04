@@ -15,7 +15,7 @@ import Data.Proxy (Proxy(..))
 import Data.Text (Text)
 import Servant.OpenApi (toOpenApi)
 
-import HMem.Server.API (HMemAPI, CreateObservationRequest, ObservationMatchRequest, UpdateWorkspaceRequest)
+import HMem.Server.API (HMemAPI, CreateObservationRequest, ObservationMatchRequest, LinkDependencyRequest, UpdateWorkspaceRequest)
 import HMem.Types
 
 openApiSpec :: OpenApi
@@ -50,6 +50,8 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation/focus/{entityType}/{entityId}" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
+  & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . post %~ fmap documentDependencyAdd
+  & paths . at "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}" . _Just . delete %~ fmap documentDependencyRemove
   where
     tagObservation operation = operation & tags .~ InsOrdSet.singleton "Observations"
     tagWorkspaceGroups operation = operation & tags .~ InsOrdSet.singleton "Workspace Groups"
@@ -65,6 +67,20 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
       , (403, Inline (mempty & description .~ "Forbidden for the requested workspace."))
       , (404, Inline (mempty & description .~ "The active workspace was not found."))
       ]
+
+    documentDependencyAdd operation = operation
+      & description ?~ "Mutates one prerequisite edge. Requests that would introduce a direct or transitive task-dependency cycle return the structured 400 dependency_cycle error; the dependency graph and automatic task blocking state are unchanged."
+      & responses %~ (<> dependencyAddErrors)
+
+    dependencyAddErrors = Responses Nothing $ InsOrdMap.fromList
+      [ (400, Inline (mempty & description .~ "Validation error. A cycle is reported as {error: dependency_cycle, message: Task dependency would create a cycle}; self-edges and cross-workspace edges are also rejected with 400.")) ]
+
+    documentDependencyRemove operation = operation
+      & description ?~ "Removes one prerequisite edge. Self-edges and cross-workspace edges are rejected with 400."
+      & responses %~ (<> dependencyRemoveErrors)
+
+    dependencyRemoveErrors = Responses Nothing $ InsOrdMap.fromList
+      [ (400, Inline (mempty & description .~ "Validation error. Self-edges and cross-workspace edges are rejected with 400.")) ]
 
 capNavigationParameter parameterRef = case parameterRef of
   Inline parameter
@@ -110,6 +126,7 @@ instance ToSchema UpdateWorkspace where
   declareNamedSchema _ = pure $ NamedSchema (Just "UpdateWorkspace")
     (mempty & type_ ?~ OpenApiObject & required .~ ["name"] & properties .~ InsOrdMap.fromList [("name", Inline (mempty & type_ ?~ OpenApiString))] & additionalProperties ?~ AdditionalPropertiesAllowed False)
 instance ToSchema UpdateWorkspaceRequest where declareNamedSchema _ = declareNamedSchema (Proxy @UpdateWorkspace)
+instance ToSchema LinkDependencyRequest where declareNamedSchema _ = declareNamedSchema (Proxy @LinkDependency)
 
 instance ToSchema ObservationEmbedding where
   declareNamedSchema _ = pure $ NamedSchema (Just "ObservationEmbedding") embeddingSchema

@@ -118,6 +118,7 @@ type alias DataLoadingModel =
     , navigationPresentations : Dict String NavigationPresentationState
     , projectCardSummaries : Dict String Api.ProjectCardSummary
     , taskCardSummaries : Dict String Api.TaskCardSummary
+
     -- The bounded navigation API is authoritative for which cached cards are
     -- currently visible. Entity dictionaries may also contain detail/focus
     -- cache entries, so they cannot by themselves drive filtered tree output.
@@ -149,7 +150,8 @@ type alias NavigationBranchState =
 
 {-| Presentation cursors are deliberately independent from transport cursors.
 The server continues returning bounded 50-item data pages, while the UI moves
-through cached 25-card windows without refetching overlapping data. -}
+through cached 25-card windows without refetching overlapping data.
+-}
 type alias NavigationPresentationState =
     { workspaceId : String
     , sessionEpoch : Int
@@ -332,6 +334,8 @@ type alias DependenciesModel =
     , taskDependencyNextOffset : Dict String Int
     , taskDependencyLoading : Dict String Bool
     , taskDependencyRequests : Dict String DependencyPageRequest
+    , taskDependencyRefreshItems : Dict String (List Api.TaskDependencySummary)
+    , taskDependencyMutations : List DependencyMutationCorrelation
     , nextTaskDependencyRequestGeneration : Int
     }
 
@@ -341,6 +345,18 @@ type alias DependencyPageRequest =
     , sessionEpoch : Int
     , offset : Int
     , generation : Int
+    }
+
+
+type alias DependencyMutationCorrelation =
+    { requestId : String
+    , taskId : String
+    , dependsOnId : String
+    , action : String
+    , workspaceId : String
+    , sessionEpoch : Int
+    , httpSucceeded : Bool
+    , echoSeen : Bool
     }
 
 
@@ -711,6 +727,7 @@ type Msg
     | CanonicalTaskFetched CanonicalRequestGuard String (Result Http.Error Api.Task)
     | CanonicalObservationFetched CanonicalRequestGuard String String (Result Http.Error Api.Observation)
     | CanonicalTaskOverviewFetched CanonicalRequestGuard String (Result Http.Error Api.TaskOverview)
+    | CanonicalTaskReadinessFetched CanonicalRequestGuard String (Result Http.Error Api.TaskOverview)
     | CanonicalProjectOverviewFetched CanonicalRequestGuard String (Result Http.Error Api.ProjectOverview)
     | CanonicalNavigationSummariesFetched CanonicalRequestGuard String (List String) (List String) (Result Http.Error Api.NavigationSummariesResponse)
     | CanonicalCatalogueFetched CanonicalRequestGuard (Result Http.Error (Api.PaginatedResult Api.Workspace))
@@ -848,7 +865,7 @@ type Msg
     | PerformUnlinkEntity String String String
     | CancelLinkEntity
       -- Task dependencies
-    | GotTaskDependencies String (Result Http.Error Api.TaskOverview)
+    | GotTaskDependencies String (Maybe String) Int Int (Result Http.Error Api.TaskOverview)
     | GotTaskDependencyPage String String Int Int Int (Result Http.Error Api.TaskDependencyPage)
     | LoadTaskDependencyPage String
     | GotProjectOverview String (Result Http.Error Api.ProjectOverview)
@@ -859,7 +876,7 @@ type Msg
     | DependencySearch String
     | PerformAddDependency String String
     | PerformRemoveDependency String String
-    | DependencyMutationDone String (Result Http.Error Api.DependencyMutationResult)
+    | DependencyMutationDone String String (Result Http.Error Api.DependencyMutationResult)
     | CancelAddDependency
       -- Navigation
     | ScrollToEntity String

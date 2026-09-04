@@ -5,10 +5,13 @@ import AppShell
 import Browser
 import Dict
 import Feature.Dependencies as Dependencies
+import Feature.WebSocket as WebSocket
 import Helpers
 import Html exposing (Html, div, h1, p, text)
 import Html.Attributes exposing (attribute, class)
-import Types exposing (Flags, Model, Msg, Page(..), WorkspaceTab(..))
+import Ports exposing (wsMessage)
+import Set
+import Types exposing (AuthStatus(..), Flags, Model, Msg(..), Page(..), WorkspaceTab(..))
 import Url
 
 
@@ -16,10 +19,20 @@ main : Program () Model Msg
 main =
     Browser.element
         { init = \_ -> ( fixtureModel, Cmd.none )
-        , update = Dependencies.update
-        , subscriptions = \_ -> Sub.none
+        , update = update
+        , subscriptions = \_ -> wsMessage WsMessageReceived
         , view = view
         }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        WsMessageReceived _ ->
+            WebSocket.update msg model
+
+        _ ->
+            Dependencies.update msg model
 
 
 view : Model -> Html Msg
@@ -40,16 +53,70 @@ fixtureModel =
 
         dependencies =
             base.dependencies
+
+        cards =
+            base.cards
+
+        loading =
+            base.dataLoading
+
+        search =
+            base.search
     in
     { base
         | selectedWorkspaceId = Just workspaceId
+        , auth = { status = AuthReady, mode = Just "test" }
         , sessionContext = Just editorSession
+        , cards = { cards | expandedCards = Dict.singleton dependentId True }
+        , dataLoading =
+            { loading
+                | taskCardSummaries = Dict.singleton dependentId dependentTaskCardSummary
+                , navigationVisibleTaskIds = Set.singleton dependentId
+                , navigationVisibilityActive = True
+            }
+        , search =
+            { search
+                | query = "selected query"
+                , unifiedResults = Just { observations = [], projects = [], tasks = [] }
+                , isSearching = True
+                , activeRequestQuery = Just "selected query"
+                , activeRequest = Just { workspaceId = workspaceId, token = 5, query = "selected query" }
+                , nextRequestToken = 6
+            }
         , tasks =
             Dict.fromList
                 [ ( dependentId, task dependentId "Current task" )
                 , ( prerequisiteId, task prerequisiteId "Prerequisite" )
                 ]
         , dependencies = { dependencies | taskDependencies = Dict.singleton dependentId [] }
+    }
+
+
+dependentTaskCardSummary : Api.TaskCardSummary
+dependentTaskCardSummary =
+    { id = dependentId
+    , workspaceId = workspaceId
+    , projectId = Nothing
+    , parentId = Nothing
+    , title = "Current task"
+    , status = Api.Todo
+    , priority = 1
+    , dueAt = Nothing
+    , completedAt = Nothing
+    , dependencyCount = 0
+    , createdAt = "2026-01-01T00:00:00Z"
+    , updatedAt = "2026-01-01T00:00:00Z"
+    , directSubtaskCount = 0
+    , hasChildren = False
+    , readinessRollup =
+        { openSubtaskCount = 0
+        , doneSubtaskCount = 0
+        , cancelledSubtaskCount = 0
+        , blockedSubtaskCount = 0
+        , dependencyBlockedTaskCount = 0
+        , openDependencyCount = 0
+        , completionReady = True
+        }
     }
 
 

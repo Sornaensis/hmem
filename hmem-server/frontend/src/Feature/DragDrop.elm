@@ -2,6 +2,7 @@ module Feature.DragDrop exposing (dragOverClass, handleEscape, init, update, vie
 
 import Api
 import Dict
+import Feature.Dependencies
 import Helpers exposing (..)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -210,12 +211,15 @@ update msg model =
                                 (updateDragDropModel (
                                     \dd -> { dd | dropActionModal = Nothing }
                                   ) model)
+
+                        correlatedModel =
+                            Feature.Dependencies.trackDependencyMutationRequest modal.dragTaskId modal.targetTaskId "add" requestId trackedModel
                     in
-                    ( trackedModel
+                    ( correlatedModel
                     , Cmd.batch
                         [ clearCmd
                         , Api.addTaskDependency model.flags.apiUrl modal.dragTaskId modal.targetTaskId requestId
-                            (DependencyMutationDone modal.dragTaskId)
+                            (DependencyMutationDone modal.dragTaskId requestId)
                         ]
                     )
 

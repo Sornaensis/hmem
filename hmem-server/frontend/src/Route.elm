@@ -5,6 +5,7 @@ import Browser
 import Browser.Navigation as Nav
 import Dict
 import Feature.DataLoading
+import Feature.Dependencies
 import Feature.Editing
 import Feature.Observation
 import Feature.Timeline
@@ -291,17 +292,8 @@ handleUrlChange url model =
                             , entityMemoryIds = Dict.empty
                         }
 
-                    currentDependencies =
-                        model.dependencies
-
                     updatedDependencies =
-                        { currentDependencies
-                            | taskDependencies = Dict.empty
-                            , taskDependencyLinks = []
-                            , taskReadinessRollups = Dict.empty
-                            , projectReadinessRollups = Dict.empty
-                            , addingDependencyFor = Nothing
-                        }
+                        Feature.Dependencies.resetCache model.dependencies
 
                     currentSearch =
                         model.search
@@ -449,6 +441,7 @@ handleUrlChange url model =
                 , selectedWorkspaceId = Nothing
                 , webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }
                 , auditLog = updatedAuditLog
+                , dependencies = Feature.Dependencies.resetCache model.dependencies
                 , focus = updatedFocus
               }
                 |> clearRouteConfirmations False
@@ -466,7 +459,7 @@ handleUrlChange url model =
                 updatedFocus =
                     { currentFocus | returnContext = Nothing }
             in
-            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }, focus = updatedFocus }
+            ( { model | url = url, page = page, auth = { status = AuthBooting, mode = model.auth.mode }, sessionContext = Nothing, sessionRequestEpoch = model.sessionRequestEpoch + 1, selectedWorkspaceId = Nothing, webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }, dependencies = Feature.Dependencies.resetCache model.dependencies, focus = updatedFocus }
                 |> clearRouteConfirmations False
             , Cmd.batch
                 [ Api.fetchSessionContext model.flags.apiUrl Nothing (GotSessionContext (model.sessionRequestEpoch + 1) Nothing)

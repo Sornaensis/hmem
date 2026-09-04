@@ -616,7 +616,7 @@ update msg model =
             let
                 fetchDepCmd =
                     if Dict.member cardId model.tasks && not (Dict.member cardId model.dependencies.taskDependencies) then
-                        Api.fetchTaskOverview model.flags.apiUrl cardId (GotTaskDependencies cardId)
+                        Api.fetchTaskOverview model.flags.apiUrl cardId (GotTaskDependencies cardId model.selectedWorkspaceId model.sessionRequestEpoch model.dependencies.nextTaskDependencyRequestGeneration)
 
                     else
                         Cmd.none

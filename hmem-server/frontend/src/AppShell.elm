@@ -280,6 +280,7 @@ handleOwned ownedMsg model =
                             { model
                                 | auth = { status = authStatusFromSessionError result, mode = model.auth.mode }
                                 , sessionContext = Nothing
+                                , sessionRequestEpoch = model.sessionRequestEpoch + 1
                             }
                         , disconnectWebSocket ()
                         )
@@ -628,7 +629,7 @@ clearSessionScopedState model =
         , search = Feature.Search.init
         , editing = Feature.Editing.init
         , memory = emptyMemoryModel
-        , dependencies = Feature.Dependencies.init
+        , dependencies = Feature.Dependencies.resetCache model.dependencies
         , cards = Feature.Cards.init
         , dragDrop = Feature.DragDrop.init
         , focus = Feature.Focus.init Nothing

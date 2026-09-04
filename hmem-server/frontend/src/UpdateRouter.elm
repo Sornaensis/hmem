@@ -61,6 +61,9 @@ update msg model =
         CanonicalTaskOverviewFetched _ _ _ ->
             Ok (Feature.WebSocket.update msg model)
 
+        CanonicalTaskReadinessFetched _ _ _ ->
+            Ok (Feature.WebSocket.update msg model)
+
         CanonicalProjectOverviewFetched _ _ _ ->
             Ok (Feature.WebSocket.update msg model)
 
@@ -534,7 +537,7 @@ update msg model =
             Ok ( model, Cmd.none )
 
         -- Task dependencies
-        GotTaskDependencies _ _ ->
+        GotTaskDependencies _ _ _ _ _ ->
             Ok (Feature.Dependencies.update msg model)
 
         GotTaskDependencyPage _ _ _ _ _ _ ->
@@ -570,7 +573,7 @@ update msg model =
         PerformRemoveDependency _ _ ->
             Ok (Feature.Dependencies.update msg model)
 
-        DependencyMutationDone _ _ ->
+        DependencyMutationDone _ _ _ ->
             Ok (Feature.Dependencies.update msg model)
 
         ScrollToEntity _ ->

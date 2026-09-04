@@ -2022,6 +2022,7 @@ type alias CanonicalEnvelope =
     , entityId : String
     , entityAction : String
     , invalidations : List CanonicalInvalidation
+    , requestId : Maybe String
     }
 
 
@@ -2171,9 +2172,9 @@ nonEmptyListDecoder itemDecoder =
             )
 
 
-canonicalTransactionDecoder : Decoder ()
+canonicalTransactionDecoder : Decoder (Maybe String)
 canonicalTransactionDecoder =
-    D.map3 (\_ _ _ -> ())
+    D.map3 (\_ _ requestId -> requestId)
         (D.field "id" nonEmptyStringDecoder)
         (D.field "cause" nonEmptyStringDecoder
             |> D.andThen
@@ -2208,7 +2209,18 @@ canonicalEnvelopeDecoder : Decoder CanonicalEnvelope
 canonicalEnvelopeDecoder =
     let
         fieldsDecoder =
-            D.map7 CanonicalEnvelope
+            D.map7
+                (\eventId scope workspaceId entityType entityId entityAction invalidations ->
+                    { eventId = eventId
+                    , scope = scope
+                    , workspaceId = workspaceId
+                    , entityType = entityType
+                    , entityId = entityId
+                    , entityAction = entityAction
+                    , invalidations = invalidations
+                    , requestId = Nothing
+                    }
+                )
                 (D.field "event_id" nonEmptyStringDecoder)
                 scopeDecoder
                 (D.field "workspace_id" (D.nullable nonEmptyStringDecoder))
@@ -2218,11 +2230,11 @@ canonicalEnvelopeDecoder =
                 (D.field "invalidations" (nonEmptyListDecoder canonicalInvalidationDecoder))
 
         metadataDecoder =
-            D.map4 (\envelope _ _ _ -> envelope)
+            D.map4 (\envelope _ _ requestId -> { envelope | requestId = requestId })
                 fieldsDecoder
                 schemaVersionOneDecoder
                 (D.field "occurred_at" nonEmptyStringDecoder)
-                (D.map2 (\_ _ -> ())
+                (D.map2 (\requestId _ -> requestId)
                     (D.field "transaction" canonicalTransactionDecoder)
                     (D.field "actor" canonicalActorDecoder)
                 )

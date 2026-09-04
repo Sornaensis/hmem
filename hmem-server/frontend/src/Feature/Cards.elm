@@ -487,21 +487,12 @@ update msg model =
                         ( toastedModel, toastCmd ) =
                             addToast Success (cascadeDeleteSuccessMessage confirmation cascade) model
 
-                        currentDependencies =
-                            toastedModel.dependencies
-
                         currentCards =
                             toastedModel.cards
 
                         cacheClearedModel =
                             { toastedModel
-                                | dependencies =
-                                    { currentDependencies
-                                        | taskDependencies = Dict.empty
-                                        , taskDependencyLinks = []
-                                        , taskReadinessRollups = Dict.empty
-                                        , projectReadinessRollups = Dict.empty
-                                    }
+                                | dependencies = Feature.Dependencies.resetCache toastedModel.dependencies
                                 , cards =
                                     { currentCards
                                         | projectNextTasks = Dict.empty
@@ -523,21 +514,12 @@ update msg model =
                         ( toastedModel, toastCmd ) =
                             addToast Error (Api.apiErrorToUserMessage (cascadeDeleteFailureFallback confirmation) err) model
 
-                        currentDependencies =
-                            toastedModel.dependencies
-
                         currentCards =
                             toastedModel.cards
 
                         cacheClearedModel =
                             { toastedModel
-                                | dependencies =
-                                    { currentDependencies
-                                        | taskDependencies = Dict.empty
-                                        , taskDependencyLinks = []
-                                        , taskReadinessRollups = Dict.empty
-                                        , projectReadinessRollups = Dict.empty
-                                    }
+                                | dependencies = Feature.Dependencies.resetCache toastedModel.dependencies
                                 , cards =
                                     { currentCards
                                         | projectNextTasks = Dict.empty

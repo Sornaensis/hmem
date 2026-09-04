@@ -9,6 +9,7 @@ import Api
 import Dict
 import Feature.ChangeStream as ChangeStream
 import Feature.DataLoading
+import Feature.Dependencies as Dependencies
 import Feature.Observation as Observation
 import Feature.Timeline as Timeline
 import Helpers exposing (applyDependencyMutationResult, applyTaskDependencyLinkMutation, beginWorkspaceDataReload, replaceFragment)
@@ -149,7 +150,11 @@ update msg model =
             if canonicalGuardIsCurrent guard model then
                 case result of
                     Ok task ->
-                        ( { model | tasks = Dict.insert task.id task model.tasks }, Cmd.none )
+                        if task.id == taskId && Just task.workspaceId == model.selectedWorkspaceId then
+                            ( { model | tasks = Dict.insert task.id task model.tasks }, Cmd.none )
+
+                        else
+                            canonicalHttpFailure guard (Http.BadBody "Task identity did not match the canonical request") model
 
                     Err (Http.BadStatus 404) ->
                         ( { model | tasks = Dict.remove taskId model.tasks }, Cmd.none )
@@ -193,12 +198,14 @@ update msg model =
 
                             retained =
                                 List.filter (\link -> link.taskId /= taskId) dependencies.taskDependencyLinks
+
+                            completeDependencies =
+                                Dependencies.cacheCompleteTaskDependencies taskId overview.dependencies dependencies
                         in
                         ( { model
                             | dependencies =
-                                { dependencies
-                                    | taskDependencies = Dict.insert taskId overview.dependencies dependencies.taskDependencies
-                                    , taskReadinessRollups = Dict.insert taskId overview.readinessRollup dependencies.taskReadinessRollups
+                                { completeDependencies
+                                    | taskReadinessRollups = Dict.insert taskId overview.readinessRollup completeDependencies.taskReadinessRollups
                                     , taskDependencyLinks = links ++ retained
                                 }
                           }
@@ -207,19 +214,48 @@ update msg model =
 
                     Err (Http.BadStatus 404) ->
                         let
+                            invalidated =
+                                Dependencies.invalidateDependencyPage taskId model
+
                             dependencies =
-                                model.dependencies
+                                invalidated.dependencies
                         in
-                        ( { model
+                        ( { invalidated
                             | dependencies =
                                 { dependencies
-                                    | taskDependencies = Dict.remove taskId dependencies.taskDependencies
-                                    , taskReadinessRollups = Dict.remove taskId dependencies.taskReadinessRollups
+                                    | taskReadinessRollups = Dict.remove taskId dependencies.taskReadinessRollups
                                     , taskDependencyLinks = List.filter (\link -> link.taskId /= taskId && link.dependsOnId /= taskId) dependencies.taskDependencyLinks
                                 }
                           }
                         , Cmd.none
                         )
+
+                    Err error ->
+                        canonicalHttpFailure guard error model
+
+            else
+                ( model, Cmd.none )
+
+        CanonicalTaskReadinessFetched guard taskId result ->
+            if canonicalGuardIsCurrent guard model then
+                case result of
+                    Ok overview ->
+                        if overview.task.id == taskId && Just overview.task.workspaceId == model.selectedWorkspaceId then
+                            let
+                                dependencies =
+                                    model.dependencies
+                            in
+                            ( { model | dependencies = { dependencies | taskReadinessRollups = Dict.insert taskId overview.readinessRollup dependencies.taskReadinessRollups } }, Cmd.none )
+
+                        else
+                            canonicalHttpFailure guard (Http.BadBody "Task overview identity did not match the readiness request") model
+
+                    Err (Http.BadStatus 404) ->
+                        let
+                            dependencies =
+                                model.dependencies
+                        in
+                        ( { model | dependencies = { dependencies | taskReadinessRollups = Dict.remove taskId dependencies.taskReadinessRollups } }, Cmd.none )
 
                     Err error ->
                         canonicalHttpFailure guard error model
@@ -268,8 +304,10 @@ update msg model =
                                 List.map .id summaries.tasks ++ summaries.missingTaskIds
 
                             complete =
-                                List.sort returnedProjectIds == List.sort projectIds
-                                    && List.sort returnedTaskIds == List.sort taskIds
+                                List.sort returnedProjectIds
+                                    == List.sort projectIds
+                                    && List.sort returnedTaskIds
+                                    == List.sort taskIds
                                     && projectIdsMatch
                                     && taskIdsMatch
                         in
@@ -292,11 +330,16 @@ update msg model =
                                 -- matching, so remove invalidated IDs until a
                                 -- fresh bounded branch response re-admits them.
                                 filteredNavigation =
-                                    model.search.filterShowOnly /= ShowAll
-                                        || model.search.filterProjectStatuses /= []
-                                        || model.search.filterTaskStatuses /= []
-                                        || model.search.filterPriority /= AnyPriority
-                                        || String.trim model.search.query /= ""
+                                    model.search.filterShowOnly
+                                        /= ShowAll
+                                        || model.search.filterProjectStatuses
+                                        /= []
+                                        || model.search.filterTaskStatuses
+                                        /= []
+                                        || model.search.filterPriority
+                                        /= AnyPriority
+                                        || String.trim model.search.query
+                                        /= ""
 
                                 -- A summary endpoint is authoritative about
                                 -- deletion, but not descendant-retained branch
@@ -316,27 +359,29 @@ update msg model =
                                     merged.tasks
 
                                 updated =
-                                    { merged | projects = List.foldl Dict.remove mergedProjects summaries.missingProjectIds
-                                    , tasks = List.foldl Dict.remove mergedTasks summaries.missingTaskIds
-                                    , dataLoading =
-                                        { loading
-                                            | projectCardSummaries = List.foldl Dict.remove loading.projectCardSummaries summaries.missingProjectIds
-                                            , taskCardSummaries = List.foldl Dict.remove loading.taskCardSummaries summaries.missingTaskIds
-                                        -- A summary response is authoritative for card state,
-                                        -- but not for server-side filtered branch membership.
-                                        -- Under a filtered tree, remove every
-                                        -- invalidated card until the next bounded
-                                        -- branch response re-admits it. This prevents
-                                        -- stale status, priority, search, or parent
-                                        -- membership from surviving a live mutation.
-                                            , navigationVisibleProjectIds = List.foldl Set.remove loading.navigationVisibleProjectIds staleProjectIds
-                                            , navigationVisibleTaskIds = List.foldl Set.remove loading.navigationVisibleTaskIds staleTaskIds
-                                        }
-                                    , dependencies =
-                                        { dependencies
-                                            | projectReadinessRollups = List.foldl Dict.remove dependencies.projectReadinessRollups summaries.missingProjectIds
-                                            , taskReadinessRollups = List.foldl Dict.remove dependencies.taskReadinessRollups summaries.missingTaskIds
-                                        }
+                                    { merged
+                                        | projects = List.foldl Dict.remove mergedProjects summaries.missingProjectIds
+                                        , tasks = List.foldl Dict.remove mergedTasks summaries.missingTaskIds
+                                        , dataLoading =
+                                            { loading
+                                                | projectCardSummaries = List.foldl Dict.remove loading.projectCardSummaries summaries.missingProjectIds
+                                                , taskCardSummaries = List.foldl Dict.remove loading.taskCardSummaries summaries.missingTaskIds
+
+                                                -- A summary response is authoritative for card state,
+                                                -- but not for server-side filtered branch membership.
+                                                -- Under a filtered tree, remove every
+                                                -- invalidated card until the next bounded
+                                                -- branch response re-admits it. This prevents
+                                                -- stale status, priority, search, or parent
+                                                -- membership from surviving a live mutation.
+                                                , navigationVisibleProjectIds = List.foldl Set.remove loading.navigationVisibleProjectIds staleProjectIds
+                                                , navigationVisibleTaskIds = List.foldl Set.remove loading.navigationVisibleTaskIds staleTaskIds
+                                            }
+                                        , dependencies =
+                                            { dependencies
+                                                | projectReadinessRollups = List.foldl Dict.remove dependencies.projectReadinessRollups summaries.missingProjectIds
+                                                , taskReadinessRollups = List.foldl Dict.remove dependencies.taskReadinessRollups summaries.missingTaskIds
+                                            }
                                     }
                             in
                             if filteredNavigation && (not (List.isEmpty projectIds) || not (List.isEmpty taskIds)) then
@@ -638,6 +683,9 @@ applyCanonicalSnapshot scope profile items token model =
                             dependencies =
                                 withStream.dependencies
 
+                            resetDependencies =
+                                Dependencies.resetCache dependencies
+
                             cards =
                                 withStream.cards
 
@@ -650,7 +698,7 @@ applyCanonicalSnapshot scope profile items token model =
                                     , projects = snapshot.projects
                                     , tasks = snapshot.tasks
                                     , observations = reconciledObservations
-                                    , dependencies = { dependencies | taskDependencyLinks = snapshot.dependencies, taskDependencies = Dict.empty, taskReadinessRollups = Dict.empty, projectReadinessRollups = Dict.empty }
+                                    , dependencies = { resetDependencies | taskDependencyLinks = snapshot.dependencies }
                                     , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
                                     , dataLoading = { loading | loadingWorkspaceData = False, pendingWorkspaceLoads = 0, activeWorkspaceLoadToken = Nothing, cardHydrationLoaded = True, navigationVisibilityActive = False }
                                 }
@@ -746,7 +794,18 @@ reconcileSnapshotObservations canonicalById observations =
 
 beginScopedResync : ChangeStream.Scope -> Model -> ( Model, Cmd Msg )
 beginScopedResync scope model =
-    ( setWebSocketState Connecting (invalidateScopeRequests scope model)
+    let
+        invalidated =
+            invalidateScopeRequests scope model
+
+        cacheCleared =
+            if scopeMatchesSelectedWorkspace scope invalidated then
+                { invalidated | dependencies = Dependencies.resetCache invalidated.dependencies }
+
+            else
+                invalidated
+    in
+    ( setWebSocketState Connecting cacheCleared
     , connectCmd model.flags model.sessionContext scope True
     )
 
@@ -820,7 +879,11 @@ applyActions scope actions model =
                 actions
 
         ( revalidationModel, revalidationCmd ) =
-            requestNavigationSummaryBatches scope navigationTargets model
+            if scopeMatchesSelectedWorkspace scope model then
+                requestNavigationSummaryBatches scope navigationTargets model
+
+            else
+                ( model, Cmd.none )
     in
     List.foldl (applyAction scope) ( revalidationModel, revalidationCmd ) otherActions
 
@@ -836,7 +899,55 @@ applyAction scope action ( model, accumulated ) =
             requestEntity scope entity identity accumulated model
 
         ChangeStream.RemoveEntity entity identity ->
-            removeEntity scope entity identity accumulated model
+            if entity == "task_dependency" && not (scopeMatchesSelectedWorkspace scope model) then
+                ( model, accumulated )
+
+            else
+                removeEntity scope entity identity accumulated model
+
+        ChangeStream.RefreshTaskDependencies taskId dependsOnId present requestId ->
+            if scopeMatchesSelectedWorkspace scope model then
+                let
+                    actionName =
+                        if present then
+                            "add"
+
+                        else
+                            "remove"
+
+                    linkReconciledModel =
+                        applyDependencyMutationResult
+                            { action = actionName
+                            , taskId = taskId
+                            , dependsOnId = dependsOnId
+                            , affectedTasks = []
+                            }
+                            model
+
+                    ( correlatedModel, shouldRefresh ) =
+                        Dependencies.prepareDependencyEventRefresh taskId dependsOnId actionName requestId linkReconciledModel
+
+                    ( readinessModel, readinessCmd ) =
+                        revalidateDependencyReadiness scope taskId dependsOnId present correlatedModel
+
+                    commands =
+                        Cmd.batch [ accumulated, readinessCmd ]
+                in
+                if not shouldRefresh then
+                    ( readinessModel, commands )
+
+                else if Dict.get taskId readinessModel.cards.expandedCards |> Maybe.withDefault False then
+                    let
+                        ( next, command ) =
+                            Dependencies.beginDependencyRefresh taskId readinessModel
+                    in
+                    ( next, Cmd.batch [ commands, command ] )
+
+                else
+                    ( Dependencies.invalidateDependencyPage taskId readinessModel, commands )
+
+            else
+                ( model, accumulated )
 
         ChangeStream.RefreshTaskOverview taskId ->
             let
@@ -886,11 +997,15 @@ applyAction scope action ( model, accumulated ) =
                 append Cmd.none model
 
         ChangeStream.RefreshSearch _ ->
-            let
-                search =
-                    model.search
-            in
-            append Cmd.none { model | search = { search | unifiedResults = Nothing, activeRequest = Nothing } }
+            if scopeMatchesSelectedWorkspace scope model then
+                let
+                    search =
+                        model.search
+                in
+                append Cmd.none { model | search = { search | unifiedResults = Nothing, activeRequest = Nothing } }
+
+            else
+                ( model, accumulated )
 
         ChangeStream.RefreshObservations ->
             let
@@ -924,9 +1039,6 @@ applyAction scope action ( model, accumulated ) =
 
                 observations =
                     model.observations
-
-                dependencies =
-                    model.dependencies
 
                 cards =
                     model.cards
@@ -963,7 +1075,7 @@ applyAction scope action ( model, accumulated ) =
                         , projects = Dict.empty
                         , tasks = Dict.empty
                         , observations = Observation.clearSelection { observations | items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty }
-                        , dependencies = { dependencies | taskDependencies = Dict.empty, taskDependencyLinks = [], taskReadinessRollups = Dict.empty, projectReadinessRollups = Dict.empty }
+                        , dependencies = Dependencies.resetCache model.dependencies
                         , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
                         , sessionRequestEpoch = model.sessionRequestEpoch + 1
                         , timeline = Timeline.reset (model.sessionRequestEpoch + 1)
@@ -1022,13 +1134,20 @@ removeEntity scope entity identity accumulated model =
                     Just ( { withGeneration | projects = Dict.remove identity withGeneration.projects }, Cmd.none )
 
                 "task" ->
+                    let
+                        invalidated =
+                            Dependencies.invalidateDependencyPage identity withGeneration
+
+                        invalidatedDependencies =
+                            invalidated.dependencies
+                    in
                     Just
-                        ( { withGeneration
-                            | tasks = Dict.remove identity withGeneration.tasks
+                        ( { invalidated
+                            | tasks = Dict.remove identity invalidated.tasks
                             , dependencies =
-                                { dependencies
-                                    | taskDependencies = Dict.remove identity dependencies.taskDependencies
-                                    , taskDependencyLinks = List.filter (\link -> link.taskId /= identity && link.dependsOnId /= identity) dependencies.taskDependencyLinks
+                                { invalidatedDependencies
+                                    | taskDependencyLinks = List.filter (\link -> link.taskId /= identity && link.dependsOnId /= identity) invalidatedDependencies.taskDependencyLinks
+                                    , taskReadinessRollups = Dict.remove identity invalidatedDependencies.taskReadinessRollups
                                 }
                           }
                         , Cmd.none
@@ -1044,7 +1163,16 @@ removeEntity scope entity identity accumulated model =
                 "task_dependency" ->
                     case String.split ":" identity of
                         taskId :: dependsOnId :: _ ->
-                            Just ( { withGeneration | dependencies = { dependencies | taskDependencyLinks = List.filter (\link -> link.taskId /= taskId || link.dependsOnId /= dependsOnId) dependencies.taskDependencyLinks } }, Cmd.none )
+                            Just
+                                ( { withGeneration
+                                    | dependencies =
+                                        { dependencies
+                                            | taskDependencies = Dict.update taskId (Maybe.map (List.filter (\dependency -> dependency.id /= dependsOnId))) dependencies.taskDependencies
+                                            , taskDependencyLinks = List.filter (\link -> link.taskId /= taskId || link.dependsOnId /= dependsOnId) dependencies.taskDependencyLinks
+                                        }
+                                  }
+                                , Cmd.none
+                                )
 
                         _ ->
                             Nothing
@@ -1240,9 +1368,13 @@ requestNavigationSummaryBatches scope targets model =
                 targetKey =
                     "navigation-summaries:" ++ String.join "," (List.map (\( entityType, entityId ) -> entityType ++ ":" ++ entityId) batch)
             in
-            requestCanonical scope targetKey
+            requestCanonical scope
+                targetKey
                 (\guard ->
-                    Api.fetchNavigationSummaries current.flags.apiUrl workspaceId projectIds taskIds
+                    Api.fetchNavigationSummaries current.flags.apiUrl
+                        workspaceId
+                        projectIds
+                        taskIds
                         (CanonicalNavigationSummariesFetched guard workspaceId projectIds taskIds)
                 )
                 accumulated
@@ -1266,6 +1398,70 @@ requestNavigationSummaryBatches scope targets model =
 requestTaskOverview : ChangeStream.Scope -> String -> Cmd Msg -> Model -> ( Model, Cmd Msg )
 requestTaskOverview scope taskId accumulated model =
     requestCanonical scope ("task-overview:" ++ taskId) (\guard -> Api.fetchTaskOverview model.flags.apiUrl taskId (CanonicalTaskOverviewFetched guard taskId)) accumulated model
+
+
+requestTaskReadiness : ChangeStream.Scope -> String -> Cmd Msg -> Model -> ( Model, Cmd Msg )
+requestTaskReadiness scope taskId accumulated model =
+    requestCanonical scope ("dependency-readiness:task:" ++ taskId) (\guard -> Api.fetchTaskOverview model.flags.apiUrl taskId (CanonicalTaskReadinessFetched guard taskId)) accumulated model
+
+
+revalidateDependencyReadiness : ChangeStream.Scope -> String -> String -> Bool -> Model -> ( Model, Cmd Msg )
+revalidateDependencyReadiness scope taskId dependsOnId present model =
+    let
+        collectAncestors getParent maybeId seen =
+            case maybeId of
+                Just identity ->
+                    if List.member identity seen then
+                        seen
+
+                    else
+                        collectAncestors getParent (getParent identity) (identity :: seen)
+
+                Nothing ->
+                    seen
+
+        taskAncestors =
+            Dict.get taskId model.tasks
+                |> Maybe.andThen .parentId
+                |> (\parentId -> collectAncestors (\identity -> Dict.get identity model.tasks |> Maybe.andThen .parentId) parentId [])
+
+        projectAncestors =
+            Dict.get taskId model.tasks
+                |> Maybe.andThen .projectId
+                |> (\projectId -> collectAncestors (\identity -> Dict.get identity model.projects |> Maybe.andThen .parentId) projectId [])
+
+        dependencies =
+            model.dependencies
+
+        invalidatedModel =
+            { model
+                | dependencies =
+                    { dependencies
+                        | taskReadinessRollups = List.foldl Dict.remove dependencies.taskReadinessRollups (taskId :: taskAncestors)
+                        , projectReadinessRollups = List.foldl Dict.remove dependencies.projectReadinessRollups projectAncestors
+                    }
+            }
+
+        ( prerequisiteModel, prerequisiteCmd ) =
+            if present && not (Dict.member dependsOnId invalidatedModel.tasks) then
+                requestEntity scope "task" dependsOnId Cmd.none invalidatedModel
+
+            else
+                ( invalidatedModel, Cmd.none )
+
+        ( taskModel, taskCmd ) =
+            List.foldl
+                (\ancestorId ( current, accumulated ) -> requestTaskReadiness scope ancestorId accumulated current)
+                ( prerequisiteModel, Cmd.none )
+                taskAncestors
+
+        ( projectModel, projectCmd ) =
+            List.foldl
+                (\projectId ( current, accumulated ) -> requestProjectOverview scope ("dependency-readiness:project:" ++ projectId) projectId accumulated current)
+                ( taskModel, Cmd.none )
+                projectAncestors
+    in
+    ( projectModel, Cmd.batch [ prerequisiteCmd, taskCmd, projectCmd ] )
 
 
 requestProjectOverview : ChangeStream.Scope -> String -> String -> Cmd Msg -> Model -> ( Model, Cmd Msg )
@@ -1381,21 +1577,12 @@ Falls back to a full re-fetch when the payload is missing or cannot be decoded.
 reloadAfterCascadeDelete : Model -> ( Model, Cmd Msg )
 reloadAfterCascadeDelete model =
     let
-        dependencies =
-            model.dependencies
-
         cards =
             model.cards
 
         cacheCleared =
             { model
-                | dependencies =
-                    { dependencies
-                        | taskDependencies = Dict.empty
-                        , taskDependencyLinks = []
-                        , taskReadinessRollups = Dict.empty
-                        , projectReadinessRollups = Dict.empty
-                    }
+                | dependencies = Dependencies.resetCache model.dependencies
                 , cards =
                     { cards
                         | projectNextTasks = Dict.empty
@@ -1539,7 +1726,7 @@ applyChangeEvent event model =
             in
             ( patchedModel
             , Cmd.batch
-                [ Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId)
+                [ Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId model.selectedWorkspaceId model.sessionRequestEpoch model.dependencies.nextTaskDependencyRequestGeneration)
                 , refreshTaskReadinessCaches patchedModel
                 , refreshProjectReadinessCaches patchedModel
                 , reloadCmd
@@ -1648,7 +1835,7 @@ refreshCachedEntityData model =
         dependencyCmds =
             model.dependencies.taskDependencies
                 |> Dict.keys
-                |> List.map (\taskId -> Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId))
+                |> List.map (\taskId -> Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId model.selectedWorkspaceId model.sessionRequestEpoch model.dependencies.nextTaskDependencyRequestGeneration))
 
         projectReadinessCmds =
             model.dependencies.projectReadinessRollups
@@ -1676,7 +1863,7 @@ refreshTaskReadinessCaches : Model -> Cmd Msg
 refreshTaskReadinessCaches model =
     model.dependencies.taskDependencies
         |> Dict.keys
-        |> List.map (\taskId -> Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId))
+        |> List.map (\taskId -> Api.fetchTaskOverview model.flags.apiUrl taskId (GotTaskDependencies taskId model.selectedWorkspaceId model.sessionRequestEpoch model.dependencies.nextTaskDependencyRequestGeneration))
         |> Cmd.batch
 
 

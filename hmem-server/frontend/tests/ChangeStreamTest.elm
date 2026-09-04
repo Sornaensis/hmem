@@ -18,7 +18,7 @@ suite =
                         ChangeStream.init (ChangeStream.Workspace "a") []
 
                     event =
-                        { eventId = "event", scope = Api.WorkspaceScope "a", workspaceId = Just "a", entityType = "task", entityId = "t", entityAction = "updated", invalidations = [ { kind = "entity", target = "task:t" } ] }
+                        { eventId = "event", scope = Api.WorkspaceScope "a", workspaceId = Just "a", entityType = "task", entityId = "t", entityAction = "updated", invalidations = [ { kind = "entity", target = "task:t" } ], requestId = Nothing }
 
                     wrong =
                         { event | scope = Api.WorkspaceScope "b" }
@@ -35,7 +35,7 @@ suite =
                         ChangeStream.init (ChangeStream.Workspace "w") []
 
                     event =
-                        { eventId = "rename", scope = Api.WorkspaceScope "w", workspaceId = Just "w", entityType = "workspace", entityId = "w", entityAction = "updated", invalidations = [ { kind = "entity", target = "workspace:w" } ] }
+                        { eventId = "rename", scope = Api.WorkspaceScope "w", workspaceId = Just "w", entityType = "workspace", entityId = "w", entityAction = "updated", invalidations = [ { kind = "entity", target = "workspace:w" } ], requestId = Nothing }
                 in
                 ChangeStream.reduceFrame (Api.CanonicalChange event) state
                     |> Tuple.second
@@ -63,6 +63,7 @@ suite =
                                 , entityId = "id"
                                 , entityAction = entityAction
                                 , invalidations = invalidations
+                                , requestId = Nothing
                                 }
                             )
                             state
@@ -106,7 +107,7 @@ suite =
                         { kind = "entity", target = "project:p" }
 
                     event =
-                        { eventId = "event", scope = Api.WorkspaceScope "a", workspaceId = Just "a", entityType = "project", entityId = "p", entityAction = "updated", invalidations = [ duplicate, duplicate ] }
+                        { eventId = "event", scope = Api.WorkspaceScope "a", workspaceId = Just "a", entityType = "project", entityId = "p", entityAction = "updated", invalidations = [ duplicate, duplicate ], requestId = Nothing }
 
                     unknown =
                         { event | eventId = "next", invalidations = [ { kind = "unrecognised", target = "project:p" } ] }
@@ -190,6 +191,7 @@ suite =
                         , entityType = "task"
                         , entityId = "t"
                         , entityAction = "updated"
+                        , requestId = Nothing
                         , invalidations =
                             [ { kind = "entity", target = "task:t" }
                             , { kind = "collection", target = "tasks:w" }
@@ -214,6 +216,7 @@ suite =
                         , entityType = "workspace"
                         , entityId = "w"
                         , entityAction = "updated"
+                        , requestId = Nothing
                         , invalidations =
                             [ { kind = "entity", target = "workspace:w" }
                             , { kind = "catalogue", target = "workspace-catalog" }
@@ -251,6 +254,7 @@ suite =
                         , entityType = "task"
                         , entityId = "t"
                         , entityAction = "updated"
+                        , requestId = Nothing
                         , invalidations = []
                         }
 
@@ -283,6 +287,7 @@ suite =
                             , entityType = "task"
                             , entityId = "t"
                             , entityAction = "updated"
+                            , requestId = Nothing
                             , invalidations = [ { kind = "entity", target = "task:t" }, { kind = "next_task", target = "workspace:w" } ]
                             }
 
@@ -301,6 +306,7 @@ suite =
                             , entityType = "workspace"
                             , entityId = "w"
                             , entityAction = action
+                            , requestId = Nothing
                             , invalidations = [ { kind = "entity", target = "workspace:w" } ]
                             }
 
@@ -312,6 +318,7 @@ suite =
                             , entityType = kind
                             , entityId = identity
                             , entityAction = action
+                            , requestId = Nothing
                             , invalidations = [ { kind = "entity", target = kind ++ ":" ++ identity } ]
                             }
 
@@ -333,10 +340,10 @@ suite =
                         , [ ChangeStream.RemoveEntity "task" "t", ChangeStream.RefreshTimeline, ChangeStream.RevalidateNavigationSummary "task" "t" ]
                         , [ ChangeStream.RevalidateNavigationSummary "task" "t", ChangeStream.RefreshTimeline, ChangeStream.RemoveEntity "task" "t" ]
                         ]
-        , test "dependency and readiness invalidations produce one bounded task-summary revalidation" <|
+        , test "dependency invalidations coalesce one dependency-page refresh and one task-summary revalidation" <|
             \_ ->
                 let
-                    event action eventId =
+                    event action eventId requestId =
                         Api.CanonicalChange
                             { eventId = eventId
                             , scope = Api.WorkspaceScope "w"
@@ -344,20 +351,32 @@ suite =
                             , entityType = "task_dependency"
                             , entityId = "t:d"
                             , entityAction = action
+                            , requestId = Just requestId
                             , invalidations =
                                 [ { kind = "entity", target = "task_dependency:t:d" }
+                                , { kind = "entity", target = "task_dependency:t:d" }
                                 , { kind = "readiness", target = "task:t" }
                                 , { kind = "readiness", target = "task:t" }
                                 , { kind = "entity", target = "task:t" }
                                 ]
                             }
                 in
-                [ ChangeStream.reduceFrame (event "updated" "u") (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
-                , ChangeStream.reduceFrame (event "deleted" "d") (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
+                [ ChangeStream.reduceFrame (event "updated" "u" "dependency-request") (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
+                , ChangeStream.reduceFrame (event "deleted" "d" "dependency-request") (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
+                , ChangeStream.reduceFrames
+                    [ event "updated" "local" "local-request"
+                    , event "updated" "remote" "remote-request"
+                    ]
+                    (ChangeStream.init (ChangeStream.Workspace "w") [])
+                    |> Tuple.second
                 ]
                     |> Expect.equal
-                        [ [ ChangeStream.RevalidateNavigationSummary "task" "t" ]
-                        , [ ChangeStream.RemoveEntity "task_dependency" "t:d", ChangeStream.RevalidateNavigationSummary "task" "t" ]
+                        [ [ ChangeStream.RefreshTaskDependencies "t" "d" True (Just "dependency-request"), ChangeStream.RevalidateNavigationSummary "task" "t" ]
+                        , [ ChangeStream.RefreshTaskDependencies "t" "d" False (Just "dependency-request"), ChangeStream.RevalidateNavigationSummary "task" "t" ]
+                        , [ ChangeStream.RefreshTaskDependencies "t" "d" True (Just "local-request")
+                          , ChangeStream.RevalidateNavigationSummary "task" "t"
+                          , ChangeStream.RefreshTaskDependencies "t" "d" True (Just "remote-request")
+                          ]
                         ]
         , test "observation invalidations stay targeted and never reload the active page" <|
             \_ ->
@@ -370,6 +389,7 @@ suite =
                             , entityType = "observation"
                             , entityId = "o"
                             , entityAction = action
+                            , requestId = Nothing
                             , invalidations =
                                 [ { kind = "entity", target = "observation:o" }
                                 , { kind = "collection", target = "observations:w" }
@@ -458,6 +478,7 @@ suite =
                         , entityType = "workspace"
                         , entityId = "w"
                         , entityAction = "deleted"
+                        , requestId = Nothing
                         , invalidations =
                             [ { kind = "entity", target = "workspace:w" }
                             , { kind = "catalogue", target = "workspace-catalog" }

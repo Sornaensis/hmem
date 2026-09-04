@@ -1866,6 +1866,11 @@ update msg model =
                             Ok overview ->
                                 { dependencies
                                     | taskDependencies = Dict.insert taskId overview.dependencies dependencies.taskDependencies
+                                    , taskDependencyHasMore = Dict.insert taskId False dependencies.taskDependencyHasMore
+                                    , taskDependencyNextOffset = Dict.insert taskId (List.length overview.dependencies) dependencies.taskDependencyNextOffset
+                                    , taskDependencyLoading = Dict.insert taskId False dependencies.taskDependencyLoading
+                                    , taskDependencyRequests = Dict.remove taskId dependencies.taskDependencyRequests
+                                    , taskDependencyRefreshItems = Dict.remove taskId dependencies.taskDependencyRefreshItems
                                     , taskReadinessRollups = Dict.insert taskId overview.readinessRollup dependencies.taskReadinessRollups
                                     , taskDependencyLinks = mergeTaskDependencyLinks taskId overview.dependencies dependencies.taskDependencyLinks
                                 }

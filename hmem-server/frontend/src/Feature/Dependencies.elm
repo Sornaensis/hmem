@@ -1,7 +1,12 @@
 module Feature.Dependencies exposing
-    ( handleEscape
+    ( beginDependencyRefresh
+    , cacheCompleteTaskDependencies
+    , handleEscape
     , init
-    , beginDependencyRefresh
+    , invalidateDependencyPage
+    , prepareDependencyEventRefresh
+    , resetCache
+    , trackDependencyMutationRequest
     , update
     , viewTaskDependencies
     )
@@ -31,6 +36,8 @@ init =
     , taskDependencyNextOffset = Dict.empty
     , taskDependencyLoading = Dict.empty
     , taskDependencyRequests = Dict.empty
+    , taskDependencyRefreshItems = Dict.empty
+    , taskDependencyMutations = []
     , nextTaskDependencyRequestGeneration = 1
     }
 
@@ -51,42 +58,220 @@ handleEscape model =
 
 -- UPDATE
 
-applyDependencyPage : String -> Int -> Result Http.Error Api.TaskDependencyPage -> Model -> ( Model, Cmd Msg )
-applyDependencyPage taskId offset result model =
+
+dependencyPageSize : Int
+dependencyPageSize =
+    50
+
+
+deduplicateAndSortDependencies : List Api.TaskDependencySummary -> List Api.TaskDependencySummary
+deduplicateAndSortDependencies items =
+    items
+        |> List.foldl
+            (\item values ->
+                if List.any (\value -> value.id == item.id) values then
+                    values
+
+                else
+                    item :: values
+            )
+            []
+        |> List.sortBy (\item -> ( String.toLower item.name, item.id ))
+
+
+resetCache : DependenciesModel -> DependenciesModel
+resetCache dependencies =
+    { dependencies
+        | taskDependencies = Dict.empty
+        , taskDependencyLinks = []
+        , taskReadinessRollups = Dict.empty
+        , projectReadinessRollups = Dict.empty
+        , addingDependencyFor = Nothing
+        , taskDependencyHasMore = Dict.empty
+        , taskDependencyNextOffset = Dict.empty
+        , taskDependencyLoading = Dict.empty
+        , taskDependencyRequests = Dict.empty
+        , taskDependencyRefreshItems = Dict.empty
+        , taskDependencyMutations = []
+        , nextTaskDependencyRequestGeneration = dependencies.nextTaskDependencyRequestGeneration + 1
+    }
+
+
+cacheCompleteTaskDependencies : String -> List Api.TaskDependencySummary -> DependenciesModel -> DependenciesModel
+cacheCompleteTaskDependencies taskId items dependencies =
+    { dependencies
+        | taskDependencies = Dict.insert taskId (deduplicateAndSortDependencies items) dependencies.taskDependencies
+        , taskDependencyHasMore = Dict.insert taskId False dependencies.taskDependencyHasMore
+        , taskDependencyNextOffset = Dict.insert taskId (List.length items) dependencies.taskDependencyNextOffset
+        , taskDependencyLoading = Dict.insert taskId False dependencies.taskDependencyLoading
+        , taskDependencyRequests = Dict.remove taskId dependencies.taskDependencyRequests
+        , taskDependencyRefreshItems = Dict.remove taskId dependencies.taskDependencyRefreshItems
+    }
+
+
+prepareDependencyEventRefresh : String -> String -> String -> Maybe String -> Model -> ( Model, Bool )
+prepareDependencyEventRefresh taskId dependsOnId action maybeRequestId model =
+    case maybeRequestId |> Maybe.andThen (\requestId -> List.filter (\correlation -> correlation.requestId == requestId && correlation.taskId == taskId && correlation.dependsOnId == dependsOnId && correlation.action == action && Just correlation.workspaceId == model.selectedWorkspaceId && correlation.sessionEpoch == model.sessionRequestEpoch) model.dependencies.taskDependencyMutations |> List.head) of
+        Just correlation ->
+            let
+                dependencies =
+                    model.dependencies
+
+                updatedCorrelations =
+                    dependencies.taskDependencyMutations
+                        |> List.map
+                            (\candidate ->
+                                if candidate.requestId == correlation.requestId && candidate.taskId == taskId && candidate.dependsOnId == dependsOnId && candidate.action == action && candidate.workspaceId == correlation.workspaceId && candidate.sessionEpoch == correlation.sessionEpoch then
+                                    { candidate | echoSeen = True }
+
+                                else
+                                    candidate
+                            )
+            in
+            ( { model | dependencies = { dependencies | taskDependencyMutations = updatedCorrelations } }
+            , not correlation.httpSucceeded && not correlation.echoSeen
+            )
+
+        Nothing ->
+            ( model, True )
+
+
+trackDependencyMutationRequest : String -> String -> String -> String -> Model -> Model
+trackDependencyMutationRequest taskId dependsOnId action requestId model =
+    case model.selectedWorkspaceId of
+        Just workspaceId ->
+            let
+                dependencies =
+                    model.dependencies
+            in
+            { model
+                | dependencies =
+                    { dependencies
+                        | taskDependencyMutations =
+                            List.take 128
+                                ({ requestId = requestId
+                                 , taskId = taskId
+                                 , dependsOnId = dependsOnId
+                                 , action = action
+                                 , workspaceId = workspaceId
+                                 , sessionEpoch = model.sessionRequestEpoch
+                                 , httpSucceeded = False
+                                 , echoSeen = False
+                                 }
+                                    :: List.filter (\correlation -> correlation.requestId /= requestId) dependencies.taskDependencyMutations
+                                )
+                    }
+            }
+
+        Nothing ->
+            model
+
+
+applyDependencyPage : String -> DependencyPageRequest -> Result Http.Error Api.TaskDependencyPage -> Model -> ( Model, Cmd Msg )
+applyDependencyPage taskId request result model =
     case result of
         Ok page ->
             let
-                dependenciesModel = model.dependencies
-                existing =
-                    if offset == 0 && not page.hasMore then
-                        []
+                dependenciesModel =
+                    model.dependencies
+
+                nextOffset =
+                    request.offset + List.length page.items
+            in
+            case Dict.get taskId dependenciesModel.taskDependencyRefreshItems of
+                Just accumulatedItems ->
+                    let
+                        authoritativeItems =
+                            deduplicateAndSortDependencies (accumulatedItems ++ page.items)
+                    in
+                    if page.hasMore && not (List.isEmpty page.items) then
+                        let
+                            nextRequest =
+                                { request
+                                    | offset = nextOffset
+                                    , generation = dependenciesModel.nextTaskDependencyRequestGeneration
+                                }
+
+                            updated =
+                                { dependenciesModel
+                                    | taskDependencyLoading = Dict.insert taskId True dependenciesModel.taskDependencyLoading
+                                    , taskDependencyRequests = Dict.insert taskId nextRequest dependenciesModel.taskDependencyRequests
+                                    , taskDependencyRefreshItems = Dict.insert taskId authoritativeItems dependenciesModel.taskDependencyRefreshItems
+                                    , nextTaskDependencyRequestGeneration = nextRequest.generation + 1
+                                }
+                        in
+                        ( { model | dependencies = updated }
+                        , Api.fetchTaskDependencyPage model.flags.apiUrl taskId nextOffset (GotTaskDependencyPage taskId request.workspaceId request.sessionEpoch nextRequest.generation nextOffset)
+                        )
+
+                    else if page.hasMore then
+                        addToast Error
+                            "Failed to refresh task dependencies"
+                            { model
+                                | dependencies =
+                                    { dependenciesModel
+                                        | taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading
+                                        , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
+                                        , taskDependencyRefreshItems = Dict.remove taskId dependenciesModel.taskDependencyRefreshItems
+                                    }
+                            }
 
                     else
-                        Dict.get taskId dependenciesModel.taskDependencies |> Maybe.withDefault []
-                ordered =
-                    (existing ++ page.items)
-                        |> List.foldl (\item values -> if List.any (\value -> value.id == item.id) values then values else item :: values) []
-                        |> List.sortBy (\item -> ( String.toLower item.name, item.id ))
-            in
-            ( { model
-                | dependencies =
-                    { dependenciesModel
-                        | taskDependencies = Dict.insert taskId ordered dependenciesModel.taskDependencies
-                        , taskDependencyHasMore = Dict.insert taskId page.hasMore dependenciesModel.taskDependencyHasMore
-                        , taskDependencyNextOffset = Dict.insert taskId (offset + List.length page.items) dependenciesModel.taskDependencyNextOffset
-                        , taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading
-                        , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
-                    }
-              }
-            , Cmd.none
-            )
+                        ( { model
+                            | dependencies =
+                                { dependenciesModel
+                                    | taskDependencies = Dict.insert taskId authoritativeItems dependenciesModel.taskDependencies
+                                    , taskDependencyHasMore = Dict.insert taskId False dependenciesModel.taskDependencyHasMore
+                                    , taskDependencyNextOffset = Dict.insert taskId nextOffset dependenciesModel.taskDependencyNextOffset
+                                    , taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading
+                                    , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
+                                    , taskDependencyRefreshItems = Dict.remove taskId dependenciesModel.taskDependencyRefreshItems
+                                }
+                          }
+                        , Cmd.none
+                        )
+
+                Nothing ->
+                    let
+                        existing =
+                            if request.offset == 0 && not page.hasMore then
+                                []
+
+                            else
+                                Dict.get taskId dependenciesModel.taskDependencies |> Maybe.withDefault []
+
+                        ordered =
+                            deduplicateAndSortDependencies (existing ++ page.items)
+                    in
+                    ( { model
+                        | dependencies =
+                            { dependenciesModel
+                                | taskDependencies = Dict.insert taskId ordered dependenciesModel.taskDependencies
+                                , taskDependencyHasMore = Dict.insert taskId page.hasMore dependenciesModel.taskDependencyHasMore
+                                , taskDependencyNextOffset = Dict.insert taskId nextOffset dependenciesModel.taskDependencyNextOffset
+                                , taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading
+                                , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
+                                , taskDependencyRefreshItems = Dict.remove taskId dependenciesModel.taskDependencyRefreshItems
+                            }
+                      }
+                    , Cmd.none
+                    )
 
         Err _ ->
             let
-                dependenciesModel = model.dependencies
+                dependenciesModel =
+                    model.dependencies
             in
-            addToast Error "Failed to load task dependencies"
-                { model | dependencies = { dependenciesModel | taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading, taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests } }
+            addToast Error
+                "Failed to load task dependencies"
+                { model
+                    | dependencies =
+                        { dependenciesModel
+                            | taskDependencyLoading = Dict.insert taskId False dependenciesModel.taskDependencyLoading
+                            , taskDependencyRequests = Dict.remove taskId dependenciesModel.taskDependencyRequests
+                            , taskDependencyRefreshItems = Dict.remove taskId dependenciesModel.taskDependencyRefreshItems
+                        }
+                }
 
 
 beginDependencyRefresh : String -> Model -> ( Model, Cmd Msg )
@@ -94,12 +279,31 @@ beginDependencyRefresh taskId model =
     case model.selectedWorkspaceId of
         Just workspaceId ->
             let
-                dependencies = model.dependencies
-                request = { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, offset = 0, generation = dependencies.nextTaskDependencyRequestGeneration }
+                dependencies =
+                    model.dependencies
+
+                request =
+                    { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, offset = 0, generation = dependencies.nextTaskDependencyRequestGeneration }
+
+                cachedItems =
+                    Dict.get taskId dependencies.taskDependencies |> Maybe.withDefault []
+
+                refreshAll =
+                    Dict.get taskId dependencies.taskDependencyHasMore
+                        /= Just True
+                        && List.length cachedItems
+                        >= dependencyPageSize
+
                 updated =
                     { dependencies
                         | taskDependencyLoading = Dict.insert taskId True dependencies.taskDependencyLoading
                         , taskDependencyRequests = Dict.insert taskId request dependencies.taskDependencyRequests
+                        , taskDependencyRefreshItems =
+                            if refreshAll then
+                                Dict.insert taskId [] dependencies.taskDependencyRefreshItems
+
+                            else
+                                Dict.remove taskId dependencies.taskDependencyRefreshItems
                         , nextTaskDependencyRequestGeneration = request.generation + 1
                     }
             in
@@ -107,6 +311,26 @@ beginDependencyRefresh taskId model =
 
         Nothing ->
             ( model, Cmd.none )
+
+
+invalidateDependencyPage : String -> Model -> Model
+invalidateDependencyPage taskId model =
+    let
+        dependencies =
+            model.dependencies
+    in
+    { model
+        | dependencies =
+            { dependencies
+                | taskDependencies = Dict.remove taskId dependencies.taskDependencies
+                , taskDependencyHasMore = Dict.remove taskId dependencies.taskDependencyHasMore
+                , taskDependencyNextOffset = Dict.remove taskId dependencies.taskDependencyNextOffset
+                , taskDependencyLoading = Dict.remove taskId dependencies.taskDependencyLoading
+                , taskDependencyRequests = Dict.remove taskId dependencies.taskDependencyRequests
+                , taskDependencyRefreshItems = Dict.remove taskId dependencies.taskDependencyRefreshItems
+                , nextTaskDependencyRequestGeneration = dependencies.nextTaskDependencyRequestGeneration + 1
+            }
+    }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -119,7 +343,7 @@ update msg model =
                         ( model, Cmd.none )
 
                     else
-                        applyDependencyPage taskId offset result model
+                        applyDependencyPage taskId request result model
 
                 Nothing ->
                     ( model, Cmd.none )
@@ -143,11 +367,14 @@ update msg model =
                 Just workspaceId ->
                     if canLoad then
                         let
-                            request = { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, offset = offset, generation = dependenciesModel.nextTaskDependencyRequestGeneration }
+                            request =
+                                { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, offset = offset, generation = dependenciesModel.nextTaskDependencyRequestGeneration }
+
                             updated =
                                 { dependenciesModel
                                     | taskDependencyLoading = Dict.insert taskId True dependenciesModel.taskDependencyLoading
                                     , taskDependencyRequests = Dict.insert taskId request dependenciesModel.taskDependencyRequests
+                                    , taskDependencyRefreshItems = Dict.remove taskId dependenciesModel.taskDependencyRefreshItems
                                     , nextTaskDependencyRequestGeneration = request.generation + 1
                                 }
                         in
@@ -161,25 +388,31 @@ update msg model =
                 Nothing ->
                     ( model, Cmd.none )
 
-        GotTaskDependencies taskId result ->
-            case result of
-                Ok overview ->
-                    let
-                        dependenciesModel =
-                            model.dependencies
-                    in
-                    ( { model
-                        | dependencies =
-                            { dependenciesModel
-                                | taskDependencies = Dict.insert taskId overview.dependencies dependenciesModel.taskDependencies
-                                , taskReadinessRollups = Dict.insert taskId overview.readinessRollup dependenciesModel.taskReadinessRollups
-                            }
-                      }
-                    , Cmd.none
-                    )
+        GotTaskDependencies taskId workspaceId sessionEpoch dependencyGeneration result ->
+            if model.auth.status /= AuthReady || model.sessionContext == Nothing || model.selectedWorkspaceId /= workspaceId || not (Permissions.canReadCurrentWorkspace model) || not (Dict.get taskId model.tasks |> Maybe.map (\task -> Just task.workspaceId == workspaceId) |> Maybe.withDefault False) || model.sessionRequestEpoch /= sessionEpoch || model.dependencies.nextTaskDependencyRequestGeneration /= dependencyGeneration || Dict.member taskId model.dependencies.taskDependencyRequests || Dict.member taskId model.dependencies.taskDependencyRefreshItems then
+                ( model, Cmd.none )
 
-                Err _ ->
-                    addToast Error "Failed to load task dependencies" model
+            else
+                case result of
+                    Ok overview ->
+                        if overview.task.id == taskId && Just overview.task.workspaceId == workspaceId then
+                            let
+                                dependenciesModel =
+                                    model.dependencies
+                            in
+                            ( { model
+                                | dependencies =
+                                    cacheCompleteTaskDependencies taskId overview.dependencies dependenciesModel
+                                        |> (\updated -> { updated | taskReadinessRollups = Dict.insert taskId overview.readinessRollup updated.taskReadinessRollups })
+                              }
+                            , Cmd.none
+                            )
+
+                        else
+                            ( model, Cmd.none )
+
+                    Err _ ->
+                        addToast Error "Failed to load task dependencies" model
 
         GotProjectOverview projectId result ->
             case result of
@@ -234,11 +467,14 @@ update msg model =
                 ( trackedModel, requestId, trackCmd ) =
                     beginTrackedMutation [ taskId, dependsOnId ]
                         { model | dependencies = { dependenciesModel | addingDependencyFor = Nothing } }
+
+                correlatedModel =
+                    trackDependencyMutationRequest taskId dependsOnId "add" requestId trackedModel
             in
-            ( trackedModel
+            ( correlatedModel
             , Cmd.batch
                 [ trackCmd
-                , Api.addTaskDependency model.flags.apiUrl taskId dependsOnId requestId (DependencyMutationDone taskId)
+                , Api.addTaskDependency model.flags.apiUrl taskId dependsOnId requestId (DependencyMutationDone taskId requestId)
                 ]
             )
 
@@ -246,33 +482,89 @@ update msg model =
             let
                 ( trackedModel, requestId, trackCmd ) =
                     beginTrackedMutation [ taskId, dependsOnId ] model
+
+                correlatedModel =
+                    trackDependencyMutationRequest taskId dependsOnId "remove" requestId trackedModel
             in
-            ( trackedModel
+            ( correlatedModel
             , Cmd.batch
                 [ trackCmd
-                , Api.removeTaskDependency model.flags.apiUrl taskId dependsOnId requestId (DependencyMutationDone taskId)
+                , Api.removeTaskDependency model.flags.apiUrl taskId dependsOnId requestId (DependencyMutationDone taskId requestId)
                 ]
             )
 
-        DependencyMutationDone taskId result ->
-            case result of
-                Ok mutationResult ->
+        DependencyMutationDone taskId requestId result ->
+            let
+                correlation =
+                    model.dependencies.taskDependencyMutations
+                        |> List.filter
+                            (\candidate ->
+                                candidate.requestId
+                                    == requestId
+                                    && candidate.taskId
+                                    == taskId
+                                    && candidate.workspaceId
+                                    == (model.selectedWorkspaceId |> Maybe.withDefault "")
+                                    && candidate.sessionEpoch
+                                    == model.sessionRequestEpoch
+                            )
+                        |> List.head
+            in
+            case ( correlation, result ) of
+                ( Just currentCorrelation, Ok mutationResult ) ->
+                    if mutationResult.taskId /= currentCorrelation.taskId || mutationResult.dependsOnId /= currentCorrelation.dependsOnId || mutationResult.action /= currentCorrelation.action then
+                        ( model, Cmd.none )
+
+                    else
+                        let
+                            dependencies =
+                                model.dependencies
+
+                            correlatedModel =
+                                { model
+                                    | dependencies =
+                                        { dependencies
+                                            | taskDependencyMutations =
+                                                dependencies.taskDependencyMutations
+                                                    |> List.map
+                                                        (\candidate ->
+                                                            if candidate.requestId == requestId && candidate.taskId == taskId then
+                                                                { candidate | httpSucceeded = True }
+
+                                                            else
+                                                                candidate
+                                                        )
+                                        }
+                                }
+
+                            updatedModel =
+                                applyDependencyMutationResult mutationResult correlatedModel
+
+                            -- Revalidate only the mutated task. Complete caches use
+                            -- the bounded authoritative crawl; request correlation
+                            -- keeps the reconciled local state visible on failure.
+                            ( revalidatedModel, revalidationCmd ) =
+                                if currentCorrelation.echoSeen then
+                                    ( updatedModel, Cmd.none )
+
+                                else
+                                    beginDependencyRefresh taskId updatedModel
+                        in
+                        ( revalidatedModel
+                        , revalidationCmd
+                        )
+
+                ( Just _, Err _ ) ->
                     let
-                        updatedModel =
-                            applyDependencyMutationResult mutationResult model
-
-                        -- Revalidate only the mutated task's offset-zero page.
-                        -- The request correlation guards stale responses, while
-                        -- the reconciled local state remains visible on failure.
-                        ( revalidatedModel, revalidationCmd ) =
-                            beginDependencyRefresh taskId updatedModel
+                        dependencies =
+                            model.dependencies
                     in
-                    ( revalidatedModel
-                    , revalidationCmd
-                    )
+                    addToast Error
+                        "Failed to update dependency"
+                        { model | dependencies = { dependencies | taskDependencyMutations = List.filter (\candidate -> candidate.requestId /= requestId || candidate.taskId /= taskId) dependencies.taskDependencyMutations } }
 
-                Err _ ->
-                    addToast Error "Failed to update dependency" model
+                ( Nothing, _ ) ->
+                    ( model, Cmd.none )
 
         _ ->
             ( model, Cmd.none )
@@ -412,7 +704,17 @@ viewAddDependencyPopover model taskId deps =
                                             , onClick (PerformAddDependency taskId t.id)
                                             ]
                                             [ div [ class "popover-card-header" ]
-                                                [ span [ class ("entity-type-label " ++ (if t.parentId /= Nothing then "entity-type-subtask" else "entity-type-task")) ]
+                                                [ span
+                                                    [ class
+                                                        ("entity-type-label "
+                                                            ++ (if t.parentId /= Nothing then
+                                                                    "entity-type-subtask"
+
+                                                                else
+                                                                    "entity-type-task"
+                                                               )
+                                                        )
+                                                    ]
                                                     [ text
                                                         (if t.parentId /= Nothing then
                                                             "SUB"
@@ -471,7 +773,17 @@ viewDependencyItem model taskId dep =
                             |> List.filter (\( eid, _, _ ) -> eid /= t.id)
                 in
                 [ div [ class "popover-card-header" ]
-                    [ span [ class ("entity-type-label " ++ (if t.parentId /= Nothing then "entity-type-subtask" else "entity-type-task")) ]
+                    [ span
+                        [ class
+                            ("entity-type-label "
+                                ++ (if t.parentId /= Nothing then
+                                        "entity-type-subtask"
+
+                                    else
+                                        "entity-type-task"
+                                   )
+                            )
+                        ]
                         [ text
                             (if t.parentId /= Nothing then
                                 "SUB"

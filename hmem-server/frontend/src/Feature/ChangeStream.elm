@@ -47,6 +47,7 @@ type alias RequestGuard =
 type Action
     = RefetchEntity String String
     | RemoveEntity String String
+    | RefreshTaskDependencies String String Bool (Maybe String)
     | RefreshTaskOverview String
     | RefreshReadiness String String
     | RevalidateNavigationSummary String String
@@ -320,11 +321,13 @@ invalidationActions envelope invalidation =
                     identity =
                         taskId ++ ":" ++ dependsOnId
                 in
-                if envelope.entityAction == "deleted" && primaryEntity == "task_dependency" && envelope.entityId == identity then
-                    [ RemoveEntity "task_dependency" identity, RevalidateNavigationSummary "task" taskId ]
+                if primaryEntity == "task_dependency" && envelope.entityId == identity then
+                    [ RefreshTaskDependencies taskId dependsOnId (envelope.entityAction /= "deleted") envelope.requestId
+                    , RevalidateNavigationSummary "task" taskId
+                    ]
 
                 else
-                    [ RevalidateNavigationSummary "task" taskId ]
+                    [ BeginResync ]
 
             else
                 [ BeginResync ]
@@ -455,6 +458,21 @@ coalesce actions =
 
                 RemoveEntity kind identity ->
                     "entity:" ++ kind ++ ":" ++ identity
+
+                RefreshTaskDependencies taskId dependsOnId present maybeRequestId ->
+                    "task-dependencies:"
+                        ++ taskId
+                        ++ ":"
+                        ++ dependsOnId
+                        ++ ":"
+                        ++ (if present then
+                                "present"
+
+                            else
+                                "absent"
+                           )
+                        ++ ":"
+                        ++ Maybe.withDefault "unidentified" maybeRequestId
 
                 RefreshTaskOverview taskId ->
                     "task-overview:" ++ taskId

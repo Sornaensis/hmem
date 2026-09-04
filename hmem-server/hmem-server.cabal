@@ -53,7 +53,9 @@ library
       HMem.Server.CtlMigrate
       HMem.Server.CtlPaths
       HMem.Server.CtlPgvector
+      HMem.Server.CtlPgvectorCli
       HMem.Server.Event
+      HMem.Server.Exception
       HMem.Server.Logging
       HMem.Server.LogRotation
       HMem.Server.OpenAPI
@@ -396,6 +398,7 @@ test-suite hmem-server-test
       HMem.Server.ChangeStreamSpec
       HMem.Server.CtlMigrateSpec
       HMem.Server.CtlPathsSpec
+      HMem.Server.CtlPgvectorCliSpec
       HMem.Server.CtlPgvectorSpec
       HMem.Server.DeployedSandboxSpec
       HMem.Server.KeycloakHarness

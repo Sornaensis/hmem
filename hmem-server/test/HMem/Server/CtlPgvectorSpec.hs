@@ -1,7 +1,23 @@
 module HMem.Server.CtlPgvectorSpec (spec) where
 
-import Control.Concurrent.Async (concurrently)
-import Control.Exception (bracket)
+import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent.Async
+  ( Async
+  , AsyncCancelled(..)
+  , async
+  , asyncThreadId
+  , cancel
+  , concurrently
+  , wait
+  , waitCatch
+  )
+import Control.Exception
+  ( AsyncException(..)
+  , SomeException
+  , bracket
+  , fromException
+  , throwTo
+  )
 import Data.ByteString qualified as BS
 import Data.Either (isRight)
 import Data.List (isInfixOf, sort)
@@ -69,6 +85,30 @@ spec = describe "hmem-ctl pgvector database operations" $ do
     case result of
       Left (PgvectorDatabaseUnavailable message) -> message `shouldSatisfy` (not . null)
       other -> expectationFailure $ "Expected PgvectorDatabaseUnavailable, got: " <> show other
+
+  it "rethrows asynchronous cancellation from inspect and provision boundaries" $
+    withPgvectorSandbox $ \db ->
+      withSingleConnectionHeld db $ \pool -> do
+        assertCancellationRethrown
+          "inspect ThreadKilled"
+          (inspectPgvectorWithPool pool)
+          (\worker -> throwTo (asyncThreadId worker) ThreadKilled)
+          (isBaseAsync ThreadKilled)
+        assertCancellationRethrown
+          "inspect AsyncCancelled"
+          (inspectPgvectorWithPool pool)
+          cancel
+          isAsyncCancelled
+        assertCancellationRethrown
+          "provision UserInterrupt"
+          (provisionPgvectorWithPool pool)
+          (\worker -> throwTo (asyncThreadId worker) UserInterrupt)
+          (isBaseAsync UserInterrupt)
+        assertCancellationRethrown
+          "provision AsyncCancelled"
+          (provisionPgvectorWithPool pool)
+          cancel
+          isAsyncCancelled
 
   it "refuses a missing observations schema without installing the extension" $
     withPgvectorSandbox $ \db -> do
@@ -362,6 +402,52 @@ withDbPool :: TestDb -> (Pool Hasql.Connection -> IO a) -> IO a
 withDbPool db = bracket
   (DBPool.createPool db.testDbConnStr 2 5 30000)
   destroyAllResources
+
+withSingleConnectionHeld
+  :: TestDb
+  -> (Pool Hasql.Connection -> IO a)
+  -> IO a
+withSingleConnectionHeld db action = bracket
+  (DBPool.createPool db.testDbConnStr 1 5 30000)
+  destroyAllResources
+  (\pool -> do
+    connectionHeld <- newEmptyMVar
+    releaseConnection <- newEmptyMVar
+    bracket
+      (async $ DBPool.withConn pool $ \_ -> do
+        putMVar connectionHeld ()
+        takeMVar releaseConnection)
+      (\holder -> putMVar releaseConnection () >> wait holder)
+      (\_ -> takeMVar connectionHeld >> action pool))
+
+assertCancellationRethrown
+  :: String
+  -> IO a
+  -> (Async a -> IO ())
+  -> (SomeException -> Bool)
+  -> Expectation
+assertCancellationRethrown label action interrupt matches = do
+  started <- newEmptyMVar
+  worker <- async $ putMVar started () >> action
+  takeMVar started
+  threadDelay 50000
+  interrupt worker
+  outcome <- waitCatch worker
+  case outcome of
+    Left err | matches err -> pure ()
+    Left err -> expectationFailure $
+      label <> " raised the wrong exception: " <> show err
+    Right _ -> expectationFailure $
+      label <> " was converted to a normal result instead of being rethrown"
+
+isBaseAsync :: AsyncException -> SomeException -> Bool
+isBaseAsync expected err =
+  (fromException err :: Maybe AsyncException) == Just expected
+
+isAsyncCancelled :: SomeException -> Bool
+isAsyncCancelled err = case fromException err :: Maybe AsyncCancelled of
+  Just AsyncCancelled -> True
+  Nothing -> False
 
 createObservationsTable :: Pool Hasql.Connection -> IO ()
 createObservationsTable pool =

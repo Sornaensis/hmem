@@ -26,7 +26,7 @@ module HMem.Server.CtlPgvector
   , provisionPgvectorWithPool
   ) where
 
-import Control.Exception (SomeException, bracket, onException, try)
+import Control.Exception (bracket, onException)
 import Control.Monad (void)
 import Data.ByteString (ByteString)
 import Data.Int (Int32, Int64)
@@ -43,6 +43,7 @@ import Hasql.Statement qualified as Statement
 
 import HMem.Config (HMemConfig(..), PoolConfig(..), connectionString, loadConfig)
 import HMem.DB.Pool qualified as Pool
+import HMem.Server.Exception (trySynchronous)
 import HMem.Types (observationEmbeddingDimensions)
 
 data PgvectorPackageStatus
@@ -341,7 +342,7 @@ inspectPgvectorWithPool
   :: Pool Hasql.Connection
   -> IO (Either PgvectorError PgvectorStatus)
 inspectPgvectorWithPool pool = do
-  result <- try @SomeException $ Pool.withConn pool $ \connection -> do
+  result <- trySynchronous $ Pool.withConn pool $ \connection -> do
     inspected <- Session.run inspectPgvectorTransaction connection
       `onException` rollbackQuietly connection
     case inspected of
@@ -371,7 +372,7 @@ provisionPgvectorWithPool
   :: Pool Hasql.Connection
   -> IO (Either PgvectorError PgvectorProvisionReport)
 provisionPgvectorWithPool pool = do
-  attempted <- try @SomeException $ Pool.withConn pool $ \connection -> do
+  attempted <- trySynchronous $ Pool.withConn pool $ \connection -> do
     result <- Session.run provisionPgvectorSession connection
       `onException` rollbackQuietly connection
     case result of
@@ -388,7 +389,7 @@ withConfiguredPool
   -> (Pool Hasql.Connection -> IO (Either PgvectorError a))
   -> IO (Either PgvectorError a)
 withConfiguredPool cfg action = do
-  result <- try @SomeException $ bracket
+  result <- trySynchronous $ bracket
     (Pool.createPool
       (connectionString cfg.database)
       cfg.pool.size
@@ -512,7 +513,8 @@ sessionSqlState = \case
       _ -> Nothing
 
 rollbackQuietly :: Hasql.Connection -> IO ()
-rollbackQuietly connection = void $ try @SomeException $ Session.run (Session.sql "ROLLBACK") connection
+rollbackQuietly connection = void $ trySynchronous $
+  Session.run (Session.sql "ROLLBACK") connection
 
 pgvectorProvisionLockKey :: Int64
 pgvectorProvisionLockKey = 5211589505520083310

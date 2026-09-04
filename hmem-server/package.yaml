@@ -136,6 +136,7 @@ tests:
       - http-types
       - async
       - process
+      - optparse-applicative
 
 default-extensions:
   - OverloadedStrings

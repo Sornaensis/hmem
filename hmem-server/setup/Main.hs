@@ -15,6 +15,8 @@
 --   @hmem-ctl auth bootstrap-superadmin@ – create/update the first deployed superadmin
 --   @hmem-ctl auth users upsert@ – create/update deployed users and global grants
 --   @hmem-ctl auth tokens issue@ – create a display-once service/PAT token
+--   @hmem-ctl pgvector status@ – inspect Observation embedding readiness
+--   @hmem-ctl pgvector enable@ – safely provision the pgvector schema contract
 --
 --   Local PostgreSQL management commands require: initdb, pg_ctl, createdb, psql on PATH.
 
@@ -42,7 +44,7 @@ import System.Directory   (createDirectoryIfMissing, copyFile,
                            findExecutable, getHomeDirectory,
                            listDirectory,
                            removeDirectoryRecursive, removeFile)
-import System.Exit        (ExitCode(..), exitFailure, exitSuccess)
+import System.Exit        (ExitCode(..), exitFailure, exitSuccess, exitWith)
 import System.FilePath    ((</>))
 import System.IO          (IOMode(..), hClose, hFlush, hPutStrLn,
                            openFile, stderr, stdout)
@@ -64,6 +66,7 @@ import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.AuthUsers qualified as AuthUsers
 import HMem.Server.CtlMigrate qualified as CtlMigrate
+import HMem.Server.CtlPgvectorCli qualified as CtlPgvectorCli
 import HMem.Server.CtlPaths
 import HMem.Types
 import Paths_hmem_server qualified as Paths
@@ -86,6 +89,7 @@ data Command
   | CmdProjects   ProjectsOpts
   | CmdWorkspace
   | CmdAuth AuthCommand
+  | CmdPgvector CtlPgvectorCli.PgvectorCliCommand
 
 data AuthCommand
   = CmdBootstrapSuperadmin BootstrapSuperadminOpts
@@ -176,6 +180,7 @@ commandParser = subparser
       (progDesc "Interactively select or create a workspace, write .hmem.workspace"))
   <> command "auth" (info (CmdAuth <$> authCommandParser)
       (progDesc "Auth operator workflows"))
+  <> command "pgvector" (CtlPgvectorCli.pgvectorCommandInfo CmdPgvector)
   )
   <|> pure CmdSetup
 
@@ -360,6 +365,20 @@ main = do
     CmdProjects opts   -> doProjects opts
     CmdWorkspace       -> doWorkspace
     CmdAuth authCmd    -> doAuth authCmd
+    CmdPgvector pgvectorCmd -> doPgvector pgvectorCmd
+
+------------------------------------------------------------------------
+-- Pgvector commands for any configured PostgreSQL database
+------------------------------------------------------------------------
+
+doPgvector :: CtlPgvectorCli.PgvectorCliCommand -> IO ()
+doPgvector commandValue = do
+  result <- CtlPgvectorCli.runPgvectorCommand commandValue
+  BL8.hPutStr stdout result.standardOutput
+  BL8.hPutStr stderr result.standardError
+  case result.exitCode of
+    ExitSuccess -> pure ()
+    failure -> exitWith failure
 
 ------------------------------------------------------------------------
 -- Migrate-only command for externally managed PostgreSQL

@@ -32,9 +32,8 @@ import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Rel8 hiding (update)
-import Rel8 qualified
 
-import HMem.DB.Pool (DBException(..), runSession)
+import HMem.DB.Pool (DBException(..), runSession, runTransaction)
 import HMem.DB.Schema
 import HMem.Types
 
@@ -102,20 +101,43 @@ getObservation pool workspace observationId = do
 updateObservation :: Pool Hasql.Connection -> UUID -> UUID -> UpdateObservation -> IO (Maybe Observation)
 updateObservation pool workspace observationId update = do
   validateOrThrow $ validateUpdateObservationInput update
-  rows <- runSession pool $ Session.statement () $ run $
-    Rel8.update Update
-      { target = observationSchema
-      , from = pure ()
-      , set = \_ row -> row { obsContent = lit update.content }
-      , updateWhere = \_ row -> row.obsId ==. lit observationId &&. row.obsWorkspaceId ==. lit workspace
-      , returning = Returning id
-      }
-  -- Rel8 can return the parent row, then retrieve its subjects in one SQL
-  -- statement.  This preserves the content-only update while avoiding a
-  -- mutable subject path.
-  case rows of
-    (row:_) -> getObservation pool workspace observationId
-    [] -> pure Nothing
+  updated <- runTransaction pool $ do
+    -- Keep the optional-column probe and update under one table lock. This
+    -- makes clearing an existing embedding part of the same logical mutation
+    -- while still allowing databases without pgvector to update normally.
+    Session.sql "LOCK TABLE public.observations IN ROW EXCLUSIVE MODE"
+    hasEmbedding <- Session.statement () observationEmbeddingColumnStatement
+    Session.statement (workspace, observationId, update.content) $
+      if hasEmbedding then updateObservationAndClearEmbeddingStatement
+                      else updateObservationContentStatement
+  if updated
+    then getObservation pool workspace observationId
+    else pure Nothing
+
+observationEmbeddingColumnStatement :: Statement.Statement () Bool
+observationEmbeddingColumnStatement = Statement.Statement
+  "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+  \WHERE table_schema = 'public' AND table_name = 'observations' AND column_name = 'embedding')"
+  Enc.noParams
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool)))
+  True
+
+updateObservationContentStatement :: Statement.Statement (UUID, UUID, Text) Bool
+updateObservationContentStatement = updateObservationStatement
+  "WITH updated AS (UPDATE observations SET content = $3 WHERE workspace_id = $1 AND id = $2 RETURNING 1) SELECT EXISTS (SELECT 1 FROM updated)"
+
+updateObservationAndClearEmbeddingStatement :: Statement.Statement (UUID, UUID, Text) Bool
+updateObservationAndClearEmbeddingStatement = updateObservationStatement
+  "WITH updated AS (UPDATE observations SET content = $3, embedding = NULL WHERE workspace_id = $1 AND id = $2 RETURNING 1) SELECT EXISTS (SELECT 1 FROM updated)"
+
+updateObservationStatement :: BS8.ByteString -> Statement.Statement (UUID, UUID, Text) Bool
+updateObservationStatement sql = Statement.Statement
+  sql
+  ( contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+ <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid))
+ <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.text)))
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool)))
+  True
 
 -- | Observations are permanently deleted; there is no soft-delete state.
 deleteObservation :: Pool Hasql.Connection -> UUID -> UUID -> IO Bool

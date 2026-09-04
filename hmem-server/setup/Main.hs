@@ -17,6 +17,8 @@
 --   @hmem-ctl auth tokens issue@ – create a display-once service/PAT token
 --   @hmem-ctl pgvector status@ – inspect Observation embedding readiness
 --   @hmem-ctl pgvector enable@ – safely provision the pgvector schema contract
+--   @hmem-ctl embeddings export@ – stream provider-neutral embedding work as NDJSON
+--   @hmem-ctl embeddings import@ – validate and compare-and-set embedding results
 --
 --   Local PostgreSQL management commands require: initdb, pg_ctl, createdb, psql on PATH.
 
@@ -66,6 +68,7 @@ import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.AuthUsers qualified as AuthUsers
 import HMem.Server.CtlMigrate qualified as CtlMigrate
+import HMem.Server.CtlEmbeddingsCli qualified as CtlEmbeddingsCli
 import HMem.Server.CtlPgvectorCli qualified as CtlPgvectorCli
 import HMem.Server.CtlPaths
 import HMem.Types
@@ -90,6 +93,7 @@ data Command
   | CmdWorkspace
   | CmdAuth AuthCommand
   | CmdPgvector CtlPgvectorCli.PgvectorCliCommand
+  | CmdEmbeddings CtlEmbeddingsCli.EmbeddingsCliCommand
 
 data AuthCommand
   = CmdBootstrapSuperadmin BootstrapSuperadminOpts
@@ -181,6 +185,7 @@ commandParser = subparser
   <> command "auth" (info (CmdAuth <$> authCommandParser)
       (progDesc "Auth operator workflows"))
   <> command "pgvector" (CtlPgvectorCli.pgvectorCommandInfo CmdPgvector)
+  <> command "embeddings" (CtlEmbeddingsCli.embeddingsCommandInfo CmdEmbeddings)
   )
   <|> pure CmdSetup
 
@@ -366,6 +371,7 @@ main = do
     CmdWorkspace       -> doWorkspace
     CmdAuth authCmd    -> doAuth authCmd
     CmdPgvector pgvectorCmd -> doPgvector pgvectorCmd
+    CmdEmbeddings embeddingsCmd -> doEmbeddings embeddingsCmd
 
 ------------------------------------------------------------------------
 -- Pgvector commands for any configured PostgreSQL database
@@ -377,6 +383,17 @@ doPgvector commandValue = do
   BL8.hPutStr stdout result.standardOutput
   BL8.hPutStr stderr result.standardError
   case result.exitCode of
+    ExitSuccess -> pure ()
+    failure -> exitWith failure
+
+------------------------------------------------------------------------
+-- Provider-neutral embedding exchange for any configured PostgreSQL database
+------------------------------------------------------------------------
+
+doEmbeddings :: CtlEmbeddingsCli.EmbeddingsCliCommand -> IO ()
+doEmbeddings commandValue = do
+  result <- CtlEmbeddingsCli.runEmbeddingsCommand commandValue
+  case result of
     ExitSuccess -> pure ()
     failure -> exitWith failure
 

@@ -50,6 +50,8 @@ library
       HMem.Server.AuthTokens
       HMem.Server.AuthUsers
       HMem.Server.ChangeStream
+      HMem.Server.CtlEmbeddings
+      HMem.Server.CtlEmbeddingsCli
       HMem.Server.CtlMigrate
       HMem.Server.CtlPaths
       HMem.Server.CtlPgvector
@@ -92,6 +94,7 @@ library
     , base >=4.7 && <5
     , bytestring
     , containers
+    , crypton
     , directory
     , fast-logger
     , filepath
@@ -155,6 +158,7 @@ executable build-frontend
     , base >=4.7 && <5
     , bytestring
     , containers
+    , crypton
     , directory
     , fast-logger
     , filepath
@@ -220,6 +224,7 @@ executable hmem-ctl
     , brick
     , bytestring
     , containers
+    , crypton
     , directory
     , fast-logger
     , filepath
@@ -289,6 +294,7 @@ executable hmem-server
     , base >=4.7 && <5
     , bytestring
     , containers
+    , crypton
     , directory
     , fast-logger
     , filepath
@@ -353,6 +359,7 @@ executable hmem-test-harness
     , base >=4.7 && <5
     , bytestring
     , containers
+    , crypton
     , directory
     , fast-logger
     , filepath
@@ -396,6 +403,8 @@ test-suite hmem-server-test
       HMem.Server.AuthTokensSpec
       HMem.Server.AuthUsersSpec
       HMem.Server.ChangeStreamSpec
+      HMem.Server.CtlEmbeddingsCliSpec
+      HMem.Server.CtlEmbeddingsSpec
       HMem.Server.CtlMigrateSpec
       HMem.Server.CtlPathsSpec
       HMem.Server.CtlPgvectorCliSpec
@@ -438,6 +447,7 @@ test-suite hmem-server-test
     , base >=4.7 && <5
     , bytestring
     , containers
+    , crypton
     , directory
     , fast-logger
     , filepath

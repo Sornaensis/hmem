@@ -1078,8 +1078,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       let vector = (1 : replicate (observationEmbeddingDimensions - 1) 0) :: [Double]
           observationPath = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))
       embeddingResponse <- request app methodPut (observationPath <> "/embedding") (encode vector)
-      case responseStatus embeddingResponse of
-        status | status == status503 -> pure ()
+      embeddingAvailable <- case responseStatus embeddingResponse of
+        status | status == status503 -> pure False
         status -> do
           status `shouldBe` status200
           similarResponse <- postJson app "/api/v1/observations/similar" (object
@@ -1093,11 +1093,20 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           jsonField "subjects" similarObservationJson `shouldBe` Just (toJSON created.subjects)
           jsonField "subject_kind" similarObservationJson `shouldBe` Just (String "file")
           jsonField "subject" similarObservationJson `shouldBe` Just (String "src/Main.hs")
+          pure True
       updated <- request app methodPut ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))) (encode (object ["content" .= ("revised observation" :: T.Text)]))
       responseStatus updated `shouldBe` status200
       let Just revised = decode (responseBody updated) :: Maybe Observation
       revised.content `shouldBe` "revised observation"
       revised.subjects `shouldBe` created.subjects
+      if embeddingAvailable
+        then do
+          afterUpdate <- postJson app "/api/v1/observations/similar" (object
+            [ "workspace_id" .= workspace.id, "embedding" .= vector ])
+          responseStatus afterUpdate `shouldBe` status200
+          let Just afterUpdateRows = decode (responseBody afterUpdate) :: Maybe [SimilarObservation]
+          afterUpdateRows `shouldBe` []
+        else pure ()
       immutable <- request app methodPut ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))) (encode (object ["content" .= ("x" :: T.Text), "git_sha" .= ("different" :: T.Text)]))
       responseStatus immutable `shouldBe` status400 -- Servant rejects non-contract request bodies before routing the handler.
       deleted <- request app methodDelete ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))) ""

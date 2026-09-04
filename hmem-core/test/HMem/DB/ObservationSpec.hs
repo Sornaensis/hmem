@@ -273,6 +273,8 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       setResult `shouldSatisfy` isCapabilityUnavailable
       searchResult <- try @DBException $ similarObservations env.pool (similarQuery workspace.id Nothing Nothing Nothing unitX Nothing Nothing Nothing)
       searchResult `shouldSatisfy` isCapabilityUnavailable
+      updated <- updateObservation env.pool workspace.id created.id (UpdateObservation "updated without pgvector")
+      fmap (.content) updated `shouldBe` Just "updated without pgvector"
 
     it "isolates embedding mutation and vector search, and applies exact filters, thresholds, ties, and pagination when pgvector is present" $ \env -> do
       owner <- createTestWorkspace env "observation-vector-owner"
@@ -312,6 +314,10 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
           tieIds `shouldBe` equalSimilarity
           tiePage <- similarIds env (similarQuery owner.id (Just SubjectFile) Nothing Nothing unitY (Just 1) (Just 1) (Just 1))
           tiePage `shouldBe` [equalSimilarity !! 1]
+          updatedTarget <- updateObservation env.pool owner.id target.id (UpdateObservation "target content changed")
+          fmap (.content) updatedTarget `shouldBe` Just "target content changed"
+          similarIds env (similarQuery owner.id (Just SubjectFile) (Just "src/Main.hs") (Just canonicalSha) unitX Nothing Nothing Nothing)
+            `shouldReturn` []
 
 assertRejectedCreate :: TestEnv -> UUID -> IO ()
 assertRejectedCreate env workspace = do

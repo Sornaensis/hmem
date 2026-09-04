@@ -450,7 +450,7 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     assertOne 2 "updated"
     Auth.deleteWorkspaceMembership env.pool workspace.id userId `shouldReturn` True
     assertOne 3 "deleted"
-  it "records embedding-only observation updates with exact redacted invalidations and transaction metadata" $ \env -> do
+  it "records embedding set and content invalidation updates with exact redacted change-stream metadata" $ \env -> do
     available <- checkPgvector env.pool
     if not available then pendingWith "pgvector is not installed; the embedding outbox path requires its column" else do
       workspace <- createTestWorkspace env "change-stream-observation-embedding"
@@ -463,14 +463,26 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
       beforeRecords <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
       Observation.setObservationEmbedding env.pool workspace.id observation.id (replicate observationEmbeddingDimensions 0.25)
       records <- listOutboxAfter env.pool (WorkspaceScope workspace.id) (maybe 0 (.outboxCursor) (safeLast beforeRecords)) 10
-      case records of
+      embeddingCursor <- case records of
         [record] -> do
           envelopeEntityField "type" record `shouldBe` Just (String "observation")
           envelopeEntityField "action" record `shouldBe` Just (String "updated")
           envelopeField "invalidations" record `shouldBe` Just (observationInvalidations workspace.id observation.id)
           show record.outboxEnvelope `shouldNotContain` "embedding"
           assertCoreTransactionMetadata record
-        _ -> expectationFailure "expected exactly one embedding-only observation outbox record"
+          pure record.outboxCursor
+        _ -> expectationFailure "expected exactly one embedding-only observation outbox record" >> fail "unreachable"
+      _ <- Observation.updateObservation env.pool workspace.id observation.id
+        (UpdateObservation "embedding-invalidating content update")
+      invalidationRecords <- listOutboxAfter env.pool (WorkspaceScope workspace.id) embeddingCursor 10
+      case invalidationRecords of
+        [record] -> do
+          envelopeEntityField "type" record `shouldBe` Just (String "observation")
+          envelopeEntityField "action" record `shouldBe` Just (String "updated")
+          envelopeField "invalidations" record `shouldBe` Just (observationInvalidations workspace.id observation.id)
+          show record.outboxEnvelope `shouldNotContain` "embedding"
+          assertCoreTransactionMetadata record
+        _ -> expectationFailure "expected exactly one content-plus-embedding-invalidation outbox record"
   it "records task status, project/task soft-delete, and restore triggers with exact invalidations" $ \env -> do
     workspace <- createTestWorkspace env "change-stream-soft-delete-outbox"
     project <- createProject env.pool CreateProject

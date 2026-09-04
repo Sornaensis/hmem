@@ -15,7 +15,7 @@ Use local mode for personal development and single-user automation.
 - With local bootstrap enabled, the local user has superadmin privileges.
 - The implicit local superadmin is loopback/local-CORS only by default; binding local mode to a non-loopback host or permissive CORS requires the explicit `auth.local.allow_remote_bootstrap: true` escape hatch and should only be used on trusted private networks.
 - Optional local bot tokens label automated actions in audit/events.
-- Legacy `auth.enabled: true` plus `auth.api_key` / `HMEM_API_KEY` is local-only static bearer compatibility. Do not use it for deployed auth.
+- Setting `auth.enabled: true` with `auth.api_key` or `HMEM_API_KEY` enables a local static bearer token. This configuration is accepted only in local mode.
 
 Minimal local config:
 
@@ -38,7 +38,7 @@ Use deployed mode for shared installations.
 - Browser users should authenticate through server-side OIDC authorization-code login and `HttpOnly` cookie sessions.
 - Explicit bearer JWT/PAT authentication remains supported for MCP, services, and fallback. If both bearer and cookie are present, bearer wins.
 - Service access uses bearer tokens resolved through database-backed `access_tokens` rows.
-- Legacy local static bearer auth does not work in deployed mode.
+- Local bootstrap and local bot tokens are not accepted in deployed mode.
 - Protected requests without a valid deployed principal fail closed.
 
 Example deployed config:
@@ -108,7 +108,7 @@ hmem-ctl auth bootstrap-superadmin \
   --email operator@example.com
 ```
 
-Required behavior for the implemented workflow:
+Command behavior:
 
 - `--auth-subject` is the stable subject claim that deployed bearer/JWT authentication resolves later.
 - The command creates or updates exactly that user with `is_superadmin = true` and `can_create_workspace = true`.
@@ -139,19 +139,19 @@ Operators can issue, rotate, and revoke deployed service/PAT tokens with `hmem-c
 hmem-ctl auth tokens issue \
   --grant-user-id user-uuid-with-required-permissions \
   --actor-label deploy-bot \
-  --expires-at 2026-05-01T00:00:00Z
+  --expires-at YYYY-MM-DDTHH:MM:SSZ
 ```
 
 Rotation creates an overlapping replacement by default; revoke the old token after clients switch, or pass `--revoke-old` for immediate cutover:
 
 ```bash
-hmem-ctl auth tokens rotate --token-id old-token-row-uuid
-hmem-ctl auth tokens revoke --token-id old-token-row-uuid
+hmem-ctl auth tokens rotate --token-id existing-token-row-uuid
+hmem-ctl auth tokens revoke --token-id existing-token-row-uuid
 ```
 
-Officially issued tokens use the `hmem_pat_v1_` prefix plus 96 lowercase hexadecimal characters from UUIDv4 random material, exceeding the 256-bit entropy floor for hmem bearer tokens. Tokens are operator-managed in v1, not self-service UI objects. Use `--actor-type bot|user`, stable `--actor-label` values, and least-privilege grant-bearing users so automated clients inherit only the permissions they need.
+Issued tokens contain at least 256 bits of cryptographically secure random material and are printed only when issued. Tokens are operator-managed rather than self-service UI objects. Use `--actor-type bot|user`, stable `--actor-label` values, and least-privilege grant-bearing users so automated clients inherit only the permissions they need.
 
-When `auth.deployed.token_hash_secret` is configured, newly issued and rotated tokens store versioned HMAC-SHA256 hashes (`hmac-sha256-v1:`). Servers with that secret still accept existing legacy `sha256:` token rows so operators can rotate clients gradually. If the secret is changed or removed, HMAC-hashed tokens issued with the old secret will stop resolving; rotate tokens after changing the secret.
+When `auth.deployed.token_hash_secret` is configured, issued and rotated tokens are stored as keyed HMAC-SHA256 hashes. Keep this secret stable and manage it through the deployment's secret store. Changing or removing it invalidates tokens hashed with the previous value, so rotate affected client credentials as part of the same operation.
 
 If an operator pre-provisions an `access_tokens` row outside `hmem-ctl`, the raw bearer secret must still be generated from at least 256 bits of cryptographically secure randomness. Do not use short, human-chosen, or reusable secrets; store only the canonical `token_hash`, and record the raw token only in a secret manager.
 
@@ -182,6 +182,6 @@ MCP token precedence is:
 1. `--auth-token`
 2. `HMEM_MCP_AUTH_TOKEN`
 3. `HMEM_AUTH_TOKEN`
-4. loopback-only local legacy static bearer config when `auth.enabled` is set and `auth.api_key` / `HMEM_API_KEY` provides the token
+4. local static bearer `auth.api_key` or `HMEM_API_KEY` when `auth.enabled` is set, considered only when the resolved hmem server URL is loopback
 
 Use `--no-auth` to suppress bearer forwarding entirely.

@@ -1,14 +1,7 @@
 # Database schema
 
 hmem stores repository evidence as provenance-bound **Observations**, and stores
-planning work separately as workspaces, projects, and tasks. This document
-reflects the V021 schema.
-
-> **V020 is destructive.** Applying V020 permanently deletes all legacy Memory
-> rows and their content-bearing audit history. It does not convert or export
-> them. Back up any data that must be retained before migrating, and upgrade
-> REST, MCP, and web UI clients: the old Memory contract is incompatible with
-> the Observation-only boundary.
+planning work separately as workspaces, projects, and tasks.
 
 ## Relationships
 
@@ -28,9 +21,9 @@ not a task attachment.
 
 ## `observations`
 
-The V021 parent table stores an Observation's workspace, Git provenance, and
-content. Its immutable ordered repository subjects are stored in the related
-`observation_subjects` table.
+The `observations` table stores an Observation's workspace, Git provenance, and
+content. Its immutable ordered repository subjects are stored in
+`observation_subjects`.
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -68,7 +61,7 @@ without the extension, the `embedding` column and vector index are absent and
 similarity operations report that capability as unavailable; all non-vector
 Observation operations remain available.
 
-## Observation API and MCP compatibility
+## Observation API and MCP
 
 REST and MCP emit canonical `subjects`, for example:
 
@@ -76,10 +69,8 @@ REST and MCP emit canonical `subjects`, for example:
 {"subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}]}
 ```
 
-During the compatibility window, responses also project the first entry as the
-deprecated top-level `subject_kind` and `subject` fields; clients should read
-the canonical nonempty `subjects` list. Exact `subject_kind` and `subject`
-filters match any subject in the set.
+Clients must read the canonical nonempty `subjects` list. Exact
+`subject_kind` and `subject` filters match any subject in the set.
 
 `POST /api/v1/observations/match` (and MCP `observation_match`) accepts 1–256
 concrete, canonical repository-relative `paths`, at most 4096 UTF-8 bytes each
@@ -97,13 +88,11 @@ expand caller globs. For example:
 The equivalent MCP call is `observation_match` with the same `paths` array and
 optional `subject_kind`, `git_sha`, `query`, `limit`, and `offset` arguments.
 
-## Other current tables
+## Other tables
 
-V021 retains the operational schema for access control, workspace groups,
+The operational schema also contains access control, workspace groups,
 workspaces, projects, tasks, task dependencies, saved views, audit records, and
-schema migrations. Workspace, project, and task lifecycle fields use their
-respective current enums; they do not establish a relationship to Observations.
+schema-migration bookkeeping. Workspace, project, and task lifecycle fields do
+not establish a relationship to Observations.
 
-The `audit_log` records current entity changes. V020 deliberately purges the
-legacy Memory-family audit records together with the legacy data, so it cannot
-be used to recover that deleted content.
+The `audit_log` records entity changes and their audit attribution.

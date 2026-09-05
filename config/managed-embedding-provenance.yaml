@@ -1,0 +1,58 @@
+# This lockfile is deliberately data-only: retrieval happens at image build time,
+# while the managed runtime reads an already verified local snapshot.
+schema_version: 1
+profile: managed-tei-gte-qwen2-1.5b-instruct
+expected_embedding_dimensions: 1536
+
+tei:
+  release: v1.9.3
+  source_commit: 06670157fb6c1523482219bdb2d1660277d38088
+  source_archive:
+    url: https://api.github.com/repos/huggingface/text-embeddings-inference/tarball/06670157fb6c1523482219bdb2d1660277d38088
+    sha256: d71a340344ed1737fc54a283685885708624993b3b950578eae86ba2457efff7
+  cpu_image:
+    reference: ghcr.io/huggingface/text-embeddings-inference@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
+    platform: linux/amd64
+    registry_manifest_url: https://ghcr.io/v2/huggingface/text-embeddings-inference/manifests/sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
+
+model:
+  id: Alibaba-NLP/gte-Qwen2-1.5B-instruct
+  revision: 1cad2ab3ff41c2671f34e135d29831368ee26b68
+  revision_url: https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/tree/1cad2ab3ff41c2671f34e135d29831368ee26b68
+  snapshot_url: https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/resolve/1cad2ab3ff41c2671f34e135d29831368ee26b68
+  artifact_root: model
+  retrieval_phase: build-time-only
+  runtime_use: local-read-only-snapshot
+  artifacts:
+    - { path: .gitattributes, sha256: 11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361 }
+    - { path: 1_Pooling/config.json, sha256: 40d120b92655c16390bd52c43540ada5f74ab94991d00838df6742c0d640d35b }
+    - { path: README.md, sha256: 06f46ea6b3ab7eb581f1fb170e6144c94493c076232dae7a65a75bef45133fea }
+    - { path: added_tokens.json, sha256: 6a475432c61f8d6154d10d28c37671a36e5717daf3d15002a988968fee54a500 }
+    - { path: config.json, sha256: 6be8440493f63c39e989842d4747127a71b1d680839af44dc105245e06a333d1 }
+    - { path: config_sentence_transformers.json, sha256: 89df38eb06c9f934ee613d846fd9ea88468cc99791e036b5bbc412411fbb1c95 }
+    - { path: generation_config.json, sha256: 71e135315a5c53cfbd7418a5fa02b03dad5e59df3e28c16f9970553c157805a9 }
+    - { path: merges.txt, sha256: 8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5 }
+    - { path: model-00001-of-00002.safetensors, sha256: 0842014813f9ecd814eac671e2577d84281cd02d74f70436583c044fac724072 }
+    - { path: model-00002-of-00002.safetensors, sha256: 661830fd8d0426f38747a747ec37cbdc05466331790dcf7b83e12a0e000ce0cc }
+    - { path: model.safetensors.index.json, sha256: 6ed4fc9a5fed84fc2401db6223b1f673eb2e0c01597660d67eddf63b525fbc97 }
+    - { path: modeling_qwen.py, sha256: 8851d692b05bbf3b06a9ada6c0c9c857df6461f2a2b093e7fa831c1078040602 }
+    - { path: modules.json, sha256: 84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf }
+    - { path: scripts/eval_mteb.py, sha256: 2a53266b072c36d8ecb0577af67d3439b4a240250d9c870f18a57c777b52232a }
+    - { path: sentence_bert_config.json, sha256: 1140b92d307aec9383d897169c9f489f3a568787b80bf760f5d7cc9d25169a65 }
+    - { path: special_tokens_map.json, sha256: daf48284de8f4779b1dbf20963a68180002fba2a34a5da72292380c5d9fb6af2 }
+    - { path: tokenization_qwen.py, sha256: e15b8ea81d39b3dda3acf751b4a00a7dabbf9f687e026608c06b3849925e3169 }
+    - { path: tokenizer.json, sha256: f7c9b2dba4a296b1aa76c16a34b8225c0c118978400d4bb66bff0902d702f5b8 }
+    - { path: tokenizer_config.json, sha256: d1b4928d0e7e7c1881a23eb235f6081d6d9db3d67f6ce5272f571feaf12fd944 }
+    - { path: vocab.json, sha256: ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910 }
+
+licenses:
+  - component: text-embeddings-inference
+    spdx: Apache-2.0
+    notice_path: licenses/managed-embedding/tei-APACHE-2.0.txt
+    notice_sha256: 28216184827860ae83a60244c8868de4cf84e16357d16cdb975a46afe3afa9db
+    source_url: https://raw.githubusercontent.com/huggingface/text-embeddings-inference/06670157fb6c1523482219bdb2d1660277d38088/LICENSE
+  - component: Alibaba-NLP/gte-Qwen2-1.5B-instruct
+    spdx: Apache-2.0
+    notice_path: licenses/managed-embedding/gte-Qwen2-1.5B-instruct-license-metadata.txt
+    notice_sha256: 5e05dfca6eeba9772cf92c589149b62c0fd75573469b8801649008df8f8e8f5f
+    source_url: https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/blob/1cad2ab3ff41c2671f34e135d29831368ee26b68/README.md

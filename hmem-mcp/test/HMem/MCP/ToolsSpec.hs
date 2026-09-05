@@ -34,7 +34,7 @@ import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkAppWithChangeStream)
 import HMem.Server.Snapshot (materializeSnapshot)
 import HMem.Server.WebSocket (newWSState)
-import HMem.Types (CreateObservation(..), ObservationSubject(..), SubjectKind(..), UpdateObservation(..), Workspace(..), maxObservationSubjects)
+import HMem.Types (BatchMoveTasksRequest(..), CreateObservation(..), ObservationSubject(..), SubjectKind(..), UpdateObservation(..), Workspace(..), maxObservationSubjects)
 
 spec :: Spec
 spec = do
@@ -121,6 +121,11 @@ spec = do
       toolDescription "project_archive" `shouldSatisfy` maybe False (not . ("summary" `T.isInfixOf`))
       sort (schemaProperties "task_dependency") `shouldBe` sort ["task_id", "depends_on_id", "action"]
       schemaRequired "task_dependency" `shouldBe` ["task_id", "depends_on_id", "action"]
+      sort (schemaProperties "task_move_batch") `shouldBe` sort ["task_ids", "project_id"]
+      schemaRequired "task_move_batch" `shouldBe` ["task_ids"]
+      schemaAdditionalProperties "task_move_batch" `shouldBe` Just (Bool False)
+      (schemaProperty "task_move_batch" "task_ids" >>= jsonField "minItems") `shouldBe` Just (Number 1)
+      (schemaProperty "task_move_batch" "task_ids" >>= jsonField "maxItems") `shouldBe` Just (Number 100)
 
     it "forwards both trusted-MCP headers only when the bridge is configured" $ do
       mcpProvenanceHeadersFor (Just "test-private-provenance")
@@ -214,6 +219,50 @@ spec = do
         workspaceContext <- newTVarIO Nothing
         jsonRpcToolCall manager base initialized workspaceContext "task_dependency" arguments
           >>= (`shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "dependency_cycle" value))
+
+    it "parses, validates, and dispatches one atomic task batch-move request" $ do
+      let observationUuid = read (T.unpack observationId) :: UUID
+          workspaceUuid = read (T.unpack workspaceId) :: UUID
+          arguments = object ["task_ids" .= [observationId, workspaceId], "project_id" .= workspaceId]
+      case parseToolCall "task_move_batch" arguments of
+        Right (TaskMoveBatch request) -> request `shouldBe` BatchMoveTasksRequest [observationUuid, workspaceUuid] (Just workspaceUuid)
+        Right _ -> expectationFailure "expected TaskMoveBatch"
+        Left err -> expectationFailure err
+      parseToolCall "task_move_batch" (object ["task_ids" .= [observationUuid], "unexpected" .= True])
+        `shouldSatisfy` isLeft
+      case parseToolCall "task_move_batch" (object ["task_ids" .= ([] :: [UUID])]) of
+        Right parsed -> validateToolCall parsed `shouldSatisfy` isLeft
+        Left err -> expectationFailure err
+      case parseToolCall "task_move_batch" (object ["task_ids" .= replicate 101 observationUuid]) of
+        Right parsed -> validateToolCall parsed `shouldSatisfy` isLeft
+        Left err -> expectationFailure err
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        result <- call manager base "task_move_batch" arguments
+        result `shouldBe` object
+          [ "ok" .= True
+          , "action" .= ("moved" :: Text)
+          , "entity_type" .= ("task" :: Text)
+          , "affected" .= (2 :: Int)
+          , "project_id" .= workspaceId
+          ]
+      [batchRequest] <- readTVarIO requests
+      batchRequest.requestMethod `shouldBe` methodPost
+      batchRequest.requestPath `shouldBe` "/api/v1/tasks/batch-move"
+      decode batchRequest.requestBody `shouldBe` Just arguments
+
+    it "preserves structured lifecycle conflicts through the MCP and JSON-RPC bridges" $
+      withLifecycleConflictMock $ \manager base -> do
+        let arguments = object ["task_ids" .= [observationId], "project_id" .= workspaceId]
+        response <- handleToolCall manager base Nothing (object ["name" .= ("task_move_batch" :: Text), "arguments" .= arguments])
+        response `shouldSatisfy` isMcpError
+        response `shouldSatisfy` contains "[HTTP_409] Cannot move tasks because dependency endpoints would span projects."
+        response `shouldSatisfy` contains "lifecycle_conflict"
+        response `shouldSatisfy` contains "TASK_DEPENDENCY_CROSS_PROJECT"
+        initialized <- newTVarIO True
+        workspaceContext <- newTVarIO Nothing
+        jsonRpcToolCall manager base initialized workspaceContext "task_move_batch" arguments
+          >>= (`shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "TASK_DEPENDENCY_CROSS_PROJECT" value))
 
     it "keeps the advertised registry parser and dispatch reachability in lockstep" $ do
       sort toolNames `shouldBe` sort (serverOwnedTools <> map fst toolSamples)
@@ -664,6 +713,7 @@ toolSamples =
   , ("task_detail", object ["task_id" .= observationId])
   , ("task_overview", object ["task_id" .= observationId])
   , ("task_dependency", object ["task_id" .= observationId, "depends_on_id" .= workspaceId, "action" .= ("add" :: Text)])
+  , ("task_move_batch", object ["task_ids" .= [observationId], "project_id" .= workspaceId])
   , ("task_start", object ["task_id" .= observationId])
   , ("task_finish", object ["task_id" .= observationId, "status" .= ("done" :: Text)])
   ]
@@ -971,6 +1021,22 @@ dependencyCycleApp :: Wai.Application
 dependencyCycleApp _ respond = respond $ Wai.responseLBS status400 [("Content-Type", "application/json")]
   (encode (object ["error" .= ("dependency_cycle" :: Text), "message" .= ("Task dependency would create a cycle" :: Text)]))
 
+withLifecycleConflictMock :: (Manager -> String -> IO a) -> IO a
+withLifecycleConflictMock action =
+  testWithApplication (pure lifecycleConflictApp) $ \port ->
+    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+      action manager ("http://127.0.0.1:" <> show port)
+
+lifecycleConflictApp :: Wai.Application
+lifecycleConflictApp _ respond = respond $ Wai.responseLBS status409 [("Content-Type", "application/json")]
+  (encode (object
+    [ "error" .= ("lifecycle_conflict" :: Text)
+    , "code" .= ("TASK_DEPENDENCY_CROSS_PROJECT" :: Text)
+    , "message" .= ("Cannot move tasks because dependency endpoints would span projects." :: Text)
+    , "detail" .= object ["task_ids" .= [observationId]]
+    , "hint" .= ("Move the complete dependency-connected component together." :: Text)
+    ]))
+
 workspaceStructuredStatusApp :: Status -> Text -> Wai.Application
 workspaceStructuredStatusApp status message _ respond =
   respond $ Wai.responseLBS status [("Content-Type", "application/json")] (encode (object ["error" .= ("workspace_error" :: Text), "message" .= message]))
@@ -996,6 +1062,7 @@ responseFor method path rawQuery body
   | path == "/api/v1/observations/match" = object ["items" .= [match, match], "has_more" .= True]
   | path == "/api/v1/observations/similar" = toJSON [object ["observation" .= observation, "similarity" .= (0.75 :: Double)]]
   | method == methodPost && path == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/dependencies" = dependencyMutation "add"
+  | method == methodPost && path == "/api/v1/tasks/batch-move" = object ["affected" .= (2 :: Int)]
   | method == methodDelete && path == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/dependencies/11111111-2222-3333-4444-555555555555" = dependencyMutation "remove"
   | method == methodPost && path == "/api/v1/observations" = observation
   | method == methodPost && path == "/api/v1/projects" = project

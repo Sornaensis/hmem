@@ -12,7 +12,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Foldable (toList)
 import Data.Functor.Contravariant ((>$<))
 import Data.IORef (modifyIORef', newIORef, readIORef)
-import Data.List (find)
+import Data.List (find, sort)
 import Data.Maybe (isJust, isNothing)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
@@ -420,6 +420,150 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         addRaw target.id (headers editorToken) malformed >>= expectValidationError
         addRaw target.id (headers editorToken) selfBody >>= (\response -> responseStatus response `shouldBe` status400)
         addRaw target.id (headers editorToken) crossBody >>= (\response -> responseStatus response `shouldBe` status403)
+
+  describe "Task batch-move HTTP contract" $ do
+    it "returns structured lifecycle conflicts, preserves an incomplete DAG, and moves the complete eight-task graph once" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "task-batch-move-api"
+      let createProject :: T.Text -> IO Project
+          createProject name = do
+            response <- postJson app "/api/v1/projects" (object ["workspace_id" .= workspace.id, "name" .= (name :: T.Text)])
+            responseStatus response `shouldBe` status200
+            maybe (expectationFailure "expected project response" >> fail "unreachable") pure (decode (responseBody response) :: Maybe Project)
+          createTask :: UUID -> T.Text -> IO Task
+          createTask projectId title = do
+            response <- postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "project_id" .= projectId, "title" .= (title :: T.Text)])
+            responseStatus response `shouldBe` status200
+            maybe (expectationFailure "expected task response" >> fail "unreachable") pure (decode (responseBody response) :: Maybe Task)
+          taskPath :: UUID -> BS.ByteString
+          taskPath taskId = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show taskId))
+          batch :: [UUID] -> Maybe UUID -> IO SResponse
+          batch taskIds projectId = postJson app "/api/v1/tasks/batch-move" (object ["task_ids" .= taskIds, "project_id" .= projectId])
+          projectOf :: UUID -> IO (Maybe UUID)
+          projectOf taskId = do
+            response <- request app methodGet (taskPath taskId) ""
+            responseStatus response `shouldBe` status200
+            maybe (expectationFailure "expected task response" >> fail "unreachable") (pure . (.projectId)) (decode (responseBody response) :: Maybe Task)
+          dependenciesOf :: UUID -> IO [UUID]
+          dependenciesOf taskId = do
+            response <- request app methodGet (taskPath taskId <> "/overview") ""
+            responseStatus response `shouldBe` status200
+            maybe (expectationFailure "expected task overview" >> fail "unreachable") (pure . map (.id) . (.dependencies)) (decode (responseBody response) :: Maybe TaskOverview)
+      source <- createProject "source"
+      destination <- createProject "destination"
+      tasks <- mapM (createTask source.id . ("task-" <>) . T.pack . show) [1 .. 8 :: Int]
+      let ids = map (.id) tasks
+          edges =
+            [ (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (1, 4)
+            , (2, 3), (2, 4), (2, 5), (3, 4), (3, 5), (3, 6)
+            , (4, 5), (4, 6), (5, 6), (5, 7), (6, 7)
+            ]
+      mapM_ (\(taskIndex, dependencyIndex) ->
+        postJson app (taskPath (ids !! taskIndex) <> "/dependencies") (object ["depends_on_id" .= (ids !! dependencyIndex)])
+          >>= (\response -> responseStatus response `shouldBe` status200)) edges
+      beforeDependencies <- mapM dependenciesOf ids
+      singleRejected <- putJson app (taskPath (head ids)) (object ["project_id" .= destination.id])
+      responseStatus singleRejected `shouldBe` status409
+      lookup "Content-Type" singleRejected.simpleHeaders `shouldBe` Just "application/json"
+      let Just singleError = decode (responseBody singleRejected) :: Maybe Value
+      jsonField "error" singleError `shouldBe` Just (String "lifecycle_conflict")
+      jsonField "code" singleError `shouldBe` Just (String "TASK_DEPENDENCY_CROSS_PROJECT")
+      jsonField "message" singleError `shouldBe` Just (String "Cannot move tasks because dependency endpoints would span projects.")
+      jsonField "detail" singleError `shouldSatisfy` isJust
+      jsonField "hint" singleError `shouldSatisfy` isJust
+      case singleError of
+        Object fields -> sort (Key.toText <$> KeyMap.keys fields) `shouldBe` ["code", "detail", "error", "hint", "message"]
+        _ -> expectationFailure "expected structured lifecycle conflict"
+      incomplete <- batch (take 7 ids) (Just destination.id)
+      responseStatus incomplete `shouldBe` status409
+      let Just incompleteError = decode (responseBody incomplete) :: Maybe Value
+      jsonField "code" incompleteError `shouldBe` Just (String "TASK_DEPENDENCY_CROSS_PROJECT")
+      mapM projectOf ids `shouldReturn` replicate 8 (Just source.id)
+      mapM dependenciesOf ids `shouldReturn` beforeDependencies
+      moved <- batch ids (Just destination.id)
+      responseStatus moved `shouldBe` status200
+      decode (responseBody moved) `shouldBe` Just BatchResult { affected = 8 }
+      mapM projectOf ids `shouldReturn` replicate 8 (Just destination.id)
+      mapM dependenciesOf ids `shouldReturn` beforeDependencies
+
+    it "validates bounds and duplicate, missing, workspace, and closed-target behavior without partial mutation" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "task-batch-move-api-validation"
+      foreignWorkspace <- createTestWorkspace env "task-batch-move-api-foreign"
+      let createProject :: UUID -> T.Text -> IO Project
+          createProject workspaceId name = do
+            response <- postJson app "/api/v1/projects" (object ["workspace_id" .= workspaceId, "name" .= (name :: T.Text)])
+            maybe (expectationFailure "expected project" >> fail "unreachable") pure (decode (responseBody response) :: Maybe Project)
+          createTask :: UUID -> Maybe UUID -> T.Text -> IO Task
+          createTask workspaceId projectId title = do
+            response <- postJson app "/api/v1/tasks" (object ["workspace_id" .= workspaceId, "project_id" .= projectId, "title" .= (title :: T.Text)])
+            maybe (expectationFailure "expected task" >> fail "unreachable") pure (decode (responseBody response) :: Maybe Task)
+          batch :: [UUID] -> Maybe UUID -> IO SResponse
+          batch taskIds projectId = postJson app "/api/v1/tasks/batch-move" (object ["task_ids" .= taskIds, "project_id" .= projectId])
+      source <- createProject workspace.id "source"
+      destination <- createProject workspace.id "destination"
+      closed <- createProject workspace.id "closed"
+      foreignProject <- createProject foreignWorkspace.id "foreign"
+      task <- createTask workspace.id (Just source.id) "task"
+      foreignTask <- createTask foreignWorkspace.id (Just foreignProject.id) "foreign task"
+      batch [] (Just destination.id) >>= expectValidationError
+      batch (replicate 101 task.id) (Just destination.id) >>= expectValidationError
+      missing <- batch [read "00000000-0000-0000-0000-000000000001" :: UUID] (Just destination.id)
+      responseStatus missing `shouldBe` status404
+      crossSources <- batch [task.id, foreignTask.id] Nothing
+      responseStatus crossSources `shouldBe` status400
+      crossDestination <- batch [task.id] (Just foreignProject.id)
+      responseStatus crossDestination `shouldBe` status400
+      duplicate <- batch [task.id, task.id] (Just destination.id)
+      responseStatus duplicate `shouldBe` status200
+      decode (responseBody duplicate) `shouldBe` Just BatchResult { affected = 1 }
+      completed <- putJson app ("/api/v1/projects/" <> Text.encodeUtf8 (T.pack (show closed.id))) (object ["status" .= ("completed" :: T.Text)])
+      responseStatus completed `shouldBe` status200
+      closedMove <- batch [task.id] (Just closed.id)
+      responseStatus closedMove `shouldBe` status409
+      let Just closedError = decode (responseBody closedMove) :: Maybe Value
+      jsonField "error" closedError `shouldBe` Just (String "lifecycle_conflict")
+      jsonField "code" closedError `shouldBe` Just (String "TASK_OPEN_UNDER_CLOSED_PROJECT")
+      reloaded <- request app methodGet ("/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show task.id))) ""
+      fmap (.projectId) (decode (responseBody reloaded) :: Maybe Task) `shouldBe` Just (Just destination.id)
+
+    it "requires edit authorization for every source task and the destination without disclosing foreign entities" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "task-batch-move-auth"
+        foreignWorkspace <- createTestWorkspace ctx.deployedEnv "task-batch-move-auth-foreign"
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        editorId <- createDeployedSandboxUser ctx.deployedEnv False False
+        outsiderId <- createDeployedSandboxUser ctx.deployedEnv False False
+        superadminId <- createDeployedSandboxUser ctx.deployedEnv False True
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership editorId Auth.WorkspaceRoleEdit) Nothing
+        readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Batch reader"
+        editorToken <- issueDeployedSandboxPAT ctx.deployedEnv editorId "Batch editor"
+        outsiderToken <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Batch outsider"
+        superadminToken <- issueDeployedSandboxPAT ctx.deployedEnv superadminId "Batch superadmin"
+        let headers token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            create path body = requestWithHeaders ctx.deployedApplication methodPost path (headers superadminToken) (encode body)
+            batch token body = requestWithHeaders ctx.deployedApplication methodPost "/api/v1/tasks/batch-move" (headers token) (encode body)
+        sourceResponse <- create "/api/v1/projects" (object ["workspace_id" .= workspace.id, "name" .= ("source" :: T.Text)])
+        destinationResponse <- create "/api/v1/projects" (object ["workspace_id" .= workspace.id, "name" .= ("destination" :: T.Text)])
+        foreignProjectResponse <- create "/api/v1/projects" (object ["workspace_id" .= foreignWorkspace.id, "name" .= ("foreign" :: T.Text)])
+        let Just source = decode (responseBody sourceResponse) :: Maybe Project
+            Just destination = decode (responseBody destinationResponse) :: Maybe Project
+            Just foreignProject = decode (responseBody foreignProjectResponse) :: Maybe Project
+        taskResponse <- create "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "project_id" .= source.id, "title" .= ("task" :: T.Text)])
+        foreignTaskResponse <- create "/api/v1/tasks" (object ["workspace_id" .= foreignWorkspace.id, "project_id" .= foreignProject.id, "title" .= ("foreign" :: T.Text)])
+        let Just task = decode (responseBody taskResponse) :: Maybe Task
+            Just foreignTask = decode (responseBody foreignTaskResponse) :: Maybe Task
+            body :: [UUID] -> Maybe UUID -> Value
+            body taskIds projectId = object ["task_ids" .= taskIds, "project_id" .= projectId]
+        request ctx.deployedApplication methodPost "/api/v1/tasks/batch-move" (encode (body [task.id] (Just destination.id)))
+          >>= (\response -> responseStatus response `shouldBe` status401)
+        batch readerToken (body [task.id] (Just destination.id)) >>= (\response -> responseStatus response `shouldBe` status403)
+        batch outsiderToken (body [task.id] (Just destination.id)) >>= (\response -> responseStatus response `shouldBe` status403)
+        batch editorToken (body [read "00000000-0000-0000-0000-000000000001" :: UUID] (Just destination.id)) >>= (\response -> responseStatus response `shouldBe` status404)
+        batch editorToken (body [task.id, foreignTask.id] Nothing) >>= (\response -> responseStatus response `shouldBe` status403)
+        batch editorToken (body [task.id] (Just foreignProject.id)) >>= (\response -> responseStatus response `shouldBe` status403)
+        authorized <- batch editorToken (body [task.id] (Just destination.id))
+        responseStatus authorized `shouldBe` status200
+        decode (responseBody authorized) `shouldBe` Just BatchResult { affected = 1 }
 
   describe "Workspace rename HTTP contract" $ do
     it "persists an authorized name-only rename, permits duplicates, and rejects invalid or inactive targets" $ \(env, app) -> do
@@ -1520,6 +1664,12 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           navigationBatchTasks = schema "NavigationSummariesRequest" >>= jsonField "properties" >>= jsonField "task_ids"
           dependencyAddResponses = jsonPath ["paths", "/api/v1/tasks/{taskId}/dependencies", "post", "responses"] document
           dependencyRemoveResponses = jsonPath ["paths", "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}", "delete", "responses"] document
+          taskBatchMoveOperation = jsonPath ["paths", "/api/v1/tasks/batch-move", "post"] document
+          taskBatchMoveResponses = taskBatchMoveOperation >>= jsonField "responses"
+          taskBatchMoveRequestRef = taskBatchMoveOperation >>= jsonField "requestBody" >>= jsonField "content" >>= jsonField "application/json;charset=utf-8" >>= jsonField "schema" >>= jsonField "$ref"
+          taskBatchMoveResultRef = taskBatchMoveResponses >>= jsonField "200" >>= jsonField "content" >>= jsonField "application/json;charset=utf-8" >>= jsonField "schema" >>= jsonField "$ref"
+          taskBatchMoveConflictRef = taskBatchMoveResponses >>= jsonField "409" >>= jsonField "content" >>= jsonField "application/json" >>= jsonField "schema" >>= jsonField "$ref"
+          taskBatchMoveIds = schema "BatchMoveTasksRequest" >>= jsonField "properties" >>= jsonField "task_ids"
           dependencyAddDescription = operationDescription "/api/v1/tasks/{taskId}/dependencies" "post"
           dependencyRemoveDescription = operationDescription "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}" "delete"
           hasDependencyCycleDescription = maybe False $ \value -> case value of
@@ -1715,6 +1865,17 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
          [dependencyAddResponses, dependencyRemoveResponses]
       dependencyAddDescription `shouldSatisfy` hasDependencyCycleDescription
       dependencyRemoveDescription `shouldNotSatisfy` hasDependencyCycleDescription
+      taskBatchMoveOperation `shouldSatisfy` isJust
+      taskBatchMoveRequestRef `shouldBe` Just (String "#/components/schemas/BatchMoveTasksRequest")
+      taskBatchMoveResultRef `shouldBe` Just (String "#/components/schemas/BatchResult")
+      taskBatchMoveConflictRef `shouldBe` Just (String "#/components/schemas/LifecycleConflictError")
+      requiredSchemaFields "BatchMoveTasksRequest" `shouldBe` Just ["task_ids"]
+      (taskBatchMoveIds >>= jsonField "minItems") `shouldBe` Just (Number 1)
+      (taskBatchMoveIds >>= jsonField "maxItems") `shouldBe` Just (Number 100)
+      requiredSchemaFields "BatchResult" `shouldBe` Just ["affected"]
+      requiredSchemaFields "LifecycleConflictError" `shouldBe` Just ["error", "code", "message"]
+      mapM_ (\fieldName -> hasSchemaProperty "LifecycleConflictError" fieldName `shouldBe` True) ["detail", "hint"]
+      mapM_ (\status -> (taskBatchMoveResponses >>= jsonField status) `shouldSatisfy` isJust) ["400", "401", "403", "404", "409"]
       schema "UpdateWorkspace" `shouldSatisfy` isJust
       requiredSchemaFields "UpdateWorkspace" `shouldBe` Just ["name"]
       (schema "UpdateWorkspace" >>= jsonField "additionalProperties") `shouldBe` Just (Bool False)

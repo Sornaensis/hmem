@@ -126,6 +126,16 @@ toolDefinitions =
   , tool "project_archive" "Archive a project by changing only its status." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
   , tool "task_create" "Create a task in the active workspace. Its description is a durable specification; status records execution state. Create later-discovered atomic work as subtasks." (schema ["project_id" .= prop "string" "Optional project UUID", "title" .= prop "string" "Atomic task title", "description" .= prop "string" "Optional durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates", "parent_id" .= prop "string" "Optional parent task UUID; use it to create a subtask for later-discovered atomic work", "priority" .= prop "integer" "Priority", "due_at" .= prop "string" "ISO-8601 due time"] ["title"])
   , tool "task_update" "Update a task's durable specification, hierarchy, or execution state. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks." (schema ["task_id" .= prop "string" "Task UUID", "title" .= prop "string" "Task title", "description" .= prop "string" "Durable task specification: scope, constraints, approach, and acceptance intent, or null; not a log of progress or updates", "project_id" .= prop "string" "Project UUID or null", "parent_id" .= prop "string" "Parent task UUID to make this an atomic subtask for later-discovered work, or null", "status" .= enumProp "Execution state; record progress here, not in the description" ["todo", "in_progress", "blocked", "done", "cancelled"], "priority" .= prop "integer" "Priority", "due_at" .= prop "string" "ISO-8601 due time or null"] ["task_id"])
+  , tool "task_move_batch" "Atomically move one to 100 tasks and their active descendants to one project or no project. Submit every dependency-connected task that must move so no dependency edge crosses a project boundary." (strictSchema
+      [ "task_ids" .= object
+          [ "type" .= ("array" :: Text)
+          , "description" .= ("Task UUIDs to move atomically; duplicates affect each task once" :: Text)
+          , "minItems" .= (1 :: Int)
+          , "maxItems" .= (100 :: Int)
+          , "items" .= prop "string" "Task UUID"
+          ]
+      , "project_id" .= nullableProp "Destination project UUID, or null/omitted to detach the tasks from a project"
+      ] ["task_ids"])
   , tool "task_detail" "Get compact task details." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_overview" "Get a compact task overview and dependency summaries." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates." (schema ["task_id" .= prop "string" "Dependent task UUID", "depends_on_id" .= prop "string" "Prerequisite task UUID", "action" .= enumProp "Dependency mutation" ["add", "remove"]] ["task_id", "depends_on_id", "action"])
@@ -164,6 +174,7 @@ data ToolCall
   | ProjectArchive UUID
   | TaskCreate CreateTask
   | TaskUpdate UUID UpdateTask
+  | TaskMoveBatch BatchMoveTasksRequest
   | TaskDetail UUID
   | TaskOverviewCall UUID
   | TaskDependency UUID UUID Text
@@ -196,6 +207,7 @@ parseToolCall name args = case name of
   "project_archive" -> ProjectArchive <$> required "project_id"
   "task_create" -> TaskCreate <$> parse args
   "task_update" -> TaskUpdate <$> required "task_id" <*> parse args
+  "task_move_batch" -> TaskMoveBatch <$> parseBatchMoveTasks args
   "task_detail" -> TaskDetail <$> required "task_id"
   "task_overview" -> TaskOverviewCall <$> required "task_id"
   "task_dependency" -> TaskDependency <$> required "task_id" <*> required "depends_on_id" <*> required "action"
@@ -222,6 +234,12 @@ parseWorkspaceUpdate = parseEither $ withObject "workspace_update" $ \o -> do
   let unexpected = filter (`notElem` ["workspace_id", "name"]) (Key.toText <$> KM.keys o)
   if null unexpected then UpdateWorkspace <$> o .: "name"
   else fail ("workspace_update accepts only workspace_id and name; unexpected fields: " <> show unexpected)
+
+parseBatchMoveTasks :: Value -> Either String BatchMoveTasksRequest
+parseBatchMoveTasks = parseEither $ withObject "task_move_batch" $ \o -> do
+  let unexpected = filter (`notElem` ["task_ids", "project_id"]) (Key.toText <$> KM.keys o)
+  if null unexpected then BatchMoveTasksRequest <$> o .: "task_ids" <*> o .:? "project_id"
+  else fail ("task_move_batch accepts only task_ids and project_id; unexpected fields: " <> show unexpected)
 
 -- | Core accepts the deprecated singleton form during the compatibility window.
 -- The MCP registry advertises only @subjects@, but parsing retains the legacy
@@ -257,6 +275,7 @@ validateToolCall call = case call of
   ProjectUpdate _ input -> checked (validateUpdateProjectInput input) call
   TaskCreate input -> checked (validateCreateTaskInput input) call
   TaskUpdate _ input -> checked (validateUpdateTaskInput input) call
+  TaskMoveBatch input -> checked (validateBatchMoveTasksRequest input) call
   TaskDependency taskId dependsOnId action
     | taskId == dependsOnId -> Left "task_dependency: a task cannot depend on itself"
     | action `notElem` ["add", "remove"] -> Left "task_dependency: action must be add or remove"
@@ -306,6 +325,7 @@ execute manager base apiKey = \case
   ProjectArchive pid -> request manager base apiKey "PUT" ("/api/v1/projects/" <> uuidPath pid) (Just (encode (object ["status" .= ("archived" :: Text)]))) (mutationAck "archived" "project" . compactProjectSummary)
   TaskCreate input -> request manager base apiKey "POST" "/api/v1/tasks" (Just (encode input)) (mutationAck "created" "task" . compactTaskSummary)
   TaskUpdate tid input -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode input)) (mutationAck "updated" "task" . compactTaskSummary)
+  TaskMoveBatch input -> request manager base apiKey "POST" "/api/v1/tasks/batch-move" (Just (encode input)) (compactTaskBatchMove input.projectId)
   TaskDetail tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid) Nothing compactTaskSummary
   TaskOverviewCall tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid <> "/overview") Nothing compactTaskOverview
   TaskDependency tid depId "add" -> request manager base apiKey "POST" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies") (Just (encode (object ["depends_on_id" .= depId]))) compactTaskDependencyMutation
@@ -455,6 +475,15 @@ compactProjectSummary value = object (catMaybes [copy "id", copy "name", copy "d
 compactTaskSummary :: Value -> Value
 compactTaskSummary value = object (catMaybes [copy "id", copy "title", copy "description", copy "status", copy "priority", copy "project_id", copy "parent_id", copy "due_at"])
   where copy key = (Key.fromText key .=) <$> field key value
+
+compactTaskBatchMove :: Maybe UUID -> Value -> Value
+compactTaskBatchMove destination value = object
+  [ "ok" .= True
+  , "action" .= ("moved" :: Text)
+  , "entity_type" .= ("task" :: Text)
+  , "affected" .= fromMaybe (Number 0) (field "affected" value)
+  , "project_id" .= destination
+  ]
 
 compactSearchResults :: Value -> Value
 compactSearchResults value = object

@@ -22,7 +22,8 @@ openApiSpec :: OpenApi
 openApiSpec = toOpenApi (Proxy @HMemAPI)
   & info . title .~ "hmem API"
   & info . version .~ "0.2.0.0"
-  & info . description ?~ "Repository-scoped observation API with immutable provenance."
+  & info . description ?~ "Repository-scoped observation API with immutable provenance. Task placement mutations can return structured lifecycle conflicts when project, hierarchy, or dependency invariants reject the requested state."
+  & components . schemas . at "LifecycleConflictError" ?~ lifecycleConflictSchema
   & tags .~ InsOrdSet.fromList
       [ Tag "Observations" (Just "Repository-scoped, provenance-bound observations.") Nothing
       , Tag "Workspace Groups" (Just "Global-superadmin workspace group management.") Nothing
@@ -49,6 +50,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/workspaces/{workspaceId}/timeline/buckets" . _Just . get %~ fmap tagTimeline
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/workspaces/{workspaceId}/navigation/focus/{entityType}/{entityId}" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
+  & paths . at "/api/v1/tasks/batch-move" . _Just . post %~ fmap documentTaskBatchMove
   & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . get . _Just . parameters . traversed %~ capNavigationParameter
   & paths . at "/api/v1/tasks/{taskId}/dependencies" . _Just . post %~ fmap documentDependencyAdd
   & paths . at "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}" . _Just . delete %~ fmap documentDependencyRemove
@@ -81,6 +83,22 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
 
     dependencyRemoveErrors = Responses Nothing $ InsOrdMap.fromList
       [ (400, Inline (mempty & description .~ "Validation error. Self-edges and cross-workspace edges are rejected with 400.")) ]
+
+    documentTaskBatchMove operation = operation
+      & description ?~ "Atomically moves one to 100 requested tasks and their active descendants to one project or to no project. Every source task and the optional destination project require edit authorization. Callers must include every endpoint of dependency edges that would otherwise cross project boundaries."
+      & responses %~ (<> taskBatchMoveErrors)
+
+    taskBatchMoveErrors = Responses Nothing $ InsOrdMap.fromList
+      [ (400, Inline (mempty & description .~ "Validation error: task_ids must contain 1 to 100 entries and all authorized source tasks and the destination project must belong to one workspace."))
+      , (401, Inline (mempty & description .~ "Authentication is required."))
+      , (403, Inline (mempty & description .~ "The principal lacks edit authorization for a requested task or destination project."))
+      , (404, Inline (mempty & description .~ "A requested task or destination project is missing, deleted, or not visible."))
+      , (409, Inline lifecycleConflictResponse)
+      ]
+
+    lifecycleConflictResponse = mempty
+      & description .~ "A placement, hierarchy, dependency, completion, or closed-project invariant rejected the atomic move; no tasks were moved."
+      & content . at "application/json" ?~ (mempty & schema ?~ Ref (Reference "LifecycleConflictError"))
 
 capNavigationParameter parameterRef = case parameterRef of
   Inline parameter
@@ -391,6 +409,23 @@ instance ToSchema Task where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CreateTask where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema UpdateTask where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema TaskMutationResult where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema BatchMoveTasksRequest where
+  declareNamedSchema _ = pure $ NamedSchema (Just "BatchMoveTasksRequest") $ mempty
+    & type_ ?~ OpenApiObject
+    & description ?~ "Atomic task-project relocation. Duplicate task IDs are accepted but affect each task once; active descendants are moved with requested roots."
+    & properties . at "task_ids" ?~ Inline (mempty
+        & type_ ?~ OpenApiArray
+        & items ?~ OpenApiItemsObject (Inline uuidSchema)
+        & minItems ?~ 1
+        & maxItems ?~ 100)
+    & properties . at "project_id" ?~ Inline (uuidSchema & nullable ?~ True)
+    & required .~ ["task_ids"]
+instance ToSchema BatchResult where
+  declareNamedSchema _ = pure $ NamedSchema (Just "BatchResult") $ mempty
+    & type_ ?~ OpenApiObject
+    & properties . at "affected" ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 0)
+    & required .~ ["affected"]
+    & additionalProperties ?~ AdditionalPropertiesAllowed False
 instance ToSchema TaskDependencyStatusChange where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema LinkDependency where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema DependencyMutationResult where declareNamedSchema = genericDeclareNamedSchema opts
@@ -417,6 +452,18 @@ instance ToSchema SessionPrincipal where declareNamedSchema = genericDeclareName
 instance ToSchema SessionGlobalPermissions where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema SessionWorkspaceContext where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema a => ToSchema (PaginatedResult a) where declareNamedSchema = genericDeclareNamedSchema opts
+
+lifecycleConflictSchema :: Schema
+lifecycleConflictSchema = mempty
+  & type_ ?~ OpenApiObject
+  & description ?~ "Stable lifecycle conflict response. detail is structured JSON when the invariant supplies it; hint is present when a safe remediation is available."
+  & properties . at "error" ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["lifecycle_conflict"])
+  & properties . at "code" ?~ Inline (mempty & type_ ?~ OpenApiString)
+  & properties . at "message" ?~ Inline (mempty & type_ ?~ OpenApiString)
+  & properties . at "detail" ?~ Inline mempty
+  & properties . at "hint" ?~ Inline (mempty & type_ ?~ OpenApiString)
+  & required .~ ["error", "code", "message"]
+  & additionalProperties ?~ AdditionalPropertiesAllowed False
 
 timelineActorOpts :: SchemaOptions
 timelineActorOpts = opts { fieldLabelModifier = \case

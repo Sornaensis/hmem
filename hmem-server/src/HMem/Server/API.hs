@@ -162,6 +162,7 @@ type TaskAPI =
          :> QueryParam "priority" Int :> QueryParam "query" Text :> QueryParam "limit" Int :> QueryParam "offset" Int
          :> Get '[JSON] (PaginatedResult Task)
   :<|> ReqBody '[JSON] CreateTask :> Post '[JSON] Task
+  :<|> "batch-move" :> ReqBody '[JSON] BatchMoveTasksRequest :> Post '[JSON] BatchResult
   :<|> Capture "taskId" UUID :> Get '[JSON] Task
   :<|> Capture "taskId" UUID :> ReqBody '[JSON] UpdateTask :> Put '[JSON] TaskMutationResult
     :<|> Capture "taskId" UUID :> Delete '[JSON] CascadeResult
@@ -211,12 +212,26 @@ handleDBErrors action = do
         -- rejection is a caller-correctable graph validation error, not an
         -- unexpected database failure.
         DBTaskDependencyCycle{} -> badRequest "dependency_cycle" "Task dependency would create a cycle"
+        DBLifecycleViolation code message detail hint -> err409
+          { errBody = Aeson.encode $ object $
+              [ "error" .= ("lifecycle_conflict" :: Text)
+              , "code" .= code
+              , "message" .= message
+              ]
+              <> ["detail" .= decodeLifecycleDetail value | Just value <- [detail]]
+              <> ["hint" .= value | Just value <- [hint]]
+          , errHeaders = [("Content-Type", "application/json")]
+          }
         DBCapabilityUnavailable{} -> err503 { errBody = Aeson.encode (object ["error" .= ("capability_unavailable" :: Text), "message" .= ("pgvector embedding support is unavailable" :: Text)]) }
         DBStatementTimeout -> err504 { errBody = Aeson.encode (object ["error" .= ("timeout" :: Text)]) }
         _ -> err500 { errBody = Aeson.encode (object ["error" .= ("internal" :: Text)]) }
 
 badRequest :: Text -> Text -> ServerError
 badRequest kind message = err400 { errBody = Aeson.encode (object ["error" .= kind, "message" .= message]) }
+
+decodeLifecycleDetail :: Text -> Value
+decodeLifecycleDetail detail = fromMaybe (Aeson.String detail) $
+  Aeson.decode (LBS8.pack (Text.unpack detail))
 
 newtype CreateObservationRequest = CreateObservationRequest (Either Text CreateObservation)
 newtype ObservationMatchRequest = ObservationMatchRequest (Either Text ObservationMatchQuery)
@@ -269,6 +284,9 @@ requireSuperadmin pool = do
   principal <- liftIO currentPrincipal
   allowed <- liftIO $ Auth.authorizeGlobal pool principal Auth.GlobalSuperadmin
   either (throwError . authError) pure allowed
+
+requireAuthenticated :: Handler ()
+requireAuthenticated = liftIO currentPrincipal >>= maybe (throwError err401) (const (pure ()))
 
 requireWorkspace :: Pool Hasql.Connection -> UUID -> Auth.WorkspaceRole -> Handler ()
 requireWorkspace pool workspaceId role = do
@@ -747,7 +765,7 @@ projects pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> over
     handleDBErrors $ Task.listNextTasks pool projectId (fromMaybe False includeBlocked) (fromMaybe 5 limit)
 
 tasks :: Pool Hasql.Connection -> Server TaskAPI
-tasks pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> dependenciesH :<|> addDependencyH :<|> removeDependencyH where
+tasks pool = listH :<|> createH :<|> batchMoveH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> dependenciesH :<|> addDependencyH :<|> removeDependencyH where
   listH workspaceId projectId status priority queryValue limit offset = do
     workspace <- case (workspaceId, projectId) of
       (Just id, _) -> requireWorkspace pool id Auth.WorkspaceRoleRead >> pure id
@@ -762,6 +780,24 @@ tasks pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overvie
     requireWorkspace pool input.workspaceId Auth.WorkspaceRoleEdit; reject (validateCreateTaskInput input)
     created <- handleDBErrors $ Task.createTask pool input
     pure created
+  batchMoveH input = do
+    requireAuthenticated
+    reject (validateBatchMoveTasksRequest input)
+    taskWorkspaces <- mapM (\taskId -> requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleEdit) input.taskIds
+    workspaceId <- case taskWorkspaces of
+      [] -> throwError err400
+      firstWorkspace : remaining -> do
+        when (any (/= firstWorkspace) remaining) $
+          reject ["task_ids must all belong to the same workspace"]
+        pure firstWorkspace
+    case input.projectId of
+      Nothing -> pure ()
+      Just projectId -> do
+        projectWorkspace <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleEdit
+        when (projectWorkspace /= workspaceId) $
+          reject ["project_id must belong to the tasks' workspace"]
+    affected <- handleDBErrors $ Task.moveTasksBatch pool input.taskIds input.projectId
+    pure BatchResult { affected = affected }
   getH taskId = do
     _ <- requireEntity pool Auth.EntityTask taskId Auth.WorkspaceRoleRead
     handleDBErrors (Task.getTask pool taskId) >>= maybe (throwError err404) pure

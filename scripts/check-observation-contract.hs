@@ -28,7 +28,7 @@ toolsDispatched =
   , Tool "observation_create" "ObservationCreate", Tool "observation_get" "ObservationGet", Tool "observation_update" "ObservationUpdate"
   , Tool "observation_list" "ObservationList", Tool "observation_match" "ObservationMatchCall", Tool "observation_delete" "ObservationDelete", Tool "observation_set_embedding" "ObservationSetEmbedding", Tool "observation_similar" "ObservationSimilar"
   , Tool "project_create" "ProjectCreate", Tool "project_update" "ProjectUpdate", Tool "project_detail" "ProjectDetail", Tool "project_overview" "ProjectOverviewCall", Tool "project_next_tasks" "ProjectNextTasks", Tool "project_spec" "ProjectSpec", Tool "project_archive" "ProjectArchive"
-  , Tool "task_create" "TaskCreate", Tool "task_update" "TaskUpdate", Tool "task_detail" "TaskDetail", Tool "task_overview" "TaskOverviewCall", Tool "task_dependency" "TaskDependency", Tool "task_start" "TaskStart", Tool "task_finish" "TaskFinish"
+  , Tool "task_create" "TaskCreate", Tool "task_update" "TaskUpdate", Tool "task_move_batch" "TaskMoveBatch", Tool "task_detail" "TaskDetail", Tool "task_overview" "TaskOverviewCall", Tool "task_dependency" "TaskDependency", Tool "task_start" "TaskStart", Tool "task_finish" "TaskFinish"
   ]
 
 liveTools :: [String]

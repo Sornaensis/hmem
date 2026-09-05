@@ -225,7 +225,7 @@ spec = do
           workspaceUuid = read (T.unpack workspaceId) :: UUID
           arguments = object ["task_ids" .= [observationId, workspaceId], "project_id" .= workspaceId]
       case parseToolCall "task_move_batch" arguments of
-        Right (TaskMoveBatch request) -> request `shouldBe` BatchMoveTasksRequest [observationUuid, workspaceUuid] (Just workspaceUuid)
+        Right (TaskMoveBatch Nothing request) -> request `shouldBe` BatchMoveTasksRequest [observationUuid, workspaceUuid] (Just workspaceUuid)
         Right _ -> expectationFailure "expected TaskMoveBatch"
         Left err -> expectationFailure err
       parseToolCall "task_move_batch" (object ["task_ids" .= [observationUuid], "unexpected" .= True])
@@ -250,6 +250,87 @@ spec = do
       batchRequest.requestMethod `shouldBe` methodPost
       batchRequest.requestPath `shouldBe` "/api/v1/tasks/batch-move"
       decode batchRequest.requestBody `shouldBe` Just arguments
+
+    it "preflights every distinct task and destination through the active JSON-RPC workspace context" $ do
+      let arguments = object ["task_ids" .= [observationId, workspaceId, observationId], "project_id" .= workspaceId]
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        initialized <- newTVarIO True
+        workspaceContext <- newTVarIO Nothing
+        _ <- serverToolCall manager initialized workspaceContext "set_workspace" (object ["workspace_id" .= workspaceId])
+        jsonRpcToolCall manager base initialized workspaceContext "task_move_batch" arguments
+          >>= (`shouldSatisfy` maybe False (not . isJsonRpcMcpError))
+      observed <- readTVarIO requests
+      map (.requestMethod) observed `shouldBe` [methodGet, methodGet, methodGet, methodPost]
+      map (.requestPath) observed `shouldBe`
+        [ "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        , "/api/v1/tasks/11111111-2222-3333-4444-555555555555"
+        , "/api/v1/projects/11111111-2222-3333-4444-555555555555"
+        , "/api/v1/tasks/batch-move"
+        ]
+      case observed of
+        [firstTaskRequest, secondTaskRequest, projectRequest, batchRequest] -> do
+          map (.requestBody) [firstTaskRequest, secondTaskRequest, projectRequest] `shouldBe` ["", "", ""]
+          decode batchRequest.requestBody `shouldBe` Just (object ["task_ids" .= [observationId, workspaceId, observationId], "project_id" .= workspaceId])
+        _ -> expectationFailure "expected two task preflights, one project preflight, and one batch move"
+
+    it "rejects invalid contextual batch-move fields and strict unknown fields before HTTP dispatch" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        initialized <- newTVarIO True
+        workspaceContext <- newTVarIO (Just (read (T.unpack workspaceId)))
+        forM_
+          [ object ["task_ids" .= [observationId], "workspace_id" .= ("not-a-uuid" :: Text)]
+          , object ["task_ids" .= [observationId], "workspace_id" .= True]
+          , object ["task_ids" .= [observationId], "unexpected" .= True]
+          ] $ \arguments ->
+            jsonRpcToolCall manager base initialized workspaceContext "task_move_batch" arguments
+              >>= (`shouldSatisfy` maybe False isJsonRpcMcpError)
+      observed <- readTVarIO requests
+      length observed `shouldBe` 0
+
+    it "fails closed when contextual task or destination provenance is missing, malformed, or mismatched" $
+      forM_
+        [ (object ["id" .= observationId, "workspace_id" .= ("99999999-2222-3333-4444-555555555555" :: Text)], projectWithWorkspace)
+        , (taskWithWorkspace, object ["id" .= workspaceId, "workspace_id" .= ("99999999-2222-3333-4444-555555555555" :: Text)])
+        , (object ["id" .= observationId], projectWithWorkspace)
+        , (object ["id" .= observationId, "workspace_id" .= ("not-a-uuid" :: Text)], projectWithWorkspace)
+        , (taskWithWorkspace, object ["id" .= workspaceId])
+        , (taskWithWorkspace, object ["id" .= workspaceId, "workspace_id" .= ("not-a-uuid" :: Text)])
+        ] $ \(taskResponse, projectResponse) -> do
+          requests <- newTVarIO []
+          withBatchMovePreflightMock requests taskResponse projectResponse $ \manager base -> do
+            initialized <- newTVarIO True
+            workspaceContext <- newTVarIO (Just (read (T.unpack workspaceId)))
+            jsonRpcToolCall manager base initialized workspaceContext "task_move_batch"
+              (object ["task_ids" .= [observationId], "project_id" .= workspaceId])
+              >>= (`shouldSatisfy` maybe False isJsonRpcMcpError)
+          observed <- readTVarIO requests
+          map (.requestMethod) observed `shouldNotSatisfy` elem methodPost
+
+    it "checks every distinct task response before dispatching a contextual batch move" $ do
+      requests <- newTVarIO []
+      withBatchMoveEveryTaskMismatchMock requests $ \manager base -> do
+        initialized <- newTVarIO True
+        workspaceContext <- newTVarIO (Just (read (T.unpack workspaceId)))
+        jsonRpcToolCall manager base initialized workspaceContext "task_move_batch"
+          (object ["task_ids" .= [observationId, workspaceId], "project_id" .= workspaceId])
+          >>= (`shouldSatisfy` maybe False isJsonRpcMcpError)
+      observed <- readTVarIO requests
+      map (.requestMethod) observed `shouldBe` [methodGet, methodGet, methodGet]
+      map (.requestMethod) observed `shouldNotSatisfy` elem methodPost
+
+    it "forwards contextual preflight GET errors and never starts the batch move" $ do
+      requests <- newTVarIO []
+      withBatchMoveGetErrorMock requests $ \manager base -> do
+        initialized <- newTVarIO True
+        workspaceContext <- newTVarIO (Just (read (T.unpack workspaceId)))
+        response <- jsonRpcToolCall manager base initialized workspaceContext "task_move_batch"
+          (object ["task_ids" .= [observationId], "project_id" .= workspaceId])
+        response `shouldSatisfy` maybe False (\value -> isJsonRpcMcpError value && contains "[HTTP_404] Task not found." value)
+      observed <- readTVarIO requests
+      map (.requestMethod) observed `shouldBe` [methodGet, methodGet]
+      map (.requestMethod) observed `shouldNotSatisfy` elem methodPost
 
     it "preserves structured lifecycle conflicts through the MCP and JSON-RPC bridges" $
       withLifecycleConflictMock $ \manager base -> do
@@ -896,6 +977,58 @@ withMock requests action = testWithApplication (pure (mockApp requests)) $ \port
   bracket (newManager defaultManagerSettings) closeManager $ \manager ->
     action manager ("http://127.0.0.1:" <> show port)
 
+withBatchMovePreflightMock :: TVar [RequestInfo] -> Value -> Value -> (Manager -> String -> IO a) -> IO a
+withBatchMovePreflightMock requests taskResponse projectResponse action =
+  testWithApplication (pure (batchMovePreflightApp requests taskResponse projectResponse)) $ \port ->
+    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+      action manager ("http://127.0.0.1:" <> show port)
+
+withBatchMoveGetErrorMock :: TVar [RequestInfo] -> (Manager -> String -> IO a) -> IO a
+withBatchMoveGetErrorMock requests action =
+  testWithApplication (pure (batchMoveGetErrorApp requests)) $ \port ->
+    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+      action manager ("http://127.0.0.1:" <> show port)
+
+withBatchMoveEveryTaskMismatchMock :: TVar [RequestInfo] -> (Manager -> String -> IO a) -> IO a
+withBatchMoveEveryTaskMismatchMock requests action =
+  testWithApplication (pure (batchMoveEveryTaskMismatchApp requests)) $ \port ->
+    bracket (newManager defaultManagerSettings) closeManager $ \manager ->
+      action manager ("http://127.0.0.1:" <> show port)
+
+batchMovePreflightApp :: TVar [RequestInfo] -> Value -> Value -> Wai.Application
+batchMovePreflightApp requests taskResponse projectResponse request respond = do
+  body <- Wai.strictRequestBody request
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  let path = request.rawPathInfo
+      response
+        | "/api/v1/tasks/" `BS.isPrefixOf` path = taskResponse
+        | "/api/v1/projects/" `BS.isPrefixOf` path = projectResponse
+        | otherwise = object ["affected" .= (1 :: Int)]
+  respond $ Wai.responseLBS status200 [("Content-Type", "application/json")] (encode response)
+
+batchMoveGetErrorApp :: TVar [RequestInfo] -> Wai.Application
+batchMoveGetErrorApp requests request respond = do
+  body <- Wai.strictRequestBody request
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  let response
+        | "/api/v1/tasks/" `BS.isPrefixOf` request.rawPathInfo = Wai.responseLBS status404 [("Content-Type", "application/json")] (encode (object ["error" .= ("not_found" :: Text), "message" .= ("Task not found." :: Text)]))
+        | otherwise = Wai.responseLBS status200 [("Content-Type", "application/json")] (encode projectWithWorkspace)
+  respond response
+
+batchMoveEveryTaskMismatchApp :: TVar [RequestInfo] -> Wai.Application
+batchMoveEveryTaskMismatchApp requests request respond = do
+  body <- Wai.strictRequestBody request
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  let response
+        | request.rawPathInfo == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" = taskWithWorkspace
+        | request.rawPathInfo == "/api/v1/tasks/11111111-2222-3333-4444-555555555555" = object ["id" .= workspaceId, "workspace_id" .= ("99999999-2222-3333-4444-555555555555" :: Text)]
+        | otherwise = projectWithWorkspace
+  respond $ Wai.responseLBS status200 [("Content-Type", "application/json")] (encode response)
+
+taskWithWorkspace, projectWithWorkspace :: Value
+taskWithWorkspace = object ["id" .= observationId, "workspace_id" .= workspaceId]
+projectWithWorkspace = object ["id" .= workspaceId, "workspace_id" .= workspaceId]
+
 trustedMcpProvenance :: String
 trustedMcpProvenance = "release-gate-mcp-provenance"
 
@@ -1072,7 +1205,9 @@ responseFor method path rawQuery body
   | path == "/api/v1/observations" = object ["items" .= [observation, observation], "has_more" .= True]
   | path == "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" = observation
   | path == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" = task
+  | path == "/api/v1/tasks/11111111-2222-3333-4444-555555555555" = object ["id" .= workspaceId, "workspace_id" .= workspaceId, "title" .= ("Task" :: Text), "status" .= ("done" :: Text), "priority" .= (5 :: Int)]
   | path == "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" = project
+  | path == "/api/v1/projects/11111111-2222-3333-4444-555555555555" = object ["id" .= workspaceId, "workspace_id" .= workspaceId, "name" .= ("Project" :: Text), "status" .= ("archived" :: Text), "priority" .= (5 :: Int)]
   | otherwise = object []
   where
     observation = object ["id" .= observationId, "workspace_id" .= workspaceId, "subjects" .= observationSubjects, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= ("complete observation content" :: Text), "content_preview" .= ("complete observation content" :: Text)]

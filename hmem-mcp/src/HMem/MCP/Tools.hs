@@ -25,6 +25,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int32)
 import Data.Foldable (toList)
+import Data.List (nub)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -174,7 +175,9 @@ data ToolCall
   | ProjectArchive UUID
   | TaskCreate CreateTask
   | TaskUpdate UUID UpdateTask
-  | TaskMoveBatch BatchMoveTasksRequest
+  -- The workspace context is injected by HMem.MCP.Server and deliberately is
+  -- not part of BatchMoveTasksRequest, which remains the REST body.
+  | TaskMoveBatch (Maybe UUID) BatchMoveTasksRequest
   | TaskDetail UUID
   | TaskOverviewCall UUID
   | TaskDependency UUID UUID Text
@@ -207,7 +210,7 @@ parseToolCall name args = case name of
   "project_archive" -> ProjectArchive <$> required "project_id"
   "task_create" -> TaskCreate <$> parse args
   "task_update" -> TaskUpdate <$> required "task_id" <*> parse args
-  "task_move_batch" -> TaskMoveBatch <$> parseBatchMoveTasks args
+  "task_move_batch" -> uncurry TaskMoveBatch <$> parseBatchMoveTasks args
   "task_detail" -> TaskDetail <$> required "task_id"
   "task_overview" -> TaskOverviewCall <$> required "task_id"
   "task_dependency" -> TaskDependency <$> required "task_id" <*> required "depends_on_id" <*> required "action"
@@ -235,10 +238,18 @@ parseWorkspaceUpdate = parseEither $ withObject "workspace_update" $ \o -> do
   if null unexpected then UpdateWorkspace <$> o .: "name"
   else fail ("workspace_update accepts only workspace_id and name; unexpected fields: " <> show unexpected)
 
-parseBatchMoveTasks :: Value -> Either String BatchMoveTasksRequest
+parseBatchMoveTasks :: Value -> Either String (Maybe UUID, BatchMoveTasksRequest)
 parseBatchMoveTasks = parseEither $ withObject "task_move_batch" $ \o -> do
-  let unexpected = filter (`notElem` ["task_ids", "project_id"]) (Key.toText <$> KM.keys o)
-  if null unexpected then BatchMoveTasksRequest <$> o .: "task_ids" <*> o .:? "project_id"
+  let unexpected = filter (`notElem` ["task_ids", "project_id", "workspace_id"]) (Key.toText <$> KM.keys o)
+  if null unexpected then do
+    injectedWorkspace <- case KM.lookup "workspace_id" o of
+      Nothing -> pure Nothing
+      Just (String workspaceText) -> case UUID.fromText workspaceText of
+        Just workspace -> pure (Just workspace)
+        Nothing -> fail "task_move_batch injected workspace_id must be a UUID"
+      Just _ -> fail "task_move_batch injected workspace_id must be a UUID"
+    batchRequest <- BatchMoveTasksRequest <$> o .: "task_ids" <*> o .:? "project_id"
+    pure (injectedWorkspace, batchRequest)
   else fail ("task_move_batch accepts only task_ids and project_id; unexpected fields: " <> show unexpected)
 
 -- | Core accepts the deprecated singleton form during the compatibility window.
@@ -275,7 +286,7 @@ validateToolCall call = case call of
   ProjectUpdate _ input -> checked (validateUpdateProjectInput input) call
   TaskCreate input -> checked (validateCreateTaskInput input) call
   TaskUpdate _ input -> checked (validateUpdateTaskInput input) call
-  TaskMoveBatch input -> checked (validateBatchMoveTasksRequest input) call
+  TaskMoveBatch _ input -> checked (validateBatchMoveTasksRequest input) call
   TaskDependency taskId dependsOnId action
     | taskId == dependsOnId -> Left "task_dependency: a task cannot depend on itself"
     | action `notElem` ["add", "remove"] -> Left "task_dependency: action must be add or remove"
@@ -325,13 +336,48 @@ execute manager base apiKey = \case
   ProjectArchive pid -> request manager base apiKey "PUT" ("/api/v1/projects/" <> uuidPath pid) (Just (encode (object ["status" .= ("archived" :: Text)]))) (mutationAck "archived" "project" . compactProjectSummary)
   TaskCreate input -> request manager base apiKey "POST" "/api/v1/tasks" (Just (encode input)) (mutationAck "created" "task" . compactTaskSummary)
   TaskUpdate tid input -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode input)) (mutationAck "updated" "task" . compactTaskSummary)
-  TaskMoveBatch input -> request manager base apiKey "POST" "/api/v1/tasks/batch-move" (Just (encode input)) (compactTaskBatchMove input.projectId)
+  TaskMoveBatch workspace input -> case workspace of
+    Nothing -> dispatchBatchMove manager base apiKey input
+    Just activeWorkspace -> do
+      preflight <- validateBatchMoveWorkspace manager base apiKey activeWorkspace input
+      case preflight of
+        Left errorValue -> pure errorValue
+        Right () -> dispatchBatchMove manager base apiKey input
   TaskDetail tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid) Nothing compactTaskSummary
   TaskOverviewCall tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid <> "/overview") Nothing compactTaskOverview
   TaskDependency tid depId "add" -> request manager base apiKey "POST" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies") (Just (encode (object ["depends_on_id" .= depId]))) compactTaskDependencyMutation
   TaskDependency tid depId "remove" -> request manager base apiKey "DELETE" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/" <> uuidPath depId) Nothing compactTaskDependencyMutation
   TaskStart tid -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= ("in_progress" :: Text)]))) (mutationAck "started" "task" . compactTaskSummary)
   TaskFinish tid status -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= status]))) (mutationAck "finished" "task" . compactTaskSummary)
+
+dispatchBatchMove :: Manager -> String -> Maybe Text -> BatchMoveTasksRequest -> IO Value
+dispatchBatchMove manager base apiKey input =
+  request manager base apiKey "POST" "/api/v1/tasks/batch-move" (Just (encode input)) (compactTaskBatchMove input.projectId)
+
+-- | A session workspace is an authorization boundary rather than a field in
+-- the batch-move REST DTO.  Verify every explicitly supplied endpoint before
+-- allowing the mutation so a stale or foreign task/project cannot be moved by
+-- a contextual call.
+validateBatchMoveWorkspace :: Manager -> String -> Maybe Text -> UUID -> BatchMoveTasksRequest -> IO (Either Value ())
+validateBatchMoveWorkspace manager base apiKey activeWorkspace input = do
+  taskResults <- mapM (fetch "task" . ("/api/v1/tasks/" <>) . uuidPath) (nub input.taskIds)
+  projectResult <- traverse (fetch "project" . ("/api/v1/projects/" <>) . uuidPath) input.projectId
+  pure $ do
+    mapM_ (>>= verifyWorkspace activeWorkspace) taskResults
+    mapM_ (>>= verifyWorkspace activeWorkspace) projectResult
+  where
+    fetch entity path = do
+      result <- rawRequest manager base apiKey "GET" path Nothing
+      pure $ case result of
+        Left errorValue -> Left errorValue
+        Right value -> Right (entity, value)
+
+verifyWorkspace :: UUID -> (Text, Value) -> Either Value ()
+verifyWorkspace activeWorkspace (entity, value) = case textField "workspace_id" value >>= UUID.fromText of
+  Just returnedWorkspace
+    | returnedWorkspace == activeWorkspace -> Right ()
+    | otherwise -> Left (mcpError ("task_move_batch " <> entity <> " workspace_id does not match the active workspace context"))
+  Nothing -> Left (mcpError ("task_move_batch " <> entity <> " response omitted a valid workspace_id"))
 
 executeProjectSpec :: Manager -> String -> Maybe Text -> UUID -> Text -> Maybe Text -> Maybe Int32 -> [SpecTask] -> IO Value
 executeProjectSpec manager base apiKey wid name description priority specs = do

@@ -57,6 +57,7 @@ library
       HMem.Server.CtlPaths
       HMem.Server.CtlPgvector
       HMem.Server.CtlPgvectorCli
+      HMem.Server.Embedding.GteQwen2
       HMem.Server.Embedding.Http
       HMem.Server.Embedding.Provider
       HMem.Server.Event
@@ -418,6 +419,7 @@ test-suite hmem-server-test
       HMem.Server.CtlPgvectorCliSpec
       HMem.Server.CtlPgvectorSpec
       HMem.Server.DeployedSandboxSpec
+      HMem.Server.Embedding.GteQwen2Spec
       HMem.Server.Embedding.HttpSpec
       HMem.Server.Embedding.ProviderSpec
       HMem.Server.KeycloakHarness

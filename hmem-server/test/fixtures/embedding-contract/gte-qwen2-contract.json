@@ -1,0 +1,90 @@
+{
+  "model": {
+    "source": {
+      "sourceUrl": "https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/resolve/1cad2ab3ff41c2671f34e135d29831368ee26b68/config.json",
+      "sourceTreeUrl": "https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/tree/1cad2ab3ff41c2671f34e135d29831368ee26b68",
+      "sourceRevision": "1cad2ab3ff41c2671f34e135d29831368ee26b68",
+      "sourceSha256": "6be8440493f63c39e989842d4747127a71b1d680839af44dc105245e06a333d1",
+      "sourceFile": "config.json",
+      "sourceLines": ["\"hidden_size\": 1536"]
+    },
+    "hiddenSize": 1536
+  },
+  "tokenizer": {
+    "source": {
+      "sourceUrl": "https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/resolve/1cad2ab3ff41c2671f34e135d29831368ee26b68/tokenizer_config.json",
+      "sourceTreeUrl": "https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/tree/1cad2ab3ff41c2671f34e135d29831368ee26b68",
+      "sourceRevision": "1cad2ab3ff41c2671f34e135d29831368ee26b68",
+      "sourceSha256": "d1b4928d0e7e7c1881a23eb235f6081d6d9db3d67f6ce5272f571feaf12fd944",
+      "sourceFile": "tokenizer_config.json",
+      "sourceLines": ["\"model_max_length\": 32768", "\"add_eos_token\": true", "\"eos_token\": \"<|endoftext|>\""]
+    },
+    "modelMaxLength": 32768,
+    "addEosToken": true,
+    "eosPadToken": "<|endoftext|>",
+    "eosPadTokenId": 151643
+  },
+  "sentenceTransformers": {
+    "source": {
+      "sourceUrl": "https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/resolve/1cad2ab3ff41c2671f34e135d29831368ee26b68/config_sentence_transformers.json",
+      "sourceTreeUrl": "https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/tree/1cad2ab3ff41c2671f34e135d29831368ee26b68",
+      "sourceRevision": "1cad2ab3ff41c2671f34e135d29831368ee26b68",
+      "sourceSha256": "89df38eb06c9f934ee613d846fd9ea88468cc99791e036b5bbc412411fbb1c95",
+      "sourceFile": "config_sentence_transformers.json",
+      "sourceLines": ["\"query\": \"Instruct: Given a web search query, retrieve relevant passages that answer the query\\nQuery: \""]
+    },
+    "queryPrefix": "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
+  },
+  "pooling": {
+    "source": {
+      "sourceUrl": "https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/resolve/1cad2ab3ff41c2671f34e135d29831368ee26b68/1_Pooling/config.json",
+      "sourceTreeUrl": "https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/tree/1cad2ab3ff41c2671f34e135d29831368ee26b68",
+      "sourceRevision": "1cad2ab3ff41c2671f34e135d29831368ee26b68",
+      "sourceSha256": "40d120b92655c16390bd52c43540ada5f74ab94991d00838df6742c0d640d35b",
+      "sourceFile": "1_Pooling/config.json",
+      "sourceLines": ["\"pooling_mode_lasttoken\": true"]
+    },
+    "lastTokenPooling": true
+  },
+  "readme": {
+    "source": {
+      "sourceUrl": "https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/resolve/1cad2ab3ff41c2671f34e135d29831368ee26b68/README.md",
+      "sourceTreeUrl": "https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/tree/1cad2ab3ff41c2671f34e135d29831368ee26b68",
+      "sourceRevision": "1cad2ab3ff41c2671f34e135d29831368ee26b68",
+      "sourceSha256": "06f46ea6b3ab7eb581f1fb170e6144c94493c076232dae7a65a75bef45133fea",
+      "sourceFile": "README.md",
+      "sourceLines": ["normalize_embeddings=True"]
+    },
+    "normalizesEmbeddings": true
+  },
+  "tei": {
+    "sourceArchive": {
+      "sourceUrl": "https://api.github.com/repos/huggingface/text-embeddings-inference/tarball/06670157fb6c1523482219bdb2d1660277d38088",
+      "sourceTreeUrl": "https://github.com/huggingface/text-embeddings-inference/tree/06670157fb6c1523482219bdb2d1660277d38088",
+      "sourceRevision": "06670157fb6c1523482219bdb2d1660277d38088",
+      "sourceSha256": "d71a340344ed1737fc54a283685885708624993b3b950578eae86ba2457efff7",
+      "sourceFile": "source archive",
+      "sourceLines": ["identity archive; its checksum does not assert a router default"]
+    },
+    "qwen2Postprocessor": {
+      "sourceUrl": "https://raw.githubusercontent.com/huggingface/text-embeddings-inference/06670157fb6c1523482219bdb2d1660277d38088/router/src/lib.rs",
+      "sourceRevision": "06670157fb6c1523482219bdb2d1660277d38088",
+      "sourceFile": "router/src/lib.rs",
+      "sourceLines": ["138-165: qwen2 remote-code models receive a TemplateProcessing postprocessor", "149-153: template appends <|endoftext|> with special-token id 151643"]
+    },
+    "lastTokenPoolingSource": {
+      "sourceUrl": "https://raw.githubusercontent.com/huggingface/text-embeddings-inference/06670157fb6c1523482219bdb2d1660277d38088/router/src/lib.rs",
+      "sourceRevision": "06670157fb6c1523482219bdb2d1660277d38088",
+      "sourceFile": "router/src/lib.rs",
+      "sourceLines": ["400-418: router reads 1_Pooling/config.json", "433-450: pooling_mode_lasttoken maps to Pool::LastToken"]
+    },
+    "routerAutoTruncateSource": {
+      "sourceUrl": "https://raw.githubusercontent.com/huggingface/text-embeddings-inference/06670157fb6c1523482219bdb2d1660277d38088/router/src/lib.rs",
+      "sourceRevision": "06670157fb6c1523482219bdb2d1660277d38088",
+      "sourceFile": "router/src/lib.rs",
+      "sourceLines": ["193-202: when input exceeds max_batch_tokens, auto_truncate=false errors", "200: omitted --auto-truncate defaults to true"]
+    },
+    "upstreamRouterAutoTruncateDefault": true,
+    "hmemContractAutoTruncate": false
+  }
+}

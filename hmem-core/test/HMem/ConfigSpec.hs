@@ -1,6 +1,7 @@
 module HMem.ConfigSpec (spec) where
 
 import Data.ByteString.Char8 qualified as BS8
+import Data.Either (isLeft)
 import Data.List (isInfixOf)
 import Data.Yaml qualified as Yaml
 import Test.Hspec
@@ -247,6 +248,123 @@ spec = do
       case Yaml.decodeEither' yaml of
         Left err -> expectationFailure (show err)
         Right (cfg :: HMemConfig) -> cfg.changeStream `shouldBe` ChangeStreamConfig 120 60 30
+
+  describe "embedding provider config" $ do
+    it "defaults to a disabled provider without an endpoint" $ do
+      defaultConfig.embeddingProvider `shouldBe` EmbeddingProviderConfig
+        { mode = EmbeddingProviderDisabled
+        , endpoint = Nothing
+        , batchSize = 32
+        , timeoutMs = 30000
+        , retryAttempts = 0
+        , spaceFingerprint = managedTeiSpaceFingerprint
+        }
+
+    it "round-trips an operator-managed HTTP TEI endpoint through YAML" $ do
+      let cfg = defaultConfig
+            { embeddingProvider = EmbeddingProviderConfig
+                { mode = EmbeddingProviderHttp
+                , endpoint = Just "https://gpu-embeddings.example"
+                , batchSize = 64
+                , timeoutMs = 12000
+                , retryAttempts = 2
+                , spaceFingerprint = managedTeiSpaceFingerprint
+                }
+            }
+      case Yaml.decodeEither' (Yaml.encode cfg) of
+        Left err -> expectationFailure (show err)
+        Right (decoded :: HMemConfig) -> decoded `shouldBe` cfg
+
+    it "rejects unsupported model spaces and invalid provider combinations" $ do
+      let invalids = BS8.pack . unlines <$>
+            [ [ "embedding:"
+              , "  mode: http"
+              , "  endpoint: https://embeddings.example"
+              , "  space_fingerprint: arbitrary-model:768"
+              ]
+            , [ "embedding:"
+              , "  mode: disabled"
+              , "  endpoint: https://embeddings.example"
+              ]
+            , [ "embedding:"
+              , "  mode: managed-tei"
+              , "  endpoint: http://127.0.0.1:8080"
+              ]
+            , [ "embedding:"
+              , "  mode: http"
+              , "  endpoint: https://user:secret@embeddings.example"
+              ]
+            , [ "embedding:"
+              , "  mode: http"
+              , "  endpoint: http://:8080"
+              ]
+            , [ "embedding:"
+              , "  mode: http"
+              , "  endpoint: https://embeddings.example/admin"
+              ]
+            ]
+      mapM_ (\yaml -> (Yaml.decodeEither' yaml :: Either Yaml.ParseException HMemConfig) `shouldSatisfy` isLeft) invalids
+
+    it "parses endpoint authorities structurally" $ do
+      parseEmbeddingEndpointAuthority "https://gpu-embeddings.example:8443/base"
+        `shouldBe` Just (EmbeddingEndpointAuthority "https" "gpu-embeddings.example" "/base")
+      mapM_ (\endpointValue -> parseEmbeddingEndpointAuthority endpointValue `shouldSatisfy` (/= Nothing))
+        [ "http://127.0.0.1:8080"
+        , "http://[::1]:8080"
+        , "https://gpu-embeddings.example"
+        , "https://a-b.example-2.test/embed"
+        ]
+      mapM_ (\endpointValue -> parseEmbeddingEndpointAuthority endpointValue `shouldBe` Nothing)
+        [ "http://:8080"
+        , "http://user@127.0.0.1:8080"
+        , "http://[::1:8080"
+        , "http://[not-an-ip]:8080"
+        , "http://[::1::]:8080"
+        , "http://127.0.0.999:8080"
+        , "http://127.0.0:8080"
+        , "http://-bad.example:8080"
+        , "http://bad-.example:8080"
+        , "http://host:99999"
+        , "http://host?query=value"
+        ]
+
+    it "applies valid environment provider overrides and rejects invalid ones" $ do
+      let httpConfig = defaultConfig
+            { embeddingProvider = defaultConfig.embeddingProvider
+                { mode = EmbeddingProviderHttp
+                , endpoint = Just "https://config.example"
+                }
+            }
+      applyEmbeddingProviderEnvOverrides (Just "http") (Just "https://gpu.example") defaultConfig
+        `shouldBe` Right (defaultConfig
+          { embeddingProvider = defaultConfig.embeddingProvider
+              { mode = EmbeddingProviderHttp, endpoint = Just "https://gpu.example" }
+          })
+      applyEmbeddingProviderEnvOverrides (Just "unknown") Nothing httpConfig
+        `shouldSatisfy` isLeft
+      let disabledProvider :: EmbeddingProviderConfig
+          disabledProvider = defaultConfig.embeddingProvider { mode = EmbeddingProviderDisabled }
+          managedProvider :: EmbeddingProviderConfig
+          managedProvider = defaultConfig.embeddingProvider { mode = EmbeddingProviderManagedTei }
+      applyEmbeddingProviderEnvOverrides (Just "disabled") Nothing httpConfig
+        `shouldBe` Right (defaultConfig
+          { embeddingProvider = disabledProvider
+          })
+      applyEmbeddingProviderEnvOverrides (Just "managed-tei") Nothing httpConfig
+        `shouldBe` Right (defaultConfig
+          { embeddingProvider = managedProvider
+          })
+      applyEmbeddingProviderEnvOverrides (Just "disabled") (Just "https://override.example") httpConfig
+        `shouldSatisfy` isLeft
+      applyEmbeddingProviderEnvOverrides (Just "managed-tei") (Just "https://override.example") httpConfig
+        `shouldSatisfy` isLeft
+
+    it "redacts a configured endpoint from Show output" $ do
+      let provider = defaultConfig.embeddingProvider
+            { mode = EmbeddingProviderHttp
+            , endpoint = Just "https://gpu.example"
+            }
+      show provider `shouldNotSatisfy` isInfixOf "gpu.example"
 
   describe "auth config parsing" $ do
     it "normalizes blank MCP provenance secrets from YAML and environment" $ do

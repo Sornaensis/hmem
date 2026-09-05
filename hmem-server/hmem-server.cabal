@@ -57,6 +57,8 @@ library
       HMem.Server.CtlPaths
       HMem.Server.CtlPgvector
       HMem.Server.CtlPgvectorCli
+      HMem.Server.Embedding.Http
+      HMem.Server.Embedding.Provider
       HMem.Server.Event
       HMem.Server.Exception
       HMem.Server.Logging
@@ -92,6 +94,7 @@ library
   ghc-options: -Wall -Wcompat -Wredundant-constraints
   build-depends:
       aeson >=2.0
+    , async
     , base >=4.7 && <5
     , bytestring
     , containers
@@ -156,6 +159,7 @@ executable build-frontend
   ghc-options: -Wall -Wcompat -Wredundant-constraints -threaded
   build-depends:
       aeson >=2.0
+    , async
     , base >=4.7 && <5
     , bytestring
     , containers
@@ -221,6 +225,7 @@ executable hmem-ctl
   ghc-options: -Wall -Wcompat -Wredundant-constraints -threaded
   build-depends:
       aeson >=2.0
+    , async
     , base >=4.7 && <5
     , brick
     , bytestring
@@ -292,6 +297,7 @@ executable hmem-server
   ghc-options: -Wall -Wcompat -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson >=2.0
+    , async
     , base >=4.7 && <5
     , bytestring
     , containers
@@ -357,6 +363,7 @@ executable hmem-test-harness
   ghc-options: -Wall -Wcompat -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson >=2.0
+    , async
     , base >=4.7 && <5
     , bytestring
     , containers
@@ -411,6 +418,8 @@ test-suite hmem-server-test
       HMem.Server.CtlPgvectorCliSpec
       HMem.Server.CtlPgvectorSpec
       HMem.Server.DeployedSandboxSpec
+      HMem.Server.Embedding.HttpSpec
+      HMem.Server.Embedding.ProviderSpec
       HMem.Server.KeycloakHarness
       HMem.Server.KeycloakHarnessSpec
       HMem.Server.LocalSandboxSpec

@@ -1,5 +1,7 @@
 module HMem.DB.TestHarnessSpec (spec) where
 
+import Control.Concurrent.Async (withAsync, wait)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, try)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
@@ -7,6 +9,7 @@ import Data.Functor.Contravariant (contramap)
 import Data.List (isInfixOf, sort)
 import Data.Pool (Pool, destroyAllResources)
 import Data.Text (Text)
+import Data.Int (Int64)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text qualified as T
 import Data.UUID (UUID)
@@ -22,7 +25,7 @@ import System.IO.Temp (getCanonicalTemporaryDirectory)
 import Test.Hspec
 
 import HMem.DB.Migration qualified as Migration
-import HMem.DB.Pool (DBException(..), createPool, runSession, runTransaction)
+import HMem.DB.Pool (DBException(..), createPool, runSession, runTransaction, withConn)
 import HMem.DB.TestHarness
 import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
 import HMem.Types (SubjectKind, subjectKindToText)
@@ -672,6 +675,154 @@ spec = do
                   runSession pool (queryBool "SELECT format_type(a.atttypid, a.atttypmod) = 'vector(1536)' FROM pg_attribute a WHERE a.attrelid = 'observations'::regclass AND a.attname = 'embedding' AND NOT a.attisdropped") `shouldReturn` True
                   runSession pool (queryBool "SELECT pg_get_indexdef('idx_observations_embedding'::regclass) = 'CREATE INDEX idx_observations_embedding ON public.observations USING hnsw (embedding vector_cosine_ops)'") `shouldReturn` True
 
+    it "upgrades a large reconvergent V021 dependency graph through V022 within the configured bound" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 25000) destroyAllResources $ \pool -> do
+              preV22Dir <- copyMigrationSubset sandbox migrations "pre-v022-bounded-cycle" (\name -> name < "V022")
+              v22ThroughCurrentDir <- copyMigrationSubset sandbox migrations "v022-through-current-bounded-cycle" (\name -> name >= "V022")
+              preResult <- Migration.runMigrations pool preV22Dir
+              preResult.failed `shouldBe` Nothing
+              runSession pool $ Session.sql reconvergentDependencyGraphSql
+              runSession pool (queryInt "SELECT count(*) FROM task_dependencies") `shouldReturn` 2268
+              runSession pool (queryInt "SELECT count(*) FROM audit_log WHERE entity_type = 'task_dependency' AND action = 'update'") `shouldReturn` 0
+
+              upgradeResult <- Migration.runMigrations pool v22ThroughCurrentDir
+              upgradeResult.failed `shouldBe` Nothing
+              upgradeResult.applied `shouldSatisfy` elem "V022__change_stream_outbox.sql"
+              upgradeResult.applied `shouldSatisfy` elem "V027__bounded_task_dependency_cycle_check.sql"
+              runSession pool (queryBool "SELECT count(*) = 1 FROM schema_migrations WHERE version = 22 AND name = 'V022__change_stream_outbox.sql'") `shouldReturn` True
+              runSession pool (queryBool "SELECT count(*) = 2268 FROM task_dependencies WHERE workspace_id = '10000000-0000-0000-0000-000000000001'") `shouldReturn` True
+              runSession pool (queryInt "SELECT count(*) FROM audit_log WHERE entity_type = 'task_dependency' AND action = 'update'") `shouldReturn` 2268
+              runSession pool (queryInt "SELECT count(*) FROM change_stream_outbox WHERE envelope->'entity'->>'type' = 'task_dependency'") `shouldReturn` 0
+              assertBoundedTaskDependencyCycleDDL pool
+
+              wsId <- runSession pool $ Session.statement ("v022-post-upgrade-workspace" :: Text) insertWorkspaceDirectStatement
+              projectId <- runSession pool $ Session.statement (wsId, "v022-post-upgrade-project" :: Text) insertProjectDirectStatement
+              firstId <- runSession pool $ Session.statement (wsId, projectId, Nothing, "first" :: Text, "todo" :: Text) insertTaskDirectStatement
+              secondId <- runSession pool $ Session.statement (wsId, projectId, Nothing, "second" :: Text, "todo" :: Text) insertTaskDirectStatement
+              thirdId <- runSession pool $ Session.statement (wsId, projectId, Nothing, "third" :: Text, "done" :: Text) insertTaskDirectStatement
+              auditBefore <- runSession pool (queryInt "SELECT count(*) FROM audit_log WHERE entity_type = 'task_dependency'")
+              outboxBefore <- runSession pool (queryInt "SELECT count(*) FROM change_stream_outbox WHERE envelope->'entity'->>'type' = 'task_dependency'")
+              runSession pool $ Session.statement (firstId, secondId) insertTaskDependencyDirectStatement
+              runSession pool (Session.statement firstId taskStatusTextStatement) `shouldReturn` "blocked"
+              runSession pool (Session.statement firstId taskAutoBlockedStatement) `shouldReturn` True
+              runSession pool $ Session.statement (secondId, thirdId) insertTaskDependencyDirectStatement
+              cycleUpdateAuditBefore <- runSession pool (queryInt "SELECT count(*) FROM audit_log WHERE entity_type = 'task_dependency'")
+              cycleUpdateOutboxBefore <- runSession pool (queryInt "SELECT count(*) FROM change_stream_outbox WHERE envelope->'entity'->>'type' = 'task_dependency'")
+              cycleUpdate <- try (runSession pool $ Session.statement (secondId, thirdId, firstId) updateTaskDependencyEndpointStatement)
+                :: IO (Either DBException ())
+              cycleUpdate `shouldSatisfy` \case
+                Left (DBTaskDependencyCycle _) -> True
+                _ -> False
+              runSession pool (Session.statement (secondId, thirdId) taskDependencyExistsStatement) `shouldReturn` True
+              runSession pool (Session.statement (secondId, firstId) taskDependencyExistsStatement) `shouldReturn` False
+              runSession pool (Session.statement firstId taskStatusTextStatement) `shouldReturn` "blocked"
+              runSession pool (Session.statement firstId taskAutoBlockedStatement) `shouldReturn` True
+              runSession pool (Session.statement secondId taskStatusTextStatement) `shouldReturn` "todo"
+              runSession pool (Session.statement secondId taskAutoBlockedStatement) `shouldReturn` False
+              runSession pool (queryInt "SELECT count(*) FROM audit_log WHERE entity_type = 'task_dependency'") `shouldReturn` cycleUpdateAuditBefore
+              runSession pool (queryInt "SELECT count(*) FROM change_stream_outbox WHERE envelope->'entity'->>'type' = 'task_dependency'") `shouldReturn` cycleUpdateOutboxBefore
+              runSession pool $ Session.statement (firstId, secondId, thirdId) updateTaskDependencyEndpointStatement
+              runSession pool (Session.statement firstId taskStatusTextStatement) `shouldReturn` "todo"
+              runSession pool (Session.statement firstId taskAutoBlockedStatement) `shouldReturn` False
+              runSession pool $ Session.statement (firstId, thirdId, secondId) updateTaskDependencyEndpointStatement
+              runSession pool (Session.statement firstId taskStatusTextStatement) `shouldReturn` "blocked"
+              runSession pool (Session.statement firstId taskAutoBlockedStatement) `shouldReturn` True
+              runSession pool $ Session.statement (firstId, wsId) updateTaskDependencyWorkspaceOnlyStatement
+              runSession pool (Session.statement firstId taskStatusTextStatement) `shouldReturn` "blocked"
+              cycleResult <- try (runSession pool $ Session.statement (secondId, firstId) insertTaskDependencyDirectStatement)
+                :: IO (Either DBException ())
+              cycleResult `shouldSatisfy` \case
+                Left (DBTaskDependencyCycle _) -> True
+                _ -> False
+              runSession pool $ Session.statement (firstId, secondId) deleteTaskDependencyDirectStatement
+              runSession pool (Session.statement firstId taskStatusTextStatement) `shouldReturn` "todo"
+              runSession pool (Session.statement firstId taskAutoBlockedStatement) `shouldReturn` False
+              runSession pool $ Session.statement (secondId, thirdId) deleteTaskDependencyDirectStatement
+              auditAfter <- runSession pool (queryInt "SELECT count(*) FROM audit_log WHERE entity_type = 'task_dependency'")
+              outboxAfter <- runSession pool (queryInt "SELECT count(*) FROM change_stream_outbox WHERE envelope->'entity'->>'type' = 'task_dependency'")
+              auditAfter - auditBefore `shouldBe` 6
+              outboxAfter - outboxBefore `shouldBe` 4
+              runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM task_dependencies WHERE task_id IN (SELECT id FROM tasks WHERE title IN ('first', 'second', 'third')))") `shouldReturn` True
+
+              rerun <- Migration.runMigrations pool v22ThroughCurrentDir
+              rerun.failed `shouldBe` Nothing
+              rerun.applied `shouldBe` []
+
+    it "rolls back a blocked V022 compatibility preflight and succeeds on retry" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db -> do
+            preV22Dir <- copyMigrationSubset sandbox migrations "pre-v022-preflight-rollback" (\name -> name < "V022")
+            v22OnlyDir <- copyMigrationSubset sandbox migrations "v022-only-preflight-rollback" (== "V022__change_stream_outbox.sql")
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \setupPool -> do
+              preResult <- Migration.runMigrations setupPool preV22Dir
+              preResult.failed `shouldBe` Nothing
+              beforeFunction <- runSession setupPool (queryText "SELECT pg_get_functiondef('hmem_check_task_dep_cycle'::regproc)")
+              beforeTrigger <- runSession setupPool (queryText "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'task_dependencies'::regclass AND tgname = 'trg_task_dep_no_cycle'")
+              beforeAutoBlockTrigger <- runSession setupPool (queryText "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'task_dependencies'::regclass AND tgname = 'trg_task_auto_blocking_from_dependency'")
+              beforeFunction `shouldSatisfy` T.isInfixOf "UNION ALL"
+              beforeTrigger `shouldSatisfy` T.isInfixOf "BEFORE INSERT OR UPDATE ON"
+
+              runSession setupPool $ Session.sql "UPDATE schema_migrations SET name = 'renamed-v021.sql' WHERE version = 21"
+              unsupportedLedger <- Migration.runMigrations setupPool v22OnlyDir
+              unsupportedLedger.failed `shouldSatisfy` \case
+                Just ("V022__change_stream_outbox.sql", message) ->
+                  "refused a non-canonical ledger" `isInfixOf` message
+                _ -> False
+              runSession setupPool (queryText "SELECT pg_get_functiondef('hmem_check_task_dep_cycle'::regproc)") `shouldReturn` beforeFunction
+              runSession setupPool (queryText "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'task_dependencies'::regclass AND tgname = 'trg_task_dep_no_cycle'") `shouldReturn` beforeTrigger
+              runSession setupPool (queryText "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'task_dependencies'::regclass AND tgname = 'trg_task_auto_blocking_from_dependency'") `shouldReturn` beforeAutoBlockTrigger
+              runSession setupPool $ Session.sql "UPDATE schema_migrations SET name = 'V021__observation_subject_sets.sql' WHERE version = 21"
+
+              bracket (createPool db.testDbConnStr 1 30 30000) destroyAllResources $ \lockPool ->
+                bracket (createPool db.testDbConnStr 1 30 1000) destroyAllResources $ \migrationPool -> do
+                  ready <- newEmptyMVar
+                  release <- newEmptyMVar
+                  withAsync (holdDependencyTableLock lockPool ready release) $ \locker -> do
+                    takeMVar ready >>= \case
+                      Left err -> expectationFailure $ "failed to acquire test lock: " <> err
+                      Right () -> pure ()
+                    failedResult <- Migration.runMigrations migrationPool v22OnlyDir
+                    failedResult.failed `shouldSatisfy` \case
+                      Just ("V022__change_stream_outbox.sql", message) ->
+                        "compatibility preflight failed and was rolled back" `isInfixOf` message
+                      _ -> False
+                    runSession setupPool (queryText "SELECT pg_get_functiondef('hmem_check_task_dep_cycle'::regproc)") `shouldReturn` beforeFunction
+                    runSession setupPool (queryText "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'task_dependencies'::regclass AND tgname = 'trg_task_dep_no_cycle'") `shouldReturn` beforeTrigger
+                    runSession setupPool (queryText "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'task_dependencies'::regclass AND tgname = 'trg_task_auto_blocking_from_dependency'") `shouldReturn` beforeAutoBlockTrigger
+                    runSession setupPool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 22) AND to_regclass('public.change_stream_outbox') IS NULL") `shouldReturn` True
+                    putMVar release ()
+                    wait locker >>= \case
+                      Left err -> expectationFailure $ "failed to release test lock: " <> err
+                      Right () -> pure ()
+                    retryResult <- Migration.runMigrations migrationPool v22OnlyDir
+                    retryResult.failed `shouldBe` Nothing
+                    retryResult.applied `shouldBe` ["V022__change_stream_outbox.sql"]
+
+              runSession setupPool (queryBool "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 22 AND name = 'V022__change_stream_outbox.sql')") `shouldReturn` True
+              assertBoundedTaskDependencyCycleDDL setupPool
+
+    it "converges a V026 database and a fresh database on the V027 cycle guard" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              throughV26Dir <- copyMigrationSubset sandbox migrations "through-v026-cycle-convergence" (\name -> name < "V027")
+              v27OnlyDir <- copyMigrationSubset sandbox migrations "v027-only-cycle-convergence" (== "V027__bounded_task_dependency_cycle_check.sql")
+              throughV26 <- Migration.runMigrations pool throughV26Dir
+              throughV26.failed `shouldBe` Nothing
+              runSession pool (queryBool "SELECT position('UNION ALL' IN pg_get_functiondef('hmem_check_task_dep_cycle'::regproc)) > 0") `shouldReturn` True
+              v27 <- Migration.runMigrations pool v27OnlyDir
+              v27.failed `shouldBe` Nothing
+              v27.applied `shouldBe` ["V027__bounded_task_dependency_cycle_check.sql"]
+              assertBoundedTaskDependencyCycleDDL pool
+
     it "cleanDB truncates migration reports after the Observation schema reset" $
       withTestSandbox $ \sandbox -> do
         migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
@@ -680,6 +831,7 @@ spec = do
             bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
               result <- Migration.runMigrations pool migrations
               result.failed `shouldBe` Nothing
+              assertBoundedTaskDependencyCycleDDL pool
               runSession pool $ Session.sql "INSERT INTO delete_cascade_migration_report (entity_type, entity_id, issue) VALUES ('task', gen_random_uuid(), 'reset-fixture')"
               cleanDB TestEnv { pool = pool, testSandbox = sandbox, testDb = db }
               runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM delete_cascade_migration_report)") `shouldReturn` True
@@ -692,6 +844,41 @@ spec = do
 
 queryBool :: BS.ByteString -> Session.Session Bool
 queryBool sql = Session.statement () $ Statement.Statement sql E.noParams (D.singleRow (D.column (D.nonNullable D.bool))) True
+
+queryInt :: BS.ByteString -> Session.Session Int64
+queryInt sql = Session.statement () $ Statement.Statement sql E.noParams (D.singleRow (D.column (D.nonNullable D.int8))) True
+
+queryText :: BS.ByteString -> Session.Session Text
+queryText sql = Session.statement () $ Statement.Statement sql E.noParams (D.singleRow (D.column (D.nonNullable D.text))) True
+
+assertBoundedTaskDependencyCycleDDL :: Pool Hasql.Connection -> IO ()
+assertBoundedTaskDependencyCycleDDL pool = do
+  runSession pool (queryBool "SELECT position('UNION ALL' IN pg_get_functiondef('hmem_check_task_dep_cycle'::regproc)) = 0 AND position(E'\\n      UNION\\n' IN pg_get_functiondef('hmem_check_task_dep_cycle'::regproc)) > 0 AND position('HD301' IN pg_get_functiondef('hmem_check_task_dep_cycle'::regproc)) > 0") `shouldReturn` True
+  runSession pool (queryBool "SELECT pg_get_triggerdef(oid) LIKE '%BEFORE INSERT OR UPDATE OF task_id, depends_on_id ON public.task_dependencies%' FROM pg_trigger WHERE tgrelid = 'task_dependencies'::regclass AND tgname = 'trg_task_dep_no_cycle' AND NOT tgisinternal") `shouldReturn` True
+  runSession pool (queryBool "SELECT pg_get_triggerdef(oid) LIKE '%AFTER INSERT OR DELETE OR UPDATE OF task_id, depends_on_id ON public.task_dependencies%' FROM pg_trigger WHERE tgrelid = 'task_dependencies'::regclass AND tgname = 'trg_task_auto_blocking_from_dependency' AND NOT tgisinternal") `shouldReturn` True
+
+holdDependencyTableLock :: Pool Hasql.Connection -> MVar (Either String ()) -> MVar () -> IO (Either String ())
+holdDependencyTableLock pool ready release = withConn pool $ \conn -> do
+  locked <- Session.run (Session.sql "BEGIN; LOCK TABLE task_dependencies IN ACCESS SHARE MODE") conn
+  case locked of
+    Left err -> putMVar ready (Left (show err)) >> pure (Left (show err))
+    Right () -> do
+      putMVar ready (Right ())
+      takeMVar release
+      Session.run (Session.sql "ROLLBACK") conn >>= \case
+        Left err -> pure (Left (show err))
+        Right () -> pure (Right ())
+
+reconvergentDependencyGraphSql :: BS.ByteString
+reconvergentDependencyGraphSql =
+  "INSERT INTO workspaces (id, name) VALUES ('10000000-0000-0000-0000-000000000001', 'v022 bounded graph');\n\
+  \INSERT INTO projects (id, workspace_id, name) VALUES ('10000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000001', 'v022 bounded graph');\n\
+  \CREATE TEMP TABLE v022_nodes(layer integer NOT NULL, slot integer NOT NULL, id uuid PRIMARY KEY);\n\
+  \INSERT INTO v022_nodes(layer, slot, id) SELECT layer, slot, md5('v022-node-' || layer || '-' || slot)::uuid FROM generate_series(0, 63) layer CROSS JOIN generate_series(0, 5) slot;\n\
+  \INSERT INTO tasks(id, workspace_id, project_id, title, status) SELECT id, '10000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000002', 'bounded node ' || layer || '-' || slot, 'todo' FROM v022_nodes;\n\
+  \ALTER TABLE task_dependencies DISABLE TRIGGER trg_task_auto_blocking_from_dependency;\n\
+  \DO $$ DECLARE layer_index integer; BEGIN FOR layer_index IN REVERSE 63..1 LOOP INSERT INTO task_dependencies(task_id, depends_on_id) SELECT upper_node.id, lower_node.id FROM v022_nodes upper_node CROSS JOIN v022_nodes lower_node WHERE upper_node.layer = layer_index AND lower_node.layer = layer_index - 1; END LOOP; END $$;\n\
+  \ALTER TABLE task_dependencies ENABLE TRIGGER trg_task_auto_blocking_from_dependency"
 
 assertSqlSubjectMatch :: Pool Hasql.Connection -> (SubjectKind, Text, Text, Bool) -> IO ()
 assertSqlSubjectMatch pool (kind, pattern, path, expected) = do
@@ -821,6 +1008,40 @@ insertTaskDependencyDirectStatement :: Statement.Statement (UUID, UUID) ()
 insertTaskDependencyDirectStatement = Statement.Statement sql encoder D.noResult True
   where
     sql = "INSERT INTO task_dependencies (task_id, depends_on_id) VALUES ($1, $2)"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
+
+taskDependencyExistsStatement :: Statement.Statement (UUID, UUID) Bool
+taskDependencyExistsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = "SELECT EXISTS (SELECT 1 FROM task_dependencies WHERE task_id = $1 AND depends_on_id = $2)"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
+    decoder = D.singleRow (D.column (D.nonNullable D.bool))
+
+updateTaskDependencyEndpointStatement :: Statement.Statement (UUID, UUID, UUID) ()
+updateTaskDependencyEndpointStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "UPDATE task_dependencies SET depends_on_id = $3 WHERE task_id = $1 AND depends_on_id = $2"
+    encoder =
+      contramap (\(taskId, _, _) -> taskId) (E.param (E.nonNullable E.uuid)) <>
+      contramap (\(_, oldDependencyId, _) -> oldDependencyId) (E.param (E.nonNullable E.uuid)) <>
+      contramap (\(_, _, newDependencyId) -> newDependencyId) (E.param (E.nonNullable E.uuid))
+
+updateTaskDependencyWorkspaceOnlyStatement :: Statement.Statement (UUID, UUID) ()
+updateTaskDependencyWorkspaceOnlyStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "UPDATE task_dependencies SET workspace_id = $2 WHERE task_id = $1"
+    encoder =
+      contramap fst (E.param (E.nonNullable E.uuid)) <>
+      contramap snd (E.param (E.nonNullable E.uuid))
+
+deleteTaskDependencyDirectStatement :: Statement.Statement (UUID, UUID) ()
+deleteTaskDependencyDirectStatement = Statement.Statement sql encoder D.noResult True
+  where
+    sql = "DELETE FROM task_dependencies WHERE task_id = $1 AND depends_on_id = $2"
     encoder =
       contramap fst (E.param (E.nonNullable E.uuid)) <>
       contramap snd (E.param (E.nonNullable E.uuid))

@@ -3,7 +3,8 @@ module HMem.Server.Embedding.HttpSpec (spec) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, asyncThreadId, cancel, wait)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (AsyncException(..), SomeException, finally, fromException, throwTo, try)
+import Control.Exception (AsyncException(..), SomeException, bracket, finally, fromException, throwTo, try)
+import Control.Monad (replicateM_)
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder (byteString)
@@ -14,6 +15,8 @@ import Data.List (isInfixOf)
 import Data.Text qualified as T
 import Network.HTTP.Client
   ( ManagerSettings(..)
+  , Manager
+  , closeManager
   , defaultManagerSettings
   , newManager
   , responseTimeoutMicro
@@ -98,16 +101,17 @@ spec = describe "TEI HTTP adapter" $ do
     Timeout.timeout 1000000 (takeMVar finished) `shouldReturn` Just ()
 
   it "retries only 408, 429, and 500 through 599 exactly to the configured bound" $ do
-    mapM_ (\retryStatus -> do
-      calls <- newIORef (0 :: Int)
-      let app _ respond = do
-            modifyIORef' calls (+ 1)
-            current <- readIORef calls
-            respond (Wai.responseLBS (if current < 3 then retryStatus else status200) [] (vectorResponse 1))
-      withTransport app (httpConfig 2 1000) $ \transport -> do
-        result <- transport requestOne
-        result `shouldBe` Right (EmbeddingBatch [replicate observationEmbeddingDimensions 0.25] managedTeiSpaceFingerprint)
-      readIORef calls `shouldReturn` 3)
+    withinTestTimeout 10000000 $
+      replicateM_ 50 $ mapM_ (\retryStatus -> do
+        calls <- newIORef (0 :: Int)
+        let app _ respond = do
+              modifyIORef' calls (+ 1)
+              current <- readIORef calls
+              respond (Wai.responseLBS (if current < 3 then retryStatus else status200) [] (vectorResponse 1))
+        withTransport app (httpConfig 2 1000) $ \transport -> do
+          result <- transport requestOne
+          result `shouldBe` Right (EmbeddingBatch [replicate observationEmbeddingDimensions 0.25] managedTeiSpaceFingerprint)
+        readIORef calls `shouldReturn` 3)
       [status408, status429, status500, mkStatus 599 "synthetic-server-error"]
 
   it "does not retry a nonretryable response status" $ do
@@ -123,13 +127,13 @@ spec = describe "TEI HTTP adapter" $ do
 
   it "retries connection failures exactly to the configured bound" $ do
     calls <- newIORef (0 :: Int)
-    manager <- newManager defaultManagerSettings
+    withManager defaultManagerSettings
       { managerRawConnection = pure $ \_ _ _ -> do
           modifyIORef' calls (+ 1)
           ioError (userError "connection closed")
-      }
-    result <- httpEmbeddingTransport manager (httpConfig 2 1000) "http://127.0.0.1:8080" requestOne
-    result `shouldBe` Left (EmbeddingFailure ProviderUnavailable True)
+      } $ \manager -> do
+        result <- httpEmbeddingTransport manager (httpConfig 2 1000) "http://127.0.0.1:8080" requestOne
+        result `shouldBe` Left (EmbeddingFailure ProviderUnavailable True)
     readIORef calls `shouldReturn` 3
 
   it "fails closed on redirects without sending the request body to the redirect route" $ do
@@ -145,11 +149,11 @@ spec = describe "TEI HTTP adapter" $ do
     readIORef redirectCalls `shouldReturn` 0
 
   it "reports malformed endpoint failures without exposing endpoint text" $ do
-    manager <- newManager defaultManagerSettings
-    let secretEndpoint = "http://127.0.0.1:1/?secret=do-not-log"
-    result <- httpEmbeddingTransport manager (httpConfig 0 250) secretEndpoint requestOne
-    result `shouldBe` Left (EmbeddingFailure ProviderConfigurationError False)
-    show result `shouldNotSatisfy` isInfixOf "do-not-log"
+    withManager defaultManagerSettings $ \manager -> do
+      let secretEndpoint = "http://127.0.0.1:1/?secret=do-not-log"
+      result <- httpEmbeddingTransport manager (httpConfig 0 250) secretEndpoint requestOne
+      result `shouldBe` Left (EmbeddingFailure ProviderConfigurationError False)
+      show result `shouldNotSatisfy` isInfixOf "do-not-log"
 
   it "returns a structured timeout and releases the request" $ do
     let app _ respond = do
@@ -204,6 +208,16 @@ vectorResponse count = Aeson.encode (replicate count (replicate observationEmbed
 contains :: LBS.ByteString -> LBS.ByteString -> Bool
 contains haystack needle = LBS8.unpack needle `isInfixOf` LBS8.unpack haystack
 
+withinTestTimeout :: Int -> IO result -> IO result
+withinTestTimeout microseconds action = do
+  result <- Timeout.timeout microseconds action
+  case result of
+    Just value -> pure value
+    Nothing -> expectationFailure "HTTP test exceeded its deterministic timeout" >> fail "unreachable"
+
+withManager :: ManagerSettings -> (Manager -> IO result) -> IO result
+withManager settings = bracket (newManager settings) closeManager
+
 withTransport
   :: Wai.Application
   -> EmbeddingProviderConfig
@@ -220,6 +234,6 @@ withTransportWithSettings
   -> IO result
 withTransportWithSettings app config settings action =
   testWithApplication (pure app) $ \port -> do
-    manager <- newManager settings
-    let endpointValue = "http://127.0.0.1:" <> T.pack (show port)
-    action (httpEmbeddingTransport manager config endpointValue)
+    withManager settings { managerIdleConnectionCount = 0 } $ \manager -> do
+      let endpointValue = "http://127.0.0.1:" <> T.pack (show port)
+      action (httpEmbeddingTransport manager config endpointValue)

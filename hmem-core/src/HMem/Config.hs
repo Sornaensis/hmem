@@ -28,6 +28,7 @@ module HMem.Config
   , defaultConfig
     -- * Load / Save
   , loadConfig
+  , loadConfigFile
   , saveConfig
     -- * Validation
   , validateConfig
@@ -54,9 +55,12 @@ module HMem.Config
   ) where
 
 import Control.Applicative ((<|>))
+import Control.Exception (throwIO)
 import Control.Monad (guard)
 import Data.Aeson (FromJSON(..), ToJSON(..), (.:), (.:?), (.!=), (.=))
 import Data.Aeson qualified as Aeson
+import Data.Aeson.KeyMap qualified as KeyMap
+import Data.ByteString qualified as BS
 import Data.Char (isAlphaNum, isDigit, isHexDigit)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
@@ -212,11 +216,27 @@ instance Show EmbeddingProviderConfig where
 managedTeiModelId :: Text
 managedTeiModelId = "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
 
--- | The one supported vector space: immutable model revision plus output
--- dimension from the checked-in managed provenance manifest.
+-- | The one supported vector space: immutable model revision, output
+-- dimension, and the explicitly selected noncausal attention semantics.
 managedTeiSpaceFingerprint :: Text
 managedTeiSpaceFingerprint =
+  "Alibaba-NLP/gte-Qwen2-1.5B-instruct@1cad2ab3ff41c2671f34e135d29831368ee26b68:1536:attention=noncausal:v1"
+
+-- Historical vectors using this unqualified identity have unknown attention
+-- provenance.  Keep the value recognizable for an actionable rejection, but
+-- never reinterpret it as the selected noncausal space.
+historicalManagedTeiSpaceFingerprint :: Text
+historicalManagedTeiSpaceFingerprint =
   "Alibaba-NLP/gte-Qwen2-1.5B-instruct@1cad2ab3ff41c2671f34e135d29831368ee26b68:1536"
+
+containsHistoricalManagedTeiSpaceFingerprint :: Aeson.Value -> Bool
+containsHistoricalManagedTeiSpaceFingerprint (Aeson.Object root) =
+  case KeyMap.lookup "embedding" root of
+    Just (Aeson.Object embedding) ->
+      KeyMap.lookup "space_fingerprint" embedding
+        == Just (Aeson.String historicalManagedTeiSpaceFingerprint)
+    _ -> False
+containsHistoricalManagedTeiSpaceFingerprint _ = False
 
 data TlsConfig = TlsConfig
   { tlsCertFile :: !(Maybe FilePath)
@@ -651,22 +671,31 @@ configFilePath = (</> "config.yaml") <$> configDir
 -- Load / Save
 ------------------------------------------------------------------------
 
--- | Load config from @~\/.hmem\/config.yaml@.  Returns 'defaultConfig'
--- if the file does not exist or cannot be parsed.  Prints warnings for
--- any validation issues and clamps values to valid ranges.
+-- | Load config from @~\/.hmem\/config.yaml@.
 loadConfig :: IO HMemConfig
-loadConfig = do
-  path   <- configFilePath
+loadConfig = configFilePath >>= loadConfigFile
+
+-- | Load config from an explicit path.  A missing or generally malformed file
+-- uses 'defaultConfig'.  An explicitly configured historical embedding identity
+-- is rejected before environment overrides can activate a rewritten provider.
+-- Prints warnings for validation issues and clamps values to valid ranges.
+loadConfigFile :: FilePath -> IO HMemConfig
+loadConfigFile path = do
   exists <- doesFileExist path
   cfg <- if exists
     then do
-      result <- Yaml.decodeFileEither path
+      contents <- BS.readFile path
+      let result = Yaml.decodeEither' contents
       case result of
         Left err -> do
-          hPutStrLn stderr $
-            "Warning: failed to parse " <> path <> ": " <> show err
-          hPutStrLn stderr "Using default configuration."
-          pure defaultConfig
+          let untyped = Yaml.decodeEither' contents :: Either Yaml.ParseException Aeson.Value
+          case untyped of
+            Right value | containsHistoricalManagedTeiSpaceFingerprint value -> throwIO err
+            _ -> do
+              hPutStrLn stderr $
+                "Warning: failed to parse " <> path <> ": " <> show err
+              hPutStrLn stderr "Using default configuration."
+              pure defaultConfig
         Right c -> pure c
     else pure defaultConfig
   envPassword <- fmap T.pack <$> lookupEnv "HMEM_DB_PASSWORD"
@@ -766,8 +795,11 @@ parseEmbeddingProviderMode value = case T.toLower (T.strip value) of
 
 validateEmbeddingProviderConfig :: EmbeddingProviderConfig -> Either String EmbeddingProviderConfig
 validateEmbeddingProviderConfig provider
+  | provider.spaceFingerprint == historicalManagedTeiSpaceFingerprint =
+      Left $ "embedding.space_fingerprint identifies the historical GTE-Qwen2 space with unknown attention semantics; configure "
+        <> T.unpack managedTeiSpaceFingerprint <> " and recompute embeddings"
   | provider.spaceFingerprint /= managedTeiSpaceFingerprint =
-      Left "embedding.space_fingerprint must identify the pinned Alibaba-NLP/gte-Qwen2-1.5B-instruct 1536-dimensional space"
+      Left "embedding.space_fingerprint must identify the pinned noncausal Alibaba-NLP/gte-Qwen2-1.5B-instruct 1536-dimensional space"
   | provider.batchSize < 1 || provider.batchSize > 256 =
       Left "embedding.batch_size must be between 1 and 256"
   | provider.timeoutMs < 100 || provider.timeoutMs > 300000 =

@@ -6,9 +6,10 @@
       "sourceRevision": "1cad2ab3ff41c2671f34e135d29831368ee26b68",
       "sourceSha256": "6be8440493f63c39e989842d4747127a71b1d680839af44dc105245e06a333d1",
       "sourceFile": "config.json",
-      "sourceLines": ["\"hidden_size\": 1536"]
+      "sourceLines": ["\"hidden_size\": 1536", "\"is_causal\": false"]
     },
-    "hiddenSize": 1536
+    "hiddenSize": 1536,
+    "isCausal": false
   },
   "tokenizer": {
     "source": {
@@ -83,6 +84,12 @@
       "sourceRevision": "06670157fb6c1523482219bdb2d1660277d38088",
       "sourceFile": "router/src/lib.rs",
       "sourceLines": ["193-202: when input exceeds max_batch_tokens, auto_truncate=false errors", "200: omitted --auto-truncate defaults to true"]
+    },
+    "qwen2AttentionSource": {
+      "sourceUrl": "https://raw.githubusercontent.com/huggingface/text-embeddings-inference/06670157fb6c1523482219bdb2d1660277d38088/backends/candle/src/models/flash_qwen2.rs",
+      "sourceRevision": "06670157fb6c1523482219bdb2d1660277d38088",
+      "sourceFile": "backends/candle/src/models/flash_qwen2.rs",
+      "sourceLines": ["72: attention stores config.is_causal", "108-118: flash_attn_varlen receives self.is_causal"]
     },
     "upstreamRouterAutoTruncateDefault": true,
     "hmemContractAutoTruncate": false

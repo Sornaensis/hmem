@@ -1,9 +1,13 @@
 module HMem.ConfigSpec (spec) where
 
+import Control.Exception (bracket, try)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Either (isLeft)
 import Data.List (isInfixOf)
 import Data.Yaml qualified as Yaml
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import HMem.Config
@@ -251,6 +255,8 @@ spec = do
 
   describe "embedding provider config" $ do
     it "defaults to a disabled provider without an endpoint" $ do
+      managedTeiSpaceFingerprint `shouldBe`
+        "Alibaba-NLP/gte-Qwen2-1.5B-instruct@1cad2ab3ff41c2671f34e135d29831368ee26b68:1536:attention=noncausal:v1"
       defaultConfig.embeddingProvider `shouldBe` EmbeddingProviderConfig
         { mode = EmbeddingProviderDisabled
         , endpoint = Nothing
@@ -273,7 +279,48 @@ spec = do
             }
       case Yaml.decodeEither' (Yaml.encode cfg) of
         Left err -> expectationFailure (show err)
-        Right (decoded :: HMemConfig) -> decoded `shouldBe` cfg
+        Right (decoded :: HMemConfig) -> do
+          decoded `shouldBe` cfg
+          decoded.embeddingProvider.spaceFingerprint `shouldBe` managedTeiSpaceFingerprint
+
+    it "rejects the historical unqualified provider identity without rewriting it" $ do
+      let historicalFingerprint =
+            "Alibaba-NLP/gte-Qwen2-1.5B-instruct@1cad2ab3ff41c2671f34e135d29831368ee26b68:1536"
+          yaml = BS8.pack $ unlines
+            [ "embedding:"
+            , "  mode: managed-tei"
+            , "  space_fingerprint: " <> historicalFingerprint
+            ]
+      case Yaml.decodeEither' yaml :: Either Yaml.ParseException HMemConfig of
+        Right _ -> expectationFailure "historical unqualified provider fingerprint was accepted"
+        Left err -> do
+          show err `shouldSatisfy` isInfixOf "historical GTE-Qwen2 space with unknown attention semantics"
+          show err `shouldSatisfy` isInfixOf "attention=noncausal:v1"
+
+    it "fails the production load path for historical managed and HTTP identities before environment overrides" $
+      withSystemTempDirectory "hmem-config-spec" $ \dir -> do
+        let historicalFingerprint =
+              "Alibaba-NLP/gte-Qwen2-1.5B-instruct@1cad2ab3ff41c2671f34e135d29831368ee26b68:1536"
+            cases =
+              [ ( "managed-to-http.yaml"
+                , [ "embedding:"
+                  , "  mode: managed-tei"
+                  , "  space_fingerprint: " <> historicalFingerprint
+                  ]
+                , Just "http"
+                , Just "https://env-embeddings.example"
+                )
+              , ( "http-to-managed.yaml"
+                , [ "embedding:"
+                  , "  mode: http"
+                  , "  endpoint: https://file-embeddings.example"
+                  , "  space_fingerprint: " <> historicalFingerprint
+                  ]
+                , Just "managed-tei"
+                , Nothing
+                )
+              ]
+        mapM_ (assertHistoricalLoadRejected dir) cases
 
     it "rejects unsupported model spaces and invalid provider combinations" $ do
       let invalids = BS8.pack . unlines <$>
@@ -453,3 +500,30 @@ spec = do
       case Yaml.decodeEither' (Yaml.encode cfg) of
         Left err -> expectationFailure (show err)
         Right (decoded :: HMemConfig) -> decoded `shouldBe` cfg
+
+assertHistoricalLoadRejected
+  :: FilePath
+  -> (FilePath, [String], Maybe String, Maybe String)
+  -> IO ()
+assertHistoricalLoadRejected dir (filename, yamlLines, envMode, envEndpoint) = do
+  let path = dir </> filename
+  BS8.writeFile path (BS8.pack (unlines yamlLines))
+  result <- withEnvVar "HMEM_EMBEDDING_PROVIDER" envMode
+    $ withEnvVar "HMEM_EMBEDDING_ENDPOINT" envEndpoint
+    $ try (loadConfigFile path)
+  case result :: Either Yaml.ParseException HMemConfig of
+    Right cfg -> expectationFailure $
+      "historical provider identity was replaced during production loading: " <> show cfg.embeddingProvider
+    Left err -> do
+      show err `shouldSatisfy` isInfixOf "historical GTE-Qwen2 space with unknown attention semantics"
+      show err `shouldSatisfy` isInfixOf "attention=noncausal:v1"
+
+withEnvVar :: String -> Maybe String -> IO a -> IO a
+withEnvVar name value = bracket setup restore . const
+  where
+    setup = do
+      old <- lookupEnv name
+      maybe (unsetEnv name) (setEnv name) value
+      pure old
+
+    restore = maybe (unsetEnv name) (setEnv name)

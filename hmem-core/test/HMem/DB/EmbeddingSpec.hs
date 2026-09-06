@@ -15,6 +15,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Test.Hspec
 
+import HMem.Config qualified as Config
 import HMem.DB.Embedding
 import HMem.DB.Observation
 import HMem.DB.Pool (checkPgvector, runSession)
@@ -38,6 +39,44 @@ spec = around withTestEnv $ do
         , limit = Nothing, offset = Nothing
         }
       map (.observation.id) results `shouldBe` [managed.id]
+
+    it "preserves historical spaces until a guarded noncausal recomputation replaces one vector" $ \env -> do
+      requirePgvector env
+      workspace <- createTestWorkspace env "embedding-qualified-noncausal-isolation"
+      historical <- create env workspace "historical unknown attention"
+      legacy <- create env workspace "legacy manual"
+      qualified <- create env workspace "already noncausal"
+      let historicalSpace = testSpace historicalManagedFingerprint
+          newSpace = testSpace Config.managedTeiSpaceFingerprint
+      setObservationEmbeddingInSpace env.pool workspace.id historical.id historicalSpace unitX
+      setObservationEmbeddingInSpace env.pool workspace.id legacy.id legacyManualEmbeddingSpace unitX
+      setObservationEmbeddingInSpace env.pool workspace.id qualified.id newSpace unitX
+
+      resultsBefore <- similarObservations env.pool (similarQueryFor workspace.id newSpace)
+      map (.observation.id) resultsBefore `shouldBe` [qualified.id]
+
+      enableEmbeddingTarget env.pool newSpace
+      reconcileEmbeddingJobs env.pool 10 `shouldReturn` 2
+      observationSpace env.pool historical.id `shouldReturn` Just historicalManagedFingerprint
+      observationSpace env.pool legacy.id `shouldReturn` Just (embeddingSpaceFingerprintText legacyManualEmbeddingSpace)
+      observationSpace env.pool qualified.id `shouldReturn` Just Config.managedTeiSpaceFingerprint
+
+      claims <- claimEmbeddingJobs env.pool "noncausal-worker" 10
+      map (.observationId) claims `shouldMatchList` [historical.id, legacy.id]
+      historicalClaim <- case [claim | claim <- claims, claim.observationId == historical.id] of
+        [claim] -> pure claim
+        _ -> expectationFailure "expected one claimed historical vector" >> fail "unreachable"
+      completeClaimedEmbeddingJob env.pool "noncausal-worker" workspace.id historical.id
+        (historicalClaim.contentFingerprint <> "-stale") newSpace unitX `shouldReturn` EmbeddingStale
+      completeClaimedEmbeddingJob env.pool "noncausal-worker" workspace.id historical.id
+        historicalClaim.contentFingerprint historicalSpace unitX `shouldReturn` EmbeddingStale
+      completeClaimedEmbeddingJob env.pool "noncausal-worker" workspace.id historical.id
+        historicalClaim.contentFingerprint newSpace unitX `shouldReturn` EmbeddingApplied
+
+      resultsAfter <- similarObservations env.pool (similarQueryFor workspace.id newSpace)
+      map (.observation.id) resultsAfter `shouldMatchList` [historical.id, qualified.id]
+      observationSpace env.pool historical.id `shouldReturn` Just Config.managedTeiSpaceFingerprint
+      observationSpace env.pool legacy.id `shouldReturn` Just (embeddingSpaceFingerprintText legacyManualEmbeddingSpace)
 
     it "rejects stale content CAS and treats an exact completed space as idempotent" $ \env -> do
       requirePgvector env
@@ -284,3 +323,24 @@ unitVectorText = "[" <> T.intercalate "," (map (T.pack . show) unitX) <> "]"
 
 testSpace :: Text -> EmbeddingSpaceFingerprint
 testSpace raw = maybe (error "test embedding space must be valid") id (parseEmbeddingSpaceFingerprint raw)
+
+historicalManagedFingerprint :: Text
+historicalManagedFingerprint =
+  "Alibaba-NLP/gte-Qwen2-1.5B-instruct@1cad2ab3ff41c2671f34e135d29831368ee26b68:1536"
+
+similarQueryFor :: UUID -> EmbeddingSpaceFingerprint -> SimilarObservationQuery
+similarQueryFor workspace space = SimilarObservationQuery
+  { workspaceId = workspace, subjectKind = Nothing, subject = Nothing, gitSha = Nothing
+  , embedding = 1 : replicate (observationEmbeddingDimensions - 1) 0
+  , spaceFingerprint = Just space, minSimilarity = Just 1
+  , limit = Nothing, offset = Nothing
+  }
+
+observationSpace :: Pool.Pool Hasql.Connection -> UUID -> IO (Maybe Text)
+observationSpace pool observation = runSession pool $ Session.statement observation observationSpaceStatement
+
+observationSpaceStatement :: Statement.Statement UUID (Maybe Text)
+observationSpaceStatement = Statement.Statement
+  "SELECT embedding_space_fingerprint FROM public.observations WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid))
+  (Dec.singleRow (Dec.column (Dec.nullable Dec.text))) True

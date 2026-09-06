@@ -40,6 +40,7 @@ data GteQwen2Requirements = GteQwen2Requirements
   , eosPadToken :: !Text
   , eosPadTokenId :: !Int
   , addEosToken :: !Bool
+  , isCausal :: !Bool
   , usesLastTokenPooling :: !Bool
   , autoTruncate :: !Bool
   , teiDefaultPrompt :: !(Maybe Text)
@@ -56,6 +57,7 @@ gteQwen2Requirements = GteQwen2Requirements
   , eosPadToken = "<|endoftext|>"
   , eosPadTokenId = 151643
   , addEosToken = True
+  , isCausal = False
   , usesLastTokenPooling = True
   , autoTruncate = False
   , teiDefaultPrompt = Nothing

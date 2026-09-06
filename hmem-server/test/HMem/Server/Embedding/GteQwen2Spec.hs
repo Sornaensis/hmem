@@ -71,6 +71,8 @@ spec = describe "GTE-Qwen2 contract" $ do
     requirements.eosPadToken `shouldBe` fixture.tokenizer.eosPadToken
     requirements.eosPadTokenId `shouldBe` fixture.tokenizer.eosPadTokenId
     requirements.addEosToken `shouldBe` fixture.tokenizer.addEosToken
+    requirements.isCausal `shouldBe` fixture.model.isCausal
+    requirements.isCausal `shouldBe` False
     requirements.usesLastTokenPooling `shouldBe` fixture.pooling.lastTokenPooling
     requirements.autoTruncate `shouldBe` fixture.tei.hmemContractAutoTruncate
     requirements.teiDefaultPrompt `shouldBe` Nothing
@@ -84,15 +86,20 @@ spec = describe "GTE-Qwen2 contract" $ do
     mapM_ (assertPinnedSource modelRevision)
       [ fixture.model.source, fixture.tokenizer.source, fixture.sentenceTransformers.source, fixture.pooling.source, fixture.readme.source ]
     assertPinnedSource teiRevision fixture.tei.sourceArchive
-    assertTeiSource teiRevision fixture.tei.qwen2Postprocessor
-    assertTeiSource teiRevision fixture.tei.lastTokenPoolingSource
-    assertTeiSource teiRevision fixture.tei.routerAutoTruncateSource
+    assertTeiSource teiRevision "router/src/lib.rs" fixture.tei.qwen2Postprocessor
+    assertTeiSource teiRevision "router/src/lib.rs" fixture.tei.lastTokenPoolingSource
+    assertTeiSource teiRevision "router/src/lib.rs" fixture.tei.routerAutoTruncateSource
+    assertTeiSource teiRevision "backends/candle/src/models/flash_qwen2.rs" fixture.tei.qwen2AttentionSource
     fixture.tei.qwen2Postprocessor.sourceLines `shouldContain`
       ["149-153: template appends <|endoftext|> with special-token id 151643"]
     fixture.tei.lastTokenPoolingSource.sourceLines `shouldContain`
       ["433-450: pooling_mode_lasttoken maps to Pool::LastToken"]
     fixture.tei.routerAutoTruncateSource.sourceLines `shouldContain`
       ["200: omitted --auto-truncate defaults to true"]
+    fixture.tei.qwen2AttentionSource.sourceLines `shouldContain`
+      [ "72: attention stores config.is_causal"
+      , "108-118: flash_attn_varlen receives self.is_causal"
+      ]
 
   it "normalizes valid 3-4 vectors deterministically and independently" $ do
     prepared <- expectPrepared (EmbeddingRequest [EmbeddingInput EmbeddingDocument "one", EmbeddingInput EmbeddingQuery "two"])
@@ -143,7 +150,7 @@ data PinnedSource = PinnedSource
   } deriving stock (Show, Eq, Generic)
 instance FromJSON PinnedSource
 
-data ModelFixture = ModelFixture { source :: !PinnedSource, hiddenSize :: !Int } deriving stock (Show, Eq, Generic)
+data ModelFixture = ModelFixture { source :: !PinnedSource, hiddenSize :: !Int, isCausal :: !Bool } deriving stock (Show, Eq, Generic)
 instance FromJSON ModelFixture
 
 data TokenizerFixture = TokenizerFixture
@@ -162,7 +169,8 @@ instance FromJSON ReadmeFixture
 
 data TeiFixture = TeiFixture
   { sourceArchive :: !PinnedSource, qwen2Postprocessor :: !TeiSource, lastTokenPoolingSource :: !TeiSource
-  , routerAutoTruncateSource :: !TeiSource, upstreamRouterAutoTruncateDefault :: !Bool, hmemContractAutoTruncate :: !Bool
+  , routerAutoTruncateSource :: !TeiSource, qwen2AttentionSource :: !TeiSource
+  , upstreamRouterAutoTruncateDefault :: !Bool, hmemContractAutoTruncate :: !Bool
   } deriving stock (Show, Eq, Generic)
 instance FromJSON TeiFixture
 
@@ -193,9 +201,9 @@ assertPinnedSource revision sourceValue = do
   sourceValue.sourceFile `shouldSatisfy` (not . Text.null)
   sourceValue.sourceLines `shouldSatisfy` (not . null)
 
-assertTeiSource :: Text.Text -> TeiSource -> Expectation
-assertTeiSource revision sourceValue = do
+assertTeiSource :: Text.Text -> Text.Text -> TeiSource -> Expectation
+assertTeiSource revision sourceFileValue sourceValue = do
   sourceValue.sourceRevision `shouldBe` revision
-  sourceValue.sourceUrl `shouldBe` "https://raw.githubusercontent.com/huggingface/text-embeddings-inference/06670157fb6c1523482219bdb2d1660277d38088/router/src/lib.rs"
-  sourceValue.sourceFile `shouldBe` "router/src/lib.rs"
+  sourceValue.sourceUrl `shouldBe` "https://raw.githubusercontent.com/huggingface/text-embeddings-inference/" <> revision <> "/" <> sourceFileValue
+  sourceValue.sourceFile `shouldBe` sourceFileValue
   sourceValue.sourceLines `shouldSatisfy` (not . null)

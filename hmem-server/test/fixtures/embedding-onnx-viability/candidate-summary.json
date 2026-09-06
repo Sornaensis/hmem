@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "status": "experimental-only-not-promoted",
+  "artifact_root": "D:\\hmem-artifacts\\aa30a81c-2adf-4f54-b1eb-cfeaa39bac77",
+  "source_snapshot": {
+    "file_count": 20,
+    "model_id": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+    "revision": "1cad2ab3ff41c2671f34e135d29831368ee26b68",
+    "source_lock_sha256": "46624f1ada9e10f97d870452888f0c0cfb26ea0dc287451fb55107b799368664"
+  },
+  "derived_serving_tree": {
+    "file_count": 296,
+    "total_bytes": 6320103980,
+    "support_file_count": 11,
+    "onnx_graph_file_count": 1,
+    "onnx_external_data_file_count": 284,
+    "model_onnx_size": 1387791,
+    "model_onnx_sha256": "9e8e8a6c70ec1c6eba8a37d571251990b45f0272c6271893d6e6bc1c456b31f8",
+    "full_inventory_path": "D:\\hmem-artifacts\\aa30a81c-2adf-4f54-b1eb-cfeaa39bac77\\evidence\\candidate-inventory.json",
+    "full_inventory_size": 64967,
+    "full_inventory_sha256": "c3d6455856e34c97ac8ac9f28fb0dc000b1a3f268aa62990078440b2e5a2c567"
+  },
+  "reproduction": {
+    "clean_exports": 2,
+    "artifact_records_per_export": 285,
+    "all_graph_and_external_data_records_identical": true,
+    "export_a_elapsed_seconds": 89.44856366700003,
+    "export_b_elapsed_seconds": 97.35586996300003,
+    "export_a_peak_rss_bytes": 14053208064,
+    "export_b_peak_rss_bytes": 13957140480
+  },
+  "build_toolchain_license_audit": {
+    "path": "toolchain-license-audit.json",
+    "sha256": "995db3fd3fadb5e9acf6fd652253a95d0432db3247be4f3ea9b7e727f186ed87",
+    "locked_wheel_count": 31,
+    "installed_debian_package_count": 106,
+    "redistribution_gate": "incomplete",
+    "unresolved_item_count": 21
+  }
+}

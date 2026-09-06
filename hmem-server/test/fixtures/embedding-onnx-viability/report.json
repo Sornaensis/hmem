@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "task_id": "aa30a81c-2adf-4f54-b1eb-cfeaa39bac77",
+  "artifact_root": "D:\\hmem-artifacts\\aa30a81c-2adf-4f54-b1eb-cfeaa39bac77",
+  "fixed_inputs": {
+    "model_id": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+    "model_revision": "1cad2ab3ff41c2671f34e135d29831368ee26b68",
+    "tei_source": "06670157fb6c1523482219bdb2d1660277d38088",
+    "tei_image": "sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07",
+    "tei_platform_manifest": "sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48"
+  },
+  "hardware": {
+    "cpu": "Intel(R) Core(TM) Ultra 9 285K",
+    "logical_cpus": 24,
+    "container_cpus": 16,
+    "exposed_isa_summary": ["sse4_2", "avx", "avx2", "avx_vnni", "fma"],
+    "avx512_exposed": false,
+    "docker_engine": "29.6.1",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "architecture": "x86_64",
+    "docker_memory_bytes": 33396793344,
+    "linux_swap_bytes": 8589934592,
+    "tei_memory_limit_bytes": 30064771072,
+    "tei_memory_plus_swap_limit_bytes": 34359738368,
+    "tei_threads": 8
+  },
+  "toolchain": {
+    "image": "hmem-managed-embedding-onnx@sha256:8ed20f622337a91b4b0638bce91f78dca5ff5f64bd4a9ee8b95d4f10e91c5bbe",
+    "base": "python@sha256:2856e6af199e8128161abd320575eb9b341f3b76f017b5d0c9cd364f60d8a050",
+    "requirements_lock_sha256": "bcb7cb748bc568fd0d4c1c621865a8f0ffeb72f77bab9e4106e461205aa19851",
+    "python": "3.11.9",
+    "torch": "2.3.1+cpu",
+    "transformers": "4.41.2",
+    "tokenizers": "0.19.1",
+    "onnx": "1.16.1",
+    "onnxruntime": "1.22.0",
+    "numpy": "1.26.4",
+    "opset": 17,
+    "license_audit": {
+      "path": "toolchain-license-audit.json",
+      "size": 96899,
+      "sha256": "995db3fd3fadb5e9acf6fd652253a95d0432db3247be4f3ea9b7e727f186ed87",
+      "locked_wheel_count": 31,
+      "installed_debian_package_count": 106,
+      "redistribution_gate": "incomplete",
+      "unresolved_item_count": 21
+    }
+  },
+  "attention_semantics": {
+    "config_is_causal": false,
+    "published_auto_model_default_is_causal": true,
+    "candidate_is_causal": true,
+    "native_tei_flash_qwen2_is_causal": false,
+    "causal_true_vs_false_normalized_cosine_distance_range_for_multitoken_samples": [0.04444899782767964, 0.41996628939575265],
+    "authority_status": "unresolved; candidate cannot establish native-GPU or unknown-existing-vector parity"
+  },
+  "evidence_files": [
+    {"path": "export-a/export-metadata.json", "size": 50704, "sha256": "6b6d39972efb1ff542f40539925ddcbc3184a3e5efa4ab4f400874f31b4b708d"},
+    {"path": "export-a/graph-report.json", "size": 108971, "sha256": "1ae6203ba0e942178ca696a6c22c34f5436e413c5fca435923e586988a727ae8"},
+    {"path": "export-b/export-metadata.json", "size": 50704, "sha256": "7c428618faf579827d49ae1b079fd35f9aa4955c23358fecb17e2fadc97fa36a"},
+    {"path": "oracle/oracle.npz", "size": 1000339, "sha256": "435de11273e4390d3a8e426427aaf9ff537e0caa179e77786467b0f62b3c2d0f"},
+    {"path": "oracle/oracle-report.json", "size": 15891, "sha256": "85d4f741d63c0cbab7ba4ec2c1598134389917dc5871cfb7f304287be61512ba"},
+    {"path": "oracle/ort-report.json", "size": 5030, "sha256": "7c4a1d84f834fef87a4d4d667f6359c504231b9aed76bb22f702539737dab746"},
+    {"path": "evidence/candidate-inventory.json", "size": 64967, "sha256": "c3d6455856e34c97ac8ac9f28fb0dc000b1a3f268aa62990078440b2e5a2c567"},
+    {"path": "evidence/tei-container-inspect.json", "size": 10133, "sha256": "587c66bc6db7c3b5be2214f4f5e78758cb441481130711701960dc16e6a0cdd8"},
+    {"path": "evidence/tei-startup.jsonl", "size": 2013, "sha256": "f535229b9c21952d2398f411791674c5009f63b36fdd3eab1308dc38eead638c"}
+  ],
+  "gates": {
+    "source_snapshot": {
+      "status": "pass",
+      "evidence": "All 20 pinned source files and 7,104,826,920 weight bytes matched the immutable source lock."
+    },
+    "toolchain_reproduction": {
+      "status": "pass",
+      "evidence": "Exact linux/amd64 base plus --require-hashes wheel-only closure built image sha256:8ed20f622337a91b4b0638bce91f78dca5ff5f64bd4a9ee8b95d4f10e91c5bbe."
+    },
+    "build_toolchain_license_audit": {
+      "status": "incomplete",
+      "evidence": "Exact-image audit records 31 locked wheels, their shipped metadata/license/notice hashes, the PSF Python license, and copyright files for 106 installed Debian packages. Redistribution review remains incomplete because 21 wheels lack a machine-readable License-Expression and require review against the recorded license fields/classifiers/files; this metadata absence is not evidence of incompatibility."
+    },
+    "clean_export_reproducibility": {
+      "status": "pass",
+      "evidence": "Two clean roots produced identical path/size/SHA-256 records for model.onnx and all 284 external-data files; graph SHA-256 is 9e8e8a6c70ec1c6eba8a37d571251990b45f0272c6271893d6e6bc1c456b31f8."
+    },
+    "graph_and_external_data_policy": {
+      "status": "pass",
+      "evidence": "Opset 17, two dynamic int64 inputs, sole dynamic fp32 [B,S,1536] output, no model functions/custom domains/non-fp32 generated or declared internal floats, and every external range exactly matches fixed dtype-by-dimensions storage; twenty negative fixtures reject unsafe variants. The hardened audit reproduced the original 284-tensor report byte-for-byte."
+    },
+    "independent_source_oracle": {
+      "status": "pass",
+      "evidence": "Exact-source fp32 SDPA oracle is repeatable, finite, unit normalized, cache-false equivalent, and batch invariant; it does not load the ONNX graph."
+    },
+    "python_ort_cpu_parity": {
+      "status": "pass",
+      "evidence": "CPUExecutionProvider only. Left-padded hidden/pooled/normalized and separately constructed TEI-style right-padded pooled/normalized outputs pass thresholds frozen before acceptance."
+    },
+    "attention_space_authority": {
+      "status": "incomplete",
+      "evidence": "Exact-source diagnostic proves causal true and false materially differ; no native TEI GPU golden evidence or authority decision exists."
+    },
+    "actual_offline_tei_cpu_startup": {
+      "status": "fail",
+      "evidence": "Exact pinned image/container loaded the backend and entered 32768-token warmup, reached its 28 GiB memory cap, and was OOM-killed with exit 137 before readiness."
+    },
+    "full_32768_token_inference": {
+      "status": "fail",
+      "evidence": "The required real warmup could not complete, so full-context inference could not be issued. Context and warmup were not lowered."
+    },
+    "tei_info_embed_scheduler_and_overlimit": {
+      "status": "incomplete",
+      "evidence": "These dependent API checks were not run because the actual pinned service never became ready."
+    },
+    "readiness_budget": {
+      "status": "fail",
+      "evidence": "Warmup began 26.024 seconds after launch, but the process was OOM-killed at 39.802 seconds and never became ready within the draft 30-second deadline; no successful fixed deadline can be recommended for this graph on this host."
+    }
+  },
+  "verdict": "not_viable",
+  "startup_recommendation": {
+    "enable_managed_profile_on_recorded_host": false,
+    "draft_30_seconds_sufficient": false,
+    "recommended_fixed_deadline_seconds": null,
+    "reason": "A deadline change cannot repair the measured full-context OOM. Re-measure only after a separately reviewed graph/runtime approach completes the same 32768-token contract."
+  },
+  "limitations": [
+    "The failed gate applies to this exact eager causal ONNX graph in pinned TEI on the recorded 31.1 GiB Docker host; it does not prove every standard-ONNX fp32 CPU graph impossible.",
+    "ORT Level3 retained 28 Softmax kernels and one Trilu kernel, so it did not fuse away dense causal attention for this graph.",
+    "No /info, /embed, concurrent scheduler, TEI /tokenize, over-limit, or full-inference result exists because required warmup failed first.",
+    "The causal attention authority remains pending and no graph or embedding-space identity is promoted by this report.",
+    "The build-only toolchain license inventory is concrete, but redistribution review is incomplete for the 21 exact wheels listed by toolchain-license-audit.json; missing License-Expression metadata does not establish incompatibility."
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "query_prompt": "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ",
+  "calibration": [
+    {"id": "cal-doc-short", "kind": "document", "text": "The capital of Denmark is Copenhagen."},
+    {"id": "cal-query-short", "kind": "query", "text": "capital of Denmark"},
+    {"id": "cal-doc-unicode", "kind": "document", "text": "naïve café — Καλημέρα"}
+  ],
+  "acceptance": [
+    {"id": "acc-doc-empty", "kind": "document", "text": ""},
+    {"id": "acc-query-empty", "kind": "query", "text": ""},
+    {"id": "acc-doc-multilingual", "kind": "document", "text": "日本語 العربية dansk français हिन्दी"},
+    {"id": "acc-query-unicode", "kind": "query", "text": "Hvor ligger København? 🧭"},
+    {"id": "acc-doc-whitespace", "kind": "document", "text": "  leading\tand trailing  \n"},
+    {"id": "acc-doc-repeated-a", "kind": "document", "text": "repeat repeat repeat"},
+    {"id": "acc-doc-repeated-b", "kind": "document", "text": "repeat repeat repeat"},
+    {"id": "acc-doc-longer", "kind": "document", "text": "A deterministic mixed-length example with punctuation: one, two; three! It remains synthetic."}
+  ],
+  "scheduled_batches": [
+    ["acc-doc-empty", "acc-doc-longer", "acc-query-unicode"],
+    ["acc-doc-longer", "acc-doc-empty", "acc-query-unicode"],
+    ["acc-doc-repeated-a", "acc-doc-repeated-b"],
+    ["acc-doc-multilingual", "acc-doc-whitespace", "acc-query-empty"]
+  ]
+}

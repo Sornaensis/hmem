@@ -1,0 +1,1511 @@
+{
+  "base_image": "python@sha256:2856e6af199e8128161abd320575eb9b341f3b76f017b5d0c9cd364f60d8a050",
+  "base_os": {
+    "BUG_REPORT_URL": "https://bugs.debian.org/",
+    "HOME_URL": "https://www.debian.org/",
+    "ID": "debian",
+    "NAME": "Debian GNU/Linux",
+    "PRETTY_NAME": "Debian GNU/Linux 12 (bookworm)",
+    "SUPPORT_URL": "https://www.debian.org/support",
+    "VERSION": "12 (bookworm)",
+    "VERSION_CODENAME": "bookworm",
+    "VERSION_ID": "12"
+  },
+  "installed_debian_packages": [
+    {
+      "copyright": {
+        "path": "/usr/share/doc/adduser/copyright",
+        "sha256": "b143053a4862ab354831487b5f8bd31dc9ffdc589d15de9d9c764332a0209796",
+        "size": 12432
+      },
+      "package": "adduser",
+      "version": "3.134"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/apt/copyright",
+        "sha256": "b4701305243d8d746f4acaafe15d94f946251b05691bd6917fef41dd15e9ee12",
+        "size": 7668
+      },
+      "package": "apt",
+      "version": "2.6.1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/base-files/copyright",
+        "sha256": "fd7e4aae7e7b05f217bcf2d02322825c360e66c52c4c2f1b28d784d6297a1c23",
+        "size": 1208
+      },
+      "package": "base-files",
+      "version": "12.4+deb12u7"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/base-passwd/copyright",
+        "sha256": "0f1cde79bd80a75f9029ae9a8c252b642223027ef36f6989c63a8230aae576a7",
+        "size": 798
+      },
+      "package": "base-passwd",
+      "version": "3.6.1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/bash/copyright",
+        "sha256": "06319d84c3e5ed096036f6a9310a030c7e84e50dff2b8a6792285c83ec0ada73",
+        "size": 9764
+      },
+      "package": "bash",
+      "version": "5.2.15-2+b7"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/bsdutils/copyright",
+        "sha256": "30539a2df6a89d844f43c727505a3193a60515f8ec6cdede8cc515ed22941d1c",
+        "size": 23237
+      },
+      "package": "bsdutils",
+      "version": "1:2.38.1-5+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/ca-certificates/copyright",
+        "sha256": "e85e1bcad3a915dc7e6f41412bc5bdeba275cadd817896ea0451f2140a93967c",
+        "size": 18940
+      },
+      "package": "ca-certificates",
+      "version": "20230311"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/coreutils/copyright",
+        "sha256": "24e86c5ca53d6bfd8e0c47988160daa62d10a74997fe11f651e1d9533c78bff6",
+        "size": 5552
+      },
+      "package": "coreutils",
+      "version": "9.1-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/dash/copyright",
+        "sha256": "d98c53f281321baad38164aa9ae6e368a9253be6ec51bd26a759b5e72b326f4a",
+        "size": 3878
+      },
+      "package": "dash",
+      "version": "0.5.12-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/debconf/copyright",
+        "sha256": "57163c71bd8a5289660892827dd0dfaa7fef47f89deedc9dc6711ced7d0a28d7",
+        "size": 2764
+      },
+      "package": "debconf",
+      "version": "1.5.82"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/debian-archive-keyring/copyright",
+        "sha256": "b32aecaae84643700a33bc9ee83fa9b36938d35aa7b61b5042092eca77ddb732",
+        "size": 1243
+      },
+      "package": "debian-archive-keyring",
+      "version": "2023.3+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/debianutils/copyright",
+        "sha256": "fd2d797e208bcfb713510e47a89867191180943e1167d44c2acd8ff1b88e5c10",
+        "size": 9055
+      },
+      "package": "debianutils",
+      "version": "5.7-0.5~deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/diffutils/copyright",
+        "sha256": "8654d7cc7cdae1f31bb67a3ce5bf35d512c0bdfffd071df757edc54153cc7930",
+        "size": 16112
+      },
+      "package": "diffutils",
+      "version": "1:3.8-4"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/dpkg/copyright",
+        "sha256": "7442bdadcd44e818fddd786057db07639cc68225c389c7c240d3bb3984b05173",
+        "size": 7943
+      },
+      "package": "dpkg",
+      "version": "1.21.22"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/e2fsprogs/copyright",
+        "sha256": "1ca415a294c0e56958c4f795b3f1f69ea3479bca53d7811f5cdd020a258949db",
+        "size": 15209
+      },
+      "package": "e2fsprogs",
+      "version": "1.47.0-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/findutils/copyright",
+        "sha256": "8fbcc77ed31f480a85654e9b6d1d25cbb95b62e9dc5159ae1565bca684c3e1dc",
+        "size": 24782
+      },
+      "package": "findutils",
+      "version": "4.9.0-4"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/gcc-12-base/copyright",
+        "sha256": "da8191658b3452ce9caf31638ba61dab31a38c619fa39df119812e050f592fd3",
+        "size": 68194
+      },
+      "package": "gcc-12-base:amd64",
+      "version": "12.2.0-14"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/gpgv/copyright",
+        "sha256": "84dab06b5c1baf3a7a45c3cdc5f98fb121234e98fdd6266c3f773d54fcdc4f54",
+        "size": 10555
+      },
+      "package": "gpgv",
+      "version": "2.2.40-1.1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/grep/copyright",
+        "sha256": "42d9b4d610396b1e8d1303dcb9487af3f5a2d2709623cf03a04cf76acdf6c5e3",
+        "size": 1807
+      },
+      "package": "grep",
+      "version": "3.8-5"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/gzip/copyright",
+        "sha256": "1ca5dd5098fe2e1c0f0d05196f5b3da8b414a807702e6ca8b536eb5fd3059130",
+        "size": 2895
+      },
+      "package": "gzip",
+      "version": "1.12-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/hostname/copyright",
+        "sha256": "94189fc5a9a7b7224d96e1a0cfdfe9be0df2018b04bf21d591627ab96b30cad1",
+        "size": 1273
+      },
+      "package": "hostname",
+      "version": "3.23+nmu1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/init-system-helpers/copyright",
+        "sha256": "7534601cc4fa513804d16490359f5831e7b6a1212da3bbf948bebdd4c8799783",
+        "size": 3133
+      },
+      "package": "init-system-helpers",
+      "version": "1.65.2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libacl1/copyright",
+        "sha256": "9a2dfb4a5abc7e84be2cc41f1089be665519c9409549296f6c19de57ab1d37c2",
+        "size": 2048
+      },
+      "package": "libacl1:amd64",
+      "version": "2.3.1-3"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libapt-pkg6.0/copyright",
+        "sha256": "b4701305243d8d746f4acaafe15d94f946251b05691bd6917fef41dd15e9ee12",
+        "size": 7668
+      },
+      "package": "libapt-pkg6.0:amd64",
+      "version": "2.6.1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libattr1/copyright",
+        "sha256": "0cbec745d85ea775450b2d54fac55277197f429e52d611f72852ed420450620e",
+        "size": 1947
+      },
+      "package": "libattr1:amd64",
+      "version": "1:2.5.1-4"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libaudit-common/copyright",
+        "sha256": "6c7011e93f643b112c4cc3622131e28a30477afad6c4f5efe466b13aa7f603cc",
+        "size": 1596
+      },
+      "package": "libaudit-common",
+      "version": "1:3.0.9-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libaudit1/copyright",
+        "sha256": "6c7011e93f643b112c4cc3622131e28a30477afad6c4f5efe466b13aa7f603cc",
+        "size": 1596
+      },
+      "package": "libaudit1:amd64",
+      "version": "1:3.0.9-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libblkid1/copyright",
+        "sha256": "30539a2df6a89d844f43c727505a3193a60515f8ec6cdede8cc515ed22941d1c",
+        "size": 23237
+      },
+      "package": "libblkid1:amd64",
+      "version": "2.38.1-5+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libbz2-1.0/copyright",
+        "sha256": "832ed535ff3c3d025a8d2348eb1b697b89addcf2eaadbc17650262040b9145e2",
+        "size": 2228
+      },
+      "package": "libbz2-1.0:amd64",
+      "version": "1.0.8-5+b1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libc-bin/copyright",
+        "sha256": "40c7e1f2118531f038ca22999bd976901254e1bc5cd1b0f0211bdd064c599987",
+        "size": 25467
+      },
+      "package": "libc-bin",
+      "version": "2.36-9+deb12u8"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libc6/copyright",
+        "sha256": "40c7e1f2118531f038ca22999bd976901254e1bc5cd1b0f0211bdd064c599987",
+        "size": 25467
+      },
+      "package": "libc6:amd64",
+      "version": "2.36-9+deb12u8"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libcap-ng0/copyright",
+        "sha256": "49b5db19990a3e3cc1a9ed716aed231f6f3c1c217e58f62ae4dc2818c6d3e9cc",
+        "size": 2035
+      },
+      "package": "libcap-ng0:amd64",
+      "version": "0.8.3-1+b3"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libcap2/copyright",
+        "sha256": "e60a5642e12e340060e4e519a65b2eb0330be2917854841c644e36268f607d54",
+        "size": 4631
+      },
+      "package": "libcap2:amd64",
+      "version": "1:2.66-4"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libcom-err2/copyright",
+        "sha256": "1ca415a294c0e56958c4f795b3f1f69ea3479bca53d7811f5cdd020a258949db",
+        "size": 15209
+      },
+      "package": "libcom-err2:amd64",
+      "version": "1.47.0-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libcrypt1/copyright",
+        "sha256": "5a5e7ca0e9f3f9679977e3a3e9ede45ad92885a3297ea78e766979f9866c5a16",
+        "size": 6010
+      },
+      "package": "libcrypt1:amd64",
+      "version": "1:4.4.33-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libdb5.3/copyright",
+        "sha256": "8b53da37d73289d9df7317b3a2dbe16491f1fa9fec8b77b86d69704b40ce2c26",
+        "size": 17177
+      },
+      "package": "libdb5.3:amd64",
+      "version": "5.3.28+dfsg2-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libdebconfclient0/copyright",
+        "sha256": "cf63099896d1c0f6529c41b8d95738e6fea342ffba609187d339c4f38ce36ecc",
+        "size": 5856
+      },
+      "package": "libdebconfclient0:amd64",
+      "version": "0.270"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libexpat1/copyright",
+        "sha256": "60919fe1a156395ff14511bb6ff79756c50ade2fff59ac60c9bae1d8a7fe6292",
+        "size": 1756
+      },
+      "package": "libexpat1:amd64",
+      "version": "2.5.0-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libext2fs2/copyright",
+        "sha256": "1ca415a294c0e56958c4f795b3f1f69ea3479bca53d7811f5cdd020a258949db",
+        "size": 15209
+      },
+      "package": "libext2fs2:amd64",
+      "version": "1.47.0-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libffi8/copyright",
+        "sha256": "f83d2ecba1ea4d99957e81c50bebbd076a128194288a3ec22cc8ccdb77c43087",
+        "size": 10165
+      },
+      "package": "libffi8:amd64",
+      "version": "3.4.4-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/gcc-12-base/copyright",
+        "sha256": "da8191658b3452ce9caf31638ba61dab31a38c619fa39df119812e050f592fd3",
+        "size": 68194
+      },
+      "package": "libgcc-s1:amd64",
+      "version": "12.2.0-14"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libgcrypt20/copyright",
+        "sha256": "95db2f9da663f2bfe2aabe9c72fce9d6c9ae767b912f397d7823f50bd55a1a7d",
+        "size": 24896
+      },
+      "package": "libgcrypt20:amd64",
+      "version": "1.10.1-3"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libgdbm6/copyright",
+        "sha256": "8bea8cf2f94cd8b37a0b8b3a2b974122b9194c1165e6ad508e366c74679e8817",
+        "size": 2701
+      },
+      "package": "libgdbm6:amd64",
+      "version": "1.23-3"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libgmp10/copyright",
+        "sha256": "7d366aef5ba325150246de1d7820c4c9926cd27ca61a69948492b26cd3b61601",
+        "size": 4153
+      },
+      "package": "libgmp10:amd64",
+      "version": "2:6.2.1+dfsg1-1.1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libgnutls30/copyright",
+        "sha256": "bb7e5c24b3e27bbba5671dd710d159a0066833bda4caa1d55d8027ffed539337",
+        "size": 51588
+      },
+      "package": "libgnutls30:amd64",
+      "version": "3.7.9-2+deb12u3"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libgpg-error0/copyright",
+        "sha256": "8760fd36efa1d7186f8769d4e76a3e678045b94d54465bf6f2db5eb871c7c27f",
+        "size": 4903
+      },
+      "package": "libgpg-error0:amd64",
+      "version": "1.46-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libgssapi-krb5-2/copyright",
+        "sha256": "936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816",
+        "size": 63047
+      },
+      "package": "libgssapi-krb5-2:amd64",
+      "version": "1.20.1-2+deb12u2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libhogweed6/copyright",
+        "sha256": "ca2ca597320220c00ef6dc0fe5d0d82025548d6d4ba80e85615eb691f9021f93",
+        "size": 24923
+      },
+      "package": "libhogweed6:amd64",
+      "version": "3.8.1-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libidn2-0/copyright",
+        "sha256": "41702469f28e8ff406345e3d1dd0c741f11bdfca319264f67036efd6aaa79e4b",
+        "size": 5348
+      },
+      "package": "libidn2-0:amd64",
+      "version": "2.3.3-1+b1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libk5crypto3/copyright",
+        "sha256": "936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816",
+        "size": 63047
+      },
+      "package": "libk5crypto3:amd64",
+      "version": "1.20.1-2+deb12u2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libkeyutils1/copyright",
+        "sha256": "c62fe37d22203046611112bc10a9e03a39a7f73bec1b061e7c615326166d9ff5",
+        "size": 2104
+      },
+      "package": "libkeyutils1:amd64",
+      "version": "1.6.3-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libkrb5-3/copyright",
+        "sha256": "936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816",
+        "size": 63047
+      },
+      "package": "libkrb5-3:amd64",
+      "version": "1.20.1-2+deb12u2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libkrb5support0/copyright",
+        "sha256": "936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816",
+        "size": 63047
+      },
+      "package": "libkrb5support0:amd64",
+      "version": "1.20.1-2+deb12u2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/liblz4-1/copyright",
+        "sha256": "d3be0f43fe14da244f97c451bbae789c0acf868612598a69f5f22a289abeca40",
+        "size": 3275
+      },
+      "package": "liblz4-1:amd64",
+      "version": "1.9.4-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/liblzma5/copyright",
+        "sha256": "a2dc8fac0f496e1c58aff67018cf0c6b88336316afa5642f9335b71642e28aa8",
+        "size": 15465
+      },
+      "package": "liblzma5:amd64",
+      "version": "5.4.1-0.2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libmd0/copyright",
+        "sha256": "4365ef6255ad553fce69dd4bc0e093472c5d0e41b8ea493a545cc926ce171aa6",
+        "size": 8018
+      },
+      "package": "libmd0:amd64",
+      "version": "1.0.4-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libmount1/copyright",
+        "sha256": "30539a2df6a89d844f43c727505a3193a60515f8ec6cdede8cc515ed22941d1c",
+        "size": 23237
+      },
+      "package": "libmount1:amd64",
+      "version": "2.38.1-5+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libtinfo6/copyright",
+        "sha256": "f0974fb41778e23c94111ff90da0546de8971f8270c58877283d372e6bd7f17e",
+        "size": 4670
+      },
+      "package": "libncursesw6:amd64",
+      "version": "6.4-4"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libnettle8/copyright",
+        "sha256": "ca2ca597320220c00ef6dc0fe5d0d82025548d6d4ba80e85615eb691f9021f93",
+        "size": 24923
+      },
+      "package": "libnettle8:amd64",
+      "version": "3.8.1-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libnsl2/copyright",
+        "sha256": "7d9c79b73fd956319a90cd210441498b225e00960352c4c6d447436481bb0eec",
+        "size": 13646
+      },
+      "package": "libnsl2:amd64",
+      "version": "1.3.0-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libp11-kit0/copyright",
+        "sha256": "ed139379f7c874f0ee75f3ddcc2e01091dd828d84ee1a0bdff6a1c5673ee6e58",
+        "size": 8646
+      },
+      "package": "libp11-kit0:amd64",
+      "version": "0.24.1-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libpam-modules-bin/copyright",
+        "sha256": "9596b9028339d66c285422237728d6170e1e29d0b0d9adf0e9f1bda82e2391ce",
+        "size": 9477
+      },
+      "package": "libpam-modules-bin",
+      "version": "1.5.2-6+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libpam-modules/copyright",
+        "sha256": "9596b9028339d66c285422237728d6170e1e29d0b0d9adf0e9f1bda82e2391ce",
+        "size": 9477
+      },
+      "package": "libpam-modules:amd64",
+      "version": "1.5.2-6+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libpam-runtime/copyright",
+        "sha256": "9596b9028339d66c285422237728d6170e1e29d0b0d9adf0e9f1bda82e2391ce",
+        "size": 9477
+      },
+      "package": "libpam-runtime",
+      "version": "1.5.2-6+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libpam0g/copyright",
+        "sha256": "9596b9028339d66c285422237728d6170e1e29d0b0d9adf0e9f1bda82e2391ce",
+        "size": 9477
+      },
+      "package": "libpam0g:amd64",
+      "version": "1.5.2-6+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libpcre2-8-0/copyright",
+        "sha256": "030511beb4d9d620ad09914c369c36ec0528dcf301d1923cc643c948ee7c6a38",
+        "size": 6626
+      },
+      "package": "libpcre2-8-0:amd64",
+      "version": "10.42-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libreadline8/copyright",
+        "sha256": "3591a8e4de849d910c5ee9045388344ef151c23b10cf8c6b1950f89f1ba1569c",
+        "size": 4414
+      },
+      "package": "libreadline8:amd64",
+      "version": "8.2-1.3"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libseccomp2/copyright",
+        "sha256": "6da0653a365b80ab31478dbfe9e7c358e80d58b6d2b52b4e16b4dbb42d7d9f5c",
+        "size": 1429
+      },
+      "package": "libseccomp2:amd64",
+      "version": "2.5.4-1+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libselinux1/copyright",
+        "sha256": "641806738b0c6a3d03168c2649e6b94205198bb66cd557e6bae3a20b71c9bb0b",
+        "size": 3131
+      },
+      "package": "libselinux1:amd64",
+      "version": "3.4-1+b6"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libsemanage-common/copyright",
+        "sha256": "e00e6a86c598f9e24ced0180a70a5f2f2e45e133d93adf2b17ce8a06ce4b1b51",
+        "size": 1830
+      },
+      "package": "libsemanage-common",
+      "version": "3.4-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libsemanage2/copyright",
+        "sha256": "e00e6a86c598f9e24ced0180a70a5f2f2e45e133d93adf2b17ce8a06ce4b1b51",
+        "size": 1830
+      },
+      "package": "libsemanage2:amd64",
+      "version": "3.4-1+b5"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libsepol2/copyright",
+        "sha256": "78d2a34606a0302057ec499a3b3c07bcbc43ca334064ce4c80891a0f69c8f6c6",
+        "size": 3750
+      },
+      "package": "libsepol2:amd64",
+      "version": "3.4-2.1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libsmartcols1/copyright",
+        "sha256": "30539a2df6a89d844f43c727505a3193a60515f8ec6cdede8cc515ed22941d1c",
+        "size": 23237
+      },
+      "package": "libsmartcols1:amd64",
+      "version": "2.38.1-5+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libsqlite3-0/copyright",
+        "sha256": "78e9df8f8153c91c762ec970b82d224ac4d30f05aa7773e7e17e268141e53873",
+        "size": 1833
+      },
+      "package": "libsqlite3-0:amd64",
+      "version": "3.40.1-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libss2/copyright",
+        "sha256": "1ca415a294c0e56958c4f795b3f1f69ea3479bca53d7811f5cdd020a258949db",
+        "size": 15209
+      },
+      "package": "libss2:amd64",
+      "version": "1.47.0-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libssl3/copyright",
+        "sha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35",
+        "size": 2543
+      },
+      "package": "libssl3:amd64",
+      "version": "3.0.14-1~deb12u2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/gcc-12-base/copyright",
+        "sha256": "da8191658b3452ce9caf31638ba61dab31a38c619fa39df119812e050f592fd3",
+        "size": 68194
+      },
+      "package": "libstdc++6:amd64",
+      "version": "12.2.0-14"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libsystemd0/copyright",
+        "sha256": "a7d06854714a1ca99f6dbd1a1641dde5bcf28635be149f6554449618f8f427f3",
+        "size": 12776
+      },
+      "package": "libsystemd0:amd64",
+      "version": "252.30-1~deb12u2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libtasn1-6/copyright",
+        "sha256": "572ad60ad184d8f52c6dc66d83a61a68f137db560b3452ce00588c9ecf128a65",
+        "size": 3451
+      },
+      "package": "libtasn1-6:amd64",
+      "version": "4.19.0-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libtinfo6/copyright",
+        "sha256": "f0974fb41778e23c94111ff90da0546de8971f8270c58877283d372e6bd7f17e",
+        "size": 4670
+      },
+      "package": "libtinfo6:amd64",
+      "version": "6.4-4"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libtirpc-common/copyright",
+        "sha256": "401dcf98d8ef2b712ec6ab310dbf727fc2cdce290bfde5b6d0b609a927530217",
+        "size": 13121
+      },
+      "package": "libtirpc-common",
+      "version": "1.3.3+ds-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libtirpc3/copyright",
+        "sha256": "401dcf98d8ef2b712ec6ab310dbf727fc2cdce290bfde5b6d0b609a927530217",
+        "size": 13121
+      },
+      "package": "libtirpc3:amd64",
+      "version": "1.3.3+ds-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libudev1/copyright",
+        "sha256": "a7d06854714a1ca99f6dbd1a1641dde5bcf28635be149f6554449618f8f427f3",
+        "size": 12776
+      },
+      "package": "libudev1:amd64",
+      "version": "252.30-1~deb12u2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libunistring2/copyright",
+        "sha256": "0035f89e5317f3cec389383e8727788521b0fde3e75cea881fa0e92e1d48cb57",
+        "size": 6068
+      },
+      "package": "libunistring2:amd64",
+      "version": "1.0-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libuuid1/copyright",
+        "sha256": "30539a2df6a89d844f43c727505a3193a60515f8ec6cdede8cc515ed22941d1c",
+        "size": 23237
+      },
+      "package": "libuuid1:amd64",
+      "version": "2.38.1-5+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libxxhash0/copyright",
+        "sha256": "a123c93b07e781919ae996276ac02bb1c8b19dfde88176cd1240ab277c14a4ce",
+        "size": 2579
+      },
+      "package": "libxxhash0:amd64",
+      "version": "0.8.1-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/libzstd1/copyright",
+        "sha256": "35e85e8e9bbb71492c5f5dddf39ed65b68775a02ad8d710c25d097b497f06c49",
+        "size": 5389
+      },
+      "package": "libzstd1:amd64",
+      "version": "1.5.4+dfsg2-5"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/login/copyright",
+        "sha256": "a4c3e5b19700dd3cc5961663d204bd7150f65f913314682aede5931548c436d5",
+        "size": 7044
+      },
+      "package": "login",
+      "version": "1:4.13+dfsg1-1+b1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/logsave/copyright",
+        "sha256": "1ca415a294c0e56958c4f795b3f1f69ea3479bca53d7811f5cdd020a258949db",
+        "size": 15209
+      },
+      "package": "logsave",
+      "version": "1.47.0-2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/mawk/copyright",
+        "sha256": "167d04422f2fdf76ab565878c23be8ba0c2ebb2c57a5dac0a5a59ccd27e747a5",
+        "size": 22591
+      },
+      "package": "mawk",
+      "version": "1.3.4.20200120-3.1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/mount/copyright",
+        "sha256": "30539a2df6a89d844f43c727505a3193a60515f8ec6cdede8cc515ed22941d1c",
+        "size": 23237
+      },
+      "package": "mount",
+      "version": "2.38.1-5+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/ncurses-base/copyright",
+        "sha256": "f0974fb41778e23c94111ff90da0546de8971f8270c58877283d372e6bd7f17e",
+        "size": 4670
+      },
+      "package": "ncurses-base",
+      "version": "6.4-4"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/ncurses-bin/copyright",
+        "sha256": "f0974fb41778e23c94111ff90da0546de8971f8270c58877283d372e6bd7f17e",
+        "size": 4670
+      },
+      "package": "ncurses-bin",
+      "version": "6.4-4"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/netbase/copyright",
+        "sha256": "795b66147ea5ad692991caa7008ece551fb0fa88b9c53656223bd1518dc58ab2",
+        "size": 1234
+      },
+      "package": "netbase",
+      "version": "6.4"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/openssl/copyright",
+        "sha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35",
+        "size": 2543
+      },
+      "package": "openssl",
+      "version": "3.0.14-1~deb12u2"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/passwd/copyright",
+        "sha256": "a4c3e5b19700dd3cc5961663d204bd7150f65f913314682aede5931548c436d5",
+        "size": 7044
+      },
+      "package": "passwd",
+      "version": "1:4.13+dfsg1-1+b1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/perl-base/copyright",
+        "sha256": "b52f3ca17b45473cb0da6ec46748949101fcf0dda1fd5d8b306e6c97fd41af4d",
+        "size": 109772
+      },
+      "package": "perl-base",
+      "version": "5.36.0-7+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/readline-common/copyright",
+        "sha256": "3591a8e4de849d910c5ee9045388344ef151c23b10cf8c6b1950f89f1ba1569c",
+        "size": 4414
+      },
+      "package": "readline-common",
+      "version": "8.2-1.3"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/sed/copyright",
+        "sha256": "719320e425e8e6da53a55e0fcfa2f2ed9b1332cea16abd65321bd651b2a88568",
+        "size": 8618
+      },
+      "package": "sed",
+      "version": "4.9-1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/sysvinit-utils/copyright",
+        "sha256": "ad7cb339e58a88918a883d553ca236795191f027e158788a8b33f747ff502fb2",
+        "size": 4689
+      },
+      "package": "sysvinit-utils",
+      "version": "3.06-4"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/tar/copyright",
+        "sha256": "bea61e0c172868e07845cf50423f97f093a9a46de167dbbe333a38be610c8e00",
+        "size": 3798
+      },
+      "package": "tar",
+      "version": "1.34+dfsg-1.2+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/tzdata/copyright",
+        "sha256": "cb61132bc0fc7b26ef5a82ee18b2fb644a1362f4f286ed980ff22e408471f59a",
+        "size": 375
+      },
+      "package": "tzdata",
+      "version": "2024a-0+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/usr-is-merged/copyright",
+        "sha256": "9836bfe2ef94505bbf29701e8c90799ab1a5fd966d26d60d019a822cdbf3d61a",
+        "size": 987
+      },
+      "package": "usr-is-merged",
+      "version": "37~deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/util-linux/copyright",
+        "sha256": "30539a2df6a89d844f43c727505a3193a60515f8ec6cdede8cc515ed22941d1c",
+        "size": 23237
+      },
+      "package": "util-linux",
+      "version": "2.38.1-5+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/util-linux-extra/copyright",
+        "sha256": "30539a2df6a89d844f43c727505a3193a60515f8ec6cdede8cc515ed22941d1c",
+        "size": 23237
+      },
+      "package": "util-linux-extra",
+      "version": "2.38.1-5+deb12u1"
+    },
+    {
+      "copyright": {
+        "path": "/usr/share/doc/zlib1g/copyright",
+        "sha256": "9e5b96d63773a5d177ba264254390f792be07e41748ebd94730981c6cac31cc6",
+        "size": 2927
+      },
+      "package": "zlib1g:amd64",
+      "version": "1:1.2.13.dfsg-1"
+    }
+  ],
+  "locked_wheels": [
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)"
+      ],
+      "license_expression": null,
+      "license_field": "MPL-2.0",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/certifi-2026.7.22.dist-info/licenses/LICENSE",
+          "sha256": "e93716da6b9c0d5a4a1df60fe695b370f0695603d21f6f83f053e42cfc10caf7",
+          "size": 989
+        }
+      ],
+      "name": "certifi",
+      "version": "2026.7.22"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": null,
+      "license_field": "MIT",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/charset_normalizer-3.5.1.dist-info/licenses/LICENSE",
+          "sha256": "6d0d41bfe170ac6c7dc248c9a63e254d0fb45a60d50a8257d0af92c6e249b887",
+          "size": 1071
+        }
+      ],
+      "name": "charset-normalizer",
+      "version": "3.5.1"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: MIT License"
+      ],
+      "license_expression": null,
+      "license_field": "MIT",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/coloredlogs-15.0.1.dist-info/LICENSE.txt",
+          "sha256": "0bef4ffb1855b65570304f2018c6d44e4bab97bd5df8716ecd7800014d717267",
+          "size": 1056
+        }
+      ],
+      "name": "coloredlogs",
+      "version": "15.0.1"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: MIT License"
+      ],
+      "license_expression": "MIT",
+      "license_field": null,
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/filelock-3.32.5.dist-info/licenses/LICENSE",
+          "sha256": "608c89d5060ae9921adccf3236695bc654a9946e12323ef6c021dfa04e294d48",
+          "size": 1088
+        }
+      ],
+      "name": "filelock",
+      "version": "3.32.5"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: Apache Software License"
+      ],
+      "license_expression": null,
+      "license_field": "Apache 2.0",
+      "license_files": [],
+      "name": "flatbuffers",
+      "version": "25.12.19"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": "BSD-3-Clause",
+      "license_field": null,
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/fsspec-2026.7.0.dist-info/licenses/LICENSE",
+          "sha256": "2dc35496ce53a7307915c008a844aad53e772b49b34cdd00445067691407ec94",
+          "size": 1513
+        }
+      ],
+      "name": "fsspec",
+      "version": "2026.7.0"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: Apache Software License"
+      ],
+      "license_expression": "Apache-2.0",
+      "license_field": null,
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/hf_xet-1.6.0.dist-info/licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "size": 11357
+        }
+      ],
+      "name": "hf-xet",
+      "version": "1.6.0"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: Apache Software License"
+      ],
+      "license_expression": null,
+      "license_field": "Apache",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/huggingface_hub-0.36.2.dist-info/licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "size": 11357
+        }
+      ],
+      "name": "huggingface_hub",
+      "version": "0.36.2"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: MIT License"
+      ],
+      "license_expression": null,
+      "license_field": "MIT",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/humanfriendly-10.0.dist-info/LICENSE.txt",
+          "sha256": "4ac48f4117809f2734066150450f120b3bb110ac1d3b32170795e0560dbbc1f5",
+          "size": 1056
+        }
+      ],
+      "name": "humanfriendly",
+      "version": "10.0"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": "BSD-3-Clause",
+      "license_field": null,
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/idna-3.19.dist-info/licenses/LICENSE.md",
+          "sha256": "1a9a4f0e3d479a27240ddd59a9137a66ab4a0f9dfdc8ca6188cc0bfd85187f04",
+          "size": 1541
+        }
+      ],
+      "name": "idna",
+      "version": "3.19"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: BSD License"
+      ],
+      "license_expression": null,
+      "license_field": null,
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/jinja2-3.1.6.dist-info/licenses/LICENSE.txt",
+          "sha256": "3b49dcee4105eb37bac10faf1be260408fe85d252b8e9df2e0979fc1e094437b",
+          "size": 1475
+        }
+      ],
+      "name": "Jinja2",
+      "version": "3.1.6"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": "BSD-3-Clause",
+      "license_field": null,
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/markupsafe-3.0.3.dist-info/licenses/LICENSE.txt",
+          "sha256": "489a8e1108509ed98a37bb983e11e0f7e1d31f0bd8f99a79c8448e7ff37d07ea",
+          "size": 1475
+        }
+      ],
+      "name": "MarkupSafe",
+      "version": "3.0.3"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: BSD License"
+      ],
+      "license_expression": null,
+      "license_field": "BSD",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/mpmath-1.3.0.dist-info/LICENSE",
+          "sha256": "c26cae81da4508e5e249985777a33821f183223ebb74d7f8cfbf90fe7eef2fb7",
+          "size": 1537
+        }
+      ],
+      "name": "mpmath",
+      "version": "1.3.0"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": "BSD-3-Clause",
+      "license_field": null,
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/networkx-3.6.1.dist-info/licenses/LICENSE.txt",
+          "sha256": "3cf7c3a179d817b23b8b8568211769fefdf93797d207d984b8b2fa24d0220b33",
+          "size": 1763
+        }
+      ],
+      "name": "networkx",
+      "version": "3.6.1"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: BSD License"
+      ],
+      "license_expression": null,
+      "license_field": "Copyright (c) 2005-2023, NumPy Developers.\nAll rights reserved.\n\nRedistribution and use in source and binary forms, with or without\nmodification, are permitted provided that the following conditions are\nmet:\n\n    * Redistributions of source code must retain the above copyright\n       notice, this list of conditions and the following disclaimer.\n\n    * Redistributions in binary form must reproduce the above\n       copyright notice, this list of conditions and the following\n       disclaimer in the documentation and/or other materials provided\n       with the distribution.\n\n    * Neither the name of the NumPy Developers nor the names of any\n       contributors may be used to endorse or promote products derived\n       from this software without specific prior written permission.\n\nTHIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n\"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\nLIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR\nA PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT\nOWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,\nSPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT\nLIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,\nDATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY\nTHEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\nOF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n\n----\n\nThe NumPy repository and source distributions bundle several libraries that are\ncompatibly licensed.  We list these here.\n\nName: lapack-lite\nFiles: numpy/linalg/lapack_lite/*\nLicense: BSD-3-Clause\n  For details, see numpy/linalg/lapack_lite/LICENSE.txt\n\nName: tempita\nFiles: tools/npy_tempita/*\nLicense: MIT\n  For details, see tools/npy_tempita/license.txt\n\nName: dragon4\nFiles: numpy/core/src/multiarray/dragon4.c\nLicense: MIT\n  For license text, see numpy/core/src/multiarray/dragon4.c\n\nName: libdivide\nFiles: numpy/core/include/numpy/libdivide/*\nLicense: Zlib\n  For license text, see numpy/core/include/numpy/libdivide/LICENSE.txt\n\n\nNote that the following files are vendored in the repository and sdist but not\ninstalled in built numpy packages:\n\nName: Meson\nFiles: vendored-meson/meson/*\nLicense: Apache 2.0\n  For license text, see vendored-meson/meson/COPYING\n\nName: spin\nFiles: .spin/cmds.py\nLicense: BSD-3\n  For license text, see .spin/LICENSE\n\n----\n\nThis binary distribution of NumPy also bundles the following software:\n\n\nName: OpenBLAS\nFiles: numpy.libs/libopenblas*.so\nDescription: bundled as a dynamically linked library\nAvailability: https://github.com/OpenMathLib/OpenBLAS/\nLicense: BSD-3-Clause\n  Copyright (c) 2011-2014, The OpenBLAS Project\n  All rights reserved.\n\n  Redistribution and use in source and binary forms, with or without\n  modification, are permitted provided that the following conditions are\n  met:\n\n     1. Redistributions of source code must retain the above copyright\n        notice, this list of conditions and the following disclaimer.\n\n     2. Redistributions in binary form must reproduce the above copyright\n        notice, this list of conditions and the following disclaimer in\n        the documentation and/or other materials provided with the\n        distribution.\n     3. Neither the name of the OpenBLAS project nor the names of\n        its contributors may be used to endorse or promote products\n        derived from this software without specific prior written\n        permission.\n\n  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\"\n  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE\n  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE\n  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL\n  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR\n  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,\n  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE\n  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n\n\nName: LAPACK\nFiles: numpy.libs/libopenblas*.so\nDescription: bundled in OpenBLAS\nAvailability: https://github.com/OpenMathLib/OpenBLAS/\nLicense: BSD-3-Clause-Attribution\n  Copyright (c) 1992-2013 The University of Tennessee and The University\n                          of Tennessee Research Foundation.  All rights\n                          reserved.\n  Copyright (c) 2000-2013 The University of California Berkeley. All\n                          rights reserved.\n  Copyright (c) 2006-2013 The University of Colorado Denver.  All rights\n                          reserved.\n\n  $COPYRIGHT$\n\n  Additional copyrights may follow\n\n  $HEADER$\n\n  Redistribution and use in source and binary forms, with or without\n  modification, are permitted provided that the following conditions are\n  met:\n\n  - Redistributions of source code must retain the above copyright\n    notice, this list of conditions and the following disclaimer.\n\n  - Redistributions in binary form must reproduce the above copyright\n    notice, this list of conditions and the following disclaimer listed\n    in this license in the documentation and/or other materials\n    provided with the distribution.\n\n  - Neither the name of the copyright holders nor the names of its\n    contributors may be used to endorse or promote products derived from\n    this software without specific prior written permission.\n\n  The copyright holders provide no reassurances that the source code\n  provided does not infringe any patent, copyright, or any other\n  intellectual property rights of third parties.  The copyright holders\n  disclaim any liability to any recipient for claims brought against\n  recipient by any third party for infringement of that parties\n  intellectual property rights.\n\n  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n  \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR\n  A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT\n  OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,\n  SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT\n  LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,\n  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY\n  THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n\n\nName: GCC runtime library\nFiles: numpy.libs/libgfortran*.so\nDescription: dynamically linked to files compiled with gcc\nAvailability: https://gcc.gnu.org/git/?p=gcc.git;a=tree;f=libgfortran\nLicense: GPL-3.0-with-GCC-exception\n  Copyright (C) 2002-2017 Free Software Foundation, Inc.\n\n  Libgfortran is free software; you can redistribute it and/or modify\n  it under the terms of the GNU General Public License as published by\n  the Free Software Foundation; either version 3, or (at your option)\n  any later version.\n\n  Libgfortran is distributed in the hope that it will be useful,\n  but WITHOUT ANY WARRANTY; without even the implied warranty of\n  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n  GNU General Public License for more details.\n\n  Under Section 7 of GPL version 3, you are granted additional\n  permissions described in the GCC Runtime Library Exception, version\n  3.1, as published by the Free Software Foundation.\n\n  You should have received a copy of the GNU General Public License and\n  a copy of the GCC Runtime Library Exception along with this program;\n  see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see\n  <http://www.gnu.org/licenses/>.\n\n----\n\nFull text of license texts referred to above follows (that they are\nlisted below does not necessarily imply the conditions apply to the\npresent binary release):\n\n----\n\nGCC RUNTIME LIBRARY EXCEPTION\n\nVersion 3.1, 31 March 2009\n\nCopyright (C) 2009 Free Software Foundation, Inc. <http://fsf.org/>\n\nEveryone is permitted to copy and distribute verbatim copies of this\nlicense document, but changing it is not allowed.\n\nThis GCC Runtime Library Exception (\"Exception\") is an additional\npermission under section 7 of the GNU General Public License, version\n3 (\"GPLv3\"). It applies to a given file (the \"Runtime Library\") that\nbears a notice placed by the copyright holder of the file stating that\nthe file is governed by GPLv3 along with this Exception.\n\nWhen you use GCC to compile a program, GCC may combine portions of\ncertain GCC header files and runtime libraries with the compiled\nprogram. The purpose of this Exception is to allow compilation of\nnon-GPL (including proprietary) programs to use, in this way, the\nheader files and runtime libraries covered by this Exception.\n\n0. Definitions.\n\nA file is an \"Independent Module\" if it either requires the Runtime\nLibrary for execution after a Compilation Process, or makes use of an\ninterface provided by the Runtime Library, but is not otherwise based\non the Runtime Library.\n\n\"GCC\" means a version of the GNU Compiler Collection, with or without\nmodifications, governed by version 3 (or a specified later version) of\nthe GNU General Public License (GPL) with the option of using any\nsubsequent versions published by the FSF.\n\n\"GPL-compatible Software\" is software whose conditions of propagation,\nmodification and use would permit combination with GCC in accord with\nthe license of GCC.\n\n\"Target Code\" refers to output from any compiler for a real or virtual\ntarget processor architecture, in executable form or suitable for\ninput to an assembler, loader, linker and/or execution\nphase. Notwithstanding that, Target Code does not include data in any\nformat that is used as a compiler intermediate representation, or used\nfor producing a compiler intermediate representation.\n\nThe \"Compilation Process\" transforms code entirely represented in\nnon-intermediate languages designed for human-written code, and/or in\nJava Virtual Machine byte code, into Target Code. Thus, for example,\nuse of source code generators and preprocessors need not be considered\npart of the Compilation Process, since the Compilation Process can be\nunderstood as starting with the output of the generators or\npreprocessors.\n\nA Compilation Process is \"Eligible\" if it is done using GCC, alone or\nwith other GPL-compatible software, or if it is done without using any\nwork based on GCC. For example, using non-GPL-compatible Software to\noptimize any GCC intermediate representations would not qualify as an\nEligible Compilation Process.\n\n1. Grant of Additional Permission.\n\nYou have permission to propagate a work of Target Code formed by\ncombining the Runtime Library with Independent Modules, even if such\npropagation would otherwise violate the terms of GPLv3, provided that\nall Target Code was generated by Eligible Compilation Processes. You\nmay then convey such a combination under terms of your choice,\nconsistent with the licensing of the Independent Modules.\n\n2. No Weakening of GCC Copyleft.\n\nThe availability of this Exception does not imply any general\npresumption that third-party software is unaffected by the copyleft\nrequirements of the license of GCC.\n\n----\n\n                    GNU GENERAL PUBLIC LICENSE\n                       Version 3, 29 June 2007\n\n Copyright (C) 2007 Free Software Foundation, Inc. <http://fsf.org/>\n Everyone is permitted to copy and distribute verbatim copies\n of this license document, but changing it is not allowed.\n\n                            Preamble\n\n  The GNU General Public License is a free, copyleft license for\nsoftware and other kinds of works.\n\n  The licenses for most software and other practical works are designed\nto take away your freedom to share and change the works.  By contrast,\nthe GNU General Public License is intended to guarantee your freedom to\nshare and change all versions of a program--to make sure it remains free\nsoftware for all its users.  We, the Free Software Foundation, use the\nGNU General Public License for most of our software; it applies also to\nany other work released this way by its authors.  You can apply it to\nyour programs, too.\n\n  When we speak of free software, we are referring to freedom, not\nprice.  Our General Public Licenses are designed to make sure that you\nhave the freedom to distribute copies of free software (and charge for\nthem if you wish), that you receive source code or can get it if you\nwant it, that you can change the software or use pieces of it in new\nfree programs, and that you know you can do these things.\n\n  To protect your rights, we need to prevent others from denying you\nthese rights or asking you to surrender the rights.  Therefore, you have\ncertain responsibilities if you distribute copies of the software, or if\nyou modify it: responsibilities to respect the freedom of others.\n\n  For example, if you distribute copies of such a program, whether\ngratis or for a fee, you must pass on to the recipients the same\nfreedoms that you received.  You must make sure that they, too, receive\nor can get the source code.  And you must show them these terms so they\nknow their rights.\n\n  Developers that use the GNU GPL protect your rights with two steps:\n(1) assert copyright on the software, and (2) offer you this License\ngiving you legal permission to copy, distribute and/or modify it.\n\n  For the developers' and authors' protection, the GPL clearly explains\nthat there is no warranty for this free software.  For both users' and\nauthors' sake, the GPL requires that modified versions be marked as\nchanged, so that their problems will not be attributed erroneously to\nauthors of previous versions.\n\n  Some devices are designed to deny users access to install or run\nmodified versions of the software inside them, although the manufacturer\ncan do so.  This is fundamentally incompatible with the aim of\nprotecting users' freedom to change the software.  The systematic\npattern of such abuse occurs in the area of products for individuals to\nuse, which is precisely where it is most unacceptable.  Therefore, we\nhave designed this version of the GPL to prohibit the practice for those\nproducts.  If such problems arise substantially in other domains, we\nstand ready to extend this provision to those domains in future versions\nof the GPL, as needed to protect the freedom of users.\n\n  Finally, every program is threatened constantly by software patents.\nStates should not allow patents to restrict development and use of\nsoftware on general-purpose computers, but in those that do, we wish to\navoid the special danger that patents applied to a free program could\nmake it effectively proprietary.  To prevent this, the GPL assures that\npatents cannot be used to render the program non-free.\n\n  The precise terms and conditions for copying, distribution and\nmodification follow.\n\n                       TERMS AND CONDITIONS\n\n  0. Definitions.\n\n  \"This License\" refers to version 3 of the GNU General Public License.\n\n  \"Copyright\" also means copyright-like laws that apply to other kinds of\nworks, such as semiconductor masks.\n\n  \"The Program\" refers to any copyrightable work licensed under this\nLicense.  Each licensee is addressed as \"you\".  \"Licensees\" and\n\"recipients\" may be individuals or organizations.\n\n  To \"modify\" a work means to copy from or adapt all or part of the work\nin a fashion requiring copyright permission, other than the making of an\nexact copy.  The resulting work is called a \"modified version\" of the\nearlier work or a work \"based on\" the earlier work.\n\n  A \"covered work\" means either the unmodified Program or a work based\non the Program.\n\n  To \"propagate\" a work means to do anything with it that, without\npermission, would make you directly or secondarily liable for\ninfringement under applicable copyright law, except executing it on a\ncomputer or modifying a private copy.  Propagation includes copying,\ndistribution (with or without modification), making available to the\npublic, and in some countries other activities as well.\n\n  To \"convey\" a work means any kind of propagation that enables other\nparties to make or receive copies.  Mere interaction with a user through\na computer network, with no transfer of a copy, is not conveying.\n\n  An interactive user interface displays \"Appropriate Legal Notices\"\nto the extent that it includes a convenient and prominently visible\nfeature that (1) displays an appropriate copyright notice, and (2)\ntells the user that there is no warranty for the work (except to the\nextent that warranties are provided), that licensees may convey the\nwork under this License, and how to view a copy of this License.  If\nthe interface presents a list of user commands or options, such as a\nmenu, a prominent item in the list meets this criterion.\n\n  1. Source Code.\n\n  The \"source code\" for a work means the preferred form of the work\nfor making modifications to it.  \"Object code\" means any non-source\nform of a work.\n\n  A \"Standard Interface\" means an interface that either is an official\nstandard defined by a recognized standards body, or, in the case of\ninterfaces specified for a particular programming language, one that\nis widely used among developers working in that language.\n\n  The \"System Libraries\" of an executable work include anything, other\nthan the work as a whole, that (a) is included in the normal form of\npackaging a Major Component, but which is not part of that Major\nComponent, and (b) serves only to enable use of the work with that\nMajor Component, or to implement a Standard Interface for which an\nimplementation is available to the public in source code form.  A\n\"Major Component\", in this context, means a major essential component\n(kernel, window system, and so on) of the specific operating system\n(if any) on which the executable work runs, or a compiler used to\nproduce the work, or an object code interpreter used to run it.\n\n  The \"Corresponding Source\" for a work in object code form means all\nthe source code needed to generate, install, and (for an executable\nwork) run the object code and to modify the work, including scripts to\ncontrol those activities.  However, it does not include the work's\nSystem Libraries, or general-purpose tools or generally available free\nprograms which are used unmodified in performing those activities but\nwhich are not part of the work.  For example, Corresponding Source\nincludes interface definition files associated with source files for\nthe work, and the source code for shared libraries and dynamically\nlinked subprograms that the work is specifically designed to require,\nsuch as by intimate data communication or control flow between those\nsubprograms and other parts of the work.\n\n  The Corresponding Source need not include anything that users\ncan regenerate automatically from other parts of the Corresponding\nSource.\n\n  The Corresponding Source for a work in source code form is that\nsame work.\n\n  2. Basic Permissions.\n\n  All rights granted under this License are granted for the term of\ncopyright on the Program, and are irrevocable provided the stated\nconditions are met.  This License explicitly affirms your unlimited\npermission to run the unmodified Program.  The output from running a\ncovered work is covered by this License only if the output, given its\ncontent, constitutes a covered work.  This License acknowledges your\nrights of fair use or other equivalent, as provided by copyright law.\n\n  You may make, run and propagate covered works that you do not\nconvey, without conditions so long as your license otherwise remains\nin force.  You may convey covered works to others for the sole purpose\nof having them make modifications exclusively for you, or provide you\nwith facilities for running those works, provided that you comply with\nthe terms of this License in conveying all material for which you do\nnot control copyright.  Those thus making or running the covered works\nfor you must do so exclusively on your behalf, under your direction\nand control, on terms that prohibit them from making any copies of\nyour copyrighted material outside their relationship with you.\n\n  Conveying under any other circumstances is permitted solely under\nthe conditions stated below.  Sublicensing is not allowed; section 10\nmakes it unnecessary.\n\n  3. Protecting Users' Legal Rights From Anti-Circumvention Law.\n\n  No covered work shall be deemed part of an effective technological\nmeasure under any applicable law fulfilling obligations under article\n11 of the WIPO copyright treaty adopted on 20 December 1996, or\nsimilar laws prohibiting or restricting circumvention of such\nmeasures.\n\n  When you convey a covered work, you waive any legal power to forbid\ncircumvention of technological measures to the extent such circumvention\nis effected by exercising rights under this License with respect to\nthe covered work, and you disclaim any intention to limit operation or\nmodification of the work as a means of enforcing, against the work's\nusers, your or third parties' legal rights to forbid circumvention of\ntechnological measures.\n\n  4. Conveying Verbatim Copies.\n\n  You may convey verbatim copies of the Program's source code as you\nreceive it, in any medium, provided that you conspicuously and\nappropriately publish on each copy an appropriate copyright notice;\nkeep intact all notices stating that this License and any\nnon-permissive terms added in accord with section 7 apply to the code;\nkeep intact all notices of the absence of any warranty; and give all\nrecipients a copy of this License along with the Program.\n\n  You may charge any price or no price for each copy that you convey,\nand you may offer support or warranty protection for a fee.\n\n  5. Conveying Modified Source Versions.\n\n  You may convey a work based on the Program, or the modifications to\nproduce it from the Program, in the form of source code under the\nterms of section 4, provided that you also meet all of these conditions:\n\n    a) The work must carry prominent notices stating that you modified\n    it, and giving a relevant date.\n\n    b) The work must carry prominent notices stating that it is\n    released under this License and any conditions added under section\n    7.  This requirement modifies the requirement in section 4 to\n    \"keep intact all notices\".\n\n    c) You must license the entire work, as a whole, under this\n    License to anyone who comes into possession of a copy.  This\n    License will therefore apply, along with any applicable section 7\n    additional terms, to the whole of the work, and all its parts,\n    regardless of how they are packaged.  This License gives no\n    permission to license the work in any other way, but it does not\n    invalidate such permission if you have separately received it.\n\n    d) If the work has interactive user interfaces, each must display\n    Appropriate Legal Notices; however, if the Program has interactive\n    interfaces that do not display Appropriate Legal Notices, your\n    work need not make them do so.\n\n  A compilation of a covered work with other separate and independent\nworks, which are not by their nature extensions of the covered work,\nand which are not combined with it such as to form a larger program,\nin or on a volume of a storage or distribution medium, is called an\n\"aggregate\" if the compilation and its resulting copyright are not\nused to limit the access or legal rights of the compilation's users\nbeyond what the individual works permit.  Inclusion of a covered work\nin an aggregate does not cause this License to apply to the other\nparts of the aggregate.\n\n  6. Conveying Non-Source Forms.\n\n  You may convey a covered work in object code form under the terms\nof sections 4 and 5, provided that you also convey the\nmachine-readable Corresponding Source under the terms of this License,\nin one of these ways:\n\n    a) Convey the object code in, or embodied in, a physical product\n    (including a physical distribution medium), accompanied by the\n    Corresponding Source fixed on a durable physical medium\n    customarily used for software interchange.\n\n    b) Convey the object code in, or embodied in, a physical product\n    (including a physical distribution medium), accompanied by a\n    written offer, valid for at least three years and valid for as\n    long as you offer spare parts or customer support for that product\n    model, to give anyone who possesses the object code either (1) a\n    copy of the Corresponding Source for all the software in the\n    product that is covered by this License, on a durable physical\n    medium customarily used for software interchange, for a price no\n    more than your reasonable cost of physically performing this\n    conveying of source, or (2) access to copy the\n    Corresponding Source from a network server at no charge.\n\n    c) Convey individual copies of the object code with a copy of the\n    written offer to provide the Corresponding Source.  This\n    alternative is allowed only occasionally and noncommercially, and\n    only if you received the object code with such an offer, in accord\n    with subsection 6b.\n\n    d) Convey the object code by offering access from a designated\n    place (gratis or for a charge), and offer equivalent access to the\n    Corresponding Source in the same way through the same place at no\n    further charge.  You need not require recipients to copy the\n    Corresponding Source along with the object code.  If the place to\n    copy the object code is a network server, the Corresponding Source\n    may be on a different server (operated by you or a third party)\n    that supports equivalent copying facilities, provided you maintain\n    clear directions next to the object code saying where to find the\n    Corresponding Source.  Regardless of what server hosts the\n    Corresponding Source, you remain obligated to ensure that it is\n    available for as long as needed to satisfy these requirements.\n\n    e) Convey the object code using peer-to-peer transmission, provided\n    you inform other peers where the object code and Corresponding\n    Source of the work are being offered to the general public at no\n    charge under subsection 6d.\n\n  A separable portion of the object code, whose source code is excluded\nfrom the Corresponding Source as a System Library, need not be\nincluded in conveying the object code work.\n\n  A \"User Product\" is either (1) a \"consumer product\", which means any\ntangible personal property which is normally used for personal, family,\nor household purposes, or (2) anything designed or sold for incorporation\ninto a dwelling.  In determining whether a product is a consumer product,\ndoubtful cases shall be resolved in favor of coverage.  For a particular\nproduct received by a particular user, \"normally used\" refers to a\ntypical or common use of that class of product, regardless of the status\nof the particular user or of the way in which the particular user\nactually uses, or expects or is expected to use, the product.  A product\nis a consumer product regardless of whether the product has substantial\ncommercial, industrial or non-consumer uses, unless such uses represent\nthe only significant mode of use of the product.\n\n  \"Installation Information\" for a User Product means any methods,\nprocedures, authorization keys, or other information required to install\nand execute modified versions of a covered work in that User Product from\na modified version of its Corresponding Source.  The information must\nsuffice to ensure that the continued functioning of the modified object\ncode is in no case prevented or interfered with solely because\nmodification has been made.\n\n  If you convey an object code work under this section in, or with, or\nspecifically for use in, a User Product, and the conveying occurs as\npart of a transaction in which the right of possession and use of the\nUser Product is transferred to the recipient in perpetuity or for a\nfixed term (regardless of how the transaction is characterized), the\nCorresponding Source conveyed under this section must be accompanied\nby the Installation Information.  But this requirement does not apply\nif neither you nor any third party retains the ability to install\nmodified object code on the User Product (for example, the work has\nbeen installed in ROM).\n\n  The requirement to provide Installation Information does not include a\nrequirement to continue to provide support service, warranty, or updates\nfor a work that has been modified or installed by the recipient, or for\nthe User Product in which it has been modified or installed.  Access to a\nnetwork may be denied when the modification itself materially and\nadversely affects the operation of the network or violates the rules and\nprotocols for communication across the network.\n\n  Corresponding Source conveyed, and Installation Information provided,\nin accord with this section must be in a format that is publicly\ndocumented (and with an implementation available to the public in\nsource code form), and must require no special password or key for\nunpacking, reading or copying.\n\n  7. Additional Terms.\n\n  \"Additional permissions\" are terms that supplement the terms of this\nLicense by making exceptions from one or more of its conditions.\nAdditional permissions that are applicable to the entire Program shall\nbe treated as though they were included in this License, to the extent\nthat they are valid under applicable law.  If additional permissions\napply only to part of the Program, that part may be used separately\nunder those permissions, but the entire Program remains governed by\nthis License without regard to the additional permissions.\n\n  When you convey a copy of a covered work, you may at your option\nremove any additional permissions from that copy, or from any part of\nit.  (Additional permissions may be written to require their own\nremoval in certain cases when you modify the work.)  You may place\nadditional permissions on material, added by you to a covered work,\nfor which you have or can give appropriate copyright permission.\n\n  Notwithstanding any other provision of this License, for material you\nadd to a covered work, you may (if authorized by the copyright holders of\nthat material) supplement the terms of this License with terms:\n\n    a) Disclaiming warranty or limiting liability differently from the\n    terms of sections 15 and 16 of this License; or\n\n    b) Requiring preservation of specified reasonable legal notices or\n    author attributions in that material or in the Appropriate Legal\n    Notices displayed by works containing it; or\n\n    c) Prohibiting misrepresentation of the origin of that material, or\n    requiring that modified versions of such material be marked in\n    reasonable ways as different from the original version; or\n\n    d) Limiting the use for publicity purposes of names of licensors or\n    authors of the material; or\n\n    e) Declining to grant rights under trademark law for use of some\n    trade names, trademarks, or service marks; or\n\n    f) Requiring indemnification of licensors and authors of that\n    material by anyone who conveys the material (or modified versions of\n    it) with contractual assumptions of liability to the recipient, for\n    any liability that these contractual assumptions directly impose on\n    those licensors and authors.\n\n  All other non-permissive additional terms are considered \"further\nrestrictions\" within the meaning of section 10.  If the Program as you\nreceived it, or any part of it, contains a notice stating that it is\ngoverned by this License along with a term that is a further\nrestriction, you may remove that term.  If a license document contains\na further restriction but permits relicensing or conveying under this\nLicense, you may add to a covered work material governed by the terms\nof that license document, provided that the further restriction does\nnot survive such relicensing or conveying.\n\n  If you add terms to a covered work in accord with this section, you\nmust place, in the relevant source files, a statement of the\nadditional terms that apply to those files, or a notice indicating\nwhere to find the applicable terms.\n\n  Additional terms, permissive or non-permissive, may be stated in the\nform of a separately written license, or stated as exceptions;\nthe above requirements apply either way.\n\n  8. Termination.\n\n  You may not propagate or modify a covered work except as expressly\nprovided under this License.  Any attempt otherwise to propagate or\nmodify it is void, and will automatically terminate your rights under\nthis License (including any patent licenses granted under the third\nparagraph of section 11).\n\n  However, if you cease all violation of this License, then your\nlicense from a particular copyright holder is reinstated (a)\nprovisionally, unless and until the copyright holder explicitly and\nfinally terminates your license, and (b) permanently, if the copyright\nholder fails to notify you of the violation by some reasonable means\nprior to 60 days after the cessation.\n\n  Moreover, your license from a particular copyright holder is\nreinstated permanently if the copyright holder notifies you of the\nviolation by some reasonable means, this is the first time you have\nreceived notice of violation of this License (for any work) from that\ncopyright holder, and you cure the violation prior to 30 days after\nyour receipt of the notice.\n\n  Termination of your rights under this section does not terminate the\nlicenses of parties who have received copies or rights from you under\nthis License.  If your rights have been terminated and not permanently\nreinstated, you do not qualify to receive new licenses for the same\nmaterial under section 10.\n\n  9. Acceptance Not Required for Having Copies.\n\n  You are not required to accept this License in order to receive or\nrun a copy of the Program.  Ancillary propagation of a covered work\noccurring solely as a consequence of using peer-to-peer transmission\nto receive a copy likewise does not require acceptance.  However,\nnothing other than this License grants you permission to propagate or\nmodify any covered work.  These actions infringe copyright if you do\nnot accept this License.  Therefore, by modifying or propagating a\ncovered work, you indicate your acceptance of this License to do so.\n\n  10. Automatic Licensing of Downstream Recipients.\n\n  Each time you convey a covered work, the recipient automatically\nreceives a license from the original licensors, to run, modify and\npropagate that work, subject to this License.  You are not responsible\nfor enforcing compliance by third parties with this License.\n\n  An \"entity transaction\" is a transaction transferring control of an\norganization, or substantially all assets of one, or subdividing an\norganization, or merging organizations.  If propagation of a covered\nwork results from an entity transaction, each party to that\ntransaction who receives a copy of the work also receives whatever\nlicenses to the work the party's predecessor in interest had or could\ngive under the previous paragraph, plus a right to possession of the\nCorresponding Source of the work from the predecessor in interest, if\nthe predecessor has it or can get it with reasonable efforts.\n\n  You may not impose any further restrictions on the exercise of the\nrights granted or affirmed under this License.  For example, you may\nnot impose a license fee, royalty, or other charge for exercise of\nrights granted under this License, and you may not initiate litigation\n(including a cross-claim or counterclaim in a lawsuit) alleging that\nany patent claim is infringed by making, using, selling, offering for\nsale, or importing the Program or any portion of it.\n\n  11. Patents.\n\n  A \"contributor\" is a copyright holder who authorizes use under this\nLicense of the Program or a work on which the Program is based.  The\nwork thus licensed is called the contributor's \"contributor version\".\n\n  A contributor's \"essential patent claims\" are all patent claims\nowned or controlled by the contributor, whether already acquired or\nhereafter acquired, that would be infringed by some manner, permitted\nby this License, of making, using, or selling its contributor version,\nbut do not include claims that would be infringed only as a\nconsequence of further modification of the contributor version.  For\npurposes of this definition, \"control\" includes the right to grant\npatent sublicenses in a manner consistent with the requirements of\nthis License.\n\n  Each contributor grants you a non-exclusive, worldwide, royalty-free\npatent license under the contributor's essential patent claims, to\nmake, use, sell, offer for sale, import and otherwise run, modify and\npropagate the contents of its contributor version.\n\n  In the following three paragraphs, a \"patent license\" is any express\nagreement or commitment, however denominated, not to enforce a patent\n(such as an express permission to practice a patent or covenant not to\nsue for patent infringement).  To \"grant\" such a patent license to a\nparty means to make such an agreement or commitment not to enforce a\npatent against the party.\n\n  If you convey a covered work, knowingly relying on a patent license,\nand the Corresponding Source of the work is not available for anyone\nto copy, free of charge and under the terms of this License, through a\npublicly available network server or other readily accessible means,\nthen you must either (1) cause the Corresponding Source to be so\navailable, or (2) arrange to deprive yourself of the benefit of the\npatent license for this particular work, or (3) arrange, in a manner\nconsistent with the requirements of this License, to extend the patent\nlicense to downstream recipients.  \"Knowingly relying\" means you have\nactual knowledge that, but for the patent license, your conveying the\ncovered work in a country, or your recipient's use of the covered work\nin a country, would infringe one or more identifiable patents in that\ncountry that you have reason to believe are valid.\n\n  If, pursuant to or in connection with a single transaction or\narrangement, you convey, or propagate by procuring conveyance of, a\ncovered work, and grant a patent license to some of the parties\nreceiving the covered work authorizing them to use, propagate, modify\nor convey a specific copy of the covered work, then the patent license\nyou grant is automatically extended to all recipients of the covered\nwork and works based on it.\n\n  A patent license is \"discriminatory\" if it does not include within\nthe scope of its coverage, prohibits the exercise of, or is\nconditioned on the non-exercise of one or more of the rights that are\nspecifically granted under this License.  You may not convey a covered\nwork if you are a party to an arrangement with a third party that is\nin the business of distributing software, under which you make payment\nto the third party based on the extent of your activity of conveying\nthe work, and under which the third party grants, to any of the\nparties who would receive the covered work from you, a discriminatory\npatent license (a) in connection with copies of the covered work\nconveyed by you (or copies made from those copies), or (b) primarily\nfor and in connection with specific products or compilations that\ncontain the covered work, unless you entered into that arrangement,\nor that patent license was granted, prior to 28 March 2007.\n\n  Nothing in this License shall be construed as excluding or limiting\nany implied license or other defenses to infringement that may\notherwise be available to you under applicable patent law.\n\n  12. No Surrender of Others' Freedom.\n\n  If conditions are imposed on you (whether by court order, agreement or\notherwise) that contradict the conditions of this License, they do not\nexcuse you from the conditions of this License.  If you cannot convey a\ncovered work so as to satisfy simultaneously your obligations under this\nLicense and any other pertinent obligations, then as a consequence you may\nnot convey it at all.  For example, if you agree to terms that obligate you\nto collect a royalty for further conveying from those to whom you convey\nthe Program, the only way you could satisfy both those terms and this\nLicense would be to refrain entirely from conveying the Program.\n\n  13. Use with the GNU Affero General Public License.\n\n  Notwithstanding any other provision of this License, you have\npermission to link or combine any covered work with a work licensed\nunder version 3 of the GNU Affero General Public License into a single\ncombined work, and to convey the resulting work.  The terms of this\nLicense will continue to apply to the part which is the covered work,\nbut the special requirements of the GNU Affero General Public License,\nsection 13, concerning interaction through a network will apply to the\ncombination as such.\n\n  14. Revised Versions of this License.\n\n  The Free Software Foundation may publish revised and/or new versions of\nthe GNU General Public License from time to time.  Such new versions will\nbe similar in spirit to the present version, but may differ in detail to\naddress new problems or concerns.\n\n  Each version is given a distinguishing version number.  If the\nProgram specifies that a certain numbered version of the GNU General\nPublic License \"or any later version\" applies to it, you have the\noption of following the terms and conditions either of that numbered\nversion or of any later version published by the Free Software\nFoundation.  If the Program does not specify a version number of the\nGNU General Public License, you may choose any version ever published\nby the Free Software Foundation.\n\n  If the Program specifies that a proxy can decide which future\nversions of the GNU General Public License can be used, that proxy's\npublic statement of acceptance of a version permanently authorizes you\nto choose that version for the Program.\n\n  Later license versions may give you additional or different\npermissions.  However, no additional obligations are imposed on any\nauthor or copyright holder as a result of your choosing to follow a\nlater version.\n\n  15. Disclaimer of Warranty.\n\n  THERE IS NO WARRANTY FOR THE PROGRAM, TO THE EXTENT PERMITTED BY\nAPPLICABLE LAW.  EXCEPT WHEN OTHERWISE STATED IN WRITING THE COPYRIGHT\nHOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM \"AS IS\" WITHOUT WARRANTY\nOF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO,\nTHE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR\nPURPOSE.  THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM\nIS WITH YOU.  SHOULD THE PROGRAM PROVE DEFECTIVE, YOU ASSUME THE COST OF\nALL NECESSARY SERVICING, REPAIR OR CORRECTION.\n\n  16. Limitation of Liability.\n\n  IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING\nWILL ANY COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MODIFIES AND/OR CONVEYS\nTHE PROGRAM AS PERMITTED ABOVE, BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY\nGENERAL, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE\nUSE OR INABILITY TO USE THE PROGRAM (INCLUDING BUT NOT LIMITED TO LOSS OF\nDATA OR DATA BEING RENDERED INACCURATE OR LOSSES SUSTAINED BY YOU OR THIRD\nPARTIES OR A FAILURE OF THE PROGRAM TO OPERATE WITH ANY OTHER PROGRAMS),\nEVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF\nSUCH DAMAGES.\n\n  17. Interpretation of Sections 15 and 16.\n\n  If the disclaimer of warranty and limitation of liability provided\nabove cannot be given local legal effect according to their terms,\nreviewing courts shall apply local law that most closely approximates\nan absolute waiver of all civil liability in connection with the\nProgram, unless a warranty or assumption of liability accompanies a\ncopy of the Program in return for a fee.\n\n                     END OF TERMS AND CONDITIONS\n\n            How to Apply These Terms to Your New Programs\n\n  If you develop a new program, and you want it to be of the greatest\npossible use to the public, the best way to achieve this is to make it\nfree software which everyone can redistribute and change under these terms.\n\n  To do so, attach the following notices to the program.  It is safest\nto attach them to the start of each source file to most effectively\nstate the exclusion of warranty; and each file should have at least\nthe \"copyright\" line and a pointer to where the full notice is found.\n\n    <one line to give the program's name and a brief idea of what it does.>\n    Copyright (C) <year>  <name of author>\n\n    This program is free software: you can redistribute it and/or modify\n    it under the terms of the GNU General Public License as published by\n    the Free Software Foundation, either version 3 of the License, or\n    (at your option) any later version.\n\n    This program is distributed in the hope that it will be useful,\n    but WITHOUT ANY WARRANTY; without even the implied warranty of\n    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n    GNU General Public License for more details.\n\n    You should have received a copy of the GNU General Public License\n    along with this program.  If not, see <http://www.gnu.org/licenses/>.\n\nAlso add information on how to contact you by electronic and paper mail.\n\n  If the program does terminal interaction, make it output a short\nnotice like this when it starts in an interactive mode:\n\n    <program>  Copyright (C) <year>  <name of author>\n    This program comes with ABSOLUTELY NO WARRANTY; for details type `show w'.\n    This is free software, and you are welcome to redistribute it\n    under certain conditions; type `show c' for details.\n\nThe hypothetical commands `show w' and `show c' should show the appropriate\nparts of the General Public License.  Of course, your program's commands\nmight be different; for a GUI interface, you would use an \"about box\".\n\n  You should also get your employer (if you work as a programmer) or school,\nif any, to sign a \"copyright disclaimer\" for the program, if necessary.\nFor more information on this, and how to apply and follow the GNU GPL, see\n<http://www.gnu.org/licenses/>.\n\n  The GNU General Public License does not permit incorporating your program\ninto proprietary programs.  If your program is a subroutine library, you\nmay consider it more useful to permit linking proprietary applications with\nthe library.  If this is what you want to do, use the GNU Lesser General\nPublic License instead of this License.  But first, please read\n<http://www.gnu.org/philosophy/why-not-lgpl.html>.\n\nName: libquadmath\nFiles: numpy.libs/libquadmath*.so\nDescription: dynamically linked to files compiled with gcc\nAvailability: https://gcc.gnu.org/git/?p=gcc.git;a=tree;f=libquadmath\nLicense: LGPL-2.1-or-later\n\n    GCC Quad-Precision Math Library\n    Copyright (C) 2010-2019 Free Software Foundation, Inc.\n    Written by Francois-Xavier Coudert  <fxcoudert@gcc.gnu.org>\n\n    This file is part of the libquadmath library.\n    Libquadmath is free software; you can redistribute it and/or\n    modify it under the terms of the GNU Library General Public\n    License as published by the Free Software Foundation; either\n    version 2.1 of the License, or (at your option) any later version.\n\n    Libquadmath is distributed in the hope that it will be useful,\n    but WITHOUT ANY WARRANTY; without even the implied warranty of\n    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU\n    Lesser General Public License for more details.\n    https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/numpy-1.26.4.dist-info/LICENSE.txt",
+          "sha256": "1107b0c831e918d4f1dbc28a33190c77215ef278d4a4c4009572088770d4334a",
+          "size": 47721
+        },
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/numpy/core/include/numpy/random/LICENSE.txt",
+          "sha256": "fbc539f47d0cf83bc61378080fb873d5c14630126cacbfe754035c3926daa5ec",
+          "size": 1018
+        },
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/numpy/ma/LICENSE",
+          "sha256": "05f3b88351988ecfad10abe92c0c50e5875c6452d5009a0084cc291551ffcca6",
+          "size": 1593
+        },
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/numpy/random/LICENSE.md",
+          "sha256": "103166b62b80443afb9eb3488e052ea06be0cff566b908f199e561fde49af19f",
+          "size": 3511
+        }
+      ],
+      "name": "numpy",
+      "version": "1.26.4"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": null,
+      "license_field": "Apache License v2.0",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/onnx-1.16.1.dist-info/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "size": 11358
+        }
+      ],
+      "name": "onnx",
+      "version": "1.16.1"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: MIT License"
+      ],
+      "license_expression": null,
+      "license_field": "MIT License",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/onnxruntime/LICENSE",
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
+          "size": 1073
+        }
+      ],
+      "name": "onnxruntime",
+      "version": "1.22.0"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": "Apache-2.0 OR BSD-2-Clause",
+      "license_field": null,
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/packaging-26.3.dist-info/licenses/LICENSE",
+          "sha256": "cad1ef5bd340d73e074ba614d26f7deaca5c7940c3d8c34852e65c4909686c48",
+          "size": 197
+        },
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/packaging-26.3.dist-info/licenses/LICENSE.APACHE",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+          "size": 10174
+        },
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/packaging-26.3.dist-info/licenses/LICENSE.BSD",
+          "sha256": "b70e7e9b742f1cc6f948b34c16aa39ffece94196364bc88ff0d2180f0028fac5",
+          "size": 1344
+        }
+      ],
+      "name": "packaging",
+      "version": "26.3"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": null,
+      "license_field": "3-Clause BSD License",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/protobuf-7.36.1.dist-info/LICENSE",
+          "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d",
+          "size": 1732
+        }
+      ],
+      "name": "protobuf",
+      "version": "7.36.1"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: BSD License"
+      ],
+      "license_expression": null,
+      "license_field": "BSD-3-Clause",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/psutil-5.9.8.dist-info/LICENSE",
+          "sha256": "b89c063b3786e28e0c0a38f1931db61fed35e69dd2a2966fbecffee0f46c8d10",
+          "size": 1548
+        }
+      ],
+      "name": "psutil",
+      "version": "5.9.8"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: MIT License"
+      ],
+      "license_expression": null,
+      "license_field": "MIT",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/PyYAML-6.0.1.dist-info/LICENSE",
+          "sha256": "8d3928f9dc4490fd635707cb88eb26bd764102a7282954307d3e5167a577e8a4",
+          "size": 1101
+        }
+      ],
+      "name": "PyYAML",
+      "version": "6.0.1"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": "Apache-2.0 AND CNRI-Python",
+      "license_field": null,
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/regex-2026.9.3.dist-info/licenses/LICENSE.txt",
+          "sha256": "bff55ef4cdcc8c14ce259f8e8ab60e264418440d6335f4dc138273fbd506144d",
+          "size": 11584
+        }
+      ],
+      "name": "regex",
+      "version": "2026.9.3"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: Apache Software License"
+      ],
+      "license_expression": null,
+      "license_field": "Apache-2.0",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/requests-2.34.2.dist-info/licenses/LICENSE",
+          "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b",
+          "size": 10142
+        },
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/requests-2.34.2.dist-info/licenses/NOTICE",
+          "sha256": "f5110972dedad2b4e9d314518daf3b7d72d6e02e499acd802181de6f74571dcc",
+          "size": 38
+        }
+      ],
+      "name": "requests",
+      "version": "2.34.2"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: Apache Software License"
+      ],
+      "license_expression": null,
+      "license_field": null,
+      "license_files": [],
+      "name": "safetensors",
+      "version": "0.4.3"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: BSD License"
+      ],
+      "license_expression": null,
+      "license_field": "BSD",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/sympy-1.14.0.dist-info/licenses/AUTHORS",
+          "sha256": "82b1038521b0696c63c90b31ed4a0a2c9c4c16871c648b157b07ca44b6f18f8d",
+          "size": 55779
+        },
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/sympy-1.14.0.dist-info/licenses/LICENSE",
+          "sha256": "07a5e9819f727b4986ad2829c7a29a6320d42575f720eb24d71b7fef573a0286",
+          "size": 7885
+        },
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/sympy/parsing/latex/LICENSE.txt",
+          "sha256": "007bc30a58fa40a996e772047120de4eaf31f5110e4f9c3b5f93fcdfbe2eaca1",
+          "size": 1075
+        }
+      ],
+      "name": "sympy",
+      "version": "1.14.0"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: Apache Software License"
+      ],
+      "license_expression": null,
+      "license_field": null,
+      "license_files": [],
+      "name": "tokenizers",
+      "version": "0.19.1"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: BSD License"
+      ],
+      "license_expression": null,
+      "license_field": "BSD-3",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/torch-2.3.1+cpu.dist-info/LICENSE",
+          "sha256": "9c2916d43b2b8aff6a3c6662ed584b6b2d7d6dcf84dd727181deeadc5472214e",
+          "size": 351851
+        },
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/torch-2.3.1+cpu.dist-info/NOTICE",
+          "sha256": "c2cc7bf0caec7652c2b460a8a470bea1677f241e4ab8e431df34cf17f5a9fec0",
+          "size": 23632
+        }
+      ],
+      "name": "torch",
+      "version": "2.3.1+cpu"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": null,
+      "license_field": "MPL-2.0 AND MIT",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/tqdm-4.70.0.dist-info/licenses/LICENCE",
+          "sha256": "fcff87c3a47ce8028a8512aa182d4fcf0ad1c90544ee75cf9b343684cac194de",
+          "size": 1985
+        }
+      ],
+      "name": "tqdm",
+      "version": "4.70.0"
+    },
+    {
+      "license_classifiers": [
+        "License :: OSI Approved :: Apache Software License"
+      ],
+      "license_expression": null,
+      "license_field": "Apache 2.0 License",
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/transformers-4.41.2.dist-info/LICENSE",
+          "sha256": "77fd4710def9ec3c0f6225800e0235f15a425abd4a8b03559127fcd782612049",
+          "size": 11418
+        }
+      ],
+      "name": "transformers",
+      "version": "4.41.2"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": "PSF-2.0",
+      "license_field": null,
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/typing_extensions-4.16.0.dist-info/licenses/LICENSE",
+          "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf",
+          "size": 13936
+        }
+      ],
+      "name": "typing_extensions",
+      "version": "4.16.0"
+    },
+    {
+      "license_classifiers": [],
+      "license_expression": "MIT",
+      "license_field": null,
+      "license_files": [
+        {
+          "path": "/usr/local/lib/python3.11/site-packages/urllib3-2.7.0.dist-info/licenses/LICENSE.txt",
+          "sha256": "130e3a64d5fdd5d096a752694634a7d9df284469de86e5732100268041e3d686",
+          "size": 1093
+        }
+      ],
+      "name": "urllib3",
+      "version": "2.7.0"
+    }
+  ],
+  "python": {
+    "license_file": {
+      "path": "/usr/local/lib/python3.11/LICENSE.txt",
+      "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf",
+      "size": 13936
+    },
+    "version": "3.11.9"
+  },
+  "redistribution_gate": "incomplete",
+  "redistribution_obligations": [
+    "Retain the copyright, license, attribution, and NOTICE material required by each redistributed component.",
+    "For redistributed GPL/LGPL base-image components, satisfy the applicable corresponding-source and relinking terms.",
+    "Review package-specific recorded terms before distributing the build-only toolchain image; this evidence is not a production license grant."
+  ],
+  "requirements_sha256": "bcb7cb748bc568fd0d4c1c621865a8f0ffeb72f77bab9e4106e461205aa19851",
+  "schema_version": 1,
+  "toolchain_image": "hmem-managed-embedding-onnx@sha256:8ed20f622337a91b4b0638bce91f78dca5ff5f64bd4a9ee8b95d4f10e91c5bbe",
+  "unresolved_redistribution_items": [
+    "certifi==2026.7.22: no License-Expression; human review of recorded metadata/files required",
+    "charset-normalizer==3.5.1: no License-Expression; human review of recorded metadata/files required",
+    "coloredlogs==15.0.1: no License-Expression; human review of recorded metadata/files required",
+    "flatbuffers==25.12.19: no License-Expression; human review of recorded metadata/files required",
+    "huggingface-hub==0.36.2: no License-Expression; human review of recorded metadata/files required",
+    "humanfriendly==10.0: no License-Expression; human review of recorded metadata/files required",
+    "jinja2==3.1.6: no License-Expression; human review of recorded metadata/files required",
+    "mpmath==1.3.0: no License-Expression; human review of recorded metadata/files required",
+    "numpy==1.26.4: no License-Expression; human review of recorded metadata/files required",
+    "onnx==1.16.1: no License-Expression; human review of recorded metadata/files required",
+    "onnxruntime==1.22.0: no License-Expression; human review of recorded metadata/files required",
+    "protobuf==7.36.1: no License-Expression; human review of recorded metadata/files required",
+    "psutil==5.9.8: no License-Expression; human review of recorded metadata/files required",
+    "pyyaml==6.0.1: no License-Expression; human review of recorded metadata/files required",
+    "requests==2.34.2: no License-Expression; human review of recorded metadata/files required",
+    "safetensors==0.4.3: no License-Expression; human review of recorded metadata/files required",
+    "sympy==1.14.0: no License-Expression; human review of recorded metadata/files required",
+    "tokenizers==0.19.1: no License-Expression; human review of recorded metadata/files required",
+    "torch==2.3.1+cpu: no License-Expression; human review of recorded metadata/files required",
+    "tqdm==4.70.0: no License-Expression; human review of recorded metadata/files required",
+    "transformers==4.41.2: no License-Expression; human review of recorded metadata/files required"
+  ]
+}

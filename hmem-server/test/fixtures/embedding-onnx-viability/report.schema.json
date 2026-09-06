@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hmem.local/schemas/embedding-onnx-viability-report-v1.json",
+  "title": "Pinned GTE-Qwen2 fp32 ONNX viability report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "artifact_root",
+    "fixed_inputs",
+    "hardware",
+    "toolchain",
+    "attention_semantics",
+    "evidence_files",
+    "gates",
+    "verdict"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "task_id": {"const": "aa30a81c-2adf-4f54-b1eb-cfeaa39bac77"},
+    "artifact_root": {"type": "string", "minLength": 1},
+    "fixed_inputs": {
+      "type": "object",
+      "required": ["model_id", "model_revision", "tei_source", "tei_image"],
+      "properties": {
+        "model_id": {"const": "Alibaba-NLP/gte-Qwen2-1.5B-instruct"},
+        "model_revision": {"const": "1cad2ab3ff41c2671f34e135d29831368ee26b68"},
+        "tei_source": {"const": "06670157fb6c1523482219bdb2d1660277d38088"},
+        "tei_image": {"const": "sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07"}
+      },
+      "additionalProperties": true
+    },
+    "hardware": {"type": "object"},
+    "toolchain": {"type": "object"},
+    "attention_semantics": {"type": "object"},
+    "evidence_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "size", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "size": {"type": "integer", "minimum": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "gates": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status", "evidence"],
+        "properties": {
+          "status": {"enum": ["pass", "fail", "incomplete"]},
+          "evidence": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "verdict": {"enum": ["viable", "not_viable", "incomplete"]},
+    "startup_recommendation": {"type": "object"},
+    "limitations": {"type": "array", "items": {"type": "string"}}
+  }
+}

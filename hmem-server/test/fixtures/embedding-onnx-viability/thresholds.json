@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "frozen_before_acceptance_results": true,
+  "frozen_at_utc": "2026-09-06T12:09:37.492Z",
+  "precision": "float32",
+  "comparisons": {
+    "hidden_state": {
+      "absolute_tolerance": 0.0002,
+      "relative_tolerance": 0.002
+    },
+    "pooled_raw": {
+      "absolute_tolerance": 0.0002,
+      "relative_tolerance": 0.002
+    },
+    "normalized": {
+      "absolute_tolerance": 0.00002,
+      "relative_tolerance": 0.001,
+      "max_cosine_distance": 0.000001
+    },
+    "reference_repeat": {
+      "absolute_tolerance": 0.0000001,
+      "relative_tolerance": 0.0000001,
+      "max_cosine_distance": 0.0000001
+    },
+    "batch_invariance": {
+      "absolute_tolerance": 0.0002,
+      "relative_tolerance": 0.002,
+      "max_cosine_distance": 0.000001
+    }
+  },
+  "rule": "A threshold is immutable after any held-out acceptance result is read. Every coordinate must satisfy abs(candidate-reference) <= absolute_tolerance + relative_tolerance*abs(reference); max absolute and max relative error (denominator max(abs(reference),1e-6)) are diagnostics only. The cosine-distance limit is an additional pooled/normalized-vector requirement."
+}

@@ -1,12 +1,12 @@
 module HMem.DB.TestHarnessSpec (spec) where
 
-import Control.Concurrent.Async (withAsync, wait)
+import Control.Concurrent.Async (cancelWith, wait, waitCatch, withAsync)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (SomeException, bracket, try)
+import Control.Exception (Exception(..), SomeException, asyncExceptionFromException, asyncExceptionToException, bracket, fromException, try)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Data.Functor.Contravariant (contramap)
-import Data.List (isInfixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, sort)
 import Data.Pool (Pool, destroyAllResources)
 import Data.Text (Text)
 import Data.Int (Int64)
@@ -22,10 +22,11 @@ import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist,
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>), takeDirectory)
 import System.IO.Temp (getCanonicalTemporaryDirectory)
+import System.Timeout (timeout)
 import Test.Hspec
 
 import HMem.DB.Migration qualified as Migration
-import HMem.DB.Pool (DBException(..), createPool, runSession, runTransaction, withConn)
+import HMem.DB.Pool (DBException(..), PoolMetrics(..), createPool, getPoolMetrics, runSession, runSessionWithRollbackForTest, runTransaction, withConn)
 import HMem.DB.TestHarness
 import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
 import HMem.Types (SubjectKind, subjectKindToText)
@@ -127,6 +128,13 @@ spec = do
         Just root -> do
           doesDirectoryExist root >>= (`shouldBe` True)
           removeDirectoryRecursive root
+
+  describe "production rollback exception boundary" $ do
+    it "preserves transaction errors and propagates asynchronous rollback cancellation" $
+      withTestEnv $ \env -> withRollbackTestEnv env (exerciseRollbackBoundary TransactionRollback)
+
+    it "preserves savepoint errors, propagates cancellation, and restores test mode" $
+      withTestEnv $ \env -> withRollbackTestEnv env (exerciseRollbackBoundary SavepointRollback)
 
   describe "migration resolution" $ do
     it "uses the resolved repository root even when cwd changes" $
@@ -907,6 +915,108 @@ assertSqlSubjectMatch pool (kind, pattern, path, expected) = do
   if actual == expected
     then pure ()
     else expectationFailure $ "SQL glob corpus mismatch for " <> show (kind, pattern, path) <> ": expected " <> show expected <> ", got " <> show actual
+
+data RollbackRoute = TransactionRollback | SavepointRollback
+
+data RollbackBoundaryAsync = RollbackBoundaryAsync
+  deriving stock (Show, Eq)
+
+instance Exception RollbackBoundaryAsync where
+  toException = asyncExceptionToException
+  fromException = asyncExceptionFromException
+
+type RollbackRunner =
+  Hasql.Connection -> BS.ByteString -> IO (Either Session.SessionError ())
+
+withRollbackTestEnv :: TestEnv -> (TestEnv -> IO a) -> IO a
+withRollbackTestEnv env action =
+  bracket
+    (createPool env.testDb.testDbConnStr 1 30 30000)
+    destroyAllResources
+    (\rollbackPool -> action env { pool = rollbackPool })
+
+exerciseRollbackBoundary :: RollbackRoute -> TestEnv -> IO ()
+exerciseRollbackBoundary route env = do
+  rollbackCalled <- newIORef False
+  runRollbackRoute route env
+    (\_ _ -> writeIORef rollbackCalled True >> fail "rollback ran for a successful session")
+    (queryInt "SELECT 1")
+    `shouldReturn` 1
+  readIORef rollbackCalled `shouldReturn` False
+  assertPoolReleasedAndUsable env
+
+  assertOriginalDatabaseError route env $ \conn rollbackSql ->
+    Session.run (Session.sql rollbackSql) conn
+
+  assertOriginalDatabaseError route env $ \_ _ ->
+    ioError (userError "injected synchronous rollback failure")
+
+  sawRollbackLeft <- newIORef False
+  assertOriginalDatabaseError route env $ \conn _ -> do
+    result <- Session.run (Session.sql "SELECT 1") conn
+    writeIORef sawRollbackLeft $ case result of
+      Left _ -> True
+      Right () -> False
+    pure result
+  readIORef sawRollbackLeft `shouldReturn` True
+
+  rollbackStarted <- newEmptyMVar
+  rollbackGate <- newEmptyMVar
+  withAsync
+    (runRollbackRoute route env
+      (\_ rollbackSql -> putMVar rollbackStarted rollbackSql >> takeMVar rollbackGate >> pure (Right ()))
+      rollbackFailureSession)
+    $ \task -> do
+      rollbackSql <- timeout 5000000 (takeMVar rollbackStarted) >>= \case
+        Just value -> pure value
+        Nothing -> expectationFailure "timed out entering the rollback boundary" >> fail "unreachable"
+      assertRollbackRoute route rollbackSql
+      outcome <- timeout 5000000 (cancelWith task RollbackBoundaryAsync >> waitCatch task)
+      outcome `shouldSatisfy` \case
+        Just (Left exceptionValue) ->
+          (fromException exceptionValue :: Maybe RollbackBoundaryAsync) == Just RollbackBoundaryAsync
+        _ -> False
+  assertPoolReleasedAndUsable env
+
+assertOriginalDatabaseError :: RollbackRoute -> TestEnv -> RollbackRunner -> IO ()
+assertOriginalDatabaseError route env rollback = do
+  rollbackSqlRef <- newIORef Nothing
+  outcome <- try
+    (runRollbackRoute route env
+      (\conn rollbackSql -> writeIORef rollbackSqlRef (Just rollbackSql) >> rollback conn rollbackSql)
+      rollbackFailureSession)
+    :: IO (Either DBException ())
+  outcome `shouldBe` Left DBStatementTimeout
+  readIORef rollbackSqlRef >>= \case
+    Just rollbackSql -> assertRollbackRoute route rollbackSql
+    Nothing -> expectationFailure "rollback boundary was not reached"
+  assertPoolReleasedAndUsable env
+
+runRollbackRoute
+  :: RollbackRoute -> TestEnv -> RollbackRunner -> Session.Session a -> IO a
+runRollbackRoute route env rollback session = case route of
+  TransactionRollback -> runSessionWithRollbackForTest rollback env.pool session
+  SavepointRollback -> withTestTransaction
+    (\testEnv -> runSessionWithRollbackForTest rollback testEnv.pool session)
+    env
+
+assertRollbackRoute :: RollbackRoute -> BS.ByteString -> IO ()
+assertRollbackRoute route rollbackSql = case route of
+  TransactionRollback -> rollbackSql `shouldBe` "ROLLBACK"
+  SavepointRollback -> B8.unpack rollbackSql
+    `shouldSatisfy` ("ROLLBACK TO SAVEPOINT sp_" `isPrefixOf`)
+
+assertPoolReleasedAndUsable :: TestEnv -> IO ()
+assertPoolReleasedAndUsable env = do
+  metrics <- getPoolMetrics
+  metrics.activeConnections `shouldBe` 0
+  runSession env.pool (queryInt "SELECT 1") `shouldReturn` 1
+  metricsAfter <- getPoolMetrics
+  metricsAfter.activeConnections `shouldBe` 0
+
+rollbackFailureSession :: Session.Session ()
+rollbackFailureSession = Session.sql
+  "DO $$ BEGIN RAISE EXCEPTION USING ERRCODE = '57014'; END $$"
 
 subjectMatchStatement :: Statement.Statement (Text, Text, Text) Bool
 subjectMatchStatement = Statement.Statement

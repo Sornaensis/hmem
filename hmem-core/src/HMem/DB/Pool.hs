@@ -9,9 +9,10 @@ module HMem.DB.Pool
   , PoolMetrics(..)
   , setTestTransactionMode
   , getPoolMetrics
+  , runSessionWithRollbackForTest
   ) where
 
-import Control.Exception (Exception, SomeException, bracket_, throwIO, try)
+import Control.Exception (Exception, SomeAsyncException, SomeException, bracket_, fromException, throwIO, try)
 import Control.Monad (void, when)
 import Data.ByteString (ByteString)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
@@ -187,6 +188,15 @@ withConn pool action = withResource pool $ \conn ->
 runSession :: Pool Hasql.Connection -> Session.Session a -> IO a
 runSession = runManagedSession "BEGIN"
 
+-- | Deterministic test seam for the rollback operation.  Both production
+-- transaction branches call the same implementation with 'runRollback'.
+runSessionWithRollbackForTest
+  :: (Hasql.Connection -> ByteString -> IO (Either Session.SessionError ()))
+  -> Pool Hasql.Connection
+  -> Session.Session a
+  -> IO a
+runSessionWithRollbackForTest rollback = runManagedSessionWithRollback rollback "BEGIN"
+
 -- | Run a Hasql 'Session' inside a database transaction (BEGIN/COMMIT/ROLLBACK).
 -- Throws a structured 'DBException' on error.
 runTransaction :: Pool Hasql.Connection -> Session.Session a -> IO a
@@ -198,15 +208,29 @@ runSerializableTransaction :: Pool Hasql.Connection -> Session.Session a -> IO a
 runSerializableTransaction = runManagedSession "BEGIN ISOLATION LEVEL SERIALIZABLE"
 
 runManagedSession :: ByteString -> Pool Hasql.Connection -> Session.Session a -> IO a
-runManagedSession beginSql pool sess = withConn pool $ \conn -> do
+runManagedSession = runManagedSessionWithRollback runRollback
+
+runManagedSessionWithRollback
+  :: (Hasql.Connection -> ByteString -> IO (Either Session.SessionError ()))
+  -> ByteString
+  -> Pool Hasql.Connection
+  -> Session.Session a
+  -> IO a
+runManagedSessionWithRollback rollback beginSql pool sess = withConn pool $ \conn -> do
   testMode <- readIORef testTransactionModeRef
   reqCtx <- currentRequestContext
   if testMode
-    then runWithSavepoint conn reqCtx sess
-    else runWithTransaction beginSql conn reqCtx sess
+    then runWithSavepoint rollback conn reqCtx sess
+    else runWithTransaction rollback beginSql conn reqCtx sess
 
-runWithTransaction :: ByteString -> Hasql.Connection -> RequestContext -> Session.Session a -> IO a
-runWithTransaction beginSql conn reqCtx sess = do
+runWithTransaction
+  :: (Hasql.Connection -> ByteString -> IO (Either Session.SessionError ()))
+  -> ByteString
+  -> Hasql.Connection
+  -> RequestContext
+  -> Session.Session a
+  -> IO a
+runWithTransaction rollback beginSql conn reqCtx sess = do
   let txn = do
         Session.sql beginSql
         applyRequestContext reqCtx
@@ -216,15 +240,15 @@ runWithTransaction beginSql conn reqCtx sess = do
   result <- Session.run txn conn
   case result of
     Right a  -> pure a
-    Left err -> do
-      -- Wrap ROLLBACK in try so that a broken connection doesn't mask
-      -- the original error.  withResource will destroy the connection
-      -- when throwIO propagates out.
-      _ <- try @SomeException $ Session.run (Session.sql "ROLLBACK") conn
-      throwIO (classifyError err)
+    Left err -> rollbackAndThrow rollback conn "ROLLBACK" err
 
-runWithSavepoint :: Hasql.Connection -> RequestContext -> Session.Session a -> IO a
-runWithSavepoint conn reqCtx sess = do
+runWithSavepoint
+  :: (Hasql.Connection -> ByteString -> IO (Either Session.SessionError ()))
+  -> Hasql.Connection
+  -> RequestContext
+  -> Session.Session a
+  -> IO a
+runWithSavepoint rollback conn reqCtx sess = do
   spId <- atomicModifyIORef' savepointCounterRef $ \n -> let n' = n + 1 in (n', n')
   let spName = "sp_" <> TE.encodeUtf8 (T.pack (show spId))
       txn = do
@@ -236,9 +260,29 @@ runWithSavepoint conn reqCtx sess = do
   result <- Session.run txn conn
   case result of
     Right a  -> pure a
-    Left err -> do
-      _ <- try @SomeException $ Session.run (Session.sql $ "ROLLBACK TO SAVEPOINT " <> spName) conn
-      throwIO (classifyError err)
+    Left err -> rollbackAndThrow rollback conn ("ROLLBACK TO SAVEPOINT " <> spName) err
+
+runRollback :: Hasql.Connection -> ByteString -> IO (Either Session.SessionError ())
+runRollback conn rollbackSql = Session.run (Session.sql rollbackSql) conn
+
+rollbackAndThrow
+  :: (Hasql.Connection -> ByteString -> IO (Either Session.SessionError ()))
+  -> Hasql.Connection
+  -> ByteString
+  -> Session.SessionError
+  -> IO a
+rollbackAndThrow rollback conn rollbackSql originalError = do
+  rollbackResult <- try @SomeException (rollback conn rollbackSql)
+  case rollbackResult of
+    Left rollbackException
+      | isAsyncException rollbackException -> throwIO rollbackException
+    _ -> throwIO (classifyError originalError)
+
+isAsyncException :: SomeException -> Bool
+isAsyncException exceptionValue =
+  case fromException exceptionValue :: Maybe SomeAsyncException of
+    Just _ -> True
+    Nothing -> False
 
 applyRequestContext :: RequestContext -> Session.Session ()
 applyRequestContext reqCtx = do

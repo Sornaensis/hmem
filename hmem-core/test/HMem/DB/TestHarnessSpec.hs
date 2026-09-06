@@ -1,8 +1,10 @@
 module HMem.DB.TestHarnessSpec (spec) where
 
-import Control.Concurrent.Async (cancelWith, wait, waitCatch, withAsync)
+import Control.Concurrent.Async (cancel, cancelWith, wait, waitCatch, withAsync)
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (Exception(..), SomeException, asyncExceptionFromException, asyncExceptionToException, bracket, fromException, try)
+import Control.Exception (Exception(..), SomeException, asyncExceptionFromException, asyncExceptionToException, bracket, finally, fromException, try)
+import Control.Monad (void, when)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
 import Data.Functor.Contravariant (contramap)
@@ -10,18 +12,22 @@ import Data.List (isInfixOf, isPrefixOf, sort)
 import Data.Pool (Pool, destroyAllResources)
 import Data.Text (Text)
 import Data.Int (Int64)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Text qualified as T
 import Data.UUID (UUID)
+import GHC.Clock (getMonotonicTimeNSec)
 import Hasql.Decoders qualified as D
 import Hasql.Encoders qualified as E
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
-import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, listDirectory, removeDirectoryRecursive, withCurrentDirectory)
+import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, removeDirectoryRecursive, withCurrentDirectory)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory)
+import System.IO (hPutStrLn, stderr)
 import System.IO.Temp (getCanonicalTemporaryDirectory)
+import System.Process (proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -33,6 +39,27 @@ import HMem.Types (SubjectKind, subjectKindToText)
 
 spec :: Spec
 spec = do
+  selectedBackend <- runIO readTestPostgresBackend
+
+  describe "PostgreSQL test backend selection" $ do
+    it "defaults to native and accepts both explicit typed values" $ do
+      withEnvVar "HMEM_TEST_POSTGRES_BACKEND" Nothing readTestPostgresBackend
+        `shouldReturn` TestPostgresNative
+      withEnvVar "HMEM_TEST_POSTGRES_BACKEND" (Just "native") readTestPostgresBackend
+        `shouldReturn` TestPostgresNative
+      withEnvVar "HMEM_TEST_POSTGRES_BACKEND" (Just "managed-linux") readTestPostgresBackend
+        `shouldReturn` TestPostgresManagedLinux
+
+    it "rejects unknown backend values" $
+      withEnvVar "HMEM_TEST_POSTGRES_BACKEND" (Just "external") readTestPostgresBackend
+        `shouldThrow` anyException
+
+    it "rejects an unknown selection before sandbox environment scrubbing" $
+      withTestSandbox $ \sandbox ->
+        withoutPreparedPostgresBackend $
+          withEnvVar "HMEM_TEST_POSTGRES_BACKEND" (Just "external") $
+            withSandboxedEnv sandbox (pure ()) `shouldThrow` anyException
+
   describe "sandboxed test harness metadata" $ do
     it "exposes sandbox and database paths for normal test environments" $
       withTestEnv $ \env -> do
@@ -66,6 +93,399 @@ spec = do
         assertInSandbox sandbox sandbox.sandboxTmpDir
         assertInSandbox sandbox (sandbox.sandboxRoot)
         assertInSandbox sandbox (takeDirectory sandbox.sandboxRoot) `shouldThrow` anyException
+
+  when (selectedBackend == TestPostgresManagedLinux) $
+    describe "managed Linux PostgreSQL sandbox" $ do
+      it "records the immutable image authority and actual server capability" $
+        withTestEnv $ \env -> do
+          authority <- readFile (env.testDb.testDbDataDir </> "authority.txt")
+          authority `shouldSatisfy` isInfixOf ("image-reference=" <> managedLinuxImageReference)
+          authority `shouldSatisfy` isInfixOf ("index-digest=" <> managedLinuxIndexDigest)
+          authority `shouldSatisfy` isInfixOf ("amd64-manifest-digest=" <> managedLinuxAmd64ManifestDigest)
+          authority `shouldSatisfy` isInfixOf ("config-digest=" <> managedLinuxConfigDigest)
+          env.testDb.testDbUnsafeExternal `shouldBe` False
+          env.testDb.testDbPort `shouldSatisfy` (> 0)
+          runSession env.pool (Session.statement () managedServerIdentityStatement) >>= \(serverVersion, vectorVersion, build, sharedMemory) -> do
+            serverVersion `shouldSatisfy` T.isPrefixOf "17."
+            vectorVersion `shouldBe` "0.8.6"
+            T.toLower build `shouldSatisfy` T.isInfixOf "linux"
+            sharedMemory `shouldBe` "posix"
+
+      it "scrubs libpq and Docker config overrides and restores them" $
+        withEnvVar "PGUSER" (Just "ambient-role") $
+          withEnvVar "PGHOSTADDR" (Just "192.0.2.1") $
+            withEnvVar "PGSERVICE" (Just "ambient-service") $
+              withEnvVar "DOCKER_CONFIG" (Just "ambient-docker-config") $
+                withEnvVar "DOCKER_API_VERSION" (Just "1.12") $
+                  withEnvVar "DOCKER_AUTH_CONFIG" (Just "ambient-docker-credentials") $ do
+                    withTestSandbox $ \sandbox ->
+                      withSandboxedEnv sandbox $ do
+                        mapM lookupEnv
+                          [ "PGUSER", "PGHOSTADDR", "PGSERVICE", "DOCKER_CONFIG"
+                          , "DOCKER_API_VERSION", "DOCKER_AUTH_CONFIG"
+                          ] `shouldReturn` replicate 6 Nothing
+                    lookupEnv "PGUSER" `shouldReturn` Just "ambient-role"
+                    lookupEnv "PGHOSTADDR" `shouldReturn` Just "192.0.2.1"
+                    lookupEnv "PGSERVICE" `shouldReturn` Just "ambient-service"
+                    lookupEnv "DOCKER_CONFIG" `shouldReturn` Just "ambient-docker-config"
+                    lookupEnv "DOCKER_API_VERSION" `shouldReturn` Just "1.12"
+                    lookupEnv "DOCKER_AUTH_CONFIG" `shouldReturn` Just "ambient-docker-credentials"
+
+      it "does not inject ambient Docker config or API settings into the container" $
+        withTestSandbox $ \ambientSandbox -> do
+          let ambientConfig = ambientSandbox.sandboxTmpDir </> "ambient-docker-config"
+              marker = "http://hmem-ambient-proxy.invalid:9876"
+          createDirectoryIfMissing True ambientConfig
+          writeFile (ambientConfig </> "config.json") $
+            "{\"proxies\":{\"default\":{\"httpProxy\":\"" <> marker <> "\"}}}"
+          withEnvVar "DOCKER_CONFIG" (Just ambientConfig) $
+            withEnvVar "DOCKER_API_VERSION" (Just "1.12") $
+              withTestSandbox $ \sandbox ->
+                withSandboxedEnv sandbox $
+                  withSandboxedPostgres sandbox $ \db -> do
+                    containerId <- containerIdFor db
+                    containerEnvironment <- runManagedDocker
+                      ["inspect", containerId, "--format", "{{json .Config.Env}}"]
+                    containerEnvironment `shouldNotSatisfy` isInfixOf marker
+
+      it "rejects stale or conflicting prepared backend metadata" $ do
+        withTestSandbox $ \sandbox ->
+          withoutActiveSandbox $
+            withEnvVar "HMEM_TEST_SANDBOX_POSTGRES_BACKEND" (Just "managed-linux") $
+              withEnvVar "HMEM_TEST_SANDBOX_POSTGRES_OWNER_ROOT" (Just sandbox.sandboxRoot) $
+                withSandboxedEnv sandbox (pure ()) `shouldThrow` anyException
+        withTestSandbox $ \sandbox ->
+          withoutActiveSandbox $
+            withoutPreparedPostgresBackend $
+              withEnvVar "HMEM_TEST_SANDBOX_DOCKER_ENDPOINT" (Just "npipe:////./pipe/docker_engine") $
+                withSandboxedEnv sandbox (pure ()) `shouldThrow` anyException
+        withTestSandbox $ \sandbox ->
+          withEnvVar "HMEM_TEST_POSTGRES_BACKEND" (Just "native") $
+            withSandboxedEnv sandbox (pure ()) `shouldThrow` anyException
+        withTestSandbox $ \sandbox ->
+          withEnvVar "HMEM_TEST_SANDBOX_DOCKER_ENDPOINT" (Just "tcp://198.51.100.7:2375") $
+            withSandboxedEnv sandbox (pure ()) `shouldThrow` anyException
+
+      it "enforces statement_timeout and lock_timeout on real server work" $
+        withTestEnv $ \env ->
+          bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \holderPool ->
+            bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \contenderPool -> do
+              statementElapsed <- elapsedSeconds $ withConn contenderPool $ \conn -> do
+                result <- Session.run
+                  (Session.sql "SET statement_timeout = '250ms'; SELECT pg_sleep(2)") conn
+                result `shouldSatisfy` isSessionFailure
+              statementElapsed `shouldSatisfy` withinTimeoutControlBounds
+
+              lockElapsed <- withConn holderPool $ \holder -> do
+                Session.run (Session.sql "SELECT pg_advisory_lock(90210071)") holder
+                  `shouldReturn` Right ()
+                elapsedSeconds (withConn contenderPool $ \contender -> do
+                  result <- Session.run
+                    (Session.sql "SET lock_timeout = '250ms'; SELECT pg_advisory_lock(90210071)") contender
+                  result `shouldSatisfy` isSessionFailure)
+                  `finally` void (Session.run (Session.sql "SELECT pg_advisory_unlock(90210071)") holder)
+              lockElapsed `shouldSatisfy` withinTimeoutControlBounds
+
+      it "creates concurrent containers with distinct database resources" $
+        withTestSandbox $ \sandbox ->
+          withSandboxedEnv sandbox $ do
+            firstReady <- newEmptyMVar
+            secondReady <- newEmptyMVar
+            releaseFirst <- newEmptyMVar
+            releaseSecond <- newEmptyMVar
+            withAsync
+              (withSandboxedPostgres sandbox $ \db -> putMVar firstReady db >> takeMVar releaseFirst)
+              $ \firstTask -> withAsync
+                (withSandboxedPostgres sandbox $ \db -> putMVar secondReady db >> takeMVar releaseSecond)
+                $ \secondTask -> do
+                  first <- requireWithin "first managed container readiness" 40000000 (takeMVar firstReady)
+                  second <- requireWithin "second managed container readiness" 40000000 (takeMVar secondReady)
+                  first.testDbName `shouldNotBe` second.testDbName
+                  first.testDbPort `shouldNotBe` second.testDbPort
+                  first.testDbDataDir `shouldNotBe` second.testDbDataDir
+                  putMVar releaseFirst ()
+                  putMVar releaseSecond ()
+                  requireWithin "first managed container cleanup" 20000000 (wait firstTask)
+                  requireWithin "second managed container cleanup" 20000000 (wait secondTask)
+
+      it "fails a selected managed backend without falling back to native" $
+        withTestSandbox $ \sandbox ->
+          withEnvVar "HMEM_TEST_SANDBOX_DOCKER_EXE" (Just (sandbox.sandboxRoot </> "missing-docker")) $
+            withSandboxedPostgres sandbox (const (pure ())) `shouldThrow` anyException
+
+      it "removes an exited partial-start container after readiness failure" $ do
+        before <- ownedManagedContainerIds
+        result <- withEnvVar "HMEM_TEST_SANDBOX_MANAGED_FAULT" (Just "exit-before-readiness") $
+          try $ withTestSandbox $ \sandbox ->
+            withSandboxedEnv sandbox $
+              withSandboxedPostgres sandbox (const (pure ()))
+        (result :: Either SomeException ()) `shouldSatisfy` either (const True) (const False)
+        ownedManagedContainerIds `shouldReturn` before
+
+      it "recovers interrupted creates with empty or truncated cidfiles by owned name" $
+        mapM_ (\fault -> do
+          before <- ownedManagedContainerIds
+          result <- withEnvVar "HMEM_TEST_SANDBOX_MANAGED_FAULT" (Just fault) $
+            try $ withTestSandbox $ \sandbox ->
+              withSandboxedEnv sandbox $
+                withSandboxedPostgres sandbox (const (pure ()))
+          (result :: Either SomeException ()) `shouldSatisfy` either (const True) (const False)
+          ownedManagedContainerIds `shouldReturn` before)
+          ["empty-cid-after-create", "truncated-cid-after-create"]
+
+      it "removes an owned container that exits before bracket cleanup" $
+        withTestSandbox $ \sandbox ->
+          withSandboxedEnv sandbox $ do
+            containerRef <- newIORef Nothing
+            withSandboxedPostgres sandbox (\db -> do
+              containerId <- containerIdFor db
+              writeIORef containerRef (Just containerId)
+              void $ runManagedDocker ["stop", "--timeout", "1", containerId])
+            requireContainerRef containerRef >>= assertManagedContainerMissing
+
+      it "removes the owned container after a body failure" $
+        withTestSandbox $ \sandbox ->
+          withSandboxedEnv sandbox $ do
+            containerRef <- newIORef Nothing
+            result <- try $ withSandboxedPostgres sandbox $ \db -> do
+              containerIdFor db >>= writeIORef containerRef . Just
+              fail "intentional managed body failure"
+            (result :: Either SomeException ()) `shouldSatisfy` either (const True) (const False)
+            requireContainerRef containerRef >>= assertManagedContainerMissing
+
+      it "continues removal when log capture fails and surfaces that failure" $
+        withTestSandbox $ \sandbox ->
+          withSandboxedEnv sandbox $ do
+            containerRef <- newIORef Nothing
+            result <- withEnvVar "HMEM_TEST_SANDBOX_MANAGED_FAULT" (Just "log-write") $
+              try $ withSandboxedPostgres sandbox $ \db ->
+                containerIdFor db >>= writeIORef containerRef . Just
+            (result :: Either SomeException ()) `shouldSatisfy` either (const True) (const False)
+            requireContainerRef containerRef >>= assertManagedContainerMissing
+
+      it "surfaces uncertain removal verification after removing the exact container" $
+        withTestSandbox $ \sandbox ->
+          withSandboxedEnv sandbox $ do
+            containerRef <- newIORef Nothing
+            result <- withEnvVar "HMEM_TEST_SANDBOX_MANAGED_FAULT" (Just "verification-uncertain") $
+              try $ withSandboxedPostgres sandbox $ \db ->
+                containerIdFor db >>= writeIORef containerRef . Just
+            (result :: Either SomeException ()) `shouldSatisfy` either (const True) (const False)
+            requireContainerRef containerRef >>= assertManagedContainerMissing
+
+      it "joins cancellation cleanup and removes the owned container" $
+        withTestSandbox $ \sandbox ->
+          withSandboxedEnv sandbox $ do
+            ready <- newEmptyMVar
+            hold <- newEmptyMVar :: IO (MVar ())
+            withAsync
+              (withSandboxedPostgres sandbox $ \db -> do
+                containerId <- containerIdFor db
+                putMVar ready containerId
+                takeMVar hold)
+              $ \task -> do
+                containerId <- requireWithin "managed cancellation readiness" 40000000 (takeMVar ready)
+                outcome <- timeout 20000000 (cancel task >> waitCatch task)
+                outcome `shouldSatisfy` \case
+                  Just (Left _) -> True
+                  _ -> False
+                assertManagedContainerMissing containerId
+
+      it "terminates and reaps an active Docker command before cancellation cleanup" $ do
+        before <- ownedManagedContainerIds
+        withTestSandbox $ \sandbox -> do
+          let traceFile = sandbox.sandboxTmpDir </> "active-command.trace"
+          withEnvVar "HMEM_TEST_SANDBOX_MANAGED_FAULT" (Just "active-command") $
+            withEnvVar "HMEM_TEST_SANDBOX_MANAGED_COMMAND_TRACE" (Just traceFile) $
+              withAsync
+                (withSandboxedEnv sandbox $
+                  withSandboxedPostgres sandbox (const (pure ()))) $ \task -> do
+                  containerId <- requireWithin "active managed command container" 40000000 $
+                    waitForNewOwnedContainer before 400
+                  requireWithin "active managed Docker command observation" 10000000 $
+                    waitForContainerProcess containerId "sleep 30" 100
+                  outcome <- timeout 20000000 (cancel task >> waitCatch task)
+                  outcome `shouldSatisfy` \case
+                    Just (Left _) -> True
+                    _ -> False
+                  assertManagedCommandTrace traceFile
+                    ["started", "cleanup-started", "reaped", "readers-joined"]
+                  assertManagedContainerMissing containerId
+
+      it "hard-terminates and reaps the exact helper after graceful termination expires" $ do
+        before <- ownedManagedContainerIds
+        withTestSandbox $ \sandbox -> do
+          let traceFile = sandbox.sandboxTmpDir </> "active-command-grace-expiry.trace"
+          withEnvVar "HMEM_TEST_SANDBOX_MANAGED_FAULT" (Just "active-command-grace-expiry") $
+            withEnvVar "HMEM_TEST_SANDBOX_MANAGED_COMMAND_TRACE" (Just traceFile) $
+              withAsync
+                (withSandboxedEnv sandbox $
+                  withSandboxedPostgres sandbox (const (pure ()))) $ \task -> do
+                  containerId <- requireWithin "grace-expiry managed command container" 40000000 $
+                    waitForNewOwnedContainer before 400
+                  requireWithin "grace-expiry managed command observation" 10000000 $
+                    waitForContainerProcess containerId "sleep 30" 100
+                  started <- getMonotonicTimeNSec
+                  withAsync (cancel task) $ \canceller -> do
+                    requireManagedCommandTraceWithin
+                      "grace-expiry exact helper reap" 12000000 traceFile
+                      ["started", "cleanup-started", "escalated", "reaped", "readers-joined"]
+                    helperFinished <- getMonotonicTimeNSec
+                    let helperElapsed = fromIntegral (helperFinished - started) / 1000000000 :: Double
+                    helperElapsed `shouldSatisfy` (\seconds -> seconds >= 4.5 && seconds < 12)
+                    requireWithin "grace-expiry cancellation cleanup" 20000000 (wait canceller)
+                    waitCatch task >>= (`shouldSatisfy` either (const True) (const False))
+                    assertManagedCommandTrace traceFile
+                      ["started", "cleanup-started", "escalated", "reaped", "readers-joined"]
+                    assertManagedContainerMissing containerId
+
+      it "remembers repeated cancellation through grace, escalation, reap, and reader joins" $ do
+        before <- ownedManagedContainerIds
+        withTestSandbox $ \sandbox -> do
+          let traceFile = sandbox.sandboxTmpDir </> "active-command-repeated-cancel.trace"
+          withEnvVar "HMEM_TEST_SANDBOX_MANAGED_FAULT" (Just "active-command-repeated-cancel") $
+            withEnvVar "HMEM_TEST_SANDBOX_MANAGED_COMMAND_TRACE" (Just traceFile) $
+              withAsync
+                (withSandboxedEnv sandbox $
+                  withSandboxedPostgres sandbox (const (pure ()))) $ \task -> do
+                  containerId <- requireWithin "repeated-cancel managed command container" 40000000 $
+                    waitForNewOwnedContainer before 400
+                  requireWithin "repeated-cancel managed command observation" 10000000 $
+                    waitForContainerProcess containerId "sleep 30" 100
+                  withAsync (cancelWith task RollbackBoundaryAsync) $ \firstCanceller -> do
+                    requireWithin "repeated-cancel cleanup entry" 5000000 $
+                      waitForManagedCommandTracePrefix traceFile ["started", "cleanup-started"]
+                    withAsync (cancelWith task RunnerCleanupAsync) $ \secondCanceller -> do
+                      requireWithin "repeated-cancel escalation" 7000000 $
+                        waitForManagedCommandTracePrefix traceFile
+                          ["started", "cleanup-started", "async-remembered", "escalated"]
+                      withAsync (cancelWith task RunnerCleanupAsync) $ \thirdCanceller -> do
+                        requireManagedCommandTraceWithin
+                          "repeated-cancel exact helper and reader joins" 5000000 traceFile
+                          [ "started", "cleanup-started", "async-remembered", "escalated"
+                          , "async-remembered", "reaped", "readers-joined"
+                          ]
+                        requireWithin "repeated-cancel cancellation cleanup" 20000000 (wait firstCanceller)
+                        requireWithin "second cancellation delivery" 2000000 (wait secondCanceller)
+                        requireWithin "third cancellation delivery" 2000000 (wait thirdCanceller)
+                        waitCatch task >>= \case
+                          Left err -> (fromException err :: Maybe RollbackBoundaryAsync)
+                            `shouldBe` Just RollbackBoundaryAsync
+                          Right () -> expectationFailure "repeatedly cancelled managed command unexpectedly succeeded"
+                        assertManagedCommandTrace traceFile
+                          [ "started", "cleanup-started", "async-remembered", "escalated"
+                          , "async-remembered", "reaped", "readers-joined"
+                          ]
+                        assertManagedContainerMissing containerId
+
+      it "reaps an already-exited helper and closes pipes after pre-reader failure" $ do
+        before <- ownedManagedContainerIds
+        withTestSandbox $ \sandbox -> do
+          let traceFile = sandbox.sandboxTmpDir </> "active-command-immediate-exit.trace"
+          result <- withEnvVar "HMEM_TEST_SANDBOX_MANAGED_FAULT" (Just "active-command-immediate-exit") $
+            withEnvVar "HMEM_TEST_SANDBOX_MANAGED_COMMAND_TRACE" (Just traceFile) $
+              try $ withSandboxedEnv sandbox $
+                withSandboxedPostgres sandbox (const (pure ()))
+          (result :: Either SomeException ()) `shouldSatisfy` either (const True) (const False)
+          assertManagedCommandTrace traceFile ["started", "cleanup-started", "reaped"]
+          ownedManagedContainerIds `shouldReturn` before
+
+      it "reaps the helper and removes the container when post-acquisition tracing fails" $ do
+        before <- ownedManagedContainerIds
+        withTestSandbox $ \sandbox -> do
+          let traceFile = sandbox.sandboxTmpDir </> "active-command-trace-failure.trace"
+          result <- withEnvVar "HMEM_TEST_SANDBOX_MANAGED_FAULT" (Just "active-command-trace-failure") $
+            withEnvVar "HMEM_TEST_SANDBOX_MANAGED_COMMAND_TRACE" (Just traceFile) $
+              try $ withSandboxedEnv sandbox $
+                withSandboxedPostgres sandbox (const (pure ()))
+          (result :: Either SomeException ()) `shouldSatisfy` either (const True) (const False)
+          assertManagedCommandTrace traceFile ["started", "cleanup-started", "reaped"]
+          ownedManagedContainerIds `shouldReturn` before
+
+      it "defers persistent cleanup trace failures until the helper and readers are joined" $ do
+        before <- ownedManagedContainerIds
+        withTestSandbox $ \sandbox -> do
+          let traceFile = sandbox.sandboxTmpDir </> "active-command-cleanup-trace-failure.trace"
+          withEnvVar "HMEM_TEST_SANDBOX_MANAGED_FAULT" (Just "active-command-cleanup-trace-failure") $
+            withEnvVar "HMEM_TEST_SANDBOX_MANAGED_COMMAND_TRACE" (Just traceFile) $
+              withAsync
+                (withSandboxedEnv sandbox $
+                  withSandboxedPostgres sandbox (const (pure ()))) $ \task -> do
+                  containerId <- requireWithin "persistent trace-failure managed command container" 40000000 $
+                    waitForNewOwnedContainer before 400
+                  requireWithin "persistent trace-failure managed command observation" 10000000 $
+                    waitForContainerProcess containerId "sleep 30" 100
+                  commandPid <- readManagedCommandPid traceFile
+                  outcome <- timeout 20000000 (cancel task >> waitCatch task)
+                  outcome `shouldSatisfy` \case
+                    Just (Left _) -> True
+                    _ -> False
+                  assertManagedCommandTrace traceFile ["started"]
+                  assertManagedCommandLifecycleAttempts (traceFile <> ".failed") commandPid
+                    ["cleanup-started", "escalated", "reaped", "readers-joined"]
+                  assertManagedContainerMissing containerId
+                  ownedManagedContainerIds `shouldReturn` before
+
+      it "prefers the first cleanup cancellation over earlier trace failures and later cancellation" $ do
+        before <- ownedManagedContainerIds
+        withTestSandbox $ \sandbox -> do
+          let traceFile = sandbox.sandboxTmpDir </> "active-command-timeout-trace-cancel.trace"
+              failedTrace = traceFile <> ".failed"
+          withEnvVar "HMEM_TEST_SANDBOX_MANAGED_FAULT" (Just "active-command-timeout-trace-cancel") $
+            withEnvVar "HMEM_TEST_SANDBOX_MANAGED_COMMAND_TRACE" (Just traceFile) $
+              withAsync
+                (withSandboxedEnv sandbox $
+                  withSandboxedPostgres sandbox (const (pure ()))) $ \task -> do
+                  containerId <- requireWithin "mixed-fault managed command container" 40000000 $
+                    waitForNewOwnedContainer before 400
+                  requireWithin "mixed-fault exact helper acquisition" 5000000 $
+                    waitForManagedCommandTracePrefix traceFile ["started"]
+                  commandPid <- readManagedCommandPid traceFile
+                  requireWithin "mixed-fault timeout cleanup entry" 5000000 $
+                    waitForManagedCommandLifecycleAttemptsPrefix failedTrace commandPid
+                      ["cleanup-started"]
+                  withAsync (cancelWith task RunnerCleanupAsync) $ \firstCanceller -> do
+                    requireWithin "mixed-fault first cancellation observed" 2000000 $
+                      waitForManagedCommandLifecycleAttemptsPrefix failedTrace commandPid
+                        ["cleanup-started", "async-remembered"]
+                    requireWithin "mixed-fault escalation" 7000000 $
+                      waitForManagedCommandLifecycleAttemptsPrefix failedTrace commandPid
+                        ["cleanup-started", "async-remembered", "escalated"]
+                    withAsync (cancelWith task RollbackBoundaryAsync) $ \secondCanceller -> do
+                      requireWithin "mixed-fault exact helper and reader joins" 5000000 $
+                        waitForManagedCommandLifecycleAttemptsPrefix failedTrace commandPid
+                          [ "cleanup-started", "async-remembered", "escalated"
+                          , "async-remembered", "reaped", "readers-joined"
+                          ]
+                      requireWithin "mixed-fault first cancellation delivery" 20000000 (wait firstCanceller)
+                      requireWithin "mixed-fault second cancellation delivery" 2000000 (wait secondCanceller)
+                      waitCatch task >>= \case
+                        Left err -> (fromException err :: Maybe RunnerCleanupAsync)
+                          `shouldBe` Just RunnerCleanupAsync
+                        Right () -> expectationFailure "mixed-fault managed command unexpectedly succeeded"
+                      assertManagedCommandTrace traceFile ["started"]
+                      assertManagedCommandLifecycleAttempts failedTrace commandPid
+                        [ "cleanup-started", "async-remembered", "escalated"
+                        , "async-remembered", "reaped", "readers-joined"
+                        ]
+                      assertManagedContainerMissing containerId
+                      ownedManagedContainerIds `shouldReturn` before
+
+      it "captures both PostgreSQL stdout and stderr container logs" $
+        withTestSandbox $ \sandbox ->
+          withSandboxedEnv sandbox $ do
+            logFile <- withSandboxedPostgres sandbox $ \db -> do
+              containerId <- containerIdFor db
+              void $ runManagedDocker
+                [ "exec", containerId, "psql", "-X", "--quiet", "-v", "ON_ERROR_STOP=1"
+                , "-h", "127.0.0.1", "-U", "postgres", "-d", T.unpack db.testDbName
+                , "-c", "DO $$ BEGIN RAISE WARNING 'hmem-distinct-stderr-marker'; END $$"
+                ]
+              pure db.testDbLogFile
+            captured <- B8.unpack <$> BS.readFile logFile
+            captured `shouldSatisfy` isInfixOf "[container stdout]"
+            captured `shouldSatisfy` isInfixOf "[container stderr]"
+            captured `shouldSatisfy` isInfixOf "hmem-distinct-stderr-marker"
 
   describe "sandboxed environment" $ do
     it "scrubs ambient credentials inside the sandbox and restores them afterwards" $
@@ -105,15 +525,16 @@ spec = do
 
     it "labels explicitly allowed external DB mode as unsafe" $
       withTestSandbox $ \externalSandbox ->
-        withSandboxedEnv externalSandbox $
+          withSandboxedEnv externalSandbox $
           withSandboxedPostgres externalSandbox $ \externalDb ->
-            withoutActiveSandbox $
-              withEnvVar "HMEM_TEST_EXTERNAL_DB" (Just (T.unpack externalDb.testDbConnStr)) $
-                withEnvVar "HMEM_TEST_ALLOW_EXTERNAL_DB" (Just "1") $
-                  withEnvVar "CI" Nothing $
-                    withTestEnv $ \env -> do
-                      env.testDb.testDbUnsafeExternal `shouldBe` True
-                      env.testDb.testDbConnStr `shouldBe` externalDb.testDbConnStr
+            withoutPreparedPostgresBackend $
+              withoutActiveSandbox $
+                withEnvVar "HMEM_TEST_EXTERNAL_DB" (Just (T.unpack externalDb.testDbConnStr)) $
+                  withEnvVar "HMEM_TEST_ALLOW_EXTERNAL_DB" (Just "1") $
+                    withEnvVar "CI" Nothing $
+                      withTestEnv $ \env -> do
+                        env.testDb.testDbUnsafeExternal `shouldBe` True
+                        env.testDb.testDbConnStr `shouldBe` externalDb.testDbConnStr
 
     it "preserves the sandbox root on failure when requested" $ do
       rootRef <- newIORef Nothing
@@ -925,6 +1346,13 @@ instance Exception RollbackBoundaryAsync where
   toException = asyncExceptionToException
   fromException = asyncExceptionFromException
 
+data RunnerCleanupAsync = RunnerCleanupAsync
+  deriving stock (Show, Eq)
+
+instance Exception RunnerCleanupAsync where
+  toException = asyncExceptionToException
+  fromException = asyncExceptionFromException
+
 type RollbackRunner =
   Hasql.Connection -> BS.ByteString -> IO (Either Session.SessionError ())
 
@@ -1018,6 +1446,180 @@ rollbackFailureSession :: Session.Session ()
 rollbackFailureSession = Session.sql
   "DO $$ BEGIN RAISE EXCEPTION USING ERRCODE = '57014'; END $$"
 
+managedServerIdentityStatement :: Statement.Statement () (Text, Text, Text, Text)
+managedServerIdentityStatement = Statement.Statement sql E.noParams decoder True
+  where
+    sql = "SELECT current_setting('server_version'), (SELECT extversion::text FROM pg_extension WHERE extname = 'vector'), version(), current_setting('dynamic_shared_memory_type')"
+    textColumn = D.column (D.nonNullable D.text)
+    decoder = D.singleRow $ (,,,) <$> textColumn <*> textColumn <*> textColumn <*> textColumn
+
+elapsedSeconds :: IO a -> IO Double
+elapsedSeconds action = do
+  started <- getMonotonicTimeNSec
+  _ <- action
+  finished <- getMonotonicTimeNSec
+  pure $ fromIntegral (finished - started) / 1000000000
+
+withinTimeoutControlBounds :: Double -> Bool
+withinTimeoutControlBounds elapsed = elapsed >= 0.1 && elapsed < 3
+
+isSessionFailure :: Either a b -> Bool
+isSessionFailure = either (const True) (const False)
+
+requireWithin :: String -> Int -> IO a -> IO a
+requireWithin label microseconds action =
+  timeout microseconds action >>= \case
+    Just value -> pure value
+    Nothing -> expectationFailure (label <> " timed out") >> fail (label <> " timed out")
+
+containerIdFor :: TestDb -> IO String
+containerIdFor db = do
+  authority <- lines <$> readFile (db.testDbDataDir </> "authority.txt")
+  case [drop (length prefix) line | line <- authority, prefix `isPrefixOf` line] of
+    [containerId] -> pure containerId
+    _ -> expectationFailure "managed authority did not contain one container ID" >> fail "missing container ID"
+  where
+    prefix = "container-id="
+
+requireContainerRef :: IORef (Maybe String) -> IO String
+requireContainerRef ref = readIORef ref >>= \case
+  Just containerId -> pure containerId
+  Nothing -> expectationFailure "managed container ID was not captured" >> fail "missing container ID"
+
+runManagedDocker :: [String] -> IO String
+runManagedDocker args = do
+  executable <- requireEnv "HMEM_TEST_SANDBOX_DOCKER_EXE"
+  endpoint <- requireEnv "HMEM_TEST_SANDBOX_DOCKER_ENDPOINT"
+  (exitCode, stdout, stderrOutput) <-
+    readCreateProcessWithExitCode (proc executable (["--host", endpoint] <> args)) ""
+  case exitCode of
+    ExitSuccess -> pure (trimTestOutput stdout)
+    ExitFailure code -> expectationFailure
+      ("managed Docker command failed (" <> show code <> "): " <> stdout <> stderrOutput)
+      >> fail "managed Docker command failed"
+
+assertManagedContainerMissing :: String -> IO ()
+assertManagedContainerMissing containerId = do
+  output <- runManagedDocker
+    ["ps", "--all", "--no-trunc", "--filter", "id=" <> containerId, "--format", "{{.ID}}"]
+  output `shouldBe` ""
+
+ownedManagedContainerIds :: IO [String]
+ownedManagedContainerIds = do
+  output <- runManagedDocker
+    ["ps", "--all", "--no-trunc", "--filter", "label=hmem.test.owner", "--format", "{{.ID}}"]
+  pure $ sort $ filter (not . null) (lines output)
+
+waitForNewOwnedContainer :: [String] -> Int -> IO String
+waitForNewOwnedContainer _ 0 = expectationFailure "managed container did not appear" >> fail "managed container did not appear"
+waitForNewOwnedContainer before attempts = do
+  current <- ownedManagedContainerIds
+  case filter (`notElem` before) current of
+    [containerId] -> pure containerId
+    [] -> threadDelay 100000 >> waitForNewOwnedContainer before (attempts - 1)
+    _ -> expectationFailure "more than one new managed container appeared" >> fail "ambiguous managed container"
+
+waitForContainerProcess :: String -> String -> Int -> IO ()
+waitForContainerProcess _ _ 0 = expectationFailure "managed Docker command did not become active" >> fail "managed Docker command did not become active"
+waitForContainerProcess containerId expected attempts = do
+  processes <- runManagedDocker ["top", containerId]
+  if expected `isInfixOf` processes
+    then pure ()
+    else threadDelay 100000 >> waitForContainerProcess containerId expected (attempts - 1)
+
+assertManagedCommandTrace :: FilePath -> [String] -> IO ()
+assertManagedCommandTrace traceFile expectedStates = do
+  trace <- lines . B8.unpack <$> BS.readFile traceFile
+  case trace of
+    [] -> expectationFailure "managed helper trace was empty"
+    started:_ -> do
+      started `shouldSatisfy` isPrefixOf "started="
+      started `shouldNotBe` "started=unavailable"
+      let commandPid = drop 8 started
+          expected = [state <> "=" <> commandPid | state <- expectedStates]
+      trace `shouldBe` expected
+      hPutStrLn stderr $ "[test-managed-command] " <> unwords trace
+
+readManagedCommandPid :: FilePath -> IO String
+readManagedCommandPid traceFile = do
+  trace <- lines . B8.unpack <$> BS.readFile traceFile
+  case trace of
+    started:_
+      | "started=" `isPrefixOf` started
+      , let commandPid = drop 8 started
+      , commandPid /= "unavailable" -> pure commandPid
+    _ -> expectationFailure "managed helper trace did not contain an exact process ID" >> fail "missing managed helper PID"
+
+assertManagedCommandLifecycleAttempts :: FilePath -> String -> [String] -> IO ()
+assertManagedCommandLifecycleAttempts attemptsFile commandPid expectedStates = do
+  attempts <- lines . B8.unpack <$> BS.readFile attemptsFile
+  attempts `shouldBe` [state <> "=" <> commandPid | state <- expectedStates]
+  hPutStrLn stderr $ "[test-managed-command-failed-diagnostics] " <> unwords attempts
+
+waitForManagedCommandTrace :: FilePath -> [String] -> IO ()
+waitForManagedCommandTrace traceFile expectedStates = do
+  exists <- doesFileExist traceFile
+  if not exists
+    then threadDelay 20000 >> waitForManagedCommandTrace traceFile expectedStates
+    else do
+      trace <- lines . B8.unpack <$> BS.readFile traceFile
+      case trace of
+        started:_
+          | "started=" `isPrefixOf` started -> do
+              let commandPid = drop 8 started
+                  expected = [state <> "=" <> commandPid | state <- expectedStates]
+              if trace == expected
+                then pure ()
+                else threadDelay 20000 >> waitForManagedCommandTrace traceFile expectedStates
+        _ -> threadDelay 20000 >> waitForManagedCommandTrace traceFile expectedStates
+
+waitForManagedCommandTracePrefix :: FilePath -> [String] -> IO ()
+waitForManagedCommandTracePrefix traceFile expectedStates = do
+  exists <- doesFileExist traceFile
+  if not exists
+    then threadDelay 20000 >> waitForManagedCommandTracePrefix traceFile expectedStates
+    else do
+      trace <- lines . B8.unpack <$> BS.readFile traceFile
+      case trace of
+        started:_
+          | "started=" `isPrefixOf` started -> do
+              let commandPid = drop 8 started
+                  expected = [state <> "=" <> commandPid | state <- expectedStates]
+              if take (length expected) trace == expected
+                then pure ()
+                else threadDelay 20000 >> waitForManagedCommandTracePrefix traceFile expectedStates
+        _ -> threadDelay 20000 >> waitForManagedCommandTracePrefix traceFile expectedStates
+
+waitForManagedCommandLifecycleAttemptsPrefix :: FilePath -> String -> [String] -> IO ()
+waitForManagedCommandLifecycleAttemptsPrefix attemptsFile commandPid expectedStates = do
+  exists <- doesFileExist attemptsFile
+  if not exists
+    then threadDelay 20000 >> waitForManagedCommandLifecycleAttemptsPrefix attemptsFile commandPid expectedStates
+    else do
+      attempts <- lines . B8.unpack <$> BS.readFile attemptsFile
+      let expected = [state <> "=" <> commandPid | state <- expectedStates]
+      if take (length expected) attempts == expected
+        then pure ()
+        else threadDelay 20000 >> waitForManagedCommandLifecycleAttemptsPrefix attemptsFile commandPid expectedStates
+
+requireManagedCommandTraceWithin :: String -> Int -> FilePath -> [String] -> IO ()
+requireManagedCommandTraceWithin label microseconds traceFile expectedStates =
+  timeout microseconds (waitForManagedCommandTrace traceFile expectedStates) >>= \case
+    Just () -> pure ()
+    Nothing -> do
+      exists <- doesFileExist traceFile
+      trace <- if exists then B8.unpack <$> BS.readFile traceFile else pure "<missing>"
+      hPutStrLn stderr $ "[test-managed-command-timeout] " <> label <> ": " <> show trace
+      expectationFailure (label <> " timed out")
+
+requireEnv :: String -> IO String
+requireEnv name = lookupEnv name >>= \case
+  Just value -> pure value
+  Nothing -> expectationFailure ("missing test environment variable " <> name) >> fail "missing test environment variable"
+
+trimTestOutput :: String -> String
+trimTestOutput = reverse . dropWhile (`elem` [' ', '\t', '\r', '\n']) . reverse
+
 subjectMatchStatement :: Statement.Statement (Text, Text, Text) Bool
 subjectMatchStatement = Statement.Statement
   "SELECT hmem_observation_subject_matches($1::observation_subject_kind, $2, $3)"
@@ -1040,6 +1642,20 @@ withEnvVar name value = bracket setup restore . const
     restore old = case old of
       Nothing -> unsetEnv name
       Just raw -> setEnv name raw
+
+withoutPreparedPostgresBackend :: IO a -> IO a
+withoutPreparedPostgresBackend action = go names action
+  where
+    names =
+      [ "HMEM_TEST_SANDBOX_POSTGRES_BACKEND"
+      , "HMEM_TEST_SANDBOX_POSTGRES_OWNER_ROOT"
+      , "HMEM_TEST_SANDBOX_DOCKER_EXE"
+      , "HMEM_TEST_SANDBOX_DOCKER_ENDPOINT"
+      , "HMEM_TEST_SANDBOX_DOCKER_IMAGE_ID"
+      , "HMEM_TEST_SANDBOX_DOCKER_ROLE"
+      ]
+    go [] inner = inner
+    go (name:rest) inner = withEnvVar name Nothing (go rest inner)
 
 withoutActiveSandbox :: IO a -> IO a
 withoutActiveSandbox = withEnvVar "HMEM_TEST_SANDBOX_ACTIVE" Nothing

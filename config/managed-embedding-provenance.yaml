@@ -14,6 +14,36 @@ tei:
     reference: ghcr.io/huggingface/text-embeddings-inference@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
     platform: linux/amd64
     registry_manifest_url: https://ghcr.io/v2/huggingface/text-embeddings-inference/manifests/sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
+    index_digest: sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
+    platform_manifest_digest: sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48
+    config_digest: sha256:f50bc806338120e138d774236098580f7e5840dbe8bc001ef64615847c1685e8
+    executable_layer_digest: sha256:51345600aa8d1cd784c97a2bc6ba969a535841224986d40ac91770c504e472a9
+  runtime_bundle:
+    # These are the files extracted from executable_layer_digest.  The remaining
+    # system ABI is supplied only by the exact pinned linux/amd64 platform image.
+    artifact_root: tei-runtime
+    source_platform_manifest_digest: sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48
+    source_config_digest: sha256:f50bc806338120e138d774236098580f7e5840dbe8bc001ef64615847c1685e8
+    source_layer_digest: sha256:51345600aa8d1cd784c97a2bc6ba969a535841224986d40ac91770c504e472a9
+    system_abi_source: exact-pinned-platform-image
+    retrieval_phase: build-time-only
+    runtime_use: verified-local-bundle
+    loader:
+      inherit_environment: false
+      ld_library_path: /usr/local/lib
+      ld_preload: /usr/local/lib/libfakeintel.so
+    artifacts:
+      - { path: usr/local/bin/text-embeddings-router, sha256: 26299644125584e504f281faa732ba4e30012a955d08707215c592247b23df07 }
+      - { path: usr/local/lib/libfakeintel.so, sha256: aebd0088156960223e1b1a8eab5e2f6e0cd681410ae711a4b21d5c9c13b98af5 }
+      - { path: usr/local/lib/libmkl_avx2.so.2, sha256: 92a9d14aabae9258feb1f5eb196d1b3f23c80c84bd9c8a2ff60c59ad4f48031e }
+      - { path: usr/local/lib/libmkl_avx512.so.2, sha256: 27aa2387bf18efffcba4b330ad2df23512dadbb60f47d58c04caa9bcfcf2f69c }
+      - { path: usr/local/lib/libmkl_core.so.2, sha256: 1f6e3f9a162efc9eaffa63dff361495ce17c1d371646d7318a83f8931f82a969 }
+      - { path: usr/local/lib/libmkl_def.so.2, sha256: c21e78a449012f1e3c90e3a68752135bb656dc774af178004b4eb05fba45311c }
+      - { path: usr/local/lib/libmkl_intel_lp64.so.2, sha256: 9c88e7e3f26c7c5739aa8ea1caefd2a0999208072458abc6b1c112698dd6c355 }
+      - { path: usr/local/lib/libmkl_intel_thread.so.2, sha256: 652fc69f34eb8c752dcfff8e4395f4dd35c94dd63926e8013d3b52d38aefeee0 }
+      - { path: usr/local/lib/libmkl_vml_avx2.so.2, sha256: 78457313d3af7be623a3f495d94c1e952d70eefff2623645186584e1de439ec7 }
+      - { path: usr/local/lib/libmkl_vml_avx512.so.2, sha256: d7c5ed56e8dce5e6b7a32a9cbbae2293c1ae17317fafc8dbdb50b70915cc5b1a }
+      - { path: usr/local/lib/libmkl_vml_def.so.2, sha256: 388187aa59614107392a58bb307d19f413c1bfa645bd1dad49992f448598aa77 }
 
 model:
   id: Alibaba-NLP/gte-Qwen2-1.5B-instruct

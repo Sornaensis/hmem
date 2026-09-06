@@ -44,21 +44,43 @@ spec = do
       original `shouldNotBe` observationContentFingerprint canonicalSha subjects "changed"
       original `shouldNotBe` observationContentFingerprint alternateSha subjects "content"
 
-    it "encodes the stable export shape without a vector" $ do
+    it "encodes the version-2 export shape without a vector" $ do
       let record = exportRecord observationId workspaceId "content"
       case Aeson.eitherDecodeStrict' (encodeEmbeddingExportRecord record) of
         Left err -> expectationFailure err
         Right (Aeson.Object fields) -> do
           KeyMap.keys fields `shouldMatchList` map Key.fromText
             [ "format_version", "observation_id", "workspace_id", "git_sha"
-            , "subjects", "content", "content_fingerprint"
+            , "subjects", "content", "content_fingerprint", "space_fingerprint"
             ]
           show fields `shouldNotContain` "embedding"
         Right other -> expectationFailure $ "expected object, got: " <> show other
 
-    it "accepts only the exact version-1 import shape and a 1536-finite vector" $ do
+    it "accepts exact versioned import shapes and a 1536-finite vector" $ do
       decodeEmbeddingImportRecord (encodeImportRecord $ importRecord observationId workspaceId validFingerprint unitX)
         `shouldBe` Right (importRecord observationId workspaceId validFingerprint unitX)
+      decodeEmbeddingImportRecord (LBS.toStrict $ Aeson.encode $ object
+        [ "format_version" .= (1 :: Int)
+        , "observation_id" .= observationId
+        , "workspace_id" .= workspaceId
+        , "content_fingerprint" .= validFingerprint
+        , "embedding" .= unitX
+        ]) `shouldBe` Right (EmbeddingImportRecord 1 observationId workspaceId validFingerprint legacyManualEmbeddingSpace unitX)
+      decodeEmbeddingImportRecord (LBS.toStrict $ Aeson.encode $ object
+        [ "format_version" .= (1 :: Int), "observation_id" .= observationId, "workspace_id" .= workspaceId
+        , "content_fingerprint" .= validFingerprint, "space_fingerprint" .= Aeson.Null, "embedding" .= unitX
+        ]) `shouldBe` Left EmbeddingRecordMalformed
+      decodeEmbeddingImportRecord (LBS.toStrict $ Aeson.encode $ object
+        [ "format_version" .= embeddingExchangeVersion, "observation_id" .= observationId, "workspace_id" .= workspaceId
+        , "content_fingerprint" .= validFingerprint, "space_fingerprint" .= Aeson.Null, "embedding" .= unitX
+        ]) `shouldBe` Left EmbeddingRecordMalformed
+      decodeEmbeddingImportRecord (LBS.toStrict $ Aeson.encode $ object
+        [ "format_version" .= embeddingExchangeVersion
+        , "observation_id" .= observationId
+        , "workspace_id" .= workspaceId
+        , "content_fingerprint" .= validFingerprint
+        , "embedding" .= unitX
+        ]) `shouldBe` Left EmbeddingRecordMalformed
       decodeEmbeddingImportRecord (LBS.toStrict $ Aeson.encode $ object
         [ "format_version" .= embeddingExchangeVersion
         , "observation_id" .= observationId
@@ -73,8 +95,13 @@ spec = do
         `shouldBe` Left EmbeddingRecordInvalidVector
       validateEmbeddingImportRecord (importRecord observationId workspaceId "ABC" unitX)
         `shouldBe` Left EmbeddingRecordInvalidFingerprint
-      validateEmbeddingImportRecord (EmbeddingImportRecord 2 observationId workspaceId validFingerprint unitX)
-        `shouldBe` Left (EmbeddingRecordUnsupportedVersion 2)
+      validateEmbeddingImportRecord (EmbeddingImportRecord 3 observationId workspaceId validFingerprint legacyManualEmbeddingSpace unitX)
+        `shouldBe` Left (EmbeddingRecordUnsupportedVersion 3)
+      decodeEmbeddingImportRecord (LBS.toStrict $ Aeson.encode $ object
+        [ "format_version" .= (3 :: Int), "observation_id" .= observationId, "workspace_id" .= workspaceId
+        , "content_fingerprint" .= validFingerprint, "space_fingerprint" .= ("hmem:unsupported:v3" :: Text), "embedding" .= unitX
+        ]) `shouldBe` Left (EmbeddingRecordUnsupportedVersion 3)
+      parseEmbeddingSpaceFingerprint "hmem:managed\x2003space" `shouldBe` Nothing
       decodeEmbeddingImportRecord (BS.replicate (maxEmbeddingImportLineBytes + 1) 32)
         `shouldBe` Left EmbeddingRecordTooLarge
       validateEmbeddingImportRecordNumber maxEmbeddingImportRecords `shouldBe` Right ()
@@ -93,25 +120,32 @@ spec = do
         setObservationEmbedding env.pool owner.id embedded.id unitX
 
         missingRows <- collectExport env EmbeddingExportOptions
-          { scope = ExportMissingEmbeddings, workspaceId = Just owner.id, pageSize = 1 }
+          { scope = ExportMissingEmbeddings, workspaceId = Just owner.id, pageSize = 1, targetSpace = legacyManualEmbeddingSpace }
         map (.observationId) missingRows `shouldBe` [missing.id]
 
         allRows <- collectExport env EmbeddingExportOptions
-          { scope = ExportAllEmbeddings, workspaceId = Just owner.id, pageSize = 1 }
+          { scope = ExportAllEmbeddings, workspaceId = Just owner.id, pageSize = 1, targetSpace = legacyManualEmbeddingSpace }
         map (.observationId) allRows `shouldBe` sort [missing.id, embedded.id]
         map (.observationId) allRows `shouldNotContain` [other.id]
         map (.contentFingerprint) allRows `shouldBe`
           map (\record -> observationContentFingerprint record.gitSha record.subjects record.content) allRows
 
+        -- The target is a request contract, not inherited from whatever
+        -- vector label happens to be stored on each row.
+        let managedTarget = testSpace "hmem:managed-gte-qwen2:export-test"
+        targetRows <- collectExport env EmbeddingExportOptions
+          { scope = ExportAllEmbeddings, workspaceId = Just owner.id, pageSize = 2, targetSpace = managedTarget }
+        map (.spaceFingerprint) targetRows `shouldBe` replicate 2 managedTarget
+
         repeated <- collectExport env EmbeddingExportOptions
-          { scope = ExportAllEmbeddings, workspaceId = Just owner.id, pageSize = 2 }
+          { scope = ExportAllEmbeddings, workspaceId = Just owner.id, pageSize = 2, targetSpace = legacyManualEmbeddingSpace }
         repeated `shouldBe` allRows
 
         configuredRef <- newIORef []
         configuredResult <- exportEmbeddingsWithConfig
           (ServerHarness.mkLocalSandboxConfig env)
           EmbeddingExportOptions
-            { scope = ExportAllEmbeddings, workspaceId = Just owner.id, pageSize = 1 }
+            { scope = ExportAllEmbeddings, workspaceId = Just owner.id, pageSize = 1, targetSpace = legacyManualEmbeddingSpace }
           (\record -> modifyIORef' configuredRef (record:))
         configuredResult `shouldBe` Right 2
         reverse <$> readIORef configuredRef `shouldReturn` allRows
@@ -208,6 +242,9 @@ collectExport env options = do
       count `shouldBe` length records
       pure records
 
+testSpace :: Text -> EmbeddingSpaceFingerprint
+testSpace raw = maybe (error "test embedding space must be valid") id (parseEmbeddingSpaceFingerprint raw)
+
 importLines
   :: TestEnv
   -> [ByteString]
@@ -242,6 +279,7 @@ exportRecord observation workspace contentValue = EmbeddingExportRecord
   , content = contentValue
   , contentFingerprint = observationContentFingerprint canonicalSha
       [ObservationSubject SubjectFile "src/Main.hs"] contentValue
+  , spaceFingerprint = legacyManualEmbeddingSpace
   }
 
 importRecord :: UUID -> UUID -> Text -> [Double] -> EmbeddingImportRecord
@@ -250,6 +288,7 @@ importRecord observation workspace fingerprint vector = EmbeddingImportRecord
   , observationId = observation
   , workspaceId = workspace
   , contentFingerprint = fingerprint
+  , spaceFingerprint = legacyManualEmbeddingSpace
   , embedding = vector
   }
 
@@ -259,6 +298,7 @@ encodeImportRecord record = LBS.toStrict $ Aeson.encode $ object
   , "observation_id" .= record.observationId
   , "workspace_id" .= record.workspaceId
   , "content_fingerprint" .= record.contentFingerprint
+  , "space_fingerprint" .= record.spaceFingerprint
   , "embedding" .= record.embedding
   ]
 
@@ -278,6 +318,7 @@ similarIds env workspace vector = fmap (map (.observation.id)) $
     , subject = Nothing
     , gitSha = Nothing
     , embedding = vector
+    , spaceFingerprint = Nothing
     , minSimilarity = Just 1
     , limit = Nothing
     , offset = Nothing

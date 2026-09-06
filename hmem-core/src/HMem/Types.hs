@@ -3,7 +3,7 @@ module HMem.Types
   , SubjectKind(..), subjectKindToText, subjectKindFromText
   , ObservationSubject(..), Observation(..), CreateObservation(..), UpdateObservation(..), ObservationQuery(..), ObservationSubjectFacetQuery(..), ObservationSubjectFacet(..), SimilarObservationQuery(..), SimilarObservation(..), ObservationMatchQuery(..), ObservationPathMatch(..), ObservationMatch(..)
   , maxObservationSubjectBytes, maxObservationSubjects, maxObservationSubjectBytesTotal, maxObservationContentBytes, observationEmbeddingDimensions
-  , ObservationEmbedding(..)
+  , ObservationEmbedding(..), EmbeddingSpaceFingerprint, embeddingSpaceFingerprintText, legacyManualEmbeddingSpace, parseEmbeddingSpaceFingerprint
   , validateCreateObservationInput, validateUpdateObservationInput, validateObservationQuery, validateObservationSubjectFacetQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
   , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
   , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
@@ -29,9 +29,10 @@ import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, Pair)
+import Control.Applicative ((<|>))
 import Control.Monad (unless)
 import Data.ByteString qualified as BS
-import Data.Char (isAlpha, isHexDigit, isLower, isUpper, toLower)
+import Data.Char (isAlpha, isHexDigit, isLower, isSpace, isUpper, toLower)
 import Data.Int (Int64)
 import Data.List (nub)
 import Data.Maybe (catMaybes, fromMaybe)
@@ -309,15 +310,50 @@ maxObservationContentBytes = 512 * 1024
 observationEmbeddingDimensions :: Int
 observationEmbeddingDimensions = 1536
 
+-- | An embedding is meaningful only inside the exact producer/model space
+-- that created it.  Its constructor is deliberately private: all external
+-- input must pass through 'parseEmbeddingSpaceFingerprint'.
+newtype EmbeddingSpaceFingerprint = EmbeddingSpaceFingerprint
+  { unEmbeddingSpaceFingerprint :: Text
+  } deriving (Show, Eq, Ord, Generic)
+
+instance ToJSON EmbeddingSpaceFingerprint where toJSON = toJSON . (.unEmbeddingSpaceFingerprint)
+instance FromJSON EmbeddingSpaceFingerprint where
+  parseJSON value = do
+    raw <- parseJSON value
+    maybe (fail "invalid embedding space_fingerprint") pure (parseEmbeddingSpaceFingerprint raw)
+
+-- | Stable compatibility identity for vectors written before producer-space
+-- isolation.  It is deliberately not the managed GTE-Qwen2 identity.
+legacyManualEmbeddingSpace :: EmbeddingSpaceFingerprint
+legacyManualEmbeddingSpace = EmbeddingSpaceFingerprint "hmem:legacy-manual:v1"
+
+embeddingSpaceFingerprintText :: EmbeddingSpaceFingerprint -> Text
+embeddingSpaceFingerprintText = (.unEmbeddingSpaceFingerprint)
+
+parseEmbeddingSpaceFingerprint :: Text -> Maybe EmbeddingSpaceFingerprint
+parseEmbeddingSpaceFingerprint raw
+  | T.null raw || T.length raw > 128 = Nothing
+  | T.any (\char -> isSpace char || char == '\DEL') raw = Nothing
+  | otherwise = Just (EmbeddingSpaceFingerprint raw)
+
 -- | Transparent JSON wrapper used where the HTTP contract accepts a raw
 -- embedding array while its schema must still state the fixed dimension.
-newtype ObservationEmbedding = ObservationEmbedding { unObservationEmbedding :: [Double] }
-  deriving (Show, Eq, Generic)
+data ObservationEmbedding = ObservationEmbedding
+  { unObservationEmbedding :: [Double]
+  , embeddingSpaceFingerprint :: Maybe EmbeddingSpaceFingerprint
+  } deriving (Show, Eq, Generic)
 
 instance ToJSON ObservationEmbedding where
-  toJSON (ObservationEmbedding values) = toJSON values
+  toJSON value = case value.embeddingSpaceFingerprint of
+    Nothing -> toJSON value.unObservationEmbedding
+    Just space -> object ["embedding" .= value.unObservationEmbedding, "space_fingerprint" .= space]
 instance FromJSON ObservationEmbedding where
-  parseJSON value = ObservationEmbedding <$> parseJSON value
+  parseJSON value = (ObservationEmbedding <$> parseJSON value <*> pure Nothing) <|>
+    withObject "ObservationEmbedding" (\objectValue -> do
+      unless (KM.size objectValue == 2 && KM.member "embedding" objectValue && KM.member "space_fingerprint" objectValue)
+        (fail "embedding envelope must contain only embedding and space_fingerprint")
+      ObservationEmbedding <$> objectValue .: "embedding" <*> (Just <$> objectValue .: "space_fingerprint")) value
 
 data ObservationSubject = ObservationSubject
   { subjectKind :: SubjectKind
@@ -426,6 +462,7 @@ data SimilarObservationQuery = SimilarObservationQuery
   , subject        :: Maybe Text
   , gitSha         :: Maybe Text
   , embedding      :: [Double]
+  , spaceFingerprint :: Maybe EmbeddingSpaceFingerprint
   , minSimilarity  :: Maybe Double
   , limit          :: Maybe Int
   , offset         :: Maybe Int
@@ -434,7 +471,16 @@ data SimilarObservationQuery = SimilarObservationQuery
 instance ToJSON SimilarObservationQuery where
   toJSON = genericToJSON jsonOptions
 instance FromJSON SimilarObservationQuery where
-  parseJSON = genericParseJSON jsonOptions
+  parseJSON = withObject "SimilarObservationQuery" $ \objectValue -> SimilarObservationQuery
+    <$> objectValue .: "workspace_id" <*> objectValue .:? "subject_kind"
+    <*> objectValue .:? "subject" <*> objectValue .:? "git_sha"
+    <*> objectValue .: "embedding" <*> presentFingerprint objectValue
+    <*> objectValue .:? "min_similarity" <*> objectValue .:? "limit" <*> objectValue .:? "offset"
+
+presentFingerprint :: Object -> Parser (Maybe EmbeddingSpaceFingerprint)
+presentFingerprint objectValue
+  | KM.member "space_fingerprint" objectValue = Just <$> objectValue .: "space_fingerprint"
+  | otherwise = pure Nothing
 
 data SimilarObservation = SimilarObservation
   { observation :: Observation
@@ -524,6 +570,8 @@ validateSimilarObservationQuery soq =
        || any (\x -> isNaN x || isInfinite x) soq.embedding]
   <> ["min_similarity must be between 0 and 1"
      | maybe False (\x -> x < 0 || x > 1 || isNaN x || isInfinite x) soq.minSimilarity]
+  <> ["space_fingerprint must be a non-blank opaque value of at most 128 characters"
+     | maybe False (\fingerprint -> parseEmbeddingSpaceFingerprint (embeddingSpaceFingerprintText fingerprint) /= Just fingerprint) soq.spaceFingerprint]
 
 validateObservationMatchQuery :: ObservationMatchQuery -> [Text]
 validateObservationMatchQuery omq =

@@ -450,6 +450,22 @@ spec = do
       case parseToolCall "observation_set_embedding" (object ["observation_id" .= observationId, "embedding" .= ([0 :: Double] :: [Double])]) of
         Right parsed -> validateToolCall parsed `shouldSatisfy` isLeft
         result -> expectationFailure (show result)
+      parseToolCall "observation_set_embedding" (object
+        [ "observation_id" .= observationId, "embedding" .= embedding
+        , "space_fingerprint" .= ("hmem:managed\x2003space" :: Text)
+        ]) `shouldSatisfy` isLeft
+      parseToolCall "observation_set_embedding" (object
+        [ "observation_id" .= observationId, "embedding" .= embedding, "space_fingerprint" .= Null
+        ]) `shouldSatisfy` isLeft
+      parseToolCall "observation_similar" (object
+        [ "workspace_id" .= workspaceId, "embedding" .= embedding, "space_fingerprint" .= Null
+        ]) `shouldSatisfy` isLeft
+      case parseToolCall "observation_set_embedding" (object
+        [ "observation_id" .= observationId, "embedding" .= embedding
+        , "space_fingerprint" .= ("hmem:managed-gte-qwen2:mcp-test" :: Text)
+        ]) of
+          Right parsed -> validateToolCall parsed `shouldBe` Right parsed
+          result -> expectationFailure (show result)
       case parseToolCall "observation_match" (object ["workspace_id" .= workspaceId, "paths" .= (["src/**/*.hs"] :: [Text])]) of
         Right parsed -> validateToolCall parsed `shouldSatisfy` isLeft
         result -> expectationFailure (show result)

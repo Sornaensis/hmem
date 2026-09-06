@@ -1,6 +1,6 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.39.6.
+-- This file has been generated from package.yaml by hpack version 0.38.1.
 --
 -- see: https://github.com/sol/hpack
 
@@ -20,6 +20,7 @@ library
       HMem.DB.Audit
       HMem.DB.Auth
       HMem.DB.ChangeStream
+      HMem.DB.Embedding
       HMem.DB.Migration
       HMem.DB.Observation
       HMem.DB.Overview
@@ -88,6 +89,7 @@ test-suite hmem-core-test
       HMem.DB.AuditSpec
       HMem.DB.AuthSpec
       HMem.DB.ChangeStreamSpec
+      HMem.DB.EmbeddingSpec
       HMem.DB.ObservationSpec
       HMem.DB.OverviewSpec
       HMem.DB.ProjectSpec

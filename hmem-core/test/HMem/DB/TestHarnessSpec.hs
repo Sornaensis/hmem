@@ -823,6 +823,27 @@ spec = do
               v27.applied `shouldBe` ["V027__bounded_task_dependency_cycle_check.sql"]
               assertBoundedTaskDependencyCycleDDL pool
 
+    it "upgrades a V027 database to V028 embedding-space isolation without requiring pgvector" $
+      withTestSandbox $ \sandbox -> do
+        migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot
+        withSandboxedEnv sandbox $
+          withSandboxedPostgres sandbox $ \db ->
+            bracket (createPool db.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
+              throughV27Dir <- copyMigrationSubset sandbox migrations "through-v027-embedding-space" (\name -> name < "V028")
+              v28OnlyDir <- copyMigrationSubset sandbox migrations "v028-only-embedding-space" (== "V028__durable_embedding_jobs_and_space_isolation.sql")
+              before <- Migration.runMigrations pool throughV27Dir
+              before.failed `shouldBe` Nothing
+              -- Seed a real V027 observation before V028.  The conditional
+              -- vector assignment makes this one fixture exercise both
+              -- installations: pgvector labels legacy data; no-pgvector
+              -- remains a supported migration path.
+              runTransaction pool $ Session.sql "SET CONSTRAINTS trg_observations_have_subjects, trg_observation_subject_set_valid DEFERRED; INSERT INTO workspaces(id, name) VALUES ('00000000-0000-0000-0000-000000000281', 'v028 vector fixture'); INSERT INTO observations(id, workspace_id, git_sha, content, subject_set_open) VALUES ('00000000-0000-0000-0000-000000000282', '00000000-0000-0000-0000-000000000281', '0123456789abcdef0123456789abcdef01234567', 'pre-existing vector', TRUE); INSERT INTO observation_subjects(observation_id, ordinal, subject_kind, subject) VALUES ('00000000-0000-0000-0000-000000000282', 0, 'file', 'src/V028.hs'); DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN EXECUTE format('UPDATE observations SET embedding = %L::vector WHERE id = %L', '[' || repeat('0,', 1535) || '1]', '00000000-0000-0000-0000-000000000282'); END IF; END $$"
+              upgraded <- Migration.runMigrations pool v28OnlyDir
+              upgraded.failed `shouldBe` Nothing
+              upgraded.applied `shouldBe` ["V028__durable_embedding_jobs_and_space_isolation.sql"]
+              runSession pool (queryBool "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'observations' AND column_name = 'embedding_space_fingerprint') AND to_regclass('public.embedding_jobs') IS NOT NULL AND to_regclass('public.embedding_target_state') IS NOT NULL AND EXISTS (SELECT 1 FROM schema_migrations WHERE version = 28 AND name = 'V028__durable_embedding_jobs_and_space_isolation.sql') AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.embedding_jobs'::regclass AND contype = 'f' AND pg_get_constraintdef(oid) LIKE '%(observation_id, workspace_id)%REFERENCES observations(id, workspace_id)%')") `shouldReturn` True
+              runSession pool (queryBool "SELECT NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') OR (SELECT embedding_space_fingerprint = 'hmem:legacy-manual:v1' FROM observations WHERE id = '00000000-0000-0000-0000-000000000282')") `shouldReturn` True
+
     it "cleanDB truncates migration reports after the Observation schema reset" $
       withTestSandbox $ \sandbox -> do
         migrations <- resolveMigrationsDir sandbox.sandboxRepoRoot

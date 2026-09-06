@@ -1221,6 +1221,20 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       jsonField "subject" searchHit `shouldBe` Just (String "src/Main.hs")
       let vector = (1 : replicate (observationEmbeddingDimensions - 1) 0) :: [Double]
           observationPath = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))
+      invalidSpace <- request app methodPut (observationPath <> "/embedding") (encode (object
+        [ "embedding" .= vector
+        , "space_fingerprint" .= ("hmem:managed\x2003space" :: T.Text)
+        ]))
+      responseStatus invalidSpace `shouldBe` status400
+      invalidNullSpace <- request app methodPut (observationPath <> "/embedding") (encode (object
+        [ "embedding" .= vector, "space_fingerprint" .= Null ]))
+      responseStatus invalidNullSpace `shouldBe` status400
+      missingEnvelopeSpace <- request app methodPut (observationPath <> "/embedding") (encode (object
+        [ "embedding" .= vector ]))
+      responseStatus missingEnvelopeSpace `shouldBe` status400
+      invalidNullQuery <- postJson app "/api/v1/observations/similar" (object
+        [ "workspace_id" .= workspace.id, "embedding" .= vector, "space_fingerprint" .= Null ])
+      responseStatus invalidNullQuery `shouldBe` status400
       embeddingResponse <- request app methodPut (observationPath <> "/embedding") (encode vector)
       embeddingAvailable <- case responseStatus embeddingResponse of
         status | status == status503 -> pure False
@@ -1659,6 +1673,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
             find (\parameter -> jsonField "name" parameter == Just (String parameterName)) (toList parameters)
           enum name = jsonStrings (schema name >>= jsonField "enum")
           embeddingSchema = schema "SimilarObservationQuery" >>= jsonField "properties" >>= jsonField "embedding"
+          embeddingSetterSchema = schema "ObservationEmbedding"
           navigationFocusAncestors = schema "NavigationFocusResponse" >>= jsonField "properties" >>= jsonField "ancestors"
           navigationBatchProjects = schema "NavigationSummariesRequest" >>= jsonField "properties" >>= jsonField "project_ids"
           navigationBatchTasks = schema "NavigationSummariesRequest" >>= jsonField "properties" >>= jsonField "task_ids"
@@ -1829,6 +1844,22 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           length continuationForms `shouldBe` 1
         _ -> expectationFailure "ChangeStreamResyncRequest must use start/continuation oneOf"
       fixedEmbedding `shouldBe` Just (Number 1536, Number 1536)
+      case embeddingSetterSchema >>= jsonField "oneOf" of
+        Just (Array forms) -> do
+          let values = toList forms
+              raw = filter (\form -> jsonField "type" form == Just (String "array")) values
+              envelopes = filter (\form -> jsonField "type" form == Just (String "object")) values
+          length values `shouldBe` 2
+          length raw `shouldBe` 1
+          length envelopes `shouldBe` 1
+          let [envelope] = envelopes
+          jsonStrings (jsonField "required" envelope) `shouldBe` Just ["embedding", "space_fingerprint"]
+          (jsonField "properties" envelope >>= jsonField "space_fingerprint" >>= jsonField "$ref")
+            `shouldBe` Just (String "#/components/schemas/EmbeddingSpaceFingerprint")
+        _ -> expectationFailure "ObservationEmbedding must accept raw and space-envelope forms"
+      (schema "EmbeddingSpaceFingerprint" >>= jsonField "minLength") `shouldBe` Just (Number 1)
+      (schema "EmbeddingSpaceFingerprint" >>= jsonField "maxLength") `shouldBe` Just (Number 128)
+      (schema "EmbeddingSpaceFingerprint" >>= jsonField "pattern") `shouldBe` Just (String "^[^\\s\\x7f]+$")
       mapM_ (\name -> schema name `shouldSatisfy` isJust)
          ["NavigationBranchResponse", "NavigationFocusResponse", "NavigationSummariesRequest", "NavigationSummary"]
       navigationBranchItemRef "projects" `shouldBe` Just (String "#/components/schemas/ProjectCardSummary")

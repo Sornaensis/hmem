@@ -89,14 +89,16 @@ toolDefinitions =
       ] ["paths"])
   , tool "observation_delete" "Delete an observation by ID." (schema ["observation_id" .= prop "string" "Observation UUID"] ["observation_id"])
   , tool "observation_set_embedding" "Set the exact 1536-dimension embedding for an observation." (schema
-      [ "observation_id" .= prop "string" "Observation UUID"
-      , "embedding" .= object ["type" .= ("array" :: Text), "description" .= ("Exactly 1536 finite numeric dimensions" :: Text), "minItems" .= (observationEmbeddingDimensions :: Int), "maxItems" .= (observationEmbeddingDimensions :: Int), "items" .= object ["type" .= ("number" :: Text)]]
+       [ "observation_id" .= prop "string" "Observation UUID"
+       , "embedding" .= object ["type" .= ("array" :: Text), "description" .= ("Exactly 1536 finite numeric dimensions" :: Text), "minItems" .= (observationEmbeddingDimensions :: Int), "maxItems" .= (observationEmbeddingDimensions :: Int), "items" .= object ["type" .= ("number" :: Text)]]
+       , "space_fingerprint" .= spaceFingerprintProp
       ] ["observation_id", "embedding"])
   , tool "observation_similar" "Find semantically similar durable, non-obvious repository insights. Subject and git_sha filters are exact provenance filters; git_sha is a staleness-audit sentinel, not timeless proof. To continue, add returned_count to offset and repeat until returned_count is less than limit or zero." (schema
       [ "subject_kind" .= enumProp "Exact kind of repository subject tied to observations" ["file", "glob"]
       , "subject" .= prop "string" "Exact repository-relative subject tied to observations"
       , "git_sha" .= prop "string" "Exact Git SHA where an Observation insight was established; use it to select potentially stale insights for re-audit"
-      , "embedding" .= object ["type" .= ("array" :: Text), "description" .= ("Exactly 1536 finite numeric dimensions" :: Text), "minItems" .= (observationEmbeddingDimensions :: Int), "maxItems" .= (observationEmbeddingDimensions :: Int), "items" .= object ["type" .= ("number" :: Text)]]
+       , "embedding" .= object ["type" .= ("array" :: Text), "description" .= ("Exactly 1536 finite numeric dimensions" :: Text), "minItems" .= (observationEmbeddingDimensions :: Int), "maxItems" .= (observationEmbeddingDimensions :: Int), "items" .= object ["type" .= ("number" :: Text)]]
+       , "space_fingerprint" .= spaceFingerprintProp
       , "min_similarity" .= prop "number" "Minimum similarity from 0 through 1"
       , "limit" .= prop "integer" "Maximum results (1-200)"
       , "offset" .= prop "integer" "Result offset"
@@ -148,6 +150,12 @@ toolDefinitions =
     schema properties required = object ["type" .= ("object" :: Text), "properties" .= object properties, "required" .= (required :: [Text])]
     strictSchema properties required = object ["type" .= ("object" :: Text), "properties" .= object properties, "required" .= (required :: [Text]), "additionalProperties" .= False]
     prop typ description = object ["type" .= (typ :: Text), "description" .= (description :: Text)]
+    spaceFingerprintProp = object
+      [ "type" .= ("string" :: Text)
+      , "description" .= ("Optional exact embedding space; omitted resolves to the legacy manual space" :: Text)
+      , "minLength" .= (1 :: Int), "maxLength" .= (128 :: Int)
+      , "pattern" .= ("^[^\\s\\x7f]+$" :: Text)
+      ]
     nullableProp description = object ["description" .= (description :: Text), "anyOf" .= [object ["type" .= ("string" :: Text)], object ["type" .= ("null" :: Text)]]]
     enumProp description choices = object ["type" .= ("string" :: Text), "description" .= (description :: Text), "enum" .= (choices :: [Text])]
     arrayEnum description choices = object ["type" .= ("array" :: Text), "description" .= (description :: Text), "items" .= object ["type" .= ("string" :: Text), "enum" .= (choices :: [Text])]]
@@ -195,7 +203,7 @@ parseToolCall name args = case name of
   "observation_list" -> ObservationList <$> parse args
   "observation_match" -> ObservationMatchCall <$> parse args
   "observation_delete" -> ObservationDelete <$> required "observation_id"
-  "observation_set_embedding" -> ObservationSetEmbedding <$> required "observation_id" <*> (ObservationEmbedding <$> required "embedding")
+  "observation_set_embedding" -> ObservationSetEmbedding <$> required "observation_id" <*> (ObservationEmbedding <$> required "embedding" <*> optionalFingerprint args)
   "observation_similar" -> ObservationSimilar <$> parse args
   "workspace_list" -> WorkspaceList <$> optional "limit"
   "workspace_register" -> WorkspaceRegister <$> parse args
@@ -224,6 +232,10 @@ parseToolCall name args = case name of
     required key = parseEither (withObject "arguments" (.: key)) args
     optional :: FromJSON a => Key.Key -> Either String (Maybe a)
     optional key = parseEither (withObject "arguments" (.:? key)) args
+    optionalFingerprint value = parseEither (withObject "arguments" $ \objectValue ->
+      if KM.member "space_fingerprint" objectValue
+        then Just <$> objectValue .: "space_fingerprint"
+        else pure Nothing) value
 
 parseUpdateObservation :: Value -> Either String UpdateObservation
 parseUpdateObservation = parseEither $ withObject "observation_update" $ \o -> do
@@ -273,7 +285,7 @@ validateToolCall call = case call of
   ObservationUpdate _ input -> checked (validateUpdateObservationInput input) call
   ObservationList input -> checked (validateObservationQuery input) call
   ObservationMatchCall input -> checked (validateObservationMatchQuery input) call
-  ObservationSetEmbedding _ (ObservationEmbedding values) -> checked (validateEmbedding values) call
+  ObservationSetEmbedding _ (ObservationEmbedding values _) -> checked (validateEmbedding values) call
   ObservationSimilar input -> checked (validateSimilarObservationQuery input) call
   WorkspaceRegister input -> checked (validateCreateWorkspaceInput input) call
   -- The rename endpoint deliberately authorizes before decoding/validating its
@@ -322,7 +334,7 @@ execute manager base apiKey = \case
   ObservationMatchCall input@(ObservationMatchQuery _ _ _ _ _ _ offset) -> request manager base apiKey "POST" "/api/v1/observations/match" (Just (encode input)) (compactObservationMatches (fromMaybe 0 offset))
   ObservationDelete oid -> noContentRequest manager base apiKey "DELETE" ("/api/v1/observations/" <> uuidPath oid) Nothing (statusAck "deleted" "observation" oid)
   ObservationSetEmbedding oid embeddingValue -> noContentRequest manager base apiKey "PUT" ("/api/v1/observations/" <> uuidPath oid <> "/embedding") (Just (encode embeddingValue)) (statusAck "embedding_set" "observation" oid)
-  ObservationSimilar input@(SimilarObservationQuery _ _ _ _ _ _ limit offset) -> request manager base apiKey "POST" "/api/v1/observations/similar" (Just (encode input)) (compactSimilarObservations (fromMaybe 50 limit) (fromMaybe 0 offset))
+  ObservationSimilar input@(SimilarObservationQuery _ _ _ _ _ _ _ limit offset) -> request manager base apiKey "POST" "/api/v1/observations/similar" (Just (encode input)) (compactSimilarObservations (fromMaybe 50 limit) (fromMaybe 0 offset))
   WorkspaceList limit -> request manager base apiKey "GET" ("/api/v1/workspaces" <> query [("limit", show <$> limit)]) Nothing compactWorkspaceList
   WorkspaceRegister input -> request manager base apiKey "POST" "/api/v1/workspaces" (Just (encode input)) (mutationAck "created" "workspace" . compactWorkspaceSummary)
   WorkspaceUpdate workspaceId input -> request manager base apiKey "PUT" ("/api/v1/workspaces/" <> uuidPath workspaceId) (Just (encode input)) (mutationAck "updated" "workspace" . compactWorkspaceSummary)

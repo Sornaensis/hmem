@@ -41,6 +41,7 @@ import System.IO
 import HMem.Config (loadConfig)
 import HMem.Server.CtlEmbeddings
 import HMem.Server.Exception (trySynchronous)
+import HMem.Types (EmbeddingSpaceFingerprint, legacyManualEmbeddingSpace, parseEmbeddingSpaceFingerprint)
 
 data EmbeddingsCliCommand
   = EmbeddingsExportCommand !EmbeddingsExportCliOptions
@@ -52,6 +53,7 @@ data EmbeddingsExportCliOptions = EmbeddingsExportCliOptions
   , workspaceId :: !(Maybe UUID)
   , outputPath :: !(Maybe FilePath)
   , pageSize :: !Int
+  , targetSpace :: !EmbeddingSpaceFingerprint
   } deriving stock (Show, Eq)
 
 data EmbeddingsCliFormat
@@ -78,9 +80,9 @@ data EmbeddingsCliOperations = EmbeddingsCliOperations
 embeddingsCommandParser :: Parser EmbeddingsCliCommand
 embeddingsCommandParser = subparser
   ( command "export" (info ((EmbeddingsExportCommand <$> exportParser) <**> helper)
-      (progDesc "Write version-1 provider-neutral Observation work as NDJSON"))
+      (progDesc "Write version-2 provider-neutral Observation work as NDJSON"))
  <> command "import" (info ((EmbeddingsImportCommand <$> importParser) <**> helper)
-      (progDesc "Validate and compare-and-set version-1 embedding result NDJSON"))
+      (progDesc "Validate and compare-and-set versioned embedding result NDJSON"))
   )
 
 embeddingsCommandInfo :: (EmbeddingsCliCommand -> a) -> ParserInfo a
@@ -126,6 +128,18 @@ exportParser = EmbeddingsExportCliOptions
      <> showDefault
      <> help "Bounded database page size (1-1000)"
       )
+  <*> option embeddingSpaceReader
+      ( long "space-fingerprint"
+     <> metavar "FINGERPRINT"
+     <> value legacyManualEmbeddingSpace
+     <> showDefaultWith (const "hmem:legacy-manual:v1")
+     <> help "Exact vector space to export (default: legacy manual space)"
+      )
+
+embeddingSpaceReader :: ReadM EmbeddingSpaceFingerprint
+embeddingSpaceReader = eitherReader $ \raw ->
+  maybe (Left "expected a nonblank embedding space fingerprint without whitespace") Right
+    (parseEmbeddingSpaceFingerprint (T.pack raw))
 
 importParser :: Parser EmbeddingsImportCliOptions
 importParser = EmbeddingsImportCliOptions
@@ -174,12 +188,13 @@ runEmbeddingsCommandWith operations standardInput standardOutput standardError =
         { scope = if options.exportAll then ExportAllEmbeddings else ExportMissingEmbeddings
         , workspaceId = options.workspaceId
         , pageSize = options.pageSize
+        , targetSpace = options.targetSpace
         }
         (writeExportRecord destination)
       case result of
         Left err -> writeError standardError err
         Right count -> do
-          let summary = BS8.pack $ "exported " <> show count <> " observation(s) as version-1 NDJSON\n"
+          let summary = BS8.pack $ "exported " <> show count <> " observation(s) as version-2 NDJSON\n"
           case options.outputPath of
             Nothing -> BS.hPut standardError summary
             Just _ -> BS.hPut standardOutput summary
@@ -345,7 +360,7 @@ outcomeDetail = \case
     EmbeddingRecordTooLarge -> "line exceeds the 1 MiB input limit"
     EmbeddingRecordLimitExceeded -> "input exceeds the 100000-record limit"
     EmbeddingRecordMalformed -> "malformed JSON or invalid field type"
-    EmbeddingRecordInvalidShape -> "record fields do not exactly match the version-1 import shape"
+    EmbeddingRecordInvalidShape -> "record fields do not exactly match a supported versioned import shape"
     EmbeddingRecordUnsupportedVersion version -> "unsupported format_version " <> T.pack (show version)
     EmbeddingRecordInvalidFingerprint -> "content_fingerprint must be 64 lowercase hexadecimal characters"
     EmbeddingRecordInvalidVector -> "embedding must contain exactly 1536 finite numbers"

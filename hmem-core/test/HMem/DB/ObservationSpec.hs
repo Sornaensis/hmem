@@ -369,7 +369,7 @@ queryWith workspace kind path sha = ObservationQuery
 similarQuery :: UUID -> Maybe SubjectKind -> Maybe T.Text -> Maybe T.Text -> [Double] -> Maybe Double -> Maybe Int -> Maybe Int -> SimilarObservationQuery
 similarQuery workspace kind path sha vector threshold pageLimit pageOffset = SimilarObservationQuery
   { workspaceId = workspace, subjectKind = kind, subject = path, gitSha = sha
-  , embedding = vector, minSimilarity = threshold, limit = pageLimit, offset = pageOffset }
+  , embedding = vector, spaceFingerprint = Nothing, minSimilarity = threshold, limit = pageLimit, offset = pageOffset }
 
 facetQuery :: UUID -> Maybe SubjectKind -> Maybe T.Text -> Maybe T.Text -> Maybe Int -> Maybe Int -> ObservationSubjectFacetQuery
 facetQuery workspace kind sha searchTerm pageLimit pageOffset = ObservationSubjectFacetQuery

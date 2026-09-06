@@ -37,6 +37,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32)
 import Data.List (sort)
+import Data.Maybe (fromMaybe)
 import Data.Pool (Pool, destroyAllResources)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -50,6 +51,7 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 
 import HMem.Config (HMemConfig(..), PoolConfig(..), connectionString)
+import HMem.DB.Embedding qualified as Embedding
 import HMem.DB.Pool qualified as Pool
 import HMem.Server.CtlPgvector
 import HMem.Server.Exception (trySynchronous)
@@ -64,6 +66,7 @@ data EmbeddingExportOptions = EmbeddingExportOptions
   { scope :: !EmbeddingExportScope
   , workspaceId :: !(Maybe UUID)
   , pageSize :: !Int
+  , targetSpace :: !EmbeddingSpaceFingerprint
   } deriving stock (Show, Eq)
 
 data EmbeddingExportRecord = EmbeddingExportRecord
@@ -74,6 +77,7 @@ data EmbeddingExportRecord = EmbeddingExportRecord
   , subjects :: ![ObservationSubject]
   , content :: !Text
   , contentFingerprint :: !Text
+  , spaceFingerprint :: !EmbeddingSpaceFingerprint
   } deriving stock (Show, Eq)
 
 data EmbeddingImportRecord = EmbeddingImportRecord
@@ -81,6 +85,7 @@ data EmbeddingImportRecord = EmbeddingImportRecord
   , observationId :: !UUID
   , workspaceId :: !UUID
   , contentFingerprint :: !Text
+  , spaceFingerprint :: !EmbeddingSpaceFingerprint
   , embedding :: ![Double]
   } deriving stock (Show, Eq)
 
@@ -130,7 +135,7 @@ data EmbeddingsError
   deriving stock (Show, Eq)
 
 embeddingExchangeVersion :: Int
-embeddingExchangeVersion = 1
+embeddingExchangeVersion = 2
 
 defaultEmbeddingExportPageSize :: Int
 defaultEmbeddingExportPageSize = 200
@@ -145,15 +150,7 @@ maxEmbeddingImportLineBytes = 1024 * 1024
 -- record. Arrays are used deliberately so the encoded bytes do not depend on
 -- JSON object key ordering.
 observationContentFingerprint :: Text -> [ObservationSubject] -> Text -> Text
-observationContentFingerprint gitShaValue subjectValues contentValue =
-  T.pack $ show (hash payload :: Digest SHA256)
-  where
-    canonicalSubjects =
-      [ (subjectKindToText subjectValue.subjectKind, subjectValue.subject)
-      | subjectValue <- subjectValues
-      ]
-    payload = LBS.toStrict $ Aeson.encode
-      ("hmem-observation-embedding-v1" :: Text, gitShaValue, canonicalSubjects, contentValue)
+observationContentFingerprint = Embedding.observationContentFingerprint
 
 encodeEmbeddingExportRecord :: EmbeddingExportRecord -> ByteString
 encodeEmbeddingExportRecord = LBS.toStrict . Aeson.encode . exportRecordJson
@@ -167,6 +164,7 @@ exportRecordJson record = object
   , "subjects" .= record.subjects
   , "content" .= record.content
   , "content_fingerprint" .= record.contentFingerprint
+  , "space_fingerprint" .= record.spaceFingerprint
   ]
 
 decodeEmbeddingImportRecord :: ByteString -> Either EmbeddingRecordError EmbeddingImportRecord
@@ -175,39 +173,43 @@ decodeEmbeddingImportRecord bytes
   | otherwise = case Aeson.eitherDecodeStrict' bytes of
       Left _ -> Left EmbeddingRecordMalformed
       Right value@(Object fields)
-        | exactImportKeys fields ->
+        | validImportKeys fields ->
             case AesonTypes.parseEither parseImportRecord value of
               Left _ -> Left EmbeddingRecordMalformed
               Right record -> validateEmbeddingImportRecord record
         | otherwise -> Left EmbeddingRecordInvalidShape
       Right _ -> Left EmbeddingRecordInvalidShape
 
-exactImportKeys :: KeyMap.KeyMap Value -> Bool
-exactImportKeys fields =
-  sort (map Key.toText (KeyMap.keys fields)) == sort importKeys
-  where
-    importKeys =
-      [ "format_version"
-      , "observation_id"
-      , "workspace_id"
-      , "content_fingerprint"
-      , "embedding"
-      ]
+validImportKeys :: KeyMap.KeyMap Value -> Bool
+validImportKeys fields = let actual = sort (map Key.toText (KeyMap.keys fields)) in
+  actual == sort ["format_version", "observation_id", "workspace_id", "content_fingerprint", "embedding"] ||
+  actual == sort ["format_version", "observation_id", "workspace_id", "content_fingerprint", "space_fingerprint", "embedding"]
 
 parseImportRecord :: Value -> AesonTypes.Parser EmbeddingImportRecord
 parseImportRecord = AesonTypes.withObject "embedding import record" $ \fields ->
-  EmbeddingImportRecord
-    <$> fields AesonTypes..: "format_version"
-    <*> fields AesonTypes..: "observation_id"
-    <*> fields AesonTypes..: "workspace_id"
-    <*> fields AesonTypes..: "content_fingerprint"
-    <*> fields AesonTypes..: "embedding"
+  do
+    version <- fields AesonTypes..: "format_version"
+    let hasSpace = KeyMap.member "space_fingerprint" fields
+    space <- case version :: Int of
+      1 | hasSpace -> fail "v1 imports cannot supply space_fingerprint"
+        | otherwise -> pure legacyManualEmbeddingSpace
+      2 | not hasSpace -> fail "v2 imports require space_fingerprint"
+        | otherwise -> do
+            raw <- fields AesonTypes..: "space_fingerprint"
+            maybe (fail "invalid embedding space_fingerprint") pure (parseEmbeddingSpaceFingerprint raw)
+      _ -> pure legacyManualEmbeddingSpace
+    EmbeddingImportRecord version
+      <$> fields AesonTypes..: "observation_id"
+      <*> fields AesonTypes..: "workspace_id"
+      <*> fields AesonTypes..: "content_fingerprint"
+      <*> pure space
+      <*> fields AesonTypes..: "embedding"
 
 validateEmbeddingImportRecord
   :: EmbeddingImportRecord
   -> Either EmbeddingRecordError EmbeddingImportRecord
 validateEmbeddingImportRecord record
-  | record.formatVersion /= embeddingExchangeVersion =
+  | record.formatVersion `notElem` [1, embeddingExchangeVersion] =
       Left $ EmbeddingRecordUnsupportedVersion record.formatVersion
   | not (validFingerprint record.contentFingerprint) =
       Left EmbeddingRecordInvalidFingerprint
@@ -253,6 +255,7 @@ exportEmbeddingsWithPool pool options emit
       rawPage <- Pool.runSession pool $ Session.statement
         ( options.workspaceId
         , options.scope == ExportAllEmbeddings
+        , embeddingSpaceFingerprintText options.targetSpace
         , cursor
         , fromIntegral options.pageSize :: Int32
         ) exportPageStatement
@@ -270,6 +273,7 @@ data RawExportRecord = RawExportRecord
   , gitSha :: !Text
   , subjectsJson :: !Text
   , content :: !Text
+  , spaceFingerprint :: !Text
   }
 
 exportRecordFromRaw :: RawExportRecord -> IO EmbeddingExportRecord
@@ -283,33 +287,36 @@ exportRecordFromRaw raw = case Aeson.eitherDecodeStrict' (TE.encodeUtf8 raw.subj
     , subjects = subjectValues
     , content = raw.content
     , contentFingerprint = observationContentFingerprint raw.gitSha subjectValues raw.content
+    , spaceFingerprint = fromMaybe legacyManualEmbeddingSpace (parseEmbeddingSpaceFingerprint raw.spaceFingerprint)
     }
 
 exportPageStatement
-  :: Statement.Statement (Maybe UUID, Bool, Maybe UUID, Int32) [RawExportRecord]
+  :: Statement.Statement (Maybe UUID, Bool, Text, Maybe UUID, Int32) [RawExportRecord]
 exportPageStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines
       [ "SELECT o.id, o.workspace_id, o.git_sha,"
       , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text,"
-      , "       o.content"
+      , "       o.content, $3::text"
       , "FROM public.observations o"
       , "JOIN public.observation_subjects s ON s.observation_id = o.id"
       , "WHERE ($1::uuid IS NULL OR o.workspace_id = $1)"
-      , "  AND ($2 OR o.embedding IS NULL)"
-      , "  AND ($3::uuid IS NULL OR o.id > $3)"
+      , "  AND ($2 OR o.embedding IS NULL OR o.embedding_space_fingerprint IS DISTINCT FROM $3)"
+      , "  AND ($4::uuid IS NULL OR o.id > $4)"
       , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content"
       , "ORDER BY o.id ASC"
-      , "LIMIT $4"
+      , "LIMIT $5"
       ]
     encoder =
-         contramap (\(a,_,_,_) -> a) (Enc.param (Enc.nullable Enc.uuid))
-      <> contramap (\(_,b,_,_) -> b) (Enc.param (Enc.nonNullable Enc.bool))
-      <> contramap (\(_,_,c,_) -> c) (Enc.param (Enc.nullable Enc.uuid))
-      <> contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nonNullable Enc.int4))
+         contramap (\(a,_,_,_,_) -> a) (Enc.param (Enc.nullable Enc.uuid))
+      <> contramap (\(_,b,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.bool))
+      <> contramap (\(_,_,c,_,_) -> c) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,_,_,d,_) -> d) (Enc.param (Enc.nullable Enc.uuid))
+      <> contramap (\(_,_,_,_,e) -> e) (Enc.param (Enc.nonNullable Enc.int4))
     decoder = Dec.rowList $ RawExportRecord
       <$> Dec.column (Dec.nonNullable Dec.uuid)
       <*> Dec.column (Dec.nonNullable Dec.uuid)
+      <*> Dec.column (Dec.nonNullable Dec.text)
       <*> Dec.column (Dec.nonNullable Dec.text)
       <*> Dec.column (Dec.nonNullable Dec.text)
       <*> Dec.column (Dec.nonNullable Dec.text)
@@ -396,63 +403,13 @@ applyImportRecord
   :: Pool Hasql.Connection
   -> EmbeddingImportRecord
   -> IO EmbeddingImportOutcome
-applyImportRecord pool record = Pool.runTransaction pool $ do
-  currentRaw <- Session.statement
-    (record.workspaceId, record.observationId)
-    currentObservationStatement
-  case currentRaw of
-    Nothing -> pure EmbeddingImportNotFound
-    Just (gitShaValue, subjectsJson, contentValue) ->
-      case Aeson.eitherDecodeStrict' (TE.encodeUtf8 subjectsJson) of
-        Left _ -> pure EmbeddingImportDatabaseError
-        Right subjectValues ->
-          if observationContentFingerprint gitShaValue subjectValues contentValue
-                /= record.contentFingerprint
-            then pure EmbeddingImportStale
-            else do
-              changed <- Session.statement
-                (record.workspaceId, record.observationId, vectorText record.embedding)
-                compareAndSetEmbeddingStatement
-              pure $ if changed
-                then EmbeddingImportApplied
-                else EmbeddingImportAlreadySatisfied
-
-currentObservationStatement
-  :: Statement.Statement (UUID, UUID) (Maybe (Text, Text, Text))
-currentObservationStatement = Statement.Statement sql encoder decoder True
-  where
-    sql = BS8.pack $ unlines
-      [ "SELECT o.git_sha,"
-      , "       (SELECT jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text"
-      , "          FROM public.observation_subjects s WHERE s.observation_id = o.id),"
-      , "       o.content"
-      , "FROM public.observations o"
-      , "WHERE o.workspace_id = $1 AND o.id = $2"
-      , "FOR UPDATE OF o"
-      ]
-    encoder =
-         contramap fst (Enc.param (Enc.nonNullable Enc.uuid))
-      <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))
-    decoder = Dec.rowMaybe $
-      (,,) <$> Dec.column (Dec.nonNullable Dec.text)
-           <*> Dec.column (Dec.nonNullable Dec.text)
-           <*> Dec.column (Dec.nonNullable Dec.text)
-
-compareAndSetEmbeddingStatement :: Statement.Statement (UUID, UUID, Text) Bool
-compareAndSetEmbeddingStatement = Statement.Statement
-  "WITH changed AS (\
-  \ UPDATE public.observations SET embedding = $3::vector\
-  \ WHERE workspace_id = $1 AND id = $2 AND embedding IS DISTINCT FROM $3::vector\
-  \ RETURNING 1)\
-  \ SELECT EXISTS (SELECT 1 FROM changed)"
-  ( contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
- <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid))
- <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.text)))
-  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool)))
-  True
-
-vectorText :: [Double] -> Text
-vectorText values = "[" <> T.intercalate "," (map (T.pack . show) values) <> "]"
+applyImportRecord pool record = do
+  result <- Embedding.compareAndSetObservationEmbedding pool record.workspaceId record.observationId record.contentFingerprint record.spaceFingerprint record.embedding
+  pure $ case result of
+    Embedding.EmbeddingApplied -> EmbeddingImportApplied
+    Embedding.EmbeddingAlreadySatisfied -> EmbeddingImportAlreadySatisfied
+    Embedding.EmbeddingStale -> EmbeddingImportStale
+    Embedding.EmbeddingNotFound -> EmbeddingImportNotFound
 
 requirePgvectorReadiness
   :: Pool Hasql.Connection

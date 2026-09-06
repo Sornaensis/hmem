@@ -46,6 +46,7 @@ import HMem.DB.Audit qualified as Audit
 import HMem.DB.ChangeStream qualified as ChangeStream
 import HMem.DB.Auth qualified as Auth
 import HMem.DB.Observation qualified as Observation
+import HMem.DB.Embedding qualified as Embedding
 import HMem.DB.Overview qualified as Overview
 import HMem.DB.Pool (DBException(..), PoolMetrics(..), getPoolMetrics, runSession)
 import HMem.DB.Project qualified as Project
@@ -725,12 +726,12 @@ observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> simi
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
     deleted <- handleDBErrors (Observation.deleteObservation pool workspaceId observationId)
     if deleted then pure NoContent else throwError err404
-  embeddingH observationId (ObservationEmbedding vector) = do
+  embeddingH observationId (ObservationEmbedding vector suppliedSpace) = do
     workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleEdit
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
     -- Verify existence so a no-op UPDATE is never reported as success.
     _ <- handleDBErrors (Observation.getObservation pool workspaceId observationId) >>= maybe (throwError err404) pure
-    handleDBErrors $ Observation.setObservationEmbedding pool workspaceId observationId vector
+    handleDBErrors $ Embedding.setObservationEmbeddingInSpace pool workspaceId observationId (fromMaybe legacyManualEmbeddingSpace suppliedSpace) vector
     pure NoContent
 
 projects :: Pool Hasql.Connection -> Server ProjectAPI

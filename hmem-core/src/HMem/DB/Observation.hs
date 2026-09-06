@@ -34,6 +34,7 @@ import Hasql.Statement qualified as Statement
 import Rel8 hiding (update)
 
 import HMem.DB.Pool (DBException(..), runSession, runTransaction)
+import HMem.DB.Embedding qualified as Embedding
 import HMem.DB.Schema
 import HMem.Types
 
@@ -52,12 +53,15 @@ createObservation pool create = do
         , content = create.content
         }
   validateOrThrow $ validateCreateObservationInput normalizedCreate
-  rows <- runSession pool $ Session.statement
-    ( normalizedCreate.workspaceId
-    , subjectsJson normalizedCreate.subjects
-    , normalizedCreate.gitSha
-    , normalizedCreate.content
-    ) createObservationStatement
+  rows <- runTransaction pool $ do
+    inserted <- Session.statement
+      ( normalizedCreate.workspaceId
+      , subjectsJson normalizedCreate.subjects
+      , normalizedCreate.gitSha
+      , normalizedCreate.content
+      ) createObservationStatement
+    mapM_ Embedding.enqueueObservationForActiveTarget inserted
+    pure inserted
   case rows of
     (row:_) -> pure row
     [] -> throwIO $ DBCheckViolation "observations require an active repository workspace"
@@ -107,12 +111,17 @@ updateObservation pool workspace observationId update = do
     -- while still allowing databases without pgvector to update normally.
     Session.sql "LOCK TABLE public.observations IN ROW EXCLUSIVE MODE"
     hasEmbedding <- Session.statement () observationEmbeddingColumnStatement
-    Session.statement (workspace, observationId, update.content) $
+    applied <- Session.statement (workspace, observationId, update.content) $
       if hasEmbedding then updateObservationAndClearEmbeddingStatement
                       else updateObservationContentStatement
-  if updated
-    then getObservation pool workspace observationId
-    else pure Nothing
+    if applied
+      then do
+        rows <- Session.statement (workspace, observationId) getObservationStatement
+        case rows of
+          (observation:_) -> Embedding.enqueueObservationForContentChange observation >> pure (Just observation)
+          [] -> pure Nothing
+      else pure Nothing
+  pure updated
 
 observationEmbeddingColumnStatement :: Statement.Statement () Bool
 observationEmbeddingColumnStatement = Statement.Statement
@@ -124,11 +133,11 @@ observationEmbeddingColumnStatement = Statement.Statement
 
 updateObservationContentStatement :: Statement.Statement (UUID, UUID, Text) Bool
 updateObservationContentStatement = updateObservationStatement
-  "WITH updated AS (UPDATE observations SET content = $3 WHERE workspace_id = $1 AND id = $2 RETURNING 1) SELECT EXISTS (SELECT 1 FROM updated)"
+  "WITH updated AS (UPDATE observations SET content = $3, embedding_space_fingerprint = NULL WHERE workspace_id = $1 AND id = $2 RETURNING 1) SELECT EXISTS (SELECT 1 FROM updated)"
 
 updateObservationAndClearEmbeddingStatement :: Statement.Statement (UUID, UUID, Text) Bool
 updateObservationAndClearEmbeddingStatement = updateObservationStatement
-  "WITH updated AS (UPDATE observations SET content = $3, embedding = NULL WHERE workspace_id = $1 AND id = $2 RETURNING 1) SELECT EXISTS (SELECT 1 FROM updated)"
+  "WITH updated AS (UPDATE observations SET content = $3, embedding = NULL, embedding_space_fingerprint = NULL WHERE workspace_id = $1 AND id = $2 RETURNING 1) SELECT EXISTS (SELECT 1 FROM updated)"
 
 updateObservationStatement :: BS8.ByteString -> Statement.Statement (UUID, UUID, Text) Bool
 updateObservationStatement sql = Statement.Statement
@@ -355,17 +364,14 @@ similarObservations pool queryValue = do
     , queryValue.subject
     , queryValue.gitSha
     , minSimilarityValue
+    , embeddingSpaceFingerprintText (fromMaybe legacyManualEmbeddingSpace queryValue.spaceFingerprint)
     , limitValue
     , offsetValue
     ) similarObservationsStatement
 
 setObservationEmbedding :: Pool Hasql.Connection -> UUID -> UUID -> [Double] -> IO ()
-setObservationEmbedding pool workspace observationId embeddingValue = do
-  validateOrThrow ["embedding must contain exactly 1536 finite dimensions"
-    | length embeddingValue /= observationEmbeddingDimensions
-      || any (\x -> isNaN x || isInfinite x) embeddingValue]
-  requirePgvector pool
-  runSession pool $ Session.statement (workspace, observationId, vecText embeddingValue) setObservationEmbeddingStatement
+setObservationEmbedding pool workspace observationId embeddingValue =
+  Embedding.setObservationEmbeddingInSpace pool workspace observationId legacyManualEmbeddingSpace embeddingValue
 
 requirePgvector :: Pool Hasql.Connection -> IO ()
 requirePgvector pool = do
@@ -384,17 +390,8 @@ observationVectorCapabilityStatement = Statement.Statement
   (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool)))
   True
 
-setObservationEmbeddingStatement :: Statement.Statement (UUID, UUID, Text) ()
-setObservationEmbeddingStatement = Statement.Statement
-  "UPDATE observations SET embedding = $3::vector WHERE workspace_id = $1 AND id = $2"
-  ( contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
- <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid))
- <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.text)))
-  Dec.noResult
-  True
-
 similarObservationsStatement :: Statement.Statement
-  (Text, UUID, Maybe Text, Maybe Text, Maybe Text, Double, Int32, Int32) [SimilarObservation]
+  (Text, UUID, Maybe Text, Maybe Text, Maybe Text, Double, Text, Int32, Int32) [SimilarObservation]
 similarObservationsStatement = Statement.Statement sql encoder (Dec.rowList similarObservationDecoder) True
   where
     sql = BS8.pack $ unlines
@@ -407,19 +404,21 @@ similarObservationsStatement = Statement.Statement sql encoder (Dec.rowList simi
       , "  AND (($3::text IS NULL AND $4::text IS NULL) OR EXISTS (SELECT 1 FROM observation_subjects f WHERE f.observation_id = o.id AND ($3::text IS NULL OR f.subject_kind::text = $3) AND ($4::text IS NULL OR f.subject = $4)))"
       , "  AND ($5::text IS NULL OR o.git_sha = $5)"
       , "  AND 1 - (o.embedding <=> $1::vector) >= $6"
+      , "  AND o.embedding_space_fingerprint = $7"
       , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.embedding"
       , "ORDER BY o.embedding <=> $1::vector ASC, o.updated_at DESC, o.id DESC"
-      , "LIMIT $7 OFFSET $8"
+      , "LIMIT $8 OFFSET $9"
       ]
     encoder =
-         contramap (\(a,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.text))
-      <> contramap (\(_,b,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid))
-      <> contramap (\(_,_,c,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,d,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,_,e,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,_,_,f,_,_) -> f) (Enc.param (Enc.nonNullable Enc.float8))
-      <> contramap (\(_,_,_,_,_,_,g,_) -> g) (Enc.param (Enc.nonNullable Enc.int4))
-      <> contramap (\(_,_,_,_,_,_,_,h) -> h) (Enc.param (Enc.nonNullable Enc.int4))
+         contramap (\(a,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,b,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,_,c,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,d,_,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,e,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,f,_,_,_) -> f) (Enc.param (Enc.nonNullable Enc.float8))
+      <> contramap (\(_,_,_,_,_,_,g,_,_) -> g) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,h,_) -> h) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,_,_,i) -> i) (Enc.param (Enc.nonNullable Enc.int4))
 
 observationDecoder :: Dec.Row Observation
 observationDecoder = do

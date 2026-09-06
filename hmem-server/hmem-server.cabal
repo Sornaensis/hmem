@@ -1,6 +1,6 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.39.6.
+-- This file has been generated from package.yaml by hpack version 0.38.1.
 --
 -- see: https://github.com/sol/hpack
 
@@ -41,6 +41,7 @@ data-files:
     migrations/V025__workspace_rename_change_stream.sql
     migrations/V026__task_dependency_cycle_sqlstate.sql
     migrations/V027__bounded_task_dependency_cycle_check.sql
+    migrations/V028__durable_embedding_jobs_and_space_isolation.sql
 
 library
   exposed-modules:
@@ -60,6 +61,7 @@ library
       HMem.Server.Embedding.GteQwen2
       HMem.Server.Embedding.Http
       HMem.Server.Embedding.Provider
+      HMem.Server.Embedding.Worker
       HMem.Server.Event
       HMem.Server.Exception
       HMem.Server.Logging
@@ -422,6 +424,7 @@ test-suite hmem-server-test
       HMem.Server.Embedding.GteQwen2Spec
       HMem.Server.Embedding.HttpSpec
       HMem.Server.Embedding.ProviderSpec
+      HMem.Server.Embedding.WorkerSpec
       HMem.Server.KeycloakHarness
       HMem.Server.KeycloakHarnessSpec
       HMem.Server.LocalSandboxSpec

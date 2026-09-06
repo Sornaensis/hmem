@@ -33,13 +33,17 @@ spec = describe "hmem-ctl embeddings CLI" $ do
     it "parses export defaults and explicit all/workspace/Windows output options" $ do
       parseCommand ["export"] `shouldBe` Right (EmbeddingsExportCommand EmbeddingsExportCliOptions
         { exportAll = False, workspaceId = Nothing, outputPath = Nothing
-        , pageSize = defaultEmbeddingExportPageSize })
+        , pageSize = defaultEmbeddingExportPageSize, targetSpace = legacyManualEmbeddingSpace })
       parseCommand
         [ "export", "--all", "--workspace", show workspaceId
         , "--output", "C:\\temp\\embedding work.ndjson", "--page-size", "17"
         ] `shouldBe` Right (EmbeddingsExportCommand EmbeddingsExportCliOptions
           { exportAll = True, workspaceId = Just workspaceId
-          , outputPath = Just "C:\\temp\\embedding work.ndjson", pageSize = 17 })
+          , outputPath = Just "C:\\temp\\embedding work.ndjson", pageSize = 17, targetSpace = legacyManualEmbeddingSpace })
+      parseCommand ["export", "--space-fingerprint", "hmem:managed-gte-qwen2:test"] `shouldBe` Right
+        (EmbeddingsExportCommand EmbeddingsExportCliOptions
+          { exportAll = False, workspaceId = Nothing, outputPath = Nothing, pageSize = defaultEmbeddingExportPageSize
+          , targetSpace = testSpace "hmem:managed-gte-qwen2:test" })
 
     it "parses import stdin/file and JSON modes and rejects operation-specific flags" $ do
       parseCommand ["import"] `shouldBe` Right
@@ -70,7 +74,7 @@ spec = describe "hmem-ctl embeddings CLI" $ do
       withHandles "" $ \input output errors -> do
         exitCode <- runEmbeddingsCommandWith successfulOperations input output errors $
           EmbeddingsExportCommand $ EmbeddingsExportCliOptions
-            False Nothing Nothing defaultEmbeddingExportPageSize
+            False Nothing Nothing defaultEmbeddingExportPageSize legacyManualEmbeddingSpace
         exitCode `shouldBe` ExitSuccess
         standardOutput <- readHandle output
         standardError <- readHandle errors
@@ -84,7 +88,7 @@ spec = describe "hmem-ctl embeddings CLI" $ do
         withTempPath "hmem-embedding-export.ndjson" $ \path -> do
           exitCode <- runEmbeddingsCommandWith successfulOperations input output errors $
             EmbeddingsExportCommand $ EmbeddingsExportCliOptions
-              True (Just workspaceId) (Just path) 1
+              True (Just workspaceId) (Just path) 1 legacyManualEmbeddingSpace
           exitCode `shouldBe` ExitSuccess
           fileBytes <- BS.readFile path
           BS8.lines fileBytes `shouldSatisfy` ((== 1) . length)
@@ -198,7 +202,7 @@ spec = describe "hmem-ctl embeddings CLI" $ do
               }
         exitCode <- runEmbeddingsCommandWith operations input output errors $
           EmbeddingsExportCommand $ EmbeddingsExportCliOptions
-            False Nothing Nothing defaultEmbeddingExportPageSize
+            False Nothing Nothing defaultEmbeddingExportPageSize legacyManualEmbeddingSpace
         exitCode `shouldBe` ExitFailure 1
         errorOutput <- readHandle errors
         errorOutput `shouldSatisfy` BS8.isInfixOf "hmem-ctl pgvector status"
@@ -243,6 +247,7 @@ exportRecord = EmbeddingExportRecord
   , subjects = [ObservationSubject SubjectFile "src/Main.hs"]
   , content = "content"
   , contentFingerprint = fingerprint
+  , spaceFingerprint = legacyManualEmbeddingSpace
   }
 
 appliedResult, alreadyResult, staleResult :: EmbeddingImportResult
@@ -334,3 +339,6 @@ uuid :: String -> UUID
 uuid raw = case UUID.fromString raw of
   Just parsed -> parsed
   Nothing -> error "invalid UUID fixture"
+
+testSpace :: Text -> EmbeddingSpaceFingerprint
+testSpace raw = maybe (error "test embedding space must be valid") id (parseEmbeddingSpaceFingerprint raw)

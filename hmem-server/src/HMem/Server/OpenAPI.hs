@@ -147,7 +147,12 @@ instance ToSchema UpdateWorkspaceRequest where declareNamedSchema _ = declareNam
 instance ToSchema LinkDependencyRequest where declareNamedSchema _ = declareNamedSchema (Proxy @LinkDependency)
 
 instance ToSchema ObservationEmbedding where
-  declareNamedSchema _ = pure $ NamedSchema (Just "ObservationEmbedding") embeddingSchema
+  declareNamedSchema _ = pure $ NamedSchema (Just "ObservationEmbedding") $
+    mempty & oneOf ?~ [Inline embeddingSchema, Inline embeddingEnvelopeSchema]
+
+instance ToSchema EmbeddingSpaceFingerprint where
+  declareNamedSchema _ = pure $ NamedSchema (Just "EmbeddingSpaceFingerprint") $
+    mempty & type_ ?~ OpenApiString & minLength ?~ 1 & maxLength ?~ 128 & pattern ?~ "^[^\\s\\x7f]+$"
 instance ToSchema ObservationSubject where
   declareNamedSchema _ = pure $ NamedSchema (Just "ObservationSubject") $ mempty
     & type_ ?~ OpenApiObject
@@ -225,6 +230,16 @@ embeddingSchema = mempty
   & items ?~ OpenApiItemsObject (Inline (mempty & type_ ?~ OpenApiNumber))
   & minItems ?~ fromIntegral observationEmbeddingDimensions
   & maxItems ?~ fromIntegral observationEmbeddingDimensions
+
+embeddingEnvelopeSchema :: Schema
+embeddingEnvelopeSchema = mempty
+  & type_ ?~ OpenApiObject
+  & required .~ ["embedding", "space_fingerprint"]
+  & additionalProperties ?~ AdditionalPropertiesAllowed False
+  & properties .~ InsOrdMap.fromList
+    [ ("embedding", Inline embeddingSchema)
+    , ("space_fingerprint", Ref (Reference "EmbeddingSpaceFingerprint"))
+    ]
 
 subjectsSchema :: Schema
 subjectsSchema = mempty

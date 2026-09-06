@@ -130,6 +130,7 @@ workflow env = do
           , workspaceId = Just workspace.id
           , outputPath = Just exportPath
           , pageSize = 1
+          , targetSpace = legacyManualEmbeddingSpace
           }
       exportExit `shouldBe` ExitSuccess
       exportError `shouldBe` mempty
@@ -243,6 +244,7 @@ decodeExportRecord bytes = case Aeson.eitherDecodeStrict' bytes >>= AesonTypes.p
         <*> fields AesonTypes..: "subjects"
         <*> fields AesonTypes..: "content"
         <*> fields AesonTypes..: "content_fingerprint"
+        <*> fields AesonTypes..: "space_fingerprint"
 
 encodeImportRecord :: EmbeddingExportRecord -> [Double] -> ByteString
 encodeImportRecord record vector = LBS.toStrict $ Aeson.encode $ object
@@ -250,6 +252,7 @@ encodeImportRecord record vector = LBS.toStrict $ Aeson.encode $ object
   , "observation_id" .= record.observationId
   , "workspace_id" .= record.workspaceId
   , "content_fingerprint" .= record.contentFingerprint
+  , "space_fingerprint" .= record.spaceFingerprint
   , "embedding" .= vector
   ]
 
@@ -277,6 +280,7 @@ exportIds env operations workspaceId exportAll fileName = do
       , workspaceId = Just workspaceId
       , outputPath = Just path
       , pageSize = 1
+      , targetSpace = legacyManualEmbeddingSpace
       }
   exitCode `shouldBe` ExitSuccess
   errors `shouldBe` mempty
@@ -291,6 +295,7 @@ similarIds env workspaceId vector = fmap (map (.observation.id)) $
     , subject = Nothing
     , gitSha = Nothing
     , embedding = vector
+    , spaceFingerprint = Nothing
     , minSimilarity = Just 1
     , limit = Nothing
     , offset = Nothing

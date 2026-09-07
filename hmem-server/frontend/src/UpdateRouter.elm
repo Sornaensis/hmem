@@ -116,6 +116,15 @@ update msg model =
         GotNavigationFocus _ _ _ _ _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
+        GotProjectCardDetail _ _ _ ->
+            Ok (Feature.DataLoading.update msg model)
+
+        GotTaskCardDetail _ _ _ ->
+            Ok (Feature.DataLoading.update msg model)
+
+        RetryCardDetail _ _ ->
+            Ok (Feature.DataLoading.update msg model)
+
         GotSessionContext epoch expectedWorkspace result ->
             Err (HandleInAppShell (AppShell.SessionContextLoadedMsg epoch expectedWorkspace result))
 

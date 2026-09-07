@@ -118,6 +118,9 @@ type alias DataLoadingModel =
     , navigationPresentations : Dict String NavigationPresentationState
     , projectCardSummaries : Dict String Api.ProjectCardSummary
     , taskCardSummaries : Dict String Api.TaskCardSummary
+    , projectCardDetailRequests : Dict String CardDetailRequest
+    , taskCardDetailRequests : Dict String CardDetailRequest
+    , nextCardDetailRequestId : Int
 
     -- The bounded navigation API is authoritative for which cached cards are
     -- currently visible. Entity dictionaries may also contain detail/focus
@@ -127,6 +130,17 @@ type alias DataLoadingModel =
     , navigationVisibilityActive : Bool
     , activeNavigationFocus : Maybe NavigationFocusRequest
     , navigationFocuses : Dict String NavigationFocusRequest
+    }
+
+
+type alias CardDetailRequest =
+    { workspaceId : String
+    , sessionEpoch : Int
+    , navigationGeneration : Int
+    , requestId : Int
+    , expectedUpdatedAt : String
+    , inFlight : Bool
+    , succeeded : Bool
     }
 
 
@@ -750,6 +764,9 @@ type Msg
     | LoadRootNavigationPage String
     | ShowPreviousRootNavigationPage String
     | GotNavigationFocus String Int Int String String String Int (Result Http.Error Api.NavigationFocusResponse)
+    | GotProjectCardDetail CardDetailRequest String (Result Http.Error Api.Project)
+    | GotTaskCardDetail CardDetailRequest String (Result Http.Error Api.Task)
+    | RetryCardDetail String String
     | GotSessionContext Int (Maybe String) (Result Http.Error Api.SessionContext)
     | GotProjects String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Project))
     | GotTasks String (Maybe Int) Int (Result Http.Error (Api.PaginatedResult Api.Task))

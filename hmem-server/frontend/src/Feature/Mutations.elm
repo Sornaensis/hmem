@@ -152,7 +152,9 @@ update msg model =
                     let
                         ( trackedModel, trackCmd ) =
                             trackLocalMutation proj.id
-                                { model | projects = Dict.insert proj.id proj model.projects }
+                                (markProjectDetailCurrent proj
+                                    { model | projects = Dict.insert proj.id proj model.projects }
+                                )
                     in
                     ( trackedModel, Cmd.batch [ trackCmd, refreshReadinessCaches trackedModel ] )
 
@@ -165,6 +167,7 @@ update msg model =
                     let
                         updatedModel =
                             applyTaskMutationResult mutationResult model
+                                |> markTaskDetailsCurrent (mutationResult.task :: List.map .task mutationResult.dependencyEffects)
 
                         ( trackedModel, trackCmd ) =
                             trackLocalMutations (taskMutationResultIds mutationResult) updatedModel
@@ -260,6 +263,63 @@ update msg model =
 
         _ ->
             ( model, Cmd.none )
+
+
+markProjectDetailCurrent : Api.Project -> Model -> Model
+markProjectDetailCurrent project model =
+    let
+        loading =
+            model.dataLoading
+
+        request =
+            { workspaceId = project.workspaceId
+            , sessionEpoch = model.sessionRequestEpoch
+            , navigationGeneration = loading.navigationGeneration
+            , requestId = loading.nextCardDetailRequestId
+            , expectedUpdatedAt = project.updatedAt
+            , inFlight = False
+            , succeeded = True
+            }
+    in
+    { model
+        | dataLoading =
+            { loading
+                | projectCardDetailRequests = Dict.insert project.id request loading.projectCardDetailRequests
+                , nextCardDetailRequestId = request.requestId + 1
+            }
+    }
+
+
+markTaskDetailsCurrent : List Api.Task -> Model -> Model
+markTaskDetailsCurrent tasks model =
+    let
+        loading =
+            model.dataLoading
+
+        mark task ( accumulatedRequests, requestId ) =
+            ( Dict.insert task.id
+                { workspaceId = task.workspaceId
+                , sessionEpoch = model.sessionRequestEpoch
+                , navigationGeneration = loading.navigationGeneration
+                , requestId = requestId
+                , expectedUpdatedAt = task.updatedAt
+                , inFlight = False
+                , succeeded = True
+                }
+                accumulatedRequests
+            , requestId + 1
+            )
+
+        ( requests, nextRequestId ) =
+            List.foldl mark ( loading.taskCardDetailRequests, loading.nextCardDetailRequestId ) tasks
+    in
+    { model
+        | dataLoading =
+            { loading
+                | taskCardDetailRequests = requests
+                , nextCardDetailRequestId = nextRequestId
+            }
+    }
 
 
 refreshAfterMutation : Model -> ( Model, Cmd Msg )

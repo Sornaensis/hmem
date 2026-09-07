@@ -4,10 +4,13 @@ import Api
 import AppShell
 import Dict
 import Expect
+import Feature.Cards as Cards
 import Feature.DataLoading as DataLoading
 import Feature.Dependencies as Dependencies
+import Feature.Mutations as Mutations
 import Feature.WebSocket as WebSocket
 import Http
+import Json.Encode as Encode
 import Set
 import String
 import Test exposing (Test, describe, test)
@@ -38,6 +41,511 @@ suite =
                     , visible = Set.member "child" updated.dataLoading.navigationVisibleProjectIds
                     , succeeded = Dict.get "project:parent" updated.dataLoading.loadedNavigationBranches |> Maybe.map .succeeded |> Maybe.withDefault False
                     }
+        , test "accepted root navigation hydrates descriptions and loads an initially expanded direct branch" <|
+            \_ ->
+                let
+                    expandedProject =
+                        let
+                            summary =
+                                project "expanded-root" Nothing
+                        in
+                        { summary | hasChildren = True, directTaskCount = 1 }
+
+                    unassignedTask =
+                        let
+                            summary =
+                                task "unassigned-root" Nothing
+                        in
+                        { summary | projectId = Nothing }
+
+                    prepared =
+                        DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
+
+                    ( updated, _ ) =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [ expandedProject ], hasMore = False }, tasks = { items = [ unassignedTask ], hasMore = False } })
+                            )
+                            prepared
+                in
+                Expect.equal
+                    { projectDetail = True, taskDetail = True, branchInFlight = True, rootSettled = True }
+                    { projectDetail = Dict.get expandedProject.id updated.dataLoading.projectCardDetailRequests |> Maybe.map .inFlight |> Maybe.withDefault False
+                    , taskDetail = Dict.get unassignedTask.id updated.dataLoading.taskCardDetailRequests |> Maybe.map .inFlight |> Maybe.withDefault False
+                    , branchInFlight = Dict.get ("project:" ++ expandedProject.id) updated.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight |> Maybe.withDefault False
+                    , rootSettled = updated.dataLoading.rootNavigationRequest |> Maybe.map (.inFlight >> not) |> Maybe.withDefault False
+                    }
+        , test "card detail hydration applies canonical descriptions and rejects a late superseded response" <|
+            \_ ->
+                let
+                    summary =
+                        project "described" Nothing
+
+                    seeded =
+                        DataLoading.mergeNavigationSummaries [ summary ] [] model
+
+                    ( requested, _ ) =
+                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+
+                    firstRequest =
+                        Dict.get summary.id requested.dataLoading.projectCardDetailRequests
+
+                    firstDetail =
+                        let
+                            detail =
+                                Api.projectFromCardSummary summary
+                        in
+                        { detail | description = Just "Canonical description" }
+
+                    applied =
+                        case firstRequest of
+                            Just request ->
+                                DataLoading.update (GotProjectCardDetail request summary.id (Ok firstDetail)) requested |> Tuple.first
+
+                            Nothing ->
+                                requested
+
+                    newerSummary =
+                        { summary | updatedAt = "2026-01-02T00:00:00Z" }
+
+                    ( superseded, _ ) =
+                        DataLoading.mergeNavigationSummaries [ newerSummary ] [] applied
+                            |> DataLoading.ensureNavigationPresentation "workspace_root" Nothing
+
+                    afterLate =
+                        case firstRequest of
+                            Just request ->
+                                DataLoading.update (GotProjectCardDetail request summary.id (Ok firstDetail)) superseded |> Tuple.first
+
+                            Nothing ->
+                                superseded
+                in
+                Expect.equal
+                    { applied = Just "Canonical description", clearedForRefresh = Nothing, lateIgnored = Nothing, superseded = True }
+                    { applied = Dict.get summary.id applied.projects |> Maybe.andThen .description
+                    , clearedForRefresh = Dict.get summary.id superseded.projects |> Maybe.andThen .description
+                    , lateIgnored = Dict.get summary.id afterLate.projects |> Maybe.andThen .description
+                    , superseded =
+                        case ( firstRequest, Dict.get summary.id superseded.dataLoading.projectCardDetailRequests ) of
+                            ( Just first, Just second ) ->
+                                second.requestId > first.requestId
+
+                            _ ->
+                                False
+                    }
+        , test "newer canonical project and task details remain hydrated across ensure and Expand All" <|
+            \_ ->
+                let
+                    projectSummary =
+                        project "detail-newer-project" Nothing
+
+                    taskSummary =
+                        let
+                            summary =
+                                task "detail-newer-task" Nothing
+                        in
+                        { summary | projectId = Nothing }
+
+                    seeded =
+                        DataLoading.mergeNavigationSummaries [ projectSummary ] [ taskSummary ] model
+
+                    ( requested, _ ) =
+                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+
+                    projectRequest =
+                        Dict.get projectSummary.id requested.dataLoading.projectCardDetailRequests
+
+                    taskRequest =
+                        Dict.get taskSummary.id requested.dataLoading.taskCardDetailRequests
+
+                    hydrated =
+                        case ( projectRequest, taskRequest ) of
+                            ( Just pendingProject, Just pendingTask ) ->
+                                let
+                                    projectDetail =
+                                        Api.projectFromCardSummary projectSummary
+
+                                    taskDetail =
+                                        Api.taskFromCardSummary taskSummary
+
+                                    newerProject =
+                                        { projectDetail | description = Just "newer project detail", updatedAt = "2026-01-05T00:00:00Z" }
+
+                                    newerTask =
+                                        { taskDetail | description = Just "newer task detail", updatedAt = "2026-01-05T00:00:00Z" }
+                                in
+                                requested
+                                    |> DataLoading.update (GotProjectCardDetail pendingProject projectSummary.id (Ok newerProject))
+                                    |> Tuple.first
+                                    |> DataLoading.update (GotTaskCardDetail pendingTask taskSummary.id (Ok newerTask))
+                                    |> Tuple.first
+
+                            _ ->
+                                requested
+
+                    ensured =
+                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing hydrated |> Tuple.first
+
+                    expanded =
+                        Cards.update ExpandAllNodes ensured |> Tuple.first
+
+                    projectState =
+                        Dict.get projectSummary.id expanded.dataLoading.projectCardDetailRequests
+
+                    taskState =
+                        Dict.get taskSummary.id expanded.dataLoading.taskCardDetailRequests
+                in
+                Expect.equal
+                    { descriptions = ( Just "newer project detail", Just "newer task detail" )
+                    , projectSettled = True
+                    , taskSettled = True
+                    , requestIdsUnchanged =
+                        ( projectRequest |> Maybe.map .requestId
+                        , taskRequest |> Maybe.map .requestId
+                        )
+                    }
+                    { descriptions =
+                        ( Dict.get projectSummary.id expanded.projects |> Maybe.andThen .description
+                        , Dict.get taskSummary.id expanded.tasks |> Maybe.andThen .description
+                        )
+                    , projectSettled = projectState |> Maybe.map (\state -> state.expectedUpdatedAt == "2026-01-05T00:00:00Z" && state.succeeded && not state.inFlight) |> Maybe.withDefault False
+                    , taskSettled = taskState |> Maybe.map (\state -> state.expectedUpdatedAt == "2026-01-05T00:00:00Z" && state.succeeded && not state.inFlight) |> Maybe.withDefault False
+                    , requestIdsUnchanged =
+                        ( projectState |> Maybe.map .requestId
+                        , taskState |> Maybe.map .requestId
+                        )
+                    }
+        , test "filter reload retires project and task detail requests across the response gap" <|
+            \_ ->
+                let
+                    projectSummary =
+                        project "filter-project" Nothing
+
+                    taskSummary =
+                        let
+                            summary =
+                                task "filter-task" Nothing
+                        in
+                        { summary | projectId = Nothing }
+
+                    seeded =
+                        DataLoading.mergeNavigationSummaries [ projectSummary ] [ taskSummary ] model
+
+                    ( requested, _ ) =
+                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+
+                    projectRequest =
+                        Dict.get projectSummary.id requested.dataLoading.projectCardDetailRequests
+
+                    taskRequest =
+                        Dict.get taskSummary.id requested.dataLoading.taskCardDetailRequests
+
+                    ( reloaded, _ ) =
+                        DataLoading.reloadNavigationForFilters requested
+
+                    afterGap =
+                        case ( projectRequest, taskRequest ) of
+                            ( Just oldProjectRequest, Just oldTaskRequest ) ->
+                                let
+                                    detail =
+                                        Api.projectFromCardSummary projectSummary
+                                in
+                                reloaded
+                                    |> DataLoading.update (GotProjectCardDetail oldProjectRequest projectSummary.id (Ok { detail | description = Just "stale" }))
+                                    |> Tuple.first
+                                    |> DataLoading.update (GotTaskCardDetail oldTaskRequest taskSummary.id (Err Http.Timeout))
+                                    |> Tuple.first
+
+                            _ ->
+                                reloaded
+
+                    replaced =
+                        case afterGap.dataLoading.rootNavigationRequest of
+                            Just request ->
+                                DataLoading.update
+                                    (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint 0 0
+                                        (Ok { workspaceId = workspaceId, projects = { items = [ projectSummary ], hasMore = False }, tasks = { items = [ taskSummary ], hasMore = False } })
+                                    )
+                                    afterGap
+                                    |> Tuple.first
+
+                            Nothing ->
+                                afterGap
+                in
+                Expect.equal
+                    { retiredDuringGap = True, projectRestarted = True, taskRestarted = True, staleDescriptionIgnored = True }
+                    { retiredDuringGap = Dict.isEmpty afterGap.dataLoading.projectCardDetailRequests && Dict.isEmpty afterGap.dataLoading.taskCardDetailRequests
+                    , projectRestarted =
+                        case ( projectRequest, Dict.get projectSummary.id replaced.dataLoading.projectCardDetailRequests ) of
+                            ( Just old, Just fresh ) ->
+                                fresh.inFlight && fresh.requestId > old.requestId
+
+                            _ ->
+                                False
+                    , taskRestarted =
+                        case ( taskRequest, Dict.get taskSummary.id replaced.dataLoading.taskCardDetailRequests ) of
+                            ( Just old, Just fresh ) ->
+                                fresh.inFlight && fresh.requestId > old.requestId
+
+                            _ ->
+                                False
+                    , staleDescriptionIgnored = Dict.get projectSummary.id afterGap.projects |> Maybe.andThen .description |> (==) Nothing
+                    }
+        , test "successful project and task mutations fence older in-flight detail responses" <|
+            \_ ->
+                let
+                    projectSummary =
+                        project "mutated-project" Nothing
+
+                    taskSummary =
+                        let
+                            summary =
+                                task "mutated-task" Nothing
+                        in
+                        { summary | projectId = Nothing }
+
+                    seeded =
+                        DataLoading.mergeNavigationSummaries [ projectSummary ] [ taskSummary ] model
+
+                    ( requested, _ ) =
+                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+
+                    projectRequest =
+                        Dict.get projectSummary.id requested.dataLoading.projectCardDetailRequests
+
+                    taskRequest =
+                        Dict.get taskSummary.id requested.dataLoading.taskCardDetailRequests
+
+                    oldProject =
+                        Api.projectFromCardSummary projectSummary
+
+                    oldTask =
+                        Api.taskFromCardSummary taskSummary
+
+                    mutatedProject =
+                        { oldProject | name = "new project", status = Api.ProjPaused, priority = 9, description = Just "new project description", updatedAt = "2026-01-03T00:00:00Z" }
+
+                    mutatedTask =
+                        { oldTask | title = "new task", status = Api.InProgress, priority = 8, description = Just "new task description", updatedAt = "2026-01-03T00:00:00Z" }
+
+                    afterMutations =
+                        requested
+                            |> Mutations.update (ProjectUpdated (Ok mutatedProject))
+                            |> Tuple.first
+                            |> Mutations.update (TaskUpdated (Ok { task = mutatedTask, dependencyEffects = [] }))
+                            |> Tuple.first
+
+                    afterLateDetails =
+                        case ( projectRequest, taskRequest ) of
+                            ( Just staleProjectRequest, Just staleTaskRequest ) ->
+                                afterMutations
+                                    |> DataLoading.update (GotProjectCardDetail staleProjectRequest projectSummary.id (Ok { oldProject | description = Just "old project description" }))
+                                    |> Tuple.first
+                                    |> DataLoading.update (GotTaskCardDetail staleTaskRequest taskSummary.id (Ok { oldTask | description = Just "old task description" }))
+                                    |> Tuple.first
+
+                            _ ->
+                                afterMutations
+                in
+                Expect.equal
+                    { project = Just { name = "new project", status = Api.ProjPaused, priority = 9, description = Just "new project description" }
+                    , task = Just { title = "new task", status = Api.InProgress, priority = 8, description = Just "new task description" }
+                    , projectDetailCurrent = True
+                    , taskDetailCurrent = True
+                    }
+                    { project = Dict.get projectSummary.id afterLateDetails.projects |> Maybe.map (\value -> { name = value.name, status = value.status, priority = value.priority, description = value.description })
+                    , task = Dict.get taskSummary.id afterLateDetails.tasks |> Maybe.map (\value -> { title = value.title, status = value.status, priority = value.priority, description = value.description })
+                    , projectDetailCurrent = Dict.get projectSummary.id afterLateDetails.dataLoading.projectCardDetailRequests |> Maybe.map (\state -> state.expectedUpdatedAt == mutatedProject.updatedAt && state.succeeded && not state.inFlight) |> Maybe.withDefault False
+                    , taskDetailCurrent = Dict.get taskSummary.id afterLateDetails.dataLoading.taskCardDetailRequests |> Maybe.map (\state -> state.expectedUpdatedAt == mutatedTask.updatedAt && state.succeeded && not state.inFlight) |> Maybe.withDefault False
+                    }
+        , test "unfiltered live summaries rehydrate visible newer project and task descriptions" <|
+            \_ ->
+                let
+                    projectSummary =
+                        project "live-project" Nothing
+
+                    taskSummary =
+                        let
+                            summary =
+                                task "live-task" Nothing
+                        in
+                        { summary | projectId = Nothing }
+
+                    seeded =
+                        DataLoading.mergeNavigationSummaries [ projectSummary ] [ taskSummary ] model
+
+                    ( requested, _ ) =
+                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+
+                    firstProjectRequest =
+                        Dict.get projectSummary.id requested.dataLoading.projectCardDetailRequests
+
+                    firstTaskRequest =
+                        Dict.get taskSummary.id requested.dataLoading.taskCardDetailRequests
+
+                    hydrated =
+                        case ( firstProjectRequest, firstTaskRequest ) of
+                            ( Just projectRequest, Just taskRequest ) ->
+                                let
+                                    projectDetail =
+                                        Api.projectFromCardSummary projectSummary
+
+                                    taskDetail =
+                                        Api.taskFromCardSummary taskSummary
+                                in
+                                requested
+                                    |> DataLoading.update (GotProjectCardDetail projectRequest projectSummary.id (Ok { projectDetail | description = Just "old project" }))
+                                    |> Tuple.first
+                                    |> DataLoading.update (GotTaskCardDetail taskRequest taskSummary.id (Ok { taskDetail | description = Just "old task" }))
+                                    |> Tuple.first
+
+                            _ ->
+                                requested
+
+                    guard =
+                        { scopeKey = "workspace:" ++ workspaceId
+                        , targetKey = "navigation-summaries:live"
+                        , targetGeneration = 1
+                        , sessionEpoch = model.sessionRequestEpoch
+                        , routeWorkspace = Just workspaceId
+                        , audienceId = "editor"
+                        }
+
+                    newerProject =
+                        { projectSummary | name = "live project newer", updatedAt = "2026-01-04T00:00:00Z" }
+
+                    newerTask =
+                        { taskSummary | title = "live task newer", updatedAt = "2026-01-04T00:00:00Z" }
+
+                    baseWebSocket =
+                        hydrated.webSocket
+
+                    source =
+                        { hydrated
+                            | auth = { status = AuthReady, mode = Just "test" }
+                            , sessionContext = Just editorSession
+                            , webSocket = { baseWebSocket | targetGenerations = Dict.singleton (guard.scopeKey ++ "|" ++ guard.targetKey) 1 }
+                        }
+
+                    updated =
+                        WebSocket.update
+                            (CanonicalNavigationSummariesFetched guard workspaceId [ projectSummary.id ] [ taskSummary.id ]
+                                (Ok { projects = [ newerProject ], tasks = [ newerTask ], missingProjectIds = [], missingTaskIds = [] })
+                            )
+                            source
+                            |> Tuple.first
+                in
+                Expect.equal
+                    { descriptionsCleared = ( Nothing, Nothing ), projectRehydrating = True, taskRehydrating = True }
+                    { descriptionsCleared =
+                        ( Dict.get projectSummary.id updated.projects |> Maybe.andThen .description
+                        , Dict.get taskSummary.id updated.tasks |> Maybe.andThen .description
+                        )
+                    , projectRehydrating =
+                        case ( firstProjectRequest, Dict.get projectSummary.id updated.dataLoading.projectCardDetailRequests ) of
+                            ( Just old, Just fresh ) ->
+                                fresh.expectedUpdatedAt == newerProject.updatedAt && fresh.inFlight && fresh.requestId > old.requestId
+
+                            _ ->
+                                False
+                    , taskRehydrating =
+                        case ( firstTaskRequest, Dict.get taskSummary.id updated.dataLoading.taskCardDetailRequests ) of
+                            ( Just old, Just fresh ) ->
+                                fresh.expectedUpdatedAt == newerTask.updatedAt && fresh.inFlight && fresh.requestId > old.requestId
+
+                            _ ->
+                                False
+                    }
+        , test "pinned project and task paging hydrate the same cached window the renderer presents" <|
+            \_ ->
+                let
+                    numbered prefix number =
+                        prefix ++ String.padLeft 3 '0' (String.fromInt number)
+
+                    projects =
+                        List.range 1 60 |> List.map (\number -> project (numbered "project-" number) Nothing)
+
+                    tasks =
+                        List.range 1 60
+                            |> List.map
+                                (\number ->
+                                    let
+                                        summary =
+                                            task (numbered "task-" number) Nothing
+                                    in
+                                    { summary | projectId = Nothing }
+                                )
+
+                    prepare entityKind entityId projectItems taskItems =
+                        let
+                            focus =
+                                model.focus
+
+                            focused =
+                                { rootLoadModel | focus = { focus | focusedEntity = Just ( entityKind, entityId ) } }
+
+                            requestedRoot =
+                                DataLoading.prepareRootNavigationRequest (Just workspaceId) focused
+
+                            loaded =
+                                DataLoading.update
+                                    (GotRootNavigation workspaceId requestedRoot.sessionRequestEpoch (Just 1) requestedRoot.dataLoading.navigationGeneration filterFingerprint 0 0
+                                        (Ok { workspaceId = workspaceId, projects = { items = projectItems, hasMore = False }, tasks = { items = taskItems, hasMore = False } })
+                                    )
+                                    requestedRoot
+                                    |> Tuple.first
+
+                            loading =
+                                loaded.dataLoading
+
+                            offsetPresentation =
+                                loading.rootNavigationPresentation
+                                    |> Maybe.map
+                                        (\presentation ->
+                                            if entityKind == "project" then
+                                                { presentation | projectOffset = 24 }
+
+                                            else
+                                                { presentation | taskOffset = 24 }
+                                        )
+
+                            isolated =
+                                { loaded
+                                    | dataLoading =
+                                        { loading
+                                            | rootNavigationPresentation = offsetPresentation
+                                            , projectCardDetailRequests = Dict.empty
+                                            , taskCardDetailRequests = Dict.empty
+                                        }
+                                }
+                        in
+                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing isolated |> Tuple.first
+
+                    projectPage =
+                        prepare "project" "project-050" projects []
+
+                    taskPage =
+                        prepare "task" "task-050" [] tasks
+
+                    projectRequestIds =
+                        projectPage.dataLoading.projectCardDetailRequests |> Dict.keys |> Set.fromList
+
+                    taskRequestIds =
+                        taskPage.dataLoading.taskCardDetailRequests |> Dict.keys |> Set.fromList
+
+                    expectedProjects =
+                        projects |> List.map .id |> Cards.presentationWindow identity (Set.singleton "project-050") 24 |> Set.fromList
+
+                    expectedTasks =
+                        tasks |> List.map .id |> Cards.presentationWindow identity (Set.singleton "task-050") 24 |> Set.fromList
+                in
+                Expect.equal
+                    { projectWindow = expectedProjects, taskWindow = expectedTasks, pinnedProjectHydrated = True, pinnedTaskHydrated = True }
+                    { projectWindow = projectRequestIds
+                    , taskWindow = taskRequestIds
+                    , pinnedProjectHydrated = Set.member "project-050" projectRequestIds
+                    , pinnedTaskHydrated = Set.member "task-050" taskRequestIds
+                    }
         , test "root navigation rejects stale workspace, session, filter, generation, and page keys" <|
             \_ ->
                 let
@@ -65,6 +573,36 @@ suite =
                         )
                         staleMessages
                     )
+        , test "late stored navigation filters supersede bootstrap loading without leaving the root in flight forever" <|
+            \_ ->
+                let
+                    prepared =
+                        DataLoading.prepareRootNavigationRequest (Just workspaceId)
+                            { rootLoadModel | auth = { status = AuthReady, mode = Just "test" }, sessionContext = Just editorSession }
+
+                    stored =
+                        Encode.object
+                            [ ( "workspaceId", Encode.string workspaceId )
+                            , ( "filterTaskStatuses", Encode.list Encode.string [ "done" ] )
+                            ]
+
+                    ( reloaded, _ ) =
+                        AppShell.handleOwned (AppShell.LocalStorageLoadedMsg stored) prepared
+
+                    oldResponse =
+                        DataLoading.update
+                            (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0 (Ok rootResponse))
+                            reloaded
+                            |> Tuple.first
+                in
+                Expect.equal
+                    { generationAdvanced = True, storedFilterApplied = [ "done" ], blockingLoadSettled = True, replacementInFlight = True, oldRejected = True }
+                    { generationAdvanced = reloaded.dataLoading.navigationGeneration > prepared.dataLoading.navigationGeneration
+                    , storedFilterApplied = reloaded.search.filterTaskStatuses
+                    , blockingLoadSettled = not reloaded.dataLoading.loadingWorkspaceData && reloaded.dataLoading.pendingWorkspaceLoads == 0
+                    , replacementInFlight = reloaded.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False
+                    , oldRejected = Dict.member "stale-root" oldResponse.dataLoading.projectCardSummaries |> not
+                    }
         , test "the prepared root navigation guard accepts the concurrent bootstrap response" <|
             \_ ->
                 let

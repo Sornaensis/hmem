@@ -8,6 +8,7 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Ports exposing (saveToLocalStorage)
 import Process
+import Set
 import String
 import Task as ElmTask
 import Types exposing (..)
@@ -28,6 +29,32 @@ local to a branch, but can never consume the cursor's entire page. -}
 presentationOrdinaryCapacity : Int -> Int
 presentationOrdinaryCapacity pinCount =
     Basics.max 1 (presentationWindowSize - Basics.min presentationMaxPinned pinCount)
+
+
+navigationPresentationWindow : (a -> String) -> Set.Set String -> Int -> List a -> List a
+navigationPresentationWindow identify pinned offset values =
+    let
+        pinnedValues =
+            values
+                |> List.filter (identify >> (\entityId -> Set.member entityId pinned))
+
+        ordinaryCapacity =
+            presentationOrdinaryCapacity (List.length pinnedValues)
+
+        ordinaryPageValues =
+            values
+                |> List.filter (\value -> not (Set.member (identify value) pinned))
+                |> List.drop offset
+                |> List.take ordinaryCapacity
+
+        selectedIds =
+            ordinaryPageValues
+                |> List.map identify
+                |> Set.fromList
+                |> Set.union pinned
+    in
+    values
+        |> List.filter (identify >> (\entityId -> Set.member entityId selectedIds))
 
 
 

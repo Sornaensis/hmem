@@ -8,6 +8,7 @@ import Feature.Cards as Cards
 import Feature.DataLoading as DataLoading
 import Feature.Focus as Focus
 import Helpers
+import Http
 import Set
 import Test exposing (Test, describe, test)
 import Test.Html.Query as Query
@@ -37,6 +38,72 @@ suite =
 
                     Nothing ->
                         Expect.fail "Expected an unloaded project expansion to request its branch"
+        , test "Expand All hydrates and loads a visible project that was collapsed before its branch arrived" <|
+            \_ ->
+                let
+                    seeded =
+                        DataLoading.mergeNavigationSummaries [ project "expand-all-parent" ] [] model
+
+                    cards =
+                        seeded.cards
+
+                    collapsed =
+                        { seeded | cards = { cards | collapsedNodes = Dict.singleton "proj-expand-all-parent" True } }
+
+                    expanded =
+                        Cards.update ExpandAllNodes collapsed |> Tuple.first
+                in
+                Expect.equal
+                    { collapsed = False, branchInFlight = True, detailInFlight = True }
+                    { collapsed = Dict.get "proj-expand-all-parent" expanded.cards.collapsedNodes |> Maybe.withDefault False
+                    , branchInFlight = Dict.get "project:expand-all-parent" expanded.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight |> Maybe.withDefault False
+                    , detailInFlight = Dict.get "expand-all-parent" expanded.dataLoading.projectCardDetailRequests |> Maybe.map .inFlight |> Maybe.withDefault False
+                    }
+        , test "an unhydrated description cannot be edited and a failed detail exposes a working retry" <|
+            \_ ->
+                let
+                    summary =
+                        project "description-state"
+
+                    seeded =
+                        DataLoading.mergeNavigationSummaries [ summary ] [] model
+
+                    ( requested, _ ) =
+                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+
+                    pendingView =
+                        Cards.viewProjectsTree workspaceId requested |> Query.fromHtml
+
+                    firstRequest =
+                        Dict.get summary.id requested.dataLoading.projectCardDetailRequests
+
+                    failed =
+                        case firstRequest of
+                            Just request ->
+                                DataLoading.update (GotProjectCardDetail request summary.id (Err Http.Timeout)) requested |> Tuple.first
+
+                            Nothing ->
+                                requested
+
+                    failedView =
+                        Cards.viewProjectsTree workspaceId failed |> Query.fromHtml
+
+                    retried =
+                        DataLoading.update (RetryCardDetail "project" summary.id) failed |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> pendingView |> Query.has [ Selector.text "Loading description…" ]
+                    , \_ -> pendingView |> Query.findAll [ Selector.text "Click to add description..." ] |> Query.count (Expect.equal 0)
+                    , \_ -> failedView |> Query.has [ Selector.text "Description unavailable.", Selector.text "Retry" ]
+                    , \_ ->
+                        case ( firstRequest, Dict.get summary.id retried.dataLoading.projectCardDetailRequests ) of
+                            ( Just first, Just second ) ->
+                                Expect.equal True (second.inFlight && second.requestId > first.requestId)
+
+                            _ ->
+                                Expect.fail "Expected the failed detail request to restart"
+                    ]
+                    ()
         , test "direct focus requests only a target absent from the bounded card cache" <|
             \_ ->
                 let

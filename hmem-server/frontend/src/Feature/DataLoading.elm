@@ -1,9 +1,9 @@
-module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
 import Feature.Observation
-import Helpers exposing (indexBy, presentationOrdinaryCapacity)
+import Helpers exposing (indexBy, navigationPresentationWindow, presentationOrdinaryCapacity)
 import Permissions
 import Set
 import String
@@ -29,6 +29,9 @@ init =
     , navigationPresentations = Dict.empty
     , projectCardSummaries = Dict.empty
     , taskCardSummaries = Dict.empty
+    , projectCardDetailRequests = Dict.empty
+    , taskCardDetailRequests = Dict.empty
+    , nextCardDetailRequestId = 1
     , navigationVisibleProjectIds = Set.empty
     , navigationVisibleTaskIds = Set.empty
     , navigationVisibilityActive = False
@@ -326,7 +329,7 @@ localPresentationPinnedIds maybeParent entityKind model =
                                             task.parentId == Just parentId
 
                                         _ ->
-                                            task.parentId == Nothing
+                                            task.projectId == Nothing && task.parentId == Nothing
                                    )
                         )
                     |> Maybe.withDefault False
@@ -477,7 +480,8 @@ beginNavigationBranchPage parentKind parentId entityKind model =
                 )
 
             else
-                ( { model | dataLoading = { currentLoading | navigationPresentations = Dict.insert key nextPresentation currentLoading.navigationPresentations } }, Cmd.none )
+                { model | dataLoading = { currentLoading | navigationPresentations = Dict.insert key nextPresentation currentLoading.navigationPresentations } }
+                    |> ensureNavigationPresentation parentKind (Just parentId)
 
         _ ->
             ( model, Cmd.none )
@@ -498,14 +502,13 @@ beginNavigationBranchPreviousPage parentKind parentId entityKind model =
                 loading =
                     model.dataLoading
             in
-            ( { model
+            { model
                 | dataLoading =
                     { loading
                         | navigationPresentations = Dict.insert key (retreatPresentation parentKind (Just ( parentKind, parentId )) entityKind model previous) model.dataLoading.navigationPresentations
                     }
-              }
-            , Cmd.none
-            )
+            }
+                |> ensureNavigationPresentation parentKind (Just parentId)
 
         Nothing ->
             ( model, Cmd.none )
@@ -596,7 +599,8 @@ beginRootNavigationPage entityKind model =
                 )
 
             else
-                ( { model | dataLoading = { loading | rootNavigationPresentation = Just nextPresentation } }, Cmd.none )
+                { model | dataLoading = { loading | rootNavigationPresentation = Just nextPresentation } }
+                    |> ensureNavigationPresentation "workspace_root" Nothing
 
         _ ->
             ( model, Cmd.none )
@@ -613,7 +617,8 @@ beginRootNavigationPreviousPage entityKind model =
                 loading =
                     model.dataLoading
             in
-            ( { model | dataLoading = { loading | rootNavigationPresentation = Just (retreatPresentation "root" Nothing entityKind model previous) } }, Cmd.none )
+            { model | dataLoading = { loading | rootNavigationPresentation = Just (retreatPresentation "root" Nothing entityKind model previous) } }
+                |> ensureNavigationPresentation "workspace_root" Nothing
 
         Nothing ->
             ( model, Cmd.none )
@@ -683,12 +688,17 @@ reloadNavigationForFilters model =
 
                 resetLoading =
                     { current
-                        | navigationGeneration = generation
+                        | loadingWorkspaceData = False
+                        , pendingWorkspaceLoads = 0
+                        , activeWorkspaceLoadToken = Nothing
+                        , navigationGeneration = generation
                         , loadedNavigationBranches = Dict.empty
                         , rootNavigationPresentation = Nothing
                         , navigationPresentations = Dict.empty
                         , projectCardSummaries = Dict.empty
                         , taskCardSummaries = Dict.empty
+                        , projectCardDetailRequests = Dict.empty
+                        , taskCardDetailRequests = Dict.empty
                         , navigationVisibleProjectIds = Set.empty
                         , navigationVisibleTaskIds = Set.empty
                         , navigationVisibilityActive = True
@@ -1173,7 +1183,14 @@ mergeNavigationSummaries projectSummaries taskSummaries model =
 
                         merged =
                             Dict.get summary.id values
-                                |> Maybe.map (\existing -> { card | description = existing.description })
+                                |> Maybe.map
+                                    (\existing ->
+                                        if existing.updatedAt == card.updatedAt then
+                                            { card | description = existing.description }
+
+                                        else
+                                            card
+                                    )
                                 |> Maybe.withDefault card
                     in
                     Dict.insert summary.id merged values
@@ -1190,7 +1207,14 @@ mergeNavigationSummaries projectSummaries taskSummaries model =
 
                         merged =
                             Dict.get summary.id values
-                                |> Maybe.map (\existing -> { card | description = existing.description, memoryLinkCount = existing.memoryLinkCount })
+                                |> Maybe.map
+                                    (\existing ->
+                                        if existing.updatedAt == card.updatedAt then
+                                            { card | description = existing.description, memoryLinkCount = existing.memoryLinkCount }
+
+                                        else
+                                            { card | memoryLinkCount = existing.memoryLinkCount }
+                                    )
                                 |> Maybe.withDefault card
                     in
                     Dict.insert summary.id merged values
@@ -1238,6 +1262,275 @@ mergeNavigationSummaries projectSummaries taskSummaries model =
                 , taskReadinessRollups = taskReadinessRollups
             }
     }
+
+
+projectSummaryBelongsTo : String -> Maybe String -> Api.ProjectCardSummary -> Bool
+projectSummaryBelongsTo parentKind maybeParentId summary =
+    case ( parentKind, maybeParentId ) of
+        ( "workspace_root", Nothing ) ->
+            summary.parentId == Nothing
+
+        ( "project", Just parentId ) ->
+            summary.parentId == Just parentId
+
+        _ ->
+            False
+
+
+taskSummaryBelongsTo : String -> Maybe String -> Api.TaskCardSummary -> Bool
+taskSummaryBelongsTo parentKind maybeParentId summary =
+    case ( parentKind, maybeParentId ) of
+        ( "workspace_root", Nothing ) ->
+            summary.projectId == Nothing && summary.parentId == Nothing
+
+        ( "project", Just parentId ) ->
+            summary.projectId == Just parentId && summary.parentId == Nothing
+
+        ( "task", Just parentId ) ->
+            summary.parentId == Just parentId
+
+        _ ->
+            False
+
+
+presentationOffsets : String -> Maybe String -> Model -> ( Int, Int )
+presentationOffsets parentKind maybeParentId model =
+    let
+        presentation =
+            case maybeParentId of
+                Nothing ->
+                    model.dataLoading.rootNavigationPresentation
+
+                Just parentId ->
+                    Dict.get (navigationBranchKey parentKind (Just parentId)) model.dataLoading.navigationPresentations
+    in
+    presentation
+        |> Maybe.map (\value -> ( value.projectOffset, value.taskOffset ))
+        |> Maybe.withDefault ( 0, 0 )
+
+
+presentedNavigationSummaries : String -> Maybe String -> Model -> ( List Api.ProjectCardSummary, List Api.TaskCardSummary )
+presentedNavigationSummaries parentKind maybeParentId model =
+    let
+        ( projectOffset, taskOffset ) =
+            presentationOffsets parentKind maybeParentId model
+
+        parent =
+            Maybe.map (\parentId -> ( parentKind, parentId )) maybeParentId
+
+        projects =
+            model.dataLoading.projectCardSummaries
+                |> Dict.values
+                |> List.filter (projectSummaryBelongsTo parentKind maybeParentId)
+                |> List.sortBy (\project -> ( Api.projectStatusOrder project.status, negate project.priority, String.toLower project.name ))
+                |> navigationPresentationWindow .id (localPresentationPinnedIds parent "project" model) projectOffset
+
+        tasks =
+            model.dataLoading.taskCardSummaries
+                |> Dict.values
+                |> List.filter (taskSummaryBelongsTo parentKind maybeParentId)
+                |> List.sortBy (\task -> ( Api.taskStatusOrder task.status, negate task.priority, String.toLower task.title ))
+                |> navigationPresentationWindow .id (localPresentationPinnedIds parent "task" model) taskOffset
+    in
+    ( projects, tasks )
+
+
+beginProjectCardDetail : Api.ProjectCardSummary -> ( Model, List (Cmd Msg) ) -> ( Model, List (Cmd Msg) )
+beginProjectCardDetail summary ( model, commands ) =
+    let
+        alreadyCurrent =
+            Dict.get summary.id model.dataLoading.projectCardDetailRequests
+                |> Maybe.map
+                    (\request ->
+                        (Dict.get summary.id model.projects |> Maybe.map .updatedAt)
+                            == Just request.expectedUpdatedAt
+                            && (request.inFlight || request.succeeded)
+                    )
+                |> Maybe.withDefault False
+    in
+    if alreadyCurrent then
+        ( model, commands )
+
+    else
+        let
+            loading =
+                model.dataLoading
+
+            request =
+                { workspaceId = summary.workspaceId
+                , sessionEpoch = model.sessionRequestEpoch
+                , navigationGeneration = loading.navigationGeneration
+                , requestId = loading.nextCardDetailRequestId
+                , expectedUpdatedAt = summary.updatedAt
+                , inFlight = True
+                , succeeded = False
+                }
+
+            updatedLoading =
+                { loading
+                    | projectCardDetailRequests = Dict.insert summary.id request loading.projectCardDetailRequests
+                    , nextCardDetailRequestId = request.requestId + 1
+                }
+    in
+    ( { model | dataLoading = updatedLoading }
+    , Api.fetchProject model.flags.apiUrl summary.id (GotProjectCardDetail request summary.id) :: commands
+    )
+
+
+beginTaskCardDetail : Api.TaskCardSummary -> ( Model, List (Cmd Msg) ) -> ( Model, List (Cmd Msg) )
+beginTaskCardDetail summary ( model, commands ) =
+    let
+        alreadyCurrent =
+            Dict.get summary.id model.dataLoading.taskCardDetailRequests
+                |> Maybe.map
+                    (\request ->
+                        (Dict.get summary.id model.tasks |> Maybe.map .updatedAt)
+                            == Just request.expectedUpdatedAt
+                            && (request.inFlight || request.succeeded)
+                    )
+                |> Maybe.withDefault False
+    in
+    if alreadyCurrent then
+        ( model, commands )
+
+    else
+        let
+            loading =
+                model.dataLoading
+
+            request =
+                { workspaceId = summary.workspaceId
+                , sessionEpoch = model.sessionRequestEpoch
+                , navigationGeneration = loading.navigationGeneration
+                , requestId = loading.nextCardDetailRequestId
+                , expectedUpdatedAt = summary.updatedAt
+                , inFlight = True
+                , succeeded = False
+                }
+
+            updatedLoading =
+                { loading
+                    | taskCardDetailRequests = Dict.insert summary.id request loading.taskCardDetailRequests
+                    , nextCardDetailRequestId = request.requestId + 1
+                }
+    in
+    ( { model | dataLoading = updatedLoading }
+    , Api.fetchTask model.flags.apiUrl summary.id (GotTaskCardDetail request summary.id) :: commands
+    )
+
+
+ensureExpandedProjectBranch : Api.ProjectCardSummary -> ( Model, List (Cmd Msg) ) -> ( Model, List (Cmd Msg) )
+ensureExpandedProjectBranch summary ( model, commands ) =
+    let
+        key =
+            navigationBranchKey "project" (Just summary.id)
+
+        expanded =
+            not (Dict.get ("proj-" ++ summary.id) model.cards.collapsedNodes |> Maybe.withDefault False)
+
+        needsRequest =
+            Dict.get key model.dataLoading.loadedNavigationBranches
+                |> Maybe.map (\request -> not request.inFlight && not request.succeeded)
+                |> Maybe.withDefault True
+    in
+    if summary.hasChildren && expanded && needsRequest then
+        case model.selectedWorkspaceId of
+            Just workspaceId ->
+                let
+                    ( updated, command ) =
+                        beginNavigationBranch "project" workspaceId (Just summary.id) model
+                in
+                ( updated, command :: commands )
+
+            Nothing ->
+                ( model, commands )
+
+    else
+        ( model, commands )
+
+
+ensureExpandedTaskBranch : Api.TaskCardSummary -> ( Model, List (Cmd Msg) ) -> ( Model, List (Cmd Msg) )
+ensureExpandedTaskBranch summary ( model, commands ) =
+    let
+        key =
+            navigationBranchKey "task" (Just summary.id)
+
+        expanded =
+            not (Dict.get ("task-" ++ summary.id) model.cards.collapsedNodes |> Maybe.withDefault False)
+
+        needsRequest =
+            Dict.get key model.dataLoading.loadedNavigationBranches
+                |> Maybe.map (\request -> not request.inFlight && not request.succeeded)
+                |> Maybe.withDefault True
+    in
+    if summary.hasChildren && expanded && needsRequest then
+        case model.selectedWorkspaceId of
+            Just workspaceId ->
+                let
+                    ( updated, command ) =
+                        beginNavigationBranch "task" workspaceId (Just summary.id) model
+                in
+                ( updated, command :: commands )
+
+            Nothing ->
+                ( model, commands )
+
+    else
+        ( model, commands )
+
+
+ensureSummaries : List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Model -> ( Model, Cmd Msg )
+ensureSummaries projects tasks model =
+    let
+        ( detailedProjects, projectDetailCommands ) =
+            List.foldl beginProjectCardDetail ( model, [] ) projects
+
+        ( detailedTasks, taskDetailCommands ) =
+            List.foldl beginTaskCardDetail ( detailedProjects, projectDetailCommands ) tasks
+
+        ( withProjectBranches, projectBranchCommands ) =
+            List.foldl ensureExpandedProjectBranch ( detailedTasks, taskDetailCommands ) projects
+
+        ( withTaskBranches, commands ) =
+            List.foldl ensureExpandedTaskBranch ( withProjectBranches, projectBranchCommands ) tasks
+    in
+    ( withTaskBranches, Cmd.batch commands )
+
+
+ensureNavigationPresentation : String -> Maybe String -> Model -> ( Model, Cmd Msg )
+ensureNavigationPresentation parentKind maybeParentId model =
+    let
+        ( projects, tasks ) =
+            presentedNavigationSummaries parentKind maybeParentId model
+    in
+    ensureSummaries projects tasks model
+
+
+ensureAllNavigationPresentations : Model -> ( Model, Cmd Msg )
+ensureAllNavigationPresentations model =
+    let
+        ensureBranch key ( current, accumulatedCommands ) =
+            case String.split ":" key of
+                parentKind :: parentId :: [] ->
+                    let
+                        ( updated, command ) =
+                            ensureNavigationPresentation parentKind (Just parentId) current
+                    in
+                    ( updated, command :: accumulatedCommands )
+
+                _ ->
+                    ( current, accumulatedCommands )
+
+        ( rootModel, rootCommand ) =
+            ensureNavigationPresentation "workspace_root" Nothing model
+
+        ( finalModel, commands ) =
+            model.dataLoading.loadedNavigationBranches
+                |> Dict.keys
+                |> List.filter ((/=) (navigationBranchKey "workspace_root" Nothing))
+                |> List.foldl ensureBranch ( rootModel, [ rootCommand ] )
+    in
+    ( finalModel, Cmd.batch commands )
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -1564,7 +1857,7 @@ update msg model =
                                                 { next | dataLoading = finishWorkspaceLoad maybeToken rootBranchLoading }
                                            )
                             in
-                            ( updatedModel, Cmd.none )
+                            ensureNavigationPresentation "workspace_root" Nothing updatedModel
 
                     Err _ ->
                         addToast Error "Failed to load workspace navigation"
@@ -1615,7 +1908,7 @@ update msg model =
                             ( model, Cmd.none )
 
                         else
-                            ( (if projectOffset == 0 && taskOffset == 0 then
+                            (if projectOffset == 0 && taskOffset == 0 then
                                     replaceNavigationBranchMembershipForKey branchKey navigation model
 
                                else
@@ -1667,8 +1960,9 @@ update msg model =
                                             }
                                     }
                                    )
-                             , Cmd.none
-                             )
+                                |> ensureNavigationPresentation
+                                    (String.split ":" branchKey |> List.head |> Maybe.withDefault "")
+                                    (String.split ":" branchKey |> List.drop 1 |> List.head)
 
                     Err _ ->
                         addToast Error "Failed to load workspace branch"
@@ -1769,7 +2063,32 @@ update msg model =
                                         )
 
                                 Nothing ->
-                                    ( completeFocus, Cmd.none )
+                                    let
+                                        projectSummaries =
+                                            focus.target :: focus.ancestors
+                                                |> List.filterMap
+                                                    (\summary ->
+                                                        case summary of
+                                                            Api.NavigationProjectSummary project ->
+                                                                Just project
+
+                                                            _ ->
+                                                                Nothing
+                                                    )
+
+                                        taskSummaries =
+                                            focus.target :: focus.ancestors
+                                                |> List.filterMap
+                                                    (\summary ->
+                                                        case summary of
+                                                            Api.NavigationTaskSummary task ->
+                                                                Just task
+
+                                                            _ ->
+                                                                Nothing
+                                                    )
+                                    in
+                                    ensureSummaries projectSummaries taskSummaries completeFocus
 
                     Err _ ->
                         let
@@ -1785,6 +2104,127 @@ update msg model =
                           }
                         , Cmd.none
                         )
+
+        RetryCardDetail entityType entityId ->
+            case entityType of
+                "project" ->
+                    case Dict.get entityId model.dataLoading.projectCardSummaries of
+                        Just summary ->
+                            let
+                                ( updated, commands ) =
+                                    beginProjectCardDetail summary ( model, [] )
+                            in
+                            ( updated, Cmd.batch commands )
+
+                        Nothing ->
+                            ( model, Cmd.none )
+
+                "task" ->
+                    case Dict.get entityId model.dataLoading.taskCardSummaries of
+                        Just summary ->
+                            let
+                                ( updated, commands ) =
+                                    beginTaskCardDetail summary ( model, [] )
+                            in
+                            ( updated, Cmd.batch commands )
+
+                        Nothing ->
+                            ( model, Cmd.none )
+
+                _ ->
+                    ( model, Cmd.none )
+
+        GotProjectCardDetail request projectId result ->
+            let
+                currentRequest =
+                    Dict.get projectId model.dataLoading.projectCardDetailRequests
+
+                currentSummary =
+                    Dict.get projectId model.dataLoading.projectCardSummaries
+
+                currentProject =
+                    Dict.get projectId model.projects
+
+                valid =
+                    currentRequest == Just request
+                        && request.inFlight
+                        && model.selectedWorkspaceId == Just request.workspaceId
+                        && model.sessionRequestEpoch == request.sessionEpoch
+                        && (currentSummary |> Maybe.map .updatedAt) == Just request.expectedUpdatedAt
+                        && (currentProject |> Maybe.map .updatedAt) == Just request.expectedUpdatedAt
+
+                loading =
+                    model.dataLoading
+            in
+            if not valid then
+                ( model, Cmd.none )
+
+            else
+                case result of
+                    Ok project ->
+                        if project.id == projectId && project.workspaceId == request.workspaceId then
+                            ( { model
+                                | projects = Dict.insert projectId project model.projects
+                                , dataLoading =
+                                    { loading
+                                        | projectCardDetailRequests =
+                                            Dict.insert projectId { request | expectedUpdatedAt = project.updatedAt, inFlight = False, succeeded = True } loading.projectCardDetailRequests
+                                    }
+                              }
+                            , Cmd.none
+                            )
+
+                        else
+                            ( { model | dataLoading = { loading | projectCardDetailRequests = Dict.insert projectId { request | inFlight = False, succeeded = False } loading.projectCardDetailRequests } }, Cmd.none )
+
+                    Err _ ->
+                        ( { model | dataLoading = { loading | projectCardDetailRequests = Dict.insert projectId { request | inFlight = False, succeeded = False } loading.projectCardDetailRequests } }, Cmd.none )
+
+        GotTaskCardDetail request taskId result ->
+            let
+                currentRequest =
+                    Dict.get taskId model.dataLoading.taskCardDetailRequests
+
+                currentSummary =
+                    Dict.get taskId model.dataLoading.taskCardSummaries
+
+                currentTask =
+                    Dict.get taskId model.tasks
+
+                valid =
+                    currentRequest == Just request
+                        && request.inFlight
+                        && model.selectedWorkspaceId == Just request.workspaceId
+                        && model.sessionRequestEpoch == request.sessionEpoch
+                        && (currentSummary |> Maybe.map .updatedAt) == Just request.expectedUpdatedAt
+                        && (currentTask |> Maybe.map .updatedAt) == Just request.expectedUpdatedAt
+
+                loading =
+                    model.dataLoading
+            in
+            if not valid then
+                ( model, Cmd.none )
+
+            else
+                case result of
+                    Ok task ->
+                        if task.id == taskId && task.workspaceId == request.workspaceId then
+                            ( { model
+                                | tasks = Dict.insert taskId task model.tasks
+                                , dataLoading =
+                                    { loading
+                                        | taskCardDetailRequests =
+                                            Dict.insert taskId { request | expectedUpdatedAt = task.updatedAt, inFlight = False, succeeded = True } loading.taskCardDetailRequests
+                                    }
+                              }
+                            , Cmd.none
+                            )
+
+                        else
+                            ( { model | dataLoading = { loading | taskCardDetailRequests = Dict.insert taskId { request | inFlight = False, succeeded = False } loading.taskCardDetailRequests } }, Cmd.none )
+
+                    Err _ ->
+                        ( { model | dataLoading = { loading | taskCardDetailRequests = Dict.insert taskId { request | inFlight = False, succeeded = False } loading.taskCardDetailRequests } }, Cmd.none )
 
         GotProjects wsId maybeToken offset result ->
             if model.selectedWorkspaceId /= Just wsId then

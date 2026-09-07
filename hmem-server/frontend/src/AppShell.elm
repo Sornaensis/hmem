@@ -377,7 +377,33 @@ handleOwned ownedMsg model =
             )
 
         LocalStorageLoadedMsg json ->
-            ( applyStoredFiltersIfCurrentWorkspace json model, Cmd.none )
+            let
+                loaded =
+                    applyStoredFiltersIfCurrentWorkspace json model
+
+                navigationFiltersChanged =
+                    loaded.search.query /= model.search.query
+                        || loaded.search.filterShowOnly /= model.search.filterShowOnly
+                        || loaded.search.filterPriority /= model.search.filterPriority
+                        || loaded.search.filterProjectStatuses /= model.search.filterProjectStatuses
+                        || loaded.search.filterTaskStatuses /= model.search.filterTaskStatuses
+
+                collapsedNodesChanged =
+                    loaded.cards.collapsedNodes /= model.cards.collapsedNodes
+
+                canReloadNavigation =
+                    loaded.auth.status == AuthReady
+                        && Permissions.canReadCurrentWorkspace loaded
+                        && loaded.selectedWorkspaceId /= Nothing
+            in
+            if canReloadNavigation && navigationFiltersChanged then
+                Feature.DataLoading.reloadNavigationForFilters loaded
+
+            else if canReloadNavigation && collapsedNodesChanged then
+                Feature.DataLoading.ensureAllNavigationPresentations loaded
+
+            else
+                ( loaded, Cmd.none )
 
         GlobalKeyDownMsg keyCode ->
             if keyCode == 27 then

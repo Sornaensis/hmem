@@ -2673,9 +2673,14 @@ fetchRootNavigation apiUrl wsId filterQuery toMsg =
 
 fetchNavigationBranch : String -> String -> String -> Maybe String -> Int -> Int -> String -> (Result Http.Error NavigationBranchResponse -> msg) -> Cmd msg
 fetchNavigationBranch apiUrl wsId parentKind maybeParentId projectOffset taskOffset filterQuery toMsg =
-    Http.get
-        { url = navigationBranchUrl apiUrl wsId parentKind maybeParentId projectOffset taskOffset filterQuery
+    Http.request
+        { method = "GET"
+        , headers = []
+        , url = navigationBranchUrl apiUrl wsId parentKind maybeParentId projectOffset taskOffset filterQuery
+        , body = Http.emptyBody
         , expect = Http.expectJson toMsg navigationBranchDecoder
+        , timeout = Just 20000
+        , tracker = Nothing
         }
 
 
@@ -2686,9 +2691,14 @@ navigationBranchUrl apiUrl wsId parentKind maybeParentId projectOffset taskOffse
 
 fetchNavigationFocus : String -> String -> String -> String -> Int -> (Result Http.Error NavigationFocusResponse -> msg) -> Cmd msg
 fetchNavigationFocus apiUrl wsId entityType entityId ancestorOffset toMsg =
-    Http.get
-        { url = navigationFocusUrl apiUrl wsId entityType entityId ancestorOffset
+    Http.request
+        { method = "GET"
+        , headers = []
+        , url = navigationFocusUrl apiUrl wsId entityType entityId ancestorOffset
+        , body = Http.emptyBody
         , expect = Http.expectJson toMsg navigationFocusDecoder
+        , timeout = Just 20000
+        , tracker = Nothing
         }
 
 
@@ -2739,9 +2749,14 @@ fetchProjectsPage apiUrl wsId offset toMsg =
 
 fetchProject : String -> String -> (Result Http.Error Project -> msg) -> Cmd msg
 fetchProject apiUrl projId toMsg =
-    Http.get
-        { url = apiUrl ++ "/api/v1/projects/" ++ projId
+    Http.request
+        { method = "GET"
+        , headers = []
+        , url = apiUrl ++ "/api/v1/projects/" ++ projId
+        , body = Http.emptyBody
         , expect = Http.expectJson toMsg projectDecoder
+        , timeout = Just 20000
+        , tracker = Nothing
         }
 
 
@@ -2760,9 +2775,14 @@ fetchTasksPage apiUrl wsId offset toMsg =
 
 fetchTask : String -> String -> (Result Http.Error Task -> msg) -> Cmd msg
 fetchTask apiUrl taskId toMsg =
-    Http.get
-        { url = apiUrl ++ "/api/v1/tasks/" ++ taskId
+    Http.request
+        { method = "GET"
+        , headers = []
+        , url = apiUrl ++ "/api/v1/tasks/" ++ taskId
+        , body = Http.emptyBody
         , expect = Http.expectJson toMsg taskDecoder
+        , timeout = Just 20000
+        , tracker = Nothing
         }
 
 

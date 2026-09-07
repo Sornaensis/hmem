@@ -392,7 +392,7 @@ update msg model =
                                 Feature.DataLoading.revalidateNavigationForAffectedBranches summaries.projects summaries.tasks updated
 
                             else
-                                ( updated, Cmd.none )
+                                Feature.DataLoading.ensureAllNavigationPresentations updated
 
                         else
                             canonicalHttpFailure guard (Http.BadBody "Navigation summary response did not match its targeted revalidation request") model

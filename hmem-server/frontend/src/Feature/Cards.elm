@@ -364,21 +364,37 @@ update msg model =
                                     let
                                         projectId = String.dropLeft 5 nodeId
                                     in
-                                    if Dict.member ("project:" ++ projectId) model.dataLoading.loadedNavigationBranches then
-                                        ( newModel, Cmd.none )
+                                    case Dict.get ("project:" ++ projectId) model.dataLoading.loadedNavigationBranches of
+                                        Just state ->
+                                            if state.inFlight then
+                                                ( newModel, Cmd.none )
 
-                                    else
-                                        Feature.DataLoading.beginNavigationBranch "project" workspaceId (Just projectId) newModel
+                                            else if state.succeeded then
+                                                Feature.DataLoading.ensureNavigationPresentation "project" (Just projectId) newModel
+
+                                            else
+                                                Feature.DataLoading.beginNavigationBranch "project" workspaceId (Just projectId) newModel
+
+                                        Nothing ->
+                                            Feature.DataLoading.beginNavigationBranch "project" workspaceId (Just projectId) newModel
 
                                 else if String.startsWith "task-" nodeId then
                                     let
                                         taskId = String.dropLeft 5 nodeId
                                     in
-                                    if Dict.member ("task:" ++ taskId) model.dataLoading.loadedNavigationBranches then
-                                        ( newModel, Cmd.none )
+                                    case Dict.get ("task:" ++ taskId) model.dataLoading.loadedNavigationBranches of
+                                        Just state ->
+                                            if state.inFlight then
+                                                ( newModel, Cmd.none )
 
-                                    else
-                                        Feature.DataLoading.beginNavigationBranch "task" workspaceId (Just taskId) newModel
+                                            else if state.succeeded then
+                                                Feature.DataLoading.ensureNavigationPresentation "task" (Just taskId) newModel
+
+                                            else
+                                                Feature.DataLoading.beginNavigationBranch "task" workspaceId (Just taskId) newModel
+
+                                        Nothing ->
+                                            Feature.DataLoading.beginNavigationBranch "task" workspaceId (Just taskId) newModel
 
                                 else
                                     ( newModel, Cmd.none )
@@ -397,7 +413,11 @@ update msg model =
                     updateCardsModel (\records -> { records | collapsedNodes = Dict.empty }) model
                         |> Feature.DataLoading.resetNavigationPresentations
             in
-            ( newModel, saveFiltersCmd newModel )
+            let
+                ( loadingModel, loadingCommand ) =
+                    Feature.DataLoading.ensureAllNavigationPresentations newModel
+            in
+            ( loadingModel, Cmd.batch [ saveFiltersCmd loadingModel, loadingCommand ] )
 
         CollapseAllNodes ->
             let
@@ -1313,6 +1333,48 @@ projectTreeMatchesIndexed query hasSearch projectStatusGate projectFilter childr
            )
 
 
+viewCardDescription : Model -> String -> String -> Maybe String -> Html Msg
+viewCardDescription model entityType entityId description =
+    let
+        summaryPresent =
+            if entityType == "project" then
+                Dict.member entityId model.dataLoading.projectCardSummaries
+
+            else
+                Dict.member entityId model.dataLoading.taskCardSummaries
+
+        request =
+            if entityType == "project" then
+                Dict.get entityId model.dataLoading.projectCardDetailRequests
+
+            else
+                Dict.get entityId model.dataLoading.taskCardDetailRequests
+    in
+    if not summaryPresent then
+        Feature.Editing.viewEditableTextarea model entityType entityId "description" (Maybe.withDefault "" description)
+
+    else
+        case request of
+            Just state ->
+                if state.succeeded then
+                    Feature.Editing.viewEditableTextarea model entityType entityId "description" (Maybe.withDefault "" description)
+
+                else if state.inFlight then
+                    div [ class "card-description-state", attribute "role" "status" ] [ text "Loading description…" ]
+
+                else
+                    div [ class "card-description-state card-description-error" ]
+                        [ span [] [ text "Description unavailable." ]
+                        , button [ class "btn-small btn-ghost", onClick (RetryCardDetail entityType entityId) ] [ text "Retry" ]
+                        ]
+
+            Nothing ->
+                div [ class "card-description-state card-description-error" ]
+                    [ span [] [ text "Description not loaded." ]
+                    , button [ class "btn-small btn-ghost", onClick (RetryCardDetail entityType entityId) ] [ text "Retry" ]
+                    ]
+
+
 viewProjectsTree : String -> Model -> Html Msg
 viewProjectsTree wsId model =
     let
@@ -1675,7 +1737,7 @@ viewProjectNode projection model depth project hasSearch query =
                                 "+"
                             )
                         ]
-                    , Feature.Editing.viewEditableTextarea model "project" project.id "description" (Maybe.withDefault "" project.description)
+                    , viewCardDescription model "project" project.id project.description
                     ]
                 , if isExpanded model project.id then
                     div [ class "card-extras" ]
@@ -2276,7 +2338,7 @@ viewTaskCard projection showProject model task =
                             "+"
                         )
                     ]
-                , Feature.Editing.viewEditableTextarea model "task" task.id "description" (Maybe.withDefault "" task.description)
+                , viewCardDescription model "task" task.id task.description
                 ]
             , if extrasExpanded then
                 div [ class "card-extras" ]
@@ -2555,31 +2617,7 @@ pages cannot grow the mounted DOM without bound. Pinned focus/edit paths stay
 mounted while the remainder of the window remains reversible. -}
 presentationWindow : (a -> String) -> Set.Set String -> Int -> List a -> List a
 presentationWindow identify pinned offset values =
-    let
-        pinnedValues =
-            values
-                |> List.filter (identify >> (\entityId -> Set.member entityId pinned))
-
-        ordinaryCapacity =
-            presentationOrdinaryCapacity (List.length pinnedValues)
-
-        ordinaryPageValues =
-            values
-                |> List.filter (\value -> not (Set.member (identify value) pinned))
-                |> List.drop offset
-                |> List.take ordinaryCapacity
-
-        selectedIds =
-            ordinaryPageValues
-                |> List.map identify
-                |> Set.fromList
-                |> Set.union pinned
-    in
-    -- Preserve the server's deterministic ordering across ordinary and pinned
-    -- rows.  The cursor counts only ordinary rows, so a breadcrumb never
-    -- displaces an unseen card from a later page.
-    values
-        |> List.filter (identify >> (\entityId -> Set.member entityId selectedIds))
+    navigationPresentationWindow identify pinned offset values
 
 
 rootPresentationWindow : String -> (a -> String) -> Set.Set String -> Model -> List a -> List a

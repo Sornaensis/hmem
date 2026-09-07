@@ -11,9 +11,12 @@ import Feature.Mutations as Mutations
 import Feature.WebSocket as WebSocket
 import Http
 import Json.Encode as Encode
+import Route
 import Set
 import String
 import Test exposing (Test, describe, test)
+import Test.Html.Query as Query
+import Test.Html.Selector as Selector
 import Types exposing (AuthStatus(..), Flags, Model, Msg(..), Page(..), WorkspaceTab(..))
 import Url
 
@@ -290,6 +293,238 @@ suite =
                             _ ->
                                 False
                     , staleDescriptionIgnored = Dict.get projectSummary.id afterGap.projects |> Maybe.andThen .description |> (==) Nothing
+                    }
+        , test "workspace routes rehydrate unchanged task and project descriptions after returning" <|
+            \_ ->
+                let
+                    projectA =
+                        project "route-project-a" Nothing
+
+                    taskA =
+                        let
+                            summary =
+                                task "route-task-a" Nothing
+                        in
+                        { summary | projectId = Nothing }
+
+                    loadedA =
+                        loadRoot workspaceId [ projectA ] [ taskA ] rootLoadModel
+
+                    oldProjectRequest =
+                        Dict.get projectA.id loadedA.dataLoading.projectCardDetailRequests
+
+                    oldTaskRequest =
+                        Dict.get taskA.id loadedA.dataLoading.taskCardDetailRequests
+
+                    projectADetail =
+                        let
+                            detail =
+                                Api.projectFromCardSummary projectA
+                        in
+                        { detail | description = Just "old project A" }
+
+                    partiallyHydratedA =
+                        case oldProjectRequest of
+                            Just request ->
+                                DataLoading.update (GotProjectCardDetail request projectA.id (Ok projectADetail)) loadedA |> Tuple.first
+
+                            Nothing ->
+                                loadedA
+
+                    ( withBranch, _ ) =
+                        DataLoading.beginNavigationBranch "project" workspaceId (Just projectA.id) partiallyHydratedA
+
+                    loadingA =
+                        withBranch.dataLoading
+
+                    offsetA =
+                        { withBranch
+                            | dataLoading =
+                                { loadingA
+                                    | rootNavigationPresentation =
+                                        loadingA.rootNavigationPresentation
+                                            |> Maybe.map (\presentation -> { presentation | projectOffset = 25, taskOffset = 25 })
+                                    , navigationPresentations =
+                                        Dict.map (\_ presentation -> { presentation | projectOffset = 25, taskOffset = 25 }) loadingA.navigationPresentations
+                                }
+                        }
+
+                    workspaceB =
+                        "workspace-2"
+
+                    switchedToB =
+                        Route.handleUrlChange { url | path = "/workspace/" ++ workspaceB } offsetA |> Tuple.first
+
+                    afterLateInBGap =
+                        case oldTaskRequest of
+                            Just request ->
+                                DataLoading.update (GotTaskCardDetail request taskA.id (Err Http.Timeout)) switchedToB |> Tuple.first
+
+                            Nothing ->
+                                switchedToB
+
+                    projectB =
+                        let
+                            summary =
+                                project "route-project-b" Nothing
+                        in
+                        { summary | workspaceId = workspaceB }
+
+                    taskB =
+                        let
+                            summary =
+                                task "route-task-b" Nothing
+                        in
+                        { summary | workspaceId = workspaceB, projectId = Nothing }
+
+                    loadedB =
+                        loadRoot workspaceB [ projectB ] [ taskB ] afterLateInBGap
+
+                    hydratedB =
+                        hydrateDescriptions "project B" "task B" projectB taskB loadedB
+
+                    returnGap =
+                        Route.handleUrlChange url hydratedB |> Tuple.first
+
+                    returnedA =
+                        loadRoot workspaceId [ projectA ] [ taskA ] returnGap
+
+                    freshProjectRequest =
+                        Dict.get projectA.id returnedA.dataLoading.projectCardDetailRequests
+
+                    freshTaskRequest =
+                        Dict.get taskA.id returnedA.dataLoading.taskCardDetailRequests
+
+                    taskADetail =
+                        let
+                            detail =
+                                Api.taskFromCardSummary taskA
+                        in
+                        { detail | description = Just "late task A" }
+
+                    afterOldResponses =
+                        case ( oldProjectRequest, oldTaskRequest ) of
+                            ( Just projectRequest, Just taskRequest ) ->
+                                returnedA
+                                    |> DataLoading.update (GotProjectCardDetail projectRequest projectA.id (Err Http.Timeout))
+                                    |> Tuple.first
+                                    |> DataLoading.update (GotTaskCardDetail taskRequest taskA.id (Ok taskADetail))
+                                    |> Tuple.first
+
+                            _ ->
+                                returnedA
+
+                    hydratedAgainA =
+                        hydrateDescriptions "fresh project A" "fresh task A" projectA taskA afterOldResponses
+
+                    newerRequest oldRequest freshRequest =
+                        case ( oldRequest, freshRequest ) of
+                            ( Just old, Just fresh ) ->
+                                fresh.requestId > old.requestId
+                                    && fresh.workspaceId == workspaceId
+                                    && fresh.sessionEpoch == returnedA.sessionRequestEpoch
+
+                            _ ->
+                                False
+                in
+                Expect.all
+                    [ \_ ->
+                        Expect.equal
+                            { retiredInBGap = True
+                            , descriptionsInB = ( Just "project B", Just "task B" )
+                            , retiredInReturnGap = True
+                            , presentationRestarted = True
+                            , projectRequestRestarted = True
+                            , taskRequestRestarted = True
+                            , oldResponsesIgnored = True
+                            , descriptionsOnReturn = ( Just "fresh project A", Just "fresh task A" )
+                            }
+                            { retiredInBGap =
+                                Dict.isEmpty afterLateInBGap.dataLoading.projectCardDetailRequests
+                                    && Dict.isEmpty afterLateInBGap.dataLoading.taskCardDetailRequests
+                                    && afterLateInBGap.dataLoading.rootNavigationPresentation == Nothing
+                                    && Dict.isEmpty afterLateInBGap.dataLoading.navigationPresentations
+                            , descriptionsInB =
+                                ( Dict.get projectB.id hydratedB.projects |> Maybe.andThen .description
+                                , Dict.get taskB.id hydratedB.tasks |> Maybe.andThen .description
+                                )
+                            , retiredInReturnGap =
+                                Dict.isEmpty returnGap.dataLoading.projectCardDetailRequests
+                                    && Dict.isEmpty returnGap.dataLoading.taskCardDetailRequests
+                                    && returnGap.dataLoading.rootNavigationPresentation == Nothing
+                                    && Dict.isEmpty returnGap.dataLoading.navigationPresentations
+                            , presentationRestarted =
+                                returnedA.dataLoading.rootNavigationPresentation
+                                    |> Maybe.map (\presentation -> presentation.projectOffset == 0 && presentation.taskOffset == 0)
+                                    |> Maybe.withDefault False
+                            , projectRequestRestarted = newerRequest oldProjectRequest freshProjectRequest
+                            , taskRequestRestarted = newerRequest oldTaskRequest freshTaskRequest
+                            , oldResponsesIgnored =
+                                Dict.get projectA.id afterOldResponses.dataLoading.projectCardDetailRequests == freshProjectRequest
+                                    && Dict.get taskA.id afterOldResponses.dataLoading.taskCardDetailRequests == freshTaskRequest
+                                    && (Dict.get taskA.id afterOldResponses.tasks |> Maybe.andThen .description) == Nothing
+                            , descriptionsOnReturn =
+                                ( Dict.get projectA.id hydratedAgainA.projects |> Maybe.andThen .description
+                                , Dict.get taskA.id hydratedAgainA.tasks |> Maybe.andThen .description
+                                )
+                            }
+                    , \_ ->
+                        Cards.viewProjectsTree workspaceId hydratedAgainA
+                            |> Query.fromHtml
+                            |> Query.has [ Selector.text "fresh project A", Selector.text "fresh task A" ]
+                    ]
+                    ()
+        , test "same-workspace routing preserves loaded empty descriptions and home re-entry retires card state" <|
+            \_ ->
+                let
+                    summary =
+                        project "empty-description" Nothing
+
+                    loaded =
+                        loadRoot workspaceId [ summary ] [] rootLoadModel
+
+                    hydratedEmpty =
+                        case Dict.get summary.id loaded.dataLoading.projectCardDetailRequests of
+                            Just request ->
+                                let
+                                    detail =
+                                        Api.projectFromCardSummary summary
+                                in
+                                DataLoading.update (GotProjectCardDetail request summary.id (Ok { detail | description = Nothing })) loaded |> Tuple.first
+
+                            Nothing ->
+                                loaded
+
+                    sameWorkspace =
+                        Route.handleUrlChange { url | fragment = Just "tab=projects" } hydratedEmpty |> Tuple.first
+
+                    ensured =
+                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing sameWorkspace |> Tuple.first
+
+                    home =
+                        Route.handleUrlChange { url | path = "/" } ensured |> Tuple.first
+
+                    returned =
+                        Route.handleUrlChange url home |> Tuple.first
+                in
+                Expect.equal
+                    { sameRequest = Dict.get summary.id hydratedEmpty.dataLoading.projectCardDetailRequests
+                    , samePresentation = hydratedEmpty.dataLoading.rootNavigationPresentation
+                    , noEmptyRetry = hydratedEmpty.dataLoading.nextCardDetailRequestId
+                    , returnedRequestsEmpty = True
+                    , returnedPresentationsEmpty = True
+                    , requestCounterPreserved = hydratedEmpty.dataLoading.nextCardDetailRequestId
+                    }
+                    { sameRequest = Dict.get summary.id sameWorkspace.dataLoading.projectCardDetailRequests
+                    , samePresentation = sameWorkspace.dataLoading.rootNavigationPresentation
+                    , noEmptyRetry = ensured.dataLoading.nextCardDetailRequestId
+                    , returnedRequestsEmpty =
+                        Dict.isEmpty returned.dataLoading.projectCardDetailRequests
+                            && Dict.isEmpty returned.dataLoading.taskCardDetailRequests
+                    , returnedPresentationsEmpty =
+                        returned.dataLoading.rootNavigationPresentation == Nothing
+                            && Dict.isEmpty returned.dataLoading.navigationPresentations
+                    , requestCounterPreserved = returned.dataLoading.nextCardDetailRequestId
                     }
         , test "successful project and task mutations fence older in-flight detail responses" <|
             \_ ->
@@ -1783,6 +2018,50 @@ flags =
 url : Url.Url
 url =
     { protocol = Url.Https, host = "app.example", port_ = Nothing, path = "/workspace/workspace-1", query = Nothing, fragment = Nothing }
+
+
+loadRoot : String -> List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Model -> Model
+loadRoot workspace projects tasks source =
+    let
+        prepared =
+            DataLoading.prepareRootNavigationRequest (Just workspace) source
+    in
+    case prepared.dataLoading.rootNavigationRequest of
+        Just request ->
+            DataLoading.update
+                (GotRootNavigation workspace request.sessionEpoch prepared.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint 0 0
+                    (Ok { workspaceId = workspace, projects = { items = projects, hasMore = False }, tasks = { items = tasks, hasMore = False } })
+                )
+                prepared
+                |> Tuple.first
+
+        Nothing ->
+            prepared
+
+
+hydrateDescriptions : String -> String -> Api.ProjectCardSummary -> Api.TaskCardSummary -> Model -> Model
+hydrateDescriptions projectDescription taskDescription projectSummary taskSummary source =
+    case
+        ( Dict.get projectSummary.id source.dataLoading.projectCardDetailRequests
+        , Dict.get taskSummary.id source.dataLoading.taskCardDetailRequests
+        )
+    of
+        ( Just projectRequest, Just taskRequest ) ->
+            let
+                projectDetail =
+                    Api.projectFromCardSummary projectSummary
+
+                taskDetail =
+                    Api.taskFromCardSummary taskSummary
+            in
+            source
+                |> DataLoading.update (GotProjectCardDetail projectRequest projectSummary.id (Ok { projectDetail | description = Just projectDescription }))
+                |> Tuple.first
+                |> DataLoading.update (GotTaskCardDetail taskRequest taskSummary.id (Ok { taskDetail | description = Just taskDescription }))
+                |> Tuple.first
+
+        _ ->
+            source
 
 
 editorSession : Api.SessionContext

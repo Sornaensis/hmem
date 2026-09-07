@@ -603,6 +603,66 @@ suite =
                     , replacementInFlight = reloaded.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False
                     , oldRejected = Dict.member "stale-root" oldResponse.dataLoading.projectCardSummaries |> not
                     }
+        , test "shell-triggered tokenless observation success and failure cannot retire the token-bearing root load" <|
+            \_ ->
+                let
+                    initialLoading =
+                        rootLoadModel.dataLoading
+
+                    bootstrap =
+                        DataLoading.prepareRootNavigationRequest (Just workspaceId)
+                            { rootLoadModel
+                                | auth = { status = AuthReady, mode = Just "test" }
+                                , sessionContext = Just editorSession
+                                , dataLoading = { initialLoading | pendingWorkspaceLoads = 0 }
+                            }
+
+                    afterShell =
+                        WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) bootstrap |> Tuple.first
+
+                    settleObservation result =
+                        DataLoading.update
+                            (GotObservations workspaceId Nothing afterShell.observations.requestGeneration afterShell.observations.queryFingerprint 0 result)
+                            afterShell
+                            |> Tuple.first
+
+                    finishRoot afterObservation =
+                        case afterObservation.dataLoading.rootNavigationRequest of
+                            Just request ->
+                                DataLoading.update
+                                    (GotRootNavigation workspaceId request.sessionEpoch (Just 1) request.generation request.filterFingerprint 0 0 (Ok rootResponse))
+                                    afterObservation
+                                    |> Tuple.first
+
+                            Nothing ->
+                                afterObservation
+
+                    afterSuccess =
+                        settleObservation (Ok { items = [], hasMore = False })
+
+                    afterFailure =
+                        settleObservation (Err Http.Timeout)
+
+                    successRoot =
+                        finishRoot afterSuccess
+
+                    failureRoot =
+                        finishRoot afterFailure
+
+                    outcome beforeRoot afterRoot =
+                        { initialPendingIsZero = bootstrap.dataLoading.pendingWorkspaceLoads == 0
+                        , initialTokenIsActive = bootstrap.dataLoading.activeWorkspaceLoadToken == Just 1
+                        , tokenPreserved = beforeRoot.dataLoading.activeWorkspaceLoadToken == Just 1
+                        , accepted = Dict.member "stale-root" afterRoot.dataLoading.projectCardSummaries
+                        , settled = afterRoot.dataLoading.rootNavigationRequest |> Maybe.map (\request -> request.succeeded && not request.inFlight) |> Maybe.withDefault False
+                        , loadFinished = afterRoot.dataLoading.activeWorkspaceLoadToken == Nothing && not afterRoot.dataLoading.loadingWorkspaceData
+                        }
+                in
+                Expect.equal
+                    [ { initialPendingIsZero = True, initialTokenIsActive = True, tokenPreserved = True, accepted = True, settled = True, loadFinished = True }
+                    , { initialPendingIsZero = True, initialTokenIsActive = True, tokenPreserved = True, accepted = True, settled = True, loadFinished = True }
+                    ]
+                    [ outcome afterSuccess successRoot, outcome afterFailure failureRoot ]
         , test "the prepared root navigation guard accepts the concurrent bootstrap response" <|
             \_ ->
                 let
@@ -1732,6 +1792,35 @@ editorSession =
     , globalPermissions = { createWorkspace = False, superadmin = False }
     , workspace = Just { workspaceId = workspaceId, role = Just "edit", canRead = True, canEdit = True, canAdmin = False }
     }
+
+
+workspaceShellSnapshotWire : String
+workspaceShellSnapshotWire =
+    Encode.object
+        [ ( "schema_version", Encode.int 1 )
+        , ( "transport", Encode.string "snapshot" )
+        , ( "scope", Encode.object [ ( "scope", Encode.string "workspace" ), ( "workspace_id", Encode.string workspaceId ) ] )
+        , ( "snapshot_profile", Encode.string "workspace_shell_v1" )
+        , ( "items"
+          , Encode.list identity
+                [ Encode.object
+                    [ ( "schema_version", Encode.int 1 )
+                    , ( "kind", Encode.string "workspace" )
+                    , ( "data"
+                      , Encode.object
+                            [ ( "id", Encode.string workspaceId )
+                            , ( "name", Encode.string "Workspace" )
+                            , ( "workspace_type", Encode.string "repository" )
+                            , ( "created_at", Encode.string "2026-01-01T00:00:00Z" )
+                            , ( "updated_at", Encode.string "2026-01-01T00:00:00Z" )
+                            ]
+                      )
+                    ]
+                ]
+          )
+        , ( "resume_token", Encode.string "workspace-shell-token" )
+        ]
+        |> Encode.encode 0
 
 
 project : String -> Maybe String -> Api.ProjectCardSummary

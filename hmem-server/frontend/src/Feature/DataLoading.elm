@@ -1023,30 +1023,30 @@ prepareForPageLoad page dataLoading =
 
 finishWorkspaceLoad : Maybe Int -> DataLoadingModel -> DataLoadingModel
 finishWorkspaceLoad maybeToken dataLoading =
-    let
-        remaining =
-            case maybeToken of
-                Just token ->
-                    if dataLoading.activeWorkspaceLoadToken == Just token then
+    case maybeToken of
+        Just token ->
+            if dataLoading.activeWorkspaceLoadToken == Just token then
+                let
+                    remaining =
                         max 0 (dataLoading.pendingWorkspaceLoads - 1)
+                in
+                { dataLoading
+                    | pendingWorkspaceLoads = remaining
+                    , loadingWorkspaceData = dataLoading.loadingWorkspaceData && remaining > 0
+                    , activeWorkspaceLoadToken =
+                        if remaining == 0 then
+                            Nothing
 
-                    else
-                        dataLoading.pendingWorkspaceLoads
-
-                Nothing ->
-                    dataLoading.pendingWorkspaceLoads
-    in
-    { dataLoading
-        | pendingWorkspaceLoads = remaining
-        , loadingWorkspaceData = dataLoading.loadingWorkspaceData && remaining > 0
-        , activeWorkspaceLoadToken =
-            if remaining == 0 then
-                Nothing
+                        else
+                            dataLoading.activeWorkspaceLoadToken
+                    , cardHydrationLoaded = remaining == 0
+                }
 
             else
-                dataLoading.activeWorkspaceLoadToken
-        , cardHydrationLoaded = remaining == 0
-    }
+                dataLoading
+
+        Nothing ->
+            dataLoading
 
 
 addInitialHydrationWork : Maybe Int -> Int -> DataLoadingModel -> DataLoadingModel

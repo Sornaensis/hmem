@@ -1,0 +1,35 @@
+FROM docker.io/library/python@sha256:2856e6af199e8128161abd320575eb9b341f3b76f017b5d0c9cd364f60d8a050
+
+LABEL org.opencontainers.image.title="hmem independent CUDA embedding reference" \
+      org.opencontainers.image.revision="ba60c4ecafdac00932fd030876041e347f222948" \
+      io.hmem.task="aa30a81c-2adf-4f54-b1eb-cfeaa39bac77" \
+      io.hmem.reference.kind="independent-pytorch-cuda"
+
+COPY reference-requirements.lock /locks/reference-requirements.lock
+COPY wheelhouse/ /wheelhouse/
+RUN /usr/local/bin/python3.11 -m pip install \
+      --no-index \
+      --find-links=/wheelhouse \
+      --require-hashes \
+      --only-binary=:all: \
+      --no-compile \
+      -r /locks/reference-requirements.lock \
+    && /usr/local/bin/python3.11 -m pip check \
+    && rm -rf /wheelhouse /root/.cache
+
+COPY reference_cuda.py /scripts/reference_cuda.py
+RUN useradd --create-home --uid 65532 --shell /usr/sbin/nologin hmem \
+    && chown root:root /scripts/reference_cuda.py /locks/reference-requirements.lock \
+    && chmod 0555 /scripts/reference_cuda.py \
+    && chmod 0444 /locks/reference-requirements.lock
+
+USER 65532:65532
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1 \
+    HF_HOME=/tmp/hf \
+    HF_MODULES_CACHE=/tmp/hf/modules \
+    TOKENIZERS_PARALLELISM=false \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+ENTRYPOINT ["/usr/local/bin/python3.11", "-I", "-B", "/scripts/reference_cuda.py"]

@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "kind": "official_torch_wheel_size_correction",
+  "previous_metadata": {
+    "path": "C:\\Users\\Sornaensis\\AppData\\Local\\Temp\\hmem-gpu-reference-wheel-metadata-r2.json",
+    "sha256": "7109f428a4fa545e078df347c6d2bbe35cfee2a2babfc79ad5ae266c039c6d57"
+  },
+  "original_contract_sha256": "f6b45623818213561cfab0fc9f8c92aff7aa45446fc5bd97d2d35fe5789baaf3",
+  "correction": "Only packages[name=torch].size added: 1039389795. Names, versions, filenames, URLs, hashes, dependency closure and target unchanged. r2 and original contract preserved. r3 replaces the package_metadata input for prefetch only.",
+  "retrieval": {
+    "requested_url": "https://download.pytorch.org/whl/cu128/torch-2.7.1%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl",
+    "method": "HEAD",
+    "status": 200,
+    "final_url": "https://download.pytorch.org/whl/cu128/torch-2.7.1%2Bcu128-cp311-cp311-manylinux_2_28_x86_64.whl",
+    "headers": {
+      "Content-Type": "binary/octet-stream",
+      "Content-Length": "1039389795",
+      "Connection": "close",
+      "Server": "AmazonS3",
+      "Date": "Mon, 07 Sep 2026 19:37:41 GMT",
+      "Last-Modified": "Tue, 03 Jun 2025 18:31:06 GMT",
+      "ETag": "\"5dbb454140be783e415501741d042fb7-124\"",
+      "x-amz-server-side-encryption": "AES256",
+      "x-amz-meta-checksum-sha256": "c301dc280458afd95450af794924c98fe07522dd148ff384739b810e3e3179f2",
+      "x-amz-version-id": "tj_5k.vXI9utbMAu1gSpCgeLicrS06g_",
+      "Accept-Ranges": "bytes",
+      "X-Cache": "Miss from cloudfront",
+      "Via": "1.1 2696274921f0df0251827f3f8e0222cc.cloudfront.net (CloudFront)",
+      "X-Amz-Cf-Pop": "CPH50-P1",
+      "X-Amz-Cf-Id": "DOiglA0MOFHiImfWPBD9exRjcIbwNt4N_2c_VrKLuHyLyE1Zcc7HWQ=="
+    },
+    "observed_utc": "2026-09-07T19:37:40.335631+00:00",
+    "body_bytes_read": 0
+  },
+  "closure_bytes": 3883897561,
+  "closure_cap_bytes": 6442450944,
+  "evidence_limit": "Official HTTP HEAD returned matching checksum metadata and exact Content-Length; no wheel body downloaded. Prefetch still verifies actual byte count and SHA256 before install.",
+  "task_id": "aa30a81c-2adf-4f54-b1eb-cfeaa39bac77",
+  "base_sha": "ba60c4ecafdac00932fd030876041e347f222948"
+}

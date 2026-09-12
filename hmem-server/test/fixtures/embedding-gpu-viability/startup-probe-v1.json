@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "task_id": "aa30a81c-2adf-4f54-b1eb-cfeaa39bac77",
+  "probe_id": "native-tei-startup-document-v1",
+  "role": "document",
+  "text": "A blue heron waits beside the tidal marsh at dawn.",
+  "utf8_sha256": "76e7f034e110a2c0118ecb938581f1d3a36ede0403ced8b795b28fa95dc1c72c",
+  "request": {
+    "normalize": true,
+    "truncate": false,
+    "prompt_name": null
+  },
+  "expected": {
+    "eos_token_id": 151643,
+    "dimensions": 1536,
+    "maximum_unit_norm_absolute_error": 0.0001
+  }
+}

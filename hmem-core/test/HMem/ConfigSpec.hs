@@ -4,6 +4,7 @@ import Control.Exception (bracket, try)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Either (isLeft)
 import Data.List (isInfixOf)
+import Data.Text qualified as T
 import Data.Yaml qualified as Yaml
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
@@ -260,6 +261,7 @@ spec = do
       defaultConfig.embeddingProvider `shouldBe` EmbeddingProviderConfig
         { mode = EmbeddingProviderDisabled
         , endpoint = Nothing
+        , gpuProfile = Nothing
         , batchSize = 32
         , timeoutMs = 30000
         , retryAttempts = 0
@@ -271,6 +273,7 @@ spec = do
             { embeddingProvider = EmbeddingProviderConfig
                 { mode = EmbeddingProviderHttp
                 , endpoint = Just "https://gpu-embeddings.example"
+                , gpuProfile = Just managedTeiGpuProfile
                 , batchSize = 64
                 , timeoutMs = 12000
                 , retryAttempts = 2
@@ -282,6 +285,31 @@ spec = do
         Right (decoded :: HMemConfig) -> do
           decoded `shouldBe` cfg
           decoded.embeddingProvider.spaceFingerprint `shouldBe` managedTeiSpaceFingerprint
+          decoded.embeddingProvider.gpuProfile `shouldBe` Just managedTeiGpuProfile
+
+    it "requires an exact optional native GPU profile assertion" $ do
+      let validYaml = BS8.pack $ unlines
+            [ "embedding:"
+            , "  mode: http"
+            , "  endpoint: https://gpu-embeddings.example"
+            , "  gpu_profile: " <> T.unpack managedTeiGpuProfile
+            ]
+          invalidYaml = BS8.pack $ unlines
+            [ "embedding:"
+            , "  mode: http"
+            , "  endpoint: https://gpu-embeddings.example"
+            , "  gpu_profile: cpu-or-unknown"
+            ]
+          disabledAsserted = BS8.pack $ unlines
+            [ "embedding:"
+            , "  mode: disabled"
+            , "  gpu_profile: " <> T.unpack managedTeiGpuProfile
+            ]
+      case Yaml.decodeEither' validYaml of
+        Left err -> expectationFailure (show err)
+        Right (cfg :: HMemConfig) -> cfg.embeddingProvider.gpuProfile `shouldBe` Just managedTeiGpuProfile
+      (Yaml.decodeEither' invalidYaml :: Either Yaml.ParseException HMemConfig) `shouldSatisfy` isLeft
+      (Yaml.decodeEither' disabledAsserted :: Either Yaml.ParseException HMemConfig) `shouldSatisfy` isLeft
 
     it "rejects the historical unqualified provider identity without rewriting it" $ do
       let historicalFingerprint =
@@ -410,8 +438,10 @@ spec = do
       let provider = defaultConfig.embeddingProvider
             { mode = EmbeddingProviderHttp
             , endpoint = Just "https://gpu.example"
+            , gpuProfile = Just managedTeiGpuProfile
             }
       show provider `shouldNotSatisfy` isInfixOf "gpu.example"
+      show provider `shouldNotSatisfy` isInfixOf "native-tei-gte"
 
   describe "auth config parsing" $ do
     it "normalizes blank MCP provenance secrets from YAML and environment" $ do

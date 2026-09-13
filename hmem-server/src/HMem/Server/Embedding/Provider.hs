@@ -11,6 +11,7 @@ module HMem.Server.Embedding.Provider
   , EmbeddingFailure(..)
   , EmbeddingProvider(..)
   , disabledEmbeddingProvider
+  , resolveEmbeddingProviderEndpoint
   , selectEmbeddingProvider
   ) where
 
@@ -100,18 +101,33 @@ selectEmbeddingProvider
   -> Maybe Text
   -> (Text -> EmbeddingRequest -> IO (Either EmbeddingFailure EmbeddingBatch))
   -> Either EmbeddingFailure EmbeddingProvider
-selectEmbeddingProvider cfg supervisorEndpoint transport = case cfg.mode of
+selectEmbeddingProvider cfg supervisorEndpoint _transport = case cfg.mode of
   EmbeddingProviderDisabled -> Right disabledEmbeddingProvider
-  EmbeddingProviderHttp -> providerAt =<< requireEndpoint cfg.endpoint
-  EmbeddingProviderManagedTei -> providerAt =<< requireManagedEndpoint supervisorEndpoint
-  where
-    providerAt endpointValue = Right EmbeddingProvider
-      { availability = pure EmbeddingAvailable
-      , embed = \request ->
-          if null request.inputs || length request.inputs > cfg.batchSize
-            then pure (Left (EmbeddingFailure ProviderConfigurationError False))
-            else transport endpointValue request
+  _ -> do
+    _ <- resolveEmbeddingProviderEndpoint cfg supervisorEndpoint
+    -- Enabled GPU providers must pass the IO validation boundary in
+    -- makeValidatedGpuEmbeddingProvider. Keep this legacy pure selector for
+    -- callers that have not yet been migrated, but fail closed without
+    -- invoking their transport.
+    Right EmbeddingProvider
+      { availability = pure (EmbeddingUnavailable unvalidatedFailure)
+      , embed = \_ -> pure (Left unvalidatedFailure)
       }
+  where
+    unvalidatedFailure = EmbeddingFailure ProviderUnavailable False
+
+-- | Resolve the endpoint selected by configuration without performing IO.
+-- Successful resolution is only an input to the validated HTTP constructor;
+-- it does not establish provider availability.
+resolveEmbeddingProviderEndpoint
+  :: EmbeddingProviderConfig
+  -> Maybe Text
+  -> Either EmbeddingFailure Text
+resolveEmbeddingProviderEndpoint cfg supervisorEndpoint = case cfg.mode of
+  EmbeddingProviderDisabled -> Left configurationFailure
+  EmbeddingProviderHttp -> requireEndpoint cfg.endpoint
+  EmbeddingProviderManagedTei -> requireManagedEndpoint supervisorEndpoint
+  where
 
     requireEndpoint = \case
       Just endpointValue -> maybe (Left configurationFailure) Right (normalizeEmbeddingEndpointRoute endpointValue)

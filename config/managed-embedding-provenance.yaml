@@ -1,49 +1,146 @@
-# This lockfile is deliberately data-only: retrieval happens at image build time,
-# while the managed runtime reads an already verified local snapshot.
-schema_version: 1
-profile: managed-tei-gte-qwen2-1.5b-instruct
+# Immutable production authority for the optional managed native TEI GPU profile.
+# Retrieval and extraction happen during image preparation. Runtime operation is
+# offline and verifies the installed trees against these embedded locks.
+schema_version: 2
+profile: native-tei-gte-qwen2-1.5b-instruct-cuda-sm120-f16-v1
+semantic_space_fingerprint: "Alibaba-NLP/gte-Qwen2-1.5B-instruct@1cad2ab3ff41c2671f34e135d29831368ee26b68:1536:attention=noncausal:v1"
 expected_embedding_dimensions: 1536
+
+historical_cpu_authority:
+  path: 'C:\Users\Sornaensis\AppData\Local\Temp\hmem-gpu-transition-planning-ba60c4e-r1.json'
+  bytes: 133506
+  sha256: ed9df8168ecb02c0439bd335a400ee73bd3fe04cc6cd88adebce703b5ac313a0
+  active_production_authority: false
+
+installation:
+  root: /opt/hmem/managed-embedding
+  manifest_path: /opt/hmem/managed-embedding/manifest/managed-embedding-provenance.yaml
+  model_root: /opt/hmem/managed-embedding/model
+  runtime_root: /opt/hmem/managed-embedding/tei-runtime
+  entrypoint_path: /opt/hmem/managed-embedding/tei-runtime/entrypoint.sh
+  router_path: /opt/hmem/managed-embedding/tei-runtime/text-embeddings-router
 
 tei:
   release: v1.9.3
   source_commit: 06670157fb6c1523482219bdb2d1660277d38088
   source_archive:
     url: https://api.github.com/repos/huggingface/text-embeddings-inference/tarball/06670157fb6c1523482219bdb2d1660277d38088
+    bytes: 1183985
     sha256: d71a340344ed1737fc54a283685885708624993b3b950578eae86ba2457efff7
-  cpu_image:
-    reference: ghcr.io/huggingface/text-embeddings-inference@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
-    platform: linux/amd64
-    registry_manifest_url: https://ghcr.io/v2/huggingface/text-embeddings-inference/manifests/sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
-    index_digest: sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
-    platform_manifest_digest: sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48
-    config_digest: sha256:f50bc806338120e138d774236098580f7e5840dbe8bc001ef64615847c1685e8
-    executable_layer_digest: sha256:51345600aa8d1cd784c97a2bc6ba969a535841224986d40ac91770c504e472a9
+  source_compatibility:
+    backend: candle-cuda
+    model_class: FlashQwen2Model
+    compile_compute_capability: 120
+    runtime_compute_capability: 120
+    cuda_build_runtime: 12.9.1
+    ubuntu_release: "24.04"
+    requires_cuda: true
+    requires_f16: true
+    uses_config_is_causal: true
+  gpu_image:
+    discovery_tag_evidence: 120-1.9.3
+    reference: ghcr.io/huggingface/text-embeddings-inference@sha256:aedf3b34836dc57289583142adcf2b93836cda0736ac8e6ce43691b9c2c67170
+    registry_manifest_url: https://ghcr.io/v2/huggingface/text-embeddings-inference/manifests/sha256:aedf3b34836dc57289583142adcf2b93836cda0736ac8e6ce43691b9c2c67170
+    index_digest: sha256:aedf3b34836dc57289583142adcf2b93836cda0736ac8e6ce43691b9c2c67170
+    platform:
+      os: linux
+      architecture: amd64
+    platform_manifest_digest: sha256:144aaa80ddcb520d49df83f915dc188ddd7cc6b1b3b9684a829c21dd39cbe3c5
+    config_digest: sha256:affa793eda6c6c6583d9c4041372dd710d74a55ab0a89025a1f322dd71b92eb2
+    config:
+      entrypoint: [./entrypoint.sh]
+      command: [--json-output]
+      working_directory: /
+      source_label: https://github.com/huggingface/text-embeddings-inference
+      revision_label: 06670157fb6c1523482219bdb2d1660277d38088
+      version_label: 120-1.9.3
+      cuda_version: 12.9.1
+      use_flash_attention: "True"
+    layers:
+      - { ordinal: 1, digest: "sha256:32f112e3802cadcab3543160f4d2aa607b3cc1c62140d57b4f5441384f40e927", bytes: 29721175 }
+      - { ordinal: 2, digest: "sha256:644e9b20358325501941bab7efe2465969b1101fd546be263fc7c2d12d2d8c6c", bytes: 4546956 }
+      - { ordinal: 3, digest: "sha256:02559cd4bc8db240554ff3a4e38df5909d4745846b3e3a4df865d102f0a6d0d9", bytes: 103517429 }
+      - { ordinal: 4, digest: "sha256:2cd52cbb1ebefad9b697ee1c60a7ba7ce8293404a1ad596fd257efdf0e9ec8d6", bytes: 182 }
+      - { ordinal: 5, digest: "sha256:6e8af4fd0a071982e528b634ba99dec2474c21147f99748be708f36e10e3f4c2", bytes: 6885 }
+      - { ordinal: 6, digest: "sha256:15a17189b2df6f2a5b84716dd422741e91bec18d40f6cd72f7dea007a02d45aa", bytes: 2303978379 }
+      - { ordinal: 7, digest: "sha256:02cb0e091e334f5f0b222d9bc044d174ed386f1b30d3959d0e79ed725eb9cb15", bytes: 59653 }
+      - { ordinal: 8, digest: "sha256:9c3d619183d2383e5d618638762511e6711c112a9e8f7e50031f94b839b2c25e", bytes: 1683 }
+      - { ordinal: 9, digest: "sha256:7f7602a82106bfe07dabfc1cd3799c2b0ee0f1314f4cb28535f7f1b7c00fbec4", bytes: 1523 }
+      - { ordinal: 10, digest: "sha256:5d0fd49fa0beb31c828306a31b7d82dd5a05caafd729b59ebdf4f6258eef50f8", bytes: 8293206 }
+      - { ordinal: 11, digest: "sha256:accfe16c0f24bec67e21206f8de8ad2d88efc9b69e362b635370dac1d74bf455", bytes: 635 }
+      - { ordinal: 12, digest: "sha256:218b749184cd4a74888c41a36f79c7d56790e6d49487c6e2709c868a5668600e", bytes: 708022063 }
   runtime_bundle:
-    # These are the files extracted from executable_layer_digest.  The remaining
-    # system ABI is supplied only by the exact pinned linux/amd64 platform image.
     artifact_root: tei-runtime
-    source_platform_manifest_digest: sha256:c26a226262ad4ff3330fb30b76653c1bb65da2fcf413b92284545a010e0a8a48
-    source_config_digest: sha256:f50bc806338120e138d774236098580f7e5840dbe8bc001ef64615847c1685e8
-    source_layer_digest: sha256:51345600aa8d1cd784c97a2bc6ba969a535841224986d40ac91770c504e472a9
+    source_image_reference: ghcr.io/huggingface/text-embeddings-inference@sha256:aedf3b34836dc57289583142adcf2b93836cda0736ac8e6ce43691b9c2c67170
+    source_platform_manifest_digest: sha256:144aaa80ddcb520d49df83f915dc188ddd7cc6b1b3b9684a829c21dd39cbe3c5
+    source_config_digest: sha256:affa793eda6c6c6583d9c4041372dd710d74a55ab0a89025a1f322dd71b92eb2
     system_abi_source: exact-pinned-platform-image
     retrieval_phase: build-time-only
     runtime_use: verified-local-bundle
+    artifacts:
+      - { path: entrypoint.sh, source_path: /entrypoint.sh, bytes: 917, sha256: 1306281c21ea511af3c6dbcfe9a80ee11627c7597b07cb8163608d8f55308bac }
+      - { path: text-embeddings-router, source_path: /usr/local/bin/text-embeddings-router, bytes: 1208166216, sha256: 8eeff6c10326b9ebaf3796bfa938a1f6ecc77b856a4622f747d73593e3587990 }
+    image_library_inventory_scope: direct-elf-loader-closure-plus-driver-boundary
+    image_library_inventory:
+      - { role: dynamic-loader, path: /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2, bytes: 236616, sha256: 4f961aefd1ecbc91b6de5980623aa389ca56e8bfb5f2a1d2a0b94b54b0fde894 }
+      - { role: libc, path: /usr/lib/x86_64-linux-gnu/libc.so.6, bytes: 2125328, sha256: de259f5276c4a991f78bf87225d6b40e56edbffe0dcbc0ffca36ec7fe30f3f77 }
+      - { role: libm, path: /usr/lib/x86_64-linux-gnu/libm.so.6, bytes: 952616, sha256: 3c24a53ee35c2ce0c67240e62bff699c4bddcd7cf8993d5d7ad29157ba072c99 }
+      - { role: libgcc, path: /usr/lib/x86_64-linux-gnu/libgcc_s.so.1, bytes: 183024, sha256: 02f3f192bf5f79b811f1e34a650fea443d407408703448906585232383957f60 }
+      - { role: libcrypto, path: /usr/lib/x86_64-linux-gnu/libcrypto.so.3, bytes: 5309400, sha256: d6fc1bc9de29c55fc905f77edba1ccc7c7a50b32bd2bb9086b0d0b00104eafc4 }
+      - { role: libssl, path: /usr/lib/x86_64-linux-gnu/libssl.so.3, bytes: 696512, sha256: 0c0f298a5b4b44526d20a07d126a55bf44b85eaab053b2b0118e5d806d28ea13 }
+      - { role: libstdc++, path: /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33, bytes: 2592224, sha256: a68762c86d371e6041f03f03a33a78fa235809ae7d81c90185940c93c3535aed }
+    cuda_dependency_binding: exact-pinned-image-layers
+    driver_injected_library:
+      soname: libcuda.so.1
+      source: nvidia-container-runtime
+      image_file: false
+      host_copy_allowed: false
+      hash_policy: driver-injected-not-image-bundled
     loader:
       inherit_environment: false
-      ld_library_path: /usr/local/lib
-      ld_preload: /usr/local/lib/libfakeintel.so
-    artifacts:
-      - { path: usr/local/bin/text-embeddings-router, sha256: 26299644125584e504f281faa732ba4e30012a955d08707215c592247b23df07 }
-      - { path: usr/local/lib/libfakeintel.so, sha256: aebd0088156960223e1b1a8eab5e2f6e0cd681410ae711a4b21d5c9c13b98af5 }
-      - { path: usr/local/lib/libmkl_avx2.so.2, sha256: 92a9d14aabae9258feb1f5eb196d1b3f23c80c84bd9c8a2ff60c59ad4f48031e }
-      - { path: usr/local/lib/libmkl_avx512.so.2, sha256: 27aa2387bf18efffcba4b330ad2df23512dadbb60f47d58c04caa9bcfcf2f69c }
-      - { path: usr/local/lib/libmkl_core.so.2, sha256: 1f6e3f9a162efc9eaffa63dff361495ce17c1d371646d7318a83f8931f82a969 }
-      - { path: usr/local/lib/libmkl_def.so.2, sha256: c21e78a449012f1e3c90e3a68752135bb656dc774af178004b4eb05fba45311c }
-      - { path: usr/local/lib/libmkl_intel_lp64.so.2, sha256: 9c88e7e3f26c7c5739aa8ea1caefd2a0999208072458abc6b1c112698dd6c355 }
-      - { path: usr/local/lib/libmkl_intel_thread.so.2, sha256: 652fc69f34eb8c752dcfff8e4395f4dd35c94dd63926e8013d3b52d38aefeee0 }
-      - { path: usr/local/lib/libmkl_vml_avx2.so.2, sha256: 78457313d3af7be623a3f495d94c1e952d70eefff2623645186584e1de439ec7 }
-      - { path: usr/local/lib/libmkl_vml_avx512.so.2, sha256: d7c5ed56e8dce5e6b7a32a9cbbae2293c1ae17317fafc8dbdb50b70915cc5b1a }
-      - { path: usr/local/lib/libmkl_vml_def.so.2, sha256: 388187aa59614107392a58bb307d19f413c1bfa645bd1dad49992f448598aa77 }
+      working_directory: /opt/hmem/managed-embedding/tei-runtime
+      path: /opt/hmem/managed-embedding/tei-runtime:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      ld_library_path: /usr/local/cuda/lib64:/usr/local/cuda/lib64
+      ld_preload: null
+      mkl_environment_allowed: false
+      cuda_compatibility_injection: forbidden-for-qualified-driver-cuda-13.2
+      nvidia_visible_devices: "0"
+      nvidia_driver_capabilities: compute,utility
+      hf_hub_offline: "1"
+      transformers_offline: "1"
+      use_flash_attention: "True"
+      argv:
+        - /opt/hmem/managed-embedding/tei-runtime/entrypoint.sh
+        - --model-id
+        - /opt/hmem/managed-embedding/model
+        - --dtype
+        - float16
+        - --max-batch-tokens
+        - "32768"
+        - --auto-truncate
+        - "false"
+        - --max-concurrent-requests
+        - "4"
+        - --max-client-batch-size
+        - "4"
+        - --tokenization-workers
+        - "2"
+        - --hostname
+        - 127.0.0.1
+        - --port
+        - "8080"
+        - --prometheus-port
+        - "9000"
+        - --json-output
+    qualified_host:
+      device: NVIDIA GeForce RTX 5090
+      device_index: 0
+      compute_capability: "12.0"
+      total_memory_mib: 32607
+      driver_version: "596.49"
+      driver_cuda_version: "13.2"
+      minimum_device_contract: sm120
+      minimum_driver_contract: satisfies-image-NVIDIA_REQUIRE_CUDA-and-not-lower-than-qualified-596.49
 
 model:
   id: Alibaba-NLP/gte-Qwen2-1.5B-instruct
@@ -53,36 +150,118 @@ model:
   artifact_root: model
   retrieval_phase: build-time-only
   runtime_use: local-read-only-snapshot
+  source_config:
+    path: config.json
+    bytes: 901
+    sha256: 6be8440493f63c39e989842d4747127a71b1d680839af44dc105245e06a333d1
+    torch_dtype: float32
+    is_causal: false
+  serving:
+    inventory: complete-upstream-authority
+    backend: candle-cuda
+    dtype: float16
+    pooling: last-valid-token
+    eos_token_id: 151643
+    pad_token_id: 151643
+    normalize: true
+    auto_truncate: false
+    max_input_tokens: 32768
+    hmem_max_formatted_utf8_bytes: 32767
+    default_prompt: null
+    query_prefix: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: "
+  endpoint_alias_contract:
+    launch_model_id: /opt/hmem/managed-embedding/model
+    accepted_model_id_aliases:
+      - /opt/hmem/managed-embedding/model
+      - /model
+      - Alibaba-NLP/gte-Qwen2-1.5B-instruct
+    accepted_served_model_name_aliases:
+      - /opt/hmem/managed-embedding/model
+      - /model
+      - Alibaba-NLP/gte-Qwen2-1.5B-instruct
+    null_model_sha_requires_operator_profile_assertion: true
+    non_null_model_sha: 1cad2ab3ff41c2671f34e135d29831368ee26b68
   artifacts:
-    - { path: .gitattributes, sha256: 11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361 }
-    - { path: 1_Pooling/config.json, sha256: 40d120b92655c16390bd52c43540ada5f74ab94991d00838df6742c0d640d35b }
-    - { path: README.md, sha256: 06f46ea6b3ab7eb581f1fb170e6144c94493c076232dae7a65a75bef45133fea }
-    - { path: added_tokens.json, sha256: 6a475432c61f8d6154d10d28c37671a36e5717daf3d15002a988968fee54a500 }
-    - { path: config.json, sha256: 6be8440493f63c39e989842d4747127a71b1d680839af44dc105245e06a333d1 }
-    - { path: config_sentence_transformers.json, sha256: 89df38eb06c9f934ee613d846fd9ea88468cc99791e036b5bbc412411fbb1c95 }
-    - { path: generation_config.json, sha256: 71e135315a5c53cfbd7418a5fa02b03dad5e59df3e28c16f9970553c157805a9 }
-    - { path: merges.txt, sha256: 8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5 }
-    - { path: model-00001-of-00002.safetensors, sha256: 0842014813f9ecd814eac671e2577d84281cd02d74f70436583c044fac724072 }
-    - { path: model-00002-of-00002.safetensors, sha256: 661830fd8d0426f38747a747ec37cbdc05466331790dcf7b83e12a0e000ce0cc }
-    - { path: model.safetensors.index.json, sha256: 6ed4fc9a5fed84fc2401db6223b1f673eb2e0c01597660d67eddf63b525fbc97 }
-    - { path: modeling_qwen.py, sha256: 8851d692b05bbf3b06a9ada6c0c9c857df6461f2a2b093e7fa831c1078040602 }
-    - { path: modules.json, sha256: 84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf }
-    - { path: scripts/eval_mteb.py, sha256: 2a53266b072c36d8ecb0577af67d3439b4a240250d9c870f18a57c777b52232a }
-    - { path: sentence_bert_config.json, sha256: 1140b92d307aec9383d897169c9f489f3a568787b80bf760f5d7cc9d25169a65 }
-    - { path: special_tokens_map.json, sha256: daf48284de8f4779b1dbf20963a68180002fba2a34a5da72292380c5d9fb6af2 }
-    - { path: tokenization_qwen.py, sha256: e15b8ea81d39b3dda3acf751b4a00a7dabbf9f687e026608c06b3849925e3169 }
-    - { path: tokenizer.json, sha256: f7c9b2dba4a296b1aa76c16a34b8225c0c118978400d4bb66bff0902d702f5b8 }
-    - { path: tokenizer_config.json, sha256: d1b4928d0e7e7c1881a23eb235f6081d6d9db3d67f6ce5272f571feaf12fd944 }
-    - { path: vocab.json, sha256: ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910 }
+    - { path: .gitattributes, bytes: 1519, sha256: 11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361 }
+    - { path: 1_Pooling/config.json, bytes: 297, sha256: 40d120b92655c16390bd52c43540ada5f74ab94991d00838df6742c0d640d35b }
+    - { path: README.md, bytes: 146265, sha256: 06f46ea6b3ab7eb581f1fb170e6144c94493c076232dae7a65a75bef45133fea }
+    - { path: added_tokens.json, bytes: 80, sha256: 6a475432c61f8d6154d10d28c37671a36e5717daf3d15002a988968fee54a500 }
+    - { path: config.json, bytes: 901, sha256: 6be8440493f63c39e989842d4747127a71b1d680839af44dc105245e06a333d1 }
+    - { path: config_sentence_transformers.json, bytes: 284, sha256: 89df38eb06c9f934ee613d846fd9ea88468cc99791e036b5bbc412411fbb1c95 }
+    - { path: generation_config.json, bytes: 117, sha256: 71e135315a5c53cfbd7418a5fa02b03dad5e59df3e28c16f9970553c157805a9 }
+    - { path: merges.txt, bytes: 1671853, sha256: 8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5 }
+    - { path: model-00001-of-00002.safetensors, bytes: 4994888704, sha256: 0842014813f9ecd814eac671e2577d84281cd02d74f70436583c044fac724072 }
+    - { path: model-00002-of-00002.safetensors, bytes: 2109938216, sha256: 661830fd8d0426f38747a747ec37cbdc05466331790dcf7b83e12a0e000ce0cc }
+    - { path: model.safetensors.index.json, bytes: 27751, sha256: 6ed4fc9a5fed84fc2401db6223b1f673eb2e0c01597660d67eddf63b525fbc97 }
+    - { path: modeling_qwen.py, bytes: 65201, sha256: 8851d692b05bbf3b06a9ada6c0c9c857df6461f2a2b093e7fa831c1078040602 }
+    - { path: modules.json, bytes: 349, sha256: 84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf }
+    - { path: scripts/eval_mteb.py, bytes: 36724, sha256: 2a53266b072c36d8ecb0577af67d3439b4a240250d9c870f18a57c777b52232a }
+    - { path: sentence_bert_config.json, bytes: 55, sha256: 1140b92d307aec9383d897169c9f489f3a568787b80bf760f5d7cc9d25169a65 }
+    - { path: special_tokens_map.json, bytes: 370, sha256: daf48284de8f4779b1dbf20963a68180002fba2a34a5da72292380c5d9fb6af2 }
+    - { path: tokenization_qwen.py, bytes: 10811, sha256: e15b8ea81d39b3dda3acf751b4a00a7dabbf9f687e026608c06b3849925e3169 }
+    - { path: tokenizer.json, bytes: 7028015, sha256: f7c9b2dba4a296b1aa76c16a34b8225c0c118978400d4bb66bff0902d702f5b8 }
+    - { path: tokenizer_config.json, bytes: 1312, sha256: d1b4928d0e7e7c1881a23eb235f6081d6d9db3d67f6ce5272f571feaf12fd944 }
+    - { path: vocab.json, bytes: 2776833, sha256: ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910 }
+
+numerical_validation:
+  authority: immutable-embedded-foundation-fixtures
+  independent_method: original-sdpa-math-cuda-f16-v3
+  fixtures:
+    - { path: hmem-server/test/fixtures/embedding-gpu-viability/foundation-contract-v1.json, bytes: 7902, sha256: ba776b330ff908a539b37fa41da7f0cd248a18f749c0ce606854171c6e6f6f0e }
+    - { path: hmem-server/test/fixtures/embedding-gpu-viability/parity-probes-v1.json, bytes: 68993, sha256: 1eded3104b9d3f18ae0a152aa6796d066c637ad1f3ceabea55b299d32b39aff7 }
+    - { path: hmem-server/test/fixtures/embedding-gpu-viability/reference-golden-v1.json, bytes: 150199, sha256: 564a22ba414bd41e1e13d3d07db79eb88d45a30e3b2d9813ee5f02b5a32a6c93 }
+  cases:
+    - { id: doc_short, role: document, token_count: 10, formatted_utf8_sha256: 69fa9cfe78c80c6e560acb593e8a5e744d1094c396035222f2268714a2c97141 }
+    - { id: mixed_long, role: document, token_count: 2048, formatted_utf8_sha256: 1c674117e897f8b03f7bf6acf7f3b3880e7c19907c595a641c5e94a0efe6cb67 }
+    - { id: multilingual, role: document, token_count: 21, formatted_utf8_sha256: d0e359a7284619e28991002111d6e5efe2abd51cccb6a309cdeeba3262b5dbfc }
+    - { id: query_search, role: query, token_count: 26, formatted_utf8_sha256: 4b2a5f15a7132d24234475398c238dfa06c92e48678d4c6b33098c75e1dd5aef }
+  thresholds:
+    minimum_cosine: 0.9995
+    maximum_l2_distance: 0.032
+    maximum_coordinate_absolute_error: 0.005
+    maximum_unit_norm_absolute_error: 0.0001
+    dimensions: 1536
+    maximum_compact_probe_tokens: 2048
+  negative_probe: wrong-prompt-must-fail
+
+operational_recommendations:
+  authority_path: hmem-server/test/fixtures/embedding-gpu-viability/gpu-foundation-qualification-v1.json
+  startup_timeout_seconds: 120
+  compact_request_timeout_seconds: 30
+  full_context_request_timeout_seconds: 300
+  qualified_compact_max_input_tokens: 2048
+  qualified_compact_batch_items: 4
+  qualified_compact_concurrent_requests: 2
+  hmem_aggregate_input_budget: 4
+  hmem_long_request_admission: singleton
+  hmem_aggregate_token_budget: 32768
+  four_maximum_length_requests_qualified: false
+  full_context_concurrency_qualified: false
+
+historical_trial_envelope:
+  authority_path: hmem-server/test/fixtures/embedding-gpu-viability/foundation-contract-v1.json
+  production_defaults: false
+  startup_timeout_seconds: 600
+  short_request_timeout_seconds: 120
+  full_context_request_timeout_seconds: 1800
+  max_concurrent_requests: 8
 
 licenses:
   - component: text-embeddings-inference
-    spdx: Apache-2.0
+    expression: Apache-2.0
     notice_path: licenses/managed-embedding/tei-APACHE-2.0.txt
+    notice_bytes: 11342
     notice_sha256: 28216184827860ae83a60244c8868de4cf84e16357d16cdb975a46afe3afa9db
-    source_url: https://raw.githubusercontent.com/huggingface/text-embeddings-inference/06670157fb6c1523482219bdb2d1660277d38088/LICENSE
+    source_identity: https://raw.githubusercontent.com/huggingface/text-embeddings-inference/06670157fb6c1523482219bdb2d1660277d38088/LICENSE
   - component: Alibaba-NLP/gte-Qwen2-1.5B-instruct
-    spdx: Apache-2.0
+    expression: Apache-2.0
     notice_path: licenses/managed-embedding/gte-Qwen2-1.5B-instruct-license-metadata.txt
+    notice_bytes: 20
     notice_sha256: 5e05dfca6eeba9772cf92c589149b62c0fd75573469b8801649008df8f8e8f5f
-    source_url: https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/blob/1cad2ab3ff41c2671f34e135d29831368ee26b68/README.md
+    source_identity: https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct/blob/1cad2ab3ff41c2671f34e135d29831368ee26b68/README.md
+  - component: NVIDIA-CUDA-runtime-container
+    expression: LicenseRef-NVIDIA-Deep-Learning-Container
+    notice_path: licenses/managed-embedding/nvidia-deep-learning-container-license.txt
+    notice_bytes: 17294
+    notice_sha256: e4196076c5496c4bb5509be61e3d1cddf36b92a449a10ece1779afce3c65e684
+    source_identity: "oci://ghcr.io/huggingface/text-embeddings-inference@sha256:aedf3b34836dc57289583142adcf2b93836cda0736ac8e6ce43691b9c2c67170/NGC-DL-CONTAINER-LICENSE"

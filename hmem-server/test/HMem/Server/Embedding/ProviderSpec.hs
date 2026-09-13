@@ -19,23 +19,25 @@ spec = describe "embedding provider selection" $ do
       `shouldReturn` Left (EmbeddingFailure ProviderDisabled False)
     readIORef calls `shouldReturn` 0
 
-  it "routes HTTP mode to its fixed configured endpoint" $ do
-    endpointSeen <- newIORef Nothing
+  it "resolves HTTP mode to its fixed configured endpoint and keeps the pure selector unvalidated" $ do
+    calls <- newIORef (0 :: Int)
     let config = defaultConfig.embeddingProvider
           { mode = EmbeddingProviderHttp, endpoint = Just "https://gpu.example" }
-        transport endpointValue _ = do
-          modifyIORef' endpointSeen (const (Just endpointValue))
-          pure (Right (EmbeddingBatch [[1.0]] config.spaceFingerprint))
+        transport _ _ = modifyIORef' calls (+ 1) >> pure (Right (EmbeddingBatch [[1.0]] config.spaceFingerprint))
+        unavailable = EmbeddingFailure ProviderUnavailable False
+    resolveEmbeddingProviderEndpoint config Nothing `shouldBe` Right "https://gpu.example/embed"
     provider <- expectRight $ selectEmbeddingProvider config Nothing transport
+    provider.availability `shouldReturn` EmbeddingUnavailable unavailable
     provider.embed (EmbeddingRequest [EmbeddingInput EmbeddingQuery "query"])
-      `shouldReturn` Right (EmbeddingBatch [[1.0]] config.spaceFingerprint)
-    readIORef endpointSeen `shouldReturn` Just "https://gpu.example/embed"
+      `shouldReturn` Left unavailable
+    readIORef calls `shouldReturn` 0
 
   it "requires an exact loopback authority for managed-tei" $ do
     let config :: EmbeddingProviderConfig
         config = EmbeddingProviderConfig
           { mode = EmbeddingProviderManagedTei
           , endpoint = Nothing
+          , gpuProfile = Just managedTeiGpuProfile
           , batchSize = 32
           , timeoutMs = 30000
           , retryAttempts = 0
@@ -54,8 +56,11 @@ spec = describe "embedding provider selection" $ do
       , "http://127.0.0.1.evil:8080"
       ]
     mapM_ (\endpointValue -> do
+      resolveEmbeddingProviderEndpoint config (Just endpointValue) `shouldSatisfy` \case
+        Right _ -> True
+        Left _ -> False
       provider <- expectRight $ selectEmbeddingProvider config (Just endpointValue) transport
-      provider.availability `shouldReturn` EmbeddingAvailable)
+      provider.availability `shouldReturn` EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable False))
       [ "http://127.0.0.1:8080"
       , "http://localhost:8080"
       , "http://[::1]:8080"
@@ -84,7 +89,7 @@ spec = describe "embedding provider selection" $ do
     rendered `shouldNotSatisfy` isInfixOf "input-sentinel"
     rendered `shouldNotSatisfy` isInfixOf "42.125"
 
-  it "rejects empty and oversized batches before calling a transport" $ do
+  it "never routes requests through the unvalidated pure selector" $ do
     calls <- newIORef (0 :: Int)
     let config = defaultConfig.embeddingProvider
           { mode = EmbeddingProviderHttp, endpoint = Just "https://gpu.example", batchSize = 1 }
@@ -92,11 +97,11 @@ spec = describe "embedding provider selection" $ do
         unavailable = Left (EmbeddingFailure ProviderUnavailable True)
     provider <- expectRight $ selectEmbeddingProvider config Nothing transport
     provider.embed (EmbeddingRequest [])
-      `shouldReturn` Left (EmbeddingFailure ProviderConfigurationError False)
+      `shouldReturn` Left (EmbeddingFailure ProviderUnavailable False)
     provider.embed (EmbeddingRequest
       [ EmbeddingInput EmbeddingDocument "one"
       , EmbeddingInput EmbeddingDocument "two"
-      ]) `shouldReturn` Left (EmbeddingFailure ProviderConfigurationError False)
+      ]) `shouldReturn` Left (EmbeddingFailure ProviderUnavailable False)
     readIORef calls `shouldReturn` 0
 
 expectRight :: Show left => Either left right -> IO right

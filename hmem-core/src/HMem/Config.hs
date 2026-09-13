@@ -22,6 +22,7 @@ module HMem.Config
   , normalizeEmbeddingEndpointRoute
   , managedTeiModelId
   , managedTeiSpaceFingerprint
+  , managedTeiGpuProfile
   , TlsConfig(..)
   , WebConfig(..)
     -- * Defaults
@@ -188,6 +189,7 @@ data EmbeddingProviderMode
 data EmbeddingProviderConfig = EmbeddingProviderConfig
   { mode             :: !EmbeddingProviderMode
   , endpoint         :: !(Maybe Text)
+  , gpuProfile       :: !(Maybe Text)
   , batchSize        :: !Int
   , timeoutMs        :: !Int
   , retryAttempts    :: !Int
@@ -207,6 +209,7 @@ instance Show EmbeddingProviderConfig where
   show provider =
     "EmbeddingProviderConfig {mode = " <> show provider.mode
       <> ", endpoint = " <> if isJust provider.endpoint then "<configured>" else "<none>"
+      <> ", gpuProfile = " <> maybe "<none>" (const "<asserted>") provider.gpuProfile
       <> ", batchSize = " <> show provider.batchSize
       <> ", timeoutMs = " <> show provider.timeoutMs
       <> ", retryAttempts = " <> show provider.retryAttempts
@@ -221,6 +224,12 @@ managedTeiModelId = "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
 managedTeiSpaceFingerprint :: Text
 managedTeiSpaceFingerprint =
   "Alibaba-NLP/gte-Qwen2-1.5B-instruct@1cad2ab3ff41c2671f34e135d29831368ee26b68:1536:attention=noncausal:v1"
+
+-- | Explicit operator assertion required before admitting a native TEI GPU
+-- endpoint. This identifies the serving/runtime contract, independently of
+-- the semantic vector-space fingerprint.
+managedTeiGpuProfile :: Text
+managedTeiGpuProfile = "native-tei-gte-qwen2-1.5b-instruct-cuda-sm120-f16-v1"
 
 -- Historical vectors using this unqualified identity have unknown attention
 -- provenance.  Keep the value recognizable for an actionable rejection, but
@@ -481,6 +490,7 @@ instance FromJSON EmbeddingProviderConfig where
     provider <- EmbeddingProviderConfig
       <$> o .:? "mode" .!= EmbeddingProviderDisabled
       <*> o .:? "endpoint"
+      <*> o .:? "gpu_profile"
       <*> o .:? "batch_size" .!= 32
       <*> o .:? "timeout_ms" .!= 30000
       <*> o .:? "retry_attempts" .!= 0
@@ -494,7 +504,9 @@ instance ToJSON EmbeddingProviderConfig where
     , "timeout_ms" .= provider.timeoutMs
     , "retry_attempts" .= provider.retryAttempts
     , "space_fingerprint" .= provider.spaceFingerprint
-    ] <> maybe [] (\value -> ["endpoint" .= value]) provider.endpoint
+    ]
+      <> maybe [] (\value -> ["endpoint" .= value]) provider.endpoint
+      <> maybe [] (\value -> ["gpu_profile" .= value]) provider.gpuProfile
 
 instance FromJSON TlsConfig where
   parseJSON = Aeson.withObject "TlsConfig" $ \o -> TlsConfig
@@ -626,6 +638,7 @@ defEmbeddingProvider :: EmbeddingProviderConfig
 defEmbeddingProvider = EmbeddingProviderConfig
   { mode = EmbeddingProviderDisabled
   , endpoint = Nothing
+  , gpuProfile = Nothing
   , batchSize = 32
   , timeoutMs = 30000
   , retryAttempts = 0
@@ -806,6 +819,10 @@ validateEmbeddingProviderConfig provider
       Left "embedding.timeout_ms must be between 100 and 300000"
   | provider.retryAttempts < 0 || provider.retryAttempts > 5 =
       Left "embedding.retry_attempts must be between 0 and 5"
+  | Just profile <- provider.gpuProfile, profile /= managedTeiGpuProfile =
+      Left "embedding.gpu_profile must identify the pinned native TEI CUDA sm120 float16 runtime profile"
+  | provider.mode == EmbeddingProviderDisabled && provider.gpuProfile /= Nothing =
+      Left "embedding.gpu_profile is not permitted when embedding.mode is disabled"
   | provider.mode == EmbeddingProviderDisabled && provider.endpoint /= Nothing =
       Left "embedding.endpoint is not permitted when embedding.mode is disabled"
   | provider.mode == EmbeddingProviderManagedTei && provider.endpoint /= Nothing =

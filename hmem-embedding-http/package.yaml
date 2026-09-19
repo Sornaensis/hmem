@@ -1,0 +1,46 @@
+name: hmem-embedding-http
+version: 0.1.0.0
+synopsis: Owned, deadline-bounded HTTP helper transport for hmem embeddings
+license: MPL-2.0
+author: hmem contributors
+category: Network
+
+dependencies:
+  - base >= 4.20 && < 5
+  - async
+  - bytestring
+  - directory
+  - filepath
+  - http-client == 0.7.19
+  - http-client-tls == 0.3.6.4
+  - http-types
+  - network == 3.2.7.0
+  - process == 1.6.25.0
+  - tls == 2.1.8
+
+ghc-options: -Wall -Wcompat
+
+library:
+  source-dirs: src
+  c-sources: cbits/process_owner.c
+  when:
+    - condition: os(linux)
+      extra-libraries: pthread
+
+executables:
+  hmem-embedding-http-helper:
+    main: Main.hs
+    source-dirs: app
+    dependencies: hmem-embedding-http
+    ghc-options: -threaded -rtsopts
+
+tests:
+  hmem-embedding-http-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - hmem-embedding-http
+      - hspec
+      - tls
+      - data-default-class
+    ghc-options: -threaded -rtsopts

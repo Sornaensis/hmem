@@ -1,0 +1,91 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.39.6.
+--
+-- see: https://github.com/sol/hpack
+
+name:           hmem-embedding-http
+version:        0.1.0.0
+synopsis:       Owned, deadline-bounded HTTP helper transport for hmem embeddings
+category:       Network
+author:         hmem contributors
+maintainer:     hmem contributors
+license:        MPL-2.0
+build-type:     Simple
+
+library
+  exposed-modules:
+      HMem.Embedding.HttpProcess
+      HMem.Embedding.HttpProtocol
+      HMem.Embedding.HttpRequest
+  other-modules:
+      Paths_hmem_embedding_http
+  hs-source-dirs:
+      src
+  ghc-options: -Wall -Wcompat
+  c-sources:
+      cbits/process_owner.c
+  build-depends:
+      async
+    , base >=4.20 && <5
+    , bytestring
+    , directory
+    , filepath
+    , http-client ==0.7.19
+    , http-client-tls ==0.3.6.4
+    , http-types
+    , network ==3.2.7.0
+    , process ==1.6.25.0
+    , tls ==2.1.8
+  default-language: Haskell2010
+  if os(linux)
+    extra-libraries:
+        pthread
+
+executable hmem-embedding-http-helper
+  main-is: Main.hs
+  other-modules:
+      Paths_hmem_embedding_http
+  hs-source-dirs:
+      app
+  ghc-options: -Wall -Wcompat -threaded -rtsopts
+  build-depends:
+      async
+    , base >=4.20 && <5
+    , bytestring
+    , directory
+    , filepath
+    , hmem-embedding-http
+    , http-client ==0.7.19
+    , http-client-tls ==0.3.6.4
+    , http-types
+    , network ==3.2.7.0
+    , process ==1.6.25.0
+    , tls ==2.1.8
+  default-language: Haskell2010
+
+test-suite hmem-embedding-http-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      HttpProcessSpec
+      Paths_hmem_embedding_http
+  hs-source-dirs:
+      test
+  ghc-options: -Wall -Wcompat -threaded -rtsopts
+  build-depends:
+      async
+    , base >=4.20 && <5
+    , bytestring
+    , data-default-class
+    , directory
+    , filepath
+    , hmem-embedding-http
+    , hspec
+    , http-client ==0.7.19
+    , http-client-tls ==0.3.6.4
+    , http-types
+    , network ==3.2.7.0
+    , process ==1.6.25.0
+    , tls
+  default-language: Haskell2010

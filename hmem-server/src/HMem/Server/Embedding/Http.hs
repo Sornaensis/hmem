@@ -18,27 +18,34 @@ module HMem.Server.Embedding.Http
   , validateGpuProbeResponse
   , embeddingRequestJson
   , decodeEmbeddingResponse
+  , logicalEmbeddingTimeoutMs
   , embeddingEndpointPath
   , normalizeEmbeddingEndpoint
   ) where
 
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Control.Concurrent.Async (AsyncCancelled(..))
+import Control.Concurrent.STM
+  ( TVar
+  , atomically
+  , check
+  , modifyTVar'
+  , newTVarIO
+  , readTVar
+  , writeTVar
+  )
 import Control.Exception
-  ( AsyncException(..)
-  , SomeAsyncException
+  ( SomeAsyncException
   , catch
   , evaluate
-  , fromException
+  , finally
+  , mask
+  , onException
   , throwIO
-  , toException
-  , try
   )
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson (FromJSON(..), Value, object, withObject, (.:), (.:?), (.=))
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as BS
-import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
 import Data.FileEmbed (embedFile, makeRelativeToProject)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
@@ -47,25 +54,12 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
-import Network.HTTP.Client
-  ( BodyReader
-  , HttpException(..)
-  , HttpExceptionContent(..)
-  , Manager
-  , Request(..)
-  , RequestBody(..)
-  , brReadSome
-  , parseRequest
-  , requestHeaders
-  , responseBody
-  , responseHeaders
-  , responseStatus
-  , responseTimeoutMicro
-  , withResponse
-  )
-import Network.HTTP.Types (statusCode)
-import Network.HTTP.Types.Header (ResponseHeaders, hContentLength)
 import System.Timeout (timeout)
+
+import HMem.Embedding.HttpProcess
+  ( HttpSession, SessionFailure(..), SessionPolicy, callHttp, withHttpSession )
+import HMem.Embedding.HttpProtocol
+  ( HttpCall(..), HttpMethod(..), HttpReply(..), TransportCode(..) )
 
 import HMem.Config
   ( EmbeddingProviderConfig(..)
@@ -94,9 +88,6 @@ gpuValidationTimeoutMs = 120000
 
 maximumInfoResponseBytes :: Int
 maximumInfoResponseBytes = 64 * 1024
-
-responseReadChunkBytes :: Int
-responseReadChunkBytes = 32 * 1024
 
 embeddedFoundationContract :: BS.ByteString
 embeddedFoundationContract = $(makeRelativeToProject "test/fixtures/embedding-gpu-viability/foundation-contract-v1.json" >>= embedFile)
@@ -432,43 +423,269 @@ decodeEmbeddingResponse expectedCount body = case Aeson.eitherDecode body of
         sequence_ [validateVector 0.0001 vector | vector <- decoded]
         Right decoded
 
+newtype LogicalDeadline = LogicalDeadline Word64
+
+data ProviderGate = ProviderGate
+  { gateActive :: !(TVar Bool)
+  , gateWaiters :: !(TVar Int)
+  }
+
+data GateAdmission = GateAcquired | GateQueued | GateOverflow
+
+data GateTicketState = GateWaiting | GateTicketAcquired | GateTicketCancelled
+  deriving stock (Eq)
+
+newProviderGate :: IO ProviderGate
+newProviderGate = ProviderGate <$> newTVarIO False <*> newTVarIO 0
+
+prepareLogicalDeadline
+  :: EmbeddingProviderConfig
+  -> EmbeddingRequest
+  -> IO (Either EmbeddingFailure LogicalDeadline)
+prepareLogicalDeadline cfg request = do
+  started <- getMonotonicTimeNSec
+  let classificationDeadline = LogicalDeadline
+        (started + fromIntegral (min cfg.timeoutMs 30000) * 1000000)
+  classified <- runWithinDeadline classificationDeadline
+    (case logicalEmbeddingTimeoutMs cfg request of
+      Left failure -> pure (Left failure)
+      Right totalMilliseconds ->
+        evaluate totalMilliseconds >> pure (Right totalMilliseconds))
+  case classified of
+    Left failure -> pure (Left failure)
+    Right totalMilliseconds -> do
+      let deadline = LogicalDeadline
+            (started + fromIntegral totalMilliseconds * 1000000)
+      remaining <- remainingDeadlineMicros deadline
+      pure $ if remaining <= 0 then timeoutFailure else Right deadline
+
+classifyLogicalRequest
+  :: EmbeddingProviderConfig
+  -> EmbeddingRequest
+  -> Either EmbeddingFailure Bool
+classifyLogicalRequest cfg request
+  | null request.inputs = Left configurationFailure
+  | length request.inputs > min cfg.batchSize 4 = Left configurationFailure
+  | otherwise = go True request.inputs
+  where
+    go compact [] = Right compact
+    go compact (input : remaining) =
+      let formattedBytes = BS.length (Text.encodeUtf8 input.inputText)
+          conservativeCost = formattedBytes + 1
+       in if formattedBytes > 32767
+            then Left configurationFailure
+            else conservativeCost `seq` go (compact && conservativeCost <= 2048) remaining
+
+-- | Resolve the configured whole-operation ceiling after applying the compact
+-- or long-input profile. Inputs are already formatted by the semantic layer;
+-- their kind therefore has no effect on byte accounting or prompt handling.
+logicalEmbeddingTimeoutMs
+  :: EmbeddingProviderConfig
+  -> EmbeddingRequest
+  -> Either EmbeddingFailure Int
+logicalEmbeddingTimeoutMs cfg request = do
+  compact <- classifyLogicalRequest cfg request
+  pure (min cfg.timeoutMs (if compact then 30000 else 300000))
+
+remainingDeadlineMicros :: LogicalDeadline -> IO Int
+remainingDeadlineMicros (LogicalDeadline deadline) = do
+  now <- getMonotonicTimeNSec
+  pure $ if now >= deadline
+    then 0
+    else fromIntegral ((deadline - now) `div` 1000)
+
+runWithinDeadline
+  :: LogicalDeadline
+  -> IO (Either EmbeddingFailure value)
+  -> IO (Either EmbeddingFailure value)
+runWithinDeadline deadline action = do
+  remaining <- remainingDeadlineMicros deadline
+  if remaining <= 0
+    then pure timeoutFailure
+    else timeout remaining action >>= \case
+      Nothing -> pure timeoutFailure
+      Just result -> pure result
+
+withProviderGate
+  :: ProviderGate
+  -> LogicalDeadline
+  -> IORef GpuRuntimeState
+  -> IO (Either EmbeddingFailure value)
+  -> IO (Either EmbeddingFailure value)
+withProviderGate gate deadline state action = mask $ \restore -> do
+  admission <- atomically $ do
+    active <- readTVar gate.gateActive
+    waiters <- readTVar gate.gateWaiters
+    if not active
+      then writeTVar gate.gateActive True >> pure GateAcquired
+      else if waiters >= 2
+        then pure GateOverflow
+        else modifyTVar' gate.gateWaiters (+ 1) >> pure GateQueued
+  acquired <- case admission of
+    GateOverflow -> pure (Left (EmbeddingFailure ProviderUnavailable True))
+    GateAcquired -> pure (Right ())
+    GateQueued -> do
+      ticket <- newTVarIO GateWaiting
+      remaining <- remainingDeadlineMicros deadline
+      let waitMicros = min 5000000 remaining
+          cleanupWaiter = atomically $ readTVar ticket >>= \case
+            GateWaiting -> do
+              writeTVar ticket GateTicketCancelled
+              modifyTVar' gate.gateWaiters (max 0 . subtract 1)
+            GateTicketAcquired -> do
+              writeTVar ticket GateTicketCancelled
+              writeTVar gate.gateActive False
+            GateTicketCancelled -> pure ()
+          waitForSlot = atomically $ do
+            active <- readTVar gate.gateActive
+            ticketState <- readTVar ticket
+            check (not active)
+            check (ticketState == GateWaiting)
+            writeTVar gate.gateActive True
+            modifyTVar' gate.gateWaiters (max 0 . subtract 1)
+            writeTVar ticket GateTicketAcquired
+      if waitMicros <= 0
+        then cleanupWaiter >> pure timeoutFailure
+        else do
+          waited <- restore (timeout waitMicros waitForSlot) `onException` cleanupWaiter
+          case waited of
+            Just () -> pure (Right ())
+            Nothing -> do
+              cleanupWaiter
+              remainingAfterWait <- remainingDeadlineMicros deadline
+              pure $ if remainingAfterWait <= 0
+                then timeoutFailure
+                else Left (EmbeddingFailure ProviderUnavailable True)
+  case acquired of
+    Left failure -> pure (Left failure)
+    Right () -> do
+      expectedEpoch <- (.runtimeEpoch) <$> readIORef state
+      -- The worker also uses a custom asynchronous StopProvider exception.
+      -- Every admitted async exit must fence the generation before slot release.
+      let publishCancellation (exception :: SomeAsyncException) = do
+            invalidateGpuRuntimeIfEpoch state expectedEpoch
+              (EmbeddingFailure ProviderCancelled False)
+            throwIO exception
+      (restore action `catch` publishCancellation)
+        `finally` atomically (writeTVar gate.gateActive False)
+
+timeoutFailure :: Either EmbeddingFailure value
+timeoutFailure = Left (EmbeddingFailure ProviderTimedOut True)
+
 httpEmbeddingTransport
-  :: Manager
+  :: SessionPolicy
   -> EmbeddingProviderConfig
   -> Text
   -> EmbeddingRequest
   -> IO (Either EmbeddingFailure EmbeddingBatch)
-httpEmbeddingTransport manager cfg endpointValue request = catchCancelled $ do
-  let totalMicros = cfg.timeoutMs * 1000
-  completed <- timeout totalMicros $ case normalizeEmbeddingEndpoint endpointValue of
+httpEmbeddingTransport policy cfg endpointValue request = do
+  prepareLogicalDeadline cfg request >>= \case
     Left failure -> pure (Left failure)
-    Right endpoint -> go endpoint (cfg.retryAttempts + 1) totalMicros
-  pure $ case completed of
-    Nothing -> Left (EmbeddingFailure ProviderTimedOut True)
-    Just result -> result
+    Right deadline -> do
+      let LogicalDeadline absoluteDeadline = deadline
+      completed <- withHttpSession forceEmbeddingResult policy absoluteDeadline $ \session ->
+        httpEmbeddingTransportUntil policy session cfg endpointValue deadline request
+      pure (flattenSessionResult completed)
+
+httpEmbeddingTransportUntil
+  :: SessionPolicy
+  -> HttpSession
+  -> EmbeddingProviderConfig
+  -> Text
+  -> LogicalDeadline
+  -> EmbeddingRequest
+  -> IO (Either EmbeddingFailure EmbeddingBatch)
+httpEmbeddingTransportUntil policy session cfg endpointValue deadline request =
+  case normalizeEmbeddingEndpoint endpointValue of
+    Left failure -> pure (Left failure)
+    Right endpoint -> collect endpoint [] request.inputs
   where
-    go routedEndpoint attempts totalMicros = do
-      result <- oneAttempt routedEndpoint totalMicros
+    collect _ reversed [] = do
+      forceVectors reversed
+      pure (Right EmbeddingBatch
+        { vectors = reverse reversed
+        , spaceFingerprint = cfg.spaceFingerprint
+        })
+    collect routedEndpoint reversed (input : remaining) = do
+      result <- go routedEndpoint (cfg.retryAttempts + 1) input
       case result of
-        Left failure | failure.retryable && attempts > 1 -> go routedEndpoint (attempts - 1) totalMicros
+        Left failure -> pure (Left failure)
+        Right vector -> collect routedEndpoint (vector : reversed) remaining
+
+    go routedEndpoint attempts input = do
+      result <- oneAttempt routedEndpoint input
+      case result of
+        Left failure | failure.retryable && attempts > 1 -> go routedEndpoint (attempts - 1) input
         _ -> pure result
 
-    oneAttempt routedEndpoint totalMicros = do
-      let encoded = Aeson.encode (embeddingRequestJson request)
-      response <- performBoundedRequest manager totalMicros "POST" routedEndpoint (Just encoded)
-        (maximumEmbeddingResponseBytes (length request.inputs))
-      evaluate $ response >>= decodeEmbeddingResponse (length request.inputs) >>= \vectors -> Right EmbeddingBatch
-        { vectors = vectors
-        , spaceFingerprint = cfg.spaceFingerprint
-        }
+    oneAttempt routedEndpoint input = do
+      let singletonRequest = EmbeddingRequest [input]
+          encoded = Aeson.encode (embeddingRequestJson singletonRequest)
+      remaining <- remainingDeadlineMicros deadline
+      if remaining <= 0
+        then pure timeoutFailure
+        else do
+          response <- performBoundedRequest policy session HttpPost routedEndpoint (Just encoded)
+            (maximumEmbeddingResponseBytes 1)
+          decoded <- evaluate $ response >>= decodeEmbeddingResponse 1
+          case decoded of
+            Left failure -> pure (Left failure)
+            Right [vector] -> forceVector vector >> pure (Right vector)
+            Right _ -> pure protocolFailure
+
+forceVectors :: [[Double]] -> IO ()
+forceVectors = mapM_ forceVector
+
+forceVector :: [Double] -> IO ()
+forceVector = mapM_ (\coordinate -> evaluate coordinate >> pure ())
+
+forceFailure :: EmbeddingFailure -> IO ()
+forceFailure failure = evaluate failure.errorCode >> evaluate failure.retryable >> pure ()
+
+forceEmbeddingResult :: Either EmbeddingFailure EmbeddingBatch -> IO ()
+forceEmbeddingResult = \case
+  Left failure -> forceFailure failure
+  Right batch -> do
+    forceVectors batch.vectors
+    evaluate (T.length batch.spaceFingerprint) >> pure ()
+
+forceAvailabilityResult :: EmbeddingAvailability -> IO ()
+forceAvailabilityResult = \case
+  EmbeddingUnavailable failure -> forceFailure failure
+  EmbeddingAvailable -> pure ()
+  EmbeddingDisabled -> pure ()
+
+forceValidationResult :: Either EmbeddingFailure () -> IO ()
+forceValidationResult = either forceFailure (const (pure ()))
+
+flattenSessionResult
+  :: Either SessionFailure (Either EmbeddingFailure value)
+  -> Either EmbeddingFailure value
+flattenSessionResult = either (Left . sessionFailure) id
+
+sessionFailure :: SessionFailure -> EmbeddingFailure
+sessionFailure = \case
+  DeadlineExceeded -> EmbeddingFailure ProviderTimedOut True
+  InvalidHelperPath -> EmbeddingFailure ProviderConfigurationError False
+  SpawnFailed -> EmbeddingFailure ProviderUnavailable True
+  ProtocolViolation -> EmbeddingFailure ProviderProtocolError False
+  PipeFailure -> EmbeddingFailure ProviderUnavailable True
+  ProcessOwnershipFailure -> EmbeddingFailure ProviderUnavailable True
+  ChildFailure code -> case code of
+    InvalidRequest -> EmbeddingFailure ProviderConfigurationError False
+    NetworkFailure -> EmbeddingFailure ProviderUnavailable True
+    InvalidResponse -> EmbeddingFailure ProviderProtocolError False
+    BodyTooLarge -> EmbeddingFailure ProviderProtocolError False
+    InvalidFrame -> EmbeddingFailure ProviderProtocolError False
+    CertificateRejected -> EmbeddingFailure ProviderUnavailable False
 
 makeValidatedGpuEmbeddingProvider
-  :: Manager
+  :: SessionPolicy
   -> EmbeddingProviderConfig
   -> Maybe Text
   -> IO (Either EmbeddingFailure EmbeddingProvider)
-makeValidatedGpuEmbeddingProvider manager cfg supervisorEndpoint =
-  fmap (fmap fst) (makeValidatedGpuEmbeddingProviderWithInvalidation manager cfg supervisorEndpoint)
+makeValidatedGpuEmbeddingProvider policy cfg supervisorEndpoint =
+  fmap (fmap fst) (makeValidatedGpuEmbeddingProviderWithInvalidation policy cfg supervisorEndpoint)
 
 -- | Construct one provider for exactly one endpoint/configuration/managed-child
 -- generation and return an explicit invalidation action. The supervisor must
@@ -483,12 +700,12 @@ makeValidatedGpuEmbeddingProvider manager cfg supervisorEndpoint =
 -- prevents queued callers from producing a probe storm. Transport retries are
 -- owned solely by 'httpEmbeddingTransport'.
 makeValidatedGpuEmbeddingProviderWithInvalidation
-  :: Manager
+  :: SessionPolicy
   -> EmbeddingProviderConfig
   -> Maybe Text
   -> IO (Either EmbeddingFailure (EmbeddingProvider, IO ()))
-makeValidatedGpuEmbeddingProviderWithInvalidation manager cfg supervisorEndpoint
-  = makeValidatedGpuEmbeddingProviderWithLifecycleHooks (pure ()) (pure ()) (pure ()) manager cfg supervisorEndpoint
+makeValidatedGpuEmbeddingProviderWithInvalidation policy cfg supervisorEndpoint
+  = makeValidatedGpuEmbeddingProviderWithLifecycleHooks (pure ()) (pure ()) (pure ()) policy cfg supervisorEndpoint
 
 -- | Construct a generation with an action immediately before validation is
 -- published. This narrow synchronization hook lets lifecycle tests withdraw a
@@ -496,12 +713,12 @@ makeValidatedGpuEmbeddingProviderWithInvalidation manager cfg supervisorEndpoint
 -- state and attempting the atomic publication.
 makeValidatedGpuEmbeddingProviderWithPublicationHook
   :: IO ()
-  -> Manager
+  -> SessionPolicy
   -> EmbeddingProviderConfig
   -> Maybe Text
   -> IO (Either EmbeddingFailure (EmbeddingProvider, IO ()))
-makeValidatedGpuEmbeddingProviderWithPublicationHook beforePublication manager cfg supervisorEndpoint
-  = makeValidatedGpuEmbeddingProviderWithLifecycleHooks beforePublication (pure ()) (pure ()) manager cfg supervisorEndpoint
+makeValidatedGpuEmbeddingProviderWithPublicationHook beforePublication policy cfg supervisorEndpoint
+  = makeValidatedGpuEmbeddingProviderWithLifecycleHooks beforePublication (pure ()) (pure ()) policy cfg supervisorEndpoint
 
 -- | Construct a provider with synchronization points around validation
 -- publication and the two state-publication gaps in a user invocation. These
@@ -511,11 +728,11 @@ makeValidatedGpuEmbeddingProviderWithLifecycleHooks
   :: IO ()
   -> IO ()
   -> IO ()
-  -> Manager
+  -> SessionPolicy
   -> EmbeddingProviderConfig
   -> Maybe Text
   -> IO (Either EmbeddingFailure (EmbeddingProvider, IO ()))
-makeValidatedGpuEmbeddingProviderWithLifecycleHooks beforePublication afterAvailability afterTransport manager cfg supervisorEndpoint
+makeValidatedGpuEmbeddingProviderWithLifecycleHooks beforePublication afterAvailability afterTransport policy cfg supervisorEndpoint
   | Just profile <- cfg.gpuProfile, profile /= managedTeiGpuProfile = pure (Left configurationFailure)
   | otherwise = case cfg.mode of
     EmbeddingProviderDisabled
@@ -534,34 +751,104 @@ makeValidatedGpuEmbeddingProviderWithLifecycleHooks beforePublication afterAvail
             , runtimeRetired = False
             }
           validationLock <- newMVar ()
-          let ensureAvailable = ensureGpuAvailability beforePublication manager endpointValue state validationLock
+          gate <- newProviderGate
+          let ensureAvailable = do
+                started <- getMonotonicTimeNSec
+                let deadline = LogicalDeadline
+                      (started + fromIntegral gpuValidationTimeoutMs * 1000000)
+                snapshot <- readIORef state
+                now <- getMonotonicTimeNSec
+                case cachedGpuAvailability now snapshot of
+                  Just available -> pure available
+                  Nothing -> do
+                    admitted <- withProviderGate gate deadline state $ do
+                      current <- readIORef state
+                      admittedAt <- getMonotonicTimeNSec
+                      case cachedGpuAvailability admittedAt current of
+                        Just available -> pure (Right available)
+                        Nothing -> do
+                          let expectedEpoch = current.runtimeEpoch
+                              LogicalDeadline absoluteDeadline = deadline
+                          completed <- withHttpSession forceAvailabilityResult policy absoluteDeadline $ \session ->
+                            ensureGpuAvailabilityAdmitted beforePublication policy session endpointValue
+                              state validationLock deadline
+                          result <- publishAdmittedSessionFailure state expectedEpoch completed
+                          latest <- readIORef state
+                          pure $ if latest.runtimeEpoch /= expectedEpoch || latest.runtimeRetired
+                            then Right latest.runtimeAvailability else result
+                    pure (either EmbeddingUnavailable id admitted)
               invalidate = invalidateGpuRuntime state (EmbeddingFailure ProviderUnavailable True)
-              invoke request
-                | null request.inputs || length request.inputs > cfg.batchSize = pure (Left configurationFailure)
-                | otherwise = catchEmbeddingCancellation state $ ensureAvailable >>= \case
-                    EmbeddingAvailable -> do
-                      afterAvailability
-                      before <- readIORef state
-                      if before.runtimeRetired || before.runtimeAvailability /= EmbeddingAvailable
-                        then pure (Left (EmbeddingFailure ProviderCancelled False))
-                        else do
-                          result <- httpEmbeddingTransport manager cfg endpointValue request
-                          afterTransport
-                          case result of
-                            Left failure -> invalidateGpuRuntimeIfEpoch state before.runtimeEpoch failure >> pure (Left failure)
-                            Right batch -> do
-                              after <- readIORef state
-                              if after.runtimeEpoch == before.runtimeEpoch
-                                  && after.runtimeAvailability == EmbeddingAvailable
-                                then pure (Right batch)
-                                else pure (Left (EmbeddingFailure ProviderCancelled False))
-                    EmbeddingUnavailable failure -> pure (Left failure)
-                    EmbeddingDisabled -> pure (Left (EmbeddingFailure ProviderDisabled False))
+              invoke request =
+                prepareLogicalDeadline cfg request >>= \case
+                  Left failure -> pure (Left failure)
+                  Right deadline -> withProviderGate gate deadline state $ do
+                    initial <- readIORef state
+                    if initial.runtimeRetired
+                      then pure $ case initial.runtimeAvailability of
+                        EmbeddingUnavailable failure -> Left failure
+                        _ -> Left (EmbeddingFailure ProviderCancelled False)
+                      else do
+                        let expectedEpoch = initial.runtimeEpoch
+                            LogicalDeadline absoluteDeadline = deadline
+                        completed <- withHttpSession forceEmbeddingResult policy absoluteDeadline $ \session ->
+                          ensureGpuAvailabilityAdmitted beforePublication policy session endpointValue
+                            state validationLock deadline >>= \case
+                              EmbeddingAvailable -> do
+                                afterAvailability
+                                before <- readIORef state
+                                if before.runtimeRetired || before.runtimeAvailability /= EmbeddingAvailable
+                                  then pure (Left (EmbeddingFailure ProviderCancelled False))
+                                  else do
+                                    result <- httpEmbeddingTransportUntil policy session cfg endpointValue deadline request
+                                    case result of
+                                      Left failure -> pure (Left failure)
+                                      Right batch -> do
+                                        afterTransport
+                                        after <- readIORef state
+                                        if after.runtimeEpoch == before.runtimeEpoch
+                                            && after.runtimeAvailability == EmbeddingAvailable
+                                          then pure (Right batch)
+                                          else pure (Left (EmbeddingFailure ProviderCancelled False))
+                              EmbeddingUnavailable failure -> pure (Left failure)
+                              EmbeddingDisabled -> pure (Left (EmbeddingFailure ProviderDisabled False))
+                        result <- case completed of
+                          Left sessionProblem ->
+                            publishAdmittedSessionFailure state expectedEpoch (Left sessionProblem)
+                          Right inner -> do
+                            case inner of
+                              Left failure -> do
+                                current <- readIORef state
+                                if current.runtimeAvailability == EmbeddingAvailable
+                                    || failure.errorCode == ProviderTimedOut
+                                  then invalidateGpuRuntimeIfEpoch state expectedEpoch failure
+                                  else pure ()
+                              Right _ -> pure ()
+                            pure inner
+                        latest <- readIORef state
+                        pure $ case result of
+                          Left failure -> Left failure
+                          Right batch
+                            | latest.runtimeEpoch /= expectedEpoch || latest.runtimeRetired ->
+                                Left (EmbeddingFailure ProviderCancelled False)
+                            | otherwise -> Right batch
               provider = EmbeddingProvider
                 { availability = ensureAvailable
                 , embed = invoke
                 }
           pure (Right (provider, invalidate))
+
+publishAdmittedSessionFailure
+  :: IORef GpuRuntimeState
+  -> Word64
+  -> Either SessionFailure value
+  -> IO (Either EmbeddingFailure value)
+publishAdmittedSessionFailure state expectedEpoch result =
+  case result of
+    Left problem -> do
+      let failure = sessionFailure problem
+      invalidateGpuRuntimeIfEpoch state expectedEpoch failure
+      pure (Left failure)
+    Right value -> pure (Right value)
 
 data GpuRuntimeState = GpuRuntimeState
   { runtimeAvailability :: !EmbeddingAvailability
@@ -570,15 +857,24 @@ data GpuRuntimeState = GpuRuntimeState
   , runtimeRetired :: !Bool
   }
 
-ensureGpuAvailability
+cachedGpuAvailability :: Word64 -> GpuRuntimeState -> Maybe EmbeddingAvailability
+cachedGpuAvailability now runtime
+  | runtime.runtimeRetired = Just runtime.runtimeAvailability
+  | runtime.runtimeAvailability == EmbeddingAvailable = Just EmbeddingAvailable
+  | now < runtime.nextValidationNs = Just runtime.runtimeAvailability
+  | otherwise = Nothing
+
+ensureGpuAvailabilityAdmitted
   :: IO ()
-  -> Manager
+  -> SessionPolicy
+  -> HttpSession
   -> Text
   -> IORef GpuRuntimeState
   -> MVar ()
+  -> LogicalDeadline
   -> IO EmbeddingAvailability
-ensureGpuAvailability beforePublication manager endpointValue state validationLock =
-  catchAvailabilityCancellation state $ withMVar validationLock $ \_ -> do
+ensureGpuAvailabilityAdmitted beforePublication policy session endpointValue state validationLock deadline =
+  withMVar validationLock $ \_ -> do
     before <- readIORef state
     now <- getMonotonicTimeNSec
     case before.runtimeAvailability of
@@ -586,7 +882,7 @@ ensureGpuAvailability beforePublication manager endpointValue state validationLo
       EmbeddingAvailable -> pure EmbeddingAvailable
       unavailable | now < before.nextValidationNs -> pure unavailable
       _ -> do
-        validation <- validateGpuEndpointCompatibility manager endpointValue
+        validation <- validateGpuEndpointCompatibilityUntil deadline (pure ()) policy session endpointValue
         _observedAfterValidation <- readIORef state
         beforePublication
         validationFinished <- getMonotonicTimeNSec
@@ -603,40 +899,6 @@ ensureGpuAvailability beforePublication manager endpointValue state validationLo
                     , nextValidationNs = retryAfter
                     }
               in (published, published.runtimeAvailability)
-
-catchAvailabilityCancellation
-  :: IORef GpuRuntimeState
-  -> IO EmbeddingAvailability
-  -> IO EmbeddingAvailability
-catchAvailabilityCancellation state action = action `catch` \(exception :: SomeAsyncException) ->
-  if isProviderCancellation exception
-    then invalidateGpuRuntimeForCancellation state
-    else throwIO exception
-
-catchEmbeddingCancellation
-  :: IORef GpuRuntimeState
-  -> IO (Either EmbeddingFailure value)
-  -> IO (Either EmbeddingFailure value)
-catchEmbeddingCancellation state action = action `catch` \(exception :: SomeAsyncException) ->
-  if isProviderCancellation exception
-    then invalidateGpuRuntimeForCancellation state
-      >> pure (Left (EmbeddingFailure ProviderCancelled False))
-    else throwIO exception
-
-invalidateGpuRuntimeForCancellation :: IORef GpuRuntimeState -> IO EmbeddingAvailability
-invalidateGpuRuntimeForCancellation state = do
-  now <- getMonotonicTimeNSec
-  atomicModifyIORef' state $ \current ->
-    if current.runtimeRetired
-      then (current, current.runtimeAvailability)
-      else
-        let cancelled = EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
-            invalidated = current
-              { runtimeAvailability = cancelled
-              , runtimeEpoch = current.runtimeEpoch + 1
-              , nextValidationNs = now + 1000000000
-              }
-        in (invalidated, cancelled)
 
 invalidateGpuRuntime :: IORef GpuRuntimeState -> EmbeddingFailure -> IO ()
 invalidateGpuRuntime state failure = atomicModifyIORef' state $ \current ->
@@ -665,7 +927,7 @@ invalidateGpuRuntimeIfEpoch state expectedEpoch failure = do
         )
 
 validateGpuEndpointCompatibility
-  :: Manager
+  :: SessionPolicy
   -> Text
   -> IO (Either EmbeddingFailure ())
 validateGpuEndpointCompatibility =
@@ -677,31 +939,57 @@ validateGpuEndpointCompatibility =
 validateGpuEndpointCompatibilityWithValidationStep
   :: Int
   -> IO ()
-  -> Manager
+  -> SessionPolicy
   -> Text
   -> IO (Either EmbeddingFailure ())
-validateGpuEndpointCompatibilityWithValidationStep timeoutMs validationStep manager endpointValue = catchCancelled $ do
-  completed <- timeout (timeoutMs * 1000) $ case embeddedGpuValidationContract of
+validateGpuEndpointCompatibilityWithValidationStep timeoutMs validationStep policy endpointValue = do
+  started <- getMonotonicTimeNSec
+  let deadline = LogicalDeadline (started + fromIntegral timeoutMs * 1000000)
+      LogicalDeadline absoluteDeadline = deadline
+  completed <- withHttpSession forceValidationResult policy absoluteDeadline $ \session ->
+    validateGpuEndpointCompatibilityUntil deadline validationStep policy session endpointValue
+  pure (flattenSessionResult completed)
+
+validateGpuEndpointCompatibilityUntil
+  :: LogicalDeadline
+  -> IO ()
+  -> SessionPolicy
+  -> HttpSession
+  -> Text
+  -> IO (Either EmbeddingFailure ())
+validateGpuEndpointCompatibilityUntil deadline validationStep policy session endpointValue =
+  case embeddedGpuValidationContract of
     Left failure -> pure (Left failure)
     Right contract -> case normalizeEmbeddingEndpoint endpointValue of
       Left failure -> pure (Left failure)
       Right embedEndpoint -> do
         let infoEndpoint = T.dropEnd (T.length embeddingEndpointPath) embedEndpoint <> infoEndpointPath
-            totalMicros = timeoutMs * 1000
-        infoResponse <- performBoundedRequest manager totalMicros "GET" infoEndpoint Nothing maximumInfoResponseBytes
-        case infoResponse >>= decodeGpuEndpointMetadata of
-          Left failure -> pure (Left failure)
-          Right _ -> do
-            let probeRequest = EmbeddingRequest contract.validationProbes
-                encoded = Aeson.encode (embeddingRequestJson probeRequest)
-            probeResponse <- performBoundedRequest manager totalMicros "POST" embedEndpoint (Just encoded)
-              (maximumEmbeddingResponseBytes (length contract.validationProbes))
-            case probeResponse >>= decodeEmbeddingResponse (length contract.validationProbes) of
+        infoRemaining <- remainingDeadlineMicros deadline
+        if infoRemaining <= 0
+          then pure timeoutFailure
+          else do
+            infoResponse <- performBoundedRequest policy session HttpGet infoEndpoint Nothing maximumInfoResponseBytes
+            decodedMetadata <- evaluate (infoResponse >>= decodeGpuEndpointMetadata)
+            case decodedMetadata of
               Left failure -> pure (Left failure)
-              Right decoded -> validateGpuProbeResponseWithStep validationStep contract decoded
-  pure $ case completed of
-    Nothing -> Left (EmbeddingFailure ProviderTimedOut True)
-    Just result -> result
+              Right _ -> do
+                let probeRequest = EmbeddingRequest contract.validationProbes
+                    encoded = Aeson.encode (embeddingRequestJson probeRequest)
+                probeRemaining <- remainingDeadlineMicros deadline
+                if probeRemaining <= 0
+                  then pure timeoutFailure
+                  else do
+                    probeResponse <- performBoundedRequest policy session HttpPost embedEndpoint (Just encoded)
+                      (maximumEmbeddingResponseBytes (length contract.validationProbes))
+                    decodedProbe <- evaluate
+                      (probeResponse >>= decodeEmbeddingResponse (length contract.validationProbes))
+                    case decodedProbe of
+                      Left failure -> pure (Left failure)
+                      Right decoded -> do
+                        validated <- validateGpuProbeResponseWithStep validationStep contract decoded
+                        case validated of
+                          Left failure -> pure (Left failure)
+                          Right () -> forceVectors decoded >> pure (Right ())
 
 validateGpuProbeResponseWithStep
   :: IO ()
@@ -721,86 +1009,28 @@ validateGpuProbeResponseWithStep validationStep contract vectors
         Right () -> go remaining
 
 performBoundedRequest
-  :: Manager
-  -> Int
-  -> BS.ByteString
+  :: SessionPolicy
+  -> HttpSession
+  -> HttpMethod
   -> Text
   -> Maybe LBS.ByteString
   -> Int
   -> IO (Either EmbeddingFailure LBS.ByteString)
-performBoundedRequest manager requestTimeoutMicros methodValue endpointValue body maximumBytes = do
-  attempted <- try @HttpException $ do
-    baseRequest <- parseRequest (T.unpack endpointValue)
-    let bodyHeaders = case body of
-          Nothing -> []
-          Just _ -> [("Content-Type", "application/json")]
-        httpRequest = baseRequest
-          { method = methodValue
-          , requestHeaders = ("Accept", "application/json") : bodyHeaders <> baseRequest.requestHeaders
-          , requestBody = maybe (RequestBodyBS BS.empty) RequestBodyLBS body
-          , redirectCount = 0
-          , responseTimeout = responseTimeoutMicro requestTimeoutMicros
-          }
-    withResponse httpRequest manager $ \response ->
-      if statusCode (responseStatus response) < 200 || statusCode (responseStatus response) >= 300
-        then pure (Left (EmbeddingFailure ProviderUnavailable (retryableStatus (statusCode (responseStatus response)))))
-        else readBoundedResponseBody maximumBytes (responseHeaders response) (responseBody response)
-  pure $ case attempted of
-    Left (HttpExceptionRequest _ ResponseTimeout) -> Left (EmbeddingFailure ProviderTimedOut True)
-    Left (HttpExceptionRequest _ ConnectionTimeout) -> Left (EmbeddingFailure ProviderTimedOut True)
-    Left _ -> Left (EmbeddingFailure ProviderUnavailable True)
-    Right result -> result
+performBoundedRequest policy session methodValue endpointValue body maximumBytes = do
+  result <- callHttp policy session (HttpCall methodValue
+    (Text.encodeUtf8 endpointValue) (maybe BS.empty LBS.toStrict body) maximumBytes)
+  pure $ case result of
+    Left failure -> Left (sessionFailure failure)
+    Right reply
+      | reply.replyStatus < 200 || reply.replyStatus >= 300 ->
+          Left (EmbeddingFailure ProviderUnavailable (retryableStatus reply.replyStatus))
+      | otherwise -> Right (LBS.fromStrict reply.replyBody)
 
 maximumEmbeddingResponseBytes :: Int -> Int
 maximumEmbeddingResponseBytes itemCount = max 2 (itemCount * observationEmbeddingDimensions * 40 + itemCount * 2 + 2)
-
-readBoundedResponseBody
-  :: Int
-  -> ResponseHeaders
-  -> BodyReader
-  -> IO (Either EmbeddingFailure LBS.ByteString)
-readBoundedResponseBody maximumBytes headers reader = case lookup hContentLength headers of
-  Just rawLength | Just declared <- parseContentLength rawLength
-                 , declared > maximumBytes -> pure protocolFailure
-                 | Nothing <- parseContentLength rawLength -> pure protocolFailure
-  _ -> go 0 []
-  where
-    go bytesRead chunks = do
-      let requested = min responseReadChunkBytes (maximumBytes - bytesRead + 1)
-      chunk <- brReadSome reader requested
-      let chunkBytes = fromIntegral (LBS.length chunk)
-          total = bytesRead + chunkBytes
-      if total > maximumBytes
-        then pure protocolFailure
-        else if LBS.null chunk
-          then pure (Right (mconcat (reverse chunks)))
-          else go total (chunk : chunks)
-
-parseContentLength :: BS.ByteString -> Maybe Int
-parseContentLength raw = case BS8.readInteger raw of
-  Just (declared, rest)
-    | BS.null rest && declared >= 0 && declared <= fromIntegral (maxBound :: Int) -> Just (fromInteger declared)
-  _ -> Nothing
 
 retryableStatus :: Int -> Bool
 retryableStatus status = status == 408 || status == 429 || (status >= 500 && status <= 599)
 
 configurationFailure :: EmbeddingFailure
 configurationFailure = EmbeddingFailure ProviderConfigurationError False
-
-catchCancelled
-  :: IO (Either EmbeddingFailure value)
-  -> IO (Either EmbeddingFailure value)
-catchCancelled action = action `catch` \(exception :: SomeAsyncException) ->
-  if isProviderCancellation exception
-    then pure (Left (EmbeddingFailure ProviderCancelled False))
-    else throwIO exception
-
-isProviderCancellation :: SomeAsyncException -> Bool
-isProviderCancellation exception =
-  case fromException (toException exception) :: Maybe AsyncCancelled of
-    Just AsyncCancelled -> True
-    Nothing -> case fromException (toException exception) :: Maybe AsyncException of
-      Just ThreadKilled -> True
-      Just UserInterrupt -> True
-      _ -> False

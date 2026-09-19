@@ -491,8 +491,8 @@ instance FromJSON EmbeddingProviderConfig where
       <$> o .:? "mode" .!= EmbeddingProviderDisabled
       <*> o .:? "endpoint"
       <*> o .:? "gpu_profile"
-      <*> o .:? "batch_size" .!= 32
-      <*> o .:? "timeout_ms" .!= 30000
+      <*> o .:? "batch_size" .!= 1
+      <*> o .:? "timeout_ms" .!= 300000
       <*> o .:? "retry_attempts" .!= 0
       <*> o .:? "space_fingerprint" .!= managedTeiSpaceFingerprint
     either fail pure (validateEmbeddingProviderConfig provider)
@@ -639,8 +639,8 @@ defEmbeddingProvider = EmbeddingProviderConfig
   { mode = EmbeddingProviderDisabled
   , endpoint = Nothing
   , gpuProfile = Nothing
-  , batchSize = 32
-  , timeoutMs = 30000
+  , batchSize = 1
+  , timeoutMs = 300000
   , retryAttempts = 0
   , spaceFingerprint = managedTeiSpaceFingerprint
   }

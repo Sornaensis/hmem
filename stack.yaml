@@ -4,6 +4,7 @@ packages:
   - hmem-core
   - hmem-server
   - hmem-mcp
+  - hmem-embedding-http
 
 extra-deps:
   - rel8-1.7.0.0

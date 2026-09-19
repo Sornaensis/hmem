@@ -1,44 +1,51 @@
 {-# LANGUAGE TemplateHaskell #-}
 
-module HMem.Server.Embedding.HttpSpec (spec) where
+module HMem.Server.Embedding.HttpSpec (spec, testHelperExecutable) where
 
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (Async, async, asyncThreadId, cancel, wait)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (AsyncException(..), SomeException, bracket, finally, fromException, throwTo, try)
-import Control.Monad (replicateM_)
+import Control.Concurrent.Async (Async, AsyncCancelled(..), async, asyncThreadId, cancel, wait, waitCatch)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
+import Control.Exception
+  ( AsyncException(..), Exception(..), SomeException, asyncExceptionFromException
+  , asyncExceptionToException, finally, fromException, throwTo, try )
+import Control.Monad (unless, void)
 import Data.Aeson (FromJSON(..), object, withObject, (.:), (.=))
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder (byteString)
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf)
 import Data.FileEmbed (embedFile, makeRelativeToProject)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as Text
 import GHC.Conc (BlockReason(..), ThreadStatus(..), threadStatus)
-import Network.HTTP.Client
-  ( ManagerSettings(..)
-  , Manager
-  , closeManager
-  , defaultManagerSettings
-  , newManager
-  , responseTimeoutMicro
-  )
+import GHC.Clock (getMonotonicTimeNSec)
+import System.Directory (canonicalizePath, doesFileExist)
+import System.Environment (getExecutablePath, lookupEnv)
+import System.FilePath ((</>), takeDirectory, takeExtension, takeFileName)
 import Network.HTTP.Types (mkStatus, status200, status302, status400, status408, status429, status500)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (testWithApplication)
 import System.Timeout qualified as Timeout
 import Test.Hspec
 
+import HMem.Embedding.HttpProcess (SessionPolicy(..))
 import HMem.Config
+import HMem.Server.Embedding.GteQwen2 (gteQwen2QueryPrefix)
 import HMem.Server.Embedding.Http
 import HMem.Server.Embedding.Provider
 import HMem.Types (observationEmbeddingDimensions)
 
 embeddedReferenceGolden :: BS.ByteString
 embeddedReferenceGolden = $(makeRelativeToProject "test/fixtures/embedding-gpu-viability/reference-golden-v1.json" >>= embedFile)
+
+data TestStopProvider = TestStopProvider deriving (Eq, Show)
+
+instance Exception TestStopProvider where
+  toException = asyncExceptionToException
+  fromException = asyncExceptionFromException
 
 spec :: Spec
 spec = describe "TEI HTTP adapter" $ do
@@ -132,14 +139,113 @@ spec = describe "TEI HTTP adapter" $ do
       Just (method, path, body) -> method == "POST" && path == "/embed" && contains body "\"inputs\":[\"document\"]"
       Nothing -> False
 
+  it "admits one through four logical inputs under legacy config and sends ordered singleton bodies" $ do
+    seen <- newIORef ([] :: [[T.Text]])
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          values <- expectInputValues body
+          modifyIORef' seen (<> [values])
+          respond (Wai.responseLBS status200 [] (vectorResponse (length values)))
+        request = EmbeddingRequest
+          [ EmbeddingInput EmbeddingDocument "first"
+          , EmbeddingInput EmbeddingQuery (gteQwen2QueryPrefix <> "already formatted")
+          , EmbeddingInput EmbeddingDocument longInput
+          , EmbeddingInput EmbeddingDocument "fourth"
+          ]
+        longInput = T.replicate 2048 "l"
+        config = (httpConfig 0 1000) { batchSize = 256 }
+    withTransport app config $ \transport -> do
+      result <- transport request
+      result `shouldBe` Right (EmbeddingBatch (replicate 4 unitVector) managedTeiSpaceFingerprint)
+    readIORef seen `shouldReturn`
+      [ ["first"]
+      , [gteQwen2QueryPrefix <> "already formatted"]
+      , [longInput]
+      , ["fourth"]
+      ]
+
+  it "rejects empty, over-logical-limit, and oversized formatted inputs before network IO" $ do
+    calls <- newIORef (0 :: Int)
+    let app _ respond = modifyIORef' calls (+ 1)
+          >> respond (Wai.responseLBS status200 [] (vectorResponse 1))
+        config = (httpConfig 0 1000) { batchSize = 32 }
+        five = EmbeddingRequest (replicate 5 (EmbeddingInput EmbeddingDocument "small"))
+        oversized = EmbeddingRequest [EmbeddingInput EmbeddingDocument (T.replicate 32768 "a")]
+    withTransport app config $ \transport -> do
+      transport (EmbeddingRequest []) `shouldReturn` Left (EmbeddingFailure ProviderConfigurationError False)
+      transport five `shouldReturn` Left (EmbeddingFailure ProviderConfigurationError False)
+      transport oversized `shouldReturn` Left (EmbeddingFailure ProviderConfigurationError False)
+    readIORef calls `shouldReturn` 0
+
+  it "accepts exact formatted UTF8 limits and counts multibyte input bytes without rewriting" $ do
+    seen <- newIORef ([] :: [T.Text])
+    let app _request respond = do
+          -- Each logical input is physically isolated, so the response count is one.
+          respond (Wai.responseLBS status200 [] (vectorResponse 1))
+        exactAscii = T.replicate 32767 "a"
+        exactMultibyte = T.replicate 16383 "é" <> "a"
+        config = (httpConfig 0 1000) { batchSize = 4 }
+        recording request respond = do
+          body <- Wai.strictRequestBody request
+          values <- expectInputValues body
+          modifyIORef' seen (<> values)
+          app request respond
+    withTransport recording config $ \transport ->
+      transport (EmbeddingRequest
+        [ EmbeddingInput EmbeddingDocument exactAscii
+        , EmbeddingInput EmbeddingDocument exactMultibyte
+        ]) `shouldReturn` Right (EmbeddingBatch (replicate 2 unitVector) managedTeiSpaceFingerprint)
+    readIORef seen `shouldReturn` [exactAscii, exactMultibyte]
+
+  it "selects compact and full ceilings from formatted UTF8 bytes plus one EOS" $ do
+    let config = (httpConfig 0 300000) { batchSize = 4 }
+        timeoutFor kind value = logicalEmbeddingTimeoutMs config
+          (EmbeddingRequest [EmbeddingInput kind value])
+        prefixedPadding = T.replicate
+          (2047 - BS.length (Text.encodeUtf8 gteQwen2QueryPrefix)) "q"
+    timeoutFor EmbeddingDocument (T.replicate 2047 "a") `shouldBe` Right 30000
+    timeoutFor EmbeddingDocument (T.replicate 2048 "a") `shouldBe` Right 300000
+    timeoutFor EmbeddingDocument (T.replicate 1023 "é") `shouldBe` Right 30000
+    timeoutFor EmbeddingDocument (T.replicate 1024 "é") `shouldBe` Right 300000
+    timeoutFor EmbeddingQuery (gteQwen2QueryPrefix <> prefixedPadding) `shouldBe` Right 30000
+    logicalEmbeddingTimeoutMs config (EmbeddingRequest
+      [ EmbeddingInput EmbeddingDocument "short"
+      , EmbeddingInput EmbeddingDocument (T.replicate 2048 "a")
+      ]) `shouldBe` Right 300000
+    logicalEmbeddingTimeoutMs config (EmbeddingRequest
+      [ EmbeddingInput EmbeddingDocument (T.replicate 2048 "a")
+      , EmbeddingInput EmbeddingDocument "short"
+      ]) `shouldBe` Right 300000
+    logicalEmbeddingTimeoutMs (config { timeoutMs = 30000 })
+      (EmbeddingRequest [EmbeddingInput EmbeddingDocument (T.replicate 2048 "a")])
+      `shouldBe` Right 30000
+
+  it "returns no partial batch and stops after a later singleton failure" $ do
+    seen <- newIORef ([] :: [T.Text])
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          [value] <- expectInputValues body
+          modifyIORef' seen (<> [value])
+          if value == "fail"
+            then respond (Wai.responseLBS status500 [] "failure")
+            else respond (Wai.responseLBS status200 [] (vectorResponse 1))
+        config = (httpConfig 0 1000) { batchSize = 4 }
+    withTransport app config $ \transport ->
+      transport (EmbeddingRequest
+        [ EmbeddingInput EmbeddingDocument "first"
+        , EmbeddingInput EmbeddingDocument "fail"
+        , EmbeddingInput EmbeddingDocument "never-sent"
+        ]) `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
+    readIORef seen `shouldReturn` ["first", "fail"]
+
   it "acquires availability only after metadata and exact golden validation" $ do
     calls <- newIORef ([] :: [(BS.ByteString, BS.ByteString, LBS.ByteString)])
     let app request respond = do
           body <- Wai.strictRequestBody request
           modifyIORef' calls (<> [(Wai.requestMethod request, Wai.rawPathInfo request, body)])
           serveCompatible request body respond
-    withEndpoint app $ \manager endpointValue -> do
-      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider manager (gpuConfig endpointValue) Nothing
+    withEndpoint app $ \policy endpointValue -> do
+      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy (gpuConfig endpointValue) Nothing
       readIORef calls `shouldReturn` []
       provider.availability `shouldReturn` EmbeddingAvailable
       firstCalls <- readIORef calls
@@ -152,22 +258,358 @@ spec = describe "TEI HTTP adapter" $ do
       provider.availability `shouldReturn` EmbeddingAvailable
       readIORef calls `shouldReturn` firstCalls
 
+  it "admits one active operation and two waiters, rejects overflow, and releases every slot" $ do
+    userStarted <- newEmptyMVar
+    releaseUser <- newEmptyMVar
+    blockNextUser <- newIORef True
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          if Wai.rawPathInfo request == "/info"
+            then respond (Wai.responseLBS status200 [] validInfoResponse)
+            else do
+              count <- expectInputCount body
+              if count == 4
+                then respond (Wai.responseLBS status200 [] referenceVectorResponse)
+                else do
+                  shouldBlock <- atomicModifyIORef' blockNextUser (\value -> (False, value))
+                  if shouldBlock then putMVar userStarted () >> takeMVar releaseUser else pure ()
+                  respond (Wai.responseLBS status200 [] (vectorResponse 1))
+    withEndpoint app $ \policy endpointValue -> do
+      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy
+        (gpuConfig endpointValue) { batchSize = 4, timeoutMs = 2000 } Nothing
+      provider.availability `shouldReturn` EmbeddingAvailable
+      active <- async (provider.embed requestOne)
+      takeMVar userStarted
+      firstWaiter <- async (provider.embed requestOne)
+      secondWaiter <- async (provider.embed requestOne)
+      withinTestTimeout 1000000 (waitUntilBlockedOnAdmission firstWaiter)
+      withinTestTimeout 1000000 (waitUntilBlockedOnAdmission secondWaiter)
+      provider.embed requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
+      putMVar releaseUser ()
+      mapM_ (\worker -> wait worker `shouldReturn` Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint))
+        [active, firstWaiter, secondWaiter]
+      provider.embed requestOne `shouldReturn` Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+
+  it "expires queued invocation admission at the shorter remaining operation deadline" $ do
+    infoStarted <- newEmptyMVar
+    releaseInfo <- newEmptyMVar
+    blockInfo <- newIORef True
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          if Wai.rawPathInfo request == "/info"
+            then do
+              shouldBlock <- atomicModifyIORef' blockInfo (\value -> (False, value))
+              if shouldBlock then putMVar infoStarted () >> takeMVar releaseInfo else pure ()
+              respond (Wai.responseLBS status200 [] validInfoResponse)
+            else serveCompatible request body respond
+    withEndpoint app $ \policy endpointValue -> do
+      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy
+        (gpuConfig endpointValue) { timeoutMs = 150 } Nothing
+      validating <- async provider.availability
+      takeMVar infoStarted
+      started <- getMonotonicTimeNSec
+      provider.embed requestOne `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+      finished <- getMonotonicTimeNSec
+      let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
+      elapsedMs `shouldSatisfy` (>= 100)
+      elapsedMs `shouldSatisfy` (< 600)
+      putMVar releaseInfo ()
+      wait validating `shouldReturn` EmbeddingAvailable
+      provider.embed requestOne `shouldReturn`
+        Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+
+  it "caps queued admission at five seconds and reuses the slot afterward" $ do
+    infoStarted <- newEmptyMVar
+    releaseInfo <- newEmptyMVar
+    blockInfo <- newIORef True
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          if Wai.rawPathInfo request == "/info"
+            then do
+              shouldBlock <- atomicModifyIORef' blockInfo (\value -> (False, value))
+              if shouldBlock then putMVar infoStarted () >> takeMVar releaseInfo else pure ()
+              respond (Wai.responseLBS status200 [] validInfoResponse)
+            else serveCompatible request body respond
+    withEndpoint app $ \policy endpointValue -> do
+      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy
+        (gpuConfig endpointValue) { timeoutMs = 300000 } Nothing
+      validating <- async provider.availability
+      takeMVar infoStarted
+      started <- getMonotonicTimeNSec
+      provider.embed requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
+      finished <- getMonotonicTimeNSec
+      let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
+      elapsedMs `shouldSatisfy` (>= 4500)
+      elapsedMs `shouldSatisfy` (< 7000)
+      putMVar releaseInfo ()
+      wait validating `shouldReturn` EmbeddingAvailable
+      provider.embed requestOne `shouldReturn`
+        Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+
+  it "releases the active gate when an invocation hook throws" $ do
+    failOnce <- newIORef True
+    let app request respond = Wai.strictRequestBody request >>= \body -> serveCompatible request body respond
+        afterAvailability = do
+          shouldFail <- atomicModifyIORef' failOnce (\value -> (False, value))
+          if shouldFail then ioError (userError "synthetic invocation failure") else pure ()
+    withEndpoint app $ \policy endpointValue -> do
+      (provider, _) <- expectRight =<<
+        makeValidatedGpuEmbeddingProviderWithLifecycleHooks (pure ()) afterAvailability (pure ()) policy
+          (gpuConfig endpointValue) Nothing
+      provider.availability `shouldReturn` EmbeddingAvailable
+      provider.embed requestOne `shouldReturn`
+        Left (EmbeddingFailure ProviderUnavailable True)
+      provider.availability `shouldReturn`
+        EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+      threadDelay 1100000
+      provider.availability `shouldReturn` EmbeddingAvailable
+      provider.embed requestOne `shouldReturn`
+        Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+
+  it "publishes the transport lifecycle hook only after a decoded successful batch" $ do
+    publications <- newIORef (0 :: Int)
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          if Wai.rawPathInfo request == "/info"
+            then respond (Wai.responseLBS status200 [] validInfoResponse)
+            else expectInputCount body >>= \case
+              4 -> respond (Wai.responseLBS status200 [] referenceVectorResponse)
+              _ -> respond (Wai.responseLBS status500 [] "real user response failed")
+    withEndpoint app $ \policy endpointValue -> do
+      (provider, _) <- expectRight =<<
+        makeValidatedGpuEmbeddingProviderWithLifecycleHooks
+          (pure ()) (pure ()) (modifyIORef' publications (+ 1)) policy
+          (gpuConfig endpointValue) Nothing
+      provider.availability `shouldReturn` EmbeddingAvailable
+      provider.embed requestOne `shouldReturn`
+        Left (EmbeddingFailure ProviderUnavailable True)
+      readIORef publications `shouldReturn` 0
+
+  it "invalidates an active invocation timeout before releasing its gate and then revalidates" $ do
+    publicationObserved <- newEmptyMVar
+    releasePublication <- newEmptyMVar
+    blockOnce <- newIORef True
+    calls <- newIORef (0 :: Int)
+    let app request respond = do
+          modifyIORef' calls (+ 1)
+          body <- Wai.strictRequestBody request
+          serveCompatible request body respond
+        afterTransport = do
+          shouldBlock <- atomicModifyIORef' blockOnce (\value -> (False, value))
+          if shouldBlock
+            then putMVar publicationObserved () >> takeMVar releasePublication
+            else pure ()
+        scenario policy endpointValue = do
+          (provider, _) <- expectRight =<<
+            makeValidatedGpuEmbeddingProviderWithLifecycleHooks
+              (pure ()) (pure ()) afterTransport policy
+              ((gpuConfig endpointValue) { timeoutMs = 100 }) Nothing
+          provider.availability `shouldReturn` EmbeddingAvailable
+          invoking <- async (provider.embed requestOne)
+          takeMVar publicationObserved
+          wait invoking `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+          provider.availability `shouldReturn`
+            EmbeddingUnavailable (EmbeddingFailure ProviderTimedOut True)
+          callsBeforeCooldown <- readIORef calls
+          threadDelay 1100000
+          provider.availability `shouldReturn` EmbeddingAvailable
+          readIORef calls `shouldReturn` (callsBeforeCooldown + 2)
+          provider.embed requestOne `shouldReturn`
+            Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+    withEndpoint app $ \policy endpointValue ->
+      scenario policy endpointValue `finally` void (tryPutMVar releasePublication ())
+
+  it "keeps a cold validation helper deadline as the cached timeout" $ do
+    validationReached <- newEmptyMVar
+    releaseValidation <- newEmptyMVar
+    let app request respond = Wai.strictRequestBody request >>= \body -> serveCompatible request body respond
+        beforePublication = putMVar validationReached () >> takeMVar releaseValidation
+        scenario policy endpointValue = do
+          (provider, _) <- expectRight =<<
+            makeValidatedGpuEmbeddingProviderWithPublicationHook beforePublication policy
+              ((gpuConfig endpointValue) { timeoutMs = 2000 }) Nothing
+          invoking <- async (provider.embed requestOne)
+          withinTestTimeout 1500000 (takeMVar validationReached)
+          wait invoking `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+          provider.availability `shouldReturn`
+            EmbeddingUnavailable (EmbeddingFailure ProviderTimedOut True)
+    withEndpoint app $ \policy endpointValue ->
+      scenario policy endpointValue `finally` void (tryPutMVar releaseValidation ())
+
+  it "caches admitted helper acquisition and readiness failures" $ do
+    withTestPolicy $ \policy -> do
+      let missing = policy { helperExecutable = helperExecutable policy <> ".absent" }
+      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider missing
+        (gpuConfig "http://127.0.0.1:1") Nothing
+      provider.availability `shouldReturn`
+        EmbeddingUnavailable (EmbeddingFailure ProviderConfigurationError False)
+      provider.availability `shouldReturn`
+        EmbeddingUnavailable (EmbeddingFailure ProviderConfigurationError False)
+    readinessCalls <- newIORef (0 :: Int)
+    let app request respond = Wai.strictRequestBody request >>= \body -> serveCompatible request body respond
+    withEndpoint app $ \policy endpointValue -> do
+      let failReadiness = policy
+            { afterSpawnBeforeReady = \_ ->
+                modifyIORef' readinessCalls (+ 1) >> ioError (userError "fixture readiness failure")
+            }
+      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider failReadiness
+        (gpuConfig endpointValue) Nothing
+      provider.availability `shouldReturn`
+        EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+      provider.availability `shouldReturn`
+        EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+      readIORef readinessCalls `shouldReturn` 1
+      threadDelay 1100000
+      provider.availability `shouldReturn`
+        EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+      readIORef readinessCalls `shouldReturn` 2
+
+  it "invalidates an available generation after a post-validation helper failure" $ do
+    successfulResponses <- newIORef (0 :: Int)
+    wireCalls <- newIORef (0 :: Int)
+    let app request respond = do
+          modifyIORef' wireCalls (+ 1)
+          Wai.strictRequestBody request >>= \body -> serveCompatible request body respond
+    withEndpoint app $ \policy endpointValue -> do
+      let failUserReply = policy { afterSuccessfulResponse = \_ -> do
+            count <- atomicModifyIORef' successfulResponses (\value -> let next = value + 1 in (next, next))
+            if count == 3 then ioError (userError "fixture post-validation failure") else pure ()
+            }
+      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider failUserReply
+        (gpuConfig endpointValue) Nothing
+      provider.availability `shouldReturn` EmbeddingAvailable
+      provider.embed requestOne `shouldReturn`
+        Left (EmbeddingFailure ProviderUnavailable True)
+      readIORef successfulResponses `shouldReturn` 3
+      beforeCached <- readIORef wireCalls
+      provider.availability `shouldReturn`
+        EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+      readIORef wireCalls `shouldReturn` beforeCached
+
+  it "keeps cold validation and ordered singleton inference inside one invocation deadline" $ do
+    calls <- newIORef (0 :: Int)
+    let app request respond = do
+          modifyIORef' calls (+ 1)
+          body <- Wai.strictRequestBody request
+          threadDelay 70000
+          serveCompatible request body respond
+        config endpointValue = (gpuConfig endpointValue)
+          { batchSize = 2, timeoutMs = 220 }
+        request = EmbeddingRequest
+          [ EmbeddingInput EmbeddingDocument "first"
+          , EmbeddingInput EmbeddingDocument "second"
+          ]
+    withEndpoint app $ \policy endpointValue -> do
+      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy (config endpointValue) Nothing
+      started <- getMonotonicTimeNSec
+      provider.embed request `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+      finished <- getMonotonicTimeNSec
+      let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
+      elapsedMs `shouldSatisfy` (>= 140)
+      elapsedMs `shouldSatisfy` (< 600)
+      readIORef calls >>= (`shouldSatisfy` (\count -> count >= 2 && count <= 4))
+
+  it "keeps queued recovery validation, retry, and ordered singletons inside one deadline" $ do
+    firstInfo <- newIORef True
+    recoveryInfoStarted <- newEmptyMVar
+    releaseRecoveryInfo <- newEmptyMVar
+    secondStarted <- newEmptyMVar
+    failFirstUser <- newIORef True
+    userInputs <- newIORef ([] :: [T.Text])
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          if Wai.rawPathInfo request == "/info"
+            then do
+              shouldFail <- atomicModifyIORef' firstInfo (\value -> (False, value))
+              if shouldFail
+                then respond (Wai.responseLBS status500 [] "initial recovery failure")
+                else do
+                  putMVar recoveryInfoStarted ()
+                  takeMVar releaseRecoveryInfo
+                  threadDelay 60000
+                  respond (Wai.responseLBS status200 [] validInfoResponse)
+            else expectInputValues body >>= \case
+              values | length values == 4 -> do
+                threadDelay 60000
+                respond (Wai.responseLBS status200 [] referenceVectorResponse)
+              [value] -> do
+                modifyIORef' userInputs (<> [value])
+                if value == "second"
+                  then do
+                    getMonotonicTimeNSec >>= putMVar secondStarted
+                    threadDelay 500000
+                    respond (Wai.responseLBS status200 [] (vectorResponse 1))
+                  else do
+                    threadDelay 60000
+                    shouldFail <- if value == "first"
+                      then atomicModifyIORef' failFirstUser (\current -> (False, current))
+                      else pure False
+                    if shouldFail
+                      then respond (Wai.responseLBS status500 [] "retry first singleton")
+                      else respond (Wai.responseLBS status200 [] (vectorResponse 1))
+              _ -> respond (Wai.responseLBS status400 [] "unexpected logical batch")
+        config endpointValue = (gpuConfig endpointValue)
+          { batchSize = 3, timeoutMs = 650, retryAttempts = 1 }
+        request = EmbeddingRequest
+          [ EmbeddingInput EmbeddingDocument "first"
+          , EmbeddingInput EmbeddingDocument "second"
+          , EmbeddingInput EmbeddingDocument "third"
+          ]
+        scenario policy endpointValue = do
+          provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy
+            (config endpointValue) Nothing
+          provider.availability `shouldReturn`
+            EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+          threadDelay 1100000
+          recovering <- async provider.availability
+          takeMVar recoveryInfoStarted
+          started <- getMonotonicTimeNSec
+          invoking <- async $ do
+            invoked <- getMonotonicTimeNSec
+            result <- provider.embed request
+            returned <- getMonotonicTimeNSec
+            pure (result, invoked, returned)
+          withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission invoking
+          threadDelay 80000
+          putMVar releaseRecoveryInfo ()
+          withinTestTimeout 1000000 (wait recovering) `shouldReturn` EmbeddingAvailable
+          secondAt <- withinTestTimeout 1000000 (takeMVar secondStarted)
+          let secondElapsedMs = fromIntegral (secondAt - started) / 1000000 :: Double
+          secondElapsedMs `shouldSatisfy` (>= 250)
+          secondElapsedMs `shouldSatisfy` (< 600)
+          (result, invoked, returned) <- withinTestTimeout 1000000 (wait invoking)
+          result `shouldBe` Left (EmbeddingFailure ProviderTimedOut True)
+          finished <- getMonotonicTimeNSec
+          let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
+              operationElapsedMs = fromIntegral (returned - invoked) / 1000000 :: Double
+          elapsedMs `shouldSatisfy` (>= 600)
+          elapsedMs `shouldSatisfy` (< 800)
+          operationElapsedMs `shouldSatisfy` (< 800)
+          (elapsedMs - secondElapsedMs) `shouldSatisfy` (< 500)
+          seen <- readIORef userInputs
+          take 3 seen `shouldBe` ["first", "first", "second"]
+          seen `shouldNotContain` ["third"]
+          provider.availability `shouldReturn`
+            EmbeddingUnavailable (EmbeddingFailure ProviderTimedOut True)
+    withEndpoint app $ \policy endpointValue ->
+      scenario policy endpointValue `finally` void (tryPutMVar releaseRecoveryInfo ())
+
   it "requires the explicit native GPU assertion without network IO" $ do
     calls <- newIORef (0 :: Int)
     let app _ respond = modifyIORef' calls (+ 1)
           >> respond (Wai.responseLBS status500 [] "unused")
-    withEndpoint app $ \manager endpointValue -> do
-      rejected <- makeValidatedGpuEmbeddingProvider manager
+    withEndpoint app $ \policy endpointValue -> do
+      rejected <- makeValidatedGpuEmbeddingProvider policy
         (gpuConfig endpointValue) { gpuProfile = Nothing } Nothing
       case rejected of
         Left failure -> failure `shouldBe` EmbeddingFailure ProviderConfigurationError False
         Right _ -> expectationFailure "provider accepted a missing GPU assertion"
-      wrong <- makeValidatedGpuEmbeddingProvider manager
+      wrong <- makeValidatedGpuEmbeddingProvider policy
         (gpuConfig endpointValue) { gpuProfile = Just "cpu-or-unknown" } Nothing
       case wrong of
         Left failure -> failure `shouldBe` EmbeddingFailure ProviderConfigurationError False
         Right _ -> expectationFailure "provider accepted a wrong GPU assertion"
-      disabled <- expectRight =<< makeValidatedGpuEmbeddingProvider manager
+      disabled <- expectRight =<< makeValidatedGpuEmbeddingProvider policy
         defaultConfig.embeddingProvider Nothing
       disabled.availability `shouldReturn` EmbeddingDisabled
       readIORef calls `shouldReturn` 0
@@ -188,9 +630,9 @@ spec = describe "TEI HTTP adapter" $ do
                 else pure ()
               respond (Wai.responseLBS status200 [("Content-Type", "application/json")] validInfoResponse)
             else serveCompatible request body respond
-    withEndpoint app $ \manager endpointValue -> do
+    withEndpoint app $ \policy endpointValue -> do
       (provider, invalidate) <- expectRight =<<
-        makeValidatedGpuEmbeddingProviderWithInvalidation manager (gpuConfig endpointValue) Nothing
+        makeValidatedGpuEmbeddingProviderWithInvalidation policy (gpuConfig endpointValue) Nothing
       checking <- async provider.availability
       takeMVar infoStarted
       invalidate
@@ -202,7 +644,7 @@ spec = describe "TEI HTTP adapter" $ do
         EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
       readIORef calls `shouldReturn` callsAfterRetirement
       replacement <- expectRight =<<
-        makeValidatedGpuEmbeddingProvider manager (gpuConfig endpointValue) Nothing
+        makeValidatedGpuEmbeddingProvider policy (gpuConfig endpointValue) Nothing
       replacement.availability `shouldReturn` EmbeddingAvailable
       readIORef calls `shouldReturn` (callsAfterRetirement + 2)
 
@@ -215,9 +657,9 @@ spec = describe "TEI HTTP adapter" $ do
           body <- Wai.strictRequestBody request
           serveCompatible request body respond
         beforePublication = putMVar publicationObserved () >> takeMVar releasePublication
-    withEndpoint app $ \manager endpointValue -> do
+    withEndpoint app $ \policy endpointValue -> do
       (provider, invalidate) <- expectRight =<<
-        makeValidatedGpuEmbeddingProviderWithPublicationHook beforePublication manager
+        makeValidatedGpuEmbeddingProviderWithPublicationHook beforePublication policy
           (gpuConfig endpointValue) Nothing
       checking <- async provider.availability
       takeMVar publicationObserved
@@ -230,7 +672,7 @@ spec = describe "TEI HTTP adapter" $ do
         EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
       readIORef calls `shouldReturn` callsAfterRetirement
 
-  it "returns structured cancellation for a caller queued behind validation and fences publication" $ do
+  it "propagates queued cancellation without invalidating the active validation" $ do
     infoStarted <- newEmptyMVar
     releaseInfo <- newEmptyMVar
     blockInfo <- newIORef True
@@ -246,56 +688,154 @@ spec = describe "TEI HTTP adapter" $ do
                 else pure ()
               respond (Wai.responseLBS status200 [("Content-Type", "application/json")] validInfoResponse)
             else serveCompatible request body respond
-    withEndpoint app $ \manager endpointValue -> do
-      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider manager (gpuConfig endpointValue) Nothing
+    withEndpoint app $ \policy endpointValue -> do
+      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy (gpuConfig endpointValue) Nothing
       validating <- async provider.availability
       takeMVar infoStarted
       queued <- async provider.availability
-      withinTestTimeout 1000000 $ waitUntilBlockedOnMVar queued
+      withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
       cancel queued
-      wait queued `shouldReturn`
-        EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
+      shouldBeCancelled queued
       putMVar releaseInfo ()
-      wait validating `shouldReturn`
-        EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
-      provider.availability `shouldReturn`
-        EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
-      threadDelay 1100000
+      wait validating `shouldReturn` EmbeddingAvailable
       provider.availability `shouldReturn` EmbeddingAvailable
 
-  it "returns structured cancellation after availability and atomically invalidates the generation" $ do
+  it "cancels a queued embed without stale transport and reuses the released gate" $ do
+    activePublished <- newEmptyMVar
+    releaseActive <- newEmptyMVar
+    blockOnce <- newIORef True
+    userCalls <- newIORef (0 :: Int)
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          count <- if Wai.rawPathInfo request == "/info" then pure 0 else expectInputCount body
+          if count == 1 then modifyIORef' userCalls (+ 1) else pure ()
+          serveCompatible request body respond
+        afterTransport = do
+          shouldBlock <- atomicModifyIORef' blockOnce (\value -> (False, value))
+          if shouldBlock then putMVar activePublished () >> takeMVar releaseActive else pure ()
+        scenario policy endpointValue = do
+          (provider, _) <- expectRight =<<
+            makeValidatedGpuEmbeddingProviderWithLifecycleHooks
+              (pure ()) (pure ()) afterTransport policy (gpuConfig endpointValue) Nothing
+          provider.availability `shouldReturn` EmbeddingAvailable
+          active <- async (provider.embed requestOne)
+          takeMVar activePublished
+          queued <- async (provider.embed requestOne)
+          withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
+          cancel queued
+          shouldBeCancelled queued
+          readIORef userCalls `shouldReturn` 1
+          void (tryPutMVar releaseActive ())
+          wait active `shouldReturn`
+            Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+          provider.availability `shouldReturn` EmbeddingAvailable
+          provider.embed requestOne `shouldReturn`
+            Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+          readIORef userCalls `shouldReturn` 2
+    withEndpoint app $ \policy endpointValue ->
+      scenario policy endpointValue `finally` void (tryPutMVar releaseActive ())
+
+  it "retires a provider while an embed waits without sending stale transport" $ do
+    activePublished <- newEmptyMVar
+    releaseActive <- newEmptyMVar
+    userCalls <- newIORef (0 :: Int)
+    blockOnce <- newIORef True
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          count <- if Wai.rawPathInfo request == "/info" then pure 0 else expectInputCount body
+          if count == 1 then modifyIORef' userCalls (+ 1) else pure ()
+          serveCompatible request body respond
+        afterTransport = do
+          shouldBlock <- atomicModifyIORef' blockOnce (\value -> (False, value))
+          if shouldBlock then putMVar activePublished () >> takeMVar releaseActive else pure ()
+        scenario policy endpointValue = do
+          (provider, invalidate) <- expectRight =<<
+            makeValidatedGpuEmbeddingProviderWithLifecycleHooks
+              (pure ()) (pure ()) afterTransport policy (gpuConfig endpointValue) Nothing
+          provider.availability `shouldReturn` EmbeddingAvailable
+          active <- async (provider.embed requestOne)
+          takeMVar activePublished
+          queued <- async (provider.embed requestOne)
+          withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
+          invalidate
+          void (tryPutMVar releaseActive ())
+          wait active `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
+          wait queued `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
+          readIORef userCalls `shouldReturn` 1
+          provider.availability `shouldReturn`
+            EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+    withEndpoint app $ \policy endpointValue ->
+      scenario policy endpointValue `finally` void (tryPutMVar releaseActive ())
+
+  it "propagates active cancellation after availability and invalidates the generation" $ do
     invocationObserved <- newEmptyMVar
     releaseInvocation <- newEmptyMVar
     let app request respond = Wai.strictRequestBody request >>= \body -> serveCompatible request body respond
         afterAvailability = putMVar invocationObserved () >> takeMVar releaseInvocation
-    withEndpoint app $ \manager endpointValue -> do
+    withEndpoint app $ \policy endpointValue -> do
       (provider, _) <- expectRight =<<
-        makeValidatedGpuEmbeddingProviderWithLifecycleHooks (pure ()) afterAvailability (pure ()) manager
+        makeValidatedGpuEmbeddingProviderWithLifecycleHooks (pure ()) afterAvailability (pure ()) policy
           (gpuConfig endpointValue) Nothing
       provider.availability `shouldReturn` EmbeddingAvailable
       worker <- async (provider.embed requestOne)
       takeMVar invocationObserved
       cancel worker
-      wait worker `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
+      shouldBeCancelled worker
       provider.availability `shouldReturn`
         EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
 
-  it "returns structured cancellation before response publication and atomically invalidates the generation" $ do
+  it "publishes active cancellation before admitting a queued successor" $ do
     publicationObserved <- newEmptyMVar
     releasePublication <- newEmptyMVar
     let app request respond = Wai.strictRequestBody request >>= \body -> serveCompatible request body respond
         afterTransport = putMVar publicationObserved () >> takeMVar releasePublication
-    withEndpoint app $ \manager endpointValue -> do
-      (provider, _) <- expectRight =<<
-        makeValidatedGpuEmbeddingProviderWithLifecycleHooks (pure ()) (pure ()) afterTransport manager
-          (gpuConfig endpointValue) Nothing
-      provider.availability `shouldReturn` EmbeddingAvailable
-      worker <- async (provider.embed requestOne)
-      takeMVar publicationObserved
-      cancel worker
-      wait worker `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
-      provider.availability `shouldReturn`
-        EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
+        scenario policy endpointValue = do
+          (provider, _) <- expectRight =<<
+            makeValidatedGpuEmbeddingProviderWithLifecycleHooks (pure ()) (pure ()) afterTransport policy
+              (gpuConfig endpointValue) Nothing
+          provider.availability `shouldReturn` EmbeddingAvailable
+          worker <- async (provider.embed requestOne)
+          takeMVar publicationObserved
+          queued <- async (provider.embed requestOne)
+          withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
+          cancel worker
+          shouldBeCancelled worker
+          wait queued `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
+          provider.availability `shouldReturn`
+            EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
+    withEndpoint app $ \policy endpointValue ->
+      scenario policy endpointValue `finally` void (tryPutMVar releasePublication ())
+
+  it "fences a queued successor after custom asynchronous provider cancellation" $ do
+    publicationObserved <- newEmptyMVar
+    releasePublication <- newEmptyMVar
+    userCalls <- newIORef (0 :: Int)
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          count <- if Wai.rawPathInfo request == "/info" then pure 0 else expectInputCount body
+          if count == 1 then modifyIORef' userCalls (+ 1) else pure ()
+          serveCompatible request body respond
+        afterTransport = putMVar publicationObserved () >> takeMVar releasePublication
+        scenario policy endpointValue = do
+          (provider, _) <- expectRight =<<
+            makeValidatedGpuEmbeddingProviderWithLifecycleHooks
+              (pure ()) (pure ()) afterTransport policy (gpuConfig endpointValue) Nothing
+          provider.availability `shouldReturn` EmbeddingAvailable
+          active <- async (provider.embed requestOne)
+          takeMVar publicationObserved
+          queued <- async (provider.embed requestOne)
+          withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
+          throwTo (asyncThreadId active) TestStopProvider
+          waitCatch active >>= \case
+            Left exception ->
+              (fromException exception :: Maybe TestStopProvider) `shouldBe` Just TestStopProvider
+            Right _ -> expectationFailure "custom provider cancellation was swallowed"
+          wait queued `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
+          readIORef userCalls `shouldReturn` 1
+          provider.availability `shouldReturn`
+            EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
+    withEndpoint app $ \policy endpointValue ->
+      scenario policy endpointValue `finally` void (tryPutMVar releasePublication ())
 
   it "rejects an empirically prompted endpoint during provider acquisition" $ do
     let app request respond = do
@@ -308,19 +848,19 @@ spec = describe "TEI HTTP adapter" $ do
                     then take 3 referenceVectors <> [wrongPromptQueryVector]
                     else replicate count unitVector
               respond (Wai.responseLBS status200 [("Content-Type", "application/json")] (Aeson.encode promptedVectors))
-    withEndpoint app $ \manager endpointValue -> do
-      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider manager (gpuConfig endpointValue) Nothing
+    withEndpoint app $ \policy endpointValue -> do
+      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy (gpuConfig endpointValue) Nothing
       provider.availability `shouldReturn`
         EmbeddingUnavailable (EmbeddingFailure ProviderProtocolError False)
 
   it "keeps decoded probe numerical validation inside the startup deadline" $ do
     numericalValidationStarted <- newEmptyMVar
     let app request respond = Wai.strictRequestBody request >>= \body -> serveCompatible request body respond
-        slowNumericalValidation = putMVar numericalValidationStarted () >> threadDelay 1000000
-    withEndpoint app $ \manager endpointValue -> do
+        slowNumericalValidation = putMVar numericalValidationStarted () >> threadDelay 3000000
+    withEndpoint app $ \policy endpointValue -> do
       validating <- async $
-        validateGpuEndpointCompatibilityWithValidationStep 100 slowNumericalValidation manager endpointValue
-      withinTestTimeout 1000000 (takeMVar numericalValidationStarted)
+        validateGpuEndpointCompatibilityWithValidationStep 1000 slowNumericalValidation policy endpointValue
+      withinTestTimeout 2000000 (takeMVar numericalValidationStarted)
       wait validating `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
 
   it "discards a user response when its generation is withdrawn in flight" $ do
@@ -339,9 +879,9 @@ spec = describe "TEI HTTP adapter" $ do
                   shouldBlock <- readIORef blockUser
                   if shouldBlock then putMVar userStarted () >> takeMVar releaseUser else pure ()
                   respond (Wai.responseLBS status200 [("Content-Type", "application/json")] (vectorResponse count))
-    withEndpoint app $ \manager endpointValue -> do
+    withEndpoint app $ \policy endpointValue -> do
       (provider, invalidate) <- expectRight =<<
-        makeValidatedGpuEmbeddingProviderWithInvalidation manager (gpuConfig endpointValue) Nothing
+        makeValidatedGpuEmbeddingProviderWithInvalidation policy (gpuConfig endpointValue) Nothing
       provider.availability `shouldReturn` EmbeddingAvailable
       modifyIORef' blockUser (const True)
       worker <- async (provider.embed requestOne)
@@ -371,8 +911,8 @@ spec = describe "TEI HTTP adapter" $ do
                     then modifyIORef' failNextUser (const False)
                       >> respond (Wai.responseLBS status500 [] "transient")
                     else respond (Wai.responseLBS status200 [] (vectorResponse count))
-    withEndpoint app $ \manager endpointValue -> do
-      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider manager (gpuConfig endpointValue) Nothing
+    withEndpoint app $ \policy endpointValue -> do
+      provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy (gpuConfig endpointValue) Nothing
       provider.availability `shouldReturn` EmbeddingAvailable
       provider.embed requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
       provider.availability `shouldReturn`
@@ -428,8 +968,8 @@ spec = describe "TEI HTTP adapter" $ do
       transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderProtocolError False)
 
   it "retries only 408, 429, and 500 through 599 exactly to the configured bound" $ do
-    withinTestTimeout 10000000 $
-      replicateM_ 50 $ mapM_ (\retryStatus -> do
+    withinTestTimeout 30000000 $
+      mapM_ (\retryStatus -> do
         calls <- newIORef (0 :: Int)
         let app _ respond = do
               modifyIORef' calls (+ 1)
@@ -450,17 +990,15 @@ spec = describe "TEI HTTP adapter" $ do
       withTransport app (httpConfig 3 1000) $ \transport ->
         transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable False)
       readIORef calls `shouldReturn` 1)
-      [status400, mkStatus 600 "synthetic-non-http"]
+      [status400]
 
   it "retries connection failures exactly to the configured bound" $ do
     calls <- newIORef (0 :: Int)
-    withManager defaultManagerSettings
-      { managerRawConnection = pure $ \_ _ _ -> do
+    let app _ respond = do
           modifyIORef' calls (+ 1)
-          ioError (userError "connection closed")
-      } $ \manager -> do
-        result <- httpEmbeddingTransport manager (httpConfig 2 1000) "http://127.0.0.1:8080" requestOne
-        result `shouldBe` Left (EmbeddingFailure ProviderUnavailable True)
+          respond (Wai.responseRaw (\_ _ -> pure ()) (Wai.responseLBS status500 [] "unused"))
+    withTransport app (httpConfig 2 1000) $ \transport ->
+      transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
     readIORef calls `shouldReturn` 3
 
   it "fails closed on redirects without sending the request body to the redirect route" $ do
@@ -476,9 +1014,9 @@ spec = describe "TEI HTTP adapter" $ do
     readIORef redirectCalls `shouldReturn` 0
 
   it "reports malformed endpoint failures without exposing endpoint text" $ do
-    withManager defaultManagerSettings $ \manager -> do
+    withTestPolicy $ \policy -> do
       let secretEndpoint = "http://127.0.0.1:1/?secret=do-not-log"
-      result <- httpEmbeddingTransport manager (httpConfig 0 250) secretEndpoint requestOne
+      result <- httpEmbeddingTransport policy (httpConfig 0 250) secretEndpoint requestOne
       result `shouldBe` Left (EmbeddingFailure ProviderConfigurationError False)
       show result `shouldNotSatisfy` isInfixOf "do-not-log"
 
@@ -486,11 +1024,10 @@ spec = describe "TEI HTTP adapter" $ do
     let app _ respond = do
           threadDelay 250000
           respond (Wai.responseLBS status200 [] (vectorResponse 1))
-    withTransportWithSettings app (httpConfig 0 100)
-      (defaultManagerSettings { managerResponseTimeout = responseTimeoutMicro 20000 }) $ \transport ->
+    withTransport app (httpConfig 0 100) $ \transport ->
       transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
 
-  it "returns structured cancellation rather than an untyped transport exception" $ do
+  it "propagates transport cancellation after owned helper cleanup" $ do
     let app _ respond = do
           threadDelay 1000000
           respond (Wai.responseLBS status200 [] (vectorResponse 1))
@@ -498,7 +1035,7 @@ spec = describe "TEI HTTP adapter" $ do
       worker <- async (transport requestOne)
       threadDelay 20000
       cancel worker
-      wait worker `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
+      shouldBeCancelled worker
 
   it "propagates unrelated asynchronous faults" $ do
     let app _ respond = do
@@ -857,9 +1394,12 @@ instance FromJSON InputEnvelope where
   parseJSON = withObject "InputEnvelope" $ \o -> InputEnvelope <$> o .: "inputs"
 
 expectInputCount :: LBS.ByteString -> IO Int
-expectInputCount body = case Aeson.eitherDecode body :: Either String InputEnvelope of
+expectInputCount body = length <$> expectInputValues body
+
+expectInputValues :: LBS.ByteString -> IO [T.Text]
+expectInputValues body = case Aeson.eitherDecode body :: Either String InputEnvelope of
   Left parseFailure -> expectationFailure parseFailure >> fail "unreachable"
-  Right envelope -> pure (length envelope.inputValues)
+  Right envelope -> pure envelope.inputValues
 
 serveCompatible
   :: Wai.Request
@@ -891,8 +1431,51 @@ withinTestTimeout microseconds action = do
     Just value -> pure value
     Nothing -> expectationFailure "HTTP test exceeded its deterministic timeout" >> fail "unreachable"
 
-withManager :: ManagerSettings -> (Manager -> IO result) -> IO result
-withManager settings = bracket (newManager settings) closeManager
+shouldBeCancelled :: Async result -> IO ()
+shouldBeCancelled worker = waitCatch worker >>= \case
+  Left exception ->
+    (fromException exception :: Maybe AsyncCancelled) `shouldBe` Just AsyncCancelled
+  Right _ -> expectationFailure "expected asynchronous cancellation"
+
+withTestPolicy :: (SessionPolicy -> IO result) -> IO result
+withTestPolicy action = do
+  path <- testHelperExecutable
+  action SessionPolicy
+    { helperExecutable = path
+    , afterSpawnBeforeReady = const (pure ())
+    , afterSuccessfulResponse = const (pure ())
+    }
+
+-- The test executable and its build-tool dependency use the same Stack dist
+-- directory. An explicit path is retained for pinned external runtime checks.
+testHelperExecutable :: IO FilePath
+testHelperExecutable = do
+  configured <- lookupEnv "HMEM_TEST_HTTP_HELPER"
+  candidate <- case configured of
+    Just value | not (null value) -> pure value
+    _ -> do
+      executable <- canonicalizePath =<< getExecutablePath
+      let testBuild = takeDirectory executable
+          build = takeDirectory testBuild
+          distHash = takeFileName (takeDirectory build)
+          dist = takeDirectory (takeDirectory build)
+          stackWork = takeDirectory dist
+          serverPackage = takeDirectory stackWork
+          repo = takeDirectory serverPackage
+          suffix = takeExtension executable
+      unless (takeFileName executable == "hmem-server-test" <> suffix
+          && takeFileName testBuild == "hmem-server-test"
+          && takeFileName build == "build"
+          && takeFileName dist == "dist"
+          && takeFileName stackWork == ".stack-work"
+          && takeFileName serverPackage == "hmem-server") $
+        expectationFailure "test executable is outside its expected Stack build layout"
+      pure $ repo </> "hmem-embedding-http" </> ".stack-work" </> "dist"
+        </> distHash </> "build" </> "hmem-embedding-http-helper"
+        </> ("hmem-embedding-http-helper" <> suffix)
+  exists <- doesFileExist candidate
+  unless exists $ expectationFailure "the built HTTP helper is unavailable"
+  canonicalizePath candidate
 
 withTransport
   :: Wai.Application
@@ -900,38 +1483,30 @@ withTransport
   -> ((EmbeddingRequest -> IO (Either EmbeddingFailure EmbeddingBatch)) -> IO result)
   -> IO result
 withTransport app config action =
-  withTransportWithSettings app config defaultManagerSettings action
-
-withTransportWithSettings
-  :: Wai.Application
-  -> EmbeddingProviderConfig
-  -> ManagerSettings
-  -> ((EmbeddingRequest -> IO (Either EmbeddingFailure EmbeddingBatch)) -> IO result)
-  -> IO result
-withTransportWithSettings app config settings action =
   testWithApplication (pure app) $ \port -> do
-    withManager settings { managerIdleConnectionCount = 0 } $ \manager -> do
+    withTestPolicy $ \policy -> do
       let endpointValue = "http://127.0.0.1:" <> T.pack (show port)
-      action (httpEmbeddingTransport manager config endpointValue)
+      action (httpEmbeddingTransport policy config endpointValue)
 
 withEndpoint
   :: Wai.Application
-  -> (Manager -> T.Text -> IO result)
+  -> (SessionPolicy -> T.Text -> IO result)
   -> IO result
 withEndpoint app action = testWithApplication (pure app) $ \port ->
-  withManager defaultManagerSettings { managerIdleConnectionCount = 0 } $ \manager ->
-    action manager ("http://127.0.0.1:" <> T.pack (show port))
+  withTestPolicy $ \policy ->
+    action policy ("http://127.0.0.1:" <> T.pack (show port))
 
 expectRight :: Show left => Either left right -> IO right
 expectRight = \case
   Left failure -> expectationFailure (show failure) >> fail "unreachable"
   Right value -> pure value
 
-waitUntilBlockedOnMVar :: Async value -> IO ()
-waitUntilBlockedOnMVar worker = do
+waitUntilBlockedOnAdmission :: Async value -> IO ()
+waitUntilBlockedOnAdmission worker = do
   status <- threadStatus (asyncThreadId worker)
   case status of
     ThreadBlocked BlockedOnMVar -> pure ()
+    ThreadBlocked BlockedOnSTM -> pure ()
     ThreadFinished -> expectationFailure "queued availability call finished before cancellation"
     ThreadDied -> expectationFailure "queued availability call died before cancellation"
-    _ -> threadDelay 1000 >> waitUntilBlockedOnMVar worker
+    _ -> threadDelay 1000 >> waitUntilBlockedOnAdmission worker

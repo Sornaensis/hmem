@@ -1,6 +1,6 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.38.1.
+-- This file has been generated from package.yaml by hpack version 0.39.6.
 --
 -- see: https://github.com/sol/hpack
 
@@ -13,6 +13,10 @@ author:         hmem contributors
 maintainer:     hmem contributors
 license:        MPL-2.0
 build-type:     Simple
+extra-source-files:
+    test/fixtures/embedding-gpu-viability/foundation-contract-v1.json
+    test/fixtures/embedding-gpu-viability/parity-probes-v1.json
+    test/fixtures/embedding-gpu-viability/reference-golden-v1.json
 data-files:
     migrations/V001__initial_schema.sql
     migrations/V002__soft_deletes_audit_and_integrity.sql
@@ -104,9 +108,11 @@ library
     , crypton
     , directory
     , fast-logger
+    , file-embed
     , filepath
     , hasql
     , hmem-core
+    , hmem-embedding-http
     , http-client
     , http-client-tls
     , http-media
@@ -169,9 +175,11 @@ executable build-frontend
     , crypton
     , directory
     , fast-logger
+    , file-embed
     , filepath
     , hasql
     , hmem-core
+    , hmem-embedding-http
     , http-client
     , http-client-tls
     , http-media
@@ -236,9 +244,11 @@ executable hmem-ctl
     , crypton
     , directory
     , fast-logger
+    , file-embed
     , filepath
     , hasql
     , hmem-core
+    , hmem-embedding-http
     , hmem-server
     , http-client
     , http-client-tls
@@ -307,9 +317,11 @@ executable hmem-server
     , crypton
     , directory
     , fast-logger
+    , file-embed
     , filepath
     , hasql
     , hmem-core
+    , hmem-embedding-http
     , hmem-server
     , http-client
     , http-client-tls
@@ -373,9 +385,11 @@ executable hmem-test-harness
     , crypton
     , directory
     , fast-logger
+    , file-embed
     , filepath
     , hasql
     , hmem-core
+    , hmem-embedding-http
     , hmem-server
     , http-client
     , http-client-tls
@@ -456,6 +470,8 @@ test-suite hmem-server-test
       MultiParamTypeClasses
       UndecidableInstances
   ghc-options: -Wall -Wcompat -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-tool-depends:
+      hmem-embedding-http:hmem-embedding-http-helper
   build-depends:
       QuickCheck
     , aeson
@@ -466,9 +482,11 @@ test-suite hmem-server-test
     , crypton
     , directory
     , fast-logger
+    , file-embed
     , filepath
     , hasql
     , hmem-core
+    , hmem-embedding-http
     , hmem-server
     , hspec
     , hspec-discover

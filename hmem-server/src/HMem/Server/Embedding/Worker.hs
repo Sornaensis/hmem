@@ -75,28 +75,31 @@ runEmbeddingWorker worker waitForNext = go
 -- contract, and use the shared CAS for every result.  Cancellation does not
 -- become a terminal provider failure; leases are returned to retryable work.
 runEmbeddingWorkerOnce :: EmbeddingWorker -> IO ()
-runEmbeddingWorkerOnce = runEmbeddingWorkerOnceWithLeasePolicy defaultEmbeddingWorkerLeasePolicy
+runEmbeddingWorkerOnce worker
+  | worker.batchSize <= 0 = pure ()
+  | otherwise = runEmbeddingWorkerOnceWithLeasePolicy defaultEmbeddingWorkerLeasePolicy
+      worker { batchSize = 1 }
 
 runEmbeddingWorkerOnceWithLeasePolicy :: EmbeddingWorkerLeasePolicy -> EmbeddingWorker -> IO ()
 runEmbeddingWorkerOnceWithLeasePolicy leasePolicy worker = do
   stopped <- worker.cancelled
-  state <- worker.provider.availability
-  case (stopped, state) of
-    (True, _) -> pure ()
-    (_, EmbeddingDisabled) -> pure ()
-    (_, EmbeddingUnavailable _) -> pure () -- no claim without a usable provider
-    (_, EmbeddingAvailable) -> do
-      _ <- DB.reconcileEmbeddingJobs worker.pool worker.batchSize
-      mask $ \restore -> do
-        jobs <- DB.claimEmbeddingJobsWithLease worker.pool worker.leaseOwner worker.batchSize leasePolicy.leaseSeconds
-        restore (do
-          stoppedAfterClaim <- worker.cancelled
-          if stoppedAfterClaim
-            then releaseCancelledAll worker jobs
-            else process leasePolicy worker jobs)
-          `catch` \(primary :: SomeException) -> do
-            cleanupErrors <- collectReleaseErrors (releaseCancelled worker) jobs
-            throwPreferredException (Just primary) cleanupErrors
+  if stopped
+    then pure ()
+    else worker.provider.availability >>= \case
+      EmbeddingDisabled -> pure ()
+      EmbeddingUnavailable _ -> pure () -- no claim without a usable provider
+      EmbeddingAvailable -> do
+        _ <- DB.reconcileEmbeddingJobs worker.pool worker.batchSize
+        mask $ \restore -> do
+          jobs <- DB.claimEmbeddingJobsWithLease worker.pool worker.leaseOwner worker.batchSize leasePolicy.leaseSeconds
+          restore (do
+            stoppedAfterClaim <- worker.cancelled
+            if stoppedAfterClaim
+              then releaseCancelledAll worker jobs
+              else process leasePolicy worker jobs)
+            `catch` \(primary :: SomeException) -> do
+              cleanupErrors <- collectReleaseErrors (releaseCancelled worker) jobs
+              throwPreferredException (Just primary) cleanupErrors
 
 process :: EmbeddingWorkerLeasePolicy -> EmbeddingWorker -> [DB.EmbeddingJob] -> IO ()
 process _ _ [] = pure ()

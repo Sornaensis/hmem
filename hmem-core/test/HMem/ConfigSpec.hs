@@ -262,11 +262,35 @@ spec = do
         { mode = EmbeddingProviderDisabled
         , endpoint = Nothing
         , gpuProfile = Nothing
-        , batchSize = 32
-        , timeoutMs = 30000
+        , batchSize = 1
+        , timeoutMs = 300000
         , retryAttempts = 0
         , spaceFingerprint = managedTeiSpaceFingerprint
         }
+
+    it "uses the production batch and whole-operation defaults when embedding fields are omitted" $ do
+      let yaml = BS8.pack $ unlines ["embedding:", "  mode: disabled"]
+      case Yaml.decodeEither' yaml of
+        Left err -> expectationFailure (show err)
+        Right (cfg :: HMemConfig) -> do
+          cfg.embeddingProvider.batchSize `shouldBe` 1
+          cfg.embeddingProvider.timeoutMs `shouldBe` 300000
+
+    it "accepts legacy batch and timeout bounds while rejecting values outside them" $ do
+      let decodeEmbedding :: Int -> Int -> Either Yaml.ParseException HMemConfig
+          decodeEmbedding batch timeoutMillis =
+            Yaml.decodeEither' (BS8.pack $ unlines
+              [ "embedding:"
+              , "  mode: disabled"
+              , "  batch_size: " <> show batch
+              , "  timeout_ms: " <> show timeoutMillis
+              ])
+      mapM_ (\batch -> decodeEmbedding batch 300000 `shouldSatisfy` either (const False) ((== batch) . (.embeddingProvider.batchSize)))
+        [1, 4, 32, 256]
+      mapM_ (\timeoutMillis -> decodeEmbedding 1 timeoutMillis `shouldSatisfy` either (const False) ((== timeoutMillis) . (.embeddingProvider.timeoutMs)))
+        [100, 30000, 300000]
+      mapM_ (\batch -> decodeEmbedding batch 300000 `shouldSatisfy` isLeft) [0, 257]
+      mapM_ (\timeoutMillis -> decodeEmbedding 1 timeoutMillis `shouldSatisfy` isLeft) [99, 300001]
 
     it "round-trips an operator-managed HTTP TEI endpoint through YAML" $ do
       let cfg = defaultConfig

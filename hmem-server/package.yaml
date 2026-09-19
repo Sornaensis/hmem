@@ -7,11 +7,16 @@ author:              hmem contributors
 category:            Web
 data-files:
   - migrations/*.sql
+extra-source-files:
+  - test/fixtures/embedding-gpu-viability/foundation-contract-v1.json
+  - test/fixtures/embedding-gpu-viability/parity-probes-v1.json
+  - test/fixtures/embedding-gpu-viability/reference-golden-v1.json
 
 dependencies:
   - base >= 4.7 && < 5
   - async
   - hmem-core
+  - hmem-embedding-http
   - containers
   - crypton
   - http-media
@@ -44,6 +49,7 @@ dependencies:
   - rel8
   - directory
   - filepath
+  - file-embed
 
 ghc-options:
   - -Wall
@@ -114,6 +120,8 @@ tests:
   hmem-server-test:
     main:        Spec.hs
     source-dirs: test
+    build-tools:
+      - hmem-embedding-http:hmem-embedding-http-helper
     ghc-options:
       - -threaded
       - -rtsopts

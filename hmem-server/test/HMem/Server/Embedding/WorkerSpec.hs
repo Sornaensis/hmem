@@ -5,6 +5,7 @@ import Control.Concurrent.Async (AsyncCancelled(..), cancel, cancelWith, poll, w
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Exception (AsyncException(..), SomeAsyncException, SomeException, bracket, catch, finally, fromException, throwIO)
 import Control.Monad (unless, void)
+import Data.Foldable (traverse_)
 import Data.IORef
 import Data.Int (Int32)
 import Data.List (elemIndex, sort, sortOn)
@@ -21,14 +22,23 @@ import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
+import System.Environment (lookupEnv)
 import Test.Hspec
 import System.Timeout (timeout)
 
-import HMem.Config (managedTeiSpaceFingerprint)
+import HMem.Config
+  ( EmbeddingProviderConfig(..)
+  , EmbeddingProviderMode(..)
+  , managedTeiGpuProfile
+  , managedTeiSpaceFingerprint
+  )
+import HMem.Embedding.HttpProcess (SessionPolicy(..))
 import HMem.DB.Embedding
 import HMem.DB.Observation
 import HMem.DB.Pool (checkPgvector, createPool, runSession)
 import HMem.DB.TestHarness qualified as Harness
+import HMem.Server.Embedding.Http (makeValidatedGpuEmbeddingProviderWithLifecycleHooks)
+import HMem.Server.Embedding.HttpSpec (testHelperExecutable)
 import HMem.Server.Embedding.Provider
 import HMem.Server.Embedding.Worker
 import HMem.Types
@@ -52,6 +62,28 @@ spec = around Harness.withTestEnv $ do
         , cancelled = pure False
         }
       readIORef calls `shouldReturn` 0
+
+    it "does not consult provider availability when an iteration is already cancelled" $ \env -> do
+      availabilityCalls <- newIORef (0 :: Int)
+      let provider = EmbeddingProvider
+            { availability = modifyIORef' availabilityCalls (+ 1) >> pure EmbeddingAvailable
+            , embed = \_ -> expectationFailure "cancelled worker must not embed" >> pure (Left (EmbeddingFailure ProviderCancelled False))
+            }
+      runEmbeddingWorkerOnce (testWorker env provider "already-cancelled" 32)
+        { cancelled = pure True }
+      readIORef availabilityCalls `shouldReturn` 0
+
+    it "normalizes every positive production batch to one claim and rejects nonpositive admission" $ \env -> do
+      requireVector env
+      enableEmbeddingTarget env.pool (testSpace managedTeiSpaceFingerprint)
+      mapM_ (assertSingleProductionClaim env) [1, 4, 32, 256]
+      availabilityCalls <- newIORef (0 :: Int)
+      let provider = EmbeddingProvider
+            { availability = modifyIORef' availabilityCalls (+ 1) >> pure EmbeddingAvailable
+            , embed = \_ -> expectationFailure "nonpositive production batch must not embed" >> pure (Left (EmbeddingFailure ProviderCancelled False))
+            }
+      mapM_ (runEmbeddingWorkerOnce . testWorker env provider "nonpositive-production") [0, -1]
+      readIORef availabilityCalls `shouldReturn` 0
 
     it "runs a cancellable loop with an injected wait policy" $ \env -> do
       checks <- newIORef [False, False, False, True]
@@ -102,7 +134,8 @@ spec = around Harness.withTestEnv $ do
                 writeIORef seen request.inputs
                 pure (Right (EmbeddingBatch [unitX, unitX] managedTeiSpaceFingerprint))
             }
-      runEmbeddingWorkerOnce EmbeddingWorker { pool = env.pool, provider = provider, leaseOwner = "worker-success", batchSize = 2, clock = getCurrentTime, cancelled = pure False }
+      runEmbeddingWorkerOnceWithLeasePolicy defaultEmbeddingWorkerLeasePolicy
+        EmbeddingWorker { pool = env.pool, provider = provider, leaseOwner = "worker-success", batchSize = 2, clock = getCurrentTime, cancelled = pure False }
       fmap (sort . map (.inputText)) (readIORef seen) `shouldReturn` ["first", "second"]
       claimEmbeddingJobs env.pool "other" 2 `shouldReturn` []
 
@@ -122,7 +155,8 @@ spec = around Harness.withTestEnv $ do
             { availability = pure EmbeddingAvailable
             , embed = \_ -> modifyIORef' calls (+ 1) >> pure (Right (EmbeddingBatch [] managedTeiSpaceFingerprint))
             }
-      runEmbeddingWorkerOnce (testWorker env provider "all-invalid" 2)
+      runEmbeddingWorkerOnceWithLeasePolicy defaultEmbeddingWorkerLeasePolicy
+        (testWorker env provider "all-invalid" 2)
       readIORef calls `shouldReturn` 0
       traverse (jobState env.pool . (.id)) observations `shouldReturn` replicate 2 "failed"
 
@@ -144,7 +178,8 @@ spec = around Harness.withTestEnv $ do
                 writeIORef seen (map (.inputText) request.inputs)
                 pure (Right (EmbeddingBatch (replicate (length request.inputs) unitX) managedTeiSpaceFingerprint))
             }
-      runEmbeddingWorkerOnce (testWorker env provider "boundaries" 4)
+      runEmbeddingWorkerOnceWithLeasePolicy defaultEmbeddingWorkerLeasePolicy
+        (testWorker env provider "boundaries" 4)
       fmap sort (readIORef seen) `shouldReturn` sort [acceptedAscii, acceptedMultibyte]
       traverse (jobState env.pool . (.id)) observations
         `shouldReturn` ["complete", "failed", "complete", "failed"]
@@ -209,7 +244,8 @@ spec = around Harness.withTestEnv $ do
       claimEmbeddingJobs env.pool "other" 1 `shouldReturn` []
       _ <- createObservation env.pool (newObservation workspace.id "terminal")
       let terminal = EmbeddingProvider { availability = pure EmbeddingAvailable, embed = \_ -> pure (Left (EmbeddingFailure ProviderProtocolError False)) }
-      runEmbeddingWorkerOnce EmbeddingWorker { pool = env.pool, provider = terminal, leaseOwner = "terminal", batchSize = 2, clock = getCurrentTime, cancelled = pure False }
+      runEmbeddingWorkerOnceWithLeasePolicy defaultEmbeddingWorkerLeasePolicy
+        EmbeddingWorker { pool = env.pool, provider = terminal, leaseOwner = "terminal", batchSize = 2, clock = getCurrentTime, cancelled = pure False }
       claimEmbeddingJobs env.pool "other" 2 `shouldReturn` []
 
     it "releases a claimed lease retryably when cancellation arrives" $ \env -> do
@@ -838,12 +874,185 @@ spec = around Harness.withTestEnv $ do
       let provider = EmbeddingProvider { availability = pure EmbeddingAvailable, embed = \_ -> pure (Left (EmbeddingFailure ProviderUnavailable True)) }
       runEmbeddingWorkerOnce EmbeddingWorker { pool = env.pool, provider = provider, leaseOwner = "ceiling", batchSize = 1, clock = getCurrentTime, cancelled = pure False }
       claimEmbeddingJobs env.pool "other" 1 `shouldReturn` []
+
+  describe "real GPU worker acceptance" $ do
+    it "completes exactly one claimed job through the validated GPU provider" $ \env -> do
+      endpointValue <- requireGpuRuntime env
+      workspace <- Harness.createTestWorkspace env "gpu-worker-success"
+      enableEmbeddingTarget env.pool (testSpace managedTeiSpaceFingerprint)
+      observations <- mapM
+        (createObservation env.pool . testObservation workspace.id)
+        ["gpu-success-first", "gpu-success-second", "gpu-success-third"]
+      transportCalls <- newIORef (0 :: Int)
+      withGpuRuntimeProvider endpointValue 300000
+        (modifyIORef' transportCalls (+ 1)) $ \provider ->
+          runEmbeddingWorkerOnce (testWorker env provider "gpu-worker-success" 256)
+      snapshots <- traverse (gpuJobSnapshot env.pool . (.id)) observations
+      length (filter ((== "complete") . (.snapshotState)) snapshots) `shouldBe` 1
+      length (filter ((== "pending") . (.snapshotState)) snapshots) `shouldBe` 2
+      map (.snapshotAttempts) snapshots `shouldMatchList` [1, 0, 0]
+      traverse_ assertCompletedGpuSnapshot
+        (filter ((== "complete") . (.snapshotState)) snapshots)
+      traverse_ assertUntouchedGpuSnapshot
+        (filter ((== "pending") . (.snapshotState)) snapshots)
+      readIORef transportCalls `shouldReturn` 1
+
+    it "returns a real post-response deadline expiry to retryable pending work" $ \env -> do
+      endpointValue <- requireGpuRuntime env
+      workspace <- Harness.createTestWorkspace env "gpu-worker-timeout"
+      enableEmbeddingTarget env.pool (testSpace managedTeiSpaceFingerprint)
+      observation <- createObservation env.pool
+        (testObservation workspace.id "gpu-timeout")
+      responseReceived <- newEmptyMVar
+      releaseHook <- newEmptyMVar
+      let afterTransport = void (tryPutMVar responseReceived ()) >> takeMVar releaseHook
+          scenario = withGpuRuntimeProvider endpointValue 5000 afterTransport $ \provider -> do
+            withAsync (runEmbeddingWorkerOnce (testWorker env provider "gpu-worker-timeout" 32)) $ \workerTask -> do
+              timeout 120000000 (takeMVar responseReceived) `shouldReturn` Just ()
+              timeout 15000000 (wait workerTask) `shouldReturn` Just ()
+      scenario `finally` void (tryPutMVar releaseHook ())
+      snapshot <- gpuJobSnapshot env.pool observation.id
+      snapshot `shouldSatisfy` isRetryableGpuFailure "provider_timeout"
+
+    it "propagates cancellation after a real response and releases the claimed job" $ \env -> do
+      endpointValue <- requireGpuRuntime env
+      workspace <- Harness.createTestWorkspace env "gpu-worker-cancel"
+      enableEmbeddingTarget env.pool (testSpace managedTeiSpaceFingerprint)
+      observation <- createObservation env.pool
+        (testObservation workspace.id "gpu-cancel")
+      responseReceived <- newEmptyMVar
+      releaseHook <- newEmptyMVar
+      let afterTransport = void (tryPutMVar responseReceived ()) >> takeMVar releaseHook
+          scenario = withGpuRuntimeProvider endpointValue 300000 afterTransport $ \provider ->
+            withAsync (runEmbeddingWorkerOnce (testWorker env provider "gpu-worker-cancel" 256)) $ \workerTask -> do
+              timeout 120000000 (takeMVar responseReceived) `shouldReturn` Just ()
+              result <- timeout 15000000
+                (cancelWith workerTask AsyncCancelled >> waitCatch workerTask)
+              result `shouldSatisfy`
+                maybe False (either isExternalAsyncCancelled (const False))
+      scenario `finally` void (tryPutMVar releaseHook ())
+      snapshot <- gpuJobSnapshot env.pool observation.id
+      snapshot `shouldSatisfy` isRetryableGpuFailure "provider_cancelled"
   where
     unitX = 1 : replicate (observationEmbeddingDimensions - 1) 0
     newObservation workspace content = CreateObservation workspace [ObservationSubject SubjectFile "src/Worker.hs"] "0123456789abcdef0123456789abcdef01234567" content
     requireVector env = do
       present <- checkPgvector env.pool
       unless present $ pendingWith "sandbox PostgreSQL does not expose pgvector"
+
+requireGpuRuntime :: Harness.TestEnv -> IO Text
+requireGpuRuntime env = do
+  required <- maybe False (`elem` ["1", "true", "TRUE"]) <$>
+    lookupEnv "HMEM_TEST_REQUIRE_GPU_RUNTIME"
+  endpointValue <- fmap (T.strip . T.pack) <$>
+    lookupEnv "HMEM_TEST_GPU_EMBEDDING_ENDPOINT"
+  endpoint <- case endpointValue of
+    Just value | not (T.null value) -> pure value
+    _ | required -> expectationFailure
+          "HMEM_TEST_GPU_EMBEDDING_ENDPOINT is required for explicit GPU runtime acceptance"
+        >> fail "unreachable"
+      | otherwise -> pendingWith
+          "set HMEM_TEST_REQUIRE_GPU_RUNTIME=1 and HMEM_TEST_GPU_EMBEDDING_ENDPOINT for real GPU acceptance"
+        >> fail "unreachable"
+  vectorPresent <- checkPgvector env.pool
+  unless vectorPresent $ expectationFailure
+    "explicit GPU runtime acceptance requires pgvector in the disposable database"
+  pure endpoint
+
+withGpuRuntimeProvider
+  :: Text -> Int -> IO () -> (EmbeddingProvider -> IO a) -> IO a
+withGpuRuntimeProvider endpointValue operationTimeout afterTransport action =
+  do
+    helper <- testHelperExecutable
+    let policy = SessionPolicy
+          { helperExecutable = helper
+          , afterSpawnBeforeReady = const (pure ())
+          , afterSuccessfulResponse = const (pure ())
+          }
+    let config = EmbeddingProviderConfig
+          { mode = EmbeddingProviderHttp
+          , endpoint = Just endpointValue
+          , gpuProfile = Just managedTeiGpuProfile
+          , batchSize = 256
+          , timeoutMs = operationTimeout
+          , retryAttempts = 0
+          , spaceFingerprint = managedTeiSpaceFingerprint
+          }
+    (provider, invalidate) <- expectGpuRight =<<
+      makeValidatedGpuEmbeddingProviderWithLifecycleHooks
+        (pure ()) (pure ()) afterTransport policy config Nothing
+    let awaitReady = provider.availability >>= \case
+          EmbeddingAvailable -> pure ()
+          EmbeddingUnavailable _ -> threadDelay 250000 >> awaitReady
+          EmbeddingDisabled -> expectationFailure
+            "explicit GPU runtime provider became disabled" >> fail "unreachable"
+    (`finally` invalidate) $ do
+      timeout 120000000 awaitReady >>= \case
+        Just () -> action provider
+        Nothing -> expectationFailure
+          "validated GPU provider did not become available within 120 seconds"
+          >> fail "unreachable"
+
+expectGpuRight :: Show left => Either left right -> IO right
+expectGpuRight = \case
+  Right value -> pure value
+  Left failure -> expectationFailure
+    ("real GPU provider construction failed: " <> show failure) >> fail "unreachable"
+
+data GpuJobSnapshot = GpuJobSnapshot
+  { snapshotState :: !Text
+  , snapshotAttempts :: !Int
+  , snapshotFailureCode :: !(Maybe Text)
+  , snapshotLeaseOwner :: !(Maybe Text)
+  , snapshotLeaseExpiry :: !(Maybe UTCTime)
+  , snapshotHasEmbedding :: !Bool
+  , snapshotDimensions :: !Int
+  , snapshotFinite :: !Bool
+  , snapshotNorm :: !(Maybe Double)
+  , snapshotSpaceFingerprint :: !(Maybe Text)
+  } deriving stock (Show, Eq)
+
+gpuJobSnapshot :: Pool Hasql.Connection -> UUID -> IO GpuJobSnapshot
+gpuJobSnapshot pool observation =
+  runSession pool $ Session.statement observation gpuJobSnapshotStatement
+
+assertCompletedGpuSnapshot :: GpuJobSnapshot -> Expectation
+assertCompletedGpuSnapshot snapshot = do
+  snapshot.snapshotState `shouldBe` "complete"
+  snapshot.snapshotAttempts `shouldBe` 1
+  snapshot.snapshotFailureCode `shouldBe` Nothing
+  snapshot.snapshotLeaseOwner `shouldBe` Nothing
+  snapshot.snapshotLeaseExpiry `shouldBe` Nothing
+  snapshot.snapshotHasEmbedding `shouldBe` True
+  snapshot.snapshotDimensions `shouldBe` observationEmbeddingDimensions
+  snapshot.snapshotFinite `shouldBe` True
+  snapshot.snapshotNorm `shouldSatisfy`
+    maybe False (\value -> abs (value - 1) <= 0.0001)
+  snapshot.snapshotSpaceFingerprint `shouldBe` Just managedTeiSpaceFingerprint
+
+assertUntouchedGpuSnapshot :: GpuJobSnapshot -> Expectation
+assertUntouchedGpuSnapshot snapshot = do
+  snapshot.snapshotState `shouldBe` "pending"
+  snapshot.snapshotAttempts `shouldBe` 0
+  snapshot.snapshotFailureCode `shouldBe` Nothing
+  snapshot.snapshotLeaseOwner `shouldBe` Nothing
+  snapshot.snapshotLeaseExpiry `shouldBe` Nothing
+  snapshot.snapshotHasEmbedding `shouldBe` False
+  snapshot.snapshotDimensions `shouldBe` 0
+  snapshot.snapshotNorm `shouldBe` Nothing
+  snapshot.snapshotSpaceFingerprint `shouldBe` Nothing
+
+isRetryableGpuFailure :: Text -> GpuJobSnapshot -> Bool
+isRetryableGpuFailure code snapshot =
+  snapshot.snapshotState == "pending"
+    && snapshot.snapshotAttempts == 1
+    && snapshot.snapshotFailureCode == Just code
+    && snapshot.snapshotLeaseOwner == Nothing
+    && snapshot.snapshotLeaseExpiry == Nothing
+    && not snapshot.snapshotHasEmbedding
+    && snapshot.snapshotDimensions == 0
+    && snapshot.snapshotNorm == Nothing
+    && snapshot.snapshotSpaceFingerprint == Nothing
 
 testWorker :: Harness.TestEnv -> EmbeddingProvider -> Text -> Int -> EmbeddingWorker
 testWorker env provider owner size = EmbeddingWorker
@@ -854,6 +1063,33 @@ testWorker env provider owner size = EmbeddingWorker
   , clock = getCurrentTime
   , cancelled = pure False
   }
+
+assertSingleProductionClaim :: Harness.TestEnv -> Int -> IO ()
+assertSingleProductionClaim env configuredBatch = do
+  let suffix = T.pack (show configuredBatch)
+  workspace <- Harness.createTestWorkspace env ("production-single-claim-" <> suffix)
+  observations <- mapM
+    (createObservation env.pool . testObservation workspace.id)
+    ["first-" <> suffix, "second-" <> suffix, "third-" <> suffix]
+  seenCounts <- newIORef []
+  let provider = EmbeddingProvider
+        { availability = pure EmbeddingAvailable
+        , embed = \request -> do
+            modifyIORef' seenCounts (<> [length request.inputs])
+            pure (Right (EmbeddingBatch
+              (replicate (length request.inputs) testUnitX)
+              managedTeiSpaceFingerprint))
+        }
+      worker = testWorker env provider ("single-claim-" <> suffix) configuredBatch
+  runEmbeddingWorkerOnce worker
+  fmap sort (traverse (jobState env.pool . (.id)) observations)
+    `shouldReturn` ["complete", "pending", "pending"]
+  readIORef seenCounts `shouldReturn` [1]
+  runEmbeddingWorkerOnce worker
+  runEmbeddingWorkerOnce worker
+  fmap sort (traverse (jobState env.pool . (.id)) observations)
+    `shouldReturn` replicate 3 "complete"
+  readIORef seenCounts `shouldReturn` [1, 1, 1]
 
 exerciseMixedAdmission :: Harness.TestEnv -> Int -> IO ()
 exerciseMixedAdmission env oversizedPosition = do
@@ -889,7 +1125,8 @@ exerciseMixedAdmission env oversizedPosition = do
         ]
       observationFor body = requireOnly ("observation for " <> T.unpack body)
         [observation | (observation, actualBody) <- zip observations bodies, actualBody == body]
-  runEmbeddingWorkerOnce (testWorker env provider "mixed-admission" 3)
+  runEmbeddingWorkerOnceWithLeasePolicy defaultEmbeddingWorkerLeasePolicy
+    (testWorker env provider "mixed-admission" 3)
   readIORef seen `shouldReturn` expectedOrder
   firstObservation <- observationFor validFirst
   secondObservation <- observationFor validSecond
@@ -1058,6 +1295,22 @@ jobStateStatement = Statement.Statement
   "SELECT state FROM public.embedding_jobs WHERE observation_id = $1"
   (Enc.param (Enc.nonNullable Enc.uuid))
   (Dec.singleRow (Dec.column (Dec.nonNullable Dec.text))) True
+
+gpuJobSnapshotStatement :: Statement.Statement UUID GpuJobSnapshot
+gpuJobSnapshotStatement = Statement.Statement
+  "SELECT j.state, j.attempts, j.failure_code, j.lease_owner, j.lease_expires_at, o.embedding IS NOT NULL, coalesce(cardinality(o.embedding::real[]), 0), o.embedding IS NOT NULL AND NOT EXISTS (SELECT 1 FROM unnest(o.embedding::real[]) AS coordinates(coordinate) WHERE coordinate::text IN ('NaN', 'Infinity', '-Infinity')), (SELECT sqrt(sum(coordinate::double precision * coordinate::double precision)) FROM unnest(o.embedding::real[]) AS coordinates(coordinate)), o.embedding_space_fingerprint FROM public.embedding_jobs j JOIN public.observations o ON o.id = j.observation_id WHERE j.observation_id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid))
+  (Dec.singleRow (GpuJobSnapshot
+    <$> Dec.column (Dec.nonNullable Dec.text)
+    <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
+    <*> Dec.column (Dec.nullable Dec.text)
+    <*> Dec.column (Dec.nullable Dec.text)
+    <*> Dec.column (Dec.nullable Dec.timestamptz)
+    <*> Dec.column (Dec.nonNullable Dec.bool)
+    <*> (fromIntegral <$> Dec.column (Dec.nonNullable Dec.int4))
+    <*> Dec.column (Dec.nonNullable Dec.bool)
+    <*> Dec.column (Dec.nullable Dec.float8)
+    <*> Dec.column (Dec.nullable Dec.text))) True
 
 vectorHeadStatement :: Statement.Statement UUID (Maybe Double, Maybe Double)
 vectorHeadStatement = Statement.Statement

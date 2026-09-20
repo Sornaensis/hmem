@@ -1,5 +1,9 @@
 # Pinned GTE-Qwen2 fp32 ONNX viability recipe
 
+> Historical CPU research only. This preserved experiment is superseded by
+> the supported native GPU deployment in [Docker deployment](../../docker.md);
+> it is not the GPU runtime or setup path and does not establish a CPU PASS.
+
 This directory contains the bounded experiment for
 `Alibaba-NLP/gte-Qwen2-1.5B-instruct` revision
 `1cad2ab3ff41c2671f34e135d29831368ee26b68` and the pinned TEI 1.9.3 CPU

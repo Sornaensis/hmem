@@ -35,6 +35,7 @@ content. Its immutable ordered repository subjects are stored in
 | `created_at` | `TIMESTAMPTZ` | Required; defaults to `now()` |
 | `updated_at` | `TIMESTAMPTZ` | Required; defaults to `now()` and is maintained by a trigger |
 | `embedding` | `vector(1536)` | Optional, nullable, no default; present only after pgvector enablement |
+| `embedding_space_fingerprint` | `TEXT` | Identifies the stored vector's space; nullable when no vector is stored |
 
 `observation_subjects` has `observation_id`, a zero-based `ordinal`,
 `subject_kind` (`file` or `glob`), and `subject`. Every Observation has 1–256
@@ -106,21 +107,36 @@ commits no partial schema changes.
 
 ### Who creates embeddings
 
-pgvector stores, indexes, and compares vectors. It does not create embeddings,
-and hmem does not invoke an embedding model, provider SDK, network service, or
-subprocess. A user-controlled external producer—such as a local program,
-service, agent, or batch job—chooses the model and exact input preprocessing,
-owns any credentials, and returns exactly 1536 finite numeric values. hmem
-validates and persists the supplied values.
+pgvector stores, indexes, and compares vectors; it does not create them. By
+default hmem leaves automatic vectorization disabled. Operators can still
+supply exactly 1536 finite coordinates through REST, MCP, or the manual NDJSON
+workflow. The external producer owns its model, input formatting, credentials,
+and matching query vectors. The `hmem-ctl embeddings` exchange itself never
+invokes a provider.
 
-Use one consistent model revision, preprocessing/canonicalization, and vector
-space for both stored Observation vectors and similarity-query vectors. Vectors
-from different spaces are not comparable. Changing any part of that identity
-requires a controlled, complete re-export and re-embedding of the corpus; do
-not mix old and new vectors during the transition.
+When explicitly enabled with a validated GPU provider and pgvector ready,
+production reconciliation creates durable `embedding_jobs` for missing or
+wrong-space Observation vectors. The worker claims a job, generates a vector,
+and uses content, space, lease, and ownership checks to write it. The tested
+managed path uses pinned native TEI on a Linux/WSL Docker NVIDIA deployment;
+an HTTP mode can use an independently validated GPU endpoint. Neither mode
+falls back to CPU inference. Provider loss leaves ordinary API operations
+available while automatic vectorization is unavailable.
 
-New Observations start with a null embedding. Editing `content` clears the
-embedding and returns the Observation to the missing set.
+Each Observation has **one** stored vector and one space fingerprint, not one
+vector per space. A same-space manual vector can settle current work under the
+compare-and-set rules. If a different provider space is enabled, reconciliation
+may replace a different-space manual vector; do not treat manual vectors as
+immutable or relabel old/unknown vectors. New Observations start with a null
+embedding; editing `content` clears the vector and fences stale work.
+
+Use the same model revision, input formatting, and space for stored and query
+vectors. Different spaces are not comparable. The qualified GPU space is
+`Alibaba-NLP/gte-Qwen2-1.5B-instruct@1cad2ab3ff41c2671f34e135d29831368ee26b68:1536:attention=noncausal:v1`.
+It uses noncausal attention, EOS/PAD 151643, last-valid-token pooling, finite
+1536-coordinate L2 normalization, unchanged document bytes, and the fixed
+query prefix exactly once when a caller actually embeds textual queries.
+Runtime precision is provenance, not a different space identity.
 
 ### Backfill and refresh with NDJSON
 
@@ -132,17 +148,24 @@ hmem-ctl embeddings export --workspace <workspace-uuid> --output embedding-input
 hmem-ctl embeddings import --input embedding-results.ndjson --json
 ```
 
-Export is missing-only by default, providing a bounded, restart-safe backfill
-and retry queue. Add `--all` to export every matching Observation, including
-rows that already have vectors. `--page-size` controls bounded database paging.
-Omit `--output` to stream versioned NDJSON to stdout; its human summary then
-goes to stderr. Each export record contains `format_version`, stable
+Export selects Observations with a null vector **or** a vector in a different
+space from the selected target. The default target is the legacy manual space
+`hmem:legacy-manual:v1`; use `--space-fingerprint <target-space>` for a qualified
+target. Add `--all` to export every matching Observation, including rows that
+already have a vector in the selected space. `--page-size` controls bounded
+database paging. Omit `--output` to stream NDJSON version 2 to stdout; its
+human summary then goes to stderr. Each export record contains `format_version`,
+the selected `space_fingerprint`, stable
 `observation_id` and `workspace_id`, immutable `git_sha` and ordered `subjects`,
 exact `content`, and a `content_fingerprint`. It never contains a vector.
 
-The external producer emits one import record with the same `format_version`,
-`observation_id`, `workspace_id`, and `content_fingerprint`, plus an `embedding`
-array of exactly 1536 finite numbers. Omit `--input` to read NDJSON from stdin.
+The external producer preserves the exported `format_version` and
+`space_fingerprint` in each result, together with `observation_id`,
+`workspace_id`, and `content_fingerprint`, and adds an `embedding` array of
+exactly 1536 finite numbers. Export always writes version 2, whose import
+records require an explicit `space_fingerprint`. Older version-1 imports omit
+it and remain in the legacy manual space. Omit `--input` to read NDJSON from
+stdin.
 The exchange format intentionally has no provider name, credentials, or model
 selection; those remain the operator's responsibility.
 
@@ -165,16 +188,20 @@ least one record was stale, not found, rejected, or had a database error; the
 successful records remain committed and only failed records need to be retried.
 Exit 1 is a setup, file I/O, connection, or unavailable-capability failure.
 
-For routine refresh, export missing rows, generate their vectors in the same
-space, and import them. If an import is stale because content changed during
-processing, export missing rows again rather than forcing the old result. For a
-model/preprocessing change, use `export --all`, generate every vector in the
-new space, and import the complete corpus during an operator-controlled
-consistency window.
+For routine refresh, export null- or different-space rows for the selected
+target, generate their vectors in that same space, and preserve the exported
+space in each import. If an import is stale because content changed during
+processing, export that selected space again rather than forcing the old
+result. For a model/preprocessing change, use `export --all`, generate every
+vector in the new space, and import the complete corpus during an
+operator-controlled consistency window. An enabled automatic target may also
+reconcile old-space rows; coordinate manual replacement with that target rather
+than assuming a manual vector stays unchanged.
 
 ```text
-hmem-ctl embeddings export --all --workspace <workspace-uuid> --output replacement-input.ndjson
-# Generate every result in the new space, then import that complete batch.
+hmem-ctl embeddings export --all --workspace <workspace-uuid> \
+  --space-fingerprint <new-space-fingerprint> --output replacement-input.ndjson
+# Generate every result in the selected space; preserve its exported space_fingerprint.
 hmem-ctl embeddings import --input replacement-results.ndjson --json
 ```
 
@@ -183,19 +210,25 @@ hmem-ctl embeddings import --input replacement-results.ndjson --json
 For an individual Observation, create or update it normally, then give its
 canonical content to the external producer. Set the returned vector with:
 
-- REST `PUT /api/v1/observations/{observationId}/embedding`, whose request body
-  is a JSON array of exactly 1536 finite numbers.
-- MCP `observation_set_embedding` with `observation_id` and `embedding`. The
-  server resolves the Observation's actual workspace from `observation_id` and
-  requires edit authorization for that workspace.
+- REST `PUT /api/v1/observations/{observationId}/embedding` with either a
+  legacy JSON array of exactly 1536 finite numbers or a qualified JSON object
+  containing that `embedding` array and a `space_fingerprint` string.
+  The envelope requires both fields; `space_fingerprint: null` is invalid.
+- MCP `observation_set_embedding` with `observation_id`, `embedding`, and
+  optional `space_fingerprint`. Omitting the space selects the legacy manual
+  space; explicit null is invalid. The server resolves the Observation's
+  actual workspace from `observation_id` and requires edit authorization.
 
-Generate a query vector with the same producer and vector-space identity, then
-search with REST `POST /api/v1/observations/similar` or MCP
-`observation_similar`. The REST request supplies `workspace_id` explicitly; for
-MCP, the active workspace supplies/injects `workspace_id` into the
-workspace-scoped call. Both accept the 1536-number query vector plus their
-documented filter/pagination fields. An Observation whose content was edited
-remains absent from similarity results until a new embedding is set.
+Generate a query vector externally with the same model, formatting, and space,
+then search with REST `POST /api/v1/observations/similar` or MCP
+`observation_similar`. The REST request supplies `workspace_id`, `embedding`,
+and, for a qualified space, `space_fingerprint` explicitly; for MCP, the active
+workspace supplies the workspace scope. Omitting `space_fingerprint` selects
+the legacy space, **not** all spaces; explicit null is invalid. A stored-vector
+self-query tests retrieval and space isolation; it is not a numerical or
+semantic-quality oracle. There is no raw-text query embedding endpoint. An
+Observation whose content was edited remains absent from similarity results
+until a new vector is stored.
 
 ## Observation API and MCP
 

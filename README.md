@@ -29,11 +29,16 @@ hmem-ctl pgvector enable
 hmem-ctl pgvector status
 ```
 
-pgvector stores, indexes, and compares vectors; it does not create them, and
-hmem does not call an embedding model. The operator supplies exact
-1536-dimensional embeddings from an external producer. See
+pgvector stores, indexes, and compares vectors; it does not create them. The
+default hmem image leaves automatic vectorization disabled, while manual
+1536-dimensional vectors through REST, MCP, or NDJSON remain available. An
+optional Linux/WSL Docker GPU deployment can validate and run the pinned
+native TEI model for automatic Observation vectorization; there is no CPU
+inference fallback. See
 [Database schema and embedding operations](database.md#pgvector-and-embedding-operations)
-for backfill, refresh, REST, and MCP workflows.
+for manual and automatic workflows, and [Docker deployment](docker.md) for
+the opt-in GPU setup. Similarity queries supply an already-produced vector;
+hmem does not expose a raw-text query embedding endpoint.
 
 ### Docker / Compose
 

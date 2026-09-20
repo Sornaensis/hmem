@@ -76,12 +76,16 @@ leaves vector operations unavailable while ordinary API health remains usable.
 | `HMEM_EMBEDDING_ENDPOINT` | unset | `embedding.endpoint` | Required only for `http`; the application accepts a restricted absolute HTTP(S) `/embed` endpoint with no credentials, query, or fragment. Managed mode supplies its own loopback endpoint. |
 | `HMEM_EMBEDDING_GPU_PROFILE` | unset | `embedding.gpu_profile` | Managed and HTTP modes both emit the required locked `native-tei-gte-qwen2-1.5b-instruct-cuda-sm120-f16-v1` profile; an explicit different value is rejected. Disabled mode omits it. HTTP still requires an independently supplied validated GPU endpoint and never starts an inference child. |
 | `HMEM_EMBEDDING_BATCH_SIZE` | `1` | `embedding.batch_size` | Valid `1..256`; the logical client admits at most four and the production worker claims one per iteration. |
-| `HMEM_EMBEDDING_TIMEOUT_MS` | `300000` | `embedding.timeout_ms` | Valid `100..300000`; compact work is capped at 30 seconds and long work at five minutes. |
+| `HMEM_EMBEDDING_TIMEOUT_MS` | `300000` | `embedding.timeout_ms` | Valid `100..300000`; a compact logical request is capped at `min(configured, 30000)` ms and a long request at `min(configured, 300000)` ms. Each deadline includes queueing, validation/retries, serial requests, decoding, and acknowledged local cleanup. |
 | `HMEM_EMBEDDING_RETRY_ATTEMPTS` | `0` | `embedding.retry_attempts` | Valid `0..5`, within the original logical deadline. |
 
 The generated YAML leaves the fixed qualified space fingerprint to the
 application's committed default. There are no transport or inference fallback
 fields in this packaging surface.
+
+Standalone HTTP provider availability/compatibility has a 120-second ceiling.
+Managed startup uses one distinct 120-second composition that includes
+compatibility and cleanup; neither is the configured logical-request timeout.
 
 ## Image selection and immutable managed bundle
 
@@ -121,10 +125,11 @@ The image has `STOPSIGNAL SIGINT`. The `hmem` Compose service runs with
 `init: true`, `stop_signal: SIGINT`, and `stop_grace_period: 180s`. Equivalent
 direct deployment uses `docker run --init --stop-timeout 180` and SIGINT as
 the configured stop signal. The entrypoint `exec`s the server, so SIGINT
-unwinds its worker and managed child ownership; 180 seconds is a grace budget,
-not a prediction from observed subsecond stops. Verify managed-stopped and
-server shutdown messages, the disabled persisted target, and closed API port
-before removing the container. Container absence alone does not prove cleanup.
+unwinds its worker and, when managed mode owns one, its child; 180 seconds is
+a grace budget, not a prediction from observed stops. Verify the server
+shutdown message and, only when a managed supervisor existed, its stopped
+message, plus the disabled persisted target and closed API port before removal.
+Container absence alone does not prove cleanup.
 This contract does not claim arbitrary SIGTERM cleanup, HTTP request draining,
 or remote CUDA preemption.
 

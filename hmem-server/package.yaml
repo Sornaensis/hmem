@@ -50,6 +50,10 @@ dependencies:
   - directory
   - filepath
   - file-embed
+  - network
+  - process
+  - random
+  - yaml
 
 ghc-options:
   - -Wall
@@ -119,9 +123,9 @@ executables:
 tests:
   hmem-server-test:
     main:        Spec.hs
-    source-dirs: test
     build-tools:
       - hmem-embedding-http:hmem-embedding-http-helper
+    source-dirs: test
     ghc-options:
       - -threaded
       - -rtsopts

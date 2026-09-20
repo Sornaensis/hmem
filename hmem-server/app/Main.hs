@@ -1,28 +1,47 @@
 module Main where
 
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.String (fromString)
 import Data.Text qualified as T
-import Control.Exception (SomeException, catch, finally)
-import Control.Monad (when)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (AsyncCancelled, asyncWithUnmask, cancel, poll, waitCatch)
+import Control.Concurrent.STM (atomically, newTVarIO, readTVar, writeTVar)
+import Control.Exception (SomeException, catch, finally, fromException, mask, onException, throwIO, try)
+import Control.Monad (void, when)
 import Data.Pool (Pool, destroyAllResources)
+import GHC.Clock (getMonotonicTimeNSec)
 import Network.Wai.Handler.Warp (defaultSettings, runSettings, setHost, setPort, setTimeout, setGracefulShutdownTimeout)
 import Network.Wai.Handler.WarpTLS (runTLS, tlsSettings)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing)
+import System.Environment (getExecutablePath)
 import System.Exit (exitFailure)
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 import System.IO (BufferMode(..), hPutStrLn, hSetBuffering, stderr)
+import System.Info (os)
 import System.Log.FastLogger (LogType'(LogFile, LogStderr), FileLogSpec(..), defaultBufSize, newFastLogger)
+
+import HMem.Embedding.HttpProcess (SessionPolicy(..))
 
 import Hasql.Connection qualified as Hasql
 import Hasql.Session qualified as Session
 import HMem.Config qualified as Config
+import HMem.DB.Embedding qualified as Embedding
 import HMem.DB.Pool qualified as Pool
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), withSandboxedTestEnv)
+import HMem.Types (parseEmbeddingSpaceFingerprint)
 import HMem.Server.AccessTracker (newAccessTracker, flushNow)
 import HMem.Server.App (mkAppWithChangeStream)
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
+import HMem.Server.Embedding.ManagedTei
+  ( defaultManagedTeiConfig, defaultManagedTeiDeps, managedTeiEventText
+  , ManagedTeiActive(..), ManagedTeiActivationFailure(..), ManagedTeiHooks(..), startManagedTeiWith
+  , awaitManagedAvailability
+  , stopManagedTei, withExternalActivation, withManagedTeiEmitter, withPreservingCleanup, runAllReleases )
+import HMem.Server.Embedding.Http (makeValidatedGpuEmbeddingProviderWithInvalidation)
+import HMem.Server.Embedding.Provider (EmbeddingAvailability(..), EmbeddingFailure(..), EmbeddingProvider(..))
+import HMem.Server.Embedding.Worker
+  ( EmbeddingWorker(..), defaultEmbeddingWorkerClock, runEmbeddingWorker )
 import HMem.Server.LogRotation (preRotateLogFileIfNeeded)
 import HMem.Server.Logging (newLogger, parseLogLevel, logInfo, logWarn, jsonRequestLogger)
 import HMem.Server.Static (resolveStaticDir)
@@ -291,60 +310,150 @@ runNormalMode opts = do
   (logAction, cleanupLog) <- newFastLogger (LogFile fileSpec defaultBufSize)
   let logger = newLogger logAction (parseLogLevel cfg.logging.level)
   requestLogger <- jsonRequestLogger logAction
-
-  logInfo logger $ "hmem-server listening on " <> cfg.server.host <> ":" <> T.pack (show port)
-  logInfo logger $ "Logging to: " <> T.pack logPath
-  logInfo logger $ "Rotation: " <> T.pack (show cfg.logging.maxSizeMB) <> " MB, "
-                               <> T.pack (show cfg.logging.backupCount) <> " backups"
-  logInfo logger $ "Log level: " <> cfg.logging.level
-  logInfo logger $ "API auth (legacy static bearer path): " <> if Config.authStaticBearerEnabled cfg.auth then "enabled" else "disabled"
-  logInfo logger $ "Rate limiting: " <> if cfg.rateLimit.rlEnabled then "enabled" else "disabled"
-  logInfo logger $ "pgvector: " <> if pgvec then "available" else "not installed (similarity search disabled)"
-  logInfo logger $ "Web UI: " <> case mStaticDir of
-    Just dir -> "serving from " <> T.pack dir
-    Nothing  -> "disabled (no static/ directory found)"
-  logInfo logger $ "WebSocket: enabled at /api/v1/ws"
-
-  -- Warn when CORS origins are localhost-only but server is network-accessible
-  let originsAreLocal = not (null cfg.cors.allowedOrigins)
-                     && not (Config.corsAllowsRemoteOrigins cfg.cors)
-  when (not (Config.serverHostIsLoopback cfg.server.host) && originsAreLocal) $
-    logWarn logger $ "CORS allowedOrigins are localhost-only but server is bound to "
-                  <> cfg.server.host <> " — remote clients will be rejected by CORS"
-
   let settings = setHost (fromString (T.unpack cfg.server.host))
                $ setPort port
                $ setTimeout 60
                $ setGracefulShutdownTimeout (Just 30)
                $ defaultSettings
-  let shutdown = do
+  let shutdownDatabase = do
         logInfo logger "hmem-server: shutting down..."
         flushNow pool tracker
           `catch` \(_ :: SomeException) -> logWarn logger "failed to flush access tracker"
-        stopChangeStreamWorker streamWorker
-        destroyAllResources pool
-        cleanupLog
+        runAllReleases
+          [ stopChangeStreamWorker streamWorker
+          , destroyAllResources pool
+          , cleanupLog
+          ]
 
   -- Resolve TLS config: CLI flags override config.yaml
   let mTlsCert = opts.optTlsCert <|> cfg.tls.tlsCertFile
       mTlsKey  = opts.optTlsKey  <|> cfg.tls.tlsKeyFile
 
-  app <- mkAppWithChangeStream cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker wsState mStaticDir pgvec
-  case (mTlsCert, mTlsKey) of
-    (Just cert, Just key) -> do
-      logInfo logger $ "TLS enabled: cert=" <> T.pack cert <> " key=" <> T.pack key
-      let tls = tlsSettings cert key
-      runTLS tls settings app
-        `finally` shutdown
-    (Just _, Nothing) -> do
-      logWarn logger "--tls-cert provided without --tls-key; running plain HTTP"
-      runSettings settings app
-        `finally` shutdown
-    (Nothing, Just _) -> do
-      logWarn logger "--tls-key provided without --tls-cert; running plain HTTP"
-      runSettings settings app
-        `finally` shutdown
-    (Nothing, Nothing) -> do
-      logInfo logger "TLS disabled (no cert/key configured)"
-      runSettings settings app
-        `finally` shutdown
+  serverExecutable <- getExecutablePath
+  let helperPath = takeDirectory serverExecutable </> helperBasename
+      helperBasename = "hmem-embedding-http-helper" <> if os == "mingw32" then ".exe" else ""
+      policy = SessionPolicy
+        { helperExecutable = helperPath
+        , afterSpawnBeforeReady = const (pure ())
+        , afterSuccessfulResponse = const (pure ())
+        }
+      retireActive active = do
+        invalidated <- try @SomeException active.activeInvalidate
+        joined <- try @SomeException active.activeStopAndJoin
+        case joined of
+          Left failure -> throwIO failure
+          Right () -> do
+            disabled <- try @SomeException active.activeDisableTarget
+            case (invalidated, disabled) of
+              (Left failure, _) -> throwIO failure
+              (_, Left failure) -> throwIO failure
+              _ -> pure ()
+      activate endpointValue remaining register = mask $ \restore ->
+        case parseEmbeddingSpaceFingerprint cfg.embeddingProvider.spaceFingerprint of
+          Nothing -> pure (Left ManagedTeiActivationPermanent)
+          Just targetSpace ->
+            makeValidatedGpuEmbeddingProviderWithInvalidation policy cfg.embeddingProvider endpointValue >>= \case
+              Left failure -> pure (Left (if failure.retryable then ManagedTeiActivationRetryable else ManagedTeiActivationPermanent))
+              Right (providerValue, invalidate) -> do
+                available <- restore (awaitManagedAvailability remaining providerValue.availability) `onException` invalidate
+                case available of
+                  EmbeddingAvailable -> do
+                    workerStopped <- newTVarIO False
+                    let worker = EmbeddingWorker
+                          { pool = pool
+                          , provider = providerValue
+                          , leaseOwner = "hmem-server-embedding-worker"
+                          , batchSize = cfg.embeddingProvider.batchSize
+                          , clock = defaultEmbeddingWorkerClock
+                          , cancelled = atomically (readTVar workerStopped)
+                          }
+                        stopWorker workerTask = do
+                          atomically $ writeTVar workerStopped True
+                          beforeCancel <- poll workerTask
+                          case beforeCancel of
+                            Nothing -> cancel workerTask
+                            Just _ -> pure ()
+                          waitCatch workerTask >>= \case
+                            Right () -> pure ()
+                            Left failure
+                              | isNothing beforeCancel
+                              , Just (_ :: AsyncCancelled) <- fromException failure -> pure ()
+                              | otherwise -> throwIO (userError "embedding lifecycle failed (embedding_worker_join_failed)")
+                    Embedding.enableEmbeddingTarget pool targetSpace
+                      `onException` (invalidate >> Embedding.disableEmbeddingTarget pool)
+                    workerTask <- asyncWithUnmask (\unmask -> unmask (runEmbeddingWorker worker (\_ -> threadDelay 500000)))
+                      `onException` (invalidate >> Embedding.disableEmbeddingTarget pool)
+                    let active = ManagedTeiActive
+                          { activeInvalidate = invalidate
+                          , activeStopAndJoin = stopWorker workerTask
+                          , activeDisableTarget = Embedding.disableEmbeddingTarget pool
+                          , activeWorkerOutcome = void (waitCatch workerTask)
+                          , activeAvailable = (== EmbeddingAvailable) <$> providerValue.availability
+                          }
+                    register active `onException` retireActive active
+                    pure (Right active)
+                  EmbeddingUnavailable failure -> invalidate >> pure (Left (if failure.retryable then ManagedTeiActivationRetryable else ManagedTeiActivationPermanent))
+                  EmbeddingDisabled -> invalidate >> pure (Left ManagedTeiActivationPermanent)
+      managedHooks = ManagedTeiHooks
+        { clearTargetBeforeLaunch = Embedding.disableEmbeddingTarget pool
+        , activateGeneration = \_ endpointValue remaining register -> activate (Just endpointValue) remaining register
+        }
+      runWarp = do
+        logInfo logger $ "hmem-server listening on " <> cfg.server.host <> ":" <> T.pack (show port)
+        logInfo logger $ "Logging to: " <> T.pack logPath
+        logInfo logger $ "Rotation: " <> T.pack (show cfg.logging.maxSizeMB) <> " MB, " <> T.pack (show cfg.logging.backupCount) <> " backups"
+        logInfo logger $ "Log level: " <> cfg.logging.level
+        logInfo logger $ "API auth (legacy static bearer path): " <> if Config.authStaticBearerEnabled cfg.auth then "enabled" else "disabled"
+        logInfo logger $ "Rate limiting: " <> if cfg.rateLimit.rlEnabled then "enabled" else "disabled"
+        logInfo logger $ "pgvector: " <> if pgvec then "available" else "not installed (similarity search disabled)"
+        logInfo logger $ "Web UI: " <> case mStaticDir of
+          Just dir -> "serving from " <> T.pack dir
+          Nothing -> "disabled (no static/ directory found)"
+        logInfo logger "WebSocket: enabled at /api/v1/ws"
+        let originsAreLocal = not (null cfg.cors.allowedOrigins) && not (Config.corsAllowsRemoteOrigins cfg.cors)
+        when (not (Config.serverHostIsLoopback cfg.server.host) && originsAreLocal) $
+          logWarn logger $ "CORS allowedOrigins are localhost-only but server is bound to " <> cfg.server.host <> " — remote clients will be rejected by CORS"
+        app <- mkAppWithChangeStream cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker wsState mStaticDir pgvec
+        let runServer = case (mTlsCert, mTlsKey) of
+              (Just cert, Just key) -> logInfo logger ("TLS enabled: cert=" <> T.pack cert <> " key=" <> T.pack key) >> runTLS (tlsSettings cert key) settings app
+              (Just _, Nothing) -> logWarn logger "--tls-cert provided without --tls-key; running plain HTTP" >> runSettings settings app
+              (Nothing, Just _) -> logWarn logger "--tls-key provided without --tls-cert; running plain HTTP" >> runSettings settings app
+              (Nothing, Nothing) -> logInfo logger "TLS disabled (no cert/key configured)" >> runSettings settings app
+        runServer
+  withPreservingCleanup (mask $ \restore -> do
+    managed <- if pgvec && cfg.embeddingProvider.mode == Config.EmbeddingProviderManagedTei
+      then do
+        let deps = withManagedTeiEmitter
+              (\eventValue -> logInfo logger (managedTeiEventText eventValue))
+              defaultManagedTeiDeps
+        Just <$> startManagedTeiWith defaultManagedTeiConfig deps managedHooks
+      else pure Nothing
+    acquiredExternal <- try @SomeException $ if pgvec && cfg.embeddingProvider.mode == Config.EmbeddingProviderHttp
+      then Just <$> asyncWithUnmask (\unmask -> unmask $ do
+        Embedding.disableEmbeddingTarget pool
+        started <- getMonotonicTimeNSec
+        let deadline = started + 120000000000
+            remaining = do
+              now <- getMonotonicTimeNSec
+              pure $ if now >= deadline then 0 else fromIntegral ((deadline - now) `div` 1000)
+        withExternalActivation
+          (activate Nothing remaining)
+          (\active -> active.activeWorkerOutcome)
+          retireActive >>= \case
+          Left _ -> logWarn logger "Embedding provider unavailable; ordinary API remains active"
+          Right () -> pure ())
+      else do
+        when (not pgvec || cfg.embeddingProvider.mode == Config.EmbeddingProviderDisabled) $
+          Embedding.disableEmbeddingTarget pool
+        pure Nothing
+    external <- case acquiredExternal of
+      Right value -> pure value
+      Left failure -> do
+        void (try @SomeException (mapM_ stopManagedTei managed))
+        throwIO failure
+    let shutdownVectors = runAllReleases
+          [ mapM_ stopManagedTei managed
+          , mapM_ (\task -> cancel task >> void (waitCatch task)) external
+          ]
+    withPreservingCleanup (restore runWarp) shutdownVectors
+    ) shutdownDatabase

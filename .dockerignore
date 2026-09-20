@@ -11,6 +11,11 @@
 .git/
 .gitignore
 .hmem.workspace
+.agents/
+.codex/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
 
 # Stack and Cabal build outputs
 .stack-work*/

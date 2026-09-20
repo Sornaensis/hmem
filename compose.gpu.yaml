@@ -1,0 +1,21 @@
+# Add to the ordinary stack only when the verified managed bundle and a CUDA
+# device are available: docker compose -f compose.yaml -f compose.gpu.yaml up.
+# This extends the existing hmem service; it never publishes the TEI child.
+services:
+  hmem:
+    image: ${HMEM_GPU_IMAGE:-hmem:gpu-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: gpu-runtime
+      additional_contexts:
+        managed-bundle: ${HMEM_MANAGED_BUNDLE_CONTEXT:?set HMEM_MANAGED_BUNDLE_CONTEXT to the verified local bundle directory}
+    environment:
+      HMEM_EMBEDDING_PROVIDER: managed-tei
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

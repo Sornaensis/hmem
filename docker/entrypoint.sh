@@ -92,7 +92,11 @@ apply_defaults() {
   default_env HMEM_LOG_BACKUP_COUNT "5"
   default_env HMEM_CORS_ALLOWED_ORIGINS ""
   default_env HMEM_WEB_ENABLED "true"
-  default_env HMEM_WEB_STATIC_DIR "/opt/hmem/static"
+  default_env HMEM_WEB_STATIC_DIR "/run/hmem/static"
+  default_env HMEM_EMBEDDING_PROVIDER "disabled"
+  default_env HMEM_EMBEDDING_BATCH_SIZE "1"
+  default_env HMEM_EMBEDDING_TIMEOUT_MS "300000"
+  default_env HMEM_EMBEDDING_RETRY_ATTEMPTS "0"
   default_env HMEM_RATE_LIMIT_ENABLED "false"
   default_env HMEM_RATE_LIMIT_REQUESTS_PER_SECOND "10.0"
   default_env HMEM_RATE_LIMIT_BURST "20"
@@ -301,11 +305,17 @@ validate_common_config() {
   HMEM_POOL_STATEMENT_TIMEOUT_MS=$(int_env HMEM_POOL_STATEMENT_TIMEOUT_MS 1000 300000); export HMEM_POOL_STATEMENT_TIMEOUT_MS
   HMEM_LOG_MAX_SIZE_MB=$(int_env HMEM_LOG_MAX_SIZE_MB 1 10000); export HMEM_LOG_MAX_SIZE_MB
   HMEM_LOG_BACKUP_COUNT=$(int_env HMEM_LOG_BACKUP_COUNT 0 100); export HMEM_LOG_BACKUP_COUNT
+  if [ $(((HMEM_LOG_BACKUP_COUNT + 1) * HMEM_LOG_MAX_SIZE_MB)) -gt 96 ]; then
+    fail "rotating logs require more than 96 MiB of the 128 MiB private HOME budget"
+  fi
   HMEM_RATE_LIMIT_REQUESTS_PER_SECOND=$(decimal_env HMEM_RATE_LIMIT_REQUESTS_PER_SECOND 0.1 10000.0); export HMEM_RATE_LIMIT_REQUESTS_PER_SECOND
   HMEM_RATE_LIMIT_BURST=$(int_env HMEM_RATE_LIMIT_BURST 1 100000); export HMEM_RATE_LIMIT_BURST
   HMEM_AUTH_DEPLOYED_SESSION_TTL_SECONDS=$(int_env HMEM_AUTH_DEPLOYED_SESSION_TTL_SECONDS 60 315360000); export HMEM_AUTH_DEPLOYED_SESSION_TTL_SECONDS
   HMEM_DB_CONNECT_RETRIES=$(int_env HMEM_DB_CONNECT_RETRIES 1 3600); export HMEM_DB_CONNECT_RETRIES
   HMEM_DB_CONNECT_RETRY_DELAY_SECONDS=$(int_env HMEM_DB_CONNECT_RETRY_DELAY_SECONDS 0 3600); export HMEM_DB_CONNECT_RETRY_DELAY_SECONDS
+  HMEM_EMBEDDING_BATCH_SIZE=$(int_env HMEM_EMBEDDING_BATCH_SIZE 1 256); export HMEM_EMBEDDING_BATCH_SIZE
+  HMEM_EMBEDDING_TIMEOUT_MS=$(int_env HMEM_EMBEDDING_TIMEOUT_MS 100 300000); export HMEM_EMBEDDING_TIMEOUT_MS
+  HMEM_EMBEDDING_RETRY_ATTEMPTS=$(int_env HMEM_EMBEDDING_RETRY_ATTEMPTS 0 5); export HMEM_EMBEDDING_RETRY_ATTEMPTS
 
   HMEM_WEB_ENABLED=$(bool_env HMEM_WEB_ENABLED); export HMEM_WEB_ENABLED
   HMEM_RATE_LIMIT_ENABLED=$(bool_env HMEM_RATE_LIMIT_ENABLED); export HMEM_RATE_LIMIT_ENABLED
@@ -316,6 +326,7 @@ validate_common_config() {
   HMEM_FRONTEND_REQUIRE_AUTH_STATE=$(bool_env HMEM_FRONTEND_REQUIRE_AUTH_STATE); export HMEM_FRONTEND_REQUIRE_AUTH_STATE
 
   one_of HMEM_AUTH_MODE local deployed
+  one_of HMEM_EMBEDDING_PROVIDER disabled managed-tei http
   one_of HMEM_AUTH_DEPLOYED_TOKEN_LOOKUP database
   one_of HMEM_AUTH_DEPLOYED_COOKIE_SAME_SITE Lax Strict None
   one_of HMEM_FRONTEND_AUTH_TOKEN_STORAGE local session memory
@@ -343,13 +354,50 @@ validate_common_config() {
     HMEM_AUTH_DEPLOYED_JWKS_URL HMEM_AUTH_DEPLOYED_TOKEN_HASH_SECRET \
     HMEM_AUTH_DEPLOYED_CLIENT_ID HMEM_AUTH_DEPLOYED_CLIENT_SECRET \
     HMEM_AUTH_DEPLOYED_REDIRECT_URI HMEM_AUTH_DEPLOYED_AUTHORIZATION_ENDPOINT \
-    HMEM_AUTH_DEPLOYED_TOKEN_ENDPOINT HMEM_TLS_CERT_FILE HMEM_TLS_KEY_FILE
+    HMEM_AUTH_DEPLOYED_TOKEN_ENDPOINT HMEM_TLS_CERT_FILE HMEM_TLS_KEY_FILE \
+    HMEM_EMBEDDING_PROVIDER HMEM_EMBEDDING_ENDPOINT HMEM_EMBEDDING_GPU_PROFILE
   do
     validate_scalar_no_newline "$scalar_var"
   done
   validate_csv_scalars_no_newline HMEM_CORS_ALLOWED_ORIGINS
   validate_csv_scalars_no_newline HMEM_AUTH_DEPLOYED_SCOPES
   validate_csv_scalars_no_newline HMEM_FRONTEND_AUTH_TOKEN_URL_PARAMS
+
+  case "$HMEM_EMBEDDING_PROVIDER" in
+    disabled)
+      [ -z "$(get_env HMEM_EMBEDDING_ENDPOINT)" ] || fail "disabled embedding must not specify an endpoint"
+      [ -z "$(get_env HMEM_EMBEDDING_GPU_PROFILE)" ] || fail "disabled embedding must not specify a GPU profile"
+      ;;
+    managed-tei)
+      [ -z "$(get_env HMEM_EMBEDDING_ENDPOINT)" ] || fail "managed embedding supplies its own endpoint"
+      if [ -n "$(get_env HMEM_EMBEDDING_GPU_PROFILE)" ] \
+        && [ "$HMEM_EMBEDDING_GPU_PROFILE" != "native-tei-gte-qwen2-1.5b-instruct-cuda-sm120-f16-v1" ]; then
+        fail "unsupported managed embedding GPU profile"
+      fi
+      HMEM_EMBEDDING_GPU_PROFILE=native-tei-gte-qwen2-1.5b-instruct-cuda-sm120-f16-v1
+      export HMEM_EMBEDDING_GPU_PROFILE
+      ;;
+    http)
+      [ -n "$(get_env HMEM_EMBEDDING_ENDPOINT)" ] || fail "HTTP embedding requires an endpoint"
+      if [ -n "$(get_env HMEM_EMBEDDING_GPU_PROFILE)" ] \
+        && [ "$HMEM_EMBEDDING_GPU_PROFILE" != "native-tei-gte-qwen2-1.5b-instruct-cuda-sm120-f16-v1" ]; then
+        fail "unsupported HTTP embedding GPU profile"
+      fi
+      HMEM_EMBEDDING_GPU_PROFILE=native-tei-gte-qwen2-1.5b-instruct-cuda-sm120-f16-v1
+      export HMEM_EMBEDDING_GPU_PROFILE
+      case "$HMEM_EMBEDDING_ENDPOINT" in
+        http://*|https://*) : ;;
+        *) fail "HTTP embedding endpoint must be an absolute http or https URL" ;;
+      esac
+      case "$HMEM_EMBEDDING_ENDPOINT" in
+        *'@'*|*'?'*|*'#'*) fail "HTTP embedding endpoint must not contain credentials, query, or fragment" ;;
+      esac
+      ;;
+  esac
+  # Empty optional environment overrides must not mask a valid generated YAML
+  # value when Config applies its environment layer after reading the file.
+  [ -n "$(get_env HMEM_EMBEDDING_ENDPOINT)" ] || unset HMEM_EMBEDDING_ENDPOINT
+  [ -n "$(get_env HMEM_EMBEDDING_GPU_PROFILE)" ] || unset HMEM_EMBEDDING_GPU_PROFILE
 
   if [ -n "$(get_env HMEM_TLS_CERT_FILE)" ] && [ -z "$(get_env HMEM_TLS_KEY_FILE)" ]; then
     fail "HMEM_TLS_CERT_FILE and HMEM_TLS_KEY_FILE must be set together"
@@ -359,7 +407,11 @@ validate_common_config() {
   fi
 
   if [ "$vc_mode" = "server" ] && [ "$HMEM_WEB_ENABLED" = "true" ]; then
-    [ -d "$HMEM_WEB_STATIC_DIR" ] || fail "HMEM_WEB_ENABLED=true but HMEM_WEB_STATIC_DIR does not exist"
+    if [ "$HMEM_WEB_STATIC_DIR" = "/run/hmem/static" ]; then
+      [ -d /opt/hmem/static ] || fail "packaged frontend assets are missing"
+    else
+      [ -d "$HMEM_WEB_STATIC_DIR" ] || fail "HMEM_WEB_ENABLED=true but HMEM_WEB_STATIC_DIR does not exist"
+    fi
   fi
 }
 
@@ -599,6 +651,18 @@ generate_config() {
     printf '  requests_per_second: %s\n' "$HMEM_RATE_LIMIT_REQUESTS_PER_SECOND"
     printf '  burst: %s\n' "$HMEM_RATE_LIMIT_BURST"
 
+    printf 'embedding:\n'
+    printf '  mode: %s\n' "$(yaml_quote "$HMEM_EMBEDDING_PROVIDER")"
+    if [ "$HMEM_EMBEDDING_PROVIDER" = "managed-tei" ]; then
+      printf '  gpu_profile: %s\n' "$(yaml_quote "$HMEM_EMBEDDING_GPU_PROFILE")"
+    elif [ "$HMEM_EMBEDDING_PROVIDER" = "http" ]; then
+      printf '  endpoint: %s\n' "$(yaml_quote "$HMEM_EMBEDDING_ENDPOINT")"
+      printf '  gpu_profile: %s\n' "$(yaml_quote "$HMEM_EMBEDDING_GPU_PROFILE")"
+    fi
+    printf '  batch_size: %s\n' "$HMEM_EMBEDDING_BATCH_SIZE"
+    printf '  timeout_ms: %s\n' "$HMEM_EMBEDDING_TIMEOUT_MS"
+    printf '  retry_attempts: %s\n' "$HMEM_EMBEDDING_RETRY_ATTEMPTS"
+
     if [ -n "$(get_env HMEM_TLS_CERT_FILE)" ] || [ -n "$(get_env HMEM_TLS_KEY_FILE)" ]; then
       printf 'tls:\n'
       yaml_optional_scalar '  ' cert_file "$(get_env HMEM_TLS_CERT_FILE)"
@@ -699,6 +763,26 @@ frontend_auth_mode() {
   fi
 }
 
+stage_frontend_assets() {
+  [ "$HMEM_WEB_ENABLED" = "true" ] || return 0
+  [ "$HMEM_WEB_STATIC_DIR" = "/run/hmem/static" ] || return 0
+  [ -d /opt/hmem/static ] || fail "packaged frontend assets are missing"
+  [ ! -L /opt/hmem/static ] || fail "packaged frontend root must not be a symlink"
+  [ ! -L /run/hmem ] || fail "frontend staging parent must not be a symlink"
+  [ -d /run/hmem ] && [ -w /run/hmem ] || fail "frontend staging parent must be writable"
+  sf_count=$(find /opt/hmem/static -mindepth 1 | wc -l | tr -d ' ')
+  [ "$sf_count" -le 512 ] || fail "packaged frontend has too many files"
+  sf_bytes=$(du -sb /opt/hmem/static | awk '{print $1}')
+  [ "$sf_bytes" -le 33554432 ] || fail "packaged frontend exceeds 32 MiB"
+  if find /opt/hmem/static -mindepth 1 ! -type f ! -type d | grep -q .; then
+    fail "packaged frontend contains a non-regular file"
+  fi
+  [ ! -e "$HMEM_WEB_STATIC_DIR" ] || fail "frontend staging path must be empty at startup"
+  mkdir -m 700 "$HMEM_WEB_STATIC_DIR" || fail "cannot create frontend staging directory"
+  cp -R /opt/hmem/static/. "$HMEM_WEB_STATIC_DIR/" || fail "cannot stage frontend assets"
+  chmod -R u=rwX,go=rX "$HMEM_WEB_STATIC_DIR" || fail "cannot set frontend staging permissions"
+}
+
 generate_frontend_config() {
   [ "$HMEM_WEB_ENABLED" = "true" ] || return 0
   [ -d "$HMEM_WEB_STATIC_DIR" ] || fail "cannot generate frontend runtime config; static dir missing"
@@ -763,6 +847,7 @@ prepare_runtime() {
   prepare_directories
   generate_config
   if [ "$pr_mode" = "server" ]; then
+    stage_frontend_assets
     generate_frontend_config
   fi
 }

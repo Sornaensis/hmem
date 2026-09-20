@@ -1,13 +1,25 @@
 # hmem container runtime configuration and auth contract
 
-This contract is the input for the Dockerfile, entrypoint, and Compose tasks. It defines the container environment surface and the config-generation rules; it does not implement those runtime scripts.
+This contract describes the Dockerfile, entrypoint, and Compose runtime surface.
+The ordinary image is the default; the native CUDA image is selected explicitly.
 
 ## Filesystem and identity
 
 - The runtime user must have both `HOME` and its passwd home set to the same writable directory: `/var/lib/hmem`.
 - `~/.hmem/config.yaml` therefore resolves to `/var/lib/hmem/.hmem/config.yaml`.
 - Server logs are written below `/var/lib/hmem/.hmem/logs`; the entrypoint must create this directory and fail if it is not writable.
-- The default packaged frontend directory is `/opt/hmem/static` and maps to `web.static_dir`.
+- In the external-PostgreSQL Compose stack, server and migration/admin HOME is a
+  private 128 MiB tmpfs (`uid=10001,gid=10001,mode=0700,noexec,nosuid,nodev`).
+  Generated config and rotating logs disappear when their container stops;
+  application/auth state stays in PostgreSQL. Keep auth and database secrets
+  stable in external environment or secret files across restarts.
+- `/opt/hmem/static` holds immutable baked frontend assets. When web is enabled,
+  the entrypoint checks their size and file type and stages at most 512 entries
+  and 32 MiB into the writable `/run/hmem/static` tmpfs. It writes
+  `hmem-runtime-config.js` by temporary file and atomic rename in that parent.
+  `web.static_dir` defaults to `/run/hmem/static`; an explicit
+  `HMEM_WEB_STATIC_DIR` override remains supported when its directory is
+  writable. API-only mode skips staging.
 - Generated config files must be mode `0600` and owned by the runtime user.
 
 ## Config generation rules
@@ -41,16 +53,94 @@ Secrets that do not currently have hmem runtime env overrides, such as OIDC `cli
 | `HMEM_POOL_IDLE_TIMEOUT` | `60` | `pool.idle_timeout` | Seconds; valid range `1..3600`. |
 | `HMEM_POOL_STATEMENT_TIMEOUT_MS` | `30000` | `pool.statement_timeout_ms` | Valid range `1000..300000`. |
 | `HMEM_LOG_LEVEL` | `info` | `logging.level` | Accepted by server logger, e.g. `debug`, `info`, `warn`, `error`. |
-| `HMEM_LOG_MAX_SIZE_MB` | `10` | `logging.max_size_mb` | Valid range `1..10000`. |
-| `HMEM_LOG_BACKUP_COUNT` | `5` | `logging.backup_count` | Valid range `0..100`. |
+| `HMEM_LOG_MAX_SIZE_MB` | `10` | `logging.max_size_mb` | Valid range `1..10000`, subject to the private HOME rotation allocation bound below. |
+| `HMEM_LOG_BACKUP_COUNT` | `5` | `logging.backup_count` | Valid range `0..100`; `(backup_count + 1) * max_size_mb` must be at most 96 MiB, leaving 32 MiB of the 128 MiB HOME cap for config and headroom. |
 | `HMEM_CORS_ALLOWED_ORIGINS` | empty list | `cors.allowed_origins` | Comma-separated exact origins. `*` is forbidden with deployed cookie auth. Same-origin frontend deployments should leave this empty. |
 | `HMEM_WEB_ENABLED` | `true` | `web.enabled` | Set `false` for API-only containers. |
-| `HMEM_WEB_STATIC_DIR` | `/opt/hmem/static` | `web.static_dir` | Must exist when `HMEM_WEB_ENABLED=true`. |
+| `HMEM_WEB_STATIC_DIR` | `/run/hmem/static` | `web.static_dir` | The default is staged from immutable `/opt/hmem/static`; overrides must exist and be writable when web is enabled. |
 | `HMEM_RATE_LIMIT_ENABLED` | `false` | `rate_limit.enabled` | Enables token-bucket middleware. |
 | `HMEM_RATE_LIMIT_REQUESTS_PER_SECOND` | `10.0` | `rate_limit.requests_per_second` | Valid range `0.1..10000.0`. |
 | `HMEM_RATE_LIMIT_BURST` | `20` | `rate_limit.burst` | Valid range `1..100000`. |
 | `HMEM_TLS_CERT_FILE` | unset | `tls.cert_file` | TLS is enabled only when both cert and key are set. |
 | `HMEM_TLS_KEY_FILE` | unset | `tls.key_file` | Fail fast if only one TLS file is set. |
+
+## Embedding configuration
+
+The entrypoint writes only existing `embedding` YAML fields. It does not
+configure a CPU or ONNX fallback. An unavailable managed or HTTP provider
+leaves vector operations unavailable while ordinary API health remains usable.
+
+| Env | Default | YAML field | Rule |
+| --- | --- | --- | --- |
+| `HMEM_EMBEDDING_PROVIDER` | `disabled` | `embedding.mode` | `disabled`, `managed-tei`, or `http`. The optional GPU Compose override sets `managed-tei` on the existing hmem service. |
+| `HMEM_EMBEDDING_ENDPOINT` | unset | `embedding.endpoint` | Required only for `http`; the application accepts a restricted absolute HTTP(S) `/embed` endpoint with no credentials, query, or fragment. Managed mode supplies its own loopback endpoint. |
+| `HMEM_EMBEDDING_GPU_PROFILE` | unset | `embedding.gpu_profile` | Managed and HTTP modes both emit the required locked `native-tei-gte-qwen2-1.5b-instruct-cuda-sm120-f16-v1` profile; an explicit different value is rejected. Disabled mode omits it. HTTP still requires an independently supplied validated GPU endpoint and never starts an inference child. |
+| `HMEM_EMBEDDING_BATCH_SIZE` | `1` | `embedding.batch_size` | Valid `1..256`; the logical client admits at most four and the production worker claims one per iteration. |
+| `HMEM_EMBEDDING_TIMEOUT_MS` | `300000` | `embedding.timeout_ms` | Valid `100..300000`; compact work is capped at 30 seconds and long work at five minutes. |
+| `HMEM_EMBEDDING_RETRY_ATTEMPTS` | `0` | `embedding.retry_attempts` | Valid `0..5`, within the original logical deadline. |
+
+The generated YAML leaves the fixed qualified space fingerprint to the
+application's committed default. There are no transport or inference fallback
+fields in this packaging surface.
+
+## Image selection and immutable managed bundle
+
+`docker build -t hmem:local .` and ordinary `docker compose up --build` select
+the final `runtime` stage and require no GPU, TEI image, or model context. Both
+images ship `hmem-server`, `hmem-ctl`, `hmem-mcp`, and the actual sibling
+`hmem-embedding-http-helper` executable in `/usr/local/bin`. The default image
+contains no CUDA/model layers. The explicit `gpu-runtime` target is based on
+the pinned native TEI OCI index in `config/managed-embedding-provenance.yaml`.
+
+Prepare a private external BuildKit `managed-bundle` directory with
+`docker/prepare-managed-gpu.py --root <committed-source-projection>
+--model-root <prefetched-model> --runtime-root <prefetched-tei-runtime>
+--output <new-private-bundle> --report <new-private-report>`. The script accepts
+only a new output path, rejects symlinks and non-regular artifacts, verifies
+source and copied trees with the independent locked Haskell checker, and never
+downloads model or runtime files. Build with
+`docker build --target gpu-runtime --build-context
+managed-bundle=<new-private-bundle> -t hmem:gpu-local .`, or set
+`HMEM_MANAGED_BUNDLE_CONTEXT` to that verified directory and use
+`docker compose -f compose.yaml -f compose.gpu.yaml up --build`. The override
+extends the same `hmem` service, reserves one NVIDIA GPU, and publishes only
+the application HTTP port. It does not publish TEI child ports or mount the
+Docker socket. The installed model/router/manifest are immutable under
+`/opt/hmem/managed-embedding`, with notices and executable/library inventory
+outside the strict model/runtime trees.
+
+The pinned runtime advertises 32768 model tokens. The application accepts at
+most 32767 fully formatted UTF-8 input bytes and uses the existing compact
+golden validation before enabling a target. No serving assets are fetched at
+container startup. Image builds record their actual base/platform digests and
+four-binary ELF closure; the final image must pass its own closure check.
+
+## Process, filesystem, and stop contract
+
+The image has `STOPSIGNAL SIGINT`. The `hmem` Compose service runs with
+`init: true`, `stop_signal: SIGINT`, and `stop_grace_period: 180s`. Equivalent
+direct deployment uses `docker run --init --stop-timeout 180` and SIGINT as
+the configured stop signal. The entrypoint `exec`s the server, so SIGINT
+unwinds its worker and managed child ownership; 180 seconds is a grace budget,
+not a prediction from observed subsecond stops. Verify managed-stopped and
+server shutdown messages, the disabled persisted target, and closed API port
+before removing the container. Container absence alone does not prove cleanup.
+This contract does not claim arbitrary SIGTERM cleanup, HTTP request draining,
+or remote CUDA preemption.
+
+Compose makes the application root filesystem read-only. Private
+`/var/lib/hmem` HOME/config/logs are bounded by the 128 MiB hardened tmpfs;
+`/tmp` and `/run/hmem` are separately bounded noexec/nosuid/nodev tmpfs
+mounts, and the latter contains staged frontend assets. Both images run
+nonroot with a matching passwd home. The existing `hmem-data` volume is
+intentionally unmounted but untouched: Compose performs no deletion, copying,
+or migration of its unknown contents. Native-host `hmem-ctl` init/service and
+custom HOME workflows are outside this ephemeral external-PostgreSQL contract.
+Operators choosing persistent HOME/log storage must arrange finite capacity,
+noexec/nosuid/nodev restrictions, ownership, secret permissions, and log
+retention themselves; an ordinary Docker local volume is not a quota.
+Operator-supplied static overrides must provide their own bounded writable
+directory.
 
 ## Auth env and safe defaults
 
@@ -108,7 +198,7 @@ Deployed-mode startup must fail fast unless provider JWT validation can be confi
 
 Static frontend assets must not be rebuilt or patched with secrets. The entrypoint may generate a small runtime JavaScript file, loaded before the Elm bundle, that assigns only non-secret values to `window.HMEM_CONFIG`.
 
-Recommended generated file: `/opt/hmem/static/hmem-runtime-config.js`.
+Generated file: `/run/hmem/static/hmem-runtime-config.js` by default.
 
 Allowed frontend env surface:
 

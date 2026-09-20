@@ -1,0 +1,6 @@
+hmem-server/test/fixtures/embedding-gpu-viability/foundation-contract-v1.json -text
+hmem-server/test/fixtures/embedding-gpu-viability/parity-probes-v1.json -text
+hmem-server/test/fixtures/embedding-gpu-viability/reference-golden-v1.json -text
+licenses/managed-embedding/tei-APACHE-2.0.txt -text
+licenses/managed-embedding/gte-Qwen2-1.5B-instruct-license-metadata.txt -text
+licenses/managed-embedding/nvidia-deep-learning-container-license.txt -text

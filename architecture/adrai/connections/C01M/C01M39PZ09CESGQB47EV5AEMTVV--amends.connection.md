@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M39PZ09CESGQB47EV5AEMTVV"
+relation = "amends"
+from_record = "R01M39PZ09CWX7BJ5K95RMDAAYJ"
+subject_adr = "A01M39P98JWSRWQ7DQG8XM2BZ3R"
+to_records = ["R01M39P98SS8CTPS17QDP4QW6YR"]
++++
+
+Correct migration transaction boundaries: V001 commits before runner ledger registration; V020 records its version before its own commit.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0ifSwiYiI6IjE5MTVlZTJkOTUxMzIyNzc4OWRkYzA1YWQ1YjRiNzIwMzlhMzgyZDIiLCJpIjoic2hhMjU2OmRBNVlIMm9aRmFXNURtellRN2NTc21PN09wZjBuZzY3S3ZvTDEtcDNVR1EiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTM5UFowOUNFU0dRQjQ3RVY1QUVNVFZWIiwib3AiOiJPMDFNMzlQWjA5Q1dYN0JKNUs5NVJNREFBWUoiLCJwIjpbIlIwMU0zOVA5OFNTOENUUFMxN1FEUDRRVzZZUiJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpscU5ZOGJpLWc1M1hERkNTTmI0bGNRMmNjR3lPU3ZXUFlBWUZVTHNocGVVIiwidCI6MTc5MDI1MzY5NTI3NiwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

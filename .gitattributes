@@ -4,3 +4,5 @@ hmem-server/test/fixtures/embedding-gpu-viability/reference-golden-v1.json -text
 licenses/managed-embedding/tei-APACHE-2.0.txt -text
 licenses/managed-embedding/gte-Qwen2-1.5B-instruct-license-metadata.txt -text
 licenses/managed-embedding/nvidia-deep-learning-container-license.txt -text
+architecture/adrai/decisions/** text eol=lf
+architecture/adrai/connections/** text eol=lf

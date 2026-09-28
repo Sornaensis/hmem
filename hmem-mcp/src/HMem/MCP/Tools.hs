@@ -105,7 +105,7 @@ toolDefinitions =
       ] ["embedding"])
   , tool "project_create" "Create a project in the active workspace. Its description is a durable specification; status records execution state." (schema ["name" .= prop "string" "Project name", "description" .= prop "string" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates", "parent_id" .= prop "string" "Optional parent project UUID for hierarchy", "priority" .= prop "integer" "Priority 1 through 10"] ["name"])
   , tool "project_update" "Update a project's durable specification, hierarchy, or execution state. Descriptions are not logs of progress or updates." (schema ["project_id" .= prop "string" "Project UUID", "name" .= prop "string" "Project name", "description" .= prop "string" "Durable project specification: aims, scope, constraints, approach, and acceptance intent, or null; not a log of progress or updates", "parent_id" .= prop "string" "Parent project UUID for hierarchy, or null", "status" .= enumProp "Execution state; record progress here, not in the description" ["active", "paused", "completed", "archived"], "priority" .= prop "integer" "Priority"] ["project_id"])
-  , tool "project_detail" "Get compact project details." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
+  , tool "project_detail" "Get project details, including its complete description." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
   , tool "project_overview" "Get a compact project overview with tasks and subprojects." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
   , tool "project_next_tasks" "Get actionable tasks for a project subtree." (schema ["project_id" .= prop "string" "Project UUID", "limit" .= prop "integer" "Maximum candidates", "include_blocked" .= prop "boolean" "Include blocked candidates"] ["project_id"])
   , tool "project_spec" "Create a project and its initial atomic tasks in one call. Descriptions are durable specifications; status records execution state. Create later-discovered atomic work as subtasks." (schema
@@ -139,7 +139,7 @@ toolDefinitions =
           ]
       , "project_id" .= nullableProp "Destination project UUID, or null/omitted to detach the tasks from a project"
       ] ["task_ids"])
-  , tool "task_detail" "Get compact task details." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
+  , tool "task_detail" "Get task details, including its complete description." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_overview" "Get a compact task overview and dependency summaries." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
   , tool "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates." (schema ["task_id" .= prop "string" "Dependent task UUID", "depends_on_id" .= prop "string" "Prerequisite task UUID", "action" .= enumProp "Dependency mutation" ["add", "remove"]] ["task_id", "depends_on_id", "action"])
   , tool "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress." (schema ["task_id" .= prop "string" "Task UUID"] ["task_id"])
@@ -341,13 +341,13 @@ execute manager base apiKey = \case
   UnifiedSearch input -> request manager base apiKey "POST" "/api/v1/search" (Just (encode input)) compactSearchResults
   ProjectCreate input -> request manager base apiKey "POST" "/api/v1/projects" (Just (encode input)) (mutationAck "created" "project" . compactProjectSummary)
   ProjectUpdate pid input -> request manager base apiKey "PUT" ("/api/v1/projects/" <> uuidPath pid) (Just (encode input)) (mutationAck "updated" "project" . compactProjectSummary)
-  ProjectDetail pid -> request manager base apiKey "GET" ("/api/v1/projects/" <> uuidPath pid) Nothing compactProjectSummary
+  ProjectDetail pid -> request manager base apiKey "GET" ("/api/v1/projects/" <> uuidPath pid) Nothing fullProjectDetail
   ProjectOverviewCall pid -> request manager base apiKey "GET" ("/api/v1/projects/" <> uuidPath pid <> "/overview") Nothing compactProjectOverview
   ProjectNextTasks pid limit includeBlocked -> request manager base apiKey "GET" ("/api/v1/projects/" <> uuidPath pid <> "/next-tasks" <> query [("limit", show <$> limit), ("include_blocked", if includeBlocked then Just "true" else Nothing)]) Nothing compactNextTasks
   ProjectSpec wid name description priority tasks -> executeProjectSpec manager base apiKey wid name description priority tasks
   ProjectArchive pid -> request manager base apiKey "PUT" ("/api/v1/projects/" <> uuidPath pid) (Just (encode (object ["status" .= ("archived" :: Text)]))) (mutationAck "archived" "project" . compactProjectSummary)
-  TaskCreate input -> request manager base apiKey "POST" "/api/v1/tasks" (Just (encode input)) (mutationAck "created" "task" . compactTaskSummary)
-  TaskUpdate tid input -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode input)) (mutationAck "updated" "task" . compactTaskSummary)
+  TaskCreate input -> request manager base apiKey "POST" "/api/v1/tasks" (Just (encode input)) (taskMutationAck "created")
+  TaskUpdate tid input -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode input)) (taskMutationAck "updated")
   TaskMoveBatch workspace input -> case workspace of
     Nothing -> dispatchBatchMove manager base apiKey input
     Just activeWorkspace -> do
@@ -355,12 +355,12 @@ execute manager base apiKey = \case
       case preflight of
         Left errorValue -> pure errorValue
         Right () -> dispatchBatchMove manager base apiKey input
-  TaskDetail tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid) Nothing compactTaskSummary
+  TaskDetail tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid) Nothing fullTaskDetail
   TaskOverviewCall tid -> request manager base apiKey "GET" ("/api/v1/tasks/" <> uuidPath tid <> "/overview") Nothing compactTaskOverview
   TaskDependency tid depId "add" -> request manager base apiKey "POST" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies") (Just (encode (object ["depends_on_id" .= depId]))) compactTaskDependencyMutation
   TaskDependency tid depId "remove" -> request manager base apiKey "DELETE" ("/api/v1/tasks/" <> uuidPath tid <> "/dependencies/" <> uuidPath depId) Nothing compactTaskDependencyMutation
-  TaskStart tid -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= ("in_progress" :: Text)]))) (mutationAck "started" "task" . compactTaskSummary)
-  TaskFinish tid status -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= status]))) (mutationAck "finished" "task" . compactTaskSummary)
+  TaskStart tid -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= ("in_progress" :: Text)]))) (taskMutationAck "started")
+  TaskFinish tid status -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode (object ["status" .= status]))) (taskMutationAck "finished")
 
 dispatchBatchMove :: Manager -> String -> Maybe Text -> BatchMoveTasksRequest -> IO Value
 dispatchBatchMove manager base apiKey input =
@@ -527,12 +527,23 @@ compactSimilarObservations limitValue offsetValue value = object
       ])
 
 compactProjectSummary :: Value -> Value
-compactProjectSummary value = object (catMaybes [copy "id", copy "name", copy "description", copy "status", copy "priority", copy "parent_id"])
+compactProjectSummary value = object (catMaybes [copy "id", copy "name", copy "status", copy "priority", copy "parent_id"])
   where copy key = (Key.fromText key .=) <$> field key value
 
+fullProjectDetail :: Value -> Value
+fullProjectDetail value = addDescription value (compactProjectSummary value)
+
 compactTaskSummary :: Value -> Value
-compactTaskSummary value = object (catMaybes [copy "id", copy "title", copy "description", copy "status", copy "priority", copy "project_id", copy "parent_id", copy "due_at"])
+compactTaskSummary value = object (catMaybes [copy "id", copy "title", copy "status", copy "priority", copy "project_id", copy "parent_id", copy "due_at"])
   where copy key = (Key.fromText key .=) <$> field key value
+
+fullTaskDetail :: Value -> Value
+fullTaskDetail value = addDescription value (compactTaskSummary value)
+
+addDescription :: Value -> Value -> Value
+addDescription source summary = case (field "description" source, summary) of
+  (Just description, Object fields) -> Object (KM.insert "description" description fields)
+  _ -> summary
 
 compactTaskBatchMove :: Maybe UUID -> Value -> Value
 compactTaskBatchMove destination value = object
@@ -572,22 +583,26 @@ compactTaskDependencyMutation value = object
   , "entity_type" .= ("task_dependency" :: Text)
   , "task_id" .= fromMaybe Null (field "task_id" value)
   , "depends_on_id" .= fromMaybe Null (field "depends_on_id" value)
-  , "affected_tasks" .= mapField "affected_tasks" compactChange value
+  , "affected_tasks" .= mapField "affected_tasks" compactDependencyChange value
   ]
-  where
-    compactChange change = object (catMaybes
-      [ ("task" .=) . compactTaskSummary <$> field "task" change
-      , ("previous_status" .=) <$> field "previous_status" change
-      , ("current_status" .=) <$> field "current_status" change
-      , ("auto_blocked" .=) <$> field "auto_blocked" change
-      , ("open_dependency_count" .=) <$> field "open_dependency_count" change
-      , ("reason" .=) <$> field "reason" change
-      ])
+
+compactDependencyChange :: Value -> Value
+compactDependencyChange change = object (catMaybes
+  [ ("task" .=) . compactTaskSummary <$> field "task" change
+  , copy "previous_status"
+  , copy "current_status"
+  , copy "previous_auto_blocked"
+  , copy "auto_blocked"
+  , copy "previous_open_dependency_count"
+  , copy "open_dependency_count"
+  , copy "reason"
+  ])
+  where copy key = (Key.fromText key .=) <$> field key change
 
 compactNextTasks :: Value -> Value
 compactNextTasks (Array rows) = toJSON (map compactRow (toList rows)) where
   compactRow row = case field "task" row of
-    Just task -> object ["task" .= compactTaskSummary task, "completion_gated" .= fromMaybe (Bool False) (field "completion_gated" row), "dependency_blocked" .= fromMaybe (Bool False) (field "dependency_blocked" row), "open_dependency_count" .= fromMaybe (Number 0) (field "open_dependency_count" row)]
+    Just task -> object ["task" .= compactTaskSummary task, "completion_gated" .= fromMaybe (Bool False) (field "completion_gated" row), "open_descendant_count" .= fromMaybe (Number 0) (field "open_descendant_count" row), "dependency_blocked" .= fromMaybe (Bool False) (field "dependency_blocked" row), "open_dependency_count" .= fromMaybe (Number 0) (field "open_dependency_count" row)]
     Nothing -> compactTaskSummary row
 compactNextTasks _ = toJSON ([] :: [Value])
 
@@ -600,6 +615,11 @@ compactWorkspaceList value = object ["items" .= mapField "items" compactWorkspac
 
 mutationAck :: Text -> Text -> Value -> Value
 mutationAck action entity summary = object ( ["ok" .= True, "action" .= action, "entity_type" .= entity, "summary" .= summary] <> maybe [] (\identifier -> ["id" .= identifier]) (field "id" summary) <> maybe [] (\status -> ["status" .= status]) (field "status" summary) )
+
+taskMutationAck :: Text -> Value -> Value
+taskMutationAck action value = case mutationAck action "task" (compactTaskSummary value) of
+  Object fields -> Object (KM.insert "dependency_effects" (toJSON (mapField "dependency_effects" compactDependencyChange value)) fields)
+  other -> other
 
 statusAck :: Text -> Text -> UUID -> Value
 statusAck action entity identifier = object ["ok" .= True, "action" .= action, "entity_type" .= entity, "id" .= identifier]

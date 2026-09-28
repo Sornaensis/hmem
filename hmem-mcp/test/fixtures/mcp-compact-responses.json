@@ -1,4 +1,24 @@
 {
+  "project_summary": {
+    "payload": {
+      "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "name": "Project",
+      "status": "archived",
+      "priority": 5,
+      "parent_id": null
+    }
+  },
+  "task_summary": {
+    "payload": {
+      "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "title": "Task",
+      "status": "done",
+      "priority": 5,
+      "project_id": "11111111-2222-3333-4444-555555555555",
+      "parent_id": null,
+      "due_at": null
+    }
+  },
   "observation_create": {
     "payload": {
       "ok": true,

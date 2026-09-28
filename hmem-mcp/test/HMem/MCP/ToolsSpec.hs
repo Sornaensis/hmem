@@ -418,6 +418,58 @@ spec = do
         matched <- call manager base "observation_match" observationMatchArguments
         matched `shouldBe` fixturePayload golden "observation_match"
 
+  describe "Project and Task response shaping" $ do
+    it "matches compact summary fixtures while leaving full descriptions to detail calls" $ do
+      golden <- compactFixtures
+      compactProjectSummary projectWithLongDescription `shouldBe` fixturePayload golden "project_summary"
+      compactTaskSummary taskWithLongDescription `shouldBe` fixturePayload golden "task_summary"
+      BL.length (encode (compactProjectSummary projectWithLongDescription)) `shouldSatisfy` (< 300)
+      BL.length (encode (compactTaskSummary taskWithLongDescription)) `shouldSatisfy` (< 350)
+      let searched = compactSearchResults (object ["observations" .= ([] :: [Value]), "projects" .= [projectWithLongDescription], "tasks" .= [taskWithLongDescription]])
+      jsonField "projects" searched `shouldBe` Just (toJSON [fixturePayload golden "project_summary"])
+      jsonField "tasks" searched `shouldBe` Just (toJSON [fixturePayload golden "task_summary"])
+      BL.length (encode searched) `shouldSatisfy` (< 700)
+
+    it "keeps aggregate and mutation replies bounded and focused details lossless" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        let projectId = observationId
+            taskId = observationId
+            projectArgs = object ["project_id" .= projectId]
+            taskArgs = object ["task_id" .= taskId]
+        projectDetail <- call manager base "project_detail" projectArgs
+        taskDetail <- call manager base "task_detail" taskArgs
+        jsonField "description" projectDetail `shouldBe` jsonField "description" projectWithLongDescription
+        jsonField "description" taskDetail `shouldBe` jsonField "description" taskWithLongDescription
+        jsonField "id" projectDetail `shouldBe` Just (toJSON projectId)
+        jsonField "id" taskDetail `shouldBe` Just (toJSON taskId)
+        projectOverview <- call manager base "project_overview" projectArgs
+        taskOverview <- call manager base "task_overview" taskArgs
+        nextTasks <- call manager base "project_next_tasks" projectArgs
+        searched <- call manager base "search" (object ["workspace_id" .= workspaceId, "entity_types" .= (["project", "task"] :: [Text])])
+        forM_ [jsonPath ["project"] projectOverview, jsonPath ["task"] taskOverview] $ \result ->
+          (result >>= jsonField "description") `shouldBe` Nothing
+        jsonField "tasks" projectOverview `shouldSatisfy` maybe False (arrayFirst (\row -> jsonField "description" row == Nothing))
+        jsonField "subprojects" projectOverview `shouldSatisfy` maybe False (arrayFirst (\row -> jsonField "description" row == Nothing))
+        jsonPath ["readiness_rollup", "completion_ready"] taskOverview `shouldBe` Just (Bool True)
+        nextTasks `shouldSatisfy` arrayFirst (\row -> jsonPath ["task", "description"] row == Nothing && jsonField "open_descendant_count" row == Just (Number 2))
+        searched `shouldSatisfy` (\value -> jsonField "projects" value /= Nothing && jsonField "tasks" value /= Nothing)
+        forM_ ["project_create", "project_update", "project_archive", "task_create", "task_update", "task_start", "task_finish"] $ \name -> do
+          let arguments = case lookup name toolSamples of Just sample -> sample; Nothing -> object []
+          response <- call manager base name arguments
+          jsonPath ["summary", "description"] response `shouldBe` Nothing
+          jsonField "id" response `shouldBe` Just (toJSON observationId)
+          if "task_" `T.isPrefixOf` name
+            then do
+              jsonPath ["dependency_effects"] response `shouldSatisfy` maybe False (arrayFirst (\effect -> jsonPath ["task", "description"] effect == Nothing && jsonField "previous_status" effect == Just (String "todo") && jsonField "current_status" effect == Just (String "blocked") && jsonField "previous_auto_blocked" effect == Just (Bool False) && jsonField "previous_open_dependency_count" effect == Just (Number 0)))
+              BL.length (encode response) `shouldSatisfy` (< 1000)
+            else pure ()
+        specResult <- call manager base "project_spec" (case lookup "project_spec" toolSamples of Just sample -> sample; Nothing -> object [])
+        jsonPath ["project", "description"] specResult `shouldBe` Nothing
+        jsonPath ["tasks"] specResult `shouldSatisfy` maybe False (arrayFirst (\row -> jsonField "description" row == Nothing))
+        dependencyResult <- call manager base "task_dependency" (object ["task_id" .= taskId, "depends_on_id" .= workspaceId, "action" .= ("add" :: Text)])
+        jsonPath ["affected_tasks"] dependencyResult `shouldSatisfy` maybe False (arrayFirst (\effect -> jsonPath ["task", "description"] effect == Nothing && jsonField "current_status" effect == Just (String "blocked")))
+
   describe "Observation parsing and validation" $ do
     it "parses provenance-bound creates and content-only updates" $ do
       case parseToolCall "observation_create" observationArguments of
@@ -1216,6 +1268,9 @@ responseFor method path rawQuery body
   | method == methodPost && path == "/api/v1/observations" = observation
   | method == methodPost && path == "/api/v1/projects" = project
   | method == methodPost && path == "/api/v1/tasks" = task
+  | path == "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview" = object ["project" .= project, "tasks" .= [task], "subprojects" .= [project], "readiness_rollup" .= object ["completion_ready" .= True]]
+  | path == "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/next-tasks" = toJSON [object ["task" .= task, "completion_gated" .= True, "open_descendant_count" .= (2 :: Int), "dependency_blocked" .= False, "open_dependency_count" .= (0 :: Int)]]
+  | path == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview" = object ["task" .= task, "dependencies" .= [object ["id" .= workspaceId, "name" .= ("Prerequisite" :: Text)]], "readiness_rollup" .= object ["completion_ready" .= True]]
   | method == methodPut && path == "/api/v1/workspaces/11111111-2222-3333-4444-555555555555" = object ["id" .= workspaceId, "name" .= ("Renamed" :: Text), "workspace_type" .= ("repository" :: Text)]
   | path == "/api/v1/observations" && "offset=2" `T.isInfixOf` TE.decodeUtf8 rawQuery = object ["items" .= [observation], "has_more" .= False]
   | path == "/api/v1/observations" = object ["items" .= [observation, observation], "has_more" .= True]
@@ -1236,7 +1291,12 @@ responseFor method path rawQuery body
       , "matched_paths" .= (["my/src/proj/Main.java", "src/HMem/Types.hs"] :: [Text])
       , "matched_subjects" .= observationSubjects
       ]
-    task = object ["id" .= observationId, "workspace_id" .= workspaceId, "title" .= ("Task" :: Text), "status" .= ("done" :: Text), "priority" .= (5 :: Int)]
-    project = object ["id" .= observationId, "workspace_id" .= workspaceId, "name" .= ("Project" :: Text), "status" .= ("archived" :: Text), "priority" .= (5 :: Int)]
+    task = taskWithLongDescription
+    project = projectWithLongDescription
     dependencyMutation :: Text -> Value
-    dependencyMutation action = object ["action" .= action, "task_id" .= observationId, "depends_on_id" .= workspaceId, "affected_tasks" .= [object ["task" .= task, "previous_status" .= ("todo" :: Text), "current_status" .= ("blocked" :: Text), "auto_blocked" .= True, "open_dependency_count" .= (1 :: Int), "reason" .= ("blocked_by_open_dependencies" :: Text)]]]
+    dependencyMutation action = object ["action" .= action, "task_id" .= observationId, "depends_on_id" .= workspaceId, "affected_tasks" .= [dependencyChange]]
+
+projectWithLongDescription, taskWithLongDescription, dependencyChange :: Value
+projectWithLongDescription = object ["id" .= observationId, "workspace_id" .= workspaceId, "name" .= ("Project" :: Text), "description" .= T.replicate 10000 "p", "status" .= ("archived" :: Text), "priority" .= (5 :: Int), "parent_id" .= Null]
+taskWithLongDescription = object ["id" .= observationId, "workspace_id" .= workspaceId, "title" .= ("Task" :: Text), "description" .= T.replicate 10000 "t", "status" .= ("done" :: Text), "priority" .= (5 :: Int), "project_id" .= workspaceId, "parent_id" .= Null, "due_at" .= Null, "dependency_effects" .= [dependencyChange]]
+dependencyChange = object ["task" .= object ["id" .= observationId, "title" .= ("Task" :: Text), "description" .= T.replicate 10000 "t", "status" .= ("blocked" :: Text), "priority" .= (5 :: Int), "project_id" .= workspaceId, "parent_id" .= Null, "due_at" .= Null], "previous_status" .= ("todo" :: Text), "current_status" .= ("blocked" :: Text), "previous_auto_blocked" .= False, "auto_blocked" .= True, "previous_open_dependency_count" .= (0 :: Int), "open_dependency_count" .= (1 :: Int), "reason" .= ("blocked_by_open_dependencies" :: Text)]

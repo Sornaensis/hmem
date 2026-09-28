@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M3KP2DJP8SE5X28BEJ153DZA"
+relation = "amends"
+from_record = "R01M3KP2DJPHCD67F6TBSZZNQSP"
+subject_adr = "A01M3KDJARNRK4M33PDRS42AGV4"
+to_records = ["R01M3KDJAX3YMVWMXV0WVC7VHCT"]
++++
+
+Bound Project and Task aggregate responses without losing focused detail or dependency effects.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0ifSwiYiI6IjUwM2Q0NWZiY2Y1Yjg4ZWVkNzVmYWM3MjBkYTZmNjY4ODI3Y2IyZGMiLCJpIjoic2hhMjU2OjhqTF9MR0FpT1NacG1vR2JQbjJweHBpNk83cG03VVlNYzA4dnVzU0lTRGsiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTNLUDJESlA4U0U1WDI4QkVKMTUzRFpBIiwib3AiOiJPMDFNM0tQMkRKUEhDRDY3RjZUQlNaWk5RU1AiLCJwIjpbIlIwMU0zS0RKQVgzWU1WV01YVjBXVkM3VkhDVCJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1Njo1enV3aEg0QURzT3FFVjBlaDVNVUowZDhyRDkwRlZSY3RHY2pJczZEQlhNIiwidCI6MTc5MDU4ODMwMjkzNCwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

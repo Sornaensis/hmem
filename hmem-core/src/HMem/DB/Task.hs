@@ -14,6 +14,7 @@ module HMem.DB.Task
   , moveTasksBatch
   , listTasks
   , listTasksWithQuery
+  , listTasksForSearch
   , listTasksByWorkspace
   , listTaskChildren
   , listFilteredTaskChildren
@@ -1173,9 +1174,17 @@ listTasks pool projId mstatus mlimit moffset =
     }
 
 listTasksWithQuery :: Pool Hasql.Connection -> TaskListQuery -> IO [Task]
-listTasksWithQuery pool tq = do
-  let (lim, off) = capPaginationOverfetch tq.limit tq.offset
-      searchLang = fromMaybe "english" tq.searchLanguage
+listTasksWithQuery pool tq =
+  listTasksWithPage pool tq (capPaginationOverfetch tq.limit tq.offset)
+
+-- Search uses the same filters and ordering, with a wider validated offset.
+listTasksForSearch :: Pool Hasql.Connection -> TaskListQuery -> IO [Task]
+listTasksForSearch pool tq =
+  listTasksWithPage pool tq (capUnifiedSearchOverfetch tq.limit tq.offset)
+
+listTasksWithPage :: Pool Hasql.Connection -> TaskListQuery -> (Int, Int) -> IO [Task]
+listTasksWithPage pool tq (lim, off) = do
+  let searchLang = fromMaybe "english" tq.searchLanguage
       applyFilters row = do
         where_ $ activeTask row
         case tq.workspaceId of

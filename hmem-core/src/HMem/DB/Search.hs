@@ -1,12 +1,17 @@
 module HMem.DB.Search
   ( searchAll
+  , searchNextOffset
+  , unifiedSearchContinuationError
   ) where
 
 import Control.Concurrent.Async (concurrently)
 import Control.Exception (throwIO)
+import Control.Monad (forM)
 import Data.Maybe (fromMaybe)
+import Data.Map.Strict qualified as Map
 import Data.Pool (Pool)
 import Data.Set qualified as Set
+import Data.Text (Text)
 import Data.Text qualified as Text
 import Hasql.Connection qualified as Hasql
 
@@ -25,9 +30,9 @@ searchAll pool queryValue = do
       limitValue = fromMaybe 10 queryValue.limit
       offsetValue = fromMaybe 0 queryValue.offset
       wantsObservations = Set.member SearchObservation wanted
-  if queryValue.workspaceId == Nothing
-    then throwIO $ DBCheckViolation "workspace_id is required for unified search"
-    else pure ()
+  case validateUnifiedSearchQuery queryValue of
+    [] -> pure ()
+    issues -> throwIO $ DBCheckViolation (Text.intercalate "; " issues)
   let observationQuery workspace = ObservationQuery
         { workspaceId = workspace
         , subjectKind = queryValue.subjectKind
@@ -66,11 +71,38 @@ searchAll pool queryValue = do
   ((observations, projects), tasks) <- concurrently
     (concurrently
       (case queryValue.workspaceId of
-          Just workspace | wantsObservations -> Observation.listObservations pool (observationQuery workspace)
+          Just workspace | wantsObservations -> Observation.listObservationsSearchOverfetch pool (observationQuery workspace)
           _ -> pure [])
-      (if Set.member SearchProject wanted then Proj.listProjectsWithQuery pool projectQuery else pure []))
-    (if Set.member SearchTask wanted then Task.listTasksWithQuery pool taskQuery else pure [])
-  pure UnifiedSearchResults { observations = map compactObservation observations, projects = projects, tasks = tasks }
+      (if Set.member SearchProject wanted then Proj.listProjectsForSearch pool projectQuery else pure []))
+    (if Set.member SearchTask wanted then Task.listTasksForSearch pool taskQuery else pure [])
+  let page :: Text -> Bool -> [a] -> Maybe (Text, Bool, Int)
+      page key requested rows =
+        if requested then Just (key, length rows > limitValue, min limitValue (length rows)) else Nothing
+      pages = [ page "observations" wantsObservations observations
+              , page "projects" (Set.member SearchProject wanted) projects
+              , page "tasks" (Set.member SearchTask wanted) tasks ]
+      hasMore = Map.fromList [(key, more) | Just (key, more, _) <- pages]
+  nextPairs <- forM [(key, count) | Just (key, True, count) <- pages] $ \(key, count) -> do
+    next <- either (throwIO . DBCheckViolation) pure (searchNextOffset offsetValue count)
+    pure (key, next)
+  let nextOffset = Map.fromList nextPairs
+  pure UnifiedSearchResults
+    { observations = map compactObservation (take limitValue observations)
+    , projects = take limitValue projects
+    , tasks = take limitValue tasks
+    , hasMore = hasMore, nextOffset = nextOffset }
+
+-- Calculate in an unbounded type before producing a cursor the next call can
+-- actually use. A terminal page needs no successor and never calls this.
+searchNextOffset :: Int -> Int -> Either Text Int
+searchNextOffset offsetValue returnedCount =
+  let next = toInteger offsetValue + toInteger returnedCount
+  in if next <= toInteger maxUnifiedSearchOffset
+       then Right (fromInteger next)
+       else Left unifiedSearchContinuationError
+
+unifiedSearchContinuationError :: Text
+unifiedSearchContinuationError = "unified search continuation exceeds the supported offset range"
 
 compactObservation :: Observation -> ObservationSearchHit
 compactObservation observation = ObservationSearchHit

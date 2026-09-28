@@ -12,7 +12,7 @@ module HMem.Types
   , TaskStatus(..), Task(..), NextTaskCandidate(..), TaskDependencyAutoBlockSnapshot(..), TaskDependencyStatusChange(..), LinkDependency(..), DependencyMutationResult(..), TaskMutationResult(..), CreateTask(..), UpdateTask(..), TaskListQuery(..)
   , NavigationParent(..), NavigationFilter(..), NavigationBranchRequest(..), NavigationPage(..), NavigationBranchResponse(..), NavigationEntityType(..), NavigationSummary(..), NavigationFocusResponse(..), NavigationSummariesRequest(..), NavigationSummariesResponse(..)
   , maxNavigationPageSize, maxNavigationOffset, maxNavigationBatchIds, maxFocusAncestors, validateNavigationPage, validateNavigationSummariesRequest
-  , EntitySearchType(..), ObservationSearchHit(..), UnifiedSearchQuery(..), UnifiedSearchResults(..), validateUnifiedSearchQuery
+  , EntitySearchType(..), ObservationSearchHit(..), UnifiedSearchQuery(..), UnifiedSearchResults(..), maxUnifiedSearchOffset, capUnifiedSearchOverfetch, validateUnifiedSearchOffset, validateUnifiedSearchQuery
   , ActivityEvent(..), WorkspaceTimelineEvent(..), TimelineActor(..), TimelineProjectContext(..), TimelineTaskContext(..), TimelineStatusTransition(..), TimelineNavigation(..), TimelineBucketCounts(..), TimelineBucketEntityCounts(..), TimelineBucketSeriesCounts(..), TimelineBucketSeries(..), WorkspaceTimelineBucket(..), WorkspaceTimelineBucketsResponse(..)
   , SavedView(..), CreateSavedView(..), UpdateSavedView(..), SavedViewListQuery(..)
   , AuditAction(..), AuditLogEntry(..), AuditLogQuery(..), RevertResult(..), auditActionToText, auditActionFromText
@@ -33,8 +33,9 @@ import Control.Applicative ((<|>))
 import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.Char (isAlpha, isHexDigit, isLower, isSpace, isUpper, toLower)
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.List (nub)
+import Data.Map.Strict (Map)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -2105,15 +2106,33 @@ instance FromJSON ObservationSearchHit where
     <*> o .: "content_preview" <*> o .: "updated_at"
 
 data UnifiedSearchResults = UnifiedSearchResults
-  { observations :: [ObservationSearchHit], projects :: [Project], tasks :: [Task] }
+  { observations :: [ObservationSearchHit], projects :: [Project], tasks :: [Task]
+  , hasMore :: Map Text Bool, nextOffset :: Map Text Int }
   deriving (Show, Eq, Generic)
 instance ToJSON UnifiedSearchResults where toJSON = genericToJSON jsonOptions
 instance FromJSON UnifiedSearchResults where parseJSON = genericParseJSON jsonOptions
+
+-- Unified search can continue beyond the generic list offset cap. Observation
+-- SQL encodes its offset as Int32, so this is the largest repeatable cursor.
+maxUnifiedSearchOffset :: Int
+maxUnifiedSearchOffset = fromIntegral (maxBound :: Int32)
+
+-- Internal search queries fetch one extra row without clamping their offset.
+-- The generic list helpers continue to cap offsets at maxPaginationOffset.
+capUnifiedSearchOverfetch :: Maybe Int -> Maybe Int -> (Int, Int)
+capUnifiedSearchOverfetch mLimit mOffset =
+  (min maxPaginationLimit (max 1 (fromMaybe 10 mLimit)) + 1, fromMaybe 0 mOffset)
+
+validateUnifiedSearchOffset :: Maybe Int -> [Text]
+validateUnifiedSearchOffset mOffset =
+  ["offset must be between 0 and " <> T.pack (show maxUnifiedSearchOffset)
+  | maybe False (\n -> n < 0 || n > maxUnifiedSearchOffset) mOffset]
 
 validateUnifiedSearchQuery :: UnifiedSearchQuery -> [Text]
 validateUnifiedSearchQuery usq =
   ["query must not be empty" | maybe False (T.null . T.strip) usq.query]
   <> ["workspace_id is required for unified search" | usq.workspaceId == Nothing]
   <> ["invalid search_language" | not (validFtsLanguage usq.searchLanguage)]
-  <> validateObservationPagination usq.limit usq.offset
+  <> validateObservationPagination usq.limit Nothing
+  <> validateUnifiedSearchOffset usq.offset
   <> validateOptionalIntRange "task_priority" 1 10 usq.taskPriority

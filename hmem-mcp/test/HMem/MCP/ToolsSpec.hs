@@ -265,7 +265,7 @@ spec = do
       T.replace "atomic work as subtasks" "parent description" planningGuidance `shouldNotSatisfy` planningGuidanceContract
 
     it "guides Observations as durable repository insights and treats Git SHAs as staleness sentinels" $ do
-      toolDescriptionIs "search" "Search observations, projects, and tasks. An Observation is a durable, non-obvious repository insight tied to file or glob subjects; subject_kind, subject, and git_sha are exact provenance filters."
+      toolDescriptionIs "search" "Search observations, projects, and tasks (default 10 per type, limit 1..200, offset 0..2147483647). An Observation is a durable, non-obvious repository insight tied to file or glob subjects; subject_kind, subject, and git_sha are exact provenance filters. has_more reports each requested type; next_offset contains only types with another page. To continue one type, repeat with entity_types set to that type and offset set to its next_offset, keeping workspace_id, query, and filters unchanged. If a further page would exceed the offset range, the server returns a continuation_limit error."
       toolDescriptionIs "observation_create" "Create an Observation: a durable, non-obvious repository insight tied to one or more repository-relative file or glob subjects. git_sha records the repository state where the insight was established; use it as a sentinel to decide whether the insight needs re-audit, not as timeless proof. Pass subjects as an ordered array; they are OR alternatives and, with git_sha, immutable after creation. File subjects must be concrete paths. Glob subjects may use only *, ?, and ** path components (for example my/src/proj/**/*.java)."
       toolDescriptionIs "observation_update" "Replace only the content of a durable, non-obvious repository insight. Subjects and git_sha are immutable provenance; git_sha remains the state where the insight was established and a staleness-audit sentinel, not timeless proof."
       toolDescriptionIs "observation_list" "List durable, non-obvious repository insights using exact subject and git_sha provenance filters and optional text search. git_sha is a sentinel for deciding when an insight needs re-audit, not timeless proof. When has_more is true, pass next_offset to retrieve the next page."
@@ -516,6 +516,25 @@ spec = do
         matched <- call manager base "observation_match" observationMatchArguments
         matched `shouldBe` fixturePayload golden "observation_match"
 
+    it "forwards one search page request with its filters and preserves continuation" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        result <- call manager base "search" (object
+          [ "workspace_id" .= workspaceId, "query" .= ("needle" :: Text)
+          , "entity_types" .= (["project", "task"] :: [Text])
+          , "project_status" .= ("archived" :: Text), "task_status" .= ("done" :: Text)
+          , "project_id" .= workspaceId, "limit" .= (2 :: Int), "offset" .= (4 :: Int) ])
+        jsonField "has_more" result `shouldBe` Just (object ["projects" .= True, "tasks" .= False])
+        jsonField "next_offset" result `shouldBe` Just (object ["projects" .= (5 :: Int)])
+        jsonField "projects" result `shouldSatisfy` maybe False (arrayFirst (\row -> jsonField "description" row == Nothing && jsonField "id" row == Just (toJSON observationId)))
+        jsonField "tasks" result `shouldSatisfy` maybe False (arrayFirst (\row -> jsonField "description" row == Nothing && jsonField "id" row == Just (toJSON observationId)))
+      [sent] <- readTVarIO requests
+      sent.requestMethod `shouldBe` methodPost
+      sent.requestPath `shouldBe` "/api/v1/search"
+      let Just payload = decode sent.requestBody :: Maybe Value
+      forM_ ["workspace_id", "query", "entity_types", "project_status", "task_status", "project_id", "limit", "offset"] $ \key ->
+        jsonField key payload `shouldBe` jsonField key (object ["workspace_id" .= workspaceId, "query" .= ("needle" :: Text), "entity_types" .= (["project", "task"] :: [Text]), "project_status" .= ("archived" :: Text), "task_status" .= ("done" :: Text), "project_id" .= workspaceId, "limit" .= (2 :: Int), "offset" .= (4 :: Int)])
+
   describe "Project and Task response shaping" $ do
     it "matches compact summary fixtures while leaving full descriptions to detail calls" $ do
       golden <- compactFixtures
@@ -523,9 +542,11 @@ spec = do
       compactTaskSummary taskWithLongDescription `shouldBe` fixturePayload golden "task_summary"
       BL.length (encode (compactProjectSummary projectWithLongDescription)) `shouldSatisfy` (< 300)
       BL.length (encode (compactTaskSummary taskWithLongDescription)) `shouldSatisfy` (< 350)
-      let searched = compactSearchResults (object ["observations" .= ([] :: [Value]), "projects" .= [projectWithLongDescription], "tasks" .= [taskWithLongDescription]])
+      let searched = compactSearchResults (object ["observations" .= ([] :: [Value]), "projects" .= [projectWithLongDescription], "tasks" .= [taskWithLongDescription], "has_more" .= object ["projects" .= True, "tasks" .= False], "next_offset" .= object ["projects" .= (2 :: Int)]])
       jsonField "projects" searched `shouldBe` Just (toJSON [fixturePayload golden "project_summary"])
       jsonField "tasks" searched `shouldBe` Just (toJSON [fixturePayload golden "task_summary"])
+      jsonField "has_more" searched `shouldBe` Just (object ["projects" .= True, "tasks" .= False])
+      jsonField "next_offset" searched `shouldBe` Just (object ["projects" .= (2 :: Int)])
       BL.length (encode searched) `shouldSatisfy` (< 700)
 
     it "keeps aggregate and mutation replies bounded and focused details lossless" $ do
@@ -551,7 +572,10 @@ spec = do
         jsonField "subprojects" projectOverview `shouldSatisfy` maybe False (arrayFirst (\row -> jsonField "description" row == Nothing))
         jsonPath ["readiness_rollup", "completion_ready"] taskOverview `shouldBe` Just (Bool True)
         nextTasks `shouldSatisfy` arrayFirst (\row -> jsonPath ["task", "description"] row == Nothing && jsonField "open_descendant_count" row == Just (Number 2))
-        searched `shouldSatisfy` (\value -> jsonField "projects" value /= Nothing && jsonField "tasks" value /= Nothing)
+        jsonField "projects" searched `shouldSatisfy` maybe False (arrayFirst (\row -> jsonField "id" row == Just (toJSON observationId) && jsonField "description" row == Nothing))
+        jsonField "tasks" searched `shouldSatisfy` maybe False (arrayFirst (\row -> jsonField "id" row == Just (toJSON observationId) && jsonField "description" row == Nothing))
+        jsonField "has_more" searched `shouldBe` Just (object ["projects" .= True, "tasks" .= False])
+        jsonField "next_offset" searched `shouldBe` Just (object ["projects" .= (1 :: Int)])
         forM_ ["project_create", "project_update", "project_archive", "task_create", "task_update", "task_start", "task_finish"] $ \name -> do
           let arguments = case lookup name toolSamples of Just sample -> sample; Nothing -> object []
           response <- call manager base name arguments
@@ -590,6 +614,8 @@ spec = do
     it "accepts observation search provenance filters and rejects legacy entity types" $ do
       parseToolCall "search" (object ["workspace_id" .= workspaceId, "entity_types" .= (["observation"] :: [Text]), "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha]) `shouldSatisfy` isRight
       parseToolCall "search" (object ["workspace_id" .= workspaceId, "entity_types" .= (["memory"] :: [Text])]) `shouldSatisfy` isLeft
+      (parseToolCall "search" (object ["workspace_id" .= workspaceId, "offset" .= (100001 :: Int)]) >>= validateToolCall) `shouldSatisfy` isRight
+      (parseToolCall "search" (object ["workspace_id" .= workspaceId, "offset" .= (2147483648 :: Int)]) >>= validateToolCall) `shouldSatisfy` isLeft
 
     it "validates Observation pagination, similarity bounds, and fixed embeddings before dispatch" $ do
       case parseToolCall "observation_list" (object ["workspace_id" .= workspaceId, "limit" .= (201 :: Int)]) of
@@ -1357,7 +1383,13 @@ statusApp requests request respond = do
 
 responseFor :: ByteString -> ByteString -> ByteString -> BL.ByteString -> Value
 responseFor method path rawQuery body
-  | path == "/api/v1/search" = object ["observations" .= [observation], "projects" .= ([] :: [Value]), "tasks" .= ([] :: [Value])]
+  | path == "/api/v1/search" = object
+      [ "observations" .= (if requested "observation" then [observation] else [])
+      , "projects" .= (if requested "project" then [project] else [])
+      , "tasks" .= (if requested "task" then [task] else [])
+      , "has_more" .= object (["observations" .= True | requested "observation"] <> ["projects" .= True | requested "project"] <> ["tasks" .= False | requested "task"])
+      , "next_offset" .= object (["observations" .= (searchOffset + 1) | requested "observation"] <> ["projects" .= (searchOffset + 1) | requested "project"])
+      ]
   | path == "/api/v1/observations/match" && "\"offset\":2" `T.isInfixOf` TE.decodeUtf8 (BL.toStrict body) = object ["items" .= ([] :: [Value]), "has_more" .= False]
   | path == "/api/v1/observations/match" = object ["items" .= [match, match], "has_more" .= True]
   | path == "/api/v1/observations/similar" = toJSON [object ["observation" .= observation, "similarity" .= (0.75 :: Double)]]
@@ -1393,6 +1425,12 @@ responseFor method path rawQuery body
       ]
     task = taskWithLongDescription
     project = projectWithLongDescription
+    requested kind = case decode body >>= jsonField "entity_types" of
+      Just (Array types) -> String kind `elem` toList types
+      _ -> True
+    searchOffset = case decode body >>= jsonField "offset" of
+      Just (Number offset) -> round offset :: Int
+      _ -> 0
     taskCount payload = case decode payload >>= jsonField "tasks" of
       Just (Array values) -> length values
       _ -> 0

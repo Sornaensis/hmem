@@ -5,6 +5,7 @@ module HMem.DB.Observation
   , deleteObservation
   , listObservations
   , listObservationsOverfetch
+  , listObservationsSearchOverfetch
   , listObservationSubjectFacets
   , listObservationSubjectFacetsOverfetch
   , matchObservations
@@ -175,6 +176,18 @@ listObservationsOverfetch pool queryValue = do
   validateOrThrow $ validateObservationQuery queryValue
   let queryWithExtra :: ObservationQuery
       queryWithExtra = queryValue { limit = Just (fromMaybe 50 queryValue.limit + 1) }
+  listObservationsUnchecked pool queryWithExtra
+
+-- Search keeps the same provenance validation and SQL ordering, but its
+-- continuation offset may exceed the generic Observation list cap.
+listObservationsSearchOverfetch :: Pool Hasql.Connection -> ObservationQuery -> IO [Observation]
+listObservationsSearchOverfetch pool queryValue = do
+  let validationQuery :: ObservationQuery
+      validationQuery = queryValue { offset = Nothing }
+  validateOrThrow $ validateObservationQuery validationQuery <> validateUnifiedSearchOffset queryValue.offset
+  let (limitValue, _) = capUnifiedSearchOverfetch queryValue.limit queryValue.offset
+      queryWithExtra :: ObservationQuery
+      queryWithExtra = queryValue { limit = Just limitValue }
   listObservationsUnchecked pool queryWithExtra
 
 listObservationsUnchecked :: Pool Hasql.Connection -> ObservationQuery -> IO [Observation]

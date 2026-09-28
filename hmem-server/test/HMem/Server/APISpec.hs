@@ -3,7 +3,7 @@ module HMem.Server.APISpec (spec) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (poll, wait, withAsync)
 import Control.Exception (bracket_, onException)
-import Control.Monad (forM_, void)
+import Control.Monad (forM, forM_, void)
 import Data.Aeson (Value(..), decode, encode, object, toJSON, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -13,6 +13,7 @@ import Data.Foldable (toList)
 import Data.Functor.Contravariant ((>$<))
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (find, sort)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
@@ -150,6 +151,67 @@ recordingObservationApp env = do
 
 spec :: Spec
 spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app))) $ do
+  describe "unified search continuation HTTP contract" $ do
+    it "returns independent page metadata and stable filtered pages" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-unified-search-pages"
+      observations <- forM [1 .. 3 :: Int] $ \index -> do
+        response <- postJson app "/api/v1/observations" (object
+          [ "workspace_id" .= workspace.id
+          , "subjects" .= [ObservationSubject SubjectFile ("src/Page" <> T.pack (show index) <> ".hs")]
+          , "git_sha" .= ("0123456789abcdef0123456789abcdef01234567" :: T.Text)
+          , "content" .= ("needle observation" :: T.Text) ])
+        responseStatus response `shouldBe` status200
+        let Just created = decode (responseBody response) :: Maybe Observation
+        pure created
+      projects <- forM [1 .. 2 :: Int] $ \index -> do
+        response <- postJson app "/api/v1/projects" (object
+          [ "workspace_id" .= workspace.id, "name" .= ("needle project " <> T.pack (show index)) ])
+        responseStatus response `shouldBe` status200
+        let Just created = decode (responseBody response) :: Maybe Project
+        pure created
+      taskResponse <- postJson app "/api/v1/tasks" (object
+        [ "workspace_id" .= workspace.id, "project_id" .= (head projects).id
+        , "title" .= ("needle task" :: T.Text) ])
+      responseStatus taskResponse `shouldBe` status200
+      let Just task = decode (responseBody taskResponse) :: Maybe Task
+          base = ["workspace_id" .= workspace.id, "query" .= ("needle" :: T.Text)]
+          getPage fields = do
+            response <- postJson app "/api/v1/search" (object (base <> fields))
+            responseStatus response `shouldBe` status200
+            let Just page = decode (responseBody response) :: Maybe UnifiedSearchResults
+            pure page
+      defaultPage <- getPage []
+      defaultPage.hasMore `shouldBe` Map.fromList [("observations", False), ("projects", False), ("tasks", False)]
+      first <- getPage ["limit" .= (1 :: Int)]
+      first.hasMore `shouldBe` Map.fromList [("observations", True), ("projects", True), ("tasks", False)]
+      first.nextOffset `shouldBe` Map.fromList [("observations", 1), ("projects", 1)]
+      second <- getPage ["limit" .= (1 :: Int), "offset" .= (1 :: Int)]
+      second.hasMore `shouldBe` Map.fromList [("observations", True), ("projects", False), ("tasks", False)]
+      second.nextOffset `shouldBe` Map.fromList [("observations", 2)]
+      lastObservation <- getPage ["entity_types" .= (["observation"] :: [T.Text]), "limit" .= (1 :: Int), "offset" .= (2 :: Int)]
+      lastObservation.hasMore `shouldBe` Map.fromList [("observations", False)]
+      lastObservation.nextOffset `shouldBe` Map.empty
+      lastObservation.projects `shouldBe` []
+      lastObservation.tasks `shouldBe` []
+      map (.id) (first.observations <> second.observations <> lastObservation.observations) `shouldBe` map (.id) defaultPage.observations
+      map (.id) defaultPage.observations `shouldMatchList` map (.id) observations
+      map (.id) (first.projects <> second.projects) `shouldBe` map (.id) defaultPage.projects
+      map (.id) defaultPage.projects `shouldMatchList` map (.id) projects
+      map (.id) defaultPage.tasks `shouldBe` [task.id]
+      empty <- getPage ["entity_types" .= (["project"] :: [T.Text]), "project_status" .= ("archived" :: T.Text)]
+      empty.projects `shouldBe` []
+      empty.hasMore `shouldBe` Map.fromList [("projects", False)]
+      empty.nextOffset `shouldBe` Map.empty
+      forM_ [100000, 100001, maxUnifiedSearchOffset] $ \offsetValue -> do
+        high <- postJson app "/api/v1/search" (object (base <> ["offset" .= offsetValue]))
+        responseStatus high `shouldBe` status200
+        let Just highPage = decode (responseBody high) :: Maybe UnifiedSearchResults
+        highPage.hasMore `shouldBe` Map.fromList [("observations", False), ("projects", False), ("tasks", False)]
+      beyond <- postJson app "/api/v1/search" (object (base <> ["offset" .= (maxUnifiedSearchOffset + 1)]))
+      responseStatus beyond `shouldBe` status400
+      let Just beyondError = decode (responseBody beyond) :: Maybe Value
+      jsonField "error" beyondError `shouldBe` Just (String "validation_error")
+
   describe "project_spec HTTP contract" $ do
     it "creates all tasks in input order and persists their project placement" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-project-spec-success"
@@ -1799,6 +1861,10 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         , ("/api/v1/observations/{observationId}/embedding", "put") ]
       enum "SubjectKind" `shouldBe` Just ["file", "glob"]
       enum "EntitySearchType" `shouldBe` Just ["observation", "project", "task"]
+      hasSchemaProperty "UnifiedSearchResults" "has_more" `shouldBe` True
+      hasSchemaProperty "UnifiedSearchResults" "next_offset" `shouldBe` True
+      (schema "UnifiedSearchQuery" >>= jsonField "properties" >>= jsonField "offset" >>= jsonField "maximum") `shouldBe` Just (Number 2147483647)
+      operationDescription "/api/v1/search" "post" `shouldSatisfy` maybe False (T.isInfixOf "continuation_limit" . \case String value -> value; _ -> "")
       schema "ObservationSubject" `shouldSatisfy` isJust
       schema "ObservationSubjectFacet" `shouldSatisfy` isJust
       schema "ObservationMatchQuery" `shouldSatisfy` isJust

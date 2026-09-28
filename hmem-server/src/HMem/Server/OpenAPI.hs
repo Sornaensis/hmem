@@ -45,6 +45,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/observations/{observationId}" . _Just . put %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}" . _Just . delete %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}/embedding" . _Just . put %~ fmap tagObservation
+  & paths . at "/api/v1/search" . _Just . post %~ fmap documentUnifiedSearch
   & paths . at "/api/v1/workspaces/{workspaceId}" . _Just . put %~ fmap tagWorkspaceRename
   & paths . at "/api/v1/workspaces/{workspaceId}/timeline" . _Just . get %~ fmap tagTimeline
   & paths . at "/api/v1/workspaces/{workspaceId}/timeline/buckets" . _Just . get %~ fmap tagTimeline
@@ -56,6 +57,8 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}" . _Just . delete %~ fmap documentDependencyRemove
   where
     tagObservation operation = operation & tags .~ InsOrdSet.singleton "Observations"
+    documentUnifiedSearch operation = operation
+      & description ?~ "Searches requested observations, projects, and tasks with independent page boundaries. Results retain all three arrays. has_more contains a boolean for each requested plural type; next_offset contains only types with more results. The default limit is 10 per type (allowed 1..200), and the offset defaults to 0 (allowed 0..2147483647). Continue one type by repeating the request with entity_types set to that type and offset set to its next_offset, keeping workspace_id, query, and applicable filters unchanged. If another page would need an offset beyond the supported range, the server returns a structured continuation_limit error instead of an unusable cursor. Offset pagination assumes an unchanged result set between requests."
     tagWorkspaceGroups operation = operation & tags .~ InsOrdSet.singleton "Workspace Groups"
     tagTimeline operation = operation & tags .~ InsOrdSet.singleton "Timeline"
     tagWorkspaceRename operation = operation
@@ -461,7 +464,12 @@ instance ToSchema DependencyMutationResult where declareNamedSchema = genericDec
 instance ToSchema TaskOverview where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema TaskReadinessRollup where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema TaskDependencySummary where declareNamedSchema = genericDeclareNamedSchema opts
-instance ToSchema UnifiedSearchQuery where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema UnifiedSearchQuery where
+  declareNamedSchema _ = do
+    NamedSchema searchName searchSchema <- genericDeclareNamedSchema opts (Proxy @UnifiedSearchQuery)
+    pure $ NamedSchema searchName $ searchSchema
+      & properties . at "limit" ?~ Inline (mempty & type_ ?~ OpenApiInteger & nullable ?~ True & minimum_ ?~ 1 & maximum_ ?~ 200)
+      & properties . at "offset" ?~ Inline (mempty & type_ ?~ OpenApiInteger & nullable ?~ True & minimum_ ?~ 0 & maximum_ ?~ fromIntegral maxUnifiedSearchOffset)
 instance ToSchema UnifiedSearchResults where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema AuditLogEntry where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema RevertResult where declareNamedSchema = genericDeclareNamedSchema opts

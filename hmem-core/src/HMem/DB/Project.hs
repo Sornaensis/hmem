@@ -13,6 +13,7 @@ module HMem.DB.Project
   , purgeProjectCascade
   , listProjects
   , listProjectsWithQuery
+  , listProjectsForSearch
   , listProjectChildren
   , listFilteredProjectChildren
   ) where
@@ -594,9 +595,17 @@ listProjects pool wsId mstatus mlimit moffset =
     }
 
 listProjectsWithQuery :: Pool Hasql.Connection -> ProjectListQuery -> IO [Project]
-listProjectsWithQuery pool pq = do
-  let (lim, off) = capPaginationOverfetch pq.limit pq.offset
-      searchLang = fromMaybe "english" pq.searchLanguage
+listProjectsWithQuery pool pq =
+  listProjectsWithPage pool pq (capPaginationOverfetch pq.limit pq.offset)
+
+-- Search uses the same filters and ordering, with a wider validated offset.
+listProjectsForSearch :: Pool Hasql.Connection -> ProjectListQuery -> IO [Project]
+listProjectsForSearch pool pq =
+  listProjectsWithPage pool pq (capUnifiedSearchOverfetch pq.limit pq.offset)
+
+listProjectsWithPage :: Pool Hasql.Connection -> ProjectListQuery -> (Int, Int) -> IO [Project]
+listProjectsWithPage pool pq (lim, off) = do
+  let searchLang = fromMaybe "english" pq.searchLanguage
       applyFilters row = do
         case pq.workspaceId of
           Just wid -> where_ $ row.projWorkspaceId ==. lit wid

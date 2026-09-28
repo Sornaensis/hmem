@@ -54,7 +54,9 @@
         }
       ],
       "projects": [],
-      "tasks": []
+      "tasks": [],
+      "has_more": { "observations": true },
+      "next_offset": { "observations": 1 }
     }
   },
   "observation_list": {

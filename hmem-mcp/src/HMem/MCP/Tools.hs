@@ -51,7 +51,7 @@ toolDefinitions =
   , tool "workspace_list" "List registered workspaces." (schema ["limit" .= prop "integer" "Maximum results (default 50)"] [])
   , tool "workspace_register" "Register a workspace." (schema ["name" .= prop "string" "Workspace name", "workspace_type" .= enumProp "Workspace type" ["repository", "planning", "personal", "organization"]] ["name"])
   , tool "workspace_update" "Rename a workspace. Only its display name is mutable." (strictSchema ["workspace_id" .= prop "string" "Workspace UUID", "name" .= prop "string" "New workspace display name"] ["workspace_id", "name"])
-  , tool "search" "Search observations, projects, and tasks. An Observation is a durable, non-obvious repository insight tied to file or glob subjects; subject_kind, subject, and git_sha are exact provenance filters." (schema
+  , tool "search" "Search observations, projects, and tasks (default 10 per type, limit 1..200, offset 0..2147483647). An Observation is a durable, non-obvious repository insight tied to file or glob subjects; subject_kind, subject, and git_sha are exact provenance filters. has_more reports each requested type; next_offset contains only types with another page. To continue one type, repeat with entity_types set to that type and offset set to its next_offset, keeping workspace_id, query, and filters unchanged. If a further page would exceed the offset range, the server returns a continuation_limit error." (schema
       [ "query" .= prop "string" "Optional full-text query"
       , "entity_types" .= arrayEnum "Entity types (default: observation, project, task)" ["observation", "project", "task"]
       , "subject_kind" .= enumProp "Exact kind of repository subject tied to observations" ["file", "glob"]
@@ -60,8 +60,8 @@ toolDefinitions =
       , "project_status" .= enumProp "Project status" ["active", "paused", "completed", "archived"]
       , "task_status" .= enumProp "Task status" ["todo", "in_progress", "blocked", "done", "cancelled"]
       , "project_id" .= prop "string" "Filter tasks by project UUID"
-      , "limit" .= prop "integer" "Maximum results per entity type"
-      , "offset" .= prop "integer" "Result offset per entity type"
+      , "limit" .= prop "integer" "Maximum results per entity type (default 10, 1..200)"
+      , "offset" .= prop "integer" "Result offset per entity type (0..2147483647)"
       ] [])
   , tool "observation_create" "Create an Observation: a durable, non-obvious repository insight tied to one or more repository-relative file or glob subjects. git_sha records the repository state where the insight was established; use it as a sentinel to decide whether the insight needs re-audit, not as timeless proof. Pass subjects as an ordered array; they are OR alternatives and, with git_sha, immutable after creation. File subjects must be concrete paths. Glob subjects may use only *, ?, and ** path components (for example my/src/proj/**/*.java)." (schema
       [ "subjects" .= object ["type" .= ("array" :: Text), "description" .= ("One to " <> T.pack (show maxObservationSubjects) <> " ordered repository-relative file or glob subjects tied to this durable insight; duplicate entries are removed in first-occurrence order"), "minItems" .= (1 :: Int), "maxItems" .= maxObservationSubjects, "items" .= object ["type" .= ("object" :: Text), "properties" .= object ["subject_kind" .= enumProp "Kind of repository subject tied to this durable insight" ["file", "glob"], "subject" .= prop "string" "Canonical repository-relative path or safe glob tied to this durable insight"], "required" .= (["subject_kind", "subject"] :: [Text])]]
@@ -549,6 +549,8 @@ compactSearchResults value = object
   [ "observations" .= mapField "observations" compactObservationSummary value
   , "projects" .= mapField "projects" compactProjectSummary value
   , "tasks" .= mapField "tasks" compactTaskSummary value
+  , "has_more" .= fromMaybe (object []) (field "has_more" value)
+  , "next_offset" .= fromMaybe (object []) (field "next_offset" value)
   ]
 
 compactProjectOverview :: Value -> Value

@@ -209,7 +209,9 @@ handleDBErrors action = do
       throwError $ case exception of
         DBUniqueViolation{} -> badRequest "conflict" "Resource already exists"
         DBForeignKeyViolation{} -> badRequest "invalid_reference" "Referenced resource does not exist"
-        DBCheckViolation{} -> badRequest "invalid_request" "Request violates a data constraint"
+        DBCheckViolation message
+          | message == Search.unifiedSearchContinuationError -> badRequest "continuation_limit" message
+          | otherwise -> badRequest "invalid_request" "Request violates a data constraint"
         -- The task-dependency trigger is the authoritative cycle guard. Its
         -- rejection is a caller-correctable graph validation error, not an
         -- unexpected database failure.

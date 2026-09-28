@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M3KDCBSXYXJKEC2X6331ZD09"
+relation = "amends"
+from_record = "R01M3KDCBSX9DH5QBQHX3WV2BZP"
+subject_adr = "A01M38ZM4YHAEMP41G8KFHWEG75"
+to_records = ["R01M38ZM53AQCNP1WBA6ZRNKY1Q"]
++++
+
+Clarify exact embedding-space isolation, the legacy default, single-vector storage, and caller-supplied query vectors without changing optional provisioning or GPU-only automatic generation.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0ifSwiYiI6ImJhNTRiNGU5MTNlZWE0MzZiNmZiMTM1NTljZjY0NDI0MTJiNGJjNjAiLCJpIjoic2hhMjU2OmRGUGl6MFI2R0U3dGZ3NTBXUEtIRmhnQVRiUFRweWRtNEdVT1dlTVk2Z2siLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTNLRENCU1hZWEpLRUMyWDYzMzFaRDA5Iiwib3AiOiJPMDFNM0tEQ0JTWDlESDVRQlFIWDNXVjJCWlAiLCJwIjpbIlIwMU0zOFpNNTNBUUNOUDFXQkE2WlJOS1kxUSJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjowbjJDdnBYVXQ0TlVEd3Z5WVJLclZxcjAzbTZtSWU3NWdLUS0wZUY5N2tRIiwidCI6MTc5MDU3OTE5MTYxMywidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

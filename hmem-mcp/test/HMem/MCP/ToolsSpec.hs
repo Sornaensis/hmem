@@ -80,6 +80,51 @@ spec = do
             ])
           response `shouldSatisfy` isMcpError
           response `shouldSatisfy` contains expected
+  describe "Nullable project and task updates" $ do
+    it "advertises exactly the clearable fields as string or null and requires only the entity ID" $ do
+      sort (schemaProperties "project_update") `shouldBe` sort ["project_id", "name", "description", "parent_id", "status", "priority"]
+      sort (schemaProperties "task_update") `shouldBe` sort ["task_id", "title", "description", "project_id", "parent_id", "status", "priority", "due_at"]
+      schemaRequired "project_update" `shouldBe` ["project_id"]
+      schemaRequired "task_update" `shouldBe` ["task_id"]
+      forM_ [("project_update", ["description", "parent_id"]), ("task_update", ["description", "project_id", "parent_id", "due_at"])] $ \(name, fields) ->
+        forM_ fields $ \field ->
+          (schemaProperty name field >>= jsonField "anyOf") `shouldSatisfy` maybe False stringOrNullTypes
+      forM_ [("project_update", ["project_id", "name", "status", "priority"]), ("task_update", ["task_id", "title", "status", "priority"])] $ \(name, fields) ->
+        forM_ fields $ \field ->
+          (schemaProperty name field >>= jsonField "anyOf") `shouldBe` Nothing
+      forM_ [("project_update", "project_id"), ("task_update", "task_id")] $ \(name, field) ->
+        (schemaProperty name field >>= jsonField "type") `shouldBe` Just (String "string")
+
+    it "parses and forwards omitted, null, and value updates without resending other fields" $ do
+      let projectCases =
+            [ (object ["project_id" .= observationId], object [])
+            , (object ["project_id" .= observationId, "description" .= Null, "parent_id" .= Null]
+              , object ["description" .= Null, "parent_id" .= Null])
+            , (object ["project_id" .= observationId, "description" .= ("Project specification" :: Text), "parent_id" .= workspaceId]
+              , object ["description" .= ("Project specification" :: Text), "parent_id" .= workspaceId])
+            ]
+          taskCases =
+            [ (object ["task_id" .= observationId], object [])
+            , (object ["task_id" .= observationId, "description" .= Null, "project_id" .= Null, "parent_id" .= Null, "due_at" .= Null]
+              , object ["description" .= Null, "project_id" .= Null, "parent_id" .= Null, "due_at" .= Null])
+            , (object ["task_id" .= observationId, "description" .= ("Task specification" :: Text), "project_id" .= workspaceId, "parent_id" .= workspaceId, "due_at" .= ("2026-10-01T12:00:00Z" :: Text)]
+              , object ["description" .= ("Task specification" :: Text), "project_id" .= workspaceId, "parent_id" .= workspaceId, "due_at" .= ("2026-10-01T12:00:00Z" :: Text)])
+            ]
+          cases = [("project_update", "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", arguments, body) | (arguments, body) <- projectCases]
+               <> [("task_update", "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", arguments, body) | (arguments, body) <- taskCases]
+      requests <- newTVarIO []
+      withMock requests $ \manager base ->
+        forM_ cases $ \(name, _, arguments, _) -> do
+          parseToolCall name arguments `shouldSatisfy` isRight
+          result <- call manager base name arguments
+          result `shouldNotSatisfy` isMcpError
+      observed <- readTVarIO requests
+      length observed `shouldBe` length cases
+      forM_ (zip cases observed) $ \((_, path, _, expectedBody), request) -> do
+        request.requestMethod `shouldBe` methodPut
+        request.requestPath `shouldBe` path
+        decode request.requestBody `shouldBe` Just expectedBody
+
   describe "Observation MCP registry" $ do
     it "advertises and parses every Observation capability, with no removed memory, link, or context tools" $ do
       toolNames `shouldContain` ["observation_create", "observation_get", "observation_update", "observation_list", "observation_match", "observation_delete", "observation_set_embedding", "observation_similar"]
@@ -116,7 +161,7 @@ spec = do
       toolDescription "observation_match" `shouldSatisfy` maybe False (\description -> all (\needle -> needle `T.isInfixOf` description) ["concrete", "OR", "glob", "next_offset"])
       schemaProperties "search" `shouldNotContain` ["memory_type", "tags", "pinned_only", "min_importance"]
       (schemaProperty "set_workspace" "workspace_id" >>= jsonField "anyOf")
-        `shouldSatisfy` maybe False nullableWorkspaceTypes
+        `shouldSatisfy` maybe False stringOrNullTypes
       toolDescription "task_finish" `shouldSatisfy` maybe False ("does not create an observation" `T.isInfixOf`)
       toolDescription "project_archive" `shouldSatisfy` maybe False (not . ("summary" `T.isInfixOf`))
       sort (schemaProperties "task_dependency") `shouldBe` sort ["task_id", "depends_on_id", "action"]
@@ -949,9 +994,9 @@ objectField :: Text -> Value -> Maybe Value
 objectField name (Object fields) = KM.lookup (Key.fromText name) fields
 objectField _ _ = Nothing
 
-nullableWorkspaceTypes :: Value -> Bool
-nullableWorkspaceTypes (Array values) = map (jsonField "type") (toList values) == [Just (String "string"), Just (String "null")]
-nullableWorkspaceTypes _ = False
+stringOrNullTypes :: Value -> Bool
+stringOrNullTypes (Array values) = map (jsonField "type") (toList values) == [Just (String "string"), Just (String "null")]
+stringOrNullTypes _ = False
 
 isUnknown :: Text -> Either String ToolCall -> Bool
 isUnknown name = \case Left message -> ("Unknown tool: " <> T.unpack name) == message; Right _ -> False

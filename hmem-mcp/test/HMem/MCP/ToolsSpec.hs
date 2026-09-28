@@ -80,7 +80,7 @@ spec = do
             ])
           response `shouldSatisfy` isMcpError
           response `shouldSatisfy` contains expected
-  describe "Nullable project and task updates" $ do
+  describe "Partial and nullable project and task updates" $ do
     it "advertises exactly the clearable fields as string or null and requires only the entity ID" $ do
       sort (schemaProperties "project_update") `shouldBe` sort ["project_id", "name", "description", "parent_id", "status", "priority"]
       sort (schemaProperties "task_update") `shouldBe` sort ["task_id", "title", "description", "project_id", "parent_id", "status", "priority", "due_at"]
@@ -95,9 +95,11 @@ spec = do
       forM_ [("project_update", "project_id"), ("task_update", "task_id")] $ \(name, field) ->
         (schemaProperty name field >>= jsonField "type") `shouldBe` Just (String "string")
 
-    it "parses and forwards omitted, null, and value updates without resending other fields" $ do
+    it "parses and forwards ID-only, one-field, null, and value updates without resending other fields" $ do
       let projectCases =
             [ (object ["project_id" .= observationId], object [])
+            , (object ["project_id" .= observationId, "name" .= ("New name" :: Text)]
+              , object ["name" .= ("New name" :: Text)])
             , (object ["project_id" .= observationId, "description" .= Null, "parent_id" .= Null]
               , object ["description" .= Null, "parent_id" .= Null])
             , (object ["project_id" .= observationId, "description" .= ("Project specification" :: Text), "parent_id" .= workspaceId]
@@ -105,6 +107,8 @@ spec = do
             ]
           taskCases =
             [ (object ["task_id" .= observationId], object [])
+            , (object ["task_id" .= observationId, "title" .= ("New title" :: Text)]
+              , object ["title" .= ("New title" :: Text)])
             , (object ["task_id" .= observationId, "description" .= Null, "project_id" .= Null, "parent_id" .= Null, "due_at" .= Null]
               , object ["description" .= Null, "project_id" .= Null, "parent_id" .= Null, "due_at" .= Null])
             , (object ["task_id" .= observationId, "description" .= ("Task specification" :: Text), "project_id" .= workspaceId, "parent_id" .= workspaceId, "due_at" .= ("2026-10-01T12:00:00Z" :: Text)]
@@ -186,21 +190,26 @@ spec = do
 
     it "guides durable project and task descriptions, status, and atomic subtasks" $ do
       toolDescriptionIs "project_create" "Create a project in the active workspace. Its description is a durable specification; status records execution state."
-      toolDescriptionIs "project_update" "Update a project's durable specification, hierarchy, or execution state. Descriptions are not logs of progress or updates."
+      toolDescriptionIs "project_update" "Update a project's durable specification, hierarchy, or execution state. Supply project_id plus only fields to change; omitted fields stay unchanged, including description and parent_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates."
       toolDescriptionIs "project_spec" "Create a project and its initial atomic tasks in one call. Descriptions are durable specifications; status records execution state. Create later-discovered atomic work as subtasks."
       toolDescriptionIs "task_create" "Create a task in the active workspace. Its description is a durable specification; status records execution state. Create later-discovered atomic work as subtasks."
-      toolDescriptionIs "task_update" "Update a task's durable specification, hierarchy, or execution state. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks."
+      toolDescriptionIs "task_update" "Update a task's durable specification, hierarchy, or execution state. Supply task_id plus only fields to change; omitted fields stay unchanged, including description, parent_id, and project_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks."
       toolDescriptionIs "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates."
       toolDescriptionIs "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress."
       toolDescriptionIs "task_finish" "Set a task's execution state to done, blocked, or cancelled. Status records progress; this does not create an observation."
       schemaPropertyDescriptionIs "project_create" "description" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates"
-      schemaPropertyDescriptionIs "project_update" "description" "Durable project specification: aims, scope, constraints, approach, and acceptance intent, or null; not a log of progress or updates"
+      schemaPropertyDescriptionIs "project_update" "project_id" "Project UUID; the only required field"
+      schemaPropertyDescriptionIs "project_update" "description" "Durable project specification: aims, scope, constraints, approach, and acceptance intent; omit to keep the existing description or use null to clear it; not a log of progress or updates"
+      schemaPropertyDescriptionIs "project_update" "parent_id" "Parent project UUID for hierarchy; omit to keep the existing parent or use null to clear it"
       schemaPropertyDescriptionIs "project_update" "status" "Execution state; record progress here, not in the description"
       schemaPropertyDescriptionIs "project_spec" "description" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates"
       schemaPropertyDescriptionIs "task_create" "description" "Optional durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates"
       schemaPropertyDescriptionIs "task_create" "parent_id" "Optional parent task UUID; use it to create a subtask for later-discovered atomic work"
-      schemaPropertyDescriptionIs "task_update" "description" "Durable task specification: scope, constraints, approach, and acceptance intent, or null; not a log of progress or updates"
-      schemaPropertyDescriptionIs "task_update" "parent_id" "Parent task UUID to make this an atomic subtask for later-discovered work, or null"
+      schemaPropertyDescriptionIs "task_update" "task_id" "Task UUID; the only required field"
+      schemaPropertyDescriptionIs "task_update" "description" "Durable task specification: scope, constraints, approach, and acceptance intent; omit to keep the existing description or use null to clear it; not a log of progress or updates"
+      schemaPropertyDescriptionIs "task_update" "project_id" "Project UUID; omit to keep the existing project or use null to clear it"
+      schemaPropertyDescriptionIs "task_update" "parent_id" "Parent task UUID to make this an atomic subtask for later-discovered work; omit to keep the existing parent or use null to clear it"
+      schemaPropertyDescriptionIs "task_update" "due_at" "ISO-8601 due time; omit to keep the existing due time or use null to clear it"
       schemaPropertyDescriptionIs "task_update" "status" "Execution state; record progress here, not in the description"
       schemaPropertyDescriptionIs "project_spec" "tasks" "Initial atomic tasks; later-discovered atomic work must be created as subtasks, not appended to a parent description"
       projectSpecTaskPropertyDescriptionIs "title" "Atomic task title"

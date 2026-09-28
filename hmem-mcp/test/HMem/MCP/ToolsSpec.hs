@@ -80,6 +80,50 @@ spec = do
             ])
           response `shouldSatisfy` isMcpError
           response `shouldSatisfy` contains expected
+  describe "project_spec MCP contract" $ do
+    it "states when atomic rejection is certain and when callers must check before retrying" $ do
+      toolDescription "project_spec" `shouldSatisfy` maybe False (\description ->
+        all (`T.isInfixOf` description)
+          [ "Validation, authorization, or database rejection creates nothing"
+          , "the outcome is uncertain"
+          , "check the workspace's projects before retrying" ])
+
+    it "sends one POST and returns full project and ordered task IDs" $ do
+      requests <- newTVarIO []
+      let arguments = object ["workspace_id" .= workspaceId, "name" .= ("new project" :: Text)
+            , "tasks" .= [object ["title" .= ("first" :: Text)], object ["title" .= ("second" :: Text)], object ["title" .= ("third" :: Text)]]]
+          expectedIds = [observationId, workspaceId, "99999999-2222-3333-4444-555555555555" :: Text]
+      withMock requests $ \manager base -> do
+        result <- call manager base "project_spec" arguments
+        result `shouldNotSatisfy` isMcpError
+        jsonField "project_id" result `shouldBe` Just (toJSON observationId)
+        jsonField "task_ids" result `shouldBe` Just (toJSON expectedIds)
+        jsonField "tasks_failed" result `shouldBe` Nothing
+      [sent] <- readTVarIO requests
+      sent.requestMethod `shouldBe` methodPost
+      sent.requestPath `shouldBe` "/api/v1/projects/spec"
+      decode sent.requestBody `shouldSatisfy` maybe False (\body -> jsonField "workspace_id" body == Just (toJSON workspaceId) && jsonField "tasks" body == jsonField "tasks" arguments)
+
+    it "rejects invalid specifications before HTTP and preserves server failures as errors" $ do
+      requests <- newTVarIO []
+      let invoke manager base arguments = handleToolCall manager base Nothing
+            (object ["name" .= ("project_spec" :: Text), "arguments" .= arguments])
+      withMock requests $ \manager base -> do
+        forM_ [[], [object ["title" .= (" " :: Text)]], [object ["title" .= ("task" :: Text), "priority" .= (11 :: Int)]], replicate 51 (object ["title" .= ("task" :: Text)])] $ \tasks ->
+          invoke manager base (object ["workspace_id" .= workspaceId, "name" .= ("project" :: Text), "tasks" .= tasks]) >>= (`shouldSatisfy` isMcpError)
+      readTVarIO requests >>= (\observed -> length observed `shouldBe` 0)
+      withWorkspaceStructuredStatusMock status400 "Middle task rejected" $ \manager base -> do
+        result <- invoke manager base (object ["workspace_id" .= workspaceId, "name" .= ("project" :: Text), "tasks" .= [object ["title" .= ("task" :: Text)] ]])
+        result `shouldSatisfy` isMcpError
+        result `shouldSatisfy` contains "[HTTP_400] Middle task rejected"
+      withStatusMock requests $ \manager base ->
+        invoke manager base (object ["workspace_id" .= workspaceId, "name" .= ("project" :: Text), "tasks" .= [object ["title" .= ("task" :: Text)] ]]) >>= (`shouldSatisfy` isMcpError)
+      withMock requests $ \manager base -> do
+        let fourTasks = replicate 4 (object ["title" .= ("task" :: Text)])
+        malformed <- invoke manager base (object ["workspace_id" .= workspaceId, "name" .= ("project" :: Text), "tasks" .= fourTasks])
+        malformed `shouldSatisfy` isMcpError
+        malformed `shouldSatisfy` contains "outcome is uncertain"
+
   describe "Partial and nullable project and task updates" $ do
     it "advertises exactly the clearable fields as string or null and requires only the entity ID" $ do
       sort (schemaProperties "project_update") `shouldBe` sort ["project_id", "name", "description", "parent_id", "status", "priority"]
@@ -191,7 +235,7 @@ spec = do
     it "guides durable project and task descriptions, status, and atomic subtasks" $ do
       toolDescriptionIs "project_create" "Create a project in the active workspace. Its description is a durable specification; status records execution state."
       toolDescriptionIs "project_update" "Update a project's durable specification, hierarchy, or execution state. Supply project_id plus only fields to change; omitted fields stay unchanged, including description and parent_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates."
-      toolDescriptionIs "project_spec" "Create a project and its initial atomic tasks in one call. Descriptions are durable specifications; status records execution state. Create later-discovered atomic work as subtasks."
+      toolDescriptionIs "project_spec" "Atomically create a project and 1 to 50 initial atomic tasks in one request. Validation, authorization, or database rejection creates nothing. If the connection or response fails, the outcome is uncertain; check the workspace's projects before retrying. Returns the project ID and task IDs in input order. Descriptions are durable specifications; status records execution state. Create later-discovered atomic work as subtasks."
       toolDescriptionIs "task_create" "Create a task in the active workspace. Its description is a durable specification; status records execution state. Create later-discovered atomic work as subtasks."
       toolDescriptionIs "task_update" "Update a task's durable specification, hierarchy, or execution state. Supply task_id plus only fields to change; omitted fields stay unchanged, including description, parent_id, and project_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks."
       toolDescriptionIs "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates."
@@ -211,7 +255,7 @@ spec = do
       schemaPropertyDescriptionIs "task_update" "parent_id" "Parent task UUID to make this an atomic subtask for later-discovered work; omit to keep the existing parent or use null to clear it"
       schemaPropertyDescriptionIs "task_update" "due_at" "ISO-8601 due time; omit to keep the existing due time or use null to clear it"
       schemaPropertyDescriptionIs "task_update" "status" "Execution state; record progress here, not in the description"
-      schemaPropertyDescriptionIs "project_spec" "tasks" "Initial atomic tasks; later-discovered atomic work must be created as subtasks, not appended to a parent description"
+      schemaPropertyDescriptionIs "project_spec" "tasks" "One to 50 initial atomic tasks, created in input order; later-discovered atomic work must be created as subtasks, not appended to a parent description"
       projectSpecTaskPropertyDescriptionIs "title" "Atomic task title"
       projectSpecTaskPropertyDescriptionIs "description" "Durable task specification: scope, constraints, approach, and acceptance intent; not a log of progress or updates"
       projectSpecTaskPropertyDescriptionIs "priority" "Task priority"
@@ -412,7 +456,7 @@ spec = do
         [ "/api/v1/workspaces", "/api/v1/search", "/api/v1/observations"
         , "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
          , "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/embedding"
-         , "/api/v1/observations/match", "/api/v1/observations/similar", "/api/v1/projects", "/api/v1/tasks"
+         , "/api/v1/observations/match", "/api/v1/observations/similar", "/api/v1/projects", "/api/v1/projects/spec", "/api/v1/tasks"
         ] `shouldBe` True
       manager <- newManager defaultManagerSettings
       initialized <- newTVarIO True
@@ -519,8 +563,9 @@ spec = do
               BL.length (encode response) `shouldSatisfy` (< 1000)
             else pure ()
         specResult <- call manager base "project_spec" (case lookup "project_spec" toolSamples of Just sample -> sample; Nothing -> object [])
-        jsonPath ["project", "description"] specResult `shouldBe` Nothing
-        jsonPath ["tasks"] specResult `shouldSatisfy` maybe False (arrayFirst (\row -> jsonField "description" row == Nothing))
+        jsonField "project_id" specResult `shouldBe` Just (toJSON observationId)
+        jsonField "task_ids" specResult `shouldBe` Just (toJSON [observationId])
+        BL.length (encode specResult) `shouldSatisfy` (< 500)
         dependencyResult <- call manager base "task_dependency" (object ["task_id" .= taskId, "depends_on_id" .= workspaceId, "action" .= ("add" :: Text)])
         jsonPath ["affected_tasks"] dependencyResult `shouldSatisfy` maybe False (arrayFirst (\effect -> jsonPath ["task", "description"] effect == Nothing && jsonField "current_status" effect == Just (String "blocked")))
 
@@ -1321,6 +1366,7 @@ responseFor method path rawQuery body
   | method == methodDelete && path == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/dependencies/11111111-2222-3333-4444-555555555555" = dependencyMutation "remove"
   | method == methodPost && path == "/api/v1/observations" = observation
   | method == methodPost && path == "/api/v1/projects" = project
+  | method == methodPost && path == "/api/v1/projects/spec" = object ["project_id" .= observationId, "task_ids" .= take (taskCount body) [observationId, workspaceId, "99999999-2222-3333-4444-555555555555" :: Text]]
   | method == methodPost && path == "/api/v1/tasks" = task
   | path == "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/overview" = object ["project" .= project, "tasks" .= [task], "subprojects" .= [project], "readiness_rollup" .= object ["completion_ready" .= True]]
   | path == "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/next-tasks" = toJSON [object ["task" .= task, "completion_gated" .= True, "open_descendant_count" .= (2 :: Int), "dependency_blocked" .= False, "open_dependency_count" .= (0 :: Int)]]
@@ -1347,6 +1393,9 @@ responseFor method path rawQuery body
       ]
     task = taskWithLongDescription
     project = projectWithLongDescription
+    taskCount payload = case decode payload >>= jsonField "tasks" of
+      Just (Array values) -> length values
+      _ -> 0
     dependencyMutation :: Text -> Value
     dependencyMutation action = object ["action" .= action, "task_id" .= observationId, "depends_on_id" .= workspaceId, "affected_tasks" .= [dependencyChange]]
 

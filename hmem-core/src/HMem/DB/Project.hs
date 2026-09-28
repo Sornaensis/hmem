@@ -1,5 +1,6 @@
 module HMem.DB.Project
   ( createProject
+  , createProjectSpec
   , getProject
   , getProjectsByIds
   , getProjectAncestorIds
@@ -17,7 +18,7 @@ module HMem.DB.Project
   ) where
 
 import Control.Exception (throwIO)
-import Control.Monad (when)
+import Control.Monad (forM, when)
 import Data.Aeson (Object, toJSON)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant ((>$<), contramap)
@@ -346,6 +347,38 @@ createProject pool cp = do
   case rows of
     (r:_) -> pure $ rowToProject r
     []    -> throwIO $ DBOtherError "createProject: INSERT returned no rows"
+
+-- | One transaction preserves the normal project and task INSERT triggers,
+-- including audit and change-stream outbox records.  Every initial task is a
+-- top-level task in the newly created project.
+createProjectSpec :: Pool Hasql.Connection -> CreateProjectSpec -> IO ProjectSpecResult
+createProjectSpec pool spec = runTransaction pool $ do
+  projectId <- Session.statement
+    (spec.workspaceId, spec.name, spec.description, fromIntegral (fromMaybe 5 spec.priority) :: Int16)
+    insertSpecProjectStatement
+  taskIds <- forM spec.tasks $ \task -> Session.statement
+    (spec.workspaceId, projectId, task.title, task.description, fromIntegral (fromMaybe 5 task.priority) :: Int16)
+    insertSpecTaskStatement
+  pure ProjectSpecResult { projectId = projectId, taskIds = taskIds }
+
+insertSpecProjectStatement :: Statement.Statement (UUID, Text, Maybe Text, Int16) UUID
+insertSpecProjectStatement = Statement.Statement
+  "INSERT INTO projects (workspace_id, name, description, priority) VALUES ($1, $2, $3, $4) RETURNING id"
+  ( contramap (\(ws, _, _, _) -> ws) (Enc.param (Enc.nonNullable Enc.uuid))
+ <> contramap (\(_, name, _, _) -> name) (Enc.param (Enc.nonNullable Enc.text))
+ <> contramap (\(_, _, description, _) -> description) (Enc.param (Enc.nullable Enc.text))
+ <> contramap (\(_, _, _, priority) -> priority) (Enc.param (Enc.nonNullable Enc.int2)) )
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.uuid))) True
+
+insertSpecTaskStatement :: Statement.Statement (UUID, UUID, Text, Maybe Text, Int16) UUID
+insertSpecTaskStatement = Statement.Statement
+  "INSERT INTO tasks (workspace_id, project_id, title, description, priority) VALUES ($1, $2, $3, $4, $5) RETURNING id"
+  ( contramap (\(ws, _, _, _, _) -> ws) (Enc.param (Enc.nonNullable Enc.uuid))
+ <> contramap (\(_, projectId, _, _, _) -> projectId) (Enc.param (Enc.nonNullable Enc.uuid))
+ <> contramap (\(_, _, title, _, _) -> title) (Enc.param (Enc.nonNullable Enc.text))
+ <> contramap (\(_, _, _, description, _) -> description) (Enc.param (Enc.nullable Enc.text))
+ <> contramap (\(_, _, _, _, priority) -> priority) (Enc.param (Enc.nonNullable Enc.int2)) )
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.uuid))) True
 
 ------------------------------------------------------------------------
 -- Read

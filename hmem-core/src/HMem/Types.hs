@@ -7,7 +7,7 @@ module HMem.Types
   , validateCreateObservationInput, validateUpdateObservationInput, validateObservationQuery, validateObservationSubjectFacetQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
   , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
   , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
-  , ProjectStatus(..), Project(..), CreateProject(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..), ProjectCardSummary(..)
+  , ProjectStatus(..), Project(..), CreateProject(..), ProjectSpecTask(..), CreateProjectSpec(..), ProjectSpecResult(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..), ProjectCardSummary(..)
   , TaskDependencySummary(..), TaskDependencyPage(..), TaskOverview(..), TaskReadinessRollup(..), TaskCardSummary(..)
   , TaskStatus(..), Task(..), NextTaskCandidate(..), TaskDependencyAutoBlockSnapshot(..), TaskDependencyStatusChange(..), LinkDependency(..), DependencyMutationResult(..), TaskMutationResult(..), CreateTask(..), UpdateTask(..), TaskListQuery(..)
   , NavigationParent(..), NavigationFilter(..), NavigationBranchRequest(..), NavigationPage(..), NavigationBranchResponse(..), NavigationEntityType(..), NavigationSummary(..), NavigationFocusResponse(..), NavigationSummariesRequest(..), NavigationSummariesResponse(..)
@@ -22,7 +22,7 @@ module HMem.Types
   , projectStatusToText, projectStatusFromText, taskStatusToText, taskStatusFromText, workspaceTypeToText, workspaceTypeFromText
   , FieldUpdate(..), parseFieldUpdate, fieldUpdatePair, applyNullableUpdate
   , maxNameBytes, maxDescriptionBytes, validFtsLanguage, maxPaginationOffset, maxPaginationLimit, capPagination, capPaginationOverfetch
-  , validateCreateWorkspaceInput, validateUpdateWorkspaceInput, validateCreateProjectInput, validateUpdateProjectInput, validateProjectListQuery, validateCreateTaskInput, validateUpdateTaskInput, validateTaskListQuery, validateCreateWorkspaceGroupInput, validateCreateSavedViewInput, validateUpdateSavedViewInput
+  , validateCreateWorkspaceInput, validateUpdateWorkspaceInput, validateCreateProjectInput, validateCreateProjectSpecInput, validateUpdateProjectInput, validateProjectListQuery, validateCreateTaskInput, validateUpdateTaskInput, validateTaskListQuery, validateCreateWorkspaceGroupInput, validateCreateSavedViewInput, validateUpdateSavedViewInput
   ) where
 
 import Data.Aeson
@@ -171,6 +171,23 @@ validateCreateProjectInput :: CreateProject -> [Text]
 validateCreateProjectInput cp =
   validateRequiredText "name" maxNameBytes cp.name
   <> validateOptionalText "description" maxDescriptionBytes cp.description
+
+validateCreateProjectSpecInput :: CreateProjectSpec -> [Text]
+validateCreateProjectSpecInput spec =
+  validateCreateProjectInput CreateProject
+    { workspaceId = spec.workspaceId, parentId = Nothing, name = spec.name
+    , description = spec.description, priority = spec.priority, metadata = Nothing }
+  <> validateOptionalIntRange "priority" 1 10 spec.priority
+  <> ["tasks must contain between 1 and 50 tasks" | null spec.tasks || length spec.tasks > 50]
+  <> concat
+    [ map (("tasks[" <> T.pack (show index) <> "].") <>)
+        (validateCreateTaskInput CreateTask
+          { workspaceId = spec.workspaceId, projectId = Nothing, parentId = Nothing
+          , title = task.title, description = task.description, priority = task.priority
+          , metadata = Nothing, dueAt = Nothing }
+         <> validateOptionalIntRange "priority" 1 10 task.priority)
+    | (index, task) <- zip [0 :: Int ..] spec.tasks
+    ]
 
 validateUpdateProjectInput :: UpdateProject -> [Text]
 validateUpdateProjectInput up =
@@ -923,6 +940,25 @@ instance ToJSON CreateProject where
   toJSON     = genericToJSON jsonOptions
 instance FromJSON CreateProject where
   parseJSON  = genericParseJSON jsonOptions
+
+data ProjectSpecTask = ProjectSpecTask
+  { title :: Text, description :: Maybe Text, priority :: Maybe Int
+  } deriving (Show, Eq, Generic)
+instance ToJSON ProjectSpecTask where toJSON = genericToJSON jsonOptions
+instance FromJSON ProjectSpecTask where parseJSON = genericParseJSON jsonOptions
+
+data CreateProjectSpec = CreateProjectSpec
+  { workspaceId :: UUID, name :: Text, description :: Maybe Text
+  , priority :: Maybe Int, tasks :: [ProjectSpecTask]
+  } deriving (Show, Eq, Generic)
+instance ToJSON CreateProjectSpec where toJSON = genericToJSON jsonOptions
+instance FromJSON CreateProjectSpec where parseJSON = genericParseJSON jsonOptions
+
+data ProjectSpecResult = ProjectSpecResult
+  { projectId :: UUID, taskIds :: [UUID]
+  } deriving (Show, Eq, Generic)
+instance ToJSON ProjectSpecResult where toJSON = genericToJSON jsonOptions
+instance FromJSON ProjectSpecResult where parseJSON = genericParseJSON jsonOptions
 
 data UpdateProject = UpdateProject
   { name        :: Maybe Text

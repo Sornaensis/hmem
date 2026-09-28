@@ -36,6 +36,8 @@ import HMem.DB.Auth qualified as Auth
 import HMem.DB.Audit qualified as Audit
 import HMem.DB.ChangeStream (ChangeScope(..), ChangeAudience(..), ResumeToken(..), ReplayPage(..), OutboxRecord(..), listOutboxAfter, replayAndRotateResumeToken)
 import HMem.DB.Pool qualified as DBPool
+import HMem.DB.Project qualified as Project
+import HMem.DB.Task qualified as Task
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
 import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
@@ -148,6 +150,58 @@ recordingObservationApp env = do
 
 spec :: Spec
 spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app))) $ do
+  describe "project_spec HTTP contract" $ do
+    it "creates all tasks in input order and persists their project placement" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-project-spec-success"
+      let body = object ["workspace_id" .= workspace.id, "name" .= ("spec project" :: T.Text)
+            , "tasks" .= [object ["title" .= ("first" :: T.Text)], object ["title" .= ("second" :: T.Text)], object ["title" .= ("third" :: T.Text)]]]
+      response <- postJson app "/api/v1/projects/spec" body
+      responseStatus response `shouldBe` status200
+      let Just created = decode (responseBody response) :: Maybe ProjectSpecResult
+      length created.taskIds `shouldBe` 3
+      project <- Project.getProject env.pool created.projectId
+      fmap (.name) project `shouldBe` Just "spec project"
+      tasks <- mapM (Task.getTask env.pool) created.taskIds
+      map (fmap (.title)) tasks `shouldBe` map Just ["first", "second", "third"]
+      map (fmap (.projectId)) tasks `shouldBe` replicate 3 (Just (Just created.projectId))
+
+    it "rejects malformed batches before mutation and rolls back a failed middle insert" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-project-spec-rollback"
+      let body tasks = object ["workspace_id" .= workspace.id, "name" .= ("spec project" :: T.Text), "tasks" .= tasks]
+          one title = object ["title" .= (title :: T.Text)]
+      forM_ [[], [one ""], [one (T.replicate 1025 "x")], [object ["title" .= ("x" :: T.Text), "priority" .= (11 :: Int)]], replicate 51 (one "many")] $ \tasks ->
+        postJson app "/api/v1/projects/spec" (body tasks) >>= expectValidationError
+      forM_
+        [ object ["workspace_id" .= workspace.id, "name" .= (" " :: T.Text), "tasks" .= [one "task"]]
+        , object ["workspace_id" .= workspace.id, "name" .= ("project" :: T.Text), "description" .= T.replicate (maxDescriptionBytes + 1) "x", "tasks" .= [one "task"]]
+        , object ["workspace_id" .= workspace.id, "name" .= ("project" :: T.Text), "priority" .= (0 :: Int), "tasks" .= [one "task"]]
+        , body [object ["title" .= ("task" :: T.Text), "description" .= T.replicate (maxDescriptionBytes + 1) "x"]]
+        ] $ \invalid -> postJson app "/api/v1/projects/spec" invalid >>= expectValidationError
+      let addConstraint = DBPool.runSession env.pool $ Session.sql "ALTER TABLE tasks ADD CONSTRAINT api_project_spec_reject_middle CHECK (title <> 'reject-middle')"
+          dropConstraint = DBPool.runSession env.pool $ Session.sql "ALTER TABLE tasks DROP CONSTRAINT api_project_spec_reject_middle"
+      bracket_ addConstraint dropConstraint $ do
+        failed <- postJson app "/api/v1/projects/spec" (body [one "first", one "reject-middle", one "third"])
+        responseStatus failed `shouldBe` status400
+        Project.listProjects env.pool workspace.id Nothing Nothing Nothing `shouldReturn` []
+        Task.listTasksByWorkspace env.pool workspace.id Nothing Nothing Nothing Nothing `shouldReturn` []
+        listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 10 `shouldReturn` []
+
+    it "requires edit access to the requested workspace" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "http-project-spec-auth"
+        otherWorkspace <- createTestWorkspace ctx.deployedEnv "http-project-spec-other"
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+          (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        readerToken <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Project spec reader"
+        let body target = encode (object ["workspace_id" .= target, "name" .= ("denied" :: T.Text), "tasks" .= [object ["title" .= ("task" :: T.Text)]]])
+            headers = [("Authorization", "Bearer " <> Text.encodeUtf8 readerToken.rawToken)]
+        request ctx.deployedApplication methodPost "/api/v1/projects/spec" (body workspace.id) >>= (\response -> responseStatus response `shouldBe` status401)
+        requestWithHeaders ctx.deployedApplication methodPost "/api/v1/projects/spec" headers (body workspace.id) >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodPost "/api/v1/projects/spec" headers (body otherWorkspace.id) >>= (\response -> responseStatus response `shouldBe` status403)
+        Project.listProjects ctx.deployedEnv.pool workspace.id Nothing Nothing Nothing `shouldReturn` []
+        Project.listProjects ctx.deployedEnv.pool otherWorkspace.id Nothing Nothing Nothing `shouldReturn` []
+
   describe "bounded workspace navigation HTTP contract" $ do
     it "retains matching ancestors, bounds pages, preserves batch order, and focuses an unloaded target" $ \(env, app) -> do
       workspace <- createTestWorkspace env "navigation-contract"

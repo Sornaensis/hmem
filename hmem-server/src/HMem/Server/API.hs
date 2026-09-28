@@ -152,6 +152,7 @@ type ProjectAPI =
        QueryParam "workspace_id" UUID :> QueryParam "status" ProjectStatus :> QueryParam "query" Text
          :> QueryParam "limit" Int :> QueryParam "offset" Int :> Get '[JSON] (PaginatedResult Project)
   :<|> ReqBody '[JSON] CreateProject :> Post '[JSON] Project
+  :<|> "spec" :> Description "Atomically creates one project and 1..50 initial top-level tasks in input order. Requires edit access to the supplied active workspace. Validation and authorization failures create nothing; database failures roll back the complete batch." :> ReqBody '[JSON] CreateProjectSpec :> Post '[JSON] ProjectSpecResult
   :<|> Capture "projectId" UUID :> Get '[JSON] Project
   :<|> Capture "projectId" UUID :> ReqBody '[JSON] UpdateProject :> Put '[JSON] Project
   :<|> Capture "projectId" UUID :> Delete '[JSON] CascadeResult
@@ -735,7 +736,7 @@ observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> simi
     pure NoContent
 
 projects :: Pool Hasql.Connection -> Server ProjectAPI
-projects pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> nextH where
+projects pool = listH :<|> createH :<|> createSpecH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> nextH where
   listH workspaceId status queryValue limit offset = do
     workspace <- maybe (throwError err403) pure workspaceId
     requireWorkspace pool workspace Auth.WorkspaceRoleRead
@@ -748,6 +749,10 @@ projects pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> over
     requireWorkspace pool input.workspaceId Auth.WorkspaceRoleEdit; reject (validateCreateProjectInput input)
     created <- handleDBErrors $ Project.createProject pool input
     pure created
+  createSpecH input = do
+    requireWorkspace pool input.workspaceId Auth.WorkspaceRoleEdit
+    reject (validateCreateProjectSpecInput input)
+    handleDBErrors $ Project.createProjectSpec pool input
   getH projectId = do
     _ <- requireEntity pool Auth.EntityProject projectId Auth.WorkspaceRoleRead
     handleDBErrors (Project.getProject pool projectId) >>= maybe (throwError err404) pure

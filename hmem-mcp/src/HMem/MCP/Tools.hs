@@ -23,7 +23,6 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (parseEither)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
-import Data.Int (Int32)
 import Data.Foldable (toList)
 import Data.List (nub)
 import Data.Maybe (catMaybes, fromMaybe)
@@ -108,13 +107,15 @@ toolDefinitions =
   , tool "project_detail" "Get project details, including its complete description." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
   , tool "project_overview" "Get a compact project overview with tasks and subprojects." (schema ["project_id" .= prop "string" "Project UUID"] ["project_id"])
   , tool "project_next_tasks" "Get actionable tasks for a project subtree." (schema ["project_id" .= prop "string" "Project UUID", "limit" .= prop "integer" "Maximum candidates", "include_blocked" .= prop "boolean" "Include blocked candidates"] ["project_id"])
-  , tool "project_spec" "Create a project and its initial atomic tasks in one call. Descriptions are durable specifications; status records execution state. Create later-discovered atomic work as subtasks." (schema
+  , tool "project_spec" "Atomically create a project and 1 to 50 initial atomic tasks in one request. Validation, authorization, or database rejection creates nothing. If the connection or response fails, the outcome is uncertain; check the workspace's projects before retrying. Returns the project ID and task IDs in input order. Descriptions are durable specifications; status records execution state. Create later-discovered atomic work as subtasks." (schema
       [ "name" .= prop "string" "Project name"
       , "description" .= prop "string" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates"
       , "priority" .= prop "integer" "Project priority"
       , "tasks" .= object
           [ "type" .= ("array" :: Text)
-          , "description" .= ("Initial atomic tasks; later-discovered atomic work must be created as subtasks, not appended to a parent description" :: Text)
+          , "description" .= ("One to 50 initial atomic tasks, created in input order; later-discovered atomic work must be created as subtasks, not appended to a parent description" :: Text)
+          , "minItems" .= (1 :: Int)
+          , "maxItems" .= (50 :: Int)
           , "items" .= object
               [ "type" .= ("object" :: Text)
               , "properties" .= object
@@ -179,7 +180,7 @@ data ToolCall
   | ProjectDetail UUID
   | ProjectOverviewCall UUID
   | ProjectNextTasks UUID (Maybe Int) Bool
-  | ProjectSpec UUID Text (Maybe Text) (Maybe Int32) [SpecTask]
+  | ProjectSpec CreateProjectSpec
   | ProjectArchive UUID
   | TaskCreate CreateTask
   | TaskUpdate UUID UpdateTask
@@ -192,8 +193,6 @@ data ToolCall
   | TaskStart UUID
   | TaskFinish UUID TaskStatus
   deriving (Show, Eq)
-
-data SpecTask = SpecTask { specTitle :: Text, specDescription :: Maybe Text, specPriority :: Maybe Int } deriving (Show, Eq)
 
 parseToolCall :: Text -> Value -> Either String ToolCall
 parseToolCall name args = case name of
@@ -214,7 +213,7 @@ parseToolCall name args = case name of
   "project_detail" -> ProjectDetail <$> required "project_id"
   "project_overview" -> ProjectOverviewCall <$> required "project_id"
   "project_next_tasks" -> ProjectNextTasks <$> required "project_id" <*> optional "limit" <*> (fromMaybe False <$> optional "include_blocked")
-  "project_spec" -> ProjectSpec <$> required "workspace_id" <*> required "name" <*> optional "description" <*> optional "priority" <*> parseTasks args
+  "project_spec" -> ProjectSpec <$> parse args
   "project_archive" -> ProjectArchive <$> required "project_id"
   "task_create" -> TaskCreate <$> parse args
   "task_update" -> TaskUpdate <$> required "task_id" <*> parse args
@@ -274,11 +273,6 @@ parseCreateObservation = parseEither $ withObject "observation_create" $ \o -> d
   if null unexpected then parseJSON (Object o)
   else fail ("observation_create received unexpected fields: " <> show unexpected)
 
-parseTasks :: Value -> Either String [SpecTask]
-parseTasks = parseEither $ withObject "project_spec" $ \o -> do
-  values <- o .: "tasks"
-  mapM (withObject "task" $ \t -> SpecTask <$> t .: "title" <*> t .:? "description" <*> t .:? "priority") values
-
 validateToolCall :: ToolCall -> Either String ToolCall
 validateToolCall call = case call of
   ObservationCreate input -> checked (validateCreateObservationInput input) call
@@ -303,12 +297,7 @@ validateToolCall call = case call of
     | taskId == dependsOnId -> Left "task_dependency: a task cannot depend on itself"
     | action `notElem` ["add", "remove"] -> Left "task_dependency: action must be add or remove"
     | otherwise -> Right call
-  ProjectSpec _ name _ _priority tasks
-    | T.null (T.strip name) -> Left "project_spec: name must not be blank"
-    | null tasks -> Left "project_spec: tasks must not be empty"
-    | length tasks > 50 -> Left "project_spec: tasks must contain at most 50 tasks"
-    | any (T.null . T.strip . (.specTitle)) tasks -> Left "project_spec: task titles must not be blank"
-    | otherwise -> Right call
+  ProjectSpec input -> checked (validateCreateProjectSpecInput input) call
   WorkspaceList (Just n) | n < 1 || n > maxPaginationLimit -> Left "limit must be between 1 and 200"
   ProjectNextTasks _ (Just n) _ | n < 1 || n > maxPaginationLimit -> Left "limit must be between 1 and 200"
   _ -> Right call
@@ -344,7 +333,7 @@ execute manager base apiKey = \case
   ProjectDetail pid -> request manager base apiKey "GET" ("/api/v1/projects/" <> uuidPath pid) Nothing fullProjectDetail
   ProjectOverviewCall pid -> request manager base apiKey "GET" ("/api/v1/projects/" <> uuidPath pid <> "/overview") Nothing compactProjectOverview
   ProjectNextTasks pid limit includeBlocked -> request manager base apiKey "GET" ("/api/v1/projects/" <> uuidPath pid <> "/next-tasks" <> query [("limit", show <$> limit), ("include_blocked", if includeBlocked then Just "true" else Nothing)]) Nothing compactNextTasks
-  ProjectSpec wid name description priority tasks -> executeProjectSpec manager base apiKey wid name description priority tasks
+  ProjectSpec input -> executeProjectSpec manager base apiKey input
   ProjectArchive pid -> request manager base apiKey "PUT" ("/api/v1/projects/" <> uuidPath pid) (Just (encode (object ["status" .= ("archived" :: Text)]))) (mutationAck "archived" "project" . compactProjectSummary)
   TaskCreate input -> request manager base apiKey "POST" "/api/v1/tasks" (Just (encode input)) (taskMutationAck "created")
   TaskUpdate tid input -> request manager base apiKey "PUT" ("/api/v1/tasks/" <> uuidPath tid) (Just (encode input)) (taskMutationAck "updated")
@@ -391,17 +380,18 @@ verifyWorkspace activeWorkspace (entity, value) = case textField "workspace_id" 
     | otherwise -> Left (mcpError ("task_move_batch " <> entity <> " workspace_id does not match the active workspace context"))
   Nothing -> Left (mcpError ("task_move_batch " <> entity <> " response omitted a valid workspace_id"))
 
-executeProjectSpec :: Manager -> String -> Maybe Text -> UUID -> Text -> Maybe Text -> Maybe Int32 -> [SpecTask] -> IO Value
-executeProjectSpec manager base apiKey wid name description priority specs = do
-  projectResult <- rawRequest manager base apiKey "POST" "/api/v1/projects" (Just (encode (object ["workspace_id" .= wid, "name" .= name, "description" .= description, "priority" .= priority])))
-  case projectResult of
-    Left errorValue -> pure errorValue
-    Right projectValue -> case textField "id" projectValue of
-      Nothing -> pure (mcpError "Project creation response omitted id")
-      Just projectId -> do
-        created <- mapM (\spec -> rawRequest manager base apiKey "POST" "/api/v1/tasks" (Just (encode (object ["workspace_id" .= wid, "project_id" .= projectId, "title" .= spec.specTitle, "description" .= spec.specDescription, "priority" .= spec.specPriority])))) specs
-        let taskValues = [value | Right value <- created]
-        pure (mcpJSON (object ["ok" .= True, "action" .= ("created" :: Text), "entity_type" .= ("project_spec" :: Text), "project" .= compactProjectSummary projectValue, "tasks" .= map compactTaskSummary taskValues, "tasks_failed" .= length [() | Left _ <- created]]))
+executeProjectSpec :: Manager -> String -> Maybe Text -> CreateProjectSpec -> IO Value
+executeProjectSpec manager base apiKey input = do
+  result <- rawRequest manager base apiKey "POST" "/api/v1/projects/spec" (Just (encode input))
+  pure $ case result of
+    Left errorValue -> errorValue
+    Right response -> case parseEither parseJSON response of
+      Left _ -> mcpError "Project spec response omitted valid project_id or task_ids; outcome is uncertain, so check the workspace's projects before retrying"
+      Right (created :: ProjectSpecResult)
+        | length created.taskIds /= length input.tasks -> mcpError "Project spec response returned an unexpected task count; outcome is uncertain, so check the workspace's projects before retrying"
+        | otherwise -> mcpJSON (object
+            [ "ok" .= True, "action" .= ("created" :: Text), "entity_type" .= ("project_spec" :: Text)
+            , "project_id" .= created.projectId, "task_ids" .= created.taskIds ])
 
 request :: Manager -> String -> Maybe Text -> String -> String -> Maybe BL.ByteString -> (Value -> Value) -> IO Value
 request manager base apiKey method path body shape = do

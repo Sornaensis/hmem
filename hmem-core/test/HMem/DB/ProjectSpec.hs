@@ -5,6 +5,7 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Maybe (isJust)
+import Control.Exception (bracket_, try)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID (UUID)
@@ -16,7 +17,7 @@ import Test.Hspec
 
 import HMem.DB.ChangeStream
 import HMem.DB.Observation
-import HMem.DB.Pool (runSession)
+import HMem.DB.Pool (runSession, DBException(..))
 import HMem.DB.Project
 import HMem.DB.Task qualified as Task
 import HMem.DB.TestHarness
@@ -24,8 +25,26 @@ import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Types
 
 spec :: Spec
-spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
-  describe "Project lifecycle" $ do
+spec = do
+  beforeAll setupTestPool $ aroundWith withTestTransaction $ describe "Project lifecycle" $ do
+    it "creates every initial task in order with project and task outbox events" $ \env -> do
+      workspace <- createTestWorkspace env "project-spec-success"
+      let input = CreateProjectSpec workspace.id "spec project" (Just "durable project description") (Just 7)
+            [ ProjectSpecTask "first" (Just "first description") (Just 8)
+            , ProjectSpecTask "second" Nothing Nothing
+            , ProjectSpecTask "third" Nothing (Just 2) ]
+      validateCreateProjectSpecInput input `shouldBe` []
+      created <- createProjectSpec env.pool input
+      project <- getProject env.pool created.projectId
+      fmap (.name) project `shouldBe` Just "spec project"
+      tasks <- mapM (Task.getTask env.pool) created.taskIds
+      map (fmap (.title)) tasks `shouldBe` map Just ["first", "second", "third"]
+      map (fmap (.projectId)) tasks `shouldBe` replicate 3 (Just (Just created.projectId))
+      records <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 10
+      length records `shouldBe` 4
+      let transactionId record = field "transaction" record.outboxEnvelope >>= field "id"
+      map transactionId records `shouldSatisfy` \case [Just a, Just b, Just c, Just d] -> a == b && b == c && c == d; _ -> False
+
     it "does not mutate independent observations" $ \env -> do
       workspace <- createTestWorkspace env "project-observation-isolation"
       observation <- createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/Project.hs"] "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "independent")
@@ -148,6 +167,24 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
           transactionId record = field "transaction" record.outboxEnvelope >>= field "id"
       length deleted `shouldBe` 2
       map transactionId deleted `shouldSatisfy` \case [Just first, Just second] -> first == second; _ -> False
+
+  beforeAll setupTestPool $ describe "Project spec transaction rollback" $
+    it "rolls back the project and all tasks when the middle insert fails" $ \env -> do
+      workspace <- createTestWorkspace env "project-spec-rollback"
+      let addConstraint = runSession env.pool $ Session.sql "ALTER TABLE tasks ADD CONSTRAINT project_spec_reject_middle CHECK (title <> 'reject-middle')"
+          dropConstraint = runSession env.pool $ Session.sql "ALTER TABLE tasks DROP CONSTRAINT project_spec_reject_middle"
+      bracket_ addConstraint dropConstraint $ do
+        let input = CreateProjectSpec workspace.id "rolled-back project" Nothing Nothing
+              [ ProjectSpecTask "first" Nothing Nothing
+              , ProjectSpecTask "reject-middle" Nothing Nothing
+              , ProjectSpecTask "third" Nothing Nothing ]
+        result <- try @DBException (createProjectSpec env.pool input)
+        result `shouldSatisfy` \case Left (DBCheckViolation _) -> True; _ -> False
+        projects <- listProjects env.pool workspace.id Nothing Nothing Nothing
+        projects `shouldBe` []
+        tasks <- Task.listTasksByWorkspace env.pool workspace.id Nothing Nothing Nothing Nothing
+        tasks `shouldBe` []
+        listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 10 `shouldReturn` []
 
 toInvalidations :: UUID -> UUID -> Value
 toInvalidations workspaceId projectId =

@@ -317,6 +317,20 @@ instance ToSchema CreateWorkspaceGroup where declareNamedSchema = genericDeclare
 instance ToSchema WorkspaceGroupMemberInput where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema Project where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CreateProject where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ProjectSpecTask where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema CreateProjectSpec where
+  declareNamedSchema _ = do
+    task <- declareSchemaRef (Proxy @ProjectSpecTask)
+    pure $ NamedSchema (Just "CreateProjectSpec") $ mempty
+      & type_ ?~ OpenApiObject
+      & description ?~ "Creates a project and all initial tasks atomically. Every task is top-level under the new project."
+      & properties . at "workspace_id" ?~ Inline uuidSchema
+      & properties . at "name" ?~ Inline (mempty & type_ ?~ OpenApiString)
+      & properties . at "description" ?~ Inline (mempty & type_ ?~ OpenApiString & nullable ?~ True)
+      & properties . at "priority" ?~ Inline (mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 1 & maximum_ ?~ 10 & nullable ?~ True)
+      & properties . at "tasks" ?~ Inline (mempty & type_ ?~ OpenApiArray & items ?~ OpenApiItemsObject task & minItems ?~ 1 & maxItems ?~ 50)
+      & required .~ ["workspace_id", "name", "tasks"]
+instance ToSchema ProjectSpecResult where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema UpdateProject where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema CascadeResult where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema ProjectOverview where declareNamedSchema = genericDeclareNamedSchema opts

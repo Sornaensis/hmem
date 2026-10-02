@@ -20,7 +20,50 @@ import Url
 suite : Test
 suite =
     describe "bounded Cards and Focus loading"
-        [ test "an unloaded expanded project card starts exactly its branch request" <|
+        [ test "collapsed project counts retain authoritative totals when readiness caches are reset" <|
+            \_ ->
+                let
+                    base =
+                        project "counted"
+
+                    rollup =
+                        base.readinessRollup
+
+                    summary =
+                        { base | directTaskCount = 75, readinessRollup = { rollup | openTaskCount = 60, doneTaskCount = 10, cancelledTaskCount = 5 } }
+
+                    seeded =
+                        DataLoading.mergeNavigationSummaries [ summary ] [] model
+
+                    dependencies =
+                        seeded.dependencies
+
+                    cards =
+                        seeded.cards
+
+                    recovering =
+                        { seeded | dependencies = { dependencies | projectReadinessRollups = Dict.empty }, cards = { cards | collapsedNodes = Dict.singleton "proj-counted" True }, tasks = Dict.empty }
+                in
+                Cards.viewProjectsTree workspaceId recovering
+                    |> Query.fromHtml
+                    |> Query.has [ Selector.text "60/75 tasks remaining" ]
+        , test "known empty project counts remain visible" <|
+            \_ ->
+                DataLoading.mergeNavigationSummaries [ project "empty" ] [] model
+                    |> Cards.viewProjectsTree workspaceId
+                    |> Query.fromHtml
+                    |> Query.has [ Selector.text "0 tasks" ]
+        , test "unknown project counts render unavailable instead of silently disappearing" <|
+            \_ ->
+                let
+                    base =
+                        project "unknown"
+                in
+                { model | projects = Dict.singleton base.id (Api.projectFromCardSummary base) }
+                    |> Cards.viewProjectsTree workspaceId
+                    |> Query.fromHtml
+                    |> Query.has [ Selector.text "Task counts unavailable" ]
+        , test "an unloaded expanded project card starts exactly its branch request" <|
             \_ ->
                 let
                     seeded =

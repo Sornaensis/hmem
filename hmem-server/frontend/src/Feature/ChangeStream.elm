@@ -52,6 +52,7 @@ type Action
     | RefreshTaskOverview String
     | RefreshReadiness String String
     | RevalidateNavigationSummary String String
+    | RefreshNavigation
     | RefreshNextTasks String
     | RefreshSearch String
     | RefreshObservations
@@ -369,6 +370,9 @@ invalidationActions envelope invalidation =
                 if collection == "observations" then
                     []
 
+                else if List.member collection [ "projects", "tasks" ] then
+                    [ RefreshNavigation ]
+
                 else
                     [ NoAction ]
 
@@ -401,7 +405,7 @@ invalidationActions envelope invalidation =
 
         ( Api.WorkspaceScope expected, "tree", [ "workspace", workspaceId ] ) ->
             if workspaceId == expected then
-                [ NoAction ]
+                [ RefreshNavigation ]
 
             else
                 [ BeginResync ]
@@ -504,6 +508,9 @@ coalesce actions =
 
                 RevalidateNavigationSummary kind identity ->
                     "navigation-summary:" ++ kind ++ ":" ++ identity
+
+                RefreshNavigation ->
+                    "navigation"
 
                 RefreshNextTasks workspace ->
                     "next:" ++ workspace

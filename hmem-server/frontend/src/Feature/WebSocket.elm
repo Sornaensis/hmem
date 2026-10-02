@@ -287,7 +287,7 @@ update msg model =
                 ( model, Cmd.none )
 
         CanonicalNavigationSummariesFetched guard workspaceId projectIds taskIds result ->
-            if model.selectedWorkspaceId == Just workspaceId && canonicalGuardIsCurrent guard model then
+            if model.selectedWorkspaceId == Just workspaceId && canonicalGuardIsCurrent guard.request model && guard.navigationGeneration == model.dataLoading.navigationGeneration then
                 case result of
                     Ok summaries ->
                         let
@@ -313,8 +313,22 @@ update msg model =
                         in
                         if complete then
                             let
+                                currentEntity kind entityId =
+                                    let
+                                        key =
+                                            guard.request.scopeKey ++ "|navigation-summary:" ++ kind ++ ":" ++ entityId
+                                    in
+                                    Dict.get key guard.entityGenerations /= Nothing && Dict.get key guard.entityGenerations == Dict.get key model.webSocket.targetGenerations
+
+                                currentSummaries =
+                                    { projects = List.filter (\summary -> currentEntity "project" summary.id) summaries.projects
+                                    , tasks = List.filter (\summary -> currentEntity "task" summary.id) summaries.tasks
+                                    , missingProjectIds = List.filter (currentEntity "project") summaries.missingProjectIds
+                                    , missingTaskIds = List.filter (currentEntity "task") summaries.missingTaskIds
+                                    }
+
                                 merged =
-                                    Feature.DataLoading.mergeNavigationSummaries summaries.projects summaries.tasks model
+                                    Feature.DataLoading.mergeNavigationSummaries currentSummaries.projects currentSummaries.tasks model
 
                                 dependencies =
                                     merged.dependencies
@@ -347,10 +361,10 @@ update msg model =
                                 -- cards visible until an authoritative branch
                                 -- replay can decide their filtered placement.
                                 staleProjectIds =
-                                    summaries.missingProjectIds
+                                    currentSummaries.missingProjectIds
 
                                 staleTaskIds =
-                                    summaries.missingTaskIds
+                                    currentSummaries.missingTaskIds
 
                                 mergedProjects =
                                     merged.projects
@@ -360,12 +374,12 @@ update msg model =
 
                                 updated =
                                     { merged
-                                        | projects = List.foldl Dict.remove mergedProjects summaries.missingProjectIds
-                                        , tasks = List.foldl Dict.remove mergedTasks summaries.missingTaskIds
+                                        | projects = List.foldl Dict.remove mergedProjects currentSummaries.missingProjectIds
+                                        , tasks = List.foldl Dict.remove mergedTasks currentSummaries.missingTaskIds
                                         , dataLoading =
                                             { loading
-                                                | projectCardSummaries = List.foldl Dict.remove loading.projectCardSummaries summaries.missingProjectIds
-                                                , taskCardSummaries = List.foldl Dict.remove loading.taskCardSummaries summaries.missingTaskIds
+                                                | projectCardSummaries = List.foldl Dict.remove loading.projectCardSummaries currentSummaries.missingProjectIds
+                                                , taskCardSummaries = List.foldl Dict.remove loading.taskCardSummaries currentSummaries.missingTaskIds
 
                                                 -- A summary response is authoritative for card state,
                                                 -- but not for server-side filtered branch membership.
@@ -379,26 +393,26 @@ update msg model =
                                             }
                                         , dependencies =
                                             { dependencies
-                                                | projectReadinessRollups = List.foldl Dict.remove dependencies.projectReadinessRollups summaries.missingProjectIds
-                                                , taskReadinessRollups = List.foldl Dict.remove dependencies.taskReadinessRollups summaries.missingTaskIds
+                                                | projectReadinessRollups = List.foldl Dict.remove dependencies.projectReadinessRollups currentSummaries.missingProjectIds
+                                                , taskReadinessRollups = List.foldl Dict.remove dependencies.taskReadinessRollups currentSummaries.missingTaskIds
                                             }
                                     }
                             in
-                            if filteredNavigation && (not (List.isEmpty projectIds) || not (List.isEmpty taskIds)) then
+                            if filteredNavigation && (not (List.isEmpty currentSummaries.projects) || not (List.isEmpty currentSummaries.tasks) || not (List.isEmpty currentSummaries.missingProjectIds) || not (List.isEmpty currentSummaries.missingTaskIds)) then
                                 -- Summary payloads establish card state, but only the
                                 -- bounded branch endpoint owns descendant-aware filtered
                                 -- membership. Reissue its root page so matching cards are
                                 -- re-admitted and moved/nonmatching cards disappear.
-                                Feature.DataLoading.revalidateNavigationForAffectedBranches summaries.projects summaries.tasks updated
+                                Feature.DataLoading.revalidateNavigationForAffectedBranches currentSummaries.projects currentSummaries.tasks updated
 
                             else
                                 Feature.DataLoading.ensureAllNavigationPresentations updated
 
                         else
-                            canonicalHttpFailure guard (Http.BadBody "Navigation summary response did not match its targeted revalidation request") model
+                            canonicalHttpFailure guard.request (Http.BadBody "Navigation summary response did not match its targeted revalidation request") model
 
                     Err error ->
-                        canonicalHttpFailure guard error model
+                        canonicalHttpFailure guard.request error model
 
             else
                 ( model, Cmd.none )
@@ -716,19 +730,28 @@ applyCanonicalSnapshot scope profile items token model =
                             shellModel =
                                 { withStream | workspaces = Dict.union snapshot.workspaces withStream.workspaces }
 
+                            ( navigationModel, navigationCmd ) =
+                                if shellModel.dataLoading.activeWorkspaceLoadToken /= Nothing then
+                                    -- Initial bootstrap already owns a fresh bounded
+                                    -- root request and its blocking-load token.
+                                    ( shellModel, Cmd.none )
+
+                                else
+                                    Feature.DataLoading.revalidateNavigationForFilters shellModel
+
                             ( observationModel, observationCmd ) =
-                                Observation.refreshActiveResults shellModel
+                                Observation.refreshActiveResults navigationModel
                         in
                         case observationModel.focus.focusedEntity of
                             Just ( entityType, entityId ) ->
                                 let
                                     ( focusedModel, focusCmd ) =
-                                        Feature.DataLoading.beginNavigationFocus workspaceId entityType entityId observationModel
+                                        Feature.DataLoading.revalidateNavigationFocus workspaceId entityType entityId observationModel
                                 in
-                                ( focusedModel, Cmd.batch [ observationCmd, focusCmd ] )
+                                ( focusedModel, Cmd.batch [ navigationCmd, observationCmd, focusCmd ] )
 
                             Nothing ->
-                                ( observationModel, observationCmd )
+                                ( observationModel, Cmd.batch [ navigationCmd, observationCmd ] )
 
                     else
                         let
@@ -863,7 +886,7 @@ beginScopedResync scope model =
 
         cacheCleared =
             if scopeMatchesSelectedWorkspace scope invalidated then
-                { invalidated | dependencies = Dependencies.resetCache invalidated.dependencies }
+                Feature.DataLoading.invalidateNavigationRequests { invalidated | dependencies = Dependencies.resetCache invalidated.dependencies }
 
             else
                 invalidated
@@ -883,7 +906,7 @@ invalidateScopeRequests scope model =
         (\webSocket ->
             { webSocket
                 | streams = Dict.update (ChangeStream.scopeKey scope) (Maybe.map (\stream -> { stream | live = False, resumeToken = Nothing, failure = Nothing })) webSocket.streams
-                , targetGenerations = Dict.filter (\target _ -> not (String.startsWith prefix target)) webSocket.targetGenerations
+                , targetGenerations = Dict.map (\target generation -> if String.startsWith prefix target then generation + 1 else generation) webSocket.targetGenerations
             }
         )
         model
@@ -936,19 +959,41 @@ applyActions scope actions model =
                         ChangeStream.RevalidateNavigationSummary _ _ ->
                             False
 
+                        ChangeStream.RefreshNavigation ->
+                            False
+
                         _ ->
                             True
                 )
                 actions
 
+        dependencyOnly =
+            List.any
+                (\action ->
+                    case action of
+                        ChangeStream.RefreshTaskDependencies _ _ _ _ ->
+                            True
+
+                        _ ->
+                            False
+                )
+                actions
+
+        ( navigationModel, navigationCmd ) =
+            if scopeMatchesSelectedWorkspace scope model && (List.member ChangeStream.RefreshNavigation actions || (not dependencyOnly && List.any (not << navigationTargetLoaded model) navigationTargets)) then
+                Feature.DataLoading.revalidateNavigationForFilters model
+
+            else
+                ( model, Cmd.none )
+
         ( revalidationModel, revalidationCmd ) =
             if scopeMatchesSelectedWorkspace scope model then
-                requestNavigationSummaryBatches scope navigationTargets model
+                requestNavigationSummaryBatches scope navigationTargets navigationModel
 
             else
                 ( model, Cmd.none )
     in
-    List.foldl (applyAction scope) ( revalidationModel, revalidationCmd ) otherActions
+    List.foldl (applyAction scope) ( revalidationModel, Cmd.batch [ navigationCmd, revalidationCmd ] ) otherActions
 
 
 applyAction : ChangeStream.Scope -> ChangeStream.Action -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
@@ -1032,6 +1077,9 @@ applyAction scope action ( model, accumulated ) =
                     requestNavigationSummaryBatches scope [ ( entity, identity ) ] model
             in
             ( next, Cmd.batch [ accumulated, command ] )
+
+        ChangeStream.RefreshNavigation ->
+            ( model, accumulated )
 
         ChangeStream.RefreshNextTasks workspaceId ->
             if model.selectedWorkspaceId == Just workspaceId then
@@ -1122,7 +1170,7 @@ applyAction scope action ( model, accumulated ) =
                     { webSocket
                         | state = remainingState
                         , streams = remainingStreams
-                        , targetGenerations = Dict.filter (\target _ -> not (String.startsWith scopePrefix target)) webSocket.targetGenerations
+                        , targetGenerations = Dict.map (\target generation -> if String.startsWith scopePrefix target then generation + 1 else generation) webSocket.targetGenerations
                     }
 
                 scopeCommand =
@@ -1359,25 +1407,25 @@ scopeMatchesSelectedWorkspace scope model =
             False
 
 
+navigationTargetLoaded : Model -> ( String, String ) -> Bool
+navigationTargetLoaded model ( entityType, entityId ) =
+    case entityType of
+        "project" ->
+            Set.member entityId model.dataLoading.navigationVisibleProjectIds || Dict.member entityId model.dataLoading.projectCardSummaries
+
+        "task" ->
+            Set.member entityId model.dataLoading.navigationVisibleTaskIds || Dict.member entityId model.dataLoading.taskCardSummaries
+
+        _ ->
+            False
+
+
 requestNavigationSummaryBatches : ChangeStream.Scope -> List ( String, String ) -> Model -> ( Model, Cmd Msg )
 requestNavigationSummaryBatches scope targets model =
     let
         -- A summary batch is a revalidation of cards the current bounded
         -- projection already owns.  Never let an event for an unloaded or
         -- filtered-out branch populate the tree behind the server filter.
-        loadedTarget ( entityType, entityId ) =
-            case entityType of
-                "project" ->
-                    Set.member entityId model.dataLoading.navigationVisibleProjectIds
-                        || Dict.member entityId model.dataLoading.projectCardSummaries
-
-                "task" ->
-                    Set.member entityId model.dataLoading.navigationVisibleTaskIds
-                        || Dict.member entityId model.dataLoading.taskCardSummaries
-
-                _ ->
-                    False
-
         uniqueTargets =
             List.foldl
                 (\target values ->
@@ -1390,7 +1438,7 @@ requestNavigationSummaryBatches scope targets model =
                 []
                 targets
                 |> List.reverse
-                |> List.filter loadedTarget
+                |> List.filter (navigationTargetLoaded model)
 
         chunks remaining =
             case remaining of
@@ -1426,6 +1474,15 @@ requestNavigationSummaryBatches scope targets model =
 
                 targetKey =
                     "navigation-summaries:" ++ String.join "," (List.map (\( entityType, entityId ) -> entityType ++ ":" ++ entityId) batch)
+                entityModel =
+                    List.foldl (\( entityType, entityId ) currentModel -> advanceCanonicalTarget scope ("navigation-summary:" ++ entityType ++ ":" ++ entityId) currentModel) current batch
+
+                entityGenerations =
+                    batch |> List.filterMap (\( entityType, entityId ) ->
+                        let
+                            key = ChangeStream.scopeKey scope ++ "|navigation-summary:" ++ entityType ++ ":" ++ entityId
+                        in
+                        Dict.get key entityModel.webSocket.targetGenerations |> Maybe.map (Tuple.pair key)) |> Dict.fromList
             in
             requestCanonical scope
                 targetKey
@@ -1434,10 +1491,10 @@ requestNavigationSummaryBatches scope targets model =
                         workspaceId
                         projectIds
                         taskIds
-                        (CanonicalNavigationSummariesFetched guard workspaceId projectIds taskIds)
+                        (CanonicalNavigationSummariesFetched { request = guard, entityGenerations = entityGenerations, navigationGeneration = entityModel.dataLoading.navigationGeneration } workspaceId projectIds taskIds)
                 )
                 accumulated
-                current
+                entityModel
     in
     if List.isEmpty uniqueTargets then
         ( model, Cmd.none )

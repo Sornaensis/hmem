@@ -1,4 +1,4 @@
-module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
@@ -594,7 +594,7 @@ beginRootNavigationPage entityKind model =
 
             else if canLoad then
                 ( { model | dataLoading = { loading | rootNavigationRequest = Just request, rootNavigationPresentation = Just nextPresentation } }
-                , Api.fetchRootNavigation model.flags.apiUrl workspaceId (navigationFilterQuery model)
+                , Api.fetchNavigationBranch model.flags.apiUrl workspaceId "workspace_root" Nothing projectOffset taskOffset (navigationFilterQuery model)
                     (GotRootNavigation workspaceId model.sessionRequestEpoch Nothing request.generation request.filterFingerprint projectOffset taskOffset)
                 )
 
@@ -776,8 +776,60 @@ revalidateNavigationForAffectedBranches affectedProjects affectedTasks model =
 
         ( affectedModel, affectedCommands ) =
             replayAffectedNavigationBranches affectedProjects affectedTasks replayedModel
+
+        currentLoading =
+            affectedModel.dataLoading
+
+        retainPresentation presentation =
+            { presentation | generation = currentLoading.navigationGeneration }
+
+        withPresentations =
+            { affectedModel
+                | dataLoading =
+                    { currentLoading
+                        | rootNavigationPresentation = Maybe.map retainPresentation preserved.rootNavigationPresentation
+                        , navigationPresentations = Dict.union (Dict.map (\_ -> retainPresentation) preserved.navigationPresentations) currentLoading.navigationPresentations
+                    }
+            }
     in
-    ( affectedModel, Cmd.batch (command :: replayCommands ++ affectedCommands) )
+    ( withPresentations, Cmd.batch (command :: replayCommands ++ affectedCommands) )
+
+
+{-| Retire pending bounded responses as soon as the scoped stream is invalidated,
+while retaining the last canonical cards and the user's presentation positions.
+-}
+invalidateNavigationRequests : Model -> Model
+invalidateNavigationRequests model =
+    let
+        loading =
+            model.dataLoading
+
+        generation =
+            loading.navigationGeneration + 1
+
+        retire request =
+            { request | generation = generation, inFlight = False, succeeded = False }
+
+        retain presentation =
+            { presentation | generation = generation }
+    in
+    { model
+        | dataLoading =
+            { loading
+                | navigationGeneration = generation
+                , rootNavigationRequest = Maybe.map retire loading.rootNavigationRequest
+                , loadedNavigationBranches = Dict.map (\_ -> retire) loading.loadedNavigationBranches
+                , rootNavigationPresentation = Maybe.map retain loading.rootNavigationPresentation
+                , navigationPresentations = Dict.map (\_ -> retain) loading.navigationPresentations
+                , projectCardDetailRequests = Dict.empty
+                , taskCardDetailRequests = Dict.empty
+                , activeNavigationFocus = Nothing
+                , navigationFocuses = Dict.empty
+                , activeWorkspaceLoadToken = Nothing
+                , loadingWorkspaceData = False
+                , pendingWorkspaceLoads = 0
+            }
+    }
 
 
 {-| Replay every already-loaded expanded branch with the root's new generation.
@@ -924,6 +976,16 @@ replayBranch workspaceId generation fingerprint parentKind parentId previous mod
 
 beginNavigationFocus : String -> String -> String -> Model -> ( Model, Cmd Msg )
 beginNavigationFocus workspaceId entityType entityId model =
+    requestNavigationFocus False workspaceId entityType entityId model
+
+
+revalidateNavigationFocus : String -> String -> String -> Model -> ( Model, Cmd Msg )
+revalidateNavigationFocus workspaceId entityType entityId model =
+    requestNavigationFocus True workspaceId entityType entityId model
+
+
+requestNavigationFocus : Bool -> String -> String -> String -> Model -> ( Model, Cmd Msg )
+requestNavigationFocus force workspaceId entityType entityId model =
     let
         alreadyPresent =
             case entityType of
@@ -941,9 +1003,11 @@ beginNavigationFocus workspaceId entityType entityId model =
             Dict.get requestKey model.dataLoading.navigationFocuses
 
         requestedAncestorOffset =
-            previousRequest
-                |> Maybe.map .ancestorOffset
-                |> Maybe.withDefault 0
+            if force then
+                0
+
+            else
+                previousRequest |> Maybe.map .ancestorOffset |> Maybe.withDefault 0
 
         retryable =
             previousRequest
@@ -976,7 +1040,7 @@ beginNavigationFocus workspaceId entityType entityId model =
                 Nothing ->
                     False
     in
-    if (alreadyPresent && not retryable) || alreadyInFlight || (entityType /= "project" && entityType /= "task") then
+    if (alreadyPresent && not retryable && not force) || (alreadyInFlight && not force) || (entityType /= "project" && entityType /= "task") then
         ( model, Cmd.none )
 
     else
@@ -1497,13 +1561,104 @@ ensureSummaries projects tasks model =
     ( withTaskBranches, Cmd.batch commands )
 
 
+{-| Refill only as far as the retained presentation window after a bounded
+revalidation; never chase all remaining workspace pages.
+-}
+restoreNavigationPresentation : String -> Maybe String -> Model -> ( Model, Cmd Msg )
+restoreNavigationPresentation parentKind maybeParentId model =
+    let
+        loading =
+            model.dataLoading
+
+        key =
+            navigationBranchKey parentKind maybeParentId
+
+        rootBranch =
+            parentKind == "workspace_root"
+
+        expected =
+            if rootBranch then loading.rootNavigationRequest else Dict.get key loading.loadedNavigationBranches
+    in
+    case expected of
+        Just previous ->
+            if previous.inFlight || not previous.succeeded then
+                ( model, Cmd.none )
+
+            else
+                let
+                    parent =
+                        Maybe.map (Tuple.pair parentKind) maybeParentId
+
+                    presentation =
+                        presentationFor previous (if rootBranch then loading.rootNavigationPresentation else Dict.get key loading.navigationPresentations)
+
+                    needs kind offset hasMore =
+                        offset > 0 && presentationNeedsTransport parentKind parent kind model presentation previous && hasMore
+
+                    projectPending =
+                        needs "project" presentation.projectOffset previous.projectHasMore
+
+                    taskPending =
+                        needs "task" presentation.taskOffset previous.taskHasMore
+
+                    clamp kind offset hasMore =
+                        if hasMore then offset else
+                            let
+                                capacity = max 1 (presentationCapacity parentKind parent kind model)
+                                lastOffset = (max 0 (cachedOrdinaryCount parent kind model previous - 1) // capacity) * capacity
+                            in
+                            min offset lastOffset
+
+                    retained =
+                        { presentation | projectOffset = clamp "project" presentation.projectOffset previous.projectHasMore, taskOffset = clamp "task" presentation.taskOffset previous.taskHasMore }
+
+                    request =
+                        { previous
+                            | projectOffset = previous.projectOffset + (if projectPending then transportPageSize else 0)
+                            , taskOffset = previous.taskOffset + (if taskPending then transportPageSize else 0)
+                            , projectRequestPending = projectPending
+                            , taskRequestPending = taskPending
+                            , inFlight = projectPending || taskPending
+                            , succeeded = not (projectPending || taskPending)
+                        }
+
+                    updated =
+                        { model | dataLoading =
+                            if rootBranch then
+                                { loading | rootNavigationRequest = Just request, rootNavigationPresentation = Just retained }
+                            else
+                                { loading | loadedNavigationBranches = Dict.insert key request loading.loadedNavigationBranches, navigationPresentations = Dict.insert key retained loading.navigationPresentations }
+                        }
+                in
+                if request.inFlight then
+                    ( updated
+                    , Api.fetchNavigationBranch model.flags.apiUrl request.workspaceId parentKind maybeParentId request.projectOffset request.taskOffset (navigationFilterQuery model)
+                        (if rootBranch then
+                            GotRootNavigation request.workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint request.projectOffset request.taskOffset
+                         else
+                            GotNavigationBranch request.workspaceId request.sessionEpoch request.generation key request.filterFingerprint request.projectOffset request.taskOffset)
+                    )
+
+                else
+                    ( updated, Cmd.none )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
 ensureNavigationPresentation : String -> Maybe String -> Model -> ( Model, Cmd Msg )
 ensureNavigationPresentation parentKind maybeParentId model =
     let
+        ( restored, transportCmd ) =
+            restoreNavigationPresentation parentKind maybeParentId model
+
         ( projects, tasks ) =
-            presentedNavigationSummaries parentKind maybeParentId model
+            presentedNavigationSummaries parentKind maybeParentId restored
+
+        ( hydrated, detailCmd ) =
+            ensureSummaries projects tasks restored
     in
-    ensureSummaries projects tasks model
+    ( hydrated, Cmd.batch [ transportCmd, detailCmd ] )
 
 
 ensureAllNavigationPresentations : Model -> ( Model, Cmd Msg )

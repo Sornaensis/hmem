@@ -102,6 +102,13 @@ type alias CanonicalRequestGuard =
     }
 
 
+type alias CanonicalNavigationRequestGuard =
+    { request : CanonicalRequestGuard
+    , entityGenerations : Dict String Int
+    , navigationGeneration : Int
+    }
+
+
 type alias DataLoadingModel =
     { loadingWorkspaces : Bool
     , activeWorkspaceListLoadToken : Maybe Int
@@ -743,7 +750,7 @@ type Msg
     | CanonicalTaskOverviewFetched CanonicalRequestGuard String (Result Http.Error Api.TaskOverview)
     | CanonicalTaskReadinessFetched CanonicalRequestGuard String (Result Http.Error Api.TaskOverview)
     | CanonicalProjectOverviewFetched CanonicalRequestGuard String (Result Http.Error Api.ProjectOverview)
-    | CanonicalNavigationSummariesFetched CanonicalRequestGuard String (List String) (List String) (Result Http.Error Api.NavigationSummariesResponse)
+    | CanonicalNavigationSummariesFetched CanonicalNavigationRequestGuard String (List String) (List String) (Result Http.Error Api.NavigationSummariesResponse)
     | CanonicalCatalogueFetched CanonicalRequestGuard (Result Http.Error (Api.PaginatedResult Api.Workspace))
     | CanonicalGroupsFetched CanonicalRequestGuard (Result Http.Error (Api.PaginatedResult Api.WorkspaceGroup))
     | CanonicalGroupMembersFetched CanonicalRequestGuard String (Result Http.Error (List String))

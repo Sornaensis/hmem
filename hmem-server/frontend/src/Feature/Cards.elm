@@ -1601,7 +1601,14 @@ viewProjectNode projection model depth project hasSearch query =
                 |> branchPresentationWindow "project" project.id "task" .id (pinnedTaskIds model) model
 
         maybeProjectRollup =
-            Dict.get project.id projection.projectRollups
+            case Dict.get project.id projection.projectRollups of
+                Just rollup ->
+                    Just rollup
+
+                Nothing ->
+                    -- A scoped resync retires readiness caches before its bounded
+                    -- navigation refresh. Retain the last canonical card total.
+                    Dict.get project.id model.dataLoading.projectCardSummaries |> Maybe.map .readinessRollup
 
         localProjectAggregate =
             case maybeProjectRollup of
@@ -1708,7 +1715,12 @@ viewProjectNode projection model depth project hasSearch query =
                 summaryParts =
                     List.filterMap identity
                         [ countLabel remainingSubprojects completedSubprojects "subproject" "subprojects"
-                        , countLabel remainingTasks completedTasks "task" "tasks"
+                        , case maybeProjectRollup of
+                            Nothing ->
+                                Just "Task counts unavailable"
+
+                            Just _ ->
+                                countLabel remainingTasks completedTasks "task" "tasks" |> Maybe.withDefault "0 tasks" |> Just
                         , if dependencyBlockedTasks > 0 then
                             Just (countPhrase dependencyBlockedTasks "dependency-blocked task" "dependency-blocked tasks")
 

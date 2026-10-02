@@ -24,7 +24,33 @@ import Url
 suite : Test
 suite =
     describe "bounded navigation response guards"
-        [ test "a branch response retains its request state and makes returned children visible" <|
+        [ test "a shell resync revalidates root, loaded branches, and an already-loaded focus" <|
+            \_ ->
+                let
+                    seeded =
+                        loadRoot workspaceId [ project "parent" Nothing ] [] model
+
+                    ( branched, _ ) =
+                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") seeded
+
+                    focus =
+                        branched.focus
+
+                    source =
+                        { branched | auth = { status = AuthReady, mode = Just "test" }, sessionContext = Just editorSession, focus = { focus | focusedEntity = Just ( "project", "parent" ) } }
+
+                    recovered =
+                        WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) source |> Tuple.first
+                in
+                Expect.equal
+                    { advanced = True, rootPending = True, branchPending = True, focusPending = True, retained = True }
+                    { advanced = recovered.dataLoading.navigationGeneration > source.dataLoading.navigationGeneration
+                    , rootPending = recovered.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False
+                    , branchPending = Dict.get "project:parent" recovered.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight |> Maybe.withDefault False
+                    , focusPending = recovered.dataLoading.activeNavigationFocus |> Maybe.map .inFlight |> Maybe.withDefault False
+                    , retained = Dict.member "parent" recovered.dataLoading.projectCardSummaries
+                    }
+        , test "a branch response retains its request state and makes returned children visible" <|
             \_ ->
                 let
                     ( requested, _ ) =
@@ -659,12 +685,12 @@ suite =
                         { hydrated
                             | auth = { status = AuthReady, mode = Just "test" }
                             , sessionContext = Just editorSession
-                            , webSocket = { baseWebSocket | targetGenerations = Dict.singleton (guard.scopeKey ++ "|" ++ guard.targetKey) 1 }
+                            , webSocket = { baseWebSocket | targetGenerations = Dict.fromList [ ( guard.scopeKey ++ "|" ++ guard.targetKey, 1 ), ( guard.scopeKey ++ "|navigation-summary:project:" ++ projectSummary.id, 1 ), ( guard.scopeKey ++ "|navigation-summary:task:" ++ taskSummary.id, 1 ) ] }
                         }
 
                     updated =
                         WebSocket.update
-                            (CanonicalNavigationSummariesFetched guard workspaceId [ projectSummary.id ] [ taskSummary.id ]
+                            (CanonicalNavigationSummariesFetched (summaryGuard guard source [ projectSummary.id ] [ taskSummary.id ]) workspaceId [ projectSummary.id ] [ taskSummary.id ]
                                 (Ok { projects = [ newerProject ], tasks = [ newerTask ], missingProjectIds = [], missingTaskIds = [] })
                             )
                             source
@@ -1666,7 +1692,7 @@ suite =
                         model.webSocket
 
                     websocket =
-                        { baseWebSocket | targetGenerations = Dict.singleton "workspace:workspace-1|navigation-summaries:project:child" 1 }
+                        { baseWebSocket | targetGenerations = Dict.fromList [ ( "workspace:workspace-1|navigation-summaries:project:child", 1 ), ( "workspace:workspace-1|navigation-summary:project:child", 1 ) ] }
 
                     baseLoading =
                         model.dataLoading
@@ -1695,7 +1721,7 @@ suite =
 
                     ( updated, _ ) =
                         WebSocket.update
-                            (CanonicalNavigationSummariesFetched guard workspaceId [ "child" ] []
+                            (CanonicalNavigationSummariesFetched (summaryGuard guard source [ "child" ] []) workspaceId [ "child" ] []
                                 (Ok { projects = [ changedProject ], tasks = [], missingProjectIds = [], missingTaskIds = [] })
                             )
                             source
@@ -1727,13 +1753,13 @@ suite =
                         model.webSocket
 
                     websocket =
-                        { baseWebSocket | targetGenerations = Dict.singleton "workspace:workspace-1|navigation-summaries:project:child" 1 }
+                        { baseWebSocket | targetGenerations = Dict.fromList [ ( "workspace:workspace-1|navigation-summaries:project:child", 1 ), ( "workspace:workspace-1|navigation-summary:project:child", 1 ) ] }
 
                     source =
                         { model | auth = { status = AuthReady, mode = Just "test" }, sessionContext = Just editorSession, search = filteredSearch, webSocket = websocket, dataLoading = loading }
 
                     updated =
-                        WebSocket.update (CanonicalNavigationSummariesFetched guard workspaceId [ "child" ] [] (Ok { projects = [], tasks = [], missingProjectIds = [ "child" ], missingTaskIds = [] })) source |> Tuple.first
+                        WebSocket.update (CanonicalNavigationSummariesFetched (summaryGuard guard source [ "child" ] []) workspaceId [ "child" ] [] (Ok { projects = [], tasks = [], missingProjectIds = [ "child" ], missingTaskIds = [] })) source |> Tuple.first
                 in
                 Expect.equal ( Nothing, False )
                     ( Dict.get "child" updated.dataLoading.projectCardSummaries
@@ -1958,6 +1984,144 @@ suite =
                     , newWasChecked = newReplay /= Nothing
                     , staleCardRemoved = Dict.member "child" completed.dataLoading.projectCardSummaries |> not
                     }
+        , test "overlapping summary subsets preserve current members and apply unrelated older members" <|
+            \_ ->
+                let
+                    base = syncModel [ project "a" Nothing, project "b" Nothing ]
+                    first = requestSummaries "first" [ ( "project", "a" ), ( "project", "b" ) ] base
+                    olderGuard = batchGuard [ ( "project", "a" ), ( "project", "b" ) ] first
+                    second = requestSummaries "second" [ ( "project", "a" ) ] first
+                    newerGuard = batchGuard [ ( "project", "a" ) ] second
+                    freshA = project "a" Nothing
+                    olderB = project "b" Nothing
+                    newest = summaryReply second newerGuard [ "a" ] [] { projects = [ { freshA | name = "current-a" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } second
+                    late = summaryReply first olderGuard [ "a", "b" ] [] { projects = [ { freshA | name = "stale-a" }, { olderB | name = "current-b" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } newest
+                    lateDeletion = summaryReply first olderGuard [ "a", "b" ] [] { projects = [ { olderB | name = "current-b" } ], tasks = [], missingProjectIds = [ "a" ], missingTaskIds = [] } newest
+                in
+                Expect.equal ( Just "current-a", Just "current-b", Just "current-a" )
+                    ( Dict.get "a" late.projects |> Maybe.map .name, Dict.get "b" late.projects |> Maybe.map .name, Dict.get "a" lateDeletion.projects |> Maybe.map .name )
+        , test "resync counters cannot reuse an old summary guard and filter lifetime rejects late responses" <|
+            \_ ->
+                let
+                    first = requestSummaries "before" [ ( "project", "a" ) ] (syncModel [ project "a" Nothing ])
+                    oldGuard = batchGuard [ ( "project", "a" ) ] first
+                    invalidated = WebSocket.update (WsMessageReceived (scopedFrame (Encode.object [ ( "schema_version", Encode.int 1 ), ( "type", Encode.string "resync_required" ) ]))) first |> Tuple.first
+                    snapshot = WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) invalidated |> Tuple.first
+                    current = requestSummaries "after" [ ( "project", "a" ) ] snapshot
+                    newGuard = batchGuard [ ( "project", "a" ) ] current
+                    stale = summaryReply first oldGuard [ "a" ] [] { projects = [], tasks = [], missingProjectIds = [ "a" ], missingTaskIds = [] } current
+                    refreshed = DataLoading.revalidateNavigationForFilters first |> Tuple.first
+                    afterFilter = summaryReply first oldGuard [ "a" ] [] { projects = [], tasks = [], missingProjectIds = [ "a" ], missingTaskIds = [] } refreshed
+                in
+                Expect.equal ( True, True, True )
+                    ( newGuard.targetGeneration > oldGuard.targetGeneration, Dict.member "a" stale.projects, Dict.member "a" afterFilter.projects )
+        , test "foreign unloaded roots and expanded-branch tasks request bounded authoritative membership" <|
+            \_ ->
+                let
+                    base = syncModel [ project "parent" Nothing ]
+                    expanded = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") base |> Tuple.first
+                    rooted = requestSummaries "foreign-project" [ ( "project", "new-root" ) ] expanded
+                    tasked = requestSummaries "foreign-task" [ ( "task", "new-task" ) ] expanded
+                    rootReturned = acceptRoot [ project "parent" Nothing, project "new-root" Nothing ] [] rooted
+                    taskBase = task "new-task" Nothing
+                    taskReturned = case Dict.get "project:parent" tasked.dataLoading.loadedNavigationBranches of
+                        Just request ->
+                            DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ { taskBase | projectId = Just "parent" } ], hasMore = False } })) tasked |> Tuple.first
+                        Nothing -> tasked
+                in
+                Expect.equal { pending = True, prematurelyInserted = False, root = True, task = True }
+                    { pending = rooted.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False, prematurelyInserted = Dict.member "new-root" rooted.projects, root = Set.member "new-root" rootReturned.dataLoading.navigationVisibleProjectIds, task = Set.member "new-task" taskReturned.dataLoading.navigationVisibleTaskIds }
+        , test "a formerly filtered-out card becomes matching only after authoritative navigation" <|
+            \_ ->
+                let
+                    base = syncModel []
+                    search = base.search
+                    filtered = { base | search = { search | filterProjectStatuses = [ "completed" ] } }
+                    pending = requestSummaries "became-matching" [ ( "project", "newly-matching" ) ] filtered
+                    summary = project "newly-matching" Nothing
+                    accepted = acceptRoot [ { summary | status = Api.ProjCompleted } ] [] pending
+                in
+                Expect.equal ( True, True )
+                    ( pending.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False, Set.member "newly-matching" accepted.dataLoading.navigationVisibleProjectIds )
+
+        , test "revalidation refills only the retained paginated root window" <|
+            \_ ->
+                let
+                    seeded = syncModel (List.range 1 100 |> List.map (\index -> project (String.fromInt index) Nothing))
+                    loading = seeded.dataLoading
+                    positioned = { seeded | dataLoading = { loading | rootNavigationPresentation = Maybe.map (\presentation -> { presentation | projectOffset = 75 }) loading.rootNavigationPresentation } }
+                    refreshing = DataLoading.revalidateNavigationForFilters positioned |> Tuple.first
+                    page offset count source =
+                        case source.dataLoading.rootNavigationRequest of
+                            Just request ->
+                                DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint offset 0 (Ok { workspaceId = workspaceId, projects = { items = List.range (offset + 1) (offset + count) |> List.map (\index -> project (String.fromInt index) Nothing), hasMore = True }, tasks = { items = [], hasMore = False } })) source |> Tuple.first
+                            Nothing -> source
+                    firstPage = page 0 50 refreshing
+                    restored = page 50 50 firstPage
+                in
+                Expect.equal { retained = Just 75, fetched = Just 50, restored = Just 75, pending = Just False, count = Just 100 }
+                    { retained = refreshing.dataLoading.rootNavigationPresentation |> Maybe.map .projectOffset, fetched = firstPage.dataLoading.rootNavigationRequest |> Maybe.map .projectOffset, restored = restored.dataLoading.rootNavigationPresentation |> Maybe.map .projectOffset, pending = restored.dataLoading.rootNavigationRequest |> Maybe.map .inFlight, count = restored.dataLoading.rootNavigationRequest |> Maybe.map .projectCardCount }
+        , test "restoring a pinned ordinary-window boundary fetches the next bounded page" <|
+            \_ ->
+                let
+                    summaries = List.range 1 100 |> List.map (\index -> project (String.padLeft 3 '0' (String.fromInt index)) Nothing)
+                    seeded = syncModel summaries
+                    loading = seeded.dataLoading
+                    focus = seeded.focus
+                    positioned = { seeded | focus = { focus | focusedEntity = Just ( "project", "001" ) }, dataLoading = { loading | rootNavigationPresentation = Maybe.map (\presentation -> { presentation | projectOffset = 49 }) loading.rootNavigationPresentation } }
+                    refreshing = DataLoading.revalidateNavigationForFilters positioned |> Tuple.first
+                    page offset source = case source.dataLoading.rootNavigationRequest of
+                        Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint offset 0 (Ok { workspaceId = workspaceId, projects = { items = List.drop offset summaries |> List.take 50, hasMore = offset == 0 }, tasks = { items = [], hasMore = False } })) source |> Tuple.first
+                        Nothing -> source
+                    first = page 0 refreshing
+                    restored = page 50 first
+                in
+                Expect.equal ( Just ( True, 50 ), Just 49, True )
+                    ( first.dataLoading.rootNavigationRequest |> Maybe.map (\request -> ( request.inFlight, request.projectOffset ))
+                    , restored.dataLoading.rootNavigationPresentation |> Maybe.map .projectOffset
+                    , Dict.member "051" restored.dataLoading.projectCardDetailRequests
+                    )
+        , test "loaded reparent with structural invalidation replaces bounded root and expanded membership" <|
+            \_ ->
+                let
+                    parent = project "parent" Nothing
+                    moving = project "moving" Nothing
+                    others = List.range 1 48 |> List.map (\n -> project ("root-" ++ String.fromInt n) Nothing)
+                    base = syncModel (parent :: moving :: others)
+                    expanded = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") base |> Tuple.first
+                    before = case Dict.get "project:parent" expanded.dataLoading.loadedNavigationBranches of
+                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })) expanded |> Tuple.first
+                        Nothing -> expanded
+                    changed = requestSummariesWithInvalidations "loaded-move" [ ( "project", "moving" ) ]
+                        [ Encode.object [ ( "kind", Encode.string "tree" ), ( "target", Encode.string ("workspace:" ++ workspaceId) ) ]
+                        , Encode.object [ ( "kind", Encode.string "readiness" ), ( "target", Encode.string "project:moving" ) ]
+                        ] before
+                    summarized = summaryReply changed (batchGuard [ ( "project", "moving" ) ] changed) [ "moving" ] [] { projects = [ { moving | parentId = Just "parent" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } changed
+                    rooted = acceptRoot (parent :: project "replacement" Nothing :: others) [] summarized
+                    branched = case Dict.get "project:parent" rooted.dataLoading.loadedNavigationBranches of
+                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [ { moving | parentId = Just "parent" } ], hasMore = False }, tasks = { items = [], hasMore = False } })) rooted |> Tuple.first
+                        Nothing -> rooted
+                in
+                Expect.equal { rootPending = Just True, branchPending = Just True, root = Just ( 50, False, ( False, True ) ), branch = Just [ "moving" ] }
+                    { rootPending = changed.dataLoading.rootNavigationRequest |> Maybe.map .inFlight
+                    , branchPending = Dict.get "project:parent" changed.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                    , root = branched.dataLoading.rootNavigationRequest |> Maybe.map (\request -> ( request.projectCardCount, request.projectHasMore, ( Set.member "moving" branched.dataLoading.navigationVisibleProjectIds && (Dict.get "moving" branched.dataLoading.projectCardSummaries |> Maybe.andThen .parentId) == Nothing, Set.member "replacement" branched.dataLoading.navigationVisibleProjectIds ) ))
+                    , branch = Dict.get "project:parent" branched.dataLoading.loadedNavigationBranches |> Maybe.map (\_ -> Dict.values branched.dataLoading.projectCardSummaries |> List.filter (\summary -> summary.parentId == Just "parent" && Set.member summary.id branched.dataLoading.navigationVisibleProjectIds) |> List.map .id)
+                    }
+        , test "reordered equal batches are stale per entity and chunks remain bounded at 100" <|
+            \_ ->
+                let
+                    base = syncModel [ project "a" Nothing, project "b" Nothing ]
+                    first = requestSummaries "ordered" [ ( "project", "a" ), ( "project", "b" ) ] base
+                    second = requestSummaries "reordered" [ ( "project", "b" ), ( "project", "a" ) ] first
+                    stale = summaryReply first (batchGuard [ ( "project", "a" ), ( "project", "b" ) ] first) [ "a", "b" ] [] { projects = [], tasks = [], missingProjectIds = [ "a", "b" ], missingTaskIds = [] } second
+                    summaries = List.range 1 101 |> List.map (\index -> project ("chunk-" ++ String.fromInt index) Nothing)
+                    chunked = requestSummaries "chunked" (List.map (\summary -> ( "project", summary.id )) summaries) (syncModel summaries)
+                    batchKeys = Dict.keys chunked.webSocket.targetGenerations |> List.filter (String.contains "|navigation-summaries:")
+                in
+                Expect.equal ( True, True, [ 1, 100 ] )
+                    ( Dict.member "a" stale.projects, Dict.member "b" stale.projects, List.map (String.split "," >> List.length) batchKeys |> List.sort )
+
         ]
 
 
@@ -2137,3 +2301,66 @@ task id parentId =
     , hasChildren = False
     , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True }
     }
+
+
+summaryGuard : Types.CanonicalRequestGuard -> Model -> List String -> List String -> Types.CanonicalNavigationRequestGuard
+summaryGuard guard source projectIds taskIds =
+    let
+        keys =
+            List.map ((++) (guard.scopeKey ++ "|navigation-summary:project:")) projectIds ++ List.map ((++) (guard.scopeKey ++ "|navigation-summary:task:")) taskIds
+    in
+    { request = guard, navigationGeneration = source.dataLoading.navigationGeneration, entityGenerations = Dict.filter (\key _ -> List.member key keys) source.webSocket.targetGenerations }
+
+
+syncModel : List Api.ProjectCardSummary -> Model
+syncModel projects =
+    let
+        base = loadRoot workspaceId projects [] model
+    in
+    { base | auth = { status = AuthReady, mode = Just "test" }, sessionContext = Just editorSession }
+
+
+acceptRoot : List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Model -> Model
+acceptRoot projects tasks source =
+    case source.dataLoading.rootNavigationRequest of
+        Just request ->
+            DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch source.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint request.projectOffset request.taskOffset (Ok { workspaceId = workspaceId, projects = { items = projects, hasMore = False }, tasks = { items = tasks, hasMore = False } })) source |> Tuple.first
+        Nothing -> source
+
+
+batchGuard : List ( String, String ) -> Model -> Types.CanonicalRequestGuard
+batchGuard targets source =
+    let
+        key = "navigation-summaries:" ++ String.join "," (List.map (\( kind, entityId ) -> kind ++ ":" ++ entityId) targets)
+    in
+    { scopeKey = "workspace:" ++ workspaceId, targetKey = key, targetGeneration = Dict.get ("workspace:" ++ workspaceId ++ "|" ++ key) source.webSocket.targetGenerations |> Maybe.withDefault -1, sessionEpoch = source.sessionRequestEpoch, routeWorkspace = Just workspaceId, audienceId = "editor" }
+
+
+summaryReply : Model -> Types.CanonicalRequestGuard -> List String -> List String -> Api.NavigationSummariesResponse -> Model -> Model
+summaryReply captured guard projectIds taskIds result source =
+    WebSocket.update (CanonicalNavigationSummariesFetched (summaryGuard guard captured projectIds taskIds) workspaceId projectIds taskIds (Ok result)) source |> Tuple.first
+
+
+scopedFrame : Encode.Value -> String
+scopedFrame frame =
+    Encode.encode 0 (Encode.object [ ( "schema_version", Encode.int 1 ), ( "transport", Encode.string "frame" ), ( "scope", Encode.object [ ( "scope", Encode.string "workspace" ), ( "workspace_id", Encode.string workspaceId ) ] ), ( "frame", frame ) ])
+
+
+requestSummaries : String -> List ( String, String ) -> Model -> Model
+requestSummaries eventId targets source =
+    requestSummariesWithInvalidations eventId targets [] source
+
+
+requestSummariesWithInvalidations : String -> List ( String, String ) -> List Encode.Value -> Model -> Model
+requestSummariesWithInvalidations eventId targets extraInvalidations source =
+    let
+        first = List.head targets |> Maybe.withDefault ( "project", "unused" )
+        scope = Encode.object [ ( "scope", Encode.string "workspace" ), ( "workspace_id", Encode.string workspaceId ) ]
+        envelope = Encode.object
+            [ ( "schema_version", Encode.int 1 ), ( "event_id", Encode.string eventId ), ( "scope", Encode.string "workspace" ), ( "workspace_id", Encode.string workspaceId )
+            , ( "entity", Encode.object [ ( "type", Encode.string (Tuple.first first) ), ( "id", Encode.string (Tuple.second first) ), ( "action", Encode.string "updated" ) ] )
+            , ( "invalidations", Encode.list identity (List.map (\( kind, entityId ) -> Encode.object [ ( "kind", Encode.string "entity" ), ( "target", Encode.string (kind ++ ":" ++ entityId) ) ]) targets ++ extraInvalidations) )
+            , ( "occurred_at", Encode.string "2026-10-02T00:00:00Z" ), ( "transaction", Encode.object [ ( "id", Encode.string eventId ), ( "cause", Encode.string "mcp" ), ( "request_id", Encode.null ) ] ), ( "actor", Encode.object [ ( "type", Encode.string "user" ), ( "id", Encode.string "foreign" ) ] )
+            ]
+    in
+    WebSocket.update (WsMessageReceived (scopedFrame (Encode.object [ ( "schema_version", Encode.int 1 ), ( "type", Encode.string "change" ), ( "event", envelope ) ]))) source |> Tuple.first

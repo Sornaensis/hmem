@@ -294,12 +294,13 @@ suite =
                 ]
                     |> Expect.equal
                         [ [ ChangeStream.RevalidateNavigationSummary "task" "t"
-                          , ChangeStream.NoAction
+                          , ChangeStream.RefreshNavigation
                           , ChangeStream.RevalidateNavigationSummary "project" "p"
                           , ChangeStream.RefreshNextTasks "w"
                           , ChangeStream.RefreshSearch "w"
                           , ChangeStream.RefreshMemberships "w"
                           , ChangeStream.RefreshGroupMembers "g"
+                          , ChangeStream.NoAction
                           , ChangeStream.RefreshCatalogue
                           , ChangeStream.RefreshSessionAuthorization
                           , ChangeStream.RefreshTimeline

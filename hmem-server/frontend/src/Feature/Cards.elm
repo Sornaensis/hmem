@@ -877,11 +877,11 @@ projectAndAncestorsAreOpenIndexed projectsById projectId =
             True
 
 
-hasDoneTaskAncestorIndexed : Dict.Dict String Api.Task -> Api.Task -> Bool
-hasDoneTaskAncestorIndexed tasksById task =
+hasClosedTaskAncestorIndexed : Dict.Dict String Api.Task -> Api.Task -> Bool
+hasClosedTaskAncestorIndexed tasksById task =
     case task.parentId |> Maybe.andThen (\parentId -> Dict.get parentId tasksById) of
         Just parent ->
-            parent.status == Api.Done || hasDoneTaskAncestorIndexed tasksById parent
+            parent.status == Api.Done || parent.status == Api.Cancelled || hasClosedTaskAncestorIndexed tasksById parent
 
         Nothing ->
             False
@@ -937,6 +937,12 @@ taskStatusOptionDisabledReason : Maybe String -> Bool -> Maybe Api.TaskStatus ->
 taskStatusOptionDisabledReason completionBlockerReason isSubtask mParentStatus status =
     if status == Api.Done then
         completionBlockerReason
+
+    else if isOpenTaskStatus status && mParentStatus == Just Api.Cancelled then
+        Just "Reopen the cancelled parent task before reopening this subtask."
+
+    else if isOpenTaskStatus status && mParentStatus == Just Api.Done then
+        Just "Reopen the parent task before reopening this subtask."
 
     else if status == Api.InProgress && isSubtask && mParentStatus /= Just Api.InProgress then
         Just "Start the parent task before moving this subtask to in progress."
@@ -1055,7 +1061,7 @@ type alias CardTreeProjection =
     , projectRollups : Dict.Dict String Api.ProjectReadinessRollup
     , taskRollups : Dict.Dict String Api.TaskReadinessRollup
     , projectAllowsOpenChildren : Dict.Dict String Bool
-    , taskHasDoneAncestor : Dict.Dict String Bool
+    , taskHasClosedAncestor : Dict.Dict String Bool
     , taskDirectOpenDependencyCounts : Dict.Dict String Int
     , projectCriteriaMatches : Set.Set String
     , taskCriteriaMatches : Set.Set String
@@ -1159,8 +1165,8 @@ cardTreeProjection workspaceId model =
         projectAllowsOpenChildren =
             projectAncestorOpenIndex projectsById projects
 
-        taskHasDoneAncestor =
-            taskDoneAncestorIndex tasksById tasks
+        taskHasClosedAncestor =
+            taskClosedAncestorIndex tasksById tasks
 
         taskDirectOpenDependencyCounts =
             directOpenDependencyCounts tasksById model.dependencies.taskDependencyLinks
@@ -1210,7 +1216,7 @@ cardTreeProjection workspaceId model =
     , projectRollups = model.dependencies.projectReadinessRollups
     , taskRollups = model.dependencies.taskReadinessRollups
     , projectAllowsOpenChildren = projectAllowsOpenChildren
-    , taskHasDoneAncestor = taskHasDoneAncestor
+    , taskHasClosedAncestor = taskHasClosedAncestor
     , taskDirectOpenDependencyCounts = taskDirectOpenDependencyCounts
     , projectCriteriaMatches = projectCriteriaMatches
     , taskCriteriaMatches = taskCriteriaMatches
@@ -1262,8 +1268,8 @@ projectAncestorOpenIndex projectsById projects =
             Dict.empty
 
 
-taskDoneAncestorIndex : Dict.Dict String Api.Task -> List Api.Task -> Dict.Dict String Bool
-taskDoneAncestorIndex tasksById tasks =
+taskClosedAncestorIndex : Dict.Dict String Api.Task -> List Api.Task -> Dict.Dict String Bool
+taskClosedAncestorIndex tasksById tasks =
     let
         resolve taskId visiting cache =
             case Dict.get taskId cache of
@@ -1286,7 +1292,7 @@ taskDoneAncestorIndex tasksById tasks =
                                             Just parentId ->
                                                 case Dict.get parentId tasksById of
                                                     Just parent ->
-                                                        if parent.status == Api.Done then
+                                                        if parent.status == Api.Done || parent.status == Api.Cancelled then
                                                             ( True, cache )
 
                                                         else
@@ -1630,7 +1636,7 @@ viewProjectNode projection model depth project hasSearch query =
             projectCompletionBlockerReason openSubprojectCount openProjectTaskCount
 
         projectStatusDisabled status =
-            if status == Api.ProjCompleted || status == Api.ProjArchived then
+            if status == Api.ProjCompleted then
                 completionBlockerReason
 
             else
@@ -1673,6 +1679,7 @@ viewProjectNode projection model depth project hasSearch query =
                 ]
             , div [ class "card-actions" ]
                 [ Feature.Editing.viewStatusSelectWithDisabled model "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString projectStatusDisabled ChangeProjectStatus
+                , span [ class "lifecycle-gate-note", title "Archiving archives all descendant projects and cancels unfinished tasks; done tasks are preserved." ] [ text "Archive includes descendants" ]
                 , Feature.Editing.viewPrioritySelect model "project" project.id project.priority ChangeProjectPriority
                 , if Permissions.canEditCurrentWorkspace model then
                         button [ class "btn-icon btn-danger", onClick (ConfirmDelete "project" project.id), title "Delete" ] [ text "✕" ]
@@ -2212,17 +2219,17 @@ viewTaskCard projection showProject model task =
                 |> Maybe.withDefault True
 
         taskHasCompletedAncestor =
-            Dict.get task.id projection.taskHasDoneAncestor
+            Dict.get task.id projection.taskHasClosedAncestor
                 |> Maybe.withDefault False
 
         taskAllowsOpenChildren =
-            not isSubtask && task.status /= Api.Done && not taskHasCompletedAncestor && taskProjectAllowsOpenTasks
+            not isSubtask && task.status /= Api.Done && task.status /= Api.Cancelled && not taskHasCompletedAncestor && taskProjectAllowsOpenTasks
 
         taskCreateChildReason =
             if isSubtask then
                 "Subtasks cannot have subtasks."
 
-            else if task.status == Api.Done then
+            else if task.status == Api.Done || task.status == Api.Cancelled then
                 "Reopen this task before adding open subtasks."
 
             else if taskHasCompletedAncestor then
@@ -2266,6 +2273,7 @@ viewTaskCard projection showProject model task =
                 ]
             , div [ class "card-actions" ]
                 [ Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) taskStatusOptions Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
+                , span [ class "lifecycle-gate-note", title "Cancelling this task cancels unfinished subtasks; done subtasks are preserved." ] [ text "Cancel includes subtasks" ]
                 , viewCompletionGateNote completionBlockerReason
                 , Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority
                 , if Permissions.canEditCurrentWorkspace model then
@@ -2950,7 +2958,12 @@ viewDropZone model zone =
                             True
 
                         ( "task", "task-subtasks" ) ->
-                            True
+                            case ( Dict.get drag.entityId model.tasks, zone.parentId |> Maybe.andThen (\parentId -> Dict.get parentId model.tasks) ) of
+                                ( Just dragTask, Just targetTask ) ->
+                                    Feature.DragDrop.canMakeSubtask model dragTask targetTask
+
+                                _ ->
+                                    False
 
                         ( "task", "orphan" ) ->
                             True

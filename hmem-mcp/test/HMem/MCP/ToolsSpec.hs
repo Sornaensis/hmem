@@ -232,15 +232,22 @@ spec = do
       mcpProvenanceHeadersFor (Just " \t ")
         `shouldBe` [("X-HMem-Change-Cause", "mcp")]
 
+    it "describes archive and cancellation cascades without automatic descendant reopening" $ do
+      toolDescription "project_archive" `shouldSatisfy` maybe False (\description -> all (`T.isInfixOf` description)
+        ["all descendant projects, including completed projects", "cancel non-done tasks", "Done tasks and dependency links are preserved", "unrelated dependent tasks are not cancelled", "Reopening does not reopen descendants"])
+      toolDescription "task_finish" `shouldSatisfy` maybe False (\description -> all (`T.isInfixOf` description)
+        ["Done requires closing open descendants", "cancels non-done subtasks", "preserving done subtasks and dependency links", "Reopening does not reopen descendants"])
+      toolDescription "task_update" `shouldSatisfy` maybe False (T.isInfixOf "Reopen a cancelled parent before moving, reparenting, or reopening unfinished subtasks beneath it")
+
     it "guides durable project and task descriptions, status, and atomic subtasks" $ do
       toolDescriptionIs "project_create" "Create a project in the active workspace. Its description is a durable specification; status records execution state."
-      toolDescriptionIs "project_update" "Update a project's durable specification, hierarchy, or execution state. Supply project_id plus only fields to change; omitted fields stay unchanged, including description and parent_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates."
+      toolDescriptionIs "project_update" "Update a project's durable specification, hierarchy, or execution state. Supply project_id plus only fields to change; omitted fields stay unchanged, including description and parent_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates. Completing requires closed descendants. Archiving also archives all descendant projects, including completed projects, and cancels non-done tasks while preserving done tasks."
       toolDescriptionIs "project_spec" "Atomically create a project and 1 to 50 initial atomic tasks in one request. Validation, authorization, or database rejection creates nothing. If the connection or response fails, the outcome is uncertain; check the workspace's projects before retrying. Returns the project ID and task IDs in input order. Descriptions are durable specifications; status records execution state. Create later-discovered atomic work as subtasks."
-      toolDescriptionIs "task_create" "Create a task in the active workspace. Its description is a durable specification; status records execution state. Create later-discovered atomic work as subtasks."
-      toolDescriptionIs "task_update" "Update a task's durable specification, hierarchy, or execution state. Supply task_id plus only fields to change; omitted fields stay unchanged, including description, parent_id, and project_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks."
+      toolDescriptionIs "task_create" "Create a task in the active workspace. Its description is a durable specification; status records execution state. Create later-discovered atomic work as subtasks. Reopen a cancelled or done parent before adding unfinished subtasks."
+      toolDescriptionIs "task_update" "Update a task's durable specification, hierarchy, or execution state. Supply task_id plus only fields to change; omitted fields stay unchanged, including description, parent_id, and project_id, so do not copy them from a prior read. Explicit null clears only clearable fields. Descriptions are not logs of progress or updates; create later-discovered atomic work as subtasks. Cancelling also cancels non-done subtasks while preserving done subtasks. Reopen a cancelled parent before moving, reparenting, or reopening unfinished subtasks beneath it. Reopening does not reopen descendants."
       toolDescriptionIs "task_dependency" "Add or remove a prerequisite edge: task_id cannot proceed until depends_on_id is complete. Use dependencies for ordering, not logs of progress or updates."
       toolDescriptionIs "task_start" "Set a task's execution state to in_progress. Preserve its description as a durable specification; status records progress."
-      toolDescriptionIs "task_finish" "Set a task's execution state to done, blocked, or cancelled. Status records progress; this does not create an observation."
+      toolDescriptionIs "task_finish" "Set a task's execution state to done, blocked, or cancelled. Status records progress; this does not create an observation. Done requires closing open descendants. Cancelled also cancels non-done subtasks while preserving done subtasks and dependency links; unrelated dependent tasks are not cancelled. Reopening does not reopen descendants."
       schemaPropertyDescriptionIs "project_create" "description" "Optional durable project specification: aims, scope, constraints, approach, and acceptance intent; not a log of progress or updates"
       schemaPropertyDescriptionIs "project_update" "project_id" "Project UUID; the only required field"
       schemaPropertyDescriptionIs "project_update" "description" "Durable project specification: aims, scope, constraints, approach, and acceptance intent; omit to keep the existing description or use null to clear it; not a log of progress or updates"
@@ -837,17 +844,19 @@ spec = do
       observed <- readTVarIO requests
       map (.authorization) observed `shouldBe` replicate 6 (Just "Bearer test-token")
 
-    it "makes task_finish and project_archive single status mutations without observation side effects" $ do
+    it "sends completion cancellation and archival as single authoritative status mutations" $ do
       requests <- newTVarIO []
       withMock requests $ \manager base -> do
         finished <- call manager base "task_finish" (object ["task_id" .= observationId, "status" .= ("done" :: Text)])
         jsonField "action" finished `shouldBe` Just (String "finished")
+        cancelled <- call manager base "task_finish" (object ["task_id" .= observationId, "status" .= ("cancelled" :: Text)])
+        jsonField "action" cancelled `shouldBe` Just (String "finished")
         archived <- call manager base "project_archive" (object ["project_id" .= observationId])
         jsonField "action" archived `shouldBe` Just (String "archived")
       observed <- readTVarIO requests
-      map (.requestPath) observed `shouldBe` ["/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]
-      map (.requestMethod) observed `shouldBe` [methodPut, methodPut]
-      mapM_ (\request -> decode request.requestBody `shouldBe` Just (object ["status" .= if request.requestPath == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" then ("done" :: Text) else "archived"])) observed
+      map (.requestPath) observed `shouldBe` ["/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/api/v1/projects/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]
+      map (.requestMethod) observed `shouldBe` [methodPut, methodPut, methodPut]
+      map (decode . (.requestBody)) observed `shouldBe` map (Just . (\status -> object ["status" .= status])) (["done", "cancelled", "archived"] :: [Text])
 
   describe "Canonical change-stream integration" $
     it "carries a real MCP proxy mutation through REST into the durable outbox and snapshot" $

@@ -881,6 +881,9 @@ structuredErrorToUserMessage fallback apiError =
                 Just "TASK_OPEN_UNDER_DONE_TASK" ->
                     "Reopen the parent task before adding or reopening open subtasks."
 
+                Just "TASK_OPEN_UNDER_CANCELLED_TASK" ->
+                    "Reopen the cancelled parent task before adding, moving, or reopening unfinished subtasks."
+
                 Just "PROJECT_COMPLETION_BLOCKED" ->
                     "Complete/archive child projects and finish or cancel all tasks before closing this project."
 

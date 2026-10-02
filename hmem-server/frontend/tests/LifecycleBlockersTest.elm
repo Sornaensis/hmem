@@ -1,22 +1,28 @@
 module LifecycleBlockersTest exposing (suite)
 
 import Api
+import AppShell
 import Dict
 import Expect
 import Feature.AuditLog
 import Feature.Cards
 import Feature.DataLoading
+import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
 import Feature.Memory
 import Feature.Timeline
 import Helpers
+import Html.Attributes as Attributes
 import Json.Decode as Decode
 import Page.Workspace
 import Permissions
 import String
 import Test exposing (..)
+import Test.Html.Query as Query
+import Test.Html.Selector as Selector
 import Types exposing (FocusReturnSource(..), Msg(..), TimelineEntityFilter(..), TimelineEventFilter(..), WorkspaceTab(..))
+import Url
 
 
 suite : Test
@@ -31,6 +37,80 @@ suite =
                 Api.decodeApiErrorBody 409 body
                     |> Api.apiErrorToUserMessage "Failed to update task"
                     |> Expect.equal "Finish or cancel all subtasks before marking this task done. (2 blockers; examples: aaaaaaaa, 11111111)"
+        , test "cancelled-parent error gives explicit reopen guidance without changing done-parent errors" <|
+            \_ ->
+                """{"error":"lifecycle_conflict","code":"TASK_OPEN_UNDER_CANCELLED_TASK","message":"Cannot place an open task under a cancelled task."}"""
+                    |> Api.decodeApiErrorBody 409
+                    |> Api.apiErrorToUserMessage "Failed to move task"
+                    |> Expect.equal "Reopen the cancelled parent task before adding, moving, or reopening unfinished subtasks."
+        , test "archive stays available with unfinished descendants while completion stays disabled" <|
+            \_ ->
+                let
+                    card =
+                        Feature.Cards.viewProjectsTree "workspace-a" lifecycleModel
+                            |> Query.fromHtml
+                            |> Query.find [ Selector.id "entity-project-a" ]
+                in
+                Expect.all
+                    [ \_ -> card |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "archived") ] |> Query.hasNot [ Selector.attribute (Attributes.disabled True) ]
+                    , \_ -> card |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value "completed") ] |> Query.has [ Selector.attribute (Attributes.disabled True) ]
+                    ]
+                    ()
+        , test "cancelled parent card disables add-subtask with reopen guidance" <|
+            \_ ->
+                Feature.Cards.viewProjectsTree "workspace-a" lifecycleModel
+                    |> Query.fromHtml
+                    |> Query.find [ Selector.id "entity-parent" ]
+                    |> Query.find [ Selector.tag "button", Selector.attribute (Attributes.title "Reopen this task before adding open subtasks.") ]
+                    |> Query.has [ Selector.attribute (Attributes.disabled True), Selector.attribute (Attributes.title "Reopen this task before adding open subtasks.") ]
+        , test "task status controls explain cancellation cascades and done-subtask preservation" <|
+            \_ ->
+                Feature.Cards.viewProjectsTree "workspace-a" lifecycleModel
+                    |> Query.fromHtml
+                    |> Query.find [ Selector.id "entity-drag" ]
+                    |> Query.find [ Selector.class "lifecycle-gate-note" ]
+                    |> Query.has [ Selector.text "Cancel includes subtasks", Selector.attribute (Attributes.title "Cancelling this task cancels unfinished subtasks; done subtasks are preserved.") ]
+        , test "cancelled parent prevents reopening children but still permits historical completion and cancellation" <|
+            \_ ->
+                List.map (Feature.Cards.taskStatusOptionDisabledReason Nothing True (Just Api.Cancelled)) [ Api.Todo, Api.Blocked, Api.InProgress, Api.Done, Api.Cancelled ]
+                    |> Expect.equal
+                        [ Just "Reopen the cancelled parent task before reopening this subtask."
+                        , Just "Reopen the cancelled parent task before reopening this subtask."
+                        , Just "Reopen the cancelled parent task before reopening this subtask."
+                        , Nothing
+                        , Nothing
+                        ]
+        , test "subtask modal denies unfinished moves to cancelled parents and actual execution stays inert" <|
+            \_ ->
+                let
+                    modal =
+                        lifecycleModel |> Feature.DragDrop.update (DragStartCard "task" "drag") |> Tuple.first |> Feature.DragDrop.update (DropOnCard "task" "parent") |> Tuple.first
+
+                    after =
+                        Feature.DragDrop.update DropActionMakeSubtask modal |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> Feature.DragDrop.viewDropActionModal modal |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Subtask" ] ] |> Query.has [ Selector.attribute (Attributes.disabled True), Selector.attribute (Attributes.title "Reopen the cancelled parent task before moving unfinished subtasks here.") ]
+                    , \_ -> Expect.equal modal.mutations.nextRequestId after.mutations.nextRequestId
+                    ]
+                    ()
+        , test "subtask drop zone rejects unfinished moves to cancelled parents but permits done children" <|
+            \_ ->
+                let
+                    drop taskId =
+                        lifecycleModel |> Feature.DragDrop.update (DragStartCard "task" taskId) |> Tuple.first |> Feature.DragDrop.update (DropOnZone subtaskZone) |> Tuple.first
+                in
+                Expect.equal
+                    ( lifecycleModel.mutations.nextRequestId, lifecycleModel.mutations.nextRequestId + 1 )
+                    ( (drop "drag").mutations.nextRequestId, (drop "done").mutations.nextRequestId )
+        , test "cancelled parent hides task-subtasks drop affordances for unfinished children" <|
+            \_ ->
+                lifecycleModel |> Feature.DragDrop.update (DragStartCard "task" "drag") |> Tuple.first
+                    |> Feature.Cards.viewProjectsTree "workspace-a"
+                    |> Query.fromHtml
+                    |> Query.find [ Selector.id "entity-parent" ]
+                    |> Query.findAll [ Selector.class "drop-zone" ]
+                    |> Query.count (Expect.equal 0)
         , test "project completion lifecycle errors use project-specific copy and counts" <|
             \_ ->
                 let
@@ -1118,6 +1198,35 @@ suite =
                     Err err ->
                         Expect.fail (Decode.errorToString err)
         ]
+
+
+lifecycleModel : Types.Model
+lifecycleModel =
+    let
+        base =
+            AppShell.initModel Nothing
+                { protocol = Url.Https, host = "app.example", port_ = Nothing, path = "/workspace/workspace-a", query = Nothing, fragment = Nothing }
+                (Types.WorkspacePage "workspace-a")
+                { apiUrl = "https://api.example", wsUrl = "wss://api.example", sessionId = "session", runtimeMode = "test", authTokenStorageKey = "token", authTokenPresent = False, loginUrl = Nothing, logoutUrl = Nothing }
+                Nothing
+                { tab = ProjectsTab, focus = Nothing, observationId = Nothing }
+                |> AppShell.finalizeInit (Types.WorkspacePage "workspace-a")
+
+        dependencies =
+            base.dependencies
+    in
+    { base
+        | auth = { status = Types.AuthReady, mode = Just "local" }
+        , sessionContext = Just (sessionContext "local" "user" "local_superadmin" True True (Just "admin"))
+        , projects = Dict.singleton "project-a" (project "project-a" Nothing)
+        , dependencies = { dependencies | projectReadinessRollups = Dict.singleton "project-a" { openProjectCount = 0, closedProjectCount = 0, openTaskCount = 1, doneTaskCount = 1, cancelledTaskCount = 2, blockedTaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = False } }
+        , tasks = Dict.fromList [ ( "parent", taskWithStatus "parent" Nothing (Just "project-a") Api.Cancelled ), ( "child", taskWithStatus "child" (Just "parent") (Just "project-a") Api.Cancelled ), ( "drag", task "drag" Nothing (Just "project-a") ), ( "done", taskWithStatus "done" Nothing (Just "project-a") Api.Done ) ]
+    }
+
+
+subtaskZone : Types.DropZoneInfo
+subtaskZone =
+    { parentType = "task-subtasks", parentId = Just "parent", projectId = Just "project-a", abovePriority = Nothing, belowPriority = Nothing }
 
 
 timelineEvent : String -> String -> String -> Api.WorkspaceTimelineEvent

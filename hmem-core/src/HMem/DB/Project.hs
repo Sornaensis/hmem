@@ -5,6 +5,7 @@ module HMem.DB.Project
   , getProjectsByIds
   , getProjectAncestorIds
   , updateProject
+  , withLifecycleStatusIntentS
   , deleteProject
   , deleteProjectCascade
   , deleteProjectBatch
@@ -24,7 +25,7 @@ import Data.Aeson (Object, toJSON)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant ((>$<), contramap)
 import Data.Int (Int16, Int32)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Time (UTCTime)
@@ -413,6 +414,22 @@ getProjectsByIds pool ids
 -- Update
 ------------------------------------------------------------------------
 
+-- Rel8 updates the complete row, so UPDATE OF status alone cannot distinguish
+-- explicit repeated archive/cancel requests from unrelated field edits. Keep
+-- intent local to this statement and restore the caller's transaction setting.
+withLifecycleStatusIntentS :: Bool -> Session.Session a -> Session.Session a
+withLifecycleStatusIntentS explicit action = do
+  previous <- Session.statement () $ Statement.Statement
+    "SELECT current_setting('hmem.status_intent', true)" Enc.noParams
+    (Dec.singleRow (Dec.column (Dec.nullable Dec.text))) True
+  let setIntent value = Session.statement value $ Statement.Statement
+        "SELECT set_config('hmem.status_intent', $1, true)"
+        (Enc.param (Enc.nonNullable Enc.text)) (Dec.singleRow (Dec.column (Dec.nonNullable Dec.text))) True
+  _ <- setIntent (if explicit then "explicit" else "unchanged")
+  result <- action
+  _ <- setIntent (fromMaybe "" previous)
+  pure result
+
 updateProject :: Pool Hasql.Connection -> UUID -> UpdateProject -> IO (Maybe Project)
 updateProject pool pid up = do
   current <- getProject pool pid
@@ -423,7 +440,7 @@ updateProject pool pid up = do
         Unchanged   -> pure ()
         SetNull     -> pure ()
         SetTo newId -> ensureParentProject pool currentProject.workspaceId (Just newId)
-      rows <- runSession pool $ Session.statement () $ run $
+      rows <- runSession pool $ withLifecycleStatusIntentS (isJust up.status) $ Session.statement () $ run $
         update Update
           { target = projectSchema
           , from = pure ()

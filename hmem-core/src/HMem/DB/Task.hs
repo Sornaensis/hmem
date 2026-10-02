@@ -38,7 +38,7 @@ import Data.Functor.Contravariant ((>$<), contramap)
 import Data.Int (Int16, Int32, Int64)
 import Data.List (intercalate, nub)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -378,6 +378,12 @@ ensureTaskCanBecomeSubtask pool taskId (Just _) = do
 ensureSubtaskStartAllowed :: Bool -> Maybe Task -> TaskStatus -> IO ()
 ensureSubtaskStartAllowed shouldEnforce mParent targetStatus =
   case (shouldEnforce, mParent, targetStatus) of
+    (_, Just parent, status) | parent.status == Cancelled && status `elem` [Todo, InProgress, Blocked] ->
+      throwIO $ lifecycleViolation
+        "TASK_OPEN_UNDER_CANCELLED_TASK"
+        "Cannot place an unfinished subtask under a cancelled task."
+        (Just $ blockerDetail parent.id)
+        (Just "Reopen the parent task before adding, moving, or reopening unfinished subtasks.")
     (True, Just parent, InProgress) | parent.status /= InProgress ->
       throwIO $ lifecycleViolation
         "TASK_SUBTASK_START_BLOCKED"
@@ -804,7 +810,8 @@ taskBatchMoveParentProjectMismatchStatement = Statement.Statement sql encoder de
 
 createTask :: Pool Hasql.Connection -> CreateTask -> IO Task
 createTask pool ct = do
-  _ <- ensureTaskPlacement pool ct.workspaceId ct.projectId ct.parentId
+  parent <- ensureTaskPlacement pool ct.workspaceId ct.projectId ct.parentId
+  ensureSubtaskStartAllowed False parent Todo
   let pri  = maybe 5 fromIntegral (ct.priority) :: Int16
       meta = fromMaybe (toJSON (mempty :: Object)) (ct.metadata)
   rows <- runSession pool $ Session.statement () $ run $
@@ -922,7 +929,7 @@ updateTaskWithDependencySnapshots pool tid ut = do
           Just err -> pure (Left err)
           Nothing -> do
             lockTasksS (tid : parentSeedIds)
-            movedIds <- if projectChanged
+            movedIds <- if projectChanged || ut.status == Just Cancelled
               then Session.statement tid taskSubtreeIdsForUpdateStatement
               else pure [tid]
             lockTasksS movedIds
@@ -947,7 +954,7 @@ updateTaskWithDependencySnapshots pool tid ut = do
               Nothing -> do
                 before <- dependencyAutoBlockSnapshotsS snapshotSeedIds
                 when (task.projectId /= targetProjectId) $ do
-                  Session.statement () $ run_ $
+                  Proj.withLifecycleStatusIntentS False $ Session.statement () $ run_ $
                     update Update
                       { target = taskSchema
                       , from = pure ()
@@ -956,7 +963,7 @@ updateTaskWithDependencySnapshots pool tid ut = do
                       , returning = NoReturning
                       }
 
-                rows <- Session.statement () $ run $
+                rows <- Proj.withLifecycleStatusIntentS (isJust ut.status) $ Session.statement () $ run $
                   update Update
                     { target = taskSchema
                     , from = pure ()
@@ -977,11 +984,11 @@ updateTaskWithDependencySnapshots pool tid ut = do
                     }
                 case rows of
                   []    -> do
-                    recomputeTaskAutoBlockingS snapshotSeedIds
+                    when (ut.status /= Just Cancelled) $ recomputeTaskAutoBlockingS snapshotSeedIds
                     after <- dependencyAutoBlockSnapshotsS snapshotSeedIds
                     pure $ Right (Nothing, before, after)
                   (r:_) -> do
-                    recomputeTaskAutoBlockingS snapshotSeedIds
+                    when (ut.status /= Just Cancelled) $ recomputeTaskAutoBlockingS snapshotSeedIds
                     after <- dependencyAutoBlockSnapshotsS snapshotSeedIds
                     pure $ Right (Just $ rowToTask r, before, after)
       (mTask, beforeRaw, afterRaw) <- case transactionResult of
@@ -1130,7 +1137,7 @@ moveTasksBatch pool ids projectId = do
               Just err -> pure (Left err)
               Nothing -> do
                 _before <- dependencyAutoBlockSnapshotsS movedIds
-                movedCount <- Session.statement () $ runN $
+                movedCount <- Proj.withLifecycleStatusIntentS False $ Session.statement () $ runN $
                   update Update
                     { target = taskSchema
                     , from = pure ()
@@ -1528,7 +1535,7 @@ dependencyAutoBlockSnapshotsStatement = Statement.Statement sql encoder decoder 
       , "  ) open_dep ON true"
       , " WHERE t.deleted_at IS NULL"
       , "   AND NOT hmem_task_is_inside_closed_project(t.id)"
-      , "   AND NOT hmem_task_has_done_ancestor(t.id)"
+      , "   AND NOT hmem_task_has_closed_ancestor(t.id)"
       , " ORDER BY t.created_at ASC, t.id ASC"
       ]
     encoder = Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.uuid)))

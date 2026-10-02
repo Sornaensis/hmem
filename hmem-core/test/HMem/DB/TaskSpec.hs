@@ -20,7 +20,7 @@ import Test.Hspec
 import HMem.DB.Observation
 import HMem.DB.Overview (getTaskOverview)
 import HMem.DB.ChangeStream (ChangeScope(..), OutboxRecord(..), listOutboxAfter)
-import HMem.DB.Pool (DBException(..), withConn)
+import HMem.DB.Pool (DBException(..), withConn, runSession)
 import HMem.DB.Project qualified as Project
 import HMem.DB.Task
 import HMem.DB.TestHarness
@@ -29,6 +29,60 @@ import HMem.Types
 spec :: Spec
 spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
   describe "Task lifecycle" $ do
+    it "cascade cancellation closes unfinished subtasks and preserves done rows and dependency edges" $ \env -> do
+      workspace <- createTestWorkspace env "task-cascade-cancel"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      child <- createTaskFor env workspace.id Nothing (Just parent.id) "unfinished"
+      doneChild <- createTaskFor env workspace.id Nothing (Just parent.id) "done"
+      deletedChild <- createTaskFor env workspace.id Nothing (Just parent.id) "deleted"
+      unrelated <- createTaskFor env workspace.id Nothing Nothing "unrelated"
+      _ <- updateTask env.pool doneChild.id (cancelStatusUpdate Done)
+      _ <- deleteTask env.pool deletedChild.id
+      beforeDeleted <- runSession env.pool $ Session.statement deletedChild.id taskRowForCascadeStatement
+      beforeDone <- getTask env.pool doneChild.id
+      addDependency env.pool unrelated.id child.id
+      _ <- updateTask env.pool parent.id (cancelStatusUpdate Cancelled)
+      mapM (fmap (fmap (.status)) . getTask env.pool) [parent.id, child.id, unrelated.id]
+        `shouldReturn` [Just Cancelled, Just Cancelled, Just Todo]
+      getTask env.pool doneChild.id `shouldReturn` beforeDone
+      runSession env.pool (Session.statement deletedChild.id taskRowForCascadeStatement) `shouldReturn` beforeDeleted
+      dependencyIds env unrelated.id `shouldReturn` [child.id]
+      _ <- updateTask env.pool parent.id (cancelStatusUpdate Cancelled)
+      getTask env.pool doneChild.id `shouldReturn` beforeDone
+
+    it "cascade cancellation shares direct SQL and batch semantics while explicit done roots remain cancellable" $ \env -> do
+      workspace <- createTestWorkspace env "task-cascade-writers"
+      first <- createTaskFor env workspace.id Nothing Nothing "first"
+      firstChild <- createTaskFor env workspace.id Nothing (Just first.id) "first child"
+      second <- createTaskFor env workspace.id Nothing Nothing "second"
+      secondChild <- createTaskFor env workspace.id Nothing (Just second.id) "second child"
+      runSession env.pool $ Session.statement first.id cancelTaskStatement
+      fmap (fmap (.status)) (getTask env.pool firstChild.id) `shouldReturn` Just Cancelled
+      updateTaskBatch env.pool [(second.id, cancelStatusUpdate Cancelled)] `shouldReturn` 1
+      fmap (fmap (.status)) (getTask env.pool secondChild.id) `shouldReturn` Just Cancelled
+      finished <- createTaskFor env workspace.id Nothing Nothing "explicit done root"
+      _ <- updateTask env.pool finished.id (cancelStatusUpdate Done)
+      _ <- updateTask env.pool finished.id (cancelStatusUpdate Cancelled)
+      fmap (fmap (.status)) (getTask env.pool finished.id) `shouldReturn` Just Cancelled
+
+    it "cascade cancellation requires reopening the parent before creating or reopening unfinished children" $ \env -> do
+      workspace <- createTestWorkspace env "task-cascade-closed-parent"
+      parent <- createTaskFor env workspace.id Nothing Nothing "parent"
+      child <- createTaskFor env workspace.id Nothing (Just parent.id) "child"
+      _ <- updateTask env.pool parent.id (cancelStatusUpdate Cancelled)
+      created <- try (createTaskFor env workspace.id Nothing (Just parent.id) "late child")
+      created `shouldSatisfy` (isLeft :: Either DBException Task -> Bool)
+      reopened <- try (updateTask env.pool child.id (cancelStatusUpdate Todo))
+      reopened `shouldSatisfy` (isLeft :: Either DBException (Maybe Task) -> Bool)
+      started <- try (updateTask env.pool child.id (cancelStatusUpdate InProgress))
+      started `shouldSatisfy` (\case Left (DBLifecycleViolation "TASK_OPEN_UNDER_CANCELLED_TASK" _ _ _) -> True; _ -> False)
+      moving <- createTaskFor env workspace.id Nothing Nothing "moving"
+      moved <- try (updateTask env.pool moving.id ((cancelStatusUpdate Todo) { parentId = SetTo parent.id }))
+      moved `shouldSatisfy` (\case Left (DBLifecycleViolation "TASK_OPEN_UNDER_CANCELLED_TASK" _ _ _) -> True; _ -> False)
+      _ <- updateTask env.pool parent.id (cancelStatusUpdate Todo)
+      fmap (fmap (.status)) (getTask env.pool child.id) `shouldReturn` Just Cancelled
+      _ <- updateTask env.pool child.id (cancelStatusUpdate Todo)
+      fmap (fmap (.status)) (getTask env.pool child.id) `shouldReturn` Just Todo
     it "does not mutate independent observations" $ \env -> do
       workspace <- createTestWorkspace env "task-observation-isolation"
       observation <- createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/Task.hs"] "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "independent")
@@ -146,6 +200,22 @@ createProjectFor :: TestEnv -> UUID -> Text -> IO Project
 createProjectFor env workspaceId name = Project.createProject env.pool CreateProject
   { workspaceId = workspaceId, parentId = Nothing, name = name, description = Nothing
   , priority = Nothing, metadata = Nothing }
+
+cancelStatusUpdate :: TaskStatus -> UpdateTask
+cancelStatusUpdate status = UpdateTask
+  { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = Unchanged
+  , status = Just status, priority = Nothing, metadata = Nothing, dueAt = Unchanged }
+
+cancelTaskStatement :: Statement.Statement UUID ()
+cancelTaskStatement = Statement.Statement
+  "UPDATE tasks SET status = 'cancelled' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+taskRowForCascadeStatement :: Statement.Statement UUID Value
+taskRowForCascadeStatement = Statement.Statement
+  "SELECT to_jsonb(t) FROM tasks t WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid))
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.jsonb))) True
 
 createTaskFor :: TestEnv -> UUID -> Maybe UUID -> Maybe UUID -> Text -> IO Task
 createTaskFor env workspaceId projectId parentId title = createTask env.pool CreateTask

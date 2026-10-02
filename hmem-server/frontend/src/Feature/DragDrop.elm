@@ -1,4 +1,4 @@
-module Feature.DragDrop exposing (dragOverClass, handleEscape, init, update, viewDropActionModal)
+module Feature.DragDrop exposing (canMakeSubtask, dragOverClass, handleEscape, init, update, viewDropActionModal)
 
 import Api
 import Dict
@@ -112,26 +112,28 @@ update msg model =
                                 model
 
                         ( "task", "task-subtasks" ) ->
-                            trackedTaskMutation [ drag.entityId ] drag.entityId
-                                [ ( "parent_id"
-                                  , case zone.parentId of
-                                        Just pid ->
-                                            Encode.string pid
+                            case ( Dict.get drag.entityId model.tasks, zone.parentId |> Maybe.andThen (\parentId -> Dict.get parentId model.tasks) ) of
+                                ( Just dragTask, Just targetTask ) ->
+                                    if canMakeSubtask model dragTask targetTask then
+                                        trackedTaskMutation [ drag.entityId, targetTask.id ] drag.entityId
+                                            [ ( "parent_id", Encode.string targetTask.id )
+                                            , ( "project_id"
+                                              , case targetTask.projectId of
+                                                    Just pid ->
+                                                        Encode.string pid
 
-                                        Nothing ->
-                                            Encode.null
-                                  )
-                                , ( "project_id"
-                                  , case zone.projectId of
-                                        Just pid ->
-                                            Encode.string pid
+                                                    Nothing ->
+                                                        Encode.null
+                                              )
+                                            , ( "priority", Encode.int newPriority )
+                                            ]
+                                            model
 
-                                        Nothing ->
-                                            Encode.null
-                                  )
-                                , ( "priority", Encode.int newPriority )
-                                ]
-                                model
+                                    else
+                                        ( clearDragState model, Cmd.none )
+
+                                _ ->
+                                    ( clearDragState model, Cmd.none )
 
                         ( "task", "orphan" ) ->
                             trackedTaskMutation [ drag.entityId ] drag.entityId
@@ -387,11 +389,12 @@ viewDropActionModal model =
                             False
 
                 subtaskTitle =
-                    if subtaskAllowed then
-                        "Make this task a subtask"
+                    case ( dragTask, targetTask ) of
+                        ( Just drag, Just target ) ->
+                            subtaskMoveDisabledReason model drag target |> Maybe.withDefault "Make this task a subtask"
 
-                    else
-                        "Subtasks can only be attached to top-level tasks, and tasks with subtasks cannot become subtasks."
+                        _ ->
+                            "Load both tasks before moving this task."
             in
             div [ class "modal-overlay", onClick CancelDropAction ]
                 [ div [ class "modal drop-action-modal", stopPropagationOn "click" (Decode.succeed ( NoOp, True )) ]
@@ -421,7 +424,22 @@ viewDropActionModal model =
 
 canMakeSubtask : Model -> Api.Task -> Api.Task -> Bool
 canMakeSubtask model dragTask targetTask =
-    targetTask.parentId == Nothing && not (taskHasChildren model dragTask.id)
+    subtaskMoveDisabledReason model dragTask targetTask == Nothing
+
+
+subtaskMoveDisabledReason : Model -> Api.Task -> Api.Task -> Maybe String
+subtaskMoveDisabledReason model dragTask targetTask =
+    if targetTask.parentId /= Nothing || taskHasChildren model dragTask.id || dragTask.id == targetTask.id then
+        Just "Subtasks can only be attached to top-level tasks, and tasks with subtasks cannot become subtasks."
+
+    else if isOpenTaskCardStatus dragTask.status && targetTask.status == Api.Cancelled then
+        Just "Reopen the cancelled parent task before moving unfinished subtasks here."
+
+    else if isOpenTaskCardStatus dragTask.status && targetTask.status == Api.Done then
+        Just "Reopen the parent task before moving unfinished subtasks here."
+
+    else
+        Nothing
 
 
 taskHasChildren : Model -> String -> Bool

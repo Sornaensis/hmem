@@ -151,6 +151,64 @@ recordingObservationApp env = do
 
 spec :: Spec
 spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app))) $ do
+  describe "cascade lifecycle HTTP contract" $ do
+    it "archives open project descendants and preserves completed task fields" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-cascade-archive"
+      root <- Project.createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+      child <- Project.createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
+      unfinished <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "unfinished" Nothing Nothing Nothing Nothing)
+      done <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "done" Nothing Nothing Nothing Nothing)
+      _ <- Task.updateTask env.pool done.id (UpdateTask Nothing Unchanged Unchanged Unchanged (Just Done) Nothing Nothing Unchanged)
+      beforeDone <- Task.getTask env.pool done.id
+      response <- putJson app ("/api/v1/projects/" <> Text.encodeUtf8 (T.pack (show root.id))) (object ["status" .= ("archived" :: T.Text)])
+      responseStatus response `shouldBe` status200
+      fmap (fmap (.status)) (Project.getProject env.pool child.id) `shouldReturn` Just ProjArchived
+      fmap (fmap (.status)) (Task.getTask env.pool unfinished.id) `shouldReturn` Just Cancelled
+      Task.getTask env.pool done.id `shouldReturn` beforeDone
+      records <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50
+      let mutations = filter (\record -> jsonPath ["entity", "action"] record.outboxEnvelope == Just (String "updated")) records
+      length mutations `shouldBe` 4 -- the initial done transition plus three archive changes
+      map (jsonPath ["transaction", "id"] . (.outboxEnvelope)) (drop 1 mutations)
+        `shouldSatisfy` (\case [Just a, Just b, Just c] -> a == b && b == c; _ -> False)
+
+    it "rejects unfinished create reparent and in-progress reopen under a cancelled parent with HM106 guidance" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-cascade-cancelled-parent"
+      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing Nothing)
+      moving <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "moving" Nothing Nothing Nothing Nothing)
+      let path task = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show task.id))
+          expectClosed response = do
+            responseStatus response `shouldBe` status409
+            let Just errorValue = decode (responseBody response) :: Maybe Value
+            jsonField "error" errorValue `shouldBe` Just (String "lifecycle_conflict")
+            jsonField "code" errorValue `shouldBe` Just (String "TASK_OPEN_UNDER_CANCELLED_TASK")
+      putJson app (path parent) (object ["status" .= ("cancelled" :: T.Text)]) >>= (\response -> responseStatus response `shouldBe` status200)
+      fmap (fmap (.status)) (Task.getTask env.pool child.id) `shouldReturn` Just Cancelled
+      postJson app "/api/v1/tasks" (object ["workspace_id" .= workspace.id, "parent_id" .= parent.id, "title" .= ("late" :: T.Text)]) >>= expectClosed
+      putJson app (path moving) (object ["parent_id" .= parent.id]) >>= expectClosed
+      putJson app (path child) (object ["status" .= ("in_progress" :: T.Text)]) >>= expectClosed
+      putJson app (path parent) (object ["status" .= ("in_progress" :: T.Text)]) >>= (\response -> responseStatus response `shouldBe` status200)
+      fmap (fmap (.status)) (Task.getTask env.pool child.id) `shouldReturn` Just Cancelled
+      putJson app (path child) (object ["status" .= ("in_progress" :: T.Text)]) >>= (\response -> responseStatus response `shouldBe` status200)
+
+    it "reverting a reopened task to cancelled invokes the same descendant cascade and audit cause" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "http-cascade-revert"
+      parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+      let path = "/api/v1/tasks/" <> Text.encodeUtf8 (T.pack (show parent.id))
+      _ <- putJson app path (object ["status" .= ("cancelled" :: T.Text)])
+      _ <- putJson app path (object ["status" .= ("todo" :: T.Text)])
+      child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "new child" Nothing Nothing Nothing Nothing)
+      response <- request app methodGet ("/api/v1/audit?workspace_id=" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "&entity_type=task") ""
+      let Just page = decode (responseBody response) :: Maybe (PaginatedResult AuditLogEntry)
+          Just entry = find (\audit -> audit.entityId == T.pack (show parent.id) && (audit.oldValues >>= jsonField "status") == Just (String "cancelled")) page.items
+      reverted <- request app methodPost ("/api/v1/audit/" <> Text.encodeUtf8 (T.pack (show entry.id)) <> "/revert") ""
+      responseStatus reverted `shouldBe` status200
+      mapM (fmap (fmap (.status)) . Task.getTask env.pool) [parent.id, child.id] `shouldReturn` replicate 2 (Just Cancelled)
+      records <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50
+      let reverts = filter (\record -> jsonPath ["transaction", "cause"] record.outboxEnvelope == Just (String "audit_revert")) records
+      length reverts `shouldBe` 2
+      map (jsonPath ["transaction", "id"] . (.outboxEnvelope)) reverts `shouldSatisfy` (\case [Just a, Just b] -> a == b; _ -> False)
+
   describe "unified search continuation HTTP contract" $ do
     it "returns independent page metadata and stable filtered pages" $ \(env, app) -> do
       workspace <- createTestWorkspace env "http-unified-search-pages"

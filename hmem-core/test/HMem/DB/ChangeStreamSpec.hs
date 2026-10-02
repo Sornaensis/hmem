@@ -5,8 +5,8 @@ import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString (ByteString)
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay, tryPutMVar)
-import Control.Concurrent.Async (async, concurrently, wait)
-import Control.Exception (SomeException, finally, try)
+import Control.Concurrent.Async (async, concurrently, wait, withAsync)
+import Control.Exception (SomeException, bracket_, finally, try)
 import Control.Monad (void)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Either (isLeft, isRight)
@@ -28,7 +28,7 @@ import Text.Read (readMaybe)
 
 import HMem.DB.Auth qualified as Auth
 import HMem.DB.ChangeStream
-import HMem.DB.Pool (checkPgvector, runSession, runTransaction, withConn)
+import HMem.DB.Pool (DBException(..), checkPgvector, runSession, runTransaction, withConn)
 import HMem.DB.Observation qualified as Observation
 import HMem.DB.Project (createProject)
 import HMem.DB.Project qualified as Project
@@ -42,6 +42,124 @@ import HMem.Types
 -- ephemeral PostgreSQL sandbox is still discarded by SpecHook after the run.
 spec :: Spec
 spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
+  it "cascade status intent rejects historical unfinished child moves without silently cancelling them" $ \env -> do
+    workspace <- createTestWorkspace env "cascade-legacy-move-intent"
+    source <- createProject env.pool (CreateProject workspace.id Nothing "source" Nothing Nothing Nothing)
+    destination <- createProject env.pool (CreateProject workspace.id Nothing "destination" Nothing Nothing Nothing)
+    let family title = do
+          parent <- Task.createTask env.pool (CreateTask workspace.id (Just source.id) Nothing title Nothing Nothing Nothing Nothing)
+          child <- Task.createTask env.pool (CreateTask workspace.id (Just source.id) (Just parent.id) "unfinished" Nothing Nothing Nothing Nothing)
+          -- V028 permitted this history. V029 must not sweep it on a move.
+          bracket_
+            (runSession env.pool $ Session.sql "ALTER TABLE tasks DISABLE TRIGGER USER")
+            (runSession env.pool $ Session.sql "ALTER TABLE tasks ENABLE TRIGGER USER") $
+              runSession env.pool $ Session.statement parent.id cascadeCancelStatement
+          pure (parent, child)
+    (singleParent, singleChild) <- family "single"
+    (batchParent, batchChild) <- family "batch"
+    before <- mapM (Task.getTask env.pool) [singleParent.id, singleChild.id, batchParent.id, batchChild.id]
+    outboxBefore <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50
+    single <- try @DBException $ Task.updateTask env.pool singleParent.id
+      (UpdateTask Nothing Unchanged (SetTo destination.id) Unchanged Nothing Nothing Nothing Unchanged)
+    batch <- try @DBException $ Task.moveTasksBatch env.pool [batchParent.id] (Just destination.id)
+    let isClosed = \case Left (DBLifecycleViolation "TASK_OPEN_UNDER_CANCELLED_TASK" _ _ _) -> True; _ -> False
+    single `shouldSatisfy` isClosed
+    batch `shouldSatisfy` isClosed
+    mapM (Task.getTask env.pool) [singleParent.id, singleChild.id, batchParent.id, batchChild.id] `shouldReturn` before
+    listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50 `shouldReturn` outboxBefore
+
+  it "cascade overlapping parent and child project updates converge in one SQL statement" $ \env -> do
+    workspace <- createTestWorkspace env "cascade-overlapping-projects"
+    parent <- createProject env.pool (CreateProject workspace.id Nothing "parent" Nothing Nothing Nothing)
+    child <- createProject env.pool (CreateProject workspace.id (Just parent.id) "child" Nothing Nothing Nothing)
+    grandchild <- createProject env.pool (CreateProject workspace.id (Just child.id) "grandchild" Nothing Nothing Nothing)
+    -- Force the heap scan to encounter the parent inserted before its child.
+    -- The child is an outer UPDATE target, not merely a cascade-only row.
+    updated <- runTransaction env.pool $ do
+      Session.sql "SET LOCAL enable_indexscan = off; SET LOCAL enable_bitmapscan = off"
+      Session.statement (parent.id, child.id) cascadeArchivePairStatement
+    updated `shouldBe` 2
+    mapM (fmap (fmap (.status)) . Project.getProject env.pool) [parent.id, child.id, grandchild.id]
+      `shouldReturn` replicate 3 (Just ProjArchived)
+
+  it "cascade overlapping parent and child task updates converge in one SQL statement" $ \env -> do
+    workspace <- createTestWorkspace env "cascade-overlapping-tasks"
+    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+    child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing Nothing)
+    sibling <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "sibling" Nothing Nothing Nothing Nothing)
+    updated <- runTransaction env.pool $ do
+      Session.sql "SET LOCAL enable_indexscan = off; SET LOCAL enable_bitmapscan = off"
+      Session.statement (parent.id, child.id) cascadeCancelPairStatement
+    updated `shouldBe` 2
+    mapM (fmap (fmap (.status)) . Task.getTask env.pool) [parent.id, child.id, sibling.id]
+      `shouldReturn` replicate 3 (Just Cancelled)
+
+  it "cascade archival rolls back every descendant audit and outbox mutation atomically" $ \env -> do
+    workspace <- createTestWorkspace env "cascade-atomic-rollback"
+    root <- createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+    child <- createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
+    task <- Task.createTask env.pool (CreateTask workspace.id (Just child.id) Nothing "task" Nothing Nothing Nothing Nothing)
+    beforeRoot <- Project.getProject env.pool root.id
+    beforeChild <- Project.getProject env.pool child.id
+    beforeTask <- Task.getTask env.pool task.id
+    beforeAudit <- getAuditLogRows env.pool "task" (T.pack (show task.id))
+    beforeOutbox <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50
+    result <- try @DBException $ runTransaction env.pool $ do
+      Session.statement root.id cascadeArchiveStatement
+      Session.sql "DO $$ BEGIN RAISE EXCEPTION 'cascade rollback sentinel'; END $$"
+    result `shouldSatisfy` (\case Left (DBOtherError message) -> message == "cascade rollback sentinel"; _ -> False)
+    Project.getProject env.pool root.id `shouldReturn` beforeRoot
+    Project.getProject env.pool child.id `shouldReturn` beforeChild
+    Task.getTask env.pool task.id `shouldReturn` beforeTask
+    getAuditLogRows env.pool "task" (T.pack (show task.id)) `shouldReturn` beforeAudit
+    listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50 `shouldReturn` beforeOutbox
+
+  it "cascade cancelled-parent policy rejects raw SQL insert reparent and reopen without partial writes" $ \env -> do
+    workspace <- createTestWorkspace env "cascade-sql-parent-policy"
+    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+    child <- Task.createTask env.pool (CreateTask workspace.id Nothing (Just parent.id) "child" Nothing Nothing Nothing Nothing)
+    moving <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "moving" Nothing Nothing Nothing Nothing)
+    runSession env.pool $ Session.statement parent.id cascadeCancelStatement
+    before <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50
+    let expectClosed action = do
+          result <- try @DBException action
+          result `shouldSatisfy` (\case Left (DBLifecycleViolation "TASK_OPEN_UNDER_CANCELLED_TASK" _ _ _) -> True; _ -> False)
+    expectClosed $ runSession env.pool $ Session.statement (workspace.id, parent.id) cascadeInsertChildStatement
+    expectClosed $ runSession env.pool $ Session.statement (moving.id, parent.id) cascadeReparentStatement
+    expectClosed $ runSession env.pool $ Session.statement child.id cascadeReopenStatement
+    fmap (fmap (.status)) (Task.getTask env.pool child.id) `shouldReturn` Just Cancelled
+    fmap (fmap (.parentId)) (Task.getTask env.pool moving.id) `shouldReturn` Just Nothing
+    listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 50 `shouldReturn` before
+
+  it "cascade cancellation serializes a concurrent unfinished child insert behind the cancelled parent" $ \_ -> withTestEnv $ \env -> do
+    workspace <- createTestWorkspace env "cascade-concurrent-insert"
+    parent <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "parent" Nothing Nothing Nothing Nothing)
+    acquired <- newEmptyMVar
+    release <- newEmptyMVar
+    let holder = withConn env.pool $ \connection ->
+          (do
+            started <- Session.run (Session.sql "BEGIN" *> Session.statement parent.id cascadeCancelStatement) connection
+            case started of Left err -> fail (show err); Right _ -> pure ()
+            putMVar acquired ()
+            takeMVar release
+            committed <- Session.run (Session.sql "COMMIT") connection
+            case committed of Left err -> fail (show err); Right _ -> pure ())
+          `finally` void (Session.run (Session.sql "ROLLBACK") connection)
+        inserting = try @DBException $ runTransaction env.pool $ do
+          Session.sql "SET LOCAL application_name = 'cascade-child-create'"
+          Session.statement (workspace.id, parent.id) cascadeInsertChildStatement
+    completed <- timeout 5000000 $
+      withAsync holder $ \writer ->
+        (do
+          takeMVar acquired
+          withAsync inserting $ \childWriter -> do
+            waitForLockWait env.pool "cascade-child-create"
+            putMVar release ()
+            wait writer
+            wait childWriter)
+        `finally` void (tryPutMVar release ())
+    completed `shouldSatisfy` (\case Just (Left (DBLifecycleViolation "TASK_OPEN_UNDER_CANCELLED_TASK" _ _ _)) -> True; _ -> False)
+
   it "retries nonterminal and terminal snapshot pages with their identical ranges" $ \env -> do
     workspace <- createTestWorkspace env "change-stream-snapshot-state"
     let scope = WorkspaceScope workspace.id
@@ -989,6 +1107,35 @@ restoreWorkspaceStatement = Statement.Statement
 hardDeleteTaskStatement :: Statement.Statement UUID.UUID ()
 hardDeleteTaskStatement = Statement.Statement
   "DELETE FROM tasks WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+cascadeArchiveStatement :: Statement.Statement UUID.UUID ()
+cascadeArchiveStatement = Statement.Statement "UPDATE projects SET status = 'archived' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+cascadeCancelStatement :: Statement.Statement UUID.UUID ()
+cascadeCancelStatement = Statement.Statement "UPDATE tasks SET status = 'cancelled' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+cascadeArchivePairStatement :: Statement.Statement (UUID.UUID, UUID.UUID) Int64
+cascadeArchivePairStatement = Statement.Statement "UPDATE projects SET status = 'archived' WHERE id IN ($1, $2)"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.rowsAffected True
+
+cascadeCancelPairStatement :: Statement.Statement (UUID.UUID, UUID.UUID) Int64
+cascadeCancelPairStatement = Statement.Statement "UPDATE tasks SET status = 'cancelled' WHERE id IN ($1, $2)"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.rowsAffected True
+
+cascadeInsertChildStatement :: Statement.Statement (UUID.UUID, UUID.UUID) ()
+cascadeInsertChildStatement = Statement.Statement
+  "INSERT INTO tasks (workspace_id, parent_id, title) VALUES ($1, $2, 'concurrent unfinished child')"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
+
+cascadeReparentStatement :: Statement.Statement (UUID.UUID, UUID.UUID) ()
+cascadeReparentStatement = Statement.Statement "UPDATE tasks SET parent_id = $2 WHERE id = $1"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))) Dec.noResult True
+
+cascadeReopenStatement :: Statement.Statement UUID.UUID ()
+cascadeReopenStatement = Statement.Statement "UPDATE tasks SET status = 'in_progress' WHERE id = $1"
   (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
 
 rollbackUpdateProjectStatement :: Statement.Statement UUID.UUID ()

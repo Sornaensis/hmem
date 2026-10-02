@@ -46,6 +46,7 @@ data-files:
     migrations/V026__task_dependency_cycle_sqlstate.sql
     migrations/V027__bounded_task_dependency_cycle_check.sql
     migrations/V028__durable_embedding_jobs_and_space_isolation.sql
+    migrations/V029__cascade_archive_and_cancel.sql
 
 library
   exposed-modules:

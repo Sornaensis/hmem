@@ -5,6 +5,7 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as AesonKey
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Maybe (isJust)
+import Data.Functor.Contravariant (contramap)
 import Control.Exception (bracket_, try)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -27,6 +28,60 @@ import HMem.Types
 spec :: Spec
 spec = do
   beforeAll setupTestPool $ aroundWith withTestTransaction $ describe "Project lifecycle" $ do
+    it "cascade archival archives completed descendant projects and cancels unfinished tasks without changing done rows" $ \env -> do
+      workspace <- createTestWorkspace env "project-cascade-archive"
+      let create parent title = createProject env.pool CreateProject
+            { workspaceId = workspace.id, parentId = parent, name = title, description = Nothing, priority = Nothing, metadata = Nothing }
+          task project parent title = Task.createTask env.pool CreateTask
+            { workspaceId = workspace.id, projectId = Just project, parentId = parent, title = title, description = Nothing, priority = Nothing, metadata = Nothing, dueAt = Nothing }
+          projectStatus status = UpdateProject Nothing Unchanged Unchanged (Just status) Nothing Nothing
+          taskStatus status = UpdateTask Nothing Unchanged Unchanged Unchanged (Just status) Nothing Nothing Unchanged
+      root <- create Nothing "root"
+      active <- create (Just root.id) "active child"
+      completed <- create (Just active.id) "completed grandchild"
+      _ <- updateProject env.pool completed.id (projectStatus ProjCompleted)
+      parent <- task active.id Nothing "parent task"
+      child <- task active.id (Just parent.id) "subtask"
+      -- The DB permits a legacy/direct-SQL child without its parent's project.
+      -- Archive must still follow the task hierarchy beyond project seed rows.
+      unassignedChild <- runSession env.pool $ Session.statement (workspace.id, parent.id) unassignedArchiveChildStatement
+      doneTask <- task active.id Nothing "done task"
+      _ <- Task.updateTask env.pool doneTask.id (taskStatus Done)
+      beforeDone <- Task.getTask env.pool doneTask.id
+      _ <- updateProject env.pool root.id (projectStatus ProjArchived)
+      mapM (fmap (fmap (.status)) . getProject env.pool) [root.id, active.id, completed.id]
+        `shouldReturn` replicate 3 (Just ProjArchived)
+      mapM (fmap (fmap (.status)) . Task.getTask env.pool) [parent.id, child.id, unassignedChild]
+        `shouldReturn` replicate 3 (Just Cancelled)
+      Task.getTask env.pool doneTask.id `shouldReturn` beforeDone
+    it "cascade archival normalizes a historical root only on explicit status intent" $ \env -> do
+      workspace <- createTestWorkspace env "project-cascade-repeat"
+      root <- createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+      child <- createProject env.pool (CreateProject workspace.id (Just root.id) "completed" Nothing Nothing Nothing)
+      _ <- updateProject env.pool child.id (archiveStatusUpdate ProjCompleted)
+      -- Simulate already-archived historical state without sweeping it.
+      bracket_
+        (runSession env.pool $ Session.sql "ALTER TABLE projects DISABLE TRIGGER USER")
+        (runSession env.pool $ Session.sql "ALTER TABLE projects ENABLE TRIGGER USER") $
+        runSession env.pool $ Session.statement root.id archiveProjectStatement
+      _ <- updateProject env.pool root.id ((archiveStatusUpdate ProjArchived) { status = Nothing, name = Just "renamed" })
+      fmap (fmap (.status)) (getProject env.pool child.id) `shouldReturn` Just ProjCompleted
+      _ <- updateProject env.pool root.id (archiveStatusUpdate ProjArchived)
+      fmap (fmap (.status)) (getProject env.pool child.id) `shouldReturn` Just ProjArchived
+
+    it "cascade archival from direct SQL preserves strict completion refusal" $ \env -> do
+      workspace <- createTestWorkspace env "project-cascade-sql"
+      root <- createProject env.pool (CreateProject workspace.id Nothing "root" Nothing Nothing Nothing)
+      child <- createProject env.pool (CreateProject workspace.id (Just root.id) "child" Nothing Nothing Nothing)
+      runSession env.pool $ Session.statement root.id archiveProjectStatement
+      mapM (fmap (fmap (.status)) . getProject env.pool) [root.id, child.id] `shouldReturn` replicate 2 (Just ProjArchived)
+      strict <- createProject env.pool (CreateProject workspace.id Nothing "strict completion" Nothing Nothing Nothing)
+      _ <- createProject env.pool (CreateProject workspace.id (Just strict.id) "still open" Nothing Nothing Nothing)
+      -- Expected SQL failures end this rollback-wrapped example: resource-pool
+      -- discards the connection on exceptions, including its outer transaction.
+      completion <- try (updateProject env.pool strict.id (archiveStatusUpdate ProjCompleted))
+      completion `shouldSatisfy` (\case Left (DBLifecycleViolation "PROJECT_COMPLETION_BLOCKED" _ _ _) -> True; _ -> False)
+
     it "creates every initial task in order with project and task outbox events" $ \env -> do
       workspace <- createTestWorkspace env "project-spec-success"
       let input = CreateProjectSpec workspace.id "spec project" (Just "durable project description") (Just 7)
@@ -208,3 +263,17 @@ field :: Text -> Value -> Maybe Value
 field key = \case
   Object objectValue -> KeyMap.lookup (AesonKey.fromText key) objectValue
   _ -> Nothing
+
+archiveStatusUpdate :: ProjectStatus -> UpdateProject
+archiveStatusUpdate status = UpdateProject Nothing Unchanged Unchanged (Just status) Nothing Nothing
+
+archiveProjectStatement :: Statement.Statement UUID ()
+archiveProjectStatement = Statement.Statement
+  "UPDATE projects SET status = 'archived' WHERE id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+unassignedArchiveChildStatement :: Statement.Statement (UUID, UUID) UUID
+unassignedArchiveChildStatement = Statement.Statement
+  "INSERT INTO tasks (workspace_id, parent_id, title) VALUES ($1, $2, 'unassigned hierarchy child') RETURNING id"
+  (contramap fst (Enc.param (Enc.nonNullable Enc.uuid)) <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid)))
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.uuid))) True

@@ -31,7 +31,7 @@ import Json.Encode as Encode
 import Page.Home
 import Page.Workspace
 import Permissions
-import Ports exposing (authSessionError, authTokenChanged, authUnauthorized, disconnectWebSocket, localStorageReceived, loginAuth, logoutAuth, onMainContentScroll)
+import Ports exposing (authSessionError, authTokenChanged, authUnauthorized, clearChangeStreamScope, disconnectChangeStreamScope, disconnectWebSocket, localStorageReceived, loginAuth, logoutAuth, onMainContentScroll)
 import Toast
 import Types exposing (..)
 import Url
@@ -176,16 +176,16 @@ handleOwned ownedMsg model =
                             sessionReadyModel =
                                 { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin, auditLog = nextAuditLog, timeline = nextTimeline }
                                     |> Feature.Observation.reconcileCurationPermission
-                                    |> updateLoadingAfterSession expectedWorkspace sessionContext
-                                    |> Feature.DataLoading.prepareRootNavigationRequest expectedWorkspace
+                                    |> updateLoadingAfterSession model expectedWorkspace sessionContext
+                                    |> prepareSessionNavigation model expectedWorkspace sessionContext
 
                             sessionBootstrapCmd =
-                                bootstrapAfterSession expectedWorkspace sessionContext sessionReadyModel
+                                bootstrapAfterSession model expectedWorkspace sessionContext sessionReadyModel
 
                             ( focusedModel, focusCmd ) =
                                 case ( expectedWorkspace, sessionReadyModel.page, sessionReadyModel.focus.focusedEntity ) of
                                     ( Just workspaceId, WorkspacePage currentWorkspaceId, Just ( entityType, entityId ) ) ->
-                                        if workspaceId == currentWorkspaceId && sessionCanReadWorkspace workspaceId sessionContext then
+                                        if workspaceId == currentWorkspaceId && sessionCanReadWorkspace workspaceId sessionContext && not (sessionScopeRetained (Feature.ChangeStream.Workspace workspaceId) sessionContext model) then
                                             Feature.DataLoading.beginNavigationFocus workspaceId entityType entityId sessionReadyModel
 
                                         else
@@ -272,7 +272,7 @@ handleOwned ownedMsg model =
                                         ( model.timeline, Cmd.none )
                         in
                         ( focusedModel
-                        , Cmd.batch [ sessionBootstrapCmd, focusCmd, fetchMembershipsCmd, fetchAuditCmd, fetchTimelineCmd ]
+                        , Cmd.batch [ retireSessionScopes sessionContext model, sessionBootstrapCmd, focusCmd, fetchMembershipsCmd, fetchAuditCmd, fetchTimelineCmd ]
                         )
 
                     Err _ ->
@@ -468,11 +468,14 @@ currentSessionWorkspace model =
             Nothing
 
 
-bootstrapAfterSession : Maybe String -> Api.SessionContext -> Model -> Cmd Msg
-bootstrapAfterSession expectedWorkspace sessionContext model =
+bootstrapAfterSession : Model -> Maybe String -> Api.SessionContext -> Model -> Cmd Msg
+bootstrapAfterSession previous expectedWorkspace sessionContext model =
     let
         workspaceListLoadToken =
-            model.dataLoading.nextWorkspaceListLoadToken
+            model.dataLoading.activeWorkspaceListLoadToken |> Maybe.withDefault model.dataLoading.nextWorkspaceListLoadToken
+
+        forceResync scope =
+            previous.sessionContext /= Nothing && not (sessionScopeRetained scope sessionContext previous)
 
         globalCmds =
             if sessionContext.globalPermissions.superadmin then
@@ -485,7 +488,7 @@ bootstrapAfterSession expectedWorkspace sessionContext model =
             case model.page of
                 WorkspacePage currentWsId ->
                     if expectedWorkspace == Just currentWsId && sessionCanReadWorkspace currentWsId sessionContext then
-                        ( [ Feature.WebSocket.connectCmd model.flags (Just sessionContext) (Feature.ChangeStream.Workspace currentWsId) False
+                        ( [ Feature.WebSocket.connectCmd model.flags (Just sessionContext) (Feature.ChangeStream.Workspace currentWsId) (forceResync (Feature.ChangeStream.Workspace currentWsId))
                           ]
                         , True
                         )
@@ -499,7 +502,7 @@ bootstrapAfterSession expectedWorkspace sessionContext model =
         rootNavigationCmd =
             case model.page of
                 WorkspacePage currentWsId ->
-                    if expectedWorkspace == Just currentWsId && sessionCanReadWorkspace currentWsId sessionContext then
+                    if expectedWorkspace == Just currentWsId && sessionCanReadWorkspace currentWsId sessionContext && not (sessionScopeRetained (Feature.ChangeStream.Workspace currentWsId) sessionContext previous) then
                         [ Feature.DataLoading.beginRootNavigation model ]
 
                     else
@@ -510,7 +513,7 @@ bootstrapAfterSession expectedWorkspace sessionContext model =
 
         globalStreamCmd =
             if sessionContext.globalPermissions.superadmin then
-                [ Feature.WebSocket.connectCmd model.flags (Just sessionContext) Feature.ChangeStream.Global False ]
+                [ Feature.WebSocket.connectCmd model.flags (Just sessionContext) Feature.ChangeStream.Global (forceResync Feature.ChangeStream.Global) ]
 
             else
                 []
@@ -571,11 +574,130 @@ resetAuditLogWithFilters filters auditLog =
     }
 
 
-updateLoadingAfterSession : Maybe String -> Api.SessionContext -> Model -> Model
-updateLoadingAfterSession expectedWorkspace sessionContext model =
+{-| Compare with the trusted context before installing a refresh. A healthy
+same-audience connect is idempotent, so retaining its canonical projection and
+response generations is necessary. Authority changes must seed a fresh snapshot.
+-}
+sameSessionAuthority : Api.SessionContext -> Model -> Bool
+sameSessionAuthority sessionContext previous =
+    previous.auth.status == AuthReady
+        && (previous.sessionContext
+                |> Maybe.map
+                    (\trusted ->
+                        trusted.authMode == sessionContext.authMode
+                            && trusted.principal.actorId == sessionContext.principal.actorId
+                            && trusted.principal.actorType == sessionContext.principal.actorType
+                            && trusted.principal.authority == sessionContext.principal.authority
+                            && trusted.principal.grantUserId == sessionContext.principal.grantUserId
+                    )
+                |> Maybe.withDefault False
+           )
+
+
+sessionScopeAllowed : Feature.ChangeStream.Scope -> Api.SessionContext -> Model -> Bool
+sessionScopeAllowed scope sessionContext model =
+    case scope of
+        Feature.ChangeStream.Global ->
+            sessionContext.globalPermissions.superadmin
+
+        Feature.ChangeStream.Workspace workspaceId ->
+            model.page == WorkspacePage workspaceId
+                && model.selectedWorkspaceId == Just workspaceId
+                && sessionCanReadWorkspace workspaceId sessionContext
+
+
+sessionScopeRetained : Feature.ChangeStream.Scope -> Api.SessionContext -> Model -> Bool
+sessionScopeRetained scope sessionContext previous =
+    sameSessionAuthority sessionContext previous
+        && sessionScopeAllowed scope sessionContext previous
+        && (previous.sessionContext |> Maybe.map (\trusted -> sessionScopeAllowed scope trusted previous) |> Maybe.withDefault False)
+
+
+prepareSessionNavigation : Model -> Maybe String -> Api.SessionContext -> Model -> Model
+prepareSessionNavigation previous expectedWorkspace sessionContext model =
+    if expectedWorkspace |> Maybe.map (\workspaceId -> sessionScopeRetained (Feature.ChangeStream.Workspace workspaceId) sessionContext previous) |> Maybe.withDefault False then
+        model
+
+    else
+        Feature.DataLoading.prepareRootNavigationRequest expectedWorkspace model
+
+
+retireSessionScopes : Api.SessionContext -> Model -> Cmd Msg
+retireSessionScopes sessionContext previous =
+    case previous.sessionContext of
+        Just trusted ->
+            let
+                oldScopes =
+                    (Feature.ChangeStream.Global :: List.map Feature.ChangeStream.Workspace (Maybe.withDefault [] (Maybe.map List.singleton previous.selectedWorkspaceId)))
+                        ++ List.map .scope (Dict.values previous.webSocket.streams)
+                        |> List.map (\scope -> ( Feature.ChangeStream.scopeKey scope, scope ))
+                        |> Dict.fromList
+                        |> Dict.values
+
+                retire scope =
+                    let
+                        value =
+                            Encode.object
+                                (( "audienceId", Encode.string trusted.principal.actorId )
+                                    :: (case scope of
+                                            Feature.ChangeStream.Global ->
+                                                [ ( "scope", Encode.string "global" ) ]
+
+                                            Feature.ChangeStream.Workspace workspaceId ->
+                                                [ ( "scope", Encode.string "workspace" ), ( "workspaceId", Encode.string workspaceId ) ]
+                                       )
+                                )
+                    in
+                    Cmd.batch [ clearChangeStreamScope value, disconnectChangeStreamScope value ]
+            in
+            -- Newly authorized scopes are restarted atomically by forceResync
+            -- in connectCmd; separate disconnect commands could close that replacement.
+            oldScopes
+                |> List.filter (\scope -> (sessionScopeAllowed scope trusted previous || Dict.member (Feature.ChangeStream.scopeKey scope) previous.webSocket.streams) && not (sessionScopeAllowed scope sessionContext previous))
+                |> List.map retire
+                |> Cmd.batch
+
+        Nothing ->
+            Cmd.none
+
+
+updateLoadingAfterSession : Model -> Maybe String -> Api.SessionContext -> Model -> Model
+updateLoadingAfterSession previous expectedWorkspace sessionContext model =
     let
+        keepGlobal =
+            sessionScopeRetained Feature.ChangeStream.Global sessionContext previous
+
+        keepWorkspace =
+            expectedWorkspace |> Maybe.map (\workspaceId -> sessionScopeRetained (Feature.ChangeStream.Workspace workspaceId) sessionContext previous) |> Maybe.withDefault False
+
+        clearScopedData =
+            previous.sessionContext /= Nothing
+                && (not (sameSessionAuthority sessionContext previous)
+                        || (expectedWorkspace /= Nothing && not keepWorkspace)
+                        || (expectedWorkspace == Nothing && not keepGlobal)
+                   )
+
+        scopedModel =
+            if clearScopedData then
+                let
+                    cleared =
+                        clearSessionScopedState model
+                in
+                { cleared
+                    | dataLoading = Feature.DataLoading.prepareForPageLoad model.page cleared.dataLoading
+                    , sessionRequestEpoch =
+                        if sameSessionAuthority sessionContext previous then
+                            model.sessionRequestEpoch
+
+                        else
+                            model.sessionRequestEpoch + 1
+                }
+
+            else
+                model
+
         currentLoading =
-            model.dataLoading
+            scopedModel.dataLoading
 
         shouldLoadWorkspaceData =
             case model.page of
@@ -585,25 +707,53 @@ updateLoadingAfterSession expectedWorkspace sessionContext model =
                 _ ->
                     False
 
-        nextWebSocket =
-            if shouldLoadWorkspaceData then
-                model.webSocket
+        retainedStreams =
+            Dict.filter (\_ stream -> sessionScopeRetained stream.scope sessionContext previous) previous.webSocket.streams
+
+        requiredScopes =
+            (if sessionContext.globalPermissions.superadmin then [ Feature.ChangeStream.Global ] else [])
+                ++ (if shouldLoadWorkspaceData then List.map Feature.ChangeStream.Workspace (Maybe.withDefault [] (Maybe.map List.singleton expectedWorkspace)) else [])
+
+        retainedStates =
+            List.map (\scope -> Dict.get (Feature.ChangeStream.scopeKey scope) retainedStreams) requiredScopes
+
+        nextState =
+            if List.isEmpty requiredScopes then
+                Disconnected
+
+            else if retainedStreams == previous.webSocket.streams && List.all (\scope -> sessionScopeRetained scope sessionContext previous) requiredScopes then
+                previous.webSocket.state
 
             else
-                { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }
+                case List.filterMap identity retainedStates |> List.filterMap (\stream -> Maybe.map (\reason -> "canonical:" ++ reason ++ ":" ++ Feature.ChangeStream.scopeKey stream.scope) stream.failure) |> List.head of
+                    Just reason ->
+                        ConnectionFailed reason
+
+                    Nothing ->
+                        if List.all (Maybe.map .live >> Maybe.withDefault False) retainedStates then
+                            Connected
+
+                        else
+                            Connecting
+
+        nextWebSocket =
+            { state = nextState
+            , streams = retainedStreams
+            , targetGenerations = nextSessionTargetGenerations sessionContext previous
+            }
 
         nextGroups =
-            if sessionContext.globalPermissions.superadmin then
-                model.groups
+            if keepGlobal then
+                previous.groups
 
             else
                 Feature.Groups.init
 
         updatedLoading =
             { currentLoading
-                | loadingWorkspaces = True
-                , activeWorkspaceListLoadToken = Just currentLoading.nextWorkspaceListLoadToken
-                , nextWorkspaceListLoadToken = currentLoading.nextWorkspaceListLoadToken + 1
+                | loadingWorkspaces = if keepGlobal then previous.dataLoading.loadingWorkspaces else True
+                , activeWorkspaceListLoadToken = if keepGlobal then previous.dataLoading.activeWorkspaceListLoadToken else Just currentLoading.nextWorkspaceListLoadToken
+                , nextWorkspaceListLoadToken = if keepGlobal then previous.dataLoading.nextWorkspaceListLoadToken else currentLoading.nextWorkspaceListLoadToken + 1
                 , loadingWorkspaceData = shouldLoadWorkspaceData && currentLoading.loadingWorkspaceData
                 , pendingWorkspaceLoads =
                     if shouldLoadWorkspaceData then
@@ -619,18 +769,56 @@ updateLoadingAfterSession expectedWorkspace sessionContext model =
                         Nothing
             }
     in
-    { model | dataLoading = updatedLoading, webSocket = nextWebSocket, workspaces = Dict.empty, groups = nextGroups }
+    { scopedModel | dataLoading = updatedLoading, webSocket = nextWebSocket, workspaces = if keepGlobal then previous.workspaces else Dict.empty, groups = nextGroups }
+
+
+{-| Retired scope counters are tombstones within a session lifetime. Removing
+them would let a revoke/regrant reuse generation 1 and accept a pre-revocation
+response. A changed authority instead advances the session epoch.
+-}
+nextSessionTargetGenerations : Api.SessionContext -> Model -> Dict.Dict String Int
+nextSessionTargetGenerations sessionContext previous =
+    if sameSessionAuthority sessionContext previous then
+        previous.webSocket.targetGenerations
+            |> Dict.map
+                (\target generation ->
+                    let
+                        scopeKey =
+                            String.split "|" target |> List.head |> Maybe.withDefault ""
+
+                        scope =
+                            if scopeKey == "global" then
+                                Feature.ChangeStream.Global
+
+                            else
+                                Feature.ChangeStream.Workspace (String.dropLeft (String.length "workspace:") scopeKey)
+
+                        wasActive =
+                            Dict.member scopeKey previous.webSocket.streams
+                                || (previous.sessionContext |> Maybe.map (\trusted -> sessionScopeAllowed scope trusted previous) |> Maybe.withDefault False)
+                    in
+                    if wasActive && not (sessionScopeRetained scope sessionContext previous) then
+                        generation + 1
+
+                    else
+                        generation
+                )
+
+    else
+        Dict.empty
 
 
 stopAllLoading : DataLoadingModel -> DataLoadingModel
 stopAllLoading dataLoading =
-    { dataLoading
-        | loadingWorkspaces = False
-        , activeWorkspaceListLoadToken = Nothing
-        , loadingWorkspaceData = False
-        , pendingWorkspaceLoads = 0
-        , activeWorkspaceLoadToken = Nothing
-        , cardHydrationLoaded = False
+    let
+        empty =
+            Feature.DataLoading.init
+    in
+    { empty
+        | nextWorkspaceListLoadToken = dataLoading.nextWorkspaceListLoadToken
+        , nextWorkspaceLoadToken = dataLoading.nextWorkspaceLoadToken
+        , nextCardDetailRequestId = dataLoading.nextCardDetailRequestId
+        , navigationGeneration = dataLoading.navigationGeneration + 1
     }
 
 

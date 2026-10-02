@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M3YDHCKS9MZX2XFM8ACH59QR"
+relation = "amends"
+from_record = "R01M3YDHCKS856BYWSEMC1Z3YF7"
+subject_adr = "A01M39R0FHX6Y5VC60CAHQDAX0D"
+to_records = ["R01M39R0FV22QYTSW5C9GY5EJYE"]
++++
+
+Enforce explicit recursive archive and cancellation while preserving done descendants and requiring cancelled-parent reopening.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0ifSwiYiI6ImU4NDc4ZjNiYWNkZDgwMTJmMmViN2ZlZjFmYmQxZWYwODYzODA3OWQiLCJpIjoic2hhMjU2OjdibXFwaGhva3hHUlhnOWZGTndKWnU4R01CVFQ3QVpDNHI5eG5yUE12cTQiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTNZREhDS1M5TVpYMlhGTThBQ0g1OVFSIiwib3AiOiJPMDFNM1lESENLUzg1NkJZV1NFTUMxWjNZRjciLCJwIjpbIlIwMU0zOVIwRlYyMlFZVFNXNUM5R1k1RUpZRSJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1Njo1LUpfM0wyYlRrZjBKbWNkWl9CUXZUMUZpNTNFYmVIYl9md09qZXRYaFRjIiwidCI6MTc5MDk0ODQ1NTAzMywidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

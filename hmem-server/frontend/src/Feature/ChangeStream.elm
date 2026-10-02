@@ -21,6 +21,7 @@ type alias State =
     , eventIds : List String
     , resumeToken : Maybe String
     , live : Bool
+    , failure : Maybe String
     }
 
 
@@ -68,7 +69,7 @@ type Action
 
 init : Scope -> List String -> State
 init scope eventIds =
-    { scope = scope, eventIds = List.take 128 eventIds, resumeToken = Nothing, live = False }
+    { scope = scope, eventIds = List.take 128 eventIds, resumeToken = Nothing, live = False, failure = Nothing }
 
 
 scopeKey : Scope -> String
@@ -119,7 +120,24 @@ reduceFrame : Api.CanonicalFrame -> State -> ( State, List Action )
 reduceFrame frame state =
     case frame of
         Api.CanonicalCheckpoint token ->
-            ( { state | resumeToken = Just token, live = True }, [] )
+            ( { state | resumeToken = Just token, live = True, failure = Nothing }, [] )
+
+        Api.CanonicalStatus scope phase ->
+            if matchesScope state.scope scope then
+                ( { state
+                    | live = False
+                    , failure =
+                        if List.member phase [ "resyncing", "connecting", "reconnecting", "replaying", "control_closed" ] then
+                            Nothing
+
+                        else
+                            Just phase
+                  }
+                , []
+                )
+
+            else
+                ( state, [] )
 
         Api.CanonicalResyncRequired ->
             ( { state | live = False, resumeToken = Nothing }, [ BeginResync ] )

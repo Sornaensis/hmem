@@ -1,5 +1,5 @@
 import { Elm } from './Main.elm'
-import { createCanonicalFrameBatcher, createChangeStreamManager } from './change-stream.js'
+import { createCanonicalFrameBatcher, createCanonicalStateHandler, createChangeStreamManager } from './change-stream.js'
 
 function createSessionId() {
   if (window.crypto && window.crypto.randomUUID) {
@@ -489,21 +489,22 @@ const canonicalStreams = createChangeStreamManager({
   apiUrl,
   wsUrl,
   storage: localStorage,
-  onState: function (scope, workspaceId, state) {
-    if (state === 'connecting' || state === 'replaying') { if (app.ports.wsConnecting) app.ports.wsConnecting.send(null) }
-    else if (state === 'unauthenticated') { notifyUnauthorized() }
-    else if (state === 'scope_forbidden') {
-      clearCanonicalFrameBatch(scope, workspaceId)
+  onState: createCanonicalStateHandler({
+    batcher: canonicalFrameBatcher,
+    onStatus: function (scope, workspaceId, state) {
+      if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'status', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, state }))
+    },
+    onUnauthorized: notifyUnauthorized,
+    onForbidden: function (scope, workspaceId) {
       canonicalScopeAudiences.delete(canonicalScopeKey(scope, workspaceId))
       canonicalStreams.clear(scope, workspaceId)
       canonicalStreams.disconnect(scope, workspaceId)
       if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'frame', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, frame: { schema_version: 1, type: 'access_revoked', ...(scope === 'workspace' ? { workspace_id: workspaceId } : {}) } }))
-    }
-    else if (state === 'resync_required' || state === 'invalid_ticket') {
+    },
+    onResync: function (scope, workspaceId) {
       if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'frame', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, frame: { schema_version: 1, type: 'resync_required' } }))
     }
-    else if (state !== 'resyncing' && state !== 'control_closed' && app.ports.wsConnectionFailed) app.ports.wsConnectionFailed.send(`canonical:${state}:${scope}:${workspaceId || ''}`)
-  },
+  }),
   onSnapshot: function (scope, workspaceId, snapshot) {
     clearCanonicalFrameBatch(scope, workspaceId)
     if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'snapshot', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, items: snapshot.items, resume_token: snapshot.resumeToken, snapshot_profile: snapshot.snapshotProfile }))

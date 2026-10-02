@@ -1,17 +1,82 @@
 module ChangeStreamTest exposing (suite)
 
 import Api
+import AppShell
 import Dict
 import Expect
 import Feature.ChangeStream as ChangeStream
+import Feature.WebSocket as WebSocket
 import Json.Encode as Encode
 import Test exposing (Test, describe, test)
+import Types exposing (AuthStatus(..), Model, Msg(..), Page(..), WSState(..), WorkspaceTab(..))
+import Url
 
 
 suite : Test
 suite =
     describe "canonical change stream policy"
-        [ test "deduplicates and ignores wrong scope events" <|
+        [ test "both required scopes need terminal checkpoints in either arrival order" <|
+            \_ ->
+                let
+                    states order =
+                        List.foldl (\scope models -> receiveCheckpoint scope (List.head models |> Maybe.withDefault streamModel) :: models) [] order
+                            |> List.reverse
+                            |> List.map (.webSocket >> .state)
+                in
+                Expect.equal [ [ Connecting, Connected ], [ Connecting, Connected ] ]
+                    [ states [ "global", "workspace" ], states [ "workspace", "global" ] ]
+        , test "another scope checkpoint cannot hide reconnecting or exhausted workspace recovery" <|
+            \_ ->
+                let
+                    live =
+                        streamModel |> receiveCheckpoint "global" |> receiveCheckpoint "workspace"
+
+                    lost =
+                        receiveStatus "workspace" "reconnecting" live
+
+                    exhausted =
+                        receiveStatus "workspace" "retry_exhausted" lost
+
+                    otherCheckpoint =
+                        receiveCheckpoint "global" exhausted
+
+                    restarting =
+                        receiveStatus "workspace" "connecting" otherCheckpoint
+
+                    restored =
+                        receiveCheckpoint "workspace" restarting
+                in
+                Expect.equal
+                    [ Connecting, ConnectionFailed "canonical:retry_exhausted:workspace:a", ConnectionFailed "canonical:retry_exhausted:workspace:a", Connecting, Connected ]
+                    (List.map (.webSocket >> .state) [ lost, exhausted, otherCheckpoint, restarting, restored ])
+        , test "resync and control closure cannot leave a scope live" <|
+            \_ ->
+                let
+                    live =
+                        streamModel |> receiveCheckpoint "global" |> receiveCheckpoint "workspace"
+
+                    recovering phase =
+                        live |> receiveStatus "workspace" phase |> receiveCheckpoint "global"
+                in
+                [ recovering "resyncing", recovering "control_closed", recovering "replaying" ]
+                    |> List.map (.webSocket >> .state)
+                    |> Expect.equal [ Connecting, Connecting, Connecting ]
+        , test "required streams follow session permissions for readers and global views" <|
+            \_ ->
+                let
+                    reader =
+                        { streamModel | sessionContext = Maybe.map (\session -> { session | globalPermissions = { createWorkspace = False, superadmin = False } }) streamModel.sessionContext }
+
+                    globalView =
+                        { streamModel | selectedWorkspaceId = Nothing, page = HomePage }
+
+                    noStreams =
+                        { reader | selectedWorkspaceId = Nothing, page = HomePage }
+                in
+                [ receiveCheckpoint "workspace" reader, receiveCheckpoint "global" globalView, receiveCheckpoint "global" noStreams ]
+                    |> List.map (.webSocket >> .state)
+                    |> Expect.equal [ Connected, Connected, Disconnected ]
+        , test "deduplicates and ignores wrong scope events" <|
             \_ ->
                 let
                     state =
@@ -598,3 +663,61 @@ dependencyItem taskId dependsOnId =
     { kind = "task_dependency"
     , data = Encode.object [ ( "task_id", Encode.string taskId ), ( "depends_on_id", Encode.string dependsOnId ) ]
     }
+
+
+streamModel : Model
+streamModel =
+    let
+        flags =
+            { apiUrl = "https://api.example", wsUrl = "wss://api.example/ws", sessionId = "test", runtimeMode = "test", authTokenStorageKey = "test", authTokenPresent = False, loginUrl = Nothing, logoutUrl = Nothing }
+
+        url =
+            { protocol = Url.Https, host = "app.example", port_ = Nothing, path = "/workspace/a", query = Nothing, fragment = Nothing }
+
+        base =
+            AppShell.initModel Nothing url (WorkspacePage "a") flags Nothing { tab = ProjectsTab, focus = Nothing, observationId = Nothing }
+    in
+    { base
+        | auth = { status = AuthReady, mode = Just "test" }
+        , selectedWorkspaceId = Just "a"
+        , sessionContext = Just { authMode = "test", principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = True }, workspace = Just { workspaceId = "a", role = Just "read", canRead = True, canEdit = False, canAdmin = False } }
+    }
+
+
+scopeValue : String -> Encode.Value
+scopeValue scope =
+    Encode.object
+        (( "scope", Encode.string scope )
+            :: (if scope == "workspace" then
+                    [ ( "workspace_id", Encode.string "a" ) ]
+
+                else
+                    []
+               )
+        )
+
+
+receiveStatus : String -> String -> Model -> Model
+receiveStatus scope state model =
+    receiveTransport
+        [ ( "transport", Encode.string "status" )
+        , ( "scope", scopeValue scope )
+        , ( "state", Encode.string state )
+        ]
+        model
+
+
+receiveCheckpoint : String -> Model -> Model
+receiveCheckpoint scope model =
+    receiveTransport
+        [ ( "transport", Encode.string "frame" )
+        , ( "scope", scopeValue scope )
+        , ( "frame", Encode.object [ ( "schema_version", Encode.int 1 ), ( "type", Encode.string "checkpoint" ), ( "catch_up", Encode.string "complete" ), ( "resume_token", Encode.string "opaque" ) ] )
+        ]
+        model
+
+
+receiveTransport : List ( String, Encode.Value ) -> Model -> Model
+receiveTransport fields model =
+    WebSocket.update (WsMessageReceived (Encode.encode 0 (Encode.object (( "schema_version", Encode.int 1 ) :: fields)))) model
+        |> Tuple.first

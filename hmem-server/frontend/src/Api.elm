@@ -2035,6 +2035,7 @@ type CanonicalFrame
     | CanonicalScoped ChangeStreamScope CanonicalFrame
     | CanonicalSnapshot ChangeStreamScope (List SnapshotItem) String String
     | CanonicalBatch ChangeStreamScope (List CanonicalFrame)
+    | CanonicalStatus ChangeStreamScope String
 
 
 type alias SnapshotItem =
@@ -2315,6 +2316,11 @@ canonicalTransportDecoder =
                     |> D.andThen
                         (\transport ->
                             case transport of
+                                "status" ->
+                                    D.map2 CanonicalStatus
+                                        (D.field "scope" scopeDecoder)
+                                        (D.field "state" nonEmptyStringDecoder)
+
                                 "frame" ->
                                     D.map2 CanonicalScoped
                                         (D.field "scope" scopeDecoder)

@@ -119,6 +119,18 @@ export function createCanonicalFrameBatcher({ onBatch, onIncomplete = () => {}, 
   }
 }
 
+// Every transport phase invalidates unfinished delivery from the prior socket.
+// Keep this boundary shared by production ports and injected regression tests.
+export function createCanonicalStateHandler({ batcher, onStatus, onUnauthorized = () => {}, onForbidden = () => {}, onResync = () => {} }) {
+  return (scope, workspaceId, state) => {
+    batcher.clear(scope, workspaceId)
+    onStatus(scope, workspaceId, state)
+    if (state === 'unauthenticated') onUnauthorized()
+    else if (state === 'scope_forbidden') onForbidden(scope, workspaceId)
+    else if (state === 'resync_required' || state === 'invalid_ticket') onResync(scope, workspaceId)
+  }
+}
+
 export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = WebSocket, storage = localStorage, cryptoImpl = globalThis.crypto, AbortControllerImpl = globalThis.AbortController, setTimer = setTimeout, clearTimer = clearTimeout, onState = () => {}, onFrame = () => {}, onSnapshot = () => {}, apiUrl = window.location.origin, wsUrl }) {
   const sockets = new Map()
   const endpoint = path => canonicalEndpoint(apiUrl, path)
@@ -274,6 +286,8 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
   }
   async function open(entry, generation) {
     try {
+      if (!isCurrent(entry, generation)) return
+      onState(entry.scope, entry.workspaceId, 'connecting')
       const ticket = await obtainTicket(entry, generation)
       if (!isCurrent(entry, generation)) return
       const socket = new WebSocketImpl(socketUrl(ticket)); entry.socket = socket
@@ -282,11 +296,13 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
         if (!isCurrent(entry, generation)) return
         try {
           const frame = JSON.parse(event.data)
-          if (frame && frame.schema_version === 1 && frame.type === 'checkpoint' && typeof frame.resume_token === 'string' && frame.catch_up === 'complete') {
+          if (frame && frame.schema_version === 1 && frame.type === 'checkpoint' && typeof frame.resume_token === 'string' && frame.resume_token && frame.catch_up === 'complete') {
             entry.resumeToken = frame.resume_token; entry.attempt = 0
+            entry.eventIds = Array.from(new Set([...entry.eventIds, ...entry.pendingEventIds])).slice(-MAX_EVENT_IDS)
+            entry.pendingEventIds = []
             writeCheckpoint(storage, entry.audienceId, entry.scope, entry.workspaceId, entry.resumeToken, entry.eventIds || [])
           }
-          if (frame && frame.schema_version === 1 && frame.type === 'change' && frame.event && typeof frame.event.event_id === 'string') entry.eventIds = Array.from(new Set([...(entry.eventIds || []), frame.event.event_id])).slice(-MAX_EVENT_IDS)
+          if (frame && frame.schema_version === 1 && frame.type === 'change' && frame.event && typeof frame.event.event_id === 'string') entry.pendingEventIds = Array.from(new Set([...entry.pendingEventIds, frame.event.event_id])).slice(-MAX_EVENT_IDS)
           const revokesThisWorkspace = frame && frame.schema_version === 1 && frame.type === 'access_revoked' && entry.scope === 'workspace' && (!frame.workspace_id || frame.workspace_id === entry.workspaceId)
           if (revokesThisWorkspace) {
             entry.closedByControl = true
@@ -302,20 +318,47 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
       socket.onclose = () => {
         if (!isCurrent(entry, generation)) return
         entry.socket = null
+        stop(entry)
+        entry.pendingEventIds = []
         if (entry.closedByControl) {
           onState(entry.scope, entry.workspaceId, 'control_closed')
           return
         }
-        if (entry.attempt >= MAX_RETRIES) { onState(entry.scope, entry.workspaceId, 'retry_exhausted'); return }
-        entry.timer = setTimer(() => open(entry, generation), Math.min(30000, 500 * 2 ** Math.min(entry.attempt++, 6)))
+        retry(entry)
       }
     } catch (error) {
       if (!isCurrent(entry, generation) || (error && error.cancelled)) return
       const reason = error && error.message ? error.message : 'transport_failure'
       if (reason === 'resync_required' || reason === 'unauthenticated' || reason === 'scope_forbidden' || reason === 'invalid_ticket') { onState(entry.scope, entry.workspaceId, reason); return }
-      if (entry.attempt >= MAX_RETRIES) { onState(entry.scope, entry.workspaceId, 'retry_exhausted'); return }
-      entry.timer = setTimer(() => open(entry, generation), Math.min(30000, 500 * 2 ** Math.min(entry.attempt++, 6)))
+      stop(entry)
+      retry(entry)
     }
+  }
+  function retry(entry) {
+    if (entry.attempt >= MAX_RETRIES) {
+      entry.restartable = true
+      onState(entry.scope, entry.workspaceId, 'retry_exhausted')
+      return
+    }
+    const generation = entry.generation
+    onState(entry.scope, entry.workspaceId, 'reconnecting')
+    if (!isCurrent(entry, generation)) return
+    entry.timer = setTimer(() => {
+      if (!isCurrent(entry, generation)) return
+      entry.timer = null
+      open(entry, generation)
+    }, Math.min(30000, 500 * 2 ** Math.min(entry.attempt++, 6)))
+  }
+  function begin(entry) {
+    const generation = ++entry.generation
+    const ready = entry.resumeToken ? Promise.resolve() : resync(entry, generation)
+    if (!entry.resumeToken) onState(entry.scope, entry.workspaceId, 'resyncing')
+    ready.then(() => { if (isCurrent(entry, generation)) open(entry, generation) }).catch(error => {
+      if (!isCurrent(entry, generation) || (error && error.cancelled)) return
+      const reason = error && error.message ? error.message : 'resync_required'
+      entry.restartable = reason !== 'unauthenticated' && reason !== 'scope_forbidden' && reason !== 'resync_required' && reason !== 'invalid_snapshot'
+      onState(entry.scope, entry.workspaceId, reason)
+    })
   }
   return {
     connect({ audienceId, scope, workspaceId = null, resumeToken, headers = {}, snapshotProfile }) {
@@ -325,6 +368,11 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
       const old = sockets.get(entryKey)
       if (old && old.audienceId === audienceId) {
         old.headers = headers
+        if (old.restartable) {
+          stop(old)
+          old.restartable = false; old.attempt = 0; old.pendingEventIds = []
+          begin(old)
+        }
         return
       }
       const storageValue = readCheckpoint(storage, audienceId, scope, workspaceId)
@@ -333,19 +381,16 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
       // safe for a caller that retained its corresponding projections.
       const resolvedProfile = snapshotProfile || (scope === 'workspace' ? WORKSPACE_SHELL_SNAPSHOT_PROFILE : FULL_SNAPSHOT_PROFILE)
       if ((scope === 'global' && resolvedProfile !== FULL_SNAPSHOT_PROFILE) || ![FULL_SNAPSHOT_PROFILE, WORKSPACE_SHELL_SNAPSHOT_PROFILE].includes(resolvedProfile)) throw new Error('invalid snapshot profile')
-      const entry = { audienceId, scope, workspaceId, resumeToken: resumeToken || null, eventIds: resumeToken && storageValue ? storageValue.eventIds : [], headers, snapshotProfile: resolvedProfile, generation: 0, attempt: 0, socket: null, timer: null, abortController: null, closedByControl: false }
-      if (!entry.resumeToken) { onState(scope, workspaceId, 'resyncing') }
+      const entry = { audienceId, scope, workspaceId, resumeToken: resumeToken || null, eventIds: resumeToken && storageValue ? storageValue.eventIds : [], pendingEventIds: [], headers, snapshotProfile: resolvedProfile, generation: 0, attempt: 0, socket: null, timer: null, abortController: null, closedByControl: false, restartable: false }
       if (old) stop(old)
-      sockets.set(entryKey, entry); const generation = ++entry.generation
-      const begin = entry.resumeToken ? Promise.resolve() : resync(entry, generation)
-      begin.then(() => { if (isCurrent(entry, generation)) { onState(scope, workspaceId, 'connecting'); open(entry, generation) } }).catch(error => {
-        if (!isCurrent(entry, generation) || (error && error.cancelled)) return
-        onState(scope, workspaceId, error && error.message ? error.message : 'resync_required')
-      })
+      sockets.set(entryKey, entry)
+      begin(entry)
     },
     checkpoint(scope, workspaceId, resumeToken, eventIds = []) {
       const entry = sockets.get(key(scope, workspaceId)); if (!entry) return false
+      if (typeof resumeToken !== 'string' || !resumeToken) return false
       entry.resumeToken = resumeToken; entry.attempt = 0
+      entry.eventIds = Array.from(new Set(eventIds)).slice(-MAX_EVENT_IDS); entry.pendingEventIds = []
       return writeCheckpoint(storage, entry.audienceId, scope, workspaceId, resumeToken, eventIds)
     },
     disconnect(scope, workspaceId) { const entryKey = key(scope, workspaceId); const entry = sockets.get(entryKey); if (entry) { stop(entry); sockets.delete(entryKey) } },

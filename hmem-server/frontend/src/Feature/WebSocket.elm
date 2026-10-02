@@ -545,6 +545,9 @@ applyCanonicalFrame frame model =
         Api.CanonicalBatch apiScope frames ->
             applyScopedFrames (toPolicyScope apiScope) frames model
 
+        Api.CanonicalStatus apiScope _ ->
+            applyScopedFrame (toPolicyScope apiScope) frame model
+
         -- Socket frames always carry the JS-owned scope wrapper.  A bare
         -- frame cannot safely bind a checkpoint/control to an audience, so it
         -- fails closed rather than guessing from the selected route.
@@ -588,16 +591,76 @@ applyScopedFrames scope frames model =
             Dict.insert key next model.webSocket.streams
 
         connectionState =
-            if next.live then
-                Connected
-
-            else
-                model.webSocket.state
+            scopedConnectionState (requiredScopes model) streams
 
         updated =
             updateWebSocket (\webSocket -> { webSocket | streams = streams, state = connectionState }) model
     in
     applyActions scope actions updated
+
+
+requiredScopes : Model -> List ChangeStream.Scope
+requiredScopes model =
+    (if Permissions.isSuperadmin model then
+        [ ChangeStream.Global ]
+
+     else
+        []
+    )
+        ++ (case model.page of
+                WorkspacePage workspaceId ->
+                    if model.selectedWorkspaceId == Just workspaceId && Permissions.canReadCurrentWorkspace model then
+                        [ ChangeStream.Workspace workspaceId ]
+
+                    else
+                        []
+
+                _ ->
+                    []
+           )
+
+
+scopedConnectionState : List ChangeStream.Scope -> Dict.Dict String ChangeStream.State -> WSState
+scopedConnectionState scopes streams =
+    let
+        required =
+            List.map (\scope -> Dict.get (ChangeStream.scopeKey scope) streams) scopes
+
+        failure =
+            required
+                |> List.filterMap identity
+                |> List.filterMap
+                    (\stream ->
+                        stream.failure
+                            |> Maybe.map
+                                (\reason ->
+                                    "canonical:"
+                                        ++ reason
+                                        ++ ":"
+                                        ++ (case stream.scope of
+                                                ChangeStream.Global ->
+                                                    "global:"
+
+                                                ChangeStream.Workspace workspaceId ->
+                                                    "workspace:" ++ workspaceId
+                                           )
+                                )
+                    )
+                |> List.head
+    in
+    case failure of
+        Just reason ->
+            ConnectionFailed reason
+
+        Nothing ->
+            if List.isEmpty scopes then
+                Disconnected
+
+            else if List.all (Maybe.map .live >> Maybe.withDefault False) required then
+                Connected
+
+            else
+                Connecting
 
 
 applyCanonicalSnapshot : ChangeStream.Scope -> String -> List Api.SnapshotItem -> String -> Model -> ( Model, Cmd Msg )
@@ -619,7 +682,7 @@ applyCanonicalSnapshot scope profile items token model =
                         |> Maybe.withDefault (ChangeStream.init scope [])
 
                 resumed =
-                    { stream | resumeToken = Just token, live = False }
+                    { stream | resumeToken = Just token, eventIds = [], live = False, failure = Nothing }
 
                 withStream =
                     updateWebSocket (\webSocket -> { webSocket | streams = Dict.insert key resumed webSocket.streams, state = Connecting }) withoutStale
@@ -819,7 +882,7 @@ invalidateScopeRequests scope model =
     updateWebSocket
         (\webSocket ->
             { webSocket
-                | streams = Dict.update (ChangeStream.scopeKey scope) (Maybe.map (\stream -> { stream | live = False, resumeToken = Nothing })) webSocket.streams
+                | streams = Dict.update (ChangeStream.scopeKey scope) (Maybe.map (\stream -> { stream | live = False, resumeToken = Nothing, failure = Nothing })) webSocket.streams
                 , targetGenerations = Dict.filter (\target _ -> not (String.startsWith prefix target)) webSocket.targetGenerations
             }
         )
@@ -1053,11 +1116,7 @@ applyAction scope action ( model, accumulated ) =
                     Dict.remove (ChangeStream.scopeKey revokedScope) webSocket.streams
 
                 remainingState =
-                    if Dict.values remainingStreams |> List.any .live then
-                        Connected
-
-                    else
-                        Disconnected
+                    scopedConnectionState (List.filter ((/=) revokedScope) (requiredScopes model)) remainingStreams
 
                 scopedWebSocket =
                     { webSocket

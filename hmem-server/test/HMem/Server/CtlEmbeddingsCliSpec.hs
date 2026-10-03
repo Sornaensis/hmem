@@ -56,13 +56,13 @@ spec = describe "hmem-ctl embeddings CLI" $ do
       parseCommand ["export", "--workspace", "not-a-uuid"] `shouldSatisfy` isLeft
 
     it "documents provider neutrality, streams, retry atomicity, and exits" $ do
-      let helpText = renderHelp
+      let helpText = unwords $ words renderHelp
       helpText `shouldSatisfy` isInfixOf "Available commands:"
       helpText `shouldSatisfy` isInfixOf "export"
       helpText `shouldSatisfy` isInfixOf "import"
       helpText `shouldSatisfy` isInfixOf "commits each"
       helpText `shouldSatisfy` isInfixOf "record independently"
-      helpText `shouldSatisfy` isInfixOf "never invokes an embedding"
+      helpText `shouldSatisfy` isInfixOf "This manual CLI does not invoke an embedding provider"
       helpText `shouldSatisfy` isInfixOf "exactly 1536 finite numbers"
       helpText `shouldSatisfy` isInfixOf "model revision, preprocessing, and vector space"
       helpText `shouldSatisfy` isInfixOf "Content edits clear embeddings"

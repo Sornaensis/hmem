@@ -3,8 +3,8 @@
 module HMem.Server.Embedding.HttpSpec (spec, testHelperExecutable) where
 
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (Async, AsyncCancelled(..), async, asyncThreadId, cancel, wait, waitCatch)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
+import Control.Concurrent.Async (Async, AsyncCancelled(..), asyncThreadId, cancel, race, wait, waitCatch, withAsync)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, readMVar, takeMVar, tryPutMVar)
 import Control.Exception
   ( AsyncException(..), Exception(..), SomeException, asyncExceptionFromException
   , asyncExceptionToException, finally, fromException, throwTo, try )
@@ -17,6 +17,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf)
+import Data.Word (Word64)
 import Data.FileEmbed (embedFile, makeRelativeToProject)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
@@ -48,7 +49,7 @@ instance Exception TestStopProvider where
   fromException = asyncExceptionFromException
 
 spec :: Spec
-spec = describe "TEI HTTP adapter" $ do
+spec = around_ (withinTestTimeout 180000000) $ describe "TEI HTTP adapter" $ do
   it "creates a provider-neutral TEI request fixture" $ do
     let request = EmbeddingRequest
           [ EmbeddingInput EmbeddingDocument "document"
@@ -131,7 +132,7 @@ spec = describe "TEI HTTP adapter" $ do
           body <- Wai.strictRequestBody request
           modifyIORef' seen (const (Just (Wai.requestMethod request, Wai.rawPathInfo request, body)))
           respond (Wai.responseLBS status200 [("Content-Type", "application/json")] (vectorResponse 1))
-    withTransport app (httpConfig 0 1000) $ \transport -> do
+    withTransport app (httpConfig 0 normalOperationBudgetMs) $ \transport -> do
       result <- transport requestOne
       result `shouldBe` Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
     recorded <- readIORef seen
@@ -153,7 +154,7 @@ spec = describe "TEI HTTP adapter" $ do
           , EmbeddingInput EmbeddingDocument "fourth"
           ]
         longInput = T.replicate 2048 "l"
-        config = (httpConfig 0 1000) { batchSize = 256 }
+        config = (httpConfig 0 normalOperationBudgetMs) { batchSize = 256 }
     withTransport app config $ \transport -> do
       result <- transport request
       result `shouldBe` Right (EmbeddingBatch (replicate 4 unitVector) managedTeiSpaceFingerprint)
@@ -168,7 +169,7 @@ spec = describe "TEI HTTP adapter" $ do
     calls <- newIORef (0 :: Int)
     let app _ respond = modifyIORef' calls (+ 1)
           >> respond (Wai.responseLBS status200 [] (vectorResponse 1))
-        config = (httpConfig 0 1000) { batchSize = 32 }
+        config = (httpConfig 0 normalOperationBudgetMs) { batchSize = 32 }
         five = EmbeddingRequest (replicate 5 (EmbeddingInput EmbeddingDocument "small"))
         oversized = EmbeddingRequest [EmbeddingInput EmbeddingDocument (T.replicate 32768 "a")]
     withTransport app config $ \transport -> do
@@ -184,7 +185,7 @@ spec = describe "TEI HTTP adapter" $ do
           respond (Wai.responseLBS status200 [] (vectorResponse 1))
         exactAscii = T.replicate 32767 "a"
         exactMultibyte = T.replicate 16383 "é" <> "a"
-        config = (httpConfig 0 1000) { batchSize = 4 }
+        config = (httpConfig 0 normalOperationBudgetMs) { batchSize = 4 }
         recording request respond = do
           body <- Wai.strictRequestBody request
           values <- expectInputValues body
@@ -229,7 +230,7 @@ spec = describe "TEI HTTP adapter" $ do
           if value == "fail"
             then respond (Wai.responseLBS status500 [] "failure")
             else respond (Wai.responseLBS status200 [] (vectorResponse 1))
-        config = (httpConfig 0 1000) { batchSize = 4 }
+        config = (httpConfig 0 normalOperationBudgetMs) { batchSize = 4 }
     withTransport app config $ \transport ->
       transport (EmbeddingRequest
         [ EmbeddingInput EmbeddingDocument "first"
@@ -276,47 +277,63 @@ spec = describe "TEI HTTP adapter" $ do
                   respond (Wai.responseLBS status200 [] (vectorResponse 1))
     withEndpoint app $ \policy endpointValue -> do
       provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy
-        (gpuConfig endpointValue) { batchSize = 4, timeoutMs = 2000 } Nothing
+        (gpuConfig endpointValue) { batchSize = 4 } Nothing
       provider.availability `shouldReturn` EmbeddingAvailable
-      active <- async (provider.embed requestOne)
-      takeMVar userStarted
-      firstWaiter <- async (provider.embed requestOne)
-      secondWaiter <- async (provider.embed requestOne)
-      withinTestTimeout 1000000 (waitUntilBlockedOnAdmission firstWaiter)
-      withinTestTimeout 1000000 (waitUntilBlockedOnAdmission secondWaiter)
-      provider.embed requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
-      putMVar releaseUser ()
-      mapM_ (\worker -> wait worker `shouldReturn` Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint))
-        [active, firstWaiter, secondWaiter]
-      provider.embed requestOne `shouldReturn` Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+      withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releaseUser]) (provider.embed requestOne) $ \active -> do
+        awaitTestSignal "userStarted" active userStarted
+        withTestWorker (pure ()) (provider.embed requestOne) $ \firstWaiter -> do
+          withTestWorker (pure ()) (provider.embed requestOne) $ \secondWaiter -> do
+            withinTestTimeout 1000000 (waitUntilBlockedOnAdmission firstWaiter)
+            withinTestTimeout 1000000 (waitUntilBlockedOnAdmission secondWaiter)
+            provider.embed requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
+            putMVar releaseUser ()
+            mapM_ (\worker -> wait worker `shouldReturn` Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint))
+              [active, firstWaiter, secondWaiter]
+            provider.embed requestOne `shouldReturn` Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
 
   it "expires queued invocation admission at the shorter remaining operation deadline" $ do
     infoStarted <- newEmptyMVar
     releaseInfo <- newEmptyMVar
     blockInfo <- newIORef True
+    infoCalls <- newIORef (0 :: Int)
+    probeCalls <- newIORef (0 :: Int)
     let app request respond = do
           body <- Wai.strictRequestBody request
           if Wai.rawPathInfo request == "/info"
             then do
+              modifyIORef' infoCalls (+ 1)
               shouldBlock <- atomicModifyIORef' blockInfo (\value -> (False, value))
-              if shouldBlock then putMVar infoStarted () >> takeMVar releaseInfo else pure ()
-              respond (Wai.responseLBS status200 [] validInfoResponse)
-            else serveCompatible request body respond
+              if shouldBlock
+                then do
+                  putMVar infoStarted ()
+                  takeMVar releaseInfo
+                  respond (Wai.responseLBS status500 [] "initial validation unavailable")
+                else respond (Wai.responseLBS status200 [] validInfoResponse)
+            else do
+              modifyIORef' probeCalls (+ 1)
+              serveCompatible request body respond
     withEndpoint app $ \policy endpointValue -> do
       provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy
         (gpuConfig endpointValue) { timeoutMs = 150 } Nothing
-      validating <- async provider.availability
-      takeMVar infoStarted
-      started <- getMonotonicTimeNSec
-      provider.embed requestOne `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
-      finished <- getMonotonicTimeNSec
-      let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
-      elapsedMs `shouldSatisfy` (>= 100)
-      elapsedMs `shouldSatisfy` (< 600)
-      putMVar releaseInfo ()
-      wait validating `shouldReturn` EmbeddingAvailable
-      provider.embed requestOne `shouldReturn`
-        Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+      withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releaseInfo]) provider.availability $ \validating -> do
+        awaitTestSignal "infoStarted" validating infoStarted
+        started <- getMonotonicTimeNSec
+        provider.embed requestOne `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+        finished <- getMonotonicTimeNSec
+        let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
+        elapsedMs `shouldSatisfy` (>= 100)
+        elapsedMs `shouldSatisfy` (< 600)
+        putMVar releaseInfo ()
+        wait validating `shouldReturn`
+          EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+        readIORef infoCalls `shouldReturn` 1
+        readIORef probeCalls `shouldReturn` 0
+        -- Revalidation uses its declared startup budget, so this proves the
+        -- same gate is reusable without requiring a native helper to spawn
+        -- and exchange a batch within the unrelated 150 ms admission ceiling.
+        awaitProviderRecovery provider
+        readIORef infoCalls `shouldReturn` 2
+        readIORef probeCalls `shouldReturn` 1
 
   it "caps queued admission at five seconds and reuses the slot afterward" $ do
     infoStarted <- newEmptyMVar
@@ -333,18 +350,18 @@ spec = describe "TEI HTTP adapter" $ do
     withEndpoint app $ \policy endpointValue -> do
       provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy
         (gpuConfig endpointValue) { timeoutMs = 300000 } Nothing
-      validating <- async provider.availability
-      takeMVar infoStarted
-      started <- getMonotonicTimeNSec
-      provider.embed requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
-      finished <- getMonotonicTimeNSec
-      let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
-      elapsedMs `shouldSatisfy` (>= 4500)
-      elapsedMs `shouldSatisfy` (< 7000)
-      putMVar releaseInfo ()
-      wait validating `shouldReturn` EmbeddingAvailable
-      provider.embed requestOne `shouldReturn`
-        Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+      withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releaseInfo]) provider.availability $ \validating -> do
+        awaitTestSignal "infoStarted" validating infoStarted
+        started <- getMonotonicTimeNSec
+        provider.embed requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
+        finished <- getMonotonicTimeNSec
+        let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
+        elapsedMs `shouldSatisfy` (>= 4500)
+        elapsedMs `shouldSatisfy` (< 7000)
+        putMVar releaseInfo ()
+        wait validating `shouldReturn` EmbeddingAvailable
+        provider.embed requestOne `shouldReturn`
+          Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
 
   it "releases the active gate when an invocation hook throws" $ do
     failOnce <- newIORef True
@@ -403,36 +420,59 @@ spec = describe "TEI HTTP adapter" $ do
           (provider, _) <- expectRight =<<
             makeValidatedGpuEmbeddingProviderWithLifecycleHooks
               (pure ()) (pure ()) afterTransport policy
-              ((gpuConfig endpointValue) { timeoutMs = 100 }) Nothing
+              (gpuConfig endpointValue) Nothing
           provider.availability `shouldReturn` EmbeddingAvailable
-          invoking <- async (provider.embed requestOne)
-          takeMVar publicationObserved
-          wait invoking `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
-          provider.availability `shouldReturn`
-            EmbeddingUnavailable (EmbeddingFailure ProviderTimedOut True)
-          callsBeforeCooldown <- readIORef calls
-          threadDelay 1100000
-          provider.availability `shouldReturn` EmbeddingAvailable
-          readIORef calls `shouldReturn` (callsBeforeCooldown + 2)
-          provider.embed requestOne `shouldReturn`
-            Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+          started <- getMonotonicTimeNSec
+          withAsync (provider.embed requestOne) $ \invoking -> do
+            awaitTestSignal "decoded transport publication" invoking publicationObserved
+            callsAtPublication <- readIORef calls
+            withTestWorker (pure ()) (provider.embed requestOne) $ \queued -> do
+              withinTestTimeout 1000000 (waitUntilBlockedOnAdmission queued)
+              waitForOperationJoin started (wait invoking) `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+              finished <- getMonotonicTimeNSec
+              let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
+              -- Transport reserves 50 ms of the original operation budget
+              -- for helper shutdown. The blocking decoded-batch hook
+              -- must be terminated by that deadline, not a test-side sleep.
+              elapsedMs `shouldSatisfy` (>= fromIntegral (deadlineOperationBudgetMs - transportReserveMs))
+              elapsedMs `shouldSatisfy` (< fromIntegral (deadlineOperationBudgetMs + nativeCleanupBudgetMs))
+              wait queued `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+              readIORef calls `shouldReturn` callsAtPublication
+              provider.availability `shouldReturn`
+                EmbeddingUnavailable (EmbeddingFailure ProviderTimedOut True)
+              callsBeforeCooldown <- readIORef calls
+              awaitProviderRecovery provider
+              readIORef calls `shouldReturn` (callsBeforeCooldown + 2)
+              provider.embed requestOne `shouldReturn`
+                Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
     withEndpoint app $ \policy endpointValue ->
       scenario policy endpointValue `finally` void (tryPutMVar releasePublication ())
 
   it "keeps a cold validation helper deadline as the cached timeout" $ do
     validationReached <- newEmptyMVar
     releaseValidation <- newEmptyMVar
-    let app request respond = Wai.strictRequestBody request >>= \body -> serveCompatible request body respond
+    operationStarted <- newEmptyMVar
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          if Wai.rawPathInfo request == "/embed"
+            then readMVar operationStarted >>= waitForTestInstant . (+ deadlinePhaseOffsetNs)
+            else pure ()
+          serveCompatible request body respond
         beforePublication = putMVar validationReached () >> takeMVar releaseValidation
         scenario policy endpointValue = do
           (provider, _) <- expectRight =<<
             makeValidatedGpuEmbeddingProviderWithPublicationHook beforePublication policy
-              ((gpuConfig endpointValue) { timeoutMs = 2000 }) Nothing
-          invoking <- async (provider.embed requestOne)
-          withinTestTimeout 1500000 (takeMVar validationReached)
-          wait invoking `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
-          provider.availability `shouldReturn`
-            EmbeddingUnavailable (EmbeddingFailure ProviderTimedOut True)
+              ((gpuConfig endpointValue) { timeoutMs = deadlineOperationBudgetMs }) Nothing
+          started <- getMonotonicTimeNSec
+          putMVar operationStarted started
+          withTestWorker (void (tryPutMVar releaseValidation ())) (provider.embed requestOne) $ \invoking -> do
+            awaitTestSignal "decoded cold validation" invoking validationReached
+            waitForOperationJoin started (wait invoking) `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+            finished <- getMonotonicTimeNSec
+            let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
+            elapsedMs `shouldSatisfy` (>= fromIntegral (deadlineOperationBudgetMs - transportReserveMs))
+            provider.availability `shouldReturn`
+              EmbeddingUnavailable (EmbeddingFailure ProviderTimedOut True)
     withEndpoint app $ \policy endpointValue ->
       scenario policy endpointValue `finally` void (tryPutMVar releaseValidation ())
 
@@ -487,14 +527,36 @@ spec = describe "TEI HTTP adapter" $ do
       readIORef wireCalls `shouldReturn` beforeCached
 
   it "keeps cold validation and ordered singleton inference inside one invocation deadline" $ do
-    calls <- newIORef (0 :: Int)
+    phases <- newIORef ([] :: [(T.Text, Word64)])
+    operationStarted <- newEmptyMVar
+    secondStarted <- newEmptyMVar
+    releaseSecond <- newEmptyMVar
+    secondFinished <- newEmptyMVar
+    secondReplyAt <- newEmptyMVar
     let app request respond = do
-          modifyIORef' calls (+ 1)
           body <- Wai.strictRequestBody request
-          threadDelay 70000
-          serveCompatible request body respond
-        config endpointValue = (gpuConfig endpointValue)
-          { batchSize = 2, timeoutMs = 220 }
+          phase <- if Wai.rawPathInfo request == "/info"
+            then pure "metadata"
+            else expectInputValues body >>= \case
+              ["first"] -> pure "first"
+              ["second"] -> pure "second"
+              _ -> pure "probe"
+          observed <- getMonotonicTimeNSec
+          modifyIORef' phases (<> [(phase, observed)])
+          if phase == "second"
+            then (putMVar secondStarted () >> takeMVar releaseSecond
+                  >> (getMonotonicTimeNSec >>= putMVar secondReplyAt)
+                  >> serveCompatible request body respond)
+                 `finally` void (tryPutMVar secondFinished ())
+            else do
+              -- Consume part of the original budget before the final request.
+              -- A transport that renews its deadline for that request would
+              -- accept the controlled late success below.
+              if phase == "first"
+                then readMVar operationStarted >>= waitForTestInstant . (+ deadlinePhaseOffsetNs)
+                else pure ()
+              serveCompatible request body respond
+        config endpointValue = (gpuConfig endpointValue) { batchSize = 2 }
         request = EmbeddingRequest
           [ EmbeddingInput EmbeddingDocument "first"
           , EmbeddingInput EmbeddingDocument "second"
@@ -502,21 +564,43 @@ spec = describe "TEI HTTP adapter" $ do
     withEndpoint app $ \policy endpointValue -> do
       provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy (config endpointValue) Nothing
       started <- getMonotonicTimeNSec
-      provider.embed request `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
-      finished <- getMonotonicTimeNSec
-      let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
-      elapsedMs `shouldSatisfy` (>= 140)
-      elapsedMs `shouldSatisfy` (< 600)
-      readIORef calls >>= (`shouldSatisfy` (\count -> count >= 2 && count <= 4))
+      putMVar operationStarted started
+      withTestWorker (void (tryPutMVar releaseSecond ())) (provider.embed request) $ \invoking -> do
+        awaitTestSignal "cold validation and both ordered singleton requests" invoking secondStarted
+        waitForTestInstant (started + deadlineLateReplyOffsetNs)
+        void (tryPutMVar releaseSecond ())
+        waitForOperationJoin started (wait invoking) `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+        finished <- getMonotonicTimeNSec
+        observed <- readIORef phases
+        map fst observed `shouldBe` ["metadata", "probe", "first", "second"]
+        -- Every wire phase shares the original absolute deadline. Native-owner
+        -- joined cleanup has a separate allowance, never a renewed deadline.
+        map snd observed `shouldSatisfy` all (< started + deadlineBudgetNs)
+        finalRequestAt <- maybe (fail "final singleton phase not observed") pure (lookup "second" observed)
+        actualReplyAt <- withinTestTimeout 1000000 (takeMVar secondReplyAt)
+        actualReplyAt `shouldSatisfy` (\instant -> instant > started + deadlineBudgetNs
+          && instant < finalRequestAt + deadlineBudgetNs - transportReserveNs)
+        let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
+        elapsedMs `shouldSatisfy` (>= fromIntegral (deadlineOperationBudgetMs - transportReserveMs))
+        void (tryPutMVar releaseSecond ())
+        withinTestTimeout 1000000 (takeMVar secondFinished)
+        provider.availability `shouldReturn`
+          EmbeddingUnavailable (EmbeddingFailure ProviderTimedOut True)
 
   it "keeps queued recovery validation, retry, and ordered singletons inside one deadline" $ do
     firstInfo <- newIORef True
     recoveryInfoStarted <- newEmptyMVar
     releaseRecoveryInfo <- newEmptyMVar
     secondStarted <- newEmptyMVar
+    secondRequestAt <- newEmptyMVar
+    secondReplyAt <- newEmptyMVar
+    releaseSecond <- newEmptyMVar
+    invocationStarted <- newEmptyMVar
     failFirstUser <- newIORef True
     userInputs <- newIORef ([] :: [T.Text])
-    let app request respond = do
+    let phaseDelay = deadlineOperationBudgetMs * 1000 `div` 10
+        release = mapM_ (\signal -> void (tryPutMVar signal ())) [releaseRecoveryInfo, releaseSecond]
+        app request respond = do
           body <- Wai.strictRequestBody request
           if Wai.rawPathInfo request == "/info"
             then do
@@ -526,21 +610,23 @@ spec = describe "TEI HTTP adapter" $ do
                 else do
                   putMVar recoveryInfoStarted ()
                   takeMVar releaseRecoveryInfo
-                  threadDelay 60000
+                  threadDelay phaseDelay
                   respond (Wai.responseLBS status200 [] validInfoResponse)
             else expectInputValues body >>= \case
               values | length values == 4 -> do
-                threadDelay 60000
+                threadDelay phaseDelay
                 respond (Wai.responseLBS status200 [] referenceVectorResponse)
               [value] -> do
                 modifyIORef' userInputs (<> [value])
                 if value == "second"
                   then do
-                    getMonotonicTimeNSec >>= putMVar secondStarted
-                    threadDelay 500000
+                    getMonotonicTimeNSec >>= putMVar secondRequestAt
+                    putMVar secondStarted ()
+                    takeMVar releaseSecond
+                    getMonotonicTimeNSec >>= putMVar secondReplyAt
                     respond (Wai.responseLBS status200 [] (vectorResponse 1))
                   else do
-                    threadDelay 60000
+                    threadDelay phaseDelay
                     shouldFail <- if value == "first"
                       then atomicModifyIORef' failFirstUser (\current -> (False, current))
                       else pure False
@@ -548,51 +634,53 @@ spec = describe "TEI HTTP adapter" $ do
                       then respond (Wai.responseLBS status500 [] "retry first singleton")
                       else respond (Wai.responseLBS status200 [] (vectorResponse 1))
               _ -> respond (Wai.responseLBS status400 [] "unexpected logical batch")
-        config endpointValue = (gpuConfig endpointValue)
-          { batchSize = 3, timeoutMs = 650, retryAttempts = 1 }
+        config endpointValue = (gpuConfig endpointValue) { batchSize = 3, retryAttempts = 1 }
         request = EmbeddingRequest
           [ EmbeddingInput EmbeddingDocument "first"
           , EmbeddingInput EmbeddingDocument "second"
           , EmbeddingInput EmbeddingDocument "third"
           ]
         scenario policy endpointValue = do
-          provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy
-            (config endpointValue) Nothing
+          provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy (config endpointValue) Nothing
           provider.availability `shouldReturn`
             EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
-          threadDelay 1100000
-          recovering <- async provider.availability
-          takeMVar recoveryInfoStarted
-          started <- getMonotonicTimeNSec
-          invoking <- async $ do
-            invoked <- getMonotonicTimeNSec
-            result <- provider.embed request
-            returned <- getMonotonicTimeNSec
-            pure (result, invoked, returned)
-          withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission invoking
-          threadDelay 80000
-          putMVar releaseRecoveryInfo ()
-          withinTestTimeout 1000000 (wait recovering) `shouldReturn` EmbeddingAvailable
-          secondAt <- withinTestTimeout 1000000 (takeMVar secondStarted)
-          let secondElapsedMs = fromIntegral (secondAt - started) / 1000000 :: Double
-          secondElapsedMs `shouldSatisfy` (>= 250)
-          secondElapsedMs `shouldSatisfy` (< 600)
-          (result, invoked, returned) <- withinTestTimeout 1000000 (wait invoking)
-          result `shouldBe` Left (EmbeddingFailure ProviderTimedOut True)
-          finished <- getMonotonicTimeNSec
-          let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
-              operationElapsedMs = fromIntegral (returned - invoked) / 1000000 :: Double
-          elapsedMs `shouldSatisfy` (>= 600)
-          elapsedMs `shouldSatisfy` (< 800)
-          operationElapsedMs `shouldSatisfy` (< 800)
-          (elapsedMs - secondElapsedMs) `shouldSatisfy` (< 500)
-          seen <- readIORef userInputs
-          take 3 seen `shouldBe` ["first", "first", "second"]
-          seen `shouldNotContain` ["third"]
-          provider.availability `shouldReturn`
-            EmbeddingUnavailable (EmbeddingFailure ProviderTimedOut True)
+          withTestWorker release (awaitProviderRecovery provider >> pure EmbeddingAvailable) $ \recovering -> do
+            awaitTestSignal "recoveryInfoStarted" recovering recoveryInfoStarted
+            let invokeTimed = do
+                  invoked <- getMonotonicTimeNSec
+                  putMVar invocationStarted invoked
+                  result <- provider.embed request
+                  returned <- getMonotonicTimeNSec
+                  pure (result, returned)
+            withTestWorker release invokeTimed $ \invoking -> do
+              started <- withinTestTimeout 1000000 (takeMVar invocationStarted)
+              withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission invoking
+              waitForTestInstant (started + deadlinePhaseOffsetNs)
+              recoveryReleasedAt <- getMonotonicTimeNSec
+              putMVar releaseRecoveryInfo ()
+              withinTestTimeout (deadlineOperationBudgetMs * 1000) (wait recovering) `shouldReturn` EmbeddingAvailable
+              awaitTestSignal "second singleton after recovery and retry" invoking secondStarted
+              secondAt <- withinTestTimeout 1000000 (takeMVar secondRequestAt)
+              secondAt `shouldSatisfy` (\instant -> instant >= recoveryReleasedAt
+                && instant < started + deadlineBudgetNs)
+              waitForTestInstant (started + deadlineLateReplyOffsetNs)
+              putMVar releaseSecond ()
+              (result, returned) <- waitForOperationJoin started (wait invoking)
+              result `shouldBe` Left (EmbeddingFailure ProviderTimedOut True)
+              actualReplyAt <- withinTestTimeout 1000000 (takeMVar secondReplyAt)
+              -- Even renewing at admission, before validation and retries,
+              -- would accept this controlled valid late response.
+              actualReplyAt `shouldSatisfy` (\instant -> instant > started + deadlineBudgetNs
+                && instant < recoveryReleasedAt + deadlineBudgetNs - transportReserveNs
+                && instant < secondAt + deadlineBudgetNs - transportReserveNs)
+              let elapsedMs = fromIntegral (returned - started) / 1000000 :: Double
+              elapsedMs `shouldSatisfy` (>= fromIntegral (deadlineOperationBudgetMs - transportReserveMs))
+              seen <- readIORef userInputs
+              seen `shouldBe` ["first", "first", "second"]
+              provider.availability `shouldReturn`
+                EmbeddingUnavailable (EmbeddingFailure ProviderTimedOut True)
     withEndpoint app $ \policy endpointValue ->
-      scenario policy endpointValue `finally` void (tryPutMVar releaseRecoveryInfo ())
+      scenario policy endpointValue `finally` release
 
   it "requires the explicit native GPU assertion without network IO" $ do
     calls <- newIORef (0 :: Int)
@@ -633,20 +721,20 @@ spec = describe "TEI HTTP adapter" $ do
     withEndpoint app $ \policy endpointValue -> do
       (provider, invalidate) <- expectRight =<<
         makeValidatedGpuEmbeddingProviderWithInvalidation policy (gpuConfig endpointValue) Nothing
-      checking <- async provider.availability
-      takeMVar infoStarted
-      invalidate
-      putMVar releaseInfo ()
-      wait checking `shouldReturn`
-        EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
-      callsAfterRetirement <- readIORef calls
-      provider.availability `shouldReturn`
-        EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
-      readIORef calls `shouldReturn` callsAfterRetirement
-      replacement <- expectRight =<<
-        makeValidatedGpuEmbeddingProvider policy (gpuConfig endpointValue) Nothing
-      replacement.availability `shouldReturn` EmbeddingAvailable
-      readIORef calls `shouldReturn` (callsAfterRetirement + 2)
+      withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releaseInfo]) provider.availability $ \checking -> do
+        awaitTestSignal "infoStarted" checking infoStarted
+        invalidate
+        putMVar releaseInfo ()
+        wait checking `shouldReturn`
+          EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+        callsAfterRetirement <- readIORef calls
+        provider.availability `shouldReturn`
+          EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+        readIORef calls `shouldReturn` callsAfterRetirement
+        replacement <- expectRight =<<
+          makeValidatedGpuEmbeddingProvider policy (gpuConfig endpointValue) Nothing
+        replacement.availability `shouldReturn` EmbeddingAvailable
+        readIORef calls `shouldReturn` (callsAfterRetirement + 2)
 
   it "cannot publish validation over retirement after observing the old epoch" $ do
     publicationObserved <- newEmptyMVar
@@ -661,16 +749,16 @@ spec = describe "TEI HTTP adapter" $ do
       (provider, invalidate) <- expectRight =<<
         makeValidatedGpuEmbeddingProviderWithPublicationHook beforePublication policy
           (gpuConfig endpointValue) Nothing
-      checking <- async provider.availability
-      takeMVar publicationObserved
-      invalidate
-      putMVar releasePublication ()
-      wait checking `shouldReturn`
-        EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
-      callsAfterRetirement <- readIORef calls
-      provider.availability `shouldReturn`
-        EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
-      readIORef calls `shouldReturn` callsAfterRetirement
+      withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releasePublication]) provider.availability $ \checking -> do
+        awaitTestSignal "publicationObserved" checking publicationObserved
+        invalidate
+        putMVar releasePublication ()
+        wait checking `shouldReturn`
+          EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+        callsAfterRetirement <- readIORef calls
+        provider.availability `shouldReturn`
+          EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+        readIORef calls `shouldReturn` callsAfterRetirement
 
   it "propagates queued cancellation without invalidating the active validation" $ do
     infoStarted <- newEmptyMVar
@@ -690,15 +778,15 @@ spec = describe "TEI HTTP adapter" $ do
             else serveCompatible request body respond
     withEndpoint app $ \policy endpointValue -> do
       provider <- expectRight =<< makeValidatedGpuEmbeddingProvider policy (gpuConfig endpointValue) Nothing
-      validating <- async provider.availability
-      takeMVar infoStarted
-      queued <- async provider.availability
-      withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
-      cancel queued
-      shouldBeCancelled queued
-      putMVar releaseInfo ()
-      wait validating `shouldReturn` EmbeddingAvailable
-      provider.availability `shouldReturn` EmbeddingAvailable
+      withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releaseInfo]) provider.availability $ \validating -> do
+        awaitTestSignal "infoStarted" validating infoStarted
+        withTestWorker (pure ()) provider.availability $ \queued -> do
+          withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
+          cancel queued
+          shouldBeCancelled queued
+          putMVar releaseInfo ()
+          wait validating `shouldReturn` EmbeddingAvailable
+          provider.availability `shouldReturn` EmbeddingAvailable
 
   it "cancels a queued embed without stale transport and reuses the released gate" $ do
     activePublished <- newEmptyMVar
@@ -718,20 +806,20 @@ spec = describe "TEI HTTP adapter" $ do
             makeValidatedGpuEmbeddingProviderWithLifecycleHooks
               (pure ()) (pure ()) afterTransport policy (gpuConfig endpointValue) Nothing
           provider.availability `shouldReturn` EmbeddingAvailable
-          active <- async (provider.embed requestOne)
-          takeMVar activePublished
-          queued <- async (provider.embed requestOne)
-          withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
-          cancel queued
-          shouldBeCancelled queued
-          readIORef userCalls `shouldReturn` 1
-          void (tryPutMVar releaseActive ())
-          wait active `shouldReturn`
-            Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
-          provider.availability `shouldReturn` EmbeddingAvailable
-          provider.embed requestOne `shouldReturn`
-            Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
-          readIORef userCalls `shouldReturn` 2
+          withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releaseActive]) (provider.embed requestOne) $ \active -> do
+            awaitTestSignal "activePublished" active activePublished
+            withTestWorker (pure ()) (provider.embed requestOne) $ \queued -> do
+              withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
+              cancel queued
+              shouldBeCancelled queued
+              readIORef userCalls `shouldReturn` 1
+              void (tryPutMVar releaseActive ())
+              wait active `shouldReturn`
+                Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+              provider.availability `shouldReturn` EmbeddingAvailable
+              provider.embed requestOne `shouldReturn`
+                Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
+              readIORef userCalls `shouldReturn` 2
     withEndpoint app $ \policy endpointValue ->
       scenario policy endpointValue `finally` void (tryPutMVar releaseActive ())
 
@@ -753,17 +841,17 @@ spec = describe "TEI HTTP adapter" $ do
             makeValidatedGpuEmbeddingProviderWithLifecycleHooks
               (pure ()) (pure ()) afterTransport policy (gpuConfig endpointValue) Nothing
           provider.availability `shouldReturn` EmbeddingAvailable
-          active <- async (provider.embed requestOne)
-          takeMVar activePublished
-          queued <- async (provider.embed requestOne)
-          withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
-          invalidate
-          void (tryPutMVar releaseActive ())
-          wait active `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
-          wait queued `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
-          readIORef userCalls `shouldReturn` 1
-          provider.availability `shouldReturn`
-            EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
+          withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releaseActive]) (provider.embed requestOne) $ \active -> do
+            awaitTestSignal "activePublished" active activePublished
+            withTestWorker (pure ()) (provider.embed requestOne) $ \queued -> do
+              withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
+              invalidate
+              void (tryPutMVar releaseActive ())
+              wait active `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
+              wait queued `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
+              readIORef userCalls `shouldReturn` 1
+              provider.availability `shouldReturn`
+                EmbeddingUnavailable (EmbeddingFailure ProviderUnavailable True)
     withEndpoint app $ \policy endpointValue ->
       scenario policy endpointValue `finally` void (tryPutMVar releaseActive ())
 
@@ -777,12 +865,12 @@ spec = describe "TEI HTTP adapter" $ do
         makeValidatedGpuEmbeddingProviderWithLifecycleHooks (pure ()) afterAvailability (pure ()) policy
           (gpuConfig endpointValue) Nothing
       provider.availability `shouldReturn` EmbeddingAvailable
-      worker <- async (provider.embed requestOne)
-      takeMVar invocationObserved
-      cancel worker
-      shouldBeCancelled worker
-      provider.availability `shouldReturn`
-        EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
+      withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releaseInvocation]) (provider.embed requestOne) $ \worker -> do
+        awaitTestSignal "invocationObserved" worker invocationObserved
+        cancel worker
+        shouldBeCancelled worker
+        provider.availability `shouldReturn`
+          EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
 
   it "publishes active cancellation before admitting a queued successor" $ do
     publicationObserved <- newEmptyMVar
@@ -794,15 +882,15 @@ spec = describe "TEI HTTP adapter" $ do
             makeValidatedGpuEmbeddingProviderWithLifecycleHooks (pure ()) (pure ()) afterTransport policy
               (gpuConfig endpointValue) Nothing
           provider.availability `shouldReturn` EmbeddingAvailable
-          worker <- async (provider.embed requestOne)
-          takeMVar publicationObserved
-          queued <- async (provider.embed requestOne)
-          withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
-          cancel worker
-          shouldBeCancelled worker
-          wait queued `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
-          provider.availability `shouldReturn`
-            EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
+          withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releasePublication]) (provider.embed requestOne) $ \worker -> do
+            awaitTestSignal "publicationObserved" worker publicationObserved
+            withTestWorker (pure ()) (provider.embed requestOne) $ \queued -> do
+              withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
+              cancel worker
+              shouldBeCancelled worker
+              wait queued `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
+              provider.availability `shouldReturn`
+                EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
     withEndpoint app $ \policy endpointValue ->
       scenario policy endpointValue `finally` void (tryPutMVar releasePublication ())
 
@@ -821,19 +909,19 @@ spec = describe "TEI HTTP adapter" $ do
             makeValidatedGpuEmbeddingProviderWithLifecycleHooks
               (pure ()) (pure ()) afterTransport policy (gpuConfig endpointValue) Nothing
           provider.availability `shouldReturn` EmbeddingAvailable
-          active <- async (provider.embed requestOne)
-          takeMVar publicationObserved
-          queued <- async (provider.embed requestOne)
-          withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
-          throwTo (asyncThreadId active) TestStopProvider
-          waitCatch active >>= \case
-            Left exception ->
-              (fromException exception :: Maybe TestStopProvider) `shouldBe` Just TestStopProvider
-            Right _ -> expectationFailure "custom provider cancellation was swallowed"
-          wait queued `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
-          readIORef userCalls `shouldReturn` 1
-          provider.availability `shouldReturn`
-            EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
+          withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releasePublication]) (provider.embed requestOne) $ \active -> do
+            awaitTestSignal "publicationObserved" active publicationObserved
+            withTestWorker (pure ()) (provider.embed requestOne) $ \queued -> do
+              withinTestTimeout 1000000 $ waitUntilBlockedOnAdmission queued
+              throwTo (asyncThreadId active) TestStopProvider
+              waitCatch active >>= \case
+                Left exception ->
+                  (fromException exception :: Maybe TestStopProvider) `shouldBe` Just TestStopProvider
+                Right _ -> expectationFailure "custom provider cancellation was swallowed"
+              wait queued `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
+              readIORef userCalls `shouldReturn` 1
+              provider.availability `shouldReturn`
+                EmbeddingUnavailable (EmbeddingFailure ProviderCancelled False)
     withEndpoint app $ \policy endpointValue ->
       scenario policy endpointValue `finally` void (tryPutMVar releasePublication ())
 
@@ -855,13 +943,37 @@ spec = describe "TEI HTTP adapter" $ do
 
   it "keeps decoded probe numerical validation inside the startup deadline" $ do
     numericalValidationStarted <- newEmptyMVar
-    let app request respond = Wai.strictRequestBody request >>= \body -> serveCompatible request body respond
-        slowNumericalValidation = putMVar numericalValidationStarted () >> threadDelay 3000000
+    operationStarted <- newEmptyMVar
+    numericalPhaseAt <- newEmptyMVar
+    releaseNumerical <- newEmptyMVar
+    let app request respond = do
+          body <- Wai.strictRequestBody request
+          if Wai.rawPathInfo request == "/embed"
+            then readMVar operationStarted >>= waitForTestInstant . (+ deadlinePhaseOffsetNs)
+            else pure ()
+          serveCompatible request body respond
+        numericalValidation = do
+          getMonotonicTimeNSec >>= putMVar numericalPhaseAt
+          putMVar numericalValidationStarted ()
+          takeMVar releaseNumerical
     withEndpoint app $ \policy endpointValue -> do
-      validating <- async $
-        validateGpuEndpointCompatibilityWithValidationStep 1000 slowNumericalValidation policy endpointValue
-      withinTestTimeout 2000000 (takeMVar numericalValidationStarted)
-      wait validating `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+      started <- getMonotonicTimeNSec
+      putMVar operationStarted started
+      withTestWorker (void (tryPutMVar releaseNumerical ()))
+        (validateGpuEndpointCompatibilityWithValidationStep deadlineOperationBudgetMs numericalValidation policy endpointValue) $ \validating -> do
+          awaitTestSignal "decoded numerical validation" validating numericalValidationStarted
+          waitForTestInstant (started + deadlineLateReplyOffsetNs)
+          actualReleasedAt <- getMonotonicTimeNSec
+          void (tryPutMVar releaseNumerical ())
+          waitForOperationJoin started (wait validating) `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+          phaseAt <- withinTestTimeout 1000000 (takeMVar numericalPhaseAt)
+          actualReleasedAt `shouldSatisfy` (\instant -> instant > started + deadlineBudgetNs
+            && instant < phaseAt + deadlineBudgetNs - transportReserveNs)
+          -- Cancellation may terminate the fixture step before its late reply.
+          -- In that case completion still had to respect the original cutoff.
+          returned <- getMonotonicTimeNSec
+          returned `shouldSatisfy` (< started + deadlineBudgetNs + fromIntegral nativeCleanupBudgetMs * 1000000)
+          phaseAt `shouldSatisfy` (>= started + deadlinePhaseOffsetNs)
 
   it "discards a user response when its generation is withdrawn in flight" $ do
     blockUser <- newIORef False
@@ -884,11 +996,11 @@ spec = describe "TEI HTTP adapter" $ do
         makeValidatedGpuEmbeddingProviderWithInvalidation policy (gpuConfig endpointValue) Nothing
       provider.availability `shouldReturn` EmbeddingAvailable
       modifyIORef' blockUser (const True)
-      worker <- async (provider.embed requestOne)
-      takeMVar userStarted
-      invalidate
-      putMVar releaseUser ()
-      wait worker `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
+      withTestWorker (mapM_ (\signal -> void (tryPutMVar signal ())) [releaseUser]) (provider.embed requestOne) $ \worker -> do
+        awaitTestSignal "userStarted" worker userStarted
+        invalidate
+        putMVar releaseUser ()
+        wait worker `shouldReturn` Left (EmbeddingFailure ProviderCancelled False)
 
   it "revalidates with non-user probes after a transient user transport failure" $ do
     failNextUser <- newIORef True
@@ -924,19 +1036,27 @@ spec = describe "TEI HTTP adapter" $ do
         Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
 
   it "keeps retries inside one total request deadline" $ do
-    calls <- newIORef (0 :: Int)
+    requests <- newIORef ([] :: [Word64])
     let app _ respond = do
-          modifyIORef' calls (+ 1)
-          threadDelay 80000
+          observed <- getMonotonicTimeNSec
+          modifyIORef' requests (<> [observed])
+          -- Two responses each consume three fifths of the same original
+          -- budget. Native startup also consumes that absolute deadline.
+          threadDelay (deadlineOperationBudgetMs * 1000 * 3 `div` 5)
           respond (Wai.responseLBS status500 [] "retry")
-    withTransport app (httpConfig 5 150) $ \transport ->
-      transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
-    callCount <- readIORef calls
-    callCount `shouldSatisfy` (\count -> count > 0 && count <= 2)
+    withTransport app (httpConfig 5 deadlineOperationBudgetMs) $ \transport -> do
+      started <- getMonotonicTimeNSec
+      waitForOperationJoin started (transport requestOne) `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+      finished <- getMonotonicTimeNSec
+      observed <- readIORef requests
+      length observed `shouldBe` 2
+      observed `shouldSatisfy` all (< started + deadlineBudgetNs)
+      let elapsedMs = fromIntegral (finished - started) / 1000000 :: Double
+      elapsedMs `shouldSatisfy` (>= fromIntegral (deadlineOperationBudgetMs - transportReserveMs))
 
   it "returns a protocol failure for a malformed successful response" $ do
     let app _ respond = respond (Wai.responseLBS status200 [] "not-json")
-    withTransport app (httpConfig 0 1000) $ \transport ->
+    withTransport app (httpConfig 0 normalOperationBudgetMs) $ \transport ->
       transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderProtocolError False)
 
   it "bounds chunked successful response bodies and releases the stream" $ do
@@ -945,28 +1065,55 @@ spec = describe "TEI HTTP adapter" $ do
         app _ respond =
           (respond (Wai.responseStream status200 [] $ \write _ -> write (byteString oversized)))
             `finally` putMVar finished ()
-    withTransport app (httpConfig 0 5000) $ \transport ->
+    withTransport app (httpConfig 0 normalOperationBudgetMs) $ \transport ->
       transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderProtocolError False)
     Timeout.timeout 1000000 (takeMVar finished) `shouldReturn` Just ()
 
   it "applies the same total deadline while a successful body streams slowly" $ do
+    operationStarted <- newEmptyMVar
+    bodyPhaseAt <- newEmptyMVar
+    bodyReplyAt <- newEmptyMVar
+    bodyStarted <- newEmptyMVar
+    releaseBody <- newEmptyMVar
     finished <- newEmptyMVar
     let app _ respond =
           (respond (Wai.responseStream status200 [] $ \write flush -> do
+            readMVar operationStarted >>= waitForTestInstant . (+ deadlinePhaseOffsetNs)
             write (byteString "[")
             flush
-            threadDelay 250000
-            write (byteString "]")))
-          `finally` putMVar finished ()
-    withTransport app (httpConfig 0 100) $ \transport ->
-      transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
-    Timeout.timeout 1000000 (takeMVar finished) `shouldReturn` Just ()
+            getMonotonicTimeNSec >>= putMVar bodyPhaseAt
+            putMVar bodyStarted ()
+            takeMVar releaseBody
+            getMonotonicTimeNSec >>= putMVar bodyReplyAt
+            write (byteString (BS.drop 1 (LBS.toStrict (vectorResponse 1))))))
+          `finally` void (tryPutMVar finished ())
+    withTransport app (httpConfig 0 normalOperationBudgetMs) $ \transport -> do
+      started <- getMonotonicTimeNSec
+      putMVar operationStarted started
+      withTestWorker (void (tryPutMVar releaseBody ())) (transport requestOne) $ \invoking -> do
+        awaitTestSignal "successful body streaming" invoking bodyStarted
+        -- A fresh body deadline would accept this valid response;
+        -- the original invocation deadline has already elapsed.
+        waitForTestInstant (started + deadlineLateReplyOffsetNs)
+        void (tryPutMVar releaseBody ())
+        waitForOperationJoin started (wait invoking) `shouldReturn` Left (EmbeddingFailure ProviderTimedOut True)
+        returned <- getMonotonicTimeNSec
+        let elapsedMs = fromIntegral (returned - started) / 1000000 :: Double
+        elapsedMs `shouldSatisfy` (>= fromIntegral (deadlineOperationBudgetMs - transportReserveMs))
+        void (tryPutMVar releaseBody ())
+        Timeout.timeout 1000000 (takeMVar finished) `shouldReturn` Just ()
+        phaseAt <- withinTestTimeout 1000000 (takeMVar bodyPhaseAt)
+        actualReplyAt <- withinTestTimeout 1000000 (takeMVar bodyReplyAt)
+        actualReplyAt `shouldSatisfy` (\instant -> instant > started + deadlineBudgetNs
+          && instant < phaseAt + deadlineBudgetNs - transportReserveNs)
 
   it "rejects an oversized declared response before consuming its body" $ do
     let app _ respond = respond (Wai.responseLBS status200 [("Content-Length", "999999999")] "[]")
-    withTransport app (httpConfig 0 1000) $ \transport ->
+    withTransport app (httpConfig 0 normalOperationBudgetMs) $ \transport ->
       transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderProtocolError False)
 
+  -- Status classification uses the existing five-second helper budget.
+  -- Deadline tests above separately force expiry after the intended wire phase.
   it "retries only 408, 429, and 500 through 599 exactly to the configured bound" $ do
     withinTestTimeout 30000000 $
       mapM_ (\retryStatus -> do
@@ -975,8 +1122,9 @@ spec = describe "TEI HTTP adapter" $ do
               modifyIORef' calls (+ 1)
               current <- readIORef calls
               respond (Wai.responseLBS (if current < 3 then retryStatus else status200) [] (vectorResponse 1))
-        withTransport app (httpConfig 2 1000) $ \transport -> do
+        withTransport app (httpConfig 2 normalOperationBudgetMs) $ \transport -> do
           result <- transport requestOne
+          readIORef calls `shouldReturn` 3
           result `shouldBe` Right (EmbeddingBatch [unitVector] managedTeiSpaceFingerprint)
         readIORef calls `shouldReturn` 3)
       [status408, status429, status500, mkStatus 599 "synthetic-server-error"]
@@ -987,7 +1135,7 @@ spec = describe "TEI HTTP adapter" $ do
       let app _ respond = do
             modifyIORef' calls (+ 1)
             respond (Wai.responseLBS nonRetryStatus [] "bad request")
-      withTransport app (httpConfig 3 1000) $ \transport ->
+      withTransport app (httpConfig 3 normalOperationBudgetMs) $ \transport ->
         transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable False)
       readIORef calls `shouldReturn` 1)
       [status400]
@@ -997,26 +1145,29 @@ spec = describe "TEI HTTP adapter" $ do
     let app _ respond = do
           modifyIORef' calls (+ 1)
           respond (Wai.responseRaw (\_ _ -> pure ()) (Wai.responseLBS status500 [] "unused"))
-    withTransport app (httpConfig 2 1000) $ \transport ->
-      transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable True)
+    result <- withTransport app (httpConfig 2 normalOperationBudgetMs) $ \transport -> transport requestOne
     readIORef calls `shouldReturn` 3
+    result `shouldBe` Left (EmbeddingFailure ProviderUnavailable True)
 
   it "fails closed on redirects without sending the request body to the redirect route" $ do
+    initialCalls <- newIORef (0 :: Int)
     redirectCalls <- newIORef (0 :: Int)
     let app request respond
           | Wai.rawPathInfo request == "/embed" =
-              respond (Wai.responseLBS status302 [("Location", "/redirect-target")] "")
+              modifyIORef' initialCalls (+ 1)
+                >> respond (Wai.responseLBS status302 [("Location", "/redirect-target")] "")
           | otherwise = do
               modifyIORef' redirectCalls (+ 1)
               respond (Wai.responseLBS status200 [] (vectorResponse 1))
-    withTransport app (httpConfig 0 1000) $ \transport ->
-      transport requestOne `shouldReturn` Left (EmbeddingFailure ProviderUnavailable False)
+    result <- withTransport app (httpConfig 0 normalOperationBudgetMs) $ \transport -> transport requestOne
+    readIORef initialCalls `shouldReturn` 1
     readIORef redirectCalls `shouldReturn` 0
+    result `shouldBe` Left (EmbeddingFailure ProviderUnavailable False)
 
   it "reports malformed endpoint failures without exposing endpoint text" $ do
     withTestPolicy $ \policy -> do
       let secretEndpoint = "http://127.0.0.1:1/?secret=do-not-log"
-      result <- httpEmbeddingTransport policy (httpConfig 0 250) secretEndpoint requestOne
+      result <- httpEmbeddingTransport policy (httpConfig 0 normalOperationBudgetMs) secretEndpoint requestOne
       result `shouldBe` Left (EmbeddingFailure ProviderConfigurationError False)
       show result `shouldNotSatisfy` isInfixOf "do-not-log"
 
@@ -1031,24 +1182,24 @@ spec = describe "TEI HTTP adapter" $ do
     let app _ respond = do
           threadDelay 1000000
           respond (Wai.responseLBS status200 [] (vectorResponse 1))
-    withTransport app (httpConfig 0 1000) $ \transport -> do
-      worker <- async (transport requestOne)
-      threadDelay 20000
-      cancel worker
-      shouldBeCancelled worker
+    withTransport app (httpConfig 0 normalOperationBudgetMs) $ \transport -> do
+      withTestWorker (pure ()) (transport requestOne) $ \worker -> do
+        threadDelay 20000
+        cancel worker
+        shouldBeCancelled worker
 
   it "propagates unrelated asynchronous faults" $ do
     let app _ respond = do
           threadDelay 1000000
           respond (Wai.responseLBS status200 [] (vectorResponse 1))
-    withTransport app (httpConfig 0 1000) $ \transport -> do
-      worker <- async (transport requestOne)
-      threadDelay 20000
-      throwTo (asyncThreadId worker) StackOverflow
-      result <- try @SomeException (wait worker)
-      case result of
-        Left caught -> (fromException caught :: Maybe AsyncException) `shouldBe` Just StackOverflow
-        Right _ -> expectationFailure "unrelated asynchronous fault was swallowed"
+    withTransport app (httpConfig 0 normalOperationBudgetMs) $ \transport -> do
+      withTestWorker (pure ()) (transport requestOne) $ \worker -> do
+        threadDelay 20000
+        throwTo (asyncThreadId worker) StackOverflow
+        result <- try @SomeException (wait worker)
+        case result of
+          Left caught -> (fromException caught :: Maybe AsyncException) `shouldBe` Just StackOverflow
+          Right _ -> expectationFailure "unrelated asynchronous fault was swallowed"
 
   it "keeps the pinned model-space fingerprint independent of endpoint routing" $ do
     let config = defaultConfig.embeddingProvider
@@ -1057,6 +1208,31 @@ spec = describe "TEI HTTP adapter" $ do
 
 requestOne :: EmbeddingRequest
 requestOne = EmbeddingRequest [EmbeddingInput EmbeddingDocument "document"]
+
+-- Classification and ordinary success fixtures allow native cold startup.
+-- Deadline fixtures use the same declared budget with deliberately separated
+-- phases; every cutoff and late-success window derives from that original clock.
+normalOperationBudgetMs, deadlineOperationBudgetMs, transportReserveMs, nativeCleanupBudgetMs :: Int
+normalOperationBudgetMs = 5000
+deadlineOperationBudgetMs = normalOperationBudgetMs
+transportReserveMs = 50
+-- Fixture-only joined cleanup allowance: one fifth of the phase budget.
+-- It never changes the transport cutoff or the precise admission checks.
+nativeCleanupBudgetMs = deadlineOperationBudgetMs `div` 5
+
+deadlineBudgetNs, deadlinePhaseOffsetNs, deadlineLateReplyOffsetNs, transportReserveNs :: Word64
+deadlineBudgetNs = fromIntegral deadlineOperationBudgetMs * 1000000
+deadlinePhaseOffsetNs = deadlineBudgetNs `div` 4
+deadlineLateReplyOffsetNs = deadlineBudgetNs + deadlineBudgetNs `div` 10
+transportReserveNs = fromIntegral transportReserveMs * 1000000
+
+waitForOperationJoin :: Word64 -> IO result -> IO result
+waitForOperationJoin started action = do
+  now <- getMonotonicTimeNSec
+  let joinedCutoff = started + deadlineBudgetNs + fromIntegral nativeCleanupBudgetMs * 1000000
+  if now >= joinedCutoff
+    then expectationFailure "operation exceeded its original deadline plus owned cleanup allowance" >> fail "expired join"
+    else withinTestTimeout (fromIntegral ((joinedCutoff - now) `div` 1000)) action
 
 httpConfig :: Int -> Int -> EmbeddingProviderConfig
 httpConfig retries timeoutMillis = defaultConfig.embeddingProvider
@@ -1067,7 +1243,7 @@ httpConfig retries timeoutMillis = defaultConfig.embeddingProvider
   }
 
 gpuConfig :: T.Text -> EmbeddingProviderConfig
-gpuConfig endpointValue = (httpConfig 0 1000)
+gpuConfig endpointValue = (httpConfig 0 normalOperationBudgetMs)
   { endpoint = Just endpointValue
   , gpuProfile = Just managedTeiGpuProfile
   }
@@ -1430,6 +1606,42 @@ withinTestTimeout microseconds action = do
   case result of
     Just value -> pure value
     Nothing -> expectationFailure "HTTP test exceeded its deterministic timeout" >> fail "unreachable"
+
+-- A lifecycle hook may never run when its producer fails during startup or
+-- transport. Observe that result instead of waiting forever for an unreachable
+-- phase, while retaining a bound if neither side makes progress.
+awaitTestSignal :: Show result => String -> Async result -> MVar () -> IO ()
+awaitTestSignal phase worker signal = do
+  observed <- withinTestTimeout 5000000 $ race (takeMVar signal) (waitCatch worker)
+  case observed of
+    Left () -> pure ()
+    Right outcome -> expectationFailure (phase <> " was not reached: " <> show outcome)
+
+-- Release server-side rendezvous before joining its client on every failure.
+waitForTestInstant :: Word64 -> IO ()
+waitForTestInstant target = do
+  now <- getMonotonicTimeNSec
+  let remaining = if now >= target then 0 else fromIntegral ((target - now) `div` 1000)
+  withinTestTimeout (remaining + nativeCleanupBudgetMs * 1000) loop
+  where
+    loop = do
+      now <- getMonotonicTimeNSec
+      if now >= target then pure () else threadDelay 1000 >> loop
+
+withTestWorker :: IO () -> IO result -> (Async result -> IO value) -> IO value
+withTestWorker release action scenario =
+  withAsync action $ \worker -> scenario worker `finally` release
+
+-- Wait for the provider's actual monotonic cooldown rather than prescribing
+-- a sleep. Unavailable polls must not send transport; the first admitted
+-- revalidation must acquire the previously released gate and succeed.
+awaitProviderRecovery :: EmbeddingProvider -> IO ()
+awaitProviderRecovery provider = withinTestTimeout 5000000 loop
+  where
+    loop = provider.availability >>= \case
+      EmbeddingAvailable -> pure ()
+      EmbeddingUnavailable _ -> threadDelay 1000 >> loop
+      EmbeddingDisabled -> expectationFailure "provider was disabled during recovery"
 
 shouldBeCancelled :: Async result -> IO ()
 shouldBeCancelled worker = waitCatch worker >>= \case

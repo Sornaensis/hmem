@@ -51,7 +51,7 @@ import Data.List (intercalate, isInfixOf)
 import Data.List qualified as List
 import Data.Maybe (catMaybes, isJust)
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Data.Pool (Pool)
+import Data.Pool (Pool, destroyAllResources)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.UUID (UUID)
@@ -225,7 +225,8 @@ withTestEnv action = do
 setupTestPool :: IO TestEnv
 setupTestPool = do
   (sandbox, db) <- requireCurrentSandbox
-  withPooledTestEnv sandbox db 1 pure
+  -- This API transfers the live pool to the caller's suite-wide fixture.
+  createPooledTestEnv sandbox db 1
 
 -- | Wrap a single test case in a database transaction that is always
 -- rolled back, regardless of success or failure.  Requires a pool of
@@ -305,7 +306,10 @@ cleanDB :: TestEnv -> IO ()
 cleanDB env = withConn env.pool $ \conn -> do
   let stmt = Statement.Statement sql E.noParams D.noResult True
       sql = mconcat
-        [ "TRUNCATE audit_log, access_tokens, workspace_memberships, users, "
+        [ "TRUNCATE change_stream_snapshot_page_tokens, change_stream_snapshot_items, "
+        , "change_stream_snapshot_sessions, change_stream_resume_tokens, "
+        , "change_stream_outbox, change_stream_scope_counters, "
+        , "audit_log, access_tokens, workspace_memberships, users, "
         , "workspace_group_members, workspace_groups, delete_cascade_migration_report, "
         , "task_dependencies, tasks, projects, observations, workspaces CASCADE"
         ]
@@ -507,7 +511,7 @@ withSandboxedPostgres sandbox action = do
           , testDbLogFile = pg.managedPgLogFile
           , testDbPort = pg.managedPgPort
           , testDbName = pg.managedPgDbName
-          , testDbConnStr = "host=localhost port=" <> T.pack (show pg.managedPgPort)
+          , testDbConnStr = "host=127.0.0.1 port=" <> T.pack (show pg.managedPgPort)
               <> " dbname=" <> pg.managedPgDbName
           , testDbUnsafeExternal = False
           }
@@ -739,6 +743,7 @@ startManagedLinuxPg sandbox docker = do
         [ "run", "--detach", "--sig-proxy=false", "--pull", "never", "--platform", "linux/amd64"
         , "--name", containerName, "--cidfile", cidFile
         , "--label", "hmem.test.owner=" <> token
+        , "--label", "hmem.test.sandbox=" <> sandbox.sandboxRoot
         , "--publish", "127.0.0.1::5432/tcp"
         , "--cpus", "2", "--memory", "768m"
         , "--mount", "type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-size=536870912"
@@ -1413,12 +1418,16 @@ assertInSandbox sandbox path = do
 ------------------------------------------------------------------------
 
 withPooledTestEnv :: TestSandbox -> TestDb -> Int -> (TestEnv -> IO a) -> IO a
-withPooledTestEnv sandbox db poolSize action = do
-  p <- createPool db.testDbConnStr poolSize 5.0 30000
-  let env = TestEnv { pool = p, testSandbox = sandbox, testDb = db }
-  ensureSchema env
-  cleanDB env
-  action env
+withPooledTestEnv sandbox db poolSize =
+  bracket (createPooledTestEnv sandbox db poolSize) (destroyAllResources . (.pool))
+
+createPooledTestEnv :: TestSandbox -> TestDb -> Int -> IO TestEnv
+createPooledTestEnv sandbox db poolSize =
+  bracketOnError (createPool db.testDbConnStr poolSize 5.0 30000) destroyAllResources $ \p -> do
+    let env = TestEnv { pool = p, testSandbox = sandbox, testDb = db }
+    ensureSchema env
+    cleanDB env
+    pure env
 
 currentSandboxFromEnv :: IO (Maybe (TestSandbox, TestDb))
 currentSandboxFromEnv = do
@@ -1592,7 +1601,12 @@ validateActiveSandbox sandbox db = do
     assertInSandbox sandbox
   unless ("hmem_test_" `T.isPrefixOf` db.testDbName) $
     fail $ "Active sandbox DB name is not harness-generated: " <> T.unpack db.testDbName
-  let expectedConnStr = "host=localhost port=" <> T.pack (show db.testDbPort) <> " dbname=" <> db.testDbName
+  prepared <- preparedPostgresBackendFromEnv sandbox
+  let host = case prepared of
+        PreparedNative -> "localhost"
+        PreparedManagedLinux _ -> "127.0.0.1"
+      expectedConnStr = "host=" <> host <> " port=" <> T.pack (show db.testDbPort)
+        <> " dbname=" <> db.testDbName
   unless (db.testDbConnStr == expectedConnStr) $
     fail "Active sandbox DB connection string does not match sandbox metadata"
 

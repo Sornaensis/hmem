@@ -10,6 +10,7 @@ import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf)
 import Data.Pool (Pool, destroyAllResources)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
 import Hasql.Connection qualified as Hasql
 import Hasql.Decoders qualified as Dec
@@ -412,7 +413,13 @@ withPgvectorSandbox :: (TestDb -> IO a) -> IO a
 withPgvectorSandbox action =
   withTestSandbox $ \sandbox ->
     withSandboxedEnv sandbox $
-      withSandboxedPostgres sandbox action
+      withSandboxedPostgres sandbox $ \db -> do
+        db.testDbUnsafeExternal `shouldBe` False
+        db.testDbName `shouldSatisfy` T.isPrefixOf "hmem_test_"
+        -- Managed startup verifies the pinned extension version first. These
+        -- operator fixtures deliberately begin with no installed extension.
+        withDbPool db $ \pool -> execSql pool "DROP EXTENSION IF EXISTS vector"
+        action db
 
 withDbPool :: TestDb -> (Pool Hasql.Connection -> IO a) -> IO a
 withDbPool db = bracket

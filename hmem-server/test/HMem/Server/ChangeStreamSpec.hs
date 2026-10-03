@@ -1,8 +1,8 @@
 module HMem.Server.ChangeStreamSpec (spec) where
 
 import Control.Concurrent (Chan, MVar, newChan, newEmptyMVar, putMVar, readChan, takeMVar, threadDelay, throwTo, tryTakeMVar, writeChan)
-import Control.Concurrent.Async (Async, async, asyncThreadId, cancel, wait, waitCatch)
-import Control.Exception (AsyncException(..), SomeException, bracket, catch, finally, fromException, try)
+import Control.Concurrent.Async (Async, async, asyncWithUnmask, asyncThreadId, cancel, wait, waitCatch)
+import Control.Exception (AsyncException(..), MaskingState(..), SomeException, bracket, catch, fromException, getMaskingState, try)
 import Control.Monad (forever)
 import Data.Aeson (FromJSON, Value(..), decode, encode, object, (.=))
 import Data.Aeson.Key qualified as Key
@@ -10,9 +10,12 @@ import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Maybe (isJust)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import GHC.Clock (getMonotonicTimeNSec)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as Text
+import Data.Time (getCurrentTime)
 import Data.UUID qualified as UUID
 import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
@@ -40,7 +43,7 @@ import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, withDeployedSandboxAppContext, withLocalSandboxAppContext)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
-import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
+import HMem.Server.ChangeStream (ChangeStreamWorker, startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker)
 import HMem.Server.Snapshot (materializeSnapshot)
 import HMem.Server.WebSocket (createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, dispatchCanonicalOutbox, handleCanonicalDispatchFailure)
 import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateWorkspaceGroup(..), Project(..), UpdateWorkspace(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
@@ -53,12 +56,49 @@ spec = describe "canonical change-stream loopback" $ do
       result <- try @SomeException $
         bracket
           (startChangeStreamWorker ctx.localEnv.pool testChangeStreamConfig ctx.localWSState)
-          (\worker -> stopChangeStreamWorker worker `finally` putMVar stopped ())
+          (\worker -> timeout 2000000 (stopChangeStreamWorker worker) >>= putMVar stopped)
           (\_worker -> ioError $ userError "injected harness setup failure")
       case result of
         Left _ -> pure ()
         Right () -> expectationFailure "injected harness setup failure unexpectedly succeeded"
-      timeout 2000000 (takeMVar stopped) `shouldReturn` Just ()
+      timeout 2000000 (takeMVar stopped) `shouldReturn` Just (Just ())
+
+  it "starts a bracket-acquired dispatcher unmasked and joins cancellation" $
+    withLocalSandboxAppContext $ \ctx -> do
+      entered <- newEmptyMVar
+      released <- newIORef False
+      let startup = do
+            masking <- getMaskingState
+            putMVar entered masking
+            started <- getMonotonicTimeNSec
+            let spin = do
+                  release <- atomicModifyIORef' released (\value -> (value, value))
+                  now <- getMonotonicTimeNSec
+                  if release || now - started >= 6000000000
+                    then ioError (userError "fixture startup gate finished before database work")
+                    else spin
+            spin
+          cleanup worker = do
+            atomicModifyIORef' released (const (True, ()))
+            timeout 2000000 (stopChangeStreamWorker worker) `shouldReturn` Just ()
+      observed <- bracket
+        (startChangeStreamWorkerWithStartupHook startup ctx.localEnv.pool testChangeStreamConfig ctx.localWSState)
+        cleanup $ \worker -> do
+          masking <- timeout 2000000 (takeMVar entered)
+          stopped <- timeout 2000000 (stopChangeStreamWorker worker)
+          pure (masking, stopped)
+      observed `shouldBe` (Just Unmasked, Just ())
+
+  it "publishes dispatcher completion when its startup hook fails" $
+    withLocalSandboxAppContext $ \ctx -> do
+      entered <- newEmptyMVar
+      let startup = putMVar entered () >> ioError (userError "fixture startup failure before SQL")
+          joined worker = timeout 2000000 (stopChangeStreamWorker worker) `shouldReturn` Just ()
+      bracket
+        (startChangeStreamWorkerWithStartupHook startup ctx.localEnv.pool testChangeStreamConfig ctx.localWSState)
+        joined $ \worker -> do
+          timeout 2000000 (takeMVar entered) `shouldReturn` Just ()
+          joined worker
 
   it "rethrows cancellation from a deterministically blocked canonical dispatch" $ do
     entered <- newEmptyMVar
@@ -464,22 +504,18 @@ spec = describe "canonical change-stream loopback" $ do
       let principal = grantPrincipal subscriberId
           scope = WorkspaceScope workspace.id
           audience = AuthenticatedAudience (UUID.toText subscriberId) subscriberId
-      resume <- terminalResume ctx scope audience
-      issued <- createCanonicalTicketWithTtl ctx.deployedWSState 0.3 principal scope resume
-      initial <- newEmptyMVar
-      expired <- newEmptyMVar
       testWithApplication (pure ctx.deployedApplication) $ \port -> do
-        client <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket issued.ticket) $ \conn -> do
-          WS.receiveData conn >>= putMVar initial
-          WS.receiveData conn >>= putMVar expired
-          WS.sendClose conn ("done" :: Text)) `catch` \(_ :: WS.ConnectionException) -> pure ()
-        frameType <$> awaitFrame initial `shouldReturn` Just "checkpoint"
-        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
-          (Auth.UpsertWorkspaceMembership hiddenUserId Auth.WorkspaceRoleRead) Nothing
-        hiddenRecord <- latestOutbox ctx scope
-        dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [hiddenRecord]
-        frameType <$> awaitFrame expired `shouldReturn` Just "resync_required"
-        wait client
+        resume <- terminalResume ctx scope audience
+        issued <- createCanonicalTicketWithTtl ctx.deployedWSState 0.3 principal scope resume
+        bracket (startOneFrameClient port issued.ticket) (\client -> joinClient "expiry client" client.clientWorker) $ \client -> do
+          frameType <$> awaitFrame client.clientInitial `shouldReturn` Just "checkpoint"
+          _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+            (Auth.UpsertWorkspaceMembership hiddenUserId Auth.WorkspaceRoleRead) Nothing
+          hiddenRecord <- latestOutbox ctx scope
+          dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [hiddenRecord]
+          frameType <$> awaitFrame client.clientObserved `shouldReturn` Just "resync_required"
+          getCurrentTime >>= (`shouldSatisfy` (>= issued.expiresAt))
+          timeout 2000000 (wait client.clientWorker) `shouldReturn` Just ()
 
   it "keeps an aged durable reconnect on its actual expiry despite hidden activity" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -491,30 +527,24 @@ spec = describe "canonical change-stream loopback" $ do
       let principal = grantPrincipal subscriberId
           scope = WorkspaceScope workspace.id
           audience = AuthenticatedAudience (UUID.toText subscriberId) subscriberId
-      -- The harness configuration permits a 24-hour bearer, but this resume
-      -- bearer was minted earlier with a sub-second lifetime. Its reconnect
-      -- ticket must retain that stored expiry rather than a fresh config TTL.
-      -- A two-second stored expiry leaves handshake headroom while proving
-      -- reconnect does not refresh the 24-hour harness configuration.
-      resume <- terminalResumeWithTtl ctx 2.0 scope audience
-      threadDelay 250000
-      validated <- validateCanonicalResumeToken ctx.deployedEnv.pool scope audience resume
-      expiresAt <- either (fail . show) pure validated
-      issued <- createCanonicalTicketWithExpiry ctx.deployedWSState expiresAt principal scope resume
-      initial <- newEmptyMVar
-      expired <- newEmptyMVar
       testWithApplication (pure ctx.deployedApplication) $ \port -> do
-        client <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket issued.ticket) $ \conn -> do
-          WS.receiveData conn >>= putMVar initial
-          WS.receiveData conn >>= putMVar expired
-          WS.sendClose conn ("done" :: Text)) `catch` \(_ :: WS.ConnectionException) -> pure ()
-        frameType <$> awaitFrame initial `shouldReturn` Just "checkpoint"
-        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
-          (Auth.UpsertWorkspaceMembership hiddenUserId Auth.WorkspaceRoleRead) Nothing
-        hiddenRecord <- latestOutbox ctx scope
-        dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [hiddenRecord]
-        frameType <$> awaitFrame expired `shouldReturn` Just "resync_required"
-        wait client
+        -- Start listening before the original durable lifetime begins. Real
+        -- validation ages the bearer; ticket exchange preserves its expiry.
+        resume <- terminalResumeWithTtl ctx 2.0 scope audience
+        validated <- validateCanonicalResumeToken ctx.deployedEnv.pool scope audience resume
+        expiresAt <- either (fail . show) pure validated
+        issued <- createCanonicalTicketWithExpiry ctx.deployedWSState expiresAt principal scope resume
+        issued.expiresAt `shouldBe` expiresAt
+        bracket (startOneFrameClient port issued.ticket)
+          (\client -> joinClient "aged expiry client" client.clientWorker) $ \client -> do
+            frameType <$> awaitFrame client.clientInitial `shouldReturn` Just "checkpoint"
+            _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+              (Auth.UpsertWorkspaceMembership hiddenUserId Auth.WorkspaceRoleRead) Nothing
+            hiddenRecord <- latestOutbox ctx scope
+            dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [hiddenRecord]
+            frameType <$> awaitFrame client.clientObserved `shouldReturn` Just "resync_required"
+            getCurrentTime >>= (`shouldSatisfy` (>= expiresAt))
+            timeout 2000000 (wait client.clientWorker) `shouldReturn` Just ()
 
   it "announces a targeted grant for a separately scoped workspace" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -645,25 +675,57 @@ spec = describe "canonical change-stream loopback" $ do
       ticket <- createCanonicalTicket ctx.deployedWSState principal scope resume
       initial <- newEmptyMVar
       liveFrames <- newChan
+      expectedReplay <- newIORef Nothing
       testWithApplication (pure ctx.deployedApplication) $ \port -> do
-        client <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket.ticket) $ \conn -> do
+        bracket (asyncWithUnmask $ \unmask -> unmask $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket.ticket) $ \conn -> do
           WS.receiveData conn >>= putMVar initial
-          forever $ (WS.receiveData conn :: IO Text) >>= writeChan liveFrames) `catch` \(_ :: WS.ConnectionException) -> pure ()
-        _ <- awaitFrame initial
-        bracket (startChangeStreamWorker ctx.deployedEnv.pool testChangeStreamConfig ctx.deployedWSState) stopChangeStreamWorker $ \worker -> do
-          _ <- Project.createProject ctx.deployedEnv.pool CreateProject
-            { workspaceId = workspace.id, parentId = Nothing, name = "before-restart"
-            , description = Nothing, priority = Nothing, metadata = Nothing }
-          awaitChangeChan liveFrames
-          stopChangeStreamWorker worker
-          _ <- Project.createProject ctx.deployedEnv.pool CreateProject
-            { workspaceId = workspace.id, parentId = Nothing, name = "during-restart"
-            , description = Nothing, priority = Nothing, metadata = Nothing }
-          bracket (startChangeStreamWorker ctx.deployedEnv.pool testChangeStreamConfig ctx.deployedWSState) stopChangeStreamWorker $ \_ -> do
-            awaitChangeChan liveFrames
-        cancel client
-      bracket (startChangeStreamWorker ctx.deployedEnv.pool testChangeStreamConfig ctx.deployedWSState) stopChangeStreamWorker $ \worker -> do
-        timeout 2000000 (stopChangeStreamWorker worker) `shouldReturn` Just ()
+          let receiveReplay = do
+                frame <- WS.receiveData conn :: IO Text
+                expected <- readIORef expectedReplay
+                let entityId = (decode (LBS.fromStrict (Text.encodeUtf8 frame)) :: Maybe Value)
+                      >>= jsonField "event" >>= jsonField "entity" >>= jsonField "id"
+                if expected /= Nothing && entityId == expected
+                  then WS.sendClose conn ("replay received" :: Text) >> writeChan liveFrames frame
+                  else writeChan liveFrames frame >> receiveReplay
+          receiveReplay) `catch` \(_ :: WS.ConnectionException) -> pure ())
+          (joinClient "restart client") $ \_client -> do
+            _ <- awaitFrame initial
+            withDispatcherFixture ctx "first dispatcher" $ \fixture -> do
+              beforeRestart <- Project.createProject ctx.deployedEnv.pool CreateProject
+                { workspaceId = workspace.id, parentId = Nothing, name = "before-restart"
+                , description = Nothing, priority = Nothing, metadata = Nothing }
+              awaitChangeChan liveFrames beforeRestart.id
+              stopDispatcherFixture ctx "first explicit stop" fixture
+              duringRestart <- Project.createProject ctx.deployedEnv.pool CreateProject
+                { workspaceId = workspace.id, parentId = Nothing, name = "during-restart"
+                , description = Nothing, priority = Nothing, metadata = Nothing }
+              atomicModifyIORef' expectedReplay (const (Just (String (UUID.toText duringRestart.id)), ()))
+              withDispatcherFixture ctx "replacement dispatcher" $ \_ -> do
+                awaitChangeChan liveFrames duringRestart.id
+      withDispatcherFixture ctx "fresh dispatcher" $ \fixture ->
+        stopDispatcherFixture ctx "fresh explicit stop" fixture
+
+-- Joined cleanup is bounded even when a fixture assertion throws.
+newtype DispatcherFixture = DispatcherFixture ChangeStreamWorker
+
+withDispatcherFixture :: DeployedSandboxApp -> String -> (DispatcherFixture -> IO value) -> IO value
+withDispatcherFixture ctx phase = bracket acquire (stopDispatcherFixture ctx (phase <> " cleanup"))
+  where
+    acquire = DispatcherFixture <$> startChangeStreamWorker ctx.deployedEnv.pool testChangeStreamConfig ctx.deployedWSState
+
+stopDispatcherFixture :: DeployedSandboxApp -> String -> DispatcherFixture -> IO ()
+stopDispatcherFixture _ctx phase (DispatcherFixture worker) = do
+  stopped <- timeout 2000000 (stopChangeStreamWorker worker)
+  case stopped of
+    Just () -> pure ()
+    Nothing -> expectationFailure (phase <> " did not join within two seconds")
+
+joinClient :: String -> Async value -> IO ()
+joinClient phase client = do
+  joined <- timeout 2000000 (cancel client)
+  case joined of
+    Just () -> pure ()
+    Nothing -> expectationFailure (phase <> " did not join within two seconds")
 
 grantPrincipal :: UUID.UUID -> Principal
 grantPrincipal userId = Principal
@@ -732,7 +794,7 @@ startOneFrameClient :: Int -> Text -> IO OneFrameClient
 startOneFrameClient port ticket = do
   initial <- newEmptyMVar
   observed <- newEmptyMVar
-  worker <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket) $ \conn -> do
+  worker <- asyncWithUnmask $ \unmask -> unmask $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket) $ \conn -> do
     WS.receiveData conn >>= putMVar initial
     WS.receiveData conn >>= putMVar observed
     WS.sendClose conn ("done" :: Text)) `catch` \(_ :: WS.ConnectionException) -> pure ()
@@ -796,13 +858,19 @@ isText :: Value -> Bool
 isText (String _) = True
 isText _ = False
 
-awaitChangeChan :: Chan Text -> IO ()
-awaitChangeChan frames = do
-  frame <- readChan frames >>= decodeFrame
-  case frameType frame of
-    Just "change" -> pure ()
-    Just "checkpoint" -> awaitChangeChan frames
-    other -> fail $ "expected canonical change frame, got " <> show other
+awaitChangeChan :: Chan Text -> UUID.UUID -> IO ()
+awaitChangeChan frames projectId = timeout 5000000 consume >>= \case
+  Just () -> pure ()
+  Nothing -> fail "timed out waiting for dispatcher change delivery"
+  where
+    consume = do
+      frame <- readChan frames >>= decodeFrame
+      case frameType frame of
+        Just "change"
+          | (jsonField "event" frame >>= jsonField "entity" >>= jsonField "id") == Just (String (UUID.toText projectId)) -> pure ()
+          | otherwise -> consume
+        Just "checkpoint" -> consume
+        other -> fail $ "expected canonical change frame, got " <> show other
 
 decodeFrame :: Text -> IO Value
 decodeFrame text = case decode (LBS.fromStrict $ Text.encodeUtf8 text) of

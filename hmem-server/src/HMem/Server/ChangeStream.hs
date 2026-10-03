@@ -5,11 +5,12 @@
 module HMem.Server.ChangeStream
   ( ChangeStreamWorker
   , startChangeStreamWorker
+  , startChangeStreamWorkerWithStartupHook
   , stopChangeStreamWorker
   ) where
 
-import Control.Concurrent (MVar, ThreadId, forkFinally, killThread, newEmptyMVar, putMVar, readMVar, threadDelay)
-import Control.Exception (AsyncException, SomeException, catch, fromException, throwIO)
+import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, killThread, newEmptyMVar, putMVar, readMVar, threadDelay)
+import Control.Exception (AsyncException, SomeException, catch, fromException, mask_, throwIO, try)
 import Control.Monad (foldM, when)
 import Data.Pool (Pool)
 import Data.Map.Strict qualified as Map
@@ -23,9 +24,17 @@ import HMem.Server.WebSocket (WSState, broadcastLegacyOutbox, dispatchCanonicalO
 data ChangeStreamWorker = ChangeStreamWorker ThreadId (MVar (Either SomeException ()))
 
 startChangeStreamWorker :: Pool Hasql.Connection -> ChangeStreamConfig -> WSState -> IO ChangeStreamWorker
-startChangeStreamWorker pool config wsState = do
+startChangeStreamWorker = startChangeStreamWorkerWithStartupHook (pure ())
+
+-- | Observe startup in the actual worker before its first database scan.
+startChangeStreamWorkerWithStartupHook :: IO () -> Pool Hasql.Connection -> ChangeStreamConfig -> WSState -> IO ChangeStreamWorker
+startChangeStreamWorkerWithStartupHook startupHook pool config wsState = mask_ $ do
   finished <- newEmptyMVar
-  worker <- forkFinally (loop Map.empty 0) (putResult finished)
+  -- A masked caller must not prevent cancellation of the worker action.
+  -- Keep startup and completion publication protected around that action.
+  worker <- forkIOWithUnmask $ \unmask -> do
+    result <- try (unmask (startupHook >> loop Map.empty 0))
+    putResult finished result
   pure (ChangeStreamWorker worker finished)
   where
     loop acknowledgements maintenanceTicks = do

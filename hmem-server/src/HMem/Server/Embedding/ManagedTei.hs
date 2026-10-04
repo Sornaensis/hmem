@@ -423,9 +423,10 @@ startManagedTeiWith config deps hooks = do
   currentGeneration <- newTVarIO 0
   startupDeadline <- newTVarIO Nothing
   stopped <- newTVarIO False
-  supervisor <- asyncWithUnmask $ \unmask -> unmask (superviseLifecycle lifecycleState
-    (runSupervisor lifecycleState startupDeadline currentGeneration currentChild currentActive stopped []
-      `finally` retireStartupBefore startupDeadline currentActive currentChild))
+  fatalCleanupFailure <- newTVarIO False
+  supervisor <- asyncWithUnmask $ \unmask -> unmask (superviseLifecycle fatalCleanupFailure lifecycleState
+    (runSupervisor fatalCleanupFailure lifecycleState startupDeadline currentGeneration currentChild currentActive stopped []
+      `finally` retireStartupBefore fatalCleanupFailure startupDeadline currentActive currentChild))
   pure ManagedTeiRuntime
     { state = readTVarIO lifecycleState
     , generation = readTVarIO currentGeneration
@@ -433,31 +434,36 @@ startManagedTeiWith config deps hooks = do
         atomically $ writeTVar stopped True
         cancel supervisor
         supervisorOutcome <- waitCatch supervisor
-        cleanupOutcome <- trySynchronous (retireStartupBefore startupDeadline currentActive currentChild)
+        cleanupOutcome <- trySynchronous (retireStartupBefore fatalCleanupFailure startupDeadline currentActive currentChild)
+        fatalCleanup <- readTVarIO fatalCleanupFailure
         let cleanSupervisor = case supervisorOutcome of
               Left failure -> case fromException failure of
                 Just (_ :: SomeAsyncException) -> True
                 Nothing -> False
               Right () -> True
         case cleanupOutcome of
-          Right () | cleanSupervisor -> do
+          Right () | cleanSupervisor && not fatalCleanup -> do
             atomically $ writeTVar lifecycleState ManagedTeiStopped
             deps.emit ManagedTeiStoppedEvent
           _ -> do
-            atomically $ writeTVar lifecycleState ManagedTeiDegraded
+            atomically $ do
+              writeTVar fatalCleanupFailure True
+              writeTVar lifecycleState ManagedTeiDegraded
             cleanupFailed
     }
   where
-    superviseLifecycle lifecycleState action = do
-      outcome <- trySynchronous action
+    superviseLifecycle fatalCleanupFailure lifecycleState action = mask $ \restore -> do
+      outcome <- trySynchronous (restore action)
       case outcome of
         Right () -> pure ()
         Left _ -> do
-          atomically $ writeTVar lifecycleState ManagedTeiDegraded
-          void (trySynchronous (deps.emit ManagedTeiDegradedEvent))
+          atomically $ do
+            writeTVar fatalCleanupFailure True
+            writeTVar lifecycleState ManagedTeiDegraded
+          void (restore (trySynchronous (deps.emit ManagedTeiDegradedEvent)))
           cleanupFailed
 
-    runSupervisor lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes = do
+    runSupervisor fatalCleanupFailure lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes = do
       started <- getMonotonicTimeNSec
       let deadline = started + fromIntegral (max 0 config.readinessTimeoutMicros) * 1000
           -- Reserve an honest part of the one startup ceiling for joined
@@ -504,17 +510,17 @@ startManagedTeiWith config deps hooks = do
                 case registered of
                   Just _ -> pure (Right child)
                   Nothing -> child.terminateAndReap >> pure (Left (toException (userError "managed child was not registered")))
-          superviseSpawn lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes token workDeadline loopbackEndpoint verifiedLaunch spawned
+          superviseSpawn fatalCleanupFailure lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes token workDeadline loopbackEndpoint verifiedLaunch spawned
 
     preflightFailure lifecycleState = do
       atomically $ writeTVar lifecycleState ManagedTeiDegraded
       deps.emit ManagedTeiPreflightFailed
 
-    superviseSpawn lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes token workDeadline loopbackEndpoint verifiedLaunch = \case
+    superviseSpawn fatalCleanupFailure lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes token workDeadline loopbackEndpoint verifiedLaunch = \case
       Left _ -> do
         deps.emit ManagedTeiReadinessFailed
-        retireStartupBefore startupDeadline currentActive currentChild
-        recover lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes
+        retireStartupBefore fatalCleanupFailure startupDeadline currentActive currentChild
+        recover fatalCleanupFailure lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes
       Right child -> do
         deps.emit ManagedTeiSpawned
         readinessAttempt <- trySynchronous (race child.waitForChildExit
@@ -531,7 +537,7 @@ startManagedTeiWith config deps hooks = do
                     registered <- readTVarIO currentActive
                     case registered of
                       Just (activeToken, _) | activeToken == token -> pure ()
-                      _ -> retireActive active >> fail "managed generation was not registered"
+                      _ -> retireActive fatalCleanupFailure active >> fail "managed generation was not registered"
                     published <- mask $ \_ -> do
                       remaining <- remainingMicros workDeadline
                       stillCurrent <- atomically $ do
@@ -557,26 +563,26 @@ startManagedTeiWith config deps hooks = do
                       let healthyNanos = fromIntegral (max 1 config.restartWindowSeconds) * 1000000000
                           nextHistory = if finishedAt - readyAt >= healthyNanos then [] else restartTimes
                       atomically $ writeTVar lifecycleState ManagedTeiDegraded
-                      retireCurrent currentActive currentChild
-                      recover lifecycleState startupDeadline currentGeneration currentChild currentActive stopped nextHistory
+                      retireCurrent fatalCleanupFailure currentActive currentChild
+                      recover fatalCleanupFailure lifecycleState startupDeadline currentGeneration currentChild currentActive stopped nextHistory
                     unless published $ do
                       atomically $ writeTVar lifecycleState ManagedTeiDegraded
-                      retireStartupBefore startupDeadline currentActive currentChild
+                      retireStartupBefore fatalCleanupFailure startupDeadline currentActive currentChild
                   Right (Right (Just (Left ManagedTeiActivationPermanent))) -> do
                     deps.emit ManagedTeiReadinessFailed
                     atomically $ writeTVar lifecycleState ManagedTeiDegraded
-                    retireStartupBefore startupDeadline currentActive currentChild
-                  _ -> readinessFailure lifecycleState startupDeadline currentChild currentActive stopped restartTimes currentGeneration
+                    retireStartupBefore fatalCleanupFailure startupDeadline currentActive currentChild
+                  _ -> readinessFailure fatalCleanupFailure lifecycleState startupDeadline currentChild currentActive stopped restartTimes currentGeneration
           Right (Left _) -> do
             deps.emit ManagedTeiChildExited
-            readinessFailure lifecycleState startupDeadline currentChild currentActive stopped restartTimes currentGeneration
-          _ -> readinessFailure lifecycleState startupDeadline currentChild currentActive stopped restartTimes currentGeneration
+            readinessFailure fatalCleanupFailure lifecycleState startupDeadline currentChild currentActive stopped restartTimes currentGeneration
+          _ -> readinessFailure fatalCleanupFailure lifecycleState startupDeadline currentChild currentActive stopped restartTimes currentGeneration
 
-    readinessFailure lifecycleState startupDeadline currentChild currentActive stopped restartTimes currentGeneration = do
+    readinessFailure fatalCleanupFailure lifecycleState startupDeadline currentChild currentActive stopped restartTimes currentGeneration = do
       deps.emit ManagedTeiReadinessFailed
       atomically $ writeTVar lifecycleState ManagedTeiDegraded
-      retireStartupBefore startupDeadline currentActive currentChild
-      recover lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes
+      retireStartupBefore fatalCleanupFailure startupDeadline currentActive currentChild
+      recover fatalCleanupFailure lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes
 
     awaitProviderLoss active = do
       checked <- trySynchronous (timeout 5000000 active.activeAvailable)
@@ -584,7 +590,7 @@ startManagedTeiWith config deps hooks = do
         Right (Just True) -> deps.sleepMicros 500000 >> awaitProviderLoss active
         _ -> pure ()
 
-    recover lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes = do
+    recover fatalCleanupFailure lifecycleState startupDeadline currentGeneration currentChild currentActive stopped restartTimes = do
       isStopped <- readTVarIO stopped
       if isStopped
         then atomically $ writeTVar lifecycleState ManagedTeiStopped
@@ -601,53 +607,69 @@ startManagedTeiWith config deps hooks = do
               deps.emit (ManagedTeiRestarting attempt)
               extraJitter <- deps.jitterMicros config.baseBackoffMicros
               deps.sleepMicros (config.baseBackoffMicros * (2 ^ (attempt - 1)) + max 0 extraJitter)
-              runSupervisor lifecycleState startupDeadline currentGeneration currentChild currentActive stopped (currentTime : inWindow)
+              runSupervisor fatalCleanupFailure lifecycleState startupDeadline currentGeneration currentChild currentActive stopped (currentTime : inWindow)
 
-    retireStartupBefore startupDeadline currentActive currentChild = do
+    retireStartupBefore fatalCleanupFailure startupDeadline currentActive currentChild = mask $ \restore -> do
       ownedActive <- readTVarIO currentActive
       ownedChild <- readTVarIO currentChild
       case (ownedActive, ownedChild) of
         (Nothing, Nothing) -> pure ()
         _ -> readTVarIO startupDeadline >>= \case
-          Nothing -> retireCurrent currentActive currentChild
+          Nothing -> retireCurrent fatalCleanupFailure currentActive currentChild
           Just deadline -> do
             -- The deadline bounds ordinary acquisition and retirement. If a
             -- blocked OS operation crosses it, the owner must still attempt
             -- acknowledged release; an expired clock is never evidence that
             -- the child or worker has disappeared.
-            outcome <- withinDeadline deadline (retireCurrent currentActive currentChild)
+            outcome <- restore (withinDeadline deadline (retireCurrent fatalCleanupFailure currentActive currentChild))
             case outcome of
               Just () -> pure ()
-              Nothing -> retireCurrent currentActive currentChild >> cleanupFailed
+              Nothing -> do
+                -- Remember the expired cleanup budget before interruptible
+                -- fallback retirement; cancellation cannot erase this outcome.
+                atomically $ writeTVar fatalCleanupFailure True
+                restore (retireCurrent fatalCleanupFailure currentActive currentChild)
+                cleanupFailed
 
-    retireActive active = do
-      invalidated <- trySynchronous active.activeInvalidate
-      joined <- trySynchronous active.activeStopAndJoin
+    retireActive fatalCleanupFailure active = mask $ \restore -> do
+      invalidated <- trySynchronous (restore active.activeInvalidate)
+      rememberFailure fatalCleanupFailure invalidated
+      joined <- trySynchronous (restore active.activeStopAndJoin)
+      rememberFailure fatalCleanupFailure joined
       -- The persisted target must remain enabled if joining could not return
       -- the worker's leases. A successful join permits disable even if the
       -- preceding invalidation reported an error.
       disabled <- case joined of
         Left _ -> pure (Right ())
-        Right () -> trySynchronous active.activeDisableTarget
+        Right () -> trySynchronous (restore active.activeDisableTarget)
+      rememberFailure fatalCleanupFailure disabled
       case (invalidated, joined, disabled) of
         (Right (), Right (), Right ()) -> pure ()
         _ -> cleanupFailed
 
-    retireCurrent currentActive currentChild = mask $ \_ -> do
+    retireCurrent fatalCleanupFailure currentActive currentChild = mask $ \_ -> do
       active <- readTVarIO currentActive
       activeResult <- try @SomeException $ case active of
         Nothing -> pure ()
         Just (_, owned) -> do
-          retireActive owned
+          retireActive fatalCleanupFailure owned
           atomically $ writeTVar currentActive Nothing
+      rememberFailure fatalCleanupFailure activeResult
       -- A failed worker join or target disable must not strand the owned TEI
       -- child. Keep any unresolved active ownership for later retry and never
       -- publish a replacement after either failure.
       childResult <- try @SomeException (cleanupCurrent currentChild)
+      rememberFailure fatalCleanupFailure childResult
       case (activeResult, childResult) of
         (Left failure, _) -> throwIO failure
         (_, Left failure) -> throwIO failure
         _ -> pure ()
+
+    rememberFailure fatalCleanupFailure = \case
+      Right () -> pure ()
+      Left failure -> case fromException failure of
+        Just (_ :: SomeAsyncException) -> pure ()
+        Nothing -> atomically $ writeTVar fatalCleanupFailure True
 
 remainingMicros :: Word64 -> IO Int
 remainingMicros deadline = do

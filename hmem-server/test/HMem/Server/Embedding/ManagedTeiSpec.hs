@@ -1,8 +1,10 @@
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 module HMem.Server.Embedding.ManagedTeiSpec (spec) where
 
 import Control.Concurrent (newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay, tryPutMVar)
 import Control.Concurrent.Async (async, asyncWithUnmask, cancel, waitCatch)
-import Control.Exception (MaskingState(..), SomeAsyncException, SomeException, finally, fromException, getMaskingState, mask, onException, throwIO, try)
+import Control.Exception (MaskingState(..), SomeAsyncException, SomeException, bracket, finally, fromException, getMaskingState, mask, onException, throwIO, try)
 import Control.Monad (void, when)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson qualified as Aeson
@@ -11,7 +13,9 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.IORef
 import Data.List (isPrefixOf, isSubsequenceOf)
 import Data.Maybe (isJust)
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
+import Foreign.C.Types (CInt(..))
+import Foreign.Ptr (Ptr, nullPtr)
 import Foreign.C.Error (ePERM, eSRCH)
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Text qualified as T
@@ -453,14 +457,23 @@ spec = describe "managed TEI supervisor" $ do
     activated <- newIORef False
     joined <- newEmptyMVar
     reapedAt <- newEmptyMVar
-    let deps = (fakeDeps launches (threadDelay 70000 >> pure (Right expectedIdentity)) neverExit)
-          { prepareLaunch = \_ launch -> threadDelay 70000 >> pure (Right launch)
+    phases <- newIORef ([] :: [(String, Word64)])
+    let mark label = do
+          stamp <- getMonotonicTimeNSec
+          atomicModifyIORef' phases (\values -> (values <> [(label, stamp)], ()))
+        baseDeps = fakeDeps launches
+          (mark "probe-start" >> threadDelay 70000 >> mark "probe-end" >> pure (Right expectedIdentity)) neverExit
+        deps = baseDeps
+          { selectLoopbackPort = mark "owner-start" >> baseDeps.selectLoopbackPort
+          , prepareLaunch = \_ launch -> mark "preflight-start" >> threadDelay 70000 >> mark "preflight-end" >> pure (Right launch)
           , spawnChild = \_ launch register -> do
               modifyIORef' launches (<> [launch.arguments])
               registerChild register ManagedTeiChild
                 { waitForChildExit = neverExit
                 , terminateAndReap = do
+                    mark "reap-start"
                     threadDelay 30000
+                    mark "reap-end"
                     getMonotonicTimeNSec >>= void . tryPutMVar reapedAt
                 , childProcessId = Nothing
                 , childProcessGroupId = Nothing }
@@ -468,15 +481,16 @@ spec = describe "managed TEI supervisor" $ do
         hooks = ManagedTeiHooks
           { clearTargetBeforeLaunch = pure ()
           , activateGeneration = \_ _ _ register -> do
+              mark "activate-start"
               writeIORef activated True
               let active = ManagedTeiActive
                     { activeInvalidate = pure ()
-                    , activeStopAndJoin = threadDelay 20000 >> void (tryPutMVar joined ())
+                    , activeStopAndJoin = mark "join-start" >> threadDelay 20000 >> mark "join-end" >> void (tryPutMVar joined ())
                     , activeDisableTarget = pure ()
                     , activeWorkerOutcome = neverExit >> pure ()
                     , activeAvailable = pure True }
               register active
-              threadDelay 1000000
+              threadDelay 1000000 `finally` mark "activate-end"
               pure (Right active) }
     startedAt <- getMonotonicTimeNSec
     runtime <- startManagedTeiWith config { readinessTimeoutMicros = 400000, restartBudget = 0 } deps hooks
@@ -485,6 +499,9 @@ spec = describe "managed TEI supervisor" $ do
     completed <- timeout 1000000 (takeMVar reapedAt)
     completed `shouldSatisfy` isJust
     let elapsedMicros = maybe maxBound (\finished -> (finished - startedAt) `div` 1000) completed
+    observedPhases <- readIORef phases
+    when (elapsedMicros >= 420000) $ putStrLn ("[managed-launch-phases] constructor-relative-us=" <> show
+      [(label, (stamp - startedAt) `div` 1000) | (label, stamp) <- observedPhases])
     elapsedMicros `shouldSatisfy` (< 420000)
     readIORef activated `shouldReturn` True
     managedTeiState runtime `shouldReturn` ManagedTeiDegraded
@@ -493,8 +510,11 @@ spec = describe "managed TEI supervisor" $ do
   it "continues owned cleanup after the startup clock expires and reports the overrun" $ do
     launches <- newIORef []
     cleanupEntered <- newEmptyMVar
+    fallbackEntered <- newEmptyMVar
     releaseCleanup <- newEmptyMVar
     reaped <- newEmptyMVar
+    fatalObserved <- newEmptyMVar
+    releaseFatalEvent <- newEmptyMVar
     calls <- newIORef (0 :: Int)
     let deps = (fakeDeps launches (threadDelay 1000000 >> pure (Right expectedIdentity)) neverExit)
           { spawnChild = \_ launch register -> do
@@ -502,22 +522,138 @@ spec = describe "managed TEI supervisor" $ do
               registerChild register ManagedTeiChild
                 { waitForChildExit = neverExit
                 , terminateAndReap = do
-                    modifyIORef' calls (+ 1)
+                    attempt <- atomicModifyIORef' calls (\n -> (n + 1, n + 1))
                     void (tryPutMVar cleanupEntered ())
+                    when (attempt >= 2) $ void (tryPutMVar fallbackEntered ())
                     readMVar releaseCleanup
                     void (tryPutMVar reaped ())
                 , childProcessId = Nothing
                 , childProcessGroupId = Nothing }
+          , emit = \eventValue -> when (eventValue == ManagedTeiDegradedEvent) $
+              void (tryPutMVar fatalObserved ()) >> readMVar releaseFatalEvent
           }
     runtime <- startManagedTei config { readinessTimeoutMicros = 120000, restartBudget = 0 } deps
-    timeout 1000000 (readMVar cleanupEntered) `shouldReturn` Just ()
-    threadDelay 150000
-    putMVar releaseCleanup ()
-    timeout 1000000 (readMVar reaped) `shouldReturn` Just ()
-    waitForState runtime ManagedTeiDegraded
-    readIORef calls >>= (`shouldSatisfy` (>= 2))
-    stopResult <- try @SomeException (stopManagedTei runtime)
-    stopResult `shouldSatisfy` either (const True) (const False)
+    let release = do
+          void (tryPutMVar releaseCleanup ())
+          void (tryPutMVar releaseFatalEvent ())
+          joined <- timeout 1000000 (try @SomeException (stopManagedTei runtime))
+          joined `shouldSatisfy` isJust
+    (do
+      timeout 1000000 (readMVar cleanupEntered) `shouldReturn` Just ()
+      -- The second attempt proves the actual startup deadline expired; no
+      -- test-side sleep is used as evidence of a terminal outcome.
+      timeout 1000000 (readMVar fallbackEntered) `shouldReturn` Just ()
+      void (tryPutMVar releaseCleanup ())
+      timeout 1000000 (readMVar reaped) `shouldReturn` Just ()
+      timeout 1000000 (readMVar fatalObserved) `shouldReturn` Just ()
+      readIORef calls >>= (`shouldSatisfy` (>= 2))
+      stopResult <- timeout 1000000 (try @SomeException (stopManagedTei runtime))
+      case stopResult of
+        Just (Left failure) -> show failure `shouldBe`
+          "user error (managed-tei lifecycle failed (managed_tei_cleanup_failed))"
+        _ -> expectationFailure ("known cleanup overrun was erased: " <> show stopResult)
+      managedTeiState runtime `shouldReturn` ManagedTeiDegraded
+      ) `finally` release
+
+  it "preserves a fatal cleanup outcome when stop cancels degraded notification" $ do
+    launches <- newIORef []
+    exitSignal <- newEmptyMVar
+    fatalObserved <- newEmptyMVar
+    releaseFatalEvent <- newEmptyMVar
+    failCleanup <- newIORef True
+    reaped <- newEmptyMVar
+    let deps = (fakeDeps launches (pure (Right expectedIdentity)) (readMVar exitSignal))
+          { spawnChild = \_ launch register -> do
+              modifyIORef' launches (<> [launch.arguments])
+              registerChild register ManagedTeiChild
+                { waitForChildExit = readMVar exitSignal
+                , terminateAndReap = do
+                    failNow <- atomicModifyIORef' failCleanup (\value -> (False, value))
+                    if failNow then throwIO (userError "sensitive cleanup detail")
+                      else void (tryPutMVar reaped ())
+                , childProcessId = Nothing
+                , childProcessGroupId = Nothing }
+          , emit = \eventValue -> when (eventValue == ManagedTeiDegradedEvent) $
+              void (tryPutMVar fatalObserved ()) >> readMVar releaseFatalEvent
+          }
+    runtime <- startManagedTei config { restartBudget = 0 } deps
+    let release = do
+          void (tryPutMVar releaseFatalEvent ())
+          joined <- timeout 1000000 (try @SomeException (stopManagedTei runtime))
+          joined `shouldSatisfy` isJust
+    (do
+      waitForState runtime (ManagedTeiReady "http://127.0.0.1:43123")
+      putMVar exitSignal ExitSuccess
+      timeout 1000000 (readMVar fatalObserved) `shouldReturn` Just ()
+      timeout 1000000 (readMVar reaped) `shouldReturn` Just ()
+      stopResult <- timeout 1000000 (try @SomeException (stopManagedTei runtime))
+      case stopResult of
+        Just (Left failure) -> show failure `shouldBe`
+          "user error (managed-tei lifecycle failed (managed_tei_cleanup_failed))"
+        _ -> expectationFailure ("known fatal cleanup was erased: " <> show stopResult)
+      managedTeiState runtime `shouldReturn` ManagedTeiDegraded
+      repeated <- timeout 1000000 (try @SomeException (stopManagedTei runtime))
+      case repeated of
+        Just (Left failure) -> show failure `shouldBe`
+          "user error (managed-tei lifecycle failed (managed_tei_cleanup_failed))"
+        _ -> expectationFailure ("repeated stop erased fatal cleanup: " <> show repeated)
+      ) `finally` release
+
+  it "preserves invalidation failure across cancellation of joined cleanup" $ do
+    launches <- newIORef []
+    failInvalidation <- newIORef True
+    joinAttempts <- newIORef (0 :: Int)
+    exitSignal <- newEmptyMVar
+    joinEntered <- newEmptyMVar
+    releaseJoin <- newEmptyMVar
+    joined <- newEmptyMVar
+    disabled <- newEmptyMVar
+    reaped <- newEmptyMVar
+    let deps = (fakeDeps launches (pure (Right expectedIdentity)) (readMVar exitSignal))
+          { spawnChild = \_ launch register -> do
+              modifyIORef' launches (<> [launch.arguments])
+              registerChild register ManagedTeiChild
+                { waitForChildExit = readMVar exitSignal
+                , terminateAndReap = void (tryPutMVar reaped ())
+                , childProcessId = Nothing
+                , childProcessGroupId = Nothing }
+          }
+        hooks = ManagedTeiHooks
+          { clearTargetBeforeLaunch = pure ()
+          , activateGeneration = \_ _ _ register ->
+              registeredActive register ManagedTeiActive
+                { activeInvalidate = do
+                    failNow <- atomicModifyIORef' failInvalidation (\value -> (False, value))
+                    when failNow (throwIO (userError "sensitive invalidation detail"))
+                , activeStopAndJoin = do
+                    attempt <- atomicModifyIORef' joinAttempts (\value -> (value + 1, value + 1))
+                    when (attempt == 1) (putMVar joinEntered () >> readMVar releaseJoin)
+                    void (tryPutMVar joined ())
+                , activeDisableTarget = void (tryPutMVar disabled ())
+                , activeWorkerOutcome = neverExit >> pure ()
+                , activeAvailable = pure True }
+          }
+    runtime <- startManagedTeiWith config { restartBudget = 0 } deps hooks
+    let release = do
+          void (tryPutMVar releaseJoin ())
+          completed <- timeout 1000000 (try @SomeException (stopManagedTei runtime))
+          completed `shouldSatisfy` isJust
+        requireFatal result = case result of
+          Just (Left failure) -> show failure `shouldBe`
+            "user error (managed-tei lifecycle failed (managed_tei_cleanup_failed))"
+          _ -> expectationFailure ("known invalidation failure was erased: " <> show result)
+    (do
+      waitForState runtime (ManagedTeiReady "http://127.0.0.1:43123")
+      putMVar exitSignal ExitSuccess
+      timeout 1000000 (readMVar joinEntered) `shouldReturn` Just ()
+      timeout 1000000 (try @SomeException (stopManagedTei runtime)) >>= requireFatal
+      timeout 1000000 (readMVar joined) `shouldReturn` Just ()
+      timeout 1000000 (readMVar disabled) `shouldReturn` Just ()
+      timeout 1000000 (readMVar reaped) `shouldReturn` Just ()
+      readIORef joinAttempts >>= (`shouldSatisfy` (>= 2))
+      managedTeiState runtime `shouldReturn` ManagedTeiDegraded
+      timeout 1000000 (try @SomeException (stopManagedTei runtime)) >>= requireFatal
+      ) `finally` release
 
   it "treats uncertain process-group probes as failure and waits for real disappearance" $ do
     classifyProcessGroupErrno Nothing `shouldBe` Right True
@@ -802,8 +938,6 @@ spec = describe "managed TEI supervisor" $ do
               { arguments = ["-NoProfile", "-Command", "[IO.File]::WriteAllText('" <> pidPath <> "',[string]$PID); Start-Sleep -Seconds 30"] }
           | otherwise = (sleepLaunchForCurrentOS 30)
               { arguments = ["-c", "printf '%s' \"$$\" > " <> show pidPath <> "; sleep 30"] }
-        exists = if os == "mingw32" then processExists else posixProcessExists
-        awaitAbsent = if os == "mingw32" then awaitNotRunning else awaitPosixNotRunning
     (do
         arrived <- newEmptyMVar
         held <- newEmptyMVar
@@ -821,14 +955,21 @@ spec = describe "managed TEI supervisor" $ do
               Right _ -> expectationFailure "publication setup did not reach its barrier"
           Just () -> do
             pid <- awaitChildPid (error "unpublished child") pidPath Nothing Nothing Nothing Nothing
-            exists pid `shouldReturn` True
-            cancel task
-            outcome <- waitCatch task
-            case outcome of
-              Left failure ->
-                (fromException failure :: Maybe SomeAsyncException) `shouldSatisfy` isJust
-              Right _ -> expectationFailure "publication-cancelled child was returned"
-            timeout 1000000 (awaitAbsent pid) `shouldReturn` Just ()
+            let verifyCleanup awaitAbsent = do
+                  cancel task
+                  outcome <- waitCatch task
+                  case outcome of
+                    Left failure ->
+                      (fromException failure :: Maybe SomeAsyncException) `shouldSatisfy` isJust
+                    Right _ -> expectationFailure "publication-cancelled child was returned"
+                  timeout 1000000 awaitAbsent `shouldReturn` Just ()
+            (if os == "mingw32"
+              then withOwnedWindowsProcess pid $ \processHandle -> do
+                waitWindowsProcess processHandle 0 `shouldReturn` 258
+                verifyCleanup (awaitWindowsProcessExit processHandle)
+              else do
+                posixProcessExists pid `shouldReturn` True
+                verifyCleanup (awaitPosixNotRunning pid)) `finally` cancel task
       ) `finally` removeIfExists pidPath
 
   it "reaps a real job-backed Windows PowerShell process tree after bounded pipes" $ do
@@ -862,18 +1003,30 @@ spec = describe "managed TEI supervisor" $ do
       { childExecutable = "powershell.exe", modelSnapshotPath = "fixture", endpoint = "http://127.0.0.1:43123", metricsPort = 43124, arguments = ["-NoProfile", "-Command", script], childEnvironment = [] }
     (do
         pingPid <- awaitChildPid child pidPath (Just failurePath) (Just startedPath) (Just contextPath) (Just afterStartPath)
-        processExists pingPid `shouldReturn` True
-        child.terminateAndReap
-        child.terminateAndReap
-        exited <- timeout 1000000 child.waitForChildExit
-        exited `shouldSatisfy` isJust
-        timeout 1000000 (awaitNotRunning pingPid) `shouldReturn` Just ()
+        withOwnedWindowsProcess pingPid $ \processHandle -> do
+          waitWindowsProcess processHandle 0 `shouldReturn` 258
+          child.terminateAndReap
+          child.terminateAndReap
+          exited <- timeout 1000000 child.waitForChildExit
+          exited `shouldSatisfy` isJust
+          timeout 1000000 (awaitWindowsProcessExit processHandle) `shouldReturn` Just ()
       ) `onException` (void $ try @SomeException child.terminateAndReap)
     removeIfExists pidPath
     removeIfExists failurePath
     removeIfExists startedPath
     removeIfExists contextPath
     removeIfExists afterStartPath
+
+  it "rejects invalid Windows process identity and wait handles as probe errors" $ do
+    when (os /= "mingw32") (pendingWith "Windows native process-handle fixture")
+    opened <- try @SomeException (withOwnedWindowsProcess 0 (const (pure ())))
+    case opened of
+      Left failure -> show failure `shouldBe` "user error (owned Windows process handle acquisition failed)"
+      Right () -> expectationFailure "invalid process identity was accepted"
+    waited <- try @SomeException (waitWindowsProcess nullPtr 0)
+    case waited of
+      Left failure -> show failure `shouldBe` "user error (owned Windows process wait failed)"
+      Right _ -> expectationFailure "invalid wait handle was treated as absence"
 
   it "reaps a resistant POSIX sh process-group descendant" $ do
     when (os == "mingw32") (pendingWith "POSIX process-group fixture")
@@ -1148,15 +1301,40 @@ removeIfExists path = do
   exists <- doesFileExist path
   when exists (removeFile path)
 
-processExists :: Int -> IO Bool
-processExists pid = do
-  (_, output, _) <- readProcessWithExitCode "tasklist" ["/FI", "PID eq " <> show pid, "/FO", "CSV", "/NH"] ""
-  pure (not ("INFO:" `isPrefixOf` output))
 
-awaitNotRunning :: Int -> IO ()
-awaitNotRunning pid = do
-  running <- processExists pid
-  when running (threadDelay 10000 >> awaitNotRunning pid)
+withOwnedWindowsProcess :: Int -> (Ptr () -> IO a) -> IO a
+withOwnedWindowsProcess pid = bracket acquire release
+  where
+    acquire = do
+      handle <- openWindowsProcess 0x00100000 0 (fromIntegral pid)
+      when (handle == nullPtr) (fail "owned Windows process handle acquisition failed")
+      pure handle
+    release handle = closeWindowsHandle handle >>= \closed ->
+      when (closed == 0) (fail "owned Windows process handle close failed")
+
+waitWindowsProcess :: Ptr () -> Word32 -> IO Word32
+waitWindowsProcess handle millis = do
+  result <- waitWindowsHandle handle millis
+  when (result /= 0 && result /= 258) (fail "owned Windows process wait failed")
+  pure result
+
+#if defined(mingw32_HOST_OS)
+foreign import stdcall unsafe "OpenProcess" openWindowsProcess :: Word32 -> CInt -> Word32 -> IO (Ptr ())
+foreign import stdcall unsafe "CloseHandle" closeWindowsHandle :: Ptr () -> IO CInt
+foreign import stdcall safe "WaitForSingleObject" waitWindowsHandle :: Ptr () -> Word32 -> IO Word32
+#else
+openWindowsProcess :: Word32 -> CInt -> Word32 -> IO (Ptr ())
+openWindowsProcess _ _ _ = fail "Windows fixture unavailable"
+closeWindowsHandle :: Ptr () -> IO CInt
+closeWindowsHandle _ = fail "Windows fixture unavailable"
+waitWindowsHandle :: Ptr () -> Word32 -> IO Word32
+waitWindowsHandle _ _ = fail "Windows fixture unavailable"
+#endif
+
+awaitWindowsProcessExit :: Ptr () -> IO ()
+awaitWindowsProcessExit handle = do
+  result <- waitWindowsProcess handle 0
+  when (result == 258) (threadDelay 10000 >> awaitWindowsProcessExit handle)
 
 posixProcessExists :: Int -> IO Bool
 posixProcessExists pid = do

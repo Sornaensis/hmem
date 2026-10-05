@@ -2,10 +2,10 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { createNavigationCompletionIndex, currentRootNavigationPass, currentNavigationPassComplete, logicalExpandedNavigationComplete, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { createUsablePaintReadiness, createNavigationCompletionIndex, currentRootNavigationPass, currentNavigationPassComplete, logicalExpandedNavigationComplete, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, FIXTURE_SCHEMA_VERSION, FIXTURE_SEED, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_BUCKET_RESPONSE_MAX, TIMELINE_BUCKET_SQL_CAP, TIMELINE_DEFAULT_UI_QUERY, TimelineBucketRequestError, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, orderedTimelineBuckets, paginate, projectOverviewResponse, projectReadinessRollup, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, stableFixtureJson, taskOverviewResponse, taskReadinessRollup, validateFixture, workspaceShellSnapshotItems } from './fixtures.mjs'
 
-import { retryNavigationKind, createTracker, fixtureResponder } from './harness.mjs'
+import { waitForFirstUsefulViewport, retryNavigationKind, createTracker, fixtureResponder } from './harness.mjs'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 
@@ -1270,4 +1270,86 @@ test('manual nonrefresh root HTTP retry preserves its pre-error single-kind mask
   const retry = control.admit('workspace_root', 50, 0)
   assert.deepEqual(Object.keys(retry.stamp.slots), ['project'], 'terminal task companion is not re-admitted by a project-only failed request')
   control.complete(retry, projects.slice(50), ['t']); control.check(true)
+})
+
+
+
+test('sampler accepts current shell completion during its existing final paint observation', async () => {
+  const fixture = generateFixture('small'), tracker = createTracker(fixture), resources = []
+  const gate = createTestGate()
+  const resyncGate = { pauseOffset: 0, used: false, signalPaused: gate.arrived, waitForRelease: gate.released }
+  const respond = fixtureResponder(fixture, tracker, { resyncGate })
+  const reply = async (path, body = null) => {
+    const request = { url: () => 'http://fixture' + path, method: () => body ? 'POST' : 'GET', postDataJSON: () => body }
+    await respond({ request: () => request, fulfill: async response => {
+      const id = response.headers['Server-Timing'].split('"')[1]
+      resources.push({ id, url: request.url(), startTime: performance.now(), responseEnd: performance.now() })
+    } })
+  }
+  await reply('/api/v1/session')
+  const heldShell = reply('/api/v1/change-stream/resync', { snapshot_profile: 'workspace_shell_v1', page_size: 100 })
+  await gate.waitForArrival
+  let evaluations = 0
+  const page = { async evaluate() {
+    const startedAt = performance.now()
+    evaluations++; gate.release(); await heldShell
+    // Model the existing second animation frame after first-frame shell release.
+    await new Promise(resolve => setTimeout(resolve, 16))
+    const frameAt = performance.now()
+    return { painted: true, origin: 'http://fixture', receipts: resources, clock: { startedAt, frameAt, endedAt: performance.now() } }
+  } }
+  await waitForFirstUsefulViewport(page, tracker, fixture, 'unused-mocked-anchor')
+  assert.equal(evaluations, 1, 'current shell completion before final paint must not add another two-frame wait')
+  assert.equal(tracker.requests.length, tracker.completed)
+})
+test('browser receipt timing accepts entry skew without accepting late or unmatched receipts', () => {
+  const url = 'http://fixture/api/v1/session', shellUrl = 'http://fixture/api/v1/change-stream/resync'
+  const proof = createUsablePaintReadiness('w', 1)
+  const session = proof.beginSession(100, 'run-session', url)
+  proof.completeSession(session, { canRead: true, workspaceId: 'w' }, 102)
+  const shell = proof.admitSnapshot(true, 103, 'run-shell', shellUrl), lifetime = proof.lifetime()
+  proof.completeSnapshot(shell, { profile: 'workspace_shell_v1', workspaceId: 'w', items: 1, complete: true }, 237)
+  const observation = { origin: 'http://fixture', clock: { startedAt: 223, frameAt: 246, endedAt: 247 },
+    receipts: [{ id: 'run-session', url, startTime: 90, responseEnd: 102 }, { id: 'run-shell', url: shellUrl, startTime: 103, responseEnd: 237 }] }
+  assert.equal(proof.readyAt(lifetime, observation), true, '12 ms entry skew cannot make the proved same-clock 9 ms completion margin stale')
+  assert.equal(proof.readyAt(lifetime, { ...observation, receipts: observation.receipts.map(r => r.id === 'run-shell' ? { ...r, responseEnd: 248 } : r) }), false)
+  assert.equal(proof.readyAt(lifetime, { ...observation, receipts: observation.receipts.map(r => r.id === 'run-shell' ? { ...r, responseEnd: 245.9 } : r) }), false, 'uncertain clock boundary fails closed')
+  assert.equal(proof.readyAt(lifetime, { ...observation, receipts: [observation.receipts[0]] }), false)
+  assert.equal(proof.readyAt(lifetime, { ...observation, receipts: [...observation.receipts, observation.receipts[1]] }), false)
+  assert.equal(proof.readyAt(lifetime, { ...observation, receipts: observation.receipts.map(r => ({ ...r, url: 'http://other/retired' })) }), false)
+  assert.equal(proof.readyAt(lifetime, { ...observation, origin: 'http://other' }), false)
+  for (const clock of [null, {startedAt:223,frameAt:NaN,endedAt:247}, {startedAt:247,frameAt:246,endedAt:248}, {startedAt:223,frameAt:246,endedAt:245}]) assert.equal(proof.readyAt(lifetime, {...observation,clock}), false)
+  for (const responseEnd of [0, NaN, Infinity, -1]) assert.equal(proof.readyAt(lifetime, { ...observation, receipts: observation.receipts.map(r => r.id === 'run-shell' ? { ...r, responseEnd } : r) }), false)
+})
+
+test('paint receipt lifetimes reject retired callbacks, ABA and unsuccessful fulfillment', async () => {
+  const fixture = generateFixture('small'), tracker = createTracker(fixture), resources = []
+  const respond = fixtureResponder(fixture, tracker)
+  const reply = async (path, body = null, fail = false) => {
+    const request = { url: () => 'http://fixture' + path, method: () => body ? 'POST' : 'GET', postDataJSON: () => body }
+    return respond({ request: () => request, fulfill: async response => {
+      const id = response.headers['Server-Timing'].split('"')[1]
+      resources.push({ id, url: request.url(), startTime: 10, responseEnd: 20 })
+      if (fail) throw new Error('fixture fulfillment failed')
+    } })
+  }
+  const observe = () => ({ origin: 'http://fixture', receipts: resources, clock: { startedAt: 10, frameAt: 30, endedAt: 31 } })
+  await assert.rejects(reply('/api/v1/session', null, true), /fixture fulfillment failed/)
+  await reply('/api/v1/change-stream/resync', { snapshot_profile: 'workspace_shell_v1', page_size: 100 })
+  assert.equal(tracker.paintReadiness.readyAt(tracker.paintReadiness.lifetime(), observe()), false, 'thrown session fulfill cannot authorize despite matching timing')
+  await reply('/api/v1/session')
+  await assert.rejects(reply('/api/v1/change-stream/resync', { snapshot_profile: 'workspace_shell_v1', page_size: 100 }, true), /fixture fulfillment failed/)
+  assert.equal(tracker.paintReadiness.readyAt(tracker.paintReadiness.lifetime(), observe()), false, 'thrown shell fulfill cannot complete despite matching timing')
+  await reply('/api/v1/change-stream/resync', { snapshot_profile: 'workspace_shell_v1', page_size: 100 })
+  const old = tracker.paintReadiness.lifetime()
+  assert.equal(tracker.paintReadiness.readyAt(old, observe()), true)
+  await reply('/api/v1/session')
+  await reply('/api/v1/change-stream/resync', { snapshot_profile: 'workspace_shell_v1', page_size: 100 })
+  assert.equal(tracker.paintReadiness.readyAt(old, observe()), false, 'same-workspace session ABA retires the captured lifetime')
+  assert.equal(tracker.paintReadiness.readyAt(tracker.paintReadiness.lifetime(), observe()), true)
+  const staleShell = tracker.requests.find(r => r.paintSnapshot).paintSnapshot
+  tracker.paintReadiness.admitSnapshot(true, performance.now(), 'new-snapshot', 'http://fixture/api/v1/change-stream/resync')
+  tracker.paintReadiness.completeSnapshot(staleShell, { profile: 'workspace_shell_v1', workspaceId: fixture.workspace.id, items: 1, complete: true }, performance.now())
+  assert.equal(tracker.paintReadiness.readyAt(tracker.paintReadiness.lifetime(), observe()), false)
+  assert.equal(tracker.requests.length, tracker.completed, 'failed fulfill still retires physical accounting')
 })

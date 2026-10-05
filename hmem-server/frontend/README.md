@@ -88,6 +88,14 @@ Chromium, and both modes reject input drift during measurement.
 
 Cold readiness ends at the accepted authorized `workspace_shell_v1` shell and
 first root-summary anchor visible in the scrolling viewport after two paints.
+Readiness joins current successfully fulfilled and validated workspace/session/
+snapshot receipts to unique same-response Server-Timing identities. The final
+paint evaluation reads matching same-origin Resource Timing responseEnd values
+in the browser clock, with a conservative 2 ms precision guard (1 ms per reading).
+Missing, duplicated, retired, unmatched or boundary-uncertain timing fails closed;
+no host/browser clock synchronization is assumed. A shell completed between the
+two frames may qualify the final paint; one completed after it cannot. Request
+and body-byte accounting still ends after the evaluation returns to the host.
 The production shell contains one workspace item. Preserved legacy full-fixture
 resync records contain 155 small or 4,951 large items; their cold timing is not
 phase-comparable with this authorized painted-root cut.

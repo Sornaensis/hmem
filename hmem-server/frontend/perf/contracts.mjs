@@ -493,3 +493,59 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
     }
   }
 }
+
+// Same-browser-clock response/paint comparison. A 1 ms allowance for each
+// Chromium reading exceeds its supported 100 µs TimeClamper granularity.
+// Boundary uncertainty fails closed; it adds no wait and changes no accounting cut.
+export function createUsablePaintReadiness(workspaceId, expectedItems) {
+  let sessionEpoch = 0, snapshotEpoch = 0, session = null, snapshot = null
+  const time = at => Number.isFinite(at) && at >= 0
+  const lifetime = () => ({ workspaceId, sessionEpoch, snapshotEpoch })
+  const receivedBeforeFrame = (receipt, observation) => {
+    if (!receipt || typeof receipt.receiptId !== 'string' || !receipt.receiptId || !Array.isArray(observation.receipts)) return false
+    let expectedUrl
+    try {
+      expectedUrl = new URL(receipt.url)
+      if (expectedUrl.origin !== observation.origin) return false
+    } catch { return false }
+    const matches = observation.receipts.filter(entry => entry?.id === receipt.receiptId)
+    if (matches.length !== 1) return false
+    const entry = matches[0]
+    return entry.url === expectedUrl.href && time(entry.startTime) && time(entry.responseEnd) && entry.responseEnd > 0
+      && entry.startTime <= entry.responseEnd && entry.responseEnd <= observation.clock.frameAt - 2
+  }
+  return {
+    lifetime,
+    beginSession(at, receiptId, url) {
+      sessionEpoch++; snapshotEpoch = 0; snapshot = null
+      session = { at, receiptId, url, completeAt: null, canRead: false, workspaceId: null }
+      return { sessionEpoch, receiptId }
+    },
+    completeSession(stamp, value, at) {
+      if (stamp?.sessionEpoch !== sessionEpoch || stamp.receiptId !== session?.receiptId || !session || !time(at) || !time(session.at) || at < session.at) return
+      session = { ...session, completeAt: at, canRead: value?.canRead === true, workspaceId: value?.workspaceId }
+    },
+    admitSnapshot(firstPage, at, receiptId, url) {
+      if (firstPage) { snapshotEpoch++; snapshot = { at, receiptId, url, completeAt: null, items: 0, pages: 0, profile: null, workspaceId: null, invalid: false } }
+      else if (snapshot) snapshot.invalid = true
+      return { sessionEpoch, snapshotEpoch, receiptId }
+    },
+    completeSnapshot(stamp, value, at) {
+      if (stamp?.sessionEpoch !== sessionEpoch || stamp?.snapshotEpoch !== snapshotEpoch || stamp.receiptId !== snapshot?.receiptId || !snapshot
+        || !time(at) || !time(snapshot.at) || at < snapshot.at) return
+      const invalid = snapshot.invalid || (snapshot.profile !== null && snapshot.profile !== value.profile)
+        || (snapshot.workspaceId !== null && value.workspaceId != null && snapshot.workspaceId !== value.workspaceId)
+        || !Number.isInteger(value.items) || value.items < 0
+      snapshot = { ...snapshot, invalid, profile: value.profile, workspaceId: value.workspaceId ?? snapshot.workspaceId,
+        items: snapshot.items + value.items, pages: snapshot.pages + 1, completeAt: value.complete === true ? at : null }
+    },
+    readyAt(observedLifetime, observation) {
+      const clock = observation?.clock
+      if (![clock?.startedAt, clock?.frameAt, clock?.endedAt].every(time) || clock.startedAt > clock.frameAt || clock.frameAt > clock.endedAt
+        || observedLifetime?.workspaceId !== workspaceId || observedLifetime?.sessionEpoch !== sessionEpoch || observedLifetime?.snapshotEpoch !== snapshotEpoch) return false
+      return !!(session?.canRead && session.workspaceId === workspaceId && time(session.completeAt) && receivedBeforeFrame(session, observation)
+        && snapshot && !snapshot.invalid && snapshot.workspaceId === workspaceId && snapshot.profile === 'workspace_shell_v1'
+        && snapshot.items === expectedItems && snapshot.pages === 1 && time(snapshot.completeAt) && receivedBeforeFrame(snapshot, observation))
+    }
+  }
+}

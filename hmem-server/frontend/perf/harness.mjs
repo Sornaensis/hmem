@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
-import { createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -218,9 +218,12 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     tracker.bytes[key] = (tracker.bytes[key] || 0) + receipt.bytes
     if (key === 'navigation:branch') receipt.navigation = value
     const gate = receipt.gate
+    let fulfilled = false
     if (gate && !gate.used) { gate.used = true; gate.signalPaused(); await (gate.waitForRelease) }
     try {
-      await route.fulfill({ status, contentType: 'application/json', body })
+      await route.fulfill({ status, contentType: 'application/json', body,
+        ...(receipt.paintReceiptId ? { headers: { 'Server-Timing': 'hmem_receipt;desc="' + receipt.paintReceiptId + '"' } } : {}) })
+      fulfilled = true
     } finally {
       if (status < 400 && key === 'change-stream:resync') {
         const requestBody = request.postDataJSON()
@@ -241,6 +244,8 @@ export function fixtureResponder(fixture, tracker, options = {}) {
         tracker.model.timelineBuckets = value.buckets.length
         tracker.model.timelineBucketRequest = { since: value.since, until: value.until, bucket: value.bucket }
       }
+      if (fulfilled && receipt.paintSession) tracker.paintReadiness.completeSession(receipt.paintSession, { canRead: status < 400 && value?.workspace?.can_read === true, workspaceId: value?.workspace?.workspace_id }, performance.now())
+      if (fulfilled && receipt.paintSnapshot && status < 400) tracker.paintReadiness.completeSnapshot(receipt.paintSnapshot, { profile: value.snapshot_profile, workspaceId: value.items.find(item => item.kind === 'workspace')?.data?.id, items: value.items.length, complete: value.has_more === false }, performance.now())
       if (receipt.proofSession !== undefined) tracker.navigationProof.completeSession(receipt.proofSession, status < 400 && value?.workspace?.can_read === true)
       if (receipt.proofNavigation) tracker.navigationProof.complete(receipt.proofNavigation, value?.projects && value?.tasks ? {
         projects: { ids: value.projects.items.map(item => item.id), hasMore: value.projects.has_more },
@@ -268,8 +273,9 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     const key = contractedKey || 'unimplemented:' + request.method() + ':' + pathname
     const receipt = { key, method: request.method(), url: request.url(), bytes: 0, at: performance.now(), done: false }
     if (tracker.navigationProof) {
-      if (key === 'session') receipt.proofSession = tracker.navigationProof.beginSession()
-      if (key === 'change-stream:resync') receipt.proofSnapshot = tracker.navigationProof.admitSnapshot(!request.postDataJSON().page_token)
+      if (key === 'session' || key === 'change-stream:resync') receipt.paintReceiptId = tracker.paintRunId + '-' + tracker.requests.length
+      if (key === 'session') { receipt.proofSession = tracker.navigationProof.beginSession(); receipt.paintSession = tracker.paintReadiness.beginSession(receipt.at, receipt.paintReceiptId, request.url()) }
+      if (key === 'change-stream:resync') { receipt.proofSnapshot = tracker.navigationProof.admitSnapshot(!request.postDataJSON().page_token); receipt.paintSnapshot = tracker.paintReadiness.admitSnapshot(!request.postDataJSON().page_token, receipt.at, receipt.paintReceiptId, request.url()) }
       if (key === 'navigation:branch' && pathname === '/api/v1/workspaces/' + tracker.workspaceId + '/navigation') {
         const kind = url.searchParams.get('parent_kind')
         receipt.proofNavigation = tracker.navigationProof.admit({
@@ -542,20 +548,24 @@ async function waitForWorkspaceReady(page, tracker, fixture, anchorId, label) {
   throw new Error(`${label} readiness failed: ${tracker.model.snapshotProfile} snapshot ${tracker.model.snapshotItems}/${expectedSnapshotItems} shell items, ${tracker.model.snapshotPages}/${expectedPages} pages, complete=${tracker.model.snapshotComplete}, navigation=${tracker.counts['navigation:branch'] || 0}, active=${tracker.active}, anchor=${anchorId}`)
 }
 
-async function waitForFirstUsefulViewport(page, tracker, fixture, anchorId) {
+export async function waitForFirstUsefulViewport(page, tracker, fixture, anchorId) {
   const deadline = performance.now() + 30000
   while (performance.now() < deadline) {
     assertNoUnhandledApiRoutes(tracker)
-    const authorized = tracker.requests.some(request => request.key === 'session' && request.done)
-    const shell = tracker.model.snapshotComplete && tracker.model.snapshotProfile === PRODUCTION_SNAPSHOT_PROFILE && tracker.model.snapshotItems === workspaceShellSnapshotItems(fixture).length
-    const painted = await page.evaluate(async id => {
+    const observedLifetime = tracker.paintReadiness.lifetime()
+    const observation = await page.evaluate(async id => {
+      const startedAt = performance.now()
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+      const frameAt = performance.now()
       const anchor = document.getElementById('entity-' + id), scroll = document.getElementById('main-content-scroll')
-      if (!anchor || !scroll) return false
-      const row = anchor.getBoundingClientRect(), viewport = scroll.getBoundingClientRect()
-      return row.height > 0 && row.bottom > viewport.top && row.top < viewport.bottom && !document.querySelector('.loading-indicator')
+      const row = anchor?.getBoundingClientRect(), viewport = scroll?.getBoundingClientRect()
+      const painted = !!(row && viewport && row.height > 0 && row.bottom > viewport.top && row.top < viewport.bottom && !document.querySelector('.loading-indicator'))
+      const receipts = performance.getEntriesByType('resource').flatMap(entry => (entry.serverTiming || [])
+        .filter(metric => metric.name === 'hmem_receipt')
+        .map(metric => ({ id: metric.description, url: entry.name, startTime: entry.startTime, responseEnd: entry.responseEnd })))
+      return { painted, origin: location.origin, receipts, clock: { startedAt, frameAt, endedAt: performance.now() } }
     }, anchorId)
-    if (authorized && shell && painted) return
+    if (observation?.painted && tracker.paintReadiness.readyAt(observedLifetime, observation)) return
   }
   throw new Error('Authorized shell and first painted root anchor were not ready')
 }
@@ -811,7 +821,7 @@ export function createTracker(fixture = null) {
     children, rootProjects: children.workspace_root.projects, rootTasks: children.workspace_root.tasks,
     context: navigationFilterContext(new URL('http://fixture?priority_mode=any'))
   })
-  return { navigationProof, workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
+  return { navigationProof, paintRunId: randomUUID(), paintReadiness: fixture && createUsablePaintReadiness(fixture.workspace.id, workspaceShellSnapshotItems(fixture).length), workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
     requests: [], arrivals: new WeakMap(), counts: {}, bytes: {}, active: 0, activeBranches: 0, activeExpandedBranches: 0, activeRootBranches: 0, activeDetails: 0, maxBranches: 0, maxExpandedBranches: 0, maxRootBranches: 0, maxDetails: 0, completed: 0, lastActivityAt: performance.now(), unhandledApiRoutes: [],
     model: { snapshotGeneration: 0, snapshotItems: 0, snapshotPages: 0, snapshotComplete: false, snapshotProfile: null, timelineEvents: 0, timelineBuckets: 0, timelineBucketRequest: null }
   }

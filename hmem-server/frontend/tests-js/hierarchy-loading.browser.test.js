@@ -142,9 +142,12 @@ test('real Markdown and native Tab cross virtual rows, while removing the tab re
       const rows = [...document.querySelectorAll('[data-hierarchy-key]')].filter(row => row.dataset.hierarchyNext && row.querySelector('button'))
       const row = rows.at(-1)
       const controls = [...row.querySelectorAll('a[href],button,input,textarea,select,[tabindex]')].filter(element => !element.disabled && element.tabIndex >= 0 && element.getClientRects().length)
-      controls.at(-1).focus()
-      return { current: row.dataset.hierarchyKey, next: row.dataset.hierarchyNext }
+      const scroll = document.getElementById('main-content-scroll')
+      const beforeTop = scroll.scrollTop
+      controls.at(-1).focus({ preventScroll: true })
+      return { current: row.dataset.hierarchyKey, next: row.dataset.hierarchyNext, beforeTop, afterFocusTop: scroll.scrollTop }
     })
+    assert.equal(next.afterFocusTop, next.beforeTop, 'Boundary setup must preserve the current physical viewport')
     assert.equal(await h.page.locator('[data-hierarchy-key="' + next.next + '"]').count(), 0, 'Keyboard successor must start outside the mounted window')
     await h.page.keyboard.press('Tab')
     await h.page.waitForFunction(key => document.activeElement?.closest('[data-hierarchy-key]')?.dataset.hierarchyKey === key, next.next)

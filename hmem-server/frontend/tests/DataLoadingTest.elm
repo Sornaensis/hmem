@@ -24,7 +24,47 @@ import Url
 suite : Test
 suite =
     describe "bounded navigation response guards"
-        [ test "a shell resync revalidates root, loaded branches, and an already-loaded focus" <|
+        [ test "an expanded branch automatically continues both kinds past fifty siblings" <|
+            \_ ->
+                let
+                    parent =
+                        project "parent" Nothing
+
+                    seeded =
+                        loadRoot workspaceId [ { parent | hasChildren = True } ] [] model
+
+                    requested =
+                        seeded
+
+                    reply projectOffset taskOffset projects tasks projectMore taskMore source =
+                        case Dict.get "project:parent" source.dataLoading.loadedNavigationBranches of
+                            Just request ->
+                                DataLoading.update
+                                    (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint projectOffset taskOffset
+                                        (Ok { workspaceId = workspaceId, projects = { items = projects, hasMore = projectMore }, tasks = { items = tasks, hasMore = taskMore } })
+                                    )
+                                    source |> Tuple.first
+
+                            Nothing ->
+                                source
+
+                    first =
+                        reply 0 0
+                            (List.range 1 50 |> List.map (\n -> project ("auto-project-" ++ String.fromInt n) (Just "parent")))
+                            (List.range 1 50 |> List.map (\n -> task ("auto-task-" ++ String.fromInt n) Nothing))
+                            True True requested
+
+                    second =
+                        reply 50 50 [ project "auto-project-51" (Just "parent") ] [ task "auto-task-51" Nothing ] False False first
+                in
+                Expect.equal
+                    { continued = Just ( 50, 50, True ), projectCount = 52, taskCount = 51, exhausted = Just ( False, False, False ) }
+                    { continued = Dict.get "project:parent" first.dataLoading.loadedNavigationBranches |> Maybe.map (\state -> ( state.projectOffset, state.taskOffset, state.inFlight ))
+                    , projectCount = Dict.size second.dataLoading.projectCardSummaries
+                    , taskCount = Dict.size second.dataLoading.taskCardSummaries
+                    , exhausted = Dict.get "project:parent" second.dataLoading.loadedNavigationBranches |> Maybe.map (\state -> ( state.projectHasMore, state.taskHasMore, state.inFlight ))
+                    }
+        , test "a shell resync revalidates root, loaded branches, and an already-loaded focus" <|
             \_ ->
                 let
                     seeded =
@@ -41,12 +81,16 @@ suite =
 
                     recovered =
                         WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) source |> Tuple.first
+                    resumed =
+                        case Dict.get "project:parent" source.dataLoading.loadedNavigationBranches of
+                            Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) recovered |> Tuple.first
+                            Nothing -> recovered
                 in
                 Expect.equal
                     { advanced = True, rootPending = True, branchPending = True, focusPending = True, retained = True }
                     { advanced = recovered.dataLoading.navigationGeneration > source.dataLoading.navigationGeneration
                     , rootPending = recovered.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False
-                    , branchPending = Dict.get "project:parent" recovered.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight |> Maybe.withDefault False
+                    , branchPending = List.member "project:parent" recovered.dataLoading.navigationQueue && (Dict.get "project:parent" resumed.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight |> Maybe.withDefault False)
                     , focusPending = recovered.dataLoading.activeNavigationFocus |> Maybe.map .inFlight |> Maybe.withDefault False
                     , retained = Dict.member "parent" recovered.dataLoading.projectCardSummaries
                     }
@@ -717,7 +761,7 @@ suite =
                             _ ->
                                 False
                     }
-        , test "pinned project and task paging hydrate the same cached window the renderer presents" <|
+        , test "pinned project and task paging admit bounded details from the rendered cached window" <|
             \_ ->
                 let
                     numbered prefix number =
@@ -777,6 +821,7 @@ suite =
                                             | rootNavigationPresentation = offsetPresentation
                                             , projectCardDetailRequests = Dict.empty
                                             , taskCardDetailRequests = Dict.empty
+                                            , cardDetailAdmissions = Set.empty
                                         }
                                 }
                         in
@@ -801,9 +846,9 @@ suite =
                         tasks |> List.map .id |> Cards.presentationWindow identity (Set.singleton "task-050") 24 |> Set.fromList
                 in
                 Expect.equal
-                    { projectWindow = expectedProjects, taskWindow = expectedTasks, pinnedProjectHydrated = True, pinnedTaskHydrated = True }
-                    { projectWindow = projectRequestIds
-                    , taskWindow = taskRequestIds
+                    { projectWindow = True, taskWindow = True, pinnedProjectHydrated = True, pinnedTaskHydrated = True }
+                    { projectWindow = Set.size projectRequestIds == 6 && Set.isEmpty (Set.diff projectRequestIds expectedProjects)
+                    , taskWindow = Set.size taskRequestIds == 6 && Set.isEmpty (Set.diff taskRequestIds expectedTasks)
                     , pinnedProjectHydrated = Set.member "project-050" projectRequestIds
                     , pinnedTaskHydrated = Set.member "task-050" taskRequestIds
                     }
@@ -1318,9 +1363,9 @@ suite =
                     { rootAt25 = ( Just 25, Just ( 0, False ) )
                     , rootAt50 = ( Just 50, Just ( 0, False ) )
                     , rootContinuation = ( Just 51, Just ( 50, True ) )
-                    , branchAt25 = ( Just 25, Just ( 0, False ) )
-                    , branchAt50 = ( Just 50, Just ( 0, False ) )
-                    , branchContinuation = ( Just 51, Just ( 50, True ) )
+                    , branchAt25 = ( Just 25, Just ( 50, True ) )
+                    , branchAt50 = ( Just 50, Just ( 50, True ) )
+                    , branchContinuation = ( Just 50, Just ( 50, True ) )
                     }
                     { rootAt25 = ( rootPresentation rootAt25, rootState rootAt25 )
                     , rootAt50 = ( rootPresentation rootAt50, rootState rootAt50 )
@@ -1329,7 +1374,7 @@ suite =
                     , branchAt50 = ( branchPresentation branchAt50, branchState branchAt50 )
                     , branchContinuation = ( branchPresentation branchContinuation, branchState branchContinuation )
                     }
-        , test "accepted root and branch transport pages dedupe sibling payloads across project-task alternation" <|
+        , test "manual roots dedupe alternation while automatic branches end each stream independently" <|
             \_ ->
                 let
                     rootPrepared =
@@ -1424,69 +1469,20 @@ suite =
                             branchInitial
                             |> Tuple.first
 
-                    branchProjectRequest =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchLoaded |> Tuple.first
+                    branchPage number taskMore projectMore source =
+                        case Dict.get "project:parent" source.dataLoading.loadedNavigationBranches of
+                            Just request ->
+                                DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset
+                                    (Ok { workspaceId = workspaceId, projects = { items = [ project ("branch-project-" ++ String.fromInt number) (Just "parent") ], hasMore = projectMore }, tasks = { items = [ task ("branch-task-" ++ String.fromInt number) Nothing ], hasMore = taskMore } })) source |> Tuple.first
+                            Nothing -> source
 
-                    branchProjectOffset =
-                        Dict.get "project:parent" branchProjectRequest.dataLoading.loadedNavigationBranches |> Maybe.map .projectOffset |> Maybe.withDefault -1
-
-                    branchProjectAccepted =
-                        DataLoading.update
-                            (GotNavigationBranch workspaceId branchProjectRequest.sessionRequestEpoch branchProjectRequest.dataLoading.navigationGeneration "project:parent" branchFingerprint branchProjectOffset 0
-                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-50" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-0" Nothing ], hasMore = True } })
-                            )
-                            branchProjectRequest
-                            |> Tuple.first
-
+                    branchProjectAccepted = branchPage 50 True True branchLoaded
                     branchDuplicateIgnored =
-                        DataLoading.update
-                            (GotNavigationBranch workspaceId branchProjectAccepted.sessionRequestEpoch branchProjectAccepted.dataLoading.navigationGeneration "project:parent" branchFingerprint branchProjectOffset 0
-                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-50" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-0" Nothing ], hasMore = True } })
-                            )
-                            branchProjectAccepted
-                            |> Tuple.first
-
-                    branchTaskRequest =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchDuplicateIgnored |> Tuple.first
-
-                    branchTaskOffset =
-                        Dict.get "project:parent" branchTaskRequest.dataLoading.loadedNavigationBranches |> Maybe.map .taskOffset |> Maybe.withDefault -1
-
-                    branchTaskAccepted =
-                        DataLoading.update
-                            (GotNavigationBranch workspaceId branchTaskRequest.sessionRequestEpoch branchTaskRequest.dataLoading.navigationGeneration "project:parent" branchFingerprint branchProjectOffset branchTaskOffset
-                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-50" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-50" Nothing ], hasMore = True } })
-                            )
-                            branchTaskRequest
-                            |> Tuple.first
-
-                    branchProjectAgainRequest =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchTaskAccepted |> Tuple.first
-
-                    branchProjectAgainOffset =
-                        Dict.get "project:parent" branchProjectAgainRequest.dataLoading.loadedNavigationBranches |> Maybe.map .projectOffset |> Maybe.withDefault -1
-
-                    branchProjectAgainAccepted =
-                        DataLoading.update
-                            (GotNavigationBranch workspaceId branchProjectAgainRequest.sessionRequestEpoch branchProjectAgainRequest.dataLoading.navigationGeneration "project:parent" branchFingerprint branchProjectAgainOffset branchTaskOffset
-                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-100" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-50" Nothing ], hasMore = True } })
-                            )
-                            branchProjectAgainRequest
-                            |> Tuple.first
-
-                    branchTaskAgainRequest =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchProjectAgainAccepted |> Tuple.first
-
-                    branchTaskAgainOffset =
-                        Dict.get "project:parent" branchTaskAgainRequest.dataLoading.loadedNavigationBranches |> Maybe.map .taskOffset |> Maybe.withDefault -1
-
-                    branchTaskAgainAccepted =
-                        DataLoading.update
-                            (GotNavigationBranch workspaceId branchTaskAgainRequest.sessionRequestEpoch branchTaskAgainRequest.dataLoading.navigationGeneration "project:parent" branchFingerprint branchProjectAgainOffset branchTaskAgainOffset
-                                (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-100" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-100" Nothing ], hasMore = True } })
-                            )
-                            branchTaskAgainRequest
-                            |> Tuple.first
+                        DataLoading.update (GotNavigationBranch workspaceId branchLoaded.sessionRequestEpoch branchLoaded.dataLoading.navigationGeneration "project:parent" branchFingerprint 50 50
+                            (Ok { workspaceId = workspaceId, projects = { items = [ project "duplicate" (Just "parent") ], hasMore = True }, tasks = { items = [ task "duplicate" Nothing ], hasMore = True } })) branchProjectAccepted |> Tuple.first
+                    branchTaskAccepted = branchPage 100 False True branchDuplicateIgnored
+                    branchProjectAgainAccepted = branchPage 150 True True branchTaskAccepted
+                    branchTaskAgainAccepted = branchPage 200 True False branchProjectAgainAccepted
 
                     counts current =
                         current.dataLoading.rootNavigationRequest
@@ -1516,11 +1512,11 @@ suite =
                     , rootAfterTask = Just { projects = 2, tasks = 2, projectOffset = 50, taskOffset = 50 }
                     , rootAfterProjectAgain = Just { projects = 3, tasks = 2, projectOffset = 100, taskOffset = 50 }
                     , rootAfterTaskAgain = Just { projects = 3, tasks = 3, projectOffset = 100, taskOffset = 100 }
-                    , branchAfterProject = Just { projects = 2, tasks = 1, projectOffset = 50, taskOffset = 0 }
-                    , branchAfterDuplicate = Just { projects = 2, tasks = 1, projectOffset = 50, taskOffset = 0 }
-                    , branchAfterTask = Just { projects = 2, tasks = 2, projectOffset = 50, taskOffset = 50 }
-                    , branchAfterProjectAgain = Just { projects = 3, tasks = 2, projectOffset = 100, taskOffset = 50 }
-                    , branchAfterTaskAgain = Just { projects = 3, tasks = 3, projectOffset = 100, taskOffset = 100 }
+                    , branchAfterProject = Just { projects = 2, tasks = 2, projectOffset = 100, taskOffset = 100 }
+                    , branchAfterDuplicate = Just { projects = 2, tasks = 2, projectOffset = 100, taskOffset = 100 }
+                    , branchAfterTask = Just { projects = 3, tasks = 3, projectOffset = 150, taskOffset = 100 }
+                    , branchAfterProjectAgain = Just { projects = 4, tasks = 3, projectOffset = 200, taskOffset = 100 }
+                    , branchAfterTaskAgain = Just { projects = 5, tasks = 3, projectOffset = 200, taskOffset = 100 }
                     }
                     { rootAfterProject = counts rootProjectAccepted
                     , rootAfterDuplicate = counts rootDuplicateIgnored
@@ -1781,7 +1777,7 @@ suite =
                         { childCard | status = Api.ProjCompleted }
 
                     parent =
-                        project "parent" Nothing
+                        let summary = project "parent" Nothing in { summary | status = Api.ProjCompleted }
 
                     baseSearch =
                         model.search
@@ -1820,7 +1816,7 @@ suite =
                             Just request ->
                                 DataLoading.update
                                     (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint 0 0
-                                        (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })
+                                        (Ok { workspaceId = workspaceId, projects = { items = [ parent ], hasMore = False }, tasks = { items = [], hasMore = False } })
                                     )
                                     replaying
                                     |> Tuple.first
@@ -1920,7 +1916,7 @@ suite =
                         project "child" (Just "old-parent")
 
                     seeded =
-                        DataLoading.mergeNavigationSummaries [ child ] [] model
+                        DataLoading.mergeNavigationSummaries [ project "old-parent" Nothing, project "new-parent" Nothing, child ] [] model
 
                     ( oldRequest, _ ) =
                         DataLoading.beginNavigationBranch "project" workspaceId (Just "old-parent") seeded
@@ -2022,12 +2018,15 @@ suite =
                     expanded = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") base |> Tuple.first
                     rooted = requestSummaries "foreign-project" [ ( "project", "new-root" ) ] expanded
                     tasked = requestSummaries "foreign-task" [ ( "task", "new-task" ) ] expanded
+                    readyTask = case Dict.get "project:parent" expanded.dataLoading.loadedNavigationBranches of
+                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) tasked |> Tuple.first
+                        Nothing -> tasked
                     rootReturned = acceptRoot [ project "parent" Nothing, project "new-root" Nothing ] [] rooted
                     taskBase = task "new-task" Nothing
-                    taskReturned = case Dict.get "project:parent" tasked.dataLoading.loadedNavigationBranches of
+                    taskReturned = case Dict.get "project:parent" readyTask.dataLoading.loadedNavigationBranches of
                         Just request ->
-                            DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ { taskBase | projectId = Just "parent" } ], hasMore = False } })) tasked |> Tuple.first
-                        Nothing -> tasked
+                            DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ { taskBase | projectId = Just "parent" } ], hasMore = False } })) readyTask |> Tuple.first
+                        Nothing -> readyTask
                 in
                 Expect.equal { pending = True, prematurelyInserted = False, root = True, task = True }
                     { pending = rooted.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False, prematurelyInserted = Dict.member "new-root" rooted.projects, root = Set.member "new-root" rootReturned.dataLoading.navigationVisibleProjectIds, task = Set.member "new-task" taskReturned.dataLoading.navigationVisibleTaskIds }
@@ -2075,11 +2074,14 @@ suite =
                         Nothing -> source
                     first = page 0 refreshing
                     restored = page 50 first
+                    resumed =
+                        Dict.toList seeded.dataLoading.projectCardDetailRequests
+                            |> List.foldl (\( id, request ) source -> DataLoading.update (GotProjectCardDetail request id (Err Http.Timeout)) source |> Tuple.first) restored
                 in
                 Expect.equal ( Just ( True, 50 ), Just 49, True )
                     ( first.dataLoading.rootNavigationRequest |> Maybe.map (\request -> ( request.inFlight, request.projectOffset ))
                     , restored.dataLoading.rootNavigationPresentation |> Maybe.map .projectOffset
-                    , Dict.member "051" restored.dataLoading.projectCardDetailRequests
+                    , Dict.member "051" resumed.dataLoading.projectCardDetailRequests
                     )
         , test "loaded reparent with structural invalidation replaces bounded root and expanded membership" <|
             \_ ->
@@ -2122,6 +2124,213 @@ suite =
                 Expect.equal ( True, True, [ 1, 100 ] )
                     ( Dict.member "a" stale.projects, Dict.member "b" stale.projects, List.map (String.split "," >> List.length) batchKeys |> List.sort )
 
+        , test "fair branch admissions stay at four and continuation yields to queued siblings" <|
+            \_ ->
+                let
+                    parents = List.range 1 9 |> List.map (\n -> let summary = project ("p" ++ String.fromInt n) Nothing in { summary | hasChildren = True })
+                    seeded = loadRoot workspaceId parents [] model
+                    continued = branchReply "project:p1" (List.range 1 50 |> List.map (\n -> project ("child" ++ String.fromInt n) (Just "p1"))) [] True False seeded
+                in
+                Expect.equal { first = 4, waiting = 5, physical = 4, sibling = Just True, continuation = Just False, queued = True }
+                    { first = Dict.size seeded.dataLoading.navigationAdmissions
+                    , waiting = List.length seeded.dataLoading.navigationQueue
+                    , physical = Dict.size continued.dataLoading.navigationAdmissions
+                    , sibling = Dict.get "project:p5" continued.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                    , continuation = Dict.get "project:p1" continued.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                    , queued = List.member "project:p1" continued.dataLoading.navigationQueue
+                    }
+        , test "collapse and reopen resume pending streams only after stale physical completion" <|
+            \_ ->
+                let
+                    parent = project "parent" Nothing
+                    child = project "child" (Just "parent")
+                    seeded = loadRoot workspaceId [ { parent | hasChildren = True } ] [] model
+                    first = branchReply "project:parent" [ { child | hasChildren = True } ] [] True False seeded
+                    old = Dict.get "project:parent" first.dataLoading.loadedNavigationBranches
+                    collapsed = Cards.update (ToggleTreeNode "proj-parent") first |> Tuple.first
+                    reopened = Cards.update (ToggleTreeNode "proj-parent") collapsed |> Tuple.first
+                    afterOld = case old of
+                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [ project "late-hidden" (Just "parent") ], hasMore = False }, tasks = { items = [], hasMore = False } })) reopened |> Tuple.first
+                        Nothing -> reopened
+                in
+                Expect.equal { held = True, hidden = Just False, pending = Just True, queued = True, resumed = Just ( 50, True ), childVisible = True, staleAbsent = True }
+                    { held = Dict.size collapsed.dataLoading.navigationAdmissions == Dict.size first.dataLoading.navigationAdmissions
+                    , hidden = Dict.get "project:child" collapsed.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                    , pending = Dict.get "project:parent" collapsed.dataLoading.loadedNavigationBranches |> Maybe.map .projectRequestPending
+                    , queued = List.member "project:parent" reopened.dataLoading.navigationQueue
+                    , resumed = Dict.get "project:parent" afterOld.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.projectOffset, request.inFlight ))
+                    , childVisible = Set.member "child" afterOld.dataLoading.navigationVisibleProjectIds
+                    , staleAbsent = not (Dict.member "late-hidden" afterOld.dataLoading.projectCardSummaries)
+                    }
+        , test "request errors stay paused across unrelated success until explicit retry" <|
+            \_ ->
+                let
+                    initial = DataLoading.beginNavigationBranch "project" workspaceId (Just "a") model |> Tuple.first
+                    both = DataLoading.beginNavigationBranch "project" workspaceId (Just "b") initial |> Tuple.first
+                    failed = case Dict.get "project:a" both.dataLoading.loadedNavigationBranches of
+                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:a" request.filterFingerprint 0 0 (Err Http.Timeout)) both |> Tuple.first
+                        Nothing -> both
+                    other = branchReply "project:b" [ project "other" (Just "b") ] [] False False failed
+                    retried = DataLoading.beginNavigationBranchPage "project" "a" "project" other |> Tuple.first
+                in
+                Expect.equal ( Just ( False, False, False ), True, Just True )
+                    ( Dict.get "project:a" other.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.inFlight, request.projectRequestPending, request.taskRequestPending ))
+                    , Dict.get "project:a" other.dataLoading.navigationPasses |> Maybe.andThen .projectError |> (/=) Nothing
+                    , Dict.get "project:a" retried.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                    )
+        , test "same-filter refresh stages each kind to exhaustion without page-one truncation" <|
+            \_ ->
+                let
+                    seeded = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") (DataLoading.mergeNavigationSummaries [ project "parent" Nothing ] [] model) |> Tuple.first
+                    loaded = branchReply "project:parent" [ project "old-a" (Just "parent"), project "old-b" (Just "parent") ] [ task "old-task" Nothing ] False False seeded
+                    fresh = DataLoading.revalidateNavigationForFilters loaded |> Tuple.first
+                    first = branchReply "project:parent" (List.range 1 50 |> List.map (\n -> project ("fresh-" ++ String.fromInt n) (Just "parent"))) [ task "fresh-task" Nothing ] True False fresh
+                    final = branchReply "project:parent" [ project "fresh-51" (Just "parent") ] [ task "ignored-other-kind" Nothing ] False True first
+                in
+                Expect.equal { oldDuring = True, freshDuring = False, taskCommitted = True, oldGone = True, allFresh = 52, taskStayedComplete = Just False }
+                    { oldDuring = Dict.member "old-a" first.dataLoading.projectCardSummaries && Dict.member "old-b" first.dataLoading.projectCardSummaries
+                    , freshDuring = Dict.member "fresh-1" first.dataLoading.projectCardSummaries
+                    , taskCommitted = Dict.member "fresh-task" first.dataLoading.taskCardSummaries && not (Dict.member "old-task" first.dataLoading.taskCardSummaries)
+                    , oldGone = not (Dict.member "old-a" final.dataLoading.projectCardSummaries)
+                    , allFresh = Dict.size final.dataLoading.projectCardSummaries
+                    , taskStayedComplete = Dict.get "project:parent" final.dataLoading.loadedNavigationBranches |> Maybe.map .taskHasMore
+                    }
+        , test "coalesced live refresh discards the shifted pass and restarts at offset zero" <|
+            \_ ->
+                let
+                    initial = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") (DataLoading.mergeNavigationSummaries [ project "parent" Nothing ] [] model) |> Tuple.first
+                    first = branchReply "project:parent" [ project "old" (Just "parent") ] [] True False initial
+                    old = Dict.get "project:parent" first.dataLoading.loadedNavigationBranches
+                    once = DataLoading.revalidateNavigationForFilters first |> Tuple.first
+                    twice = DataLoading.revalidateNavigationForFilters once |> Tuple.first
+                    released = case old of
+                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) twice |> Tuple.first
+                        Nothing -> twice
+                    complete = branchReply "project:parent" [ project "replacement" (Just "parent") ] [] False False released
+                in
+                Expect.equal { held = 1, queued = 1, fresh = Just ( 0, True ), old = False, replacement = True }
+                    { held = Dict.size twice.dataLoading.navigationAdmissions
+                    , queued = List.length (List.filter ((==) "project:parent") twice.dataLoading.navigationQueue)
+                    , fresh = Dict.get "project:parent" released.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.projectOffset, request.inFlight ))
+                    , old = Dict.member "old" complete.dataLoading.projectCardSummaries
+                    , replacement = Dict.member "replacement" complete.dataLoading.projectCardSummaries
+                    }
+        , test "duplicate nonprogress stops one kind while the other continues" <|
+            \_ ->
+                let
+                    seeded = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model |> Tuple.first
+                    first = branchReply "project:parent" [ project "duplicate" (Just "parent") ] [ task "task-one" Nothing ] True True seeded
+                    second = branchReply "project:parent" [ project "duplicate" (Just "parent") ] [ task "task-two" Nothing ] True True first
+                    final = branchReply "project:parent" [ project "ignored" (Just "parent") ] [ task "task-three" Nothing ] True False second
+                in
+                Expect.equal { state = Just ( True, False, False ), paused = True, projects = 1, tasks = 3 }
+                    { state = Dict.get "project:parent" final.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.projectHasMore, request.taskHasMore, request.inFlight ))
+                    , paused = Dict.get "project:parent" final.dataLoading.navigationPasses |> Maybe.andThen .projectError |> (/=) Nothing
+                    , projects = Dict.size final.dataLoading.projectCardSummaries
+                    , tasks = Dict.size final.dataLoading.taskCardSummaries
+                    }
+        , test "the client ceiling retains truthful has-more and stops without issuing an illegal offset" <|
+            \_ ->
+                let
+                    seeded = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model |> Tuple.first
+                    loading = seeded.dataLoading
+                    atBoundary = { seeded | dataLoading = { loading | loadedNavigationBranches = Dict.update "project:parent" (Maybe.map (\request -> { request | projectOffset = 10000 })) loading.loadedNavigationBranches } }
+                    result = branchReply "project:parent" (List.range 1 50 |> List.map (\n -> project ("ceiling-" ++ String.fromInt n) (Just "parent"))) [] True False atBoundary
+                in
+                Expect.equal ( Just ( 10000, True, ( False, False ) ), True, 50 )
+                    ( Dict.get "project:parent" result.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.projectOffset, request.projectHasMore, ( request.inFlight, request.projectRequestPending ) ))
+                    , Dict.get "project:parent" result.dataLoading.navigationPasses |> Maybe.andThen .projectError |> (/=) Nothing
+                    , Dict.size result.dataLoading.projectCardSummaries
+                    )
+        , test "visible detail demand is guarded and six physical slots survive workspace churn" <|
+            \_ ->
+                let
+                    summaries = List.range 1 50 |> List.map (\n -> project ("detail-" ++ String.fromInt n) Nothing)
+                    seeded = loadRoot workspaceId summaries [] { model | auth = { status = AuthReady, mode = Just "test" } }
+                    reloaded = DataLoading.reloadNavigationForFilters seeded |> Tuple.first
+                    newWorkspace = { reloaded | selectedWorkspaceId = Just "other" }
+                    requested = DataLoading.ensureVisibleCardDetails workspaceId seeded.sessionRequestEpoch seeded.dataLoading.navigationGeneration (Set.fromList (List.map .id summaries)) Set.empty newWorkspace |> Tuple.first
+                    released = Dict.toList seeded.dataLoading.projectCardDetailRequests |> List.foldl (\( id, request ) source -> DataLoading.update (GotProjectCardDetail request id (Err Http.Timeout)) source |> Tuple.first) requested
+                in
+                Expect.equal { first = 6, held = 6, stale = Nothing, released = 0 }
+                    { first = Set.size seeded.dataLoading.cardDetailAdmissions
+                    , held = Set.size requested.dataLoading.cardDetailAdmissions
+                    , stale = requested.dataLoading.visibleDetailDemand
+                    , released = Set.size released.dataLoading.cardDetailAdmissions
+                    }
+        , test "deep focus hydrates the target before ordinary cards without hydrating its ancestors" <|
+            \_ ->
+                let
+                    summaries = List.range 1 100 |> List.map (\n -> project ("deep-" ++ String.fromInt n) (if n == 1 then Nothing else Just ("deep-" ++ String.fromInt (n - 1))))
+                    seeded = DataLoading.mergeNavigationSummaries summaries [] { model | auth = { status = AuthReady, mode = Just "test" } }
+                    focus = seeded.focus
+                    focused = { seeded | focus = { focus | focusedEntity = Just ( "project", "deep-100" ) } }
+                    demanded = DataLoading.ensureVisibleCardDetails workspaceId focused.sessionRequestEpoch focused.dataLoading.navigationGeneration Set.empty Set.empty focused |> Tuple.first
+                    complete = case ( Dict.get "deep-100" demanded.dataLoading.projectCardDetailRequests, Dict.get "deep-100" demanded.dataLoading.projectCardSummaries ) of
+                        ( Just request, Just summary ) -> DataLoading.update (GotProjectCardDetail request summary.id (Ok (Api.projectFromCardSummary summary))) demanded |> Tuple.first
+                        _ -> demanded
+                in
+                Expect.equal ( [ "deep-100" ], [ "deep-100" ], 0 )
+                    ( Dict.keys demanded.dataLoading.projectCardDetailRequests
+                    , Dict.keys complete.dataLoading.projectCardDetailRequests
+                    , Set.size complete.dataLoading.cardDetailAdmissions
+                    )
+        , test "authoritative parent membership removal retires cached child and grandchild replies" <|
+            \_ ->
+                let
+                    parent = project "p" Nothing
+                    child = project "c" (Just "p")
+                    grandchild = project "g" (Just "c")
+                    seeded = loadRoot workspaceId [ { parent | hasChildren = True } ] [] model
+                    children = branchReply "project:p" [ { child | hasChildren = True } ] [] False False seeded
+                    descendants = branchReply "project:c" [ { grandchild | hasChildren = True } ] [] True False children
+                    old = Dict.get "project:g" descendants.dataLoading.loadedNavigationBranches
+                    freshParent = DataLoading.beginNavigationBranch "project" workspaceId (Just "p") descendants |> Tuple.first
+                    removed = branchReply "project:p" [] [] False False freshParent
+                    afterOld = case old of
+                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:g" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [ project "late-grandchild" (Just "g") ], hasMore = True }, tasks = { items = [], hasMore = False } })) removed |> Tuple.first
+                        Nothing -> removed
+                in
+                Expect.equal { parentApplied = True, childRetired = Just False, grandchildRetired = Just False, fenced = True, held = 2, released = 1, lateAbsent = True, queued = [] }
+                    { parentApplied = not (Dict.member "c" removed.dataLoading.projectCardSummaries)
+                    , childRetired = Dict.get "project:c" removed.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                    , grandchildRetired = Dict.get "project:g" removed.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                    , fenced = case ( old, Dict.get "project:g" removed.dataLoading.loadedNavigationBranches ) of
+                        ( Just oldRequest, Just current ) -> current.generation > oldRequest.generation
+                        _ -> False
+                    , held = Dict.size removed.dataLoading.navigationAdmissions
+                    , released = Dict.size afterOld.dataLoading.navigationAdmissions
+                    , lateAbsent = not (Dict.member "late-grandchild" afterOld.dataLoading.projectCardSummaries)
+                    , queued = afterOld.dataLoading.navigationQueue
+                    }
+        , test "explicit branch retry fences old error and success callbacks at the same offsets" <|
+            \_ ->
+                let
+                    initial = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model |> Tuple.first
+                    old = Dict.get "project:parent" initial.dataLoading.loadedNavigationBranches
+                    message result = case old of
+                        Just request -> GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 result
+                        Nothing -> LoadRootNavigationPage "project"
+                    failed = DataLoading.update (message (Err Http.Timeout)) initial |> Tuple.first
+                    retry = DataLoading.beginNavigationBranchPage "project" "parent" "project" failed |> Tuple.first
+                    lateError = DataLoading.update (message (Err Http.Timeout)) retry |> Tuple.first
+                    lateSuccess = DataLoading.update (message (Ok { workspaceId = workspaceId, projects = { items = [ project "old-payload" (Just "parent") ], hasMore = False }, tasks = { items = [], hasMore = False } })) lateError |> Tuple.first
+                in
+                Expect.equal ( True, Just True, ( 1, False ) )
+                    ( case ( old, Dict.get "project:parent" retry.dataLoading.loadedNavigationBranches ) of
+                        ( Just previous, Just current ) -> current.generation > previous.generation
+                        _ -> False
+                    , Dict.get "project:parent" lateSuccess.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                    , ( Dict.size lateSuccess.dataLoading.navigationAdmissions, Dict.member "old-payload" lateSuccess.dataLoading.projectCardSummaries )
+                    )
+        , test "Cards reopening a failed continuation retains fifty-plus cached children and both cursors" <|
+            \_ ->
+                Expect.equal { offsets = Just ( 100, 100 ), pass = Just ( False, 51 ), freshIdentity = True, displayed = ( 51, 51 ), completed = ( 52, 52 ), oldRetained = True, freshComplete = True }
+                    (reopenFailedBranchScenario False)
+        , test "Cards reopening a failed staged refresh preserves staging until each kind finishes" <|
+            \_ ->
+                Expect.equal { offsets = Just ( 50, 50 ), pass = Just ( True, 50 ), freshIdentity = True, displayed = ( 51, 51 ), completed = ( 51, 51 ), oldRetained = False, freshComplete = True }
+                    (reopenFailedBranchScenario True)
         ]
 
 
@@ -2364,3 +2573,49 @@ requestSummariesWithInvalidations eventId targets extraInvalidations source =
             ]
     in
     WebSocket.update (WsMessageReceived (scopedFrame (Encode.object [ ( "schema_version", Encode.int 1 ), ( "type", Encode.string "change" ), ( "event", envelope ) ]))) source |> Tuple.first
+
+
+branchReply : String -> List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Bool -> Bool -> Model -> Model
+branchReply key projects tasks projectMore taskMore source =
+    case Dict.get key source.dataLoading.loadedNavigationBranches of
+        Just request ->
+            DataLoading.update (GotNavigationBranch request.workspaceId request.sessionEpoch request.generation key request.filterFingerprint request.projectOffset request.taskOffset
+                (Ok { workspaceId = request.workspaceId, projects = { items = projects, hasMore = projectMore }, tasks = { items = tasks, hasMore = taskMore } })) source |> Tuple.first
+        Nothing -> source
+
+
+reopenFailedBranchScenario staged =
+    let
+        projectPage prefix start end = List.range start end |> List.map (\n -> project (prefix ++ String.fromInt n) (Just "parent"))
+        taskPage prefix start end = List.range start end |> List.map (\n -> task (prefix ++ String.fromInt n) Nothing)
+        parent = project "parent" Nothing
+        seeded = loadRoot workspaceId [ { parent | hasChildren = True } ] [] model
+        first = branchReply "project:parent" (projectPage "old-" 1 50) (taskPage "old-" 1 50) True True seeded
+        second = branchReply "project:parent" (projectPage "old-" 51 51) (taskPage "old-" 51 51) (not staged) (not staged) first
+        pending =
+            if staged then
+                DataLoading.revalidateNavigationForFilters second |> Tuple.first |> branchReply "project:parent" (projectPage "fresh-" 1 50) (taskPage "fresh-" 1 50) True True
+            else second
+        failed = case Dict.get "project:parent" pending.dataLoading.loadedNavigationBranches of
+            Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) pending |> Tuple.first
+            Nothing -> pending
+        collapsed = Cards.update (ToggleTreeNode "proj-parent") failed |> Tuple.first
+        reopened = Cards.update (ToggleTreeNode "proj-parent") collapsed |> Tuple.first
+        completed = case Dict.get "project:parent" reopened.dataLoading.loadedNavigationBranches of
+            Just request ->
+                if staged && request.projectOffset == 50 then branchReply "project:parent" (projectPage "fresh-" 51 51) (taskPage "fresh-" 51 51) False False reopened
+                else if not staged && request.projectOffset == 100 then branchReply "project:parent" (projectPage "old-" 52 52) (taskPage "old-" 52 52) False False reopened
+                else branchReply "project:parent" (projectPage (if staged then "fresh-" else "old-") 1 50) (taskPage (if staged then "fresh-" else "old-") 1 50) True True reopened
+            Nothing -> reopened
+        counts current = ( Dict.values current.dataLoading.projectCardSummaries |> List.filter (\summary -> summary.parentId == Just "parent") |> List.length, Dict.size current.dataLoading.taskCardSummaries )
+    in
+    { offsets = Dict.get "project:parent" reopened.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.projectOffset, request.taskOffset ))
+    , pass = Dict.get "project:parent" reopened.dataLoading.navigationPasses |> Maybe.map (\progress -> ( progress.refreshing, Dict.size progress.projects ))
+    , freshIdentity = case ( Dict.get "project:parent" failed.dataLoading.loadedNavigationBranches, Dict.get "project:parent" reopened.dataLoading.loadedNavigationBranches ) of
+        ( Just previous, Just current ) -> current.generation > previous.generation
+        _ -> False
+    , displayed = counts reopened
+    , completed = counts completed
+    , oldRetained = Dict.member "old-51" completed.dataLoading.projectCardSummaries && Dict.member "old-51" completed.dataLoading.taskCardSummaries
+    , freshComplete = Dict.get "project:parent" completed.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> not request.projectHasMore && not request.taskHasMore && not request.inFlight) |> Maybe.withDefault False
+    }

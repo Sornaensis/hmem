@@ -12,6 +12,35 @@ npm test
 
 `test:browser:install` provisions the exact Chromium revision required by the locked Playwright version. The timeline browser test starts from a new, empty browser context and runs the compiled production Elm fixture without authentication or backend dependencies.
 
+## Expanded hierarchy loading
+
+Navigation transports 50 summaries per kind per request. Expanded nodes whose
+ancestors are also visible and expanded continue automatically, including the
+default expanded state and Expand All. Root lists still load through explicit
+navigation demand. The branch queue is fair and admits at most four physical
+HTTP requests. Collapse, filter, workspace, and session changes retire logical
+generations; a stale response or error still releases its physical admission.
+Session resets preserve those admissions until completion.
+
+Project and task streams finish independently. Same-filter branch refreshes
+stage fresh membership until each kind finishes, preserving its displayed
+cache while fresh pages arrive. Ordering or membership invalidation discards
+the partial pass and coalesces a restart at offset zero. Errors pause until
+retry or reopening; repeated pages without new IDs stop that kind. The client
+automatic offset ceiling is 10,000 (the server allows 100,000); reaching it
+reports an incomplete branch and preserves `hasMore` rather than claiming an
+exhausted stream. The wire `hasMore` contract guarantees full 50-item pages;
+offsets advance by transport size while cached counts deduplicate IDs.
+
+Detail hydration admits at most six physical requests. Its ordinary demand is
+globally limited to 25 current presentation cards, with focus, edit, inline
+create, and explicit retry targets requested separately. Deep focus requests
+the target before ordinary cards; ancestor projection does not demand ancestor
+details. A guarded visible-ID demand interface is ready for the scroll
+viewport. The current renderer still uses moving 25-card presentation windows;
+a single scrolling viewport is the next integration step. Canonical snapshot
+and replay behavior remains governed by its separate transport contract.
+
 ## Large-workspace performance baseline
 
 The versioned harness in `perf/` runs the real production `Main` application in

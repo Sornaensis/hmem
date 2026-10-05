@@ -9,6 +9,7 @@ import Feature.DataLoading as DataLoading
 import Feature.WebSocket as WebSocket
 import Http
 import Json.Encode as Encode
+import Set
 import Test exposing (Test, describe, test)
 import Types exposing (AuthStatus(..), Model, Msg(..), Page(..), WSState(..), WorkspaceTab(..))
 import Url
@@ -123,6 +124,28 @@ suite =
                         in
                         Expect.equal ( AuthRequired, before.sessionRequestEpoch + 1, Dict.empty )
                             ( after.auth.status, after.sessionRequestEpoch, after.webSocket.streams )
+               , test "session retirement holds physical navigation and detail slots until stale completion" <|
+                    \_ ->
+                        let
+                            admitted = List.foldl (\id current -> DataLoading.beginNavigationBranch "project" "a" (Just id) current |> Tuple.first) (populated (WorkspacePage "a")) [ "one", "two", "three", "four" ]
+                            loading = admitted.dataLoading
+                            before = { admitted | dataLoading = { loading | cardDetailAdmissions = Set.fromList [ 41, 42, 43, 44, 45, 46 ], nextCardDetailRequestId = 47 } }
+                            retired = AppShell.handleOwned AuthUnauthorizedMsg before |> Tuple.first
+                            authorized = refresh superadmin retired
+                            queued = DataLoading.beginNavigationBranch "project" "a" (Just "replacement") authorized |> Tuple.first
+                            released = case Dict.get "project:one" before.dataLoading.loadedNavigationBranches of
+                                Just request -> DataLoading.update (GotNavigationBranch "a" request.sessionEpoch request.generation "project:one" request.filterFingerprint 0 0 (Err Http.Timeout)) queued |> Tuple.first
+                                Nothing -> queued
+                        in
+                        Expect.equal { physical = 4, details = 6, identity = 47, retired = True, queued = Just False, released = Just True, finalCap = 4 }
+                            { physical = Dict.size retired.dataLoading.navigationAdmissions
+                            , details = Set.size retired.dataLoading.cardDetailAdmissions
+                            , identity = retired.dataLoading.nextCardDetailRequestId
+                            , retired = Dict.isEmpty retired.dataLoading.loadedNavigationBranches && retired.sessionRequestEpoch > before.sessionRequestEpoch
+                            , queued = Dict.get "project:replacement" queued.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                            , released = Dict.get "project:replacement" released.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                            , finalCap = Dict.size released.dataLoading.navigationAdmissions
+                            }
                , test "stale epoch and wrong workspace session responses are inert" <|
                     \_ ->
                         let

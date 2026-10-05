@@ -121,6 +121,12 @@ type alias DataLoadingModel =
     , navigationGeneration : Int
     , rootNavigationRequest : Maybe NavigationBranchState
     , loadedNavigationBranches : Dict String NavigationBranchState
+    , navigationQueue : List String
+    , navigationAdmissions : Dict String NavigationBranchState
+    , navigationPasses : Dict String NavigationPass
+    , cardDetailAdmissions : Set Int
+    , cardDetailRetries : Set ( String, String )
+    , visibleDetailDemand : Maybe ( Set String, Set String )
     , rootNavigationPresentation : Maybe NavigationPresentationState
     , navigationPresentations : Dict String NavigationPresentationState
     , projectCardSummaries : Dict String Api.ProjectCardSummary
@@ -148,6 +154,18 @@ type alias CardDetailRequest =
     , expectedUpdatedAt : String
     , inFlight : Bool
     , succeeded : Bool
+    }
+
+
+{-| A fresh membership pass is independent of the displayed cache. Each kind
+commits when it reaches its own end; errors keep the last authoritative cards.
+-}
+type alias NavigationPass =
+    { refreshing : Bool
+    , projects : Dict String Api.ProjectCardSummary
+    , tasks : Dict String Api.TaskCardSummary
+    , projectError : Maybe String
+    , taskError : Maybe String
     }
 
 

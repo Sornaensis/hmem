@@ -819,6 +819,8 @@ stopAllLoading dataLoading =
         , nextWorkspaceLoadToken = dataLoading.nextWorkspaceLoadToken
         , nextCardDetailRequestId = dataLoading.nextCardDetailRequestId
         , navigationGeneration = dataLoading.navigationGeneration + 1
+        , navigationAdmissions = dataLoading.navigationAdmissions
+        , cardDetailAdmissions = dataLoading.cardDetailAdmissions
     }
 
 

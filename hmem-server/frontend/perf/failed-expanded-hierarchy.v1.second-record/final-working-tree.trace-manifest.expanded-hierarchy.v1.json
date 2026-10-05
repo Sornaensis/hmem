@@ -1,0 +1,265 @@
+{
+  "schemaVersion": 1,
+  "baseCommit": "ca04f51c3494c83c433d12bd7791f89be876daea",
+  "taskId": "555ebf6e-8442-43f4-a75d-c33fcffc76f4",
+  "evidenceBaseCommit": "d9ff753763f086fa4faef078b451f2e48ca1a7a4",
+  "measurementRevision": "expanded-hierarchy.v1",
+  "inputQualification": {
+    "evidenceBaseCommit": "d9ff753763f086fa4faef078b451f2e48ca1a7a4",
+    "source": [
+      {
+        "path": "hmem-server/frontend/src/Api.elm",
+        "sha256": "74ce36817558bcd12377c1e68354d77de6514907ee385433b331af0dfe1d72a5"
+      },
+      {
+        "path": "hmem-server/frontend/src/AppShell.elm",
+        "sha256": "be461c8cbc6c0074d4b65810ec231403d0efa04077963694899596e9a58e8121"
+      },
+      {
+        "path": "hmem-server/frontend/src/DependenciesFixture.elm",
+        "sha256": "4bf71e05b6b3b577c3b7a2a759693db3d78e6f7659410e9fb551d6a8d2e97568"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/AuditLog.elm",
+        "sha256": "fda97da0eb51da6627bcad25102239caf03daef9053ed2932acc30e25db17c52"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/Cards.elm",
+        "sha256": "d79c945327f3dc86204774d9c8e8fd21c4ae0d6ec52ac5e59f30ca37358b91a8"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/ChangeStream.elm",
+        "sha256": "6604a136e5286dc5cd26f0f20941dfcb0914ebac2f76fdc112371a93c7edaa36"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/DataLoading.elm",
+        "sha256": "1025e689a54e7c19880008e0f6313783bf0a28956b522494d674362ef2e364ce"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/Dependencies.elm",
+        "sha256": "afe656ebcea04f00a317eeb3b4314926deadffc9603fe2c2786d355edb1a4542"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/DragDrop.elm",
+        "sha256": "f1542f7770361ed64dd4323e1add15a54cf9b6842e3b02dd1ee58800d3559d2f"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/Editing.elm",
+        "sha256": "1d64c1278bc3a623a6eb588893ff029d0d342836ac9e62d7cc5faba97e2c1bf6"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/Focus.elm",
+        "sha256": "484987a0cb846123d56dd05d3924e88cf31dee40a694a762950f02ef9bd61263"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/Groups.elm",
+        "sha256": "fd8e058c904dc48307d01fddbf345e03d0bc8fed08942d2044086e1470d9f9ce"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/Memory.elm",
+        "sha256": "25f0b28cf96af7b6e12002d7ff6d06c20d81befc6dca80964ed6171476a69abc"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/Mutations.elm",
+        "sha256": "801f9b7f88556d87c5b61eac6b21a04c8307436d622d183c1861a143aa42cbe7"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/Observation.elm",
+        "sha256": "28cb6dafb04246f51926fce8df3891871311d2c3a6c3564f9ead55c6d3214f1b"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/Search.elm",
+        "sha256": "943734f68825521982d460adde27eb79fe74abebb31ae32e145d6cde0ffd4ae9"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/Timeline.elm",
+        "sha256": "4e4eb04aa7f98a37139dea0ea15f6a96c46267111c910e15ebf4ec03722e4582"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/WebSocket.elm",
+        "sha256": "f198edea15cb5ddceeed07829d16c2c865e9a7c25c29928271847b203c3b95d8"
+      },
+      {
+        "path": "hmem-server/frontend/src/Feature/WorkspaceAdmin.elm",
+        "sha256": "839afc9e8d54dd73db61d054faa7c5291ed121a6e64a41f7a7bd95d1bd759b5f"
+      },
+      {
+        "path": "hmem-server/frontend/src/Helpers.elm",
+        "sha256": "dbdc3211ad0b55595ca91cb955799fe21cf709ec23d625193baa79953d32ef47"
+      },
+      {
+        "path": "hmem-server/frontend/src/HierarchyViewport.elm",
+        "sha256": "b3a48504cc02fcfa81ace0037bf62307e6a9c02e5be5054d4f97d452793dc029"
+      },
+      {
+        "path": "hmem-server/frontend/src/Main.elm",
+        "sha256": "310594279b82f24473ef2780cda65b7a151b29759b6d64d2564834e5a0ff91cb"
+      },
+      {
+        "path": "hmem-server/frontend/src/Page/Home.elm",
+        "sha256": "d4733f1027df8eff616cecf91cabee60f477f6b9702686f7daddaf68cd2d8fd9"
+      },
+      {
+        "path": "hmem-server/frontend/src/Page/Workspace.elm",
+        "sha256": "6d179c439db4118e1ba77e9580e4af2d80c598f666de20085ebdc3352c87f32f"
+      },
+      {
+        "path": "hmem-server/frontend/src/Permissions.elm",
+        "sha256": "700340d9f87aba447d0ebc910ebaf9d71781439abed4619e34d2c4b587496b39"
+      },
+      {
+        "path": "hmem-server/frontend/src/Ports.elm",
+        "sha256": "550da324d51a7dec71f97cbede7eb91894709ebb16b24c46322bb29e024aa029"
+      },
+      {
+        "path": "hmem-server/frontend/src/Route.elm",
+        "sha256": "41a3eb29aaa81ebd5c206f90d72be92311d447e15c63457bc15848f2a8403ba3"
+      },
+      {
+        "path": "hmem-server/frontend/src/TimelineFixture.elm",
+        "sha256": "8867a7beac63a9e73cb759c74cc545e0539c19eeed23db00ae62278870c73898"
+      },
+      {
+        "path": "hmem-server/frontend/src/Toast.elm",
+        "sha256": "a26c99934bba8e0688284d2361909c959e1598fb451c3d12ba5ca69881b6b182"
+      },
+      {
+        "path": "hmem-server/frontend/src/Types.elm",
+        "sha256": "7d8e9d98bd6a60a75ad6984438335b6d7a93176ad00f0820acb298669499c7ed"
+      },
+      {
+        "path": "hmem-server/frontend/src/UpdateRouter.elm",
+        "sha256": "7aaf87d953295d447e91dd439dc64bb977b8614943922e75d502db91482a3f16"
+      },
+      {
+        "path": "hmem-server/frontend/src/change-stream.js",
+        "sha256": "f20a3b701b96279571d62562e757b83540f1ec091df92be3c40bef790a77f684"
+      },
+      {
+        "path": "hmem-server/frontend/src/hierarchy-viewport.js",
+        "sha256": "d6f944dc3e5b226f730bc366159fdb99d5adaf61403e22b59c1811d52a0c99c6"
+      },
+      {
+        "path": "hmem-server/frontend/src/main.js",
+        "sha256": "51a568a1e9f120af0b0b04c2f4e25aec55840886cd1ac903243c8348052023b3"
+      },
+      {
+        "path": "hmem-server/frontend/src/style.css",
+        "sha256": "54e1329265107a4b0d7ce774ac55484c69d0bcc4a067e4e05c35ada94342aaac"
+      },
+      {
+        "path": "hmem-server/frontend/src/timeline-fixture.js",
+        "sha256": "1459c2f52f163b7ab8711e2cf11c56683961d9f69fa3aa0a5c3affdc14c1adc6"
+      },
+      {
+        "path": "hmem-server/frontend/perf/harness.mjs",
+        "sha256": "25ff3a7505640e8b79704d6969f5a2c26ac9f900dc68408a9ac1eed9d4c36fbd"
+      },
+      {
+        "path": "hmem-server/frontend/perf/contracts.mjs",
+        "sha256": "30d76497d0a142a3b009fb37d88d78c9a73e9fdae39000e143d2d8204fdb1c2c"
+      },
+      {
+        "path": "hmem-server/frontend/perf/fixtures.mjs",
+        "sha256": "7839a7cc0c6304efbd5da252ec242aebee972be86abb3ba562659c7b58d48e02"
+      },
+      {
+        "path": "hmem-server/frontend/perf/fixtures.test.mjs",
+        "sha256": "477abda6a3ad8d8f458ad3e5cc0d796940ff1dc938f1ce25e8bd180eba0ee079"
+      },
+      {
+        "path": "hmem-server/frontend/package.json",
+        "sha256": "7d1be8fe07a16193910df34cb5920f533a7a5d1e8544368a4601b5fdff45c30c"
+      },
+      {
+        "path": "hmem-server/frontend/package-lock.json",
+        "sha256": "84ee774d2f58da9cd0a85764ad18a7c9b0b1b8be836f6f51b6f5ab9360bab8e7"
+      },
+      {
+        "path": "hmem-server/frontend/README.md",
+        "sha256": "4781033514979eb590aa4928af52b5af9746ea5f0b7745dc75fb813454ce22af"
+      }
+    ],
+    "productionAssets": [
+      {
+        "path": "hmem-server/static/assets/index-C2L8fXn7.css",
+        "sha256": "44be5c7a1e3881a5214a4e0ffc229290250230966ada7593fd5e36f8061e0daa"
+      },
+      {
+        "path": "hmem-server/static/assets/index-RePMe4W8.js",
+        "sha256": "bb71a1361f63f4d13d7c706915251d0b9830d86d713c3ab740423a177b5e7dcc"
+      },
+      {
+        "path": "hmem-server/static/hmem-runtime-config.js",
+        "sha256": "739734590402f928ffac6856daa2448f3ba9b549a64d171fc5c5c2b3f03f6ae0"
+      },
+      {
+        "path": "hmem-server/static/index.html",
+        "sha256": "a86c20106f392569b47acbab63baf865c936c16f7ef204bab949544c7b7b3ecb"
+      }
+    ]
+  },
+  "sourceProvenance": {
+    "reviewBaseCommit": "d9ff753763f086fa4faef078b451f2e48ca1a7a4",
+    "headCommit": "b4af6bd69916046d7fd98fc1518400e262b15bd7",
+    "orderedCommits": [
+      "1b41a7450e3660afeb0fda4933974118da8902b3",
+      "e12a31759084be1b0acf3b2f65f20867c5846888",
+      "4f9e005875e8944603170ec1670b4d4b4e1743e6",
+      "4fb3d13e4956db00a086e0d4080f0224dd633a50",
+      "25e4c498450c7d68215359ad7703feeadc0fb83f",
+      "ae59eeea4a70cbbdd03aab880e07de45eddbe56a",
+      "c6dc907e45f2e66ad682e8e719c81d93174833d0",
+      "bed290811b8be0a06ce4f8a1e54b0655e6518629",
+      "b4af6bd69916046d7fd98fc1518400e262b15bd7"
+    ],
+    "workingTreeQualification": "exact source and production-asset SHA-256 list; complete diff from review base retained separately"
+  },
+  "contracts": {
+    "budgetsHash": "bcf994aeb8074f53a75ab89ce24ee17c4059db5cb1e3e7061934641321b2da90",
+    "configurationHash": "b6c007fd0f72c240355646d97a8661948b95cc8fa9649aeb336b1718881bb01f",
+    "directFocusContractHash": "e2a132adb8d9386e17be584946a790268ad58e5d10cd9e90d3a4810848864f50",
+    "fixtures": {
+      "small": "827312e056054ad5f144284fe198e22d4f8bac97980afa0ecb3142b9d86e0851",
+      "large": "1ae208983d613c84b9a96500c477615c0b3e27686ff08f03bb20f15f99b35a08"
+    },
+    "snapshots": {
+      "small": "c49d1b7d57cd229cae0835e26604f9c526d20be2d6fda4cf1094cf16394ff5f0",
+      "large": "49222dd4d70fdf34c636188ebd7b5be08fbbddad6391a3276bc57e25214ffa1b"
+    }
+  },
+  "trace": {
+    "logicalName": "large measured sample 5/5 Playwright trace",
+    "sha256": "93e133c03228aded19849012d18e5f693e98463f6a9023cfa06271deb98d99fc",
+    "sizeBytes": 62635369,
+    "capturedRun": "large sample 5/5 after two warmups",
+    "verifiedDuringRecord": true,
+    "retention": "generated under task-owned .scratch/expanded-navigation-perf, intentionally removed by finite owned cleanup before success finalization; this versioned manifest retains verified provenance and does not claim the opaque archive is available"
+  },
+  "retirement": {
+    "passed": true,
+    "boundPerResourceMs": 5000,
+    "receipts": [
+      {
+        "resource": "browser connection",
+        "passed": true,
+        "durationMs": 2
+      },
+      {
+        "resource": "owned Chromium process",
+        "passed": true,
+        "durationMs": 3859
+      },
+      {
+        "resource": "owned HTTP server",
+        "passed": true,
+        "durationMs": 0
+      },
+      {
+        "resource": "task trace",
+        "passed": true,
+        "durationMs": 0
+      }
+    ]
+  }
+}

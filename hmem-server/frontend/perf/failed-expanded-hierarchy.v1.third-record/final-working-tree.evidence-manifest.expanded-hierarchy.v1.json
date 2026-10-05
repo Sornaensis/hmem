@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "taskId": "555ebf6e-8442-43f4-a75d-c33fcffc76f4",
+  "evidenceBaseCommit": "d9ff753763f086fa4faef078b451f2e48ca1a7a4",
+  "qualificationPassed": false,
+  "failure": "spawnSync git ENOBUFS",
+  "retirement": {
+    "passed": true,
+    "boundPerResourceMs": 5000,
+    "receipts": [
+      {
+        "resource": "browser connection",
+        "passed": true,
+        "durationMs": 1
+      },
+      {
+        "resource": "owned Chromium process",
+        "passed": true,
+        "durationMs": 1434
+      },
+      {
+        "resource": "owned HTTP server",
+        "passed": true,
+        "durationMs": 0
+      },
+      {
+        "resource": "task trace",
+        "passed": true,
+        "durationMs": 7
+      }
+    ]
+  },
+  "validationRecord": {
+    "path": "hmem-server/frontend/perf/final-working-tree.validation-record.expanded-hierarchy.v1.json",
+    "sha256": "efef1d794ea402abb0a34031844fc44b3361f4e4da6684b4886fe6fe4e1f538f"
+  }
+}

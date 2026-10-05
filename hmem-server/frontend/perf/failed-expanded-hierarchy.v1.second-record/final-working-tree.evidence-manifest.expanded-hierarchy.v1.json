@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "taskId": "555ebf6e-8442-43f4-a75d-c33fcffc76f4",
+  "parentTaskId": "6a3f31c2-be12-4aa8-a460-8ec3274332a3",
+  "measurementPhase": "cold cuts at authorized workspace_shell_v1 and the first painted root-summary anchor; count every request arrival and fixture byte before that cut, including held responses; separately verify complete automatically expanded membership, terminal pages, scroll reachability, physical admission and lifetime render/observer maxima; tab/live use deterministic unfiltered/unfocused restoration; direct focus uses a fresh focus-first shell session",
+  "sourceProvenance": {
+    "reviewBaseCommit": "d9ff753763f086fa4faef078b451f2e48ca1a7a4",
+    "headCommit": "b4af6bd69916046d7fd98fc1518400e262b15bd7",
+    "orderedCommits": [
+      "1b41a7450e3660afeb0fda4933974118da8902b3",
+      "e12a31759084be1b0acf3b2f65f20867c5846888",
+      "4f9e005875e8944603170ec1670b4d4b4e1743e6",
+      "4fb3d13e4956db00a086e0d4080f0224dd633a50",
+      "25e4c498450c7d68215359ad7703feeadc0fb83f",
+      "ae59eeea4a70cbbdd03aab880e07de45eddbe56a",
+      "c6dc907e45f2e66ad682e8e719c81d93174833d0",
+      "bed290811b8be0a06ce4f8a1e54b0655e6518629",
+      "b4af6bd69916046d7fd98fc1518400e262b15bd7"
+    ],
+    "workingTreeQualification": "exact source and production-asset SHA-256 list; complete diff from review base retained separately"
+  },
+  "qualificationPassed": false,
+  "evidenceBaseCommit": "d9ff753763f086fa4faef078b451f2e48ca1a7a4",
+  "normalization": "repository-relative POSIX paths; SHA-256 of exact file bytes; binary Git diff without external diff drivers; untracked source files represented by deterministic no-index additions; generated evidence artifacts separately hash-listed",
+  "recipe": "HMEM_EVIDENCE_BASE_COMMIT=d9ff753763f086fa4faef078b451f2e48ca1a7a4 npm run perf:record-after",
+  "equality": {
+    "baselinePath": "hmem-server/frontend/perf/baseline.v1.json",
+    "source": "d9ff753763f086fa4faef078b451f2e48ca1a7a4:hmem-server/frontend/perf/baseline.v1.json",
+    "byteForByteEqual": true,
+    "baseSha256": "6e4a25edff09fa046dd931449dbcb2e8d666d1900454cf7420fcd834a5b47d14",
+    "workingTreeSha256": "6e4a25edff09fa046dd931449dbcb2e8d666d1900454cf7420fcd834a5b47d14"
+  },
+  "artifacts": [
+    {
+      "path": "hmem-server/frontend/perf/final-working-tree.after.expanded-hierarchy.v1.json",
+      "sha256": "9ab20ebacc006d74c909ff1e93499eedbac26b0cfdb0b9fadd6cbb18d86def3f",
+      "sizeBytes": 329047
+    },
+    {
+      "path": "hmem-server/frontend/perf/final-working-tree.trace-manifest.expanded-hierarchy.v1.json",
+      "sha256": "1d1205ccd86157dfd6e01d2733db52ca934b352e698ce5ff7f0891dae270e9e3",
+      "sizeBytes": 10577
+    },
+    {
+      "path": "hmem-server/frontend/perf/final-working-tree.complete.expanded-hierarchy.v1.diff",
+      "sha256": "0530f8d00d2dd86a7b1157fdca216344243467bf04c1de3cbb452bcbe02ba52a",
+      "sizeBytes": 1213726
+    },
+    {
+      "path": "hmem-server/frontend/perf/final-working-tree.validation-record.expanded-hierarchy.v1.json",
+      "sha256": "189bf940ade6b92b104b11b4eebf2303f75ffbc606971f3b55fc04b49629a517",
+      "sizeBytes": 15745
+    }
+  ],
+  "changedPaths": [
+    {
+      "path": "hmem-server/frontend/README.md",
+      "sha256": "4781033514979eb590aa4928af52b5af9746ea5f0b7745dc75fb813454ce22af"
+    },
+    {
+      "path": "hmem-server/frontend/package.json",
+      "sha256": "7d1be8fe07a16193910df34cb5920f533a7a5d1e8544368a4601b5fdff45c30c"
+    },
+    {
+      "path": "hmem-server/frontend/perf/contracts.mjs",
+      "sha256": "30d76497d0a142a3b009fb37d88d78c9a73e9fdae39000e143d2d8204fdb1c2c"
+    },
+    {
+      "path": "hmem-server/frontend/perf/fixtures.test.mjs",
+      "sha256": "477abda6a3ad8d8f458ad3e5cc0d796940ff1dc938f1ce25e8bd180eba0ee079"
+    },
+    {
+      "path": "hmem-server/frontend/perf/harness.mjs",
+      "sha256": "25ff3a7505640e8b79704d6969f5a2c26ac9f900dc68408a9ac1eed9d4c36fbd"
+    },
+    {
+      "path": "hmem-server/frontend/src/Feature/Cards.elm",
+      "sha256": "d79c945327f3dc86204774d9c8e8fd21c4ae0d6ec52ac5e59f30ca37358b91a8"
+    },
+    {
+      "path": "hmem-server/frontend/src/Feature/ChangeStream.elm",
+      "sha256": "6604a136e5286dc5cd26f0f20941dfcb0914ebac2f76fdc112371a93c7edaa36"
+    },
+    {
+      "path": "hmem-server/frontend/src/Feature/DataLoading.elm",
+      "sha256": "1025e689a54e7c19880008e0f6313783bf0a28956b522494d674362ef2e364ce"
+    },
+    {
+      "path": "hmem-server/frontend/src/Feature/WebSocket.elm",
+      "sha256": "f198edea15cb5ddceeed07829d16c2c865e9a7c25c29928271847b203c3b95d8"
+    },
+    {
+      "path": "hmem-server/frontend/src/HierarchyViewport.elm",
+      "sha256": "b3a48504cc02fcfa81ace0037bf62307e6a9c02e5be5054d4f97d452793dc029"
+    },
+    {
+      "path": "hmem-server/frontend/src/Types.elm",
+      "sha256": "7d8e9d98bd6a60a75ad6984438335b6d7a93176ad00f0820acb298669499c7ed"
+    },
+    {
+      "path": "hmem-server/frontend/src/hierarchy-viewport.js",
+      "sha256": "d6f944dc3e5b226f730bc366159fdb99d5adaf61403e22b59c1811d52a0c99c6"
+    },
+    {
+      "path": "hmem-server/frontend/tests-js/hierarchy-fixture.mjs",
+      "sha256": "1270d18f37e3b03047ccd60cbb17a98b493909b68229fce5f229c5288eed981f"
+    },
+    {
+      "path": "hmem-server/frontend/tests-js/hierarchy-loading.browser.test.js",
+      "sha256": "c99be7cc6a84b22c8655e0da6b48533d2ea06f95e72a44d84647f851130be3aa"
+    },
+    {
+      "path": "hmem-server/frontend/tests-js/hierarchy-viewport.test.js",
+      "sha256": "89f71936da784825d472214fdae1a1c1e53b68e45fa42119643195c8c2ace96a"
+    },
+    {
+      "path": "hmem-server/frontend/tests/AppShellSessionTest.elm",
+      "sha256": "d413bb8604d34e4ea8819d54458d1d241f94ae9a6620a6a06d741f3bb3dba98e"
+    },
+    {
+      "path": "hmem-server/frontend/tests/CardsFocusNavigationTest.elm",
+      "sha256": "db03225c8222a38f2e7c8f5a0ce4877344471d86c97657c5ebd5a650e03616b0"
+    },
+    {
+      "path": "hmem-server/frontend/tests/ChangeStreamTest.elm",
+      "sha256": "881a4bde537d327b4bdb704faa9cd075dd748c6c527e656dc425c8afcb6afabb"
+    },
+    {
+      "path": "hmem-server/frontend/tests/DataLoadingTest.elm",
+      "sha256": "dd68a13684aa4095bebfdf5efabc7376adee2770145ba116d9622f79f5a07c96"
+    },
+    {
+      "path": "hmem-server/frontend/tests/HierarchyViewportTest.elm",
+      "sha256": "cda036b6b92940d62407f1cdf5e5c0ca5265c7745a7662768456d85e6137e844"
+    },
+    {
+      "path": "hmem-server/frontend/perf/failed-expanded-hierarchy.v1/final-working-tree.after.expanded-hierarchy.v1.json",
+      "sha256": "6d5a2c102499d5bd9f01caf1ba7b0b8cfb39cfb01f24e0463a6e9dfab7f636a8"
+    },
+    {
+      "path": "hmem-server/frontend/perf/failed-expanded-hierarchy.v1/final-working-tree.complete.expanded-hierarchy.v1.diff",
+      "sha256": "a2b2ca9048a7ebc624f1158779f0fd36b2b68d80b9b354278438cb8abf0b0e95"
+    },
+    {
+      "path": "hmem-server/frontend/perf/failed-expanded-hierarchy.v1/final-working-tree.evidence-manifest.expanded-hierarchy.v1.json",
+      "sha256": "c7ad98fe62c30c7484b34525caac1e18d33cd69296a62fcdec6db7a916934f70"
+    },
+    {
+      "path": "hmem-server/frontend/perf/failed-expanded-hierarchy.v1/final-working-tree.trace-manifest.expanded-hierarchy.v1.json",
+      "sha256": "09c754832dee88da037e127e343a705352273655301122b749230f3e533758e8"
+    },
+    {
+      "path": "hmem-server/frontend/perf/failed-expanded-hierarchy.v1/final-working-tree.validation-record.expanded-hierarchy.v1.json",
+      "sha256": "37a311b2c2722bf704d0982a3d51118e37ca945ade86bf54af735c6c857c3bc4"
+    }
+  ],
+  "completeDiff": {
+    "path": "hmem-server/frontend/perf/final-working-tree.complete.expanded-hierarchy.v1.diff",
+    "sha256": "0530f8d00d2dd86a7b1157fdca216344243467bf04c1de3cbb452bcbe02ba52a",
+    "sizeBytes": 1213726
+  }
+}

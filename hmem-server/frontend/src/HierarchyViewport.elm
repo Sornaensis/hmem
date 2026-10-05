@@ -1,4 +1,4 @@
-module HierarchyViewport exposing (Index, Piece(..), build, height, measure, offset, positionAt, window)
+module HierarchyViewport exposing (Index, Piece(..), build, height, measure, offset, partition, positionAt, window)
 
 import Array exposing (Array)
 import Dict exposing (Dict)
@@ -26,6 +26,28 @@ type HeightTree
 type Piece
     = Row Int String Float
     | Gap Int Float
+
+
+{-| Keep a protected row in a stable DOM boundary while both surrounding
+windows change. Concatenating the three segments preserves logical order and
+every omitted extent; only the bounded mounted pieces are traversed.
+-}
+partition : Maybe String -> List Piece -> { before : List Piece, pivot : List Piece, after : List Piece }
+partition target pieces =
+    let
+        find preceding remaining =
+            case remaining of
+                [] -> { before = pieces, pivot = [], after = [] }
+                piece :: tail ->
+                    case piece of
+                        Row _ key _ ->
+                            if target == Just key then
+                                { before = List.reverse preceding, pivot = [ piece ], after = tail }
+                            else
+                                find (piece :: preceding) tail
+                        _ -> find (piece :: preceding) tail
+    in
+    find [] pieces
 
 
 build : Float -> Dict String Float -> List String -> Index

@@ -3290,21 +3290,24 @@ viewportPins : Model -> Set.Set String
 viewportPins model =
     let
         entityKey ( kind, id ) = kind ++ ":" ++ id
-        inline =
-            case model.editing.inlineCreate of
-                Just (InlineCreateProject value) -> value.parentId |> Maybe.map (Tuple.pair "project")
-                Just (InlineCreateTask value) ->
-                    case value.parentId of
-                        Just id -> Just ( "task", id )
-                        Nothing -> value.projectId |> Maybe.map (Tuple.pair "project")
-                _ -> Nothing
         drag = model.dragDrop.dragging |> Maybe.map (\value -> ( value.entityType, value.entityId ))
         viewport = model.cards.viewport
     in
-    [ model.focus.focusedEntity, editTarget model, inline, drag ]
+    [ model.focus.focusedEntity, editTarget model, inlineCreateTarget model, drag ]
         |> List.filterMap identity |> List.map entityKey |> Set.fromList
         |> Set.union viewport.nativePins
         |> Set.union (viewport.target |> Maybe.map Set.singleton |> Maybe.withDefault Set.empty)
+
+
+inlineCreateTarget : Model -> Maybe ( String, String )
+inlineCreateTarget model =
+    case model.editing.inlineCreate of
+        Just (InlineCreateProject value) -> value.parentId |> Maybe.map (Tuple.pair "project")
+        Just (InlineCreateTask value) ->
+            case value.parentId of
+                Just id -> Just ( "task", id )
+                Nothing -> value.projectId |> Maybe.map (Tuple.pair "project")
+        _ -> Nothing
 
 
 mountedViewportKeys : Model -> List String
@@ -3414,7 +3417,11 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                     measurements = if sameContext then Dict.union old.index.heights defaults else defaults
                     index = Viewport.build 160 measurements keys
                     anchorPosition = Viewport.positionAt old.top old.index
-                    anchor = Array.get anchorPosition old.index.keys
+                    awaitingFirstRows =
+                        old.top == 0 && not (Dict.values old.rows |> List.any (\row -> row.kind == "project" || row.kind == "task"))
+                    -- Loading end-status rows precede the first real roots.
+                    -- They are not a user anchor at untouched scroll origin.
+                    anchor = if awaitingFirstRows then Nothing else Array.get anchorPosition old.index.keys
                     delta = old.top - Viewport.offset anchorPosition old.index
                     anchoredTop =
                         if sameContext then
@@ -3543,6 +3550,14 @@ viewHierarchyViewport ws incoming =
                         , attribute "data-hierarchy-previous" (neighborEntity -1 position)
                         , style "padding-left" (String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0 |> (\depth -> depth * 20)) ++ "px")
                         ] [ row |> Maybe.map content |> Maybe.withDefault (text "") ] )
+        pieces = Viewport.window viewport.top viewport.height 300 25 (viewportPins model) viewport.index
+        protectedInput =
+            case editTarget model of
+                Just target -> Just target
+                Nothing -> inlineCreateTarget model
+        segments = Viewport.partition (protectedInput |> Maybe.map (\( kind, entityId ) -> kind ++ ":" ++ entityId)) pieces
+        segment key contents =
+            ( key, Keyed.node "div" [ class "hierarchy-segment", style "display" "contents" ] (List.map pieceView contents) )
     in
     div [ class "tree-view" ]
         [ div [ class "tree-toolbar" ]
@@ -3552,7 +3567,7 @@ viewHierarchyViewport ws incoming =
         , Feature.Editing.viewInlineCreateInput model Nothing "project"
         , Feature.Focus.viewFocusBreadcrumbBar model
         , Keyed.node "div" [ class "hierarchy-viewport", id "hierarchy-viewport", attribute "data-hierarchy-context" config ]
-            (Viewport.window viewport.top viewport.height 300 25 (viewportPins model) viewport.index |> List.map pieceView)
+            [ segment "before" segments.before, segment "editor" segments.pivot, segment "after" segments.after ]
         ]
 
 

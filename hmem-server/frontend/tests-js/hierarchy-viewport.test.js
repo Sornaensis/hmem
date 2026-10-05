@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { installHierarchyViewport } from '../src/hierarchy-viewport.js'
 
 function harness({ resizeObserver = true } = {}) {
-  const listeners = new Map(), frames = new Map(), sent = [], observers = []
+  const listeners = new Map(), windowListeners = new Map(), frames = new Map(), sent = [], observers = []
   let nextFrame = 0, rows = [], viewport = true
   const elements = new Map()
   const stamp = { workspace: 'ws', epoch: 1, generation: 2, revision: 3 }
@@ -16,20 +16,80 @@ function harness({ resizeObserver = true } = {}) {
   const callbacks = {}
   const app = { ports: { onHierarchyViewport: { send: value => sent.push(value) }, syncHierarchyViewport: { subscribe: fn => { callbacks.sync = fn }, unsubscribe() {} }, scrollHierarchyTarget: { subscribe: fn => { callbacks.target = fn }, unsubscribe() {} } } }
   class Resize { constructor() { this.rows = new Set(); observers.push(this) } observe(row) { this.rows.add(row) } unobserve(row) { this.rows.delete(row) } disconnect() { this.rows.clear() } }
-  class Mutation { observe() {} disconnect() {} }
-  const win = { addEventListener() {}, removeEventListener() {}, getComputedStyle(control) { return control.style || { display: 'block', visibility: 'visible' } } }
+  const mutationCallbacks = []
+  class Mutation { constructor(callback) { mutationCallbacks.push(callback) } observe() {} disconnect() {} }
+  const win = { addEventListener(name, fn) { windowListeners.set(name, fn) }, removeEventListener(name) { windowListeners.delete(name) }, getComputedStyle(control) { return control.style || { display: 'block', visibility: 'visible' } } }
   const bridge = installHierarchyViewport(app, { document: doc, window: win, ResizeObserver: resizeObserver ? Resize : undefined, MutationObserver: Mutation,
     requestAnimationFrame(fn) { const id = ++nextFrame; frames.set(id, fn); return id }, cancelAnimationFrame(id) { frames.delete(id) } })
   function row(key, top, height = 160, next = '') {
-    const value = { dataset: { hierarchyKey: key, hierarchyNext: next, hierarchyPrevious: '' }, getBoundingClientRect: () => ({ top: top - scroller.scrollTop, height }), closest: selector => selector === '[data-hierarchy-key]' ? value : null }
-    const button = { tabIndex: 0, closest: selector => selector === '[data-hierarchy-key]' ? value : null, getClientRects: () => [{}], focus() { doc.activeElement = button } }
+    const value = { dataset: { hierarchyKey: key, hierarchyNext: next, hierarchyPrevious: '' }, getBoundingClientRect: () => ({ top: top - scroller.scrollTop, height }), closest: selector => selector === '[data-hierarchy-key]' ? value : null, contains: control => control === value.button }
+    const button = { isConnected: true, tabIndex: 0, closest: selector => selector === '[data-hierarchy-key]' ? value : null, getClientRects: () => [{}], focus() { doc.activeElement = button } }
     value.querySelector = () => button; value.querySelectorAll = () => [button]; value.button = button
     return value
   }
   function flush() { const current = [...frames.values()]; frames.clear(); for (const fn of current) fn() }
-  return { bridge, row, flush, sent, callbacks, stamp, scroller, doc, observers, listeners, elements,
-    setRows(value) { rows = value }, setStamp(value) { container.dataset.hierarchyContext = JSON.stringify(value) }, hide() { viewport = false } }
+  return { bridge, row, flush, sent, callbacks, stamp, scroller, doc, observers, listeners, windowListeners, elements,
+    setRows(value) { rows = value }, setStamp(value) { container.dataset.hierarchyContext = JSON.stringify(value) }, mutate(records) { for (const callback of mutationCallbacks) callback(records) }, hide() { viewport = false } }
 }
+
+test('only a proven same-row move restores the exact retained native control', () => {
+  const h = harness(), row = h.row('project:p', 0)
+  h.setRows([row]); h.flush(); row.button.focus(); h.listeners.get('focusin')({ target: row.button })
+  h.doc.activeElement = null; h.listeners.get('focusout')({ target: row.button, relatedTarget: null })
+  h.mutate([{ removedNodes: [row], addedNodes: [row] }]); h.flush()
+  assert.equal(h.doc.activeElement, row.button)
+  h.bridge.dispose()
+})
+
+test('native recovery rejects unproven blur, outside pointer intent and changed lifetime', () => {
+  for (const retirement of ['no-move', 'pointer', 'lifetime', 'tab', 'outside-row']) {
+    const h = harness(), row = h.row('project:p', 0)
+    h.setRows([row]); h.flush(); row.button.focus(); h.listeners.get('focusin')({ target: row.button })
+    h.doc.activeElement = null; h.listeners.get('focusout')({ target: row.button, relatedTarget: null })
+    if (retirement === 'pointer') h.listeners.get('pointerdown')({ target: {} })
+    if (retirement === 'lifetime') h.callbacks.sync({ ...h.stamp, epoch: 2 })
+    if (retirement === 'tab') h.listeners.get('keydown')({ key: 'Tab', target: row.button, ctrlKey: true })
+    if (retirement === 'outside-row') row.contains = () => false
+    if (retirement !== 'no-move') h.mutate([{ removedNodes: [row], addedNodes: [row] }])
+    h.flush(); assert.equal(h.doc.activeElement, null, retirement)
+    h.bridge.dispose()
+  }
+})
+
+test('native recovery cannot combine movement and blur from different paint episodes', () => {
+  for (const first of ['move', 'blur']) {
+    const h = harness(), row = h.row('project:p', 0)
+    h.setRows([row]); h.flush(); row.button.focus(); h.listeners.get('focusin')({ target: row.button })
+    const move = () => h.mutate([{ removedNodes: [row], addedNodes: [row] }])
+    const blur = () => { h.doc.activeElement = null; h.listeners.get('focusout')({ target: row.button, relatedTarget: null }) }
+    if (first === 'move') move(); else blur()
+    h.flush()
+    if (first === 'move') blur(); else move()
+    h.flush(); assert.equal(h.doc.activeElement, null, first)
+    h.bridge.dispose()
+  }
+})
+
+test('history and fragment navigation retire native recovery even when the hierarchy stamp is unchanged', () => {
+  for (const event of ['hashchange', 'popstate']) {
+    const h = harness(), row = h.row('project:p', 0)
+    h.setRows([row]); h.flush(); row.button.focus(); h.listeners.get('focusin')({ target: row.button })
+    h.doc.activeElement = null; h.listeners.get('focusout')({ target: row.button, relatedTarget: null })
+    h.mutate([{ removedNodes: [row], addedNodes: [row] }]); h.windowListeners.get(event)(); h.flush()
+    assert.equal(h.doc.activeElement, null, event)
+    h.bridge.dispose(); assert.equal(h.windowListeners.has(event), false)
+  }
+})
+
+test('native focus captures the painted row stamp rather than an older bridge receipt', () => {
+  const h = harness(), row = h.row('project:p', 0), next = { ...h.stamp, generation: 3 }
+  h.setRows([row]); h.flush(); h.setStamp(next); h.callbacks.sync(next)
+  row.button.focus(); h.listeners.get('focusin')({ target: row.button })
+  h.doc.activeElement = null; h.listeners.get('focusout')({ target: row.button, relatedTarget: null })
+  h.mutate([{ removedNodes: [row], addedNodes: [row] }]); h.flush()
+  assert.equal(h.doc.activeElement, row.button)
+  h.bridge.dispose()
+})
 
 test('mounted-row observers report exact wrapper heights and release detached rows', () => {
   const h = harness(), first = h.row('project:a', 0, 206), last = h.row('task:z', 10000, 86)
@@ -84,6 +144,27 @@ test('layout anchors preserve a measured row and its intrarow offset', () => {
   h.setRows([anchor]); h.flush(); h.scroller.scrollTop = 500
   h.callbacks.sync({ ...h.stamp, anchor: 'project:a', delta: 15, top: 715 }); h.flush()
   assert.equal(h.scroller.scrollTop, 715)
+  h.bridge.dispose()
+})
+
+test('a newer physical scroll wins over an older matching-stamp measurement layout', () => {
+  const h = harness(), row = h.row('project:a', 700)
+  h.setRows([row]); h.flush(); h.scroller.scrollTop = 100
+  h.callbacks.sync({ ...h.stamp, anchor: 'project:a', delta: 15, top: 715 })
+  h.scroller.scrollTop = 500; h.flush()
+  assert.equal(h.scroller.scrollTop, 500)
+  assert.equal(h.sent.at(-1).top, 500)
+  h.bridge.dispose()
+})
+
+test('a layout admitted after a bridge-owned scroll still preserves its new measurement anchor', () => {
+  const h = harness(), row = h.row('project:a', 700)
+  h.setRows([row]); h.flush(); h.scroller.scrollTop = 100
+  h.callbacks.sync({ ...h.stamp, anchor: 'project:a', delta: 15, top: 715 }); h.flush()
+  assert.equal(h.scroller.scrollTop, 715)
+  row.getBoundingClientRect = () => ({ top: 900 - h.scroller.scrollTop, height: 200 })
+  h.callbacks.sync({ ...h.stamp, anchor: 'project:a', delta: 15, top: 915 }); h.flush()
+  assert.equal(h.scroller.scrollTop, 915)
   h.bridge.dispose()
 })
 

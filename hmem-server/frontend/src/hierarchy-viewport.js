@@ -12,8 +12,10 @@ export function installHierarchyViewport(app, options = {}) {
   let context = null
   let lifetime = null
   let pendingLayout = null
+  let layoutScrollTop = null
   let pendingTarget = null
   let pendingElement = null
+  let retainedFocus = null
   let lastReceipt = ''
   const observed = new Set()
   const heights = new Map()
@@ -51,7 +53,7 @@ export function installHierarchyViewport(app, options = {}) {
     if (!next || !scroll) {
       for (const row of observed) observer?.unobserve(row)
       observed.clear(); heights.clear(); context = null; container = null
-      pendingLayout = null; pendingTarget = null; lastReceipt = ''
+      pendingLayout = null; pendingTarget = null; retainedFocus = null; lastReceipt = ''
       if (scroller) scroller.removeEventListener('scroll', schedule)
       scroller = null
       return
@@ -73,12 +75,36 @@ export function installHierarchyViewport(app, options = {}) {
     if (!lifetime) lifetime = stamp
     const rows = mounted()
     const active = new Set(rows)
+    // Elm's keyed renderer can temporarily move a retained row through a
+    // detached fragment. Recover only the exact non-editor control after a
+    // proven remove/reinsert, never an intentional user focus transition.
+    if (retainedFocus?.lost && retainedFocus.removed && retainedFocus.added
+      && sameLifetime(retainedFocus.stamp, lifetime) && sameLifetime(retainedFocus.stamp, stamp)
+      && retainedFocus.control.isConnected && active.has(retainedFocus.row)
+      && retainedFocus.row.contains(retainedFocus.control)
+      && rowFor(retainedFocus.key) === retainedFocus.row
+      && (!doc.activeElement || doc.activeElement === doc.body)) {
+      const saved = retainedFocus
+      saved.lost = false; saved.removed = false; saved.added = false
+      saved.control.focus({ preventScroll: true })
+    }
+    // A removal and a null-relatedTarget blur must belong to this one paint
+    // episode. Neither receipt may authorize a later unrelated focus loss.
+    if (retainedFocus) {
+      if (retainedFocus.lost) retainedFocus = null
+      else { retainedFocus.removed = false; retainedFocus.added = false }
+    }
     for (const row of observed) if (!active.has(row)) { observer?.unobserve(row); observed.delete(row); heights.delete(row.dataset.hierarchyKey) }
     for (const row of rows) if (!observed.has(row)) { observer?.observe(row); observed.add(row) }
     if (sameStamp(pendingLayout, stamp)) {
       const anchor = rowFor(pendingLayout.anchor)
-      if (anchor) scroller.scrollTop = scroller.scrollTop + anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top + pendingLayout.delta
-      else scroller.scrollTop = origin() + Math.max(0, pendingLayout.top)
+      // Sample at admission and compare the actual position before writing:
+      // a newer scroll can arrive before its event is delivered. Layouts
+      // admitted after our own clamped writes sample their resulting position.
+      if (layoutScrollTop == null || scroller.scrollTop === layoutScrollTop) {
+        if (anchor) scroller.scrollTop = scroller.scrollTop + anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top + pendingLayout.delta
+        else scroller.scrollTop = origin() + Math.max(0, pendingLayout.top)
+      }
       if (pendingLayout.target) pendingTarget = { key: pendingLayout.target, focus: pendingTarget?.focus || false, stamp }
       pendingLayout = null
     } else if (pendingLayout && (pendingLayout.workspace !== stamp.workspace || pendingLayout.epoch !== stamp.epoch || pendingLayout.generation !== stamp.generation || pendingLayout.revision < stamp.revision)) pendingLayout = null
@@ -115,8 +141,9 @@ export function installHierarchyViewport(app, options = {}) {
     }
   }
   function sync(layout) {
-    if (!sameLifetime(lifetime, layout)) pendingElement = null
+    if (!sameLifetime(lifetime, layout)) { pendingElement = null; retainedFocus = null }
     lifetime = layout
+    layoutScrollTop = doc.getElementById('main-content-scroll')?.scrollTop ?? null
     pendingLayout = layout; schedule()
   }
   function target(id) {
@@ -141,6 +168,7 @@ export function installHierarchyViewport(app, options = {}) {
     schedule()
   }
   function keyboard(event) {
+    if (['Tab', 'Escape', 'Enter'].includes(event.key)) retainedFocus = null
     if (event.key !== 'Tab' || event.ctrlKey || event.metaKey || event.altKey) return
     const row = event.target.closest?.('[data-hierarchy-key]')
     if (!row || !container?.contains(row)) return
@@ -152,12 +180,41 @@ export function installHierarchyViewport(app, options = {}) {
     event.preventDefault()
     pendingTarget = { key, focus: event.shiftKey ? 'last' : 'first', stamp: context }; schedule()
   }
-  const mutations = MO ? new MO(schedule) : null
+  function focusIn(event) {
+    const control = event.target, row = control.closest?.('[data-hierarchy-key]')
+    let stamp = null
+    try { stamp = JSON.parse(container?.dataset.hierarchyContext) } catch {}
+    retainedFocus = row && container?.contains(row) && !control.closest?.('.inline-edit,.inline-create-row')
+      ? { control, row, key: row.dataset.hierarchyKey, stamp, lost: false, removed: false, added: false } : null
+    schedule()
+  }
+  function focusOut(event) {
+    if (retainedFocus?.control === event.target) {
+      if (event.relatedTarget) retainedFocus = null
+      else retainedFocus.lost = true
+    }
+    schedule()
+  }
+  function pointerIntent(event) {
+    if (retainedFocus && event.target !== retainedFocus.control && !retainedFocus.control.contains?.(event.target)) retainedFocus = null
+  }
+  function navigationIntent() { retainedFocus = null }
+  const mutations = MO ? new MO(records => {
+    if (retainedFocus) for (const record of records) {
+      const includesRow = nodes => Array.from(nodes || []).some(node => node === retainedFocus.row || node.contains?.(retainedFocus.row))
+      if (includesRow(record.removedNodes)) retainedFocus.removed = true
+      if (includesRow(record.addedNodes)) retainedFocus.added = true
+    }
+    schedule()
+  }) : null
   mutations?.observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-hierarchy-context'] })
-  doc.addEventListener('focusin', schedule)
-  doc.addEventListener('focusout', schedule)
+  doc.addEventListener('focusin', focusIn)
+  doc.addEventListener('focusout', focusOut)
+  doc.addEventListener('pointerdown', pointerIntent, true)
   doc.addEventListener('keydown', keyboard, true)
   win.addEventListener('resize', schedule)
+  win.addEventListener('hashchange', navigationIntent)
+  win.addEventListener('popstate', navigationIntent)
   app.ports.syncHierarchyViewport.subscribe(sync)
   app.ports.scrollHierarchyTarget.subscribe(target)
   schedule()
@@ -167,10 +224,12 @@ export function installHierarchyViewport(app, options = {}) {
       if (frame != null) cancel(frame)
       observer?.disconnect(); mutations?.disconnect()
       scroller?.removeEventListener('scroll', schedule)
-      doc.removeEventListener('focusin', schedule); doc.removeEventListener('focusout', schedule)
+      doc.removeEventListener('focusin', focusIn); doc.removeEventListener('focusout', focusOut)
+      doc.removeEventListener('pointerdown', pointerIntent, true)
       doc.removeEventListener('keydown', keyboard, true); win.removeEventListener('resize', schedule)
+      win.removeEventListener('hashchange', navigationIntent); win.removeEventListener('popstate', navigationIntent)
       app.ports.syncHierarchyViewport.unsubscribe?.(sync); app.ports.scrollHierarchyTarget.unsubscribe?.(target)
-      observed.clear(); heights.clear(); pendingElement = null
+      observed.clear(); heights.clear(); pendingElement = null; retainedFocus = null
     }
   }
 }

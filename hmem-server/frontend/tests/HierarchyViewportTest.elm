@@ -29,7 +29,19 @@ rows pieces =
 tests : Test
 tests =
     describe "global hierarchy viewport"
-        [ test "short measured rows prioritize the actual viewport over overscan" <| \_ ->
+        [ test "protected pivot segments retain logical order and all spacer geometry" <| \_ ->
+            let
+                pieces = [ Gap 0 200, Row 2 "editor" 100, Gap 3 49700, Row 500 "visible" 100, Gap 501 49900 ]
+                segments = Viewport.partition (Just "editor") pieces
+            in
+            Expect.equal ( pieces, [ Row 2 "editor" 100 ] ) ( segments.before ++ segments.pivot ++ segments.after, segments.pivot )
+        , test "absent retired pivot leaves the complete ordinary window" <| \_ ->
+            let
+                pieces = Viewport.window 50000 600 0 12 Set.empty (Viewport.build 100 Dict.empty keys)
+                segments = Viewport.partition (Just "retired") pieces
+            in
+            Expect.equal ( pieces, [], [] ) ( segments.before, segments.pivot, segments.after )
+        , test "short measured rows prioritize the actual viewport over overscan" <| \_ ->
             Viewport.window 500 100 100 12 Set.empty (Viewport.build 1 Dict.empty keys)
                 |> rows |> List.head |> Expect.equal (Just "500")
         , test "a thousand cached rows mount only the bounded scroll window" <| \_ ->

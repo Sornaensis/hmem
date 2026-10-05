@@ -176,6 +176,18 @@ suite =
                     , missingInFlight = missing.dataLoading.activeNavigationFocus |> Maybe.map .inFlight |> Maybe.withDefault False
                     , knownHasNoRequest = Dict.member "project:inside-root-page" known.dataLoading.navigationFocuses |> not
                     }
+        , test "initial end-status placeholder cannot move scroll origin when real expanded roots arrive before paint" <| \_ ->
+            let
+                waiting = rootSeed [] |> viewportReady
+                root = project "root"
+                children = List.range 1 50 |> List.map (\n -> let child = project ("child-" ++ String.fromInt n) in { child | parentId = Just "root" })
+                first = DataLoading.mergeNavigationSummaries [ root ] [] waiting
+                firstPaint = Cards.refreshViewport waiting ( first, Cmd.none ) |> Tuple.first
+                continued = DataLoading.mergeNavigationSummaries children [] firstPaint
+                beforePaint = Cards.refreshViewport firstPaint ( continued, Cmd.none ) |> Tuple.first
+            in
+            Expect.equal ( 0, 0, True )
+                ( firstPaint.cards.viewport.top, beforePaint.cards.viewport.top, List.member "project:root" (Cards.mountedViewportKeys beforePaint) )
         , test "cached root rows remain scroll reachable with a bounded first paint" <| \_ ->
             let
                 seeded = rootSeed (List.range 1 50 |> List.map (\number -> project ("root-" ++ String.padLeft 3 '0' (String.fromInt number))))

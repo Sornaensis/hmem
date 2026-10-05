@@ -287,7 +287,7 @@ update msg model =
                 ( model, Cmd.none )
 
         CanonicalNavigationSummariesFetched guard workspaceId projectIds taskIds result ->
-            if model.selectedWorkspaceId == Just workspaceId && canonicalGuardIsCurrent guard.request model && guard.navigationGeneration == model.dataLoading.navigationGeneration then
+            if model.selectedWorkspaceId == Just workspaceId && canonicalGuardIsCurrent guard.request model && guard.filterFingerprint == Feature.DataLoading.navigationFilterFingerprint model then
                 case result of
                     Ok summaries ->
                         let
@@ -336,25 +336,6 @@ update msg model =
                                 loading =
                                     merged.dataLoading
 
-                                -- Without an active server-owned filter every
-                                -- revalidated existing card remains eligible
-                                -- for the current tree; only missing IDs leave
-                                -- membership. Under a filter, summary payloads
-                                -- cannot safely reproduce descendant-aware
-                                -- matching, so remove invalidated IDs until a
-                                -- fresh bounded branch response re-admits them.
-                                filteredNavigation =
-                                    model.search.filterShowOnly
-                                        /= ShowAll
-                                        || model.search.filterProjectStatuses
-                                        /= []
-                                        || model.search.filterTaskStatuses
-                                        /= []
-                                        || model.search.filterPriority
-                                        /= AnyPriority
-                                        || String.trim model.search.query
-                                        /= ""
-
                                 -- A summary endpoint is authoritative about
                                 -- deletion, but not descendant-retained branch
                                 -- membership under filters.  Keep existing
@@ -381,15 +362,10 @@ update msg model =
                                                 | projectCardSummaries = List.foldl Dict.remove loading.projectCardSummaries currentSummaries.missingProjectIds
                                                 , taskCardSummaries = List.foldl Dict.remove loading.taskCardSummaries currentSummaries.missingTaskIds
 
-                                                -- A summary response is authoritative for card state,
-                                                -- but not for server-side filtered branch membership.
-                                                -- Under a filtered tree, remove every
-                                                -- invalidated card until the next bounded
-                                                -- branch response re-admits it. This prevents
-                                                -- stale status, priority, search, or parent
-                                                -- membership from surviving a live mutation.
-                                                , navigationVisibleProjectIds = List.foldl Set.remove loading.navigationVisibleProjectIds staleProjectIds
-                                                , navigationVisibleTaskIds = List.foldl Set.remove loading.navigationVisibleTaskIds staleTaskIds
+                                                -- Unknown summaries populate metadata only.
+                                                -- Existing membership stays staged until its owner response.
+                                                , navigationVisibleProjectIds = List.foldl Set.remove model.dataLoading.navigationVisibleProjectIds staleProjectIds
+                                                , navigationVisibleTaskIds = List.foldl Set.remove model.dataLoading.navigationVisibleTaskIds staleTaskIds
                                             }
                                         , dependencies =
                                             { dependencies
@@ -398,15 +374,7 @@ update msg model =
                                             }
                                     }
                             in
-                            if filteredNavigation && (not (List.isEmpty currentSummaries.projects) || not (List.isEmpty currentSummaries.tasks) || not (List.isEmpty currentSummaries.missingProjectIds) || not (List.isEmpty currentSummaries.missingTaskIds)) then
-                                -- Summary payloads establish card state, but only the
-                                -- bounded branch endpoint owns descendant-aware filtered
-                                -- membership. Reissue its root page so matching cards are
-                                -- re-admitted and moved/nonmatching cards disappear.
-                                Feature.DataLoading.revalidateNavigationForAffectedBranches currentSummaries.projects currentSummaries.tasks updated
-
-                            else
-                                Feature.DataLoading.ensureAllNavigationPresentations updated
+                            Feature.DataLoading.revalidateNavigationForChangedSummaries model currentSummaries updated
 
                         else
                             canonicalHttpFailure guard.request (Http.BadBody "Navigation summary response did not match its targeted revalidation request") model
@@ -977,20 +945,8 @@ applyActions scope actions model =
                 )
                 actions
 
-        dependencyOnly =
-            List.any
-                (\action ->
-                    case action of
-                        ChangeStream.RefreshTaskDependencies _ _ _ _ ->
-                            True
-
-                        _ ->
-                            False
-                )
-                actions
-
         ( navigationModel, navigationCmd ) =
-            if scopeMatchesSelectedWorkspace scope model && (List.member ChangeStream.RefreshNavigation actions || (not dependencyOnly && List.any (not << navigationTargetLoaded model) navigationTargets)) then
+            if scopeMatchesSelectedWorkspace scope model && List.member ChangeStream.RefreshNavigation actions then
                 Feature.DataLoading.revalidateNavigationForFilters model
 
             else
@@ -1417,25 +1373,11 @@ scopeMatchesSelectedWorkspace scope model =
             False
 
 
-navigationTargetLoaded : Model -> ( String, String ) -> Bool
-navigationTargetLoaded model ( entityType, entityId ) =
-    case entityType of
-        "project" ->
-            Set.member entityId model.dataLoading.navigationVisibleProjectIds || Dict.member entityId model.dataLoading.projectCardSummaries
-
-        "task" ->
-            Set.member entityId model.dataLoading.navigationVisibleTaskIds || Dict.member entityId model.dataLoading.taskCardSummaries
-
-        _ ->
-            False
-
-
 requestNavigationSummaryBatches : ChangeStream.Scope -> List ( String, String ) -> Model -> ( Model, Cmd Msg )
 requestNavigationSummaryBatches scope targets model =
     let
-        -- A summary batch is a revalidation of cards the current bounded
-        -- projection already owns.  Never let an event for an unloaded or
-        -- filtered-out branch populate the tree behind the server filter.
+        -- Fetch every invalidated ID, including uncached cards. Metadata alone
+        -- cannot admit membership; affected owner responses remain authoritative.
         uniqueTargets =
             List.foldl
                 (\target values ->
@@ -1448,7 +1390,7 @@ requestNavigationSummaryBatches scope targets model =
                 []
                 targets
                 |> List.reverse
-                |> List.filter (navigationTargetLoaded model)
+
 
         chunks remaining =
             case remaining of
@@ -1501,7 +1443,7 @@ requestNavigationSummaryBatches scope targets model =
                         workspaceId
                         projectIds
                         taskIds
-                        (CanonicalNavigationSummariesFetched { request = guard, entityGenerations = entityGenerations, navigationGeneration = entityModel.dataLoading.navigationGeneration } workspaceId projectIds taskIds)
+                        (CanonicalNavigationSummariesFetched { request = guard, entityGenerations = entityGenerations, navigationGeneration = entityModel.dataLoading.navigationGeneration, filterFingerprint = Feature.DataLoading.navigationFilterFingerprint entityModel } workspaceId projectIds taskIds)
                 )
                 accumulated
                 entityModel

@@ -1,4 +1,4 @@
-module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
@@ -163,7 +163,7 @@ navigationConcurrency =
 
 emptyNavigationPass : Bool -> NavigationPass
 emptyNavigationPass refreshing =
-    { refreshing = refreshing, projects = Dict.empty, tasks = Dict.empty, projectError = Nothing, taskError = Nothing }
+    { refreshing = refreshing, rootDemand = Nothing, projects = Dict.empty, tasks = Dict.empty, projectError = Nothing, taskError = Nothing }
 
 
 navigationAdmissionKey : String -> NavigationBranchState -> String
@@ -311,7 +311,8 @@ retireHiddenNavigation model =
     let
         loading = model.dataLoading
         hidden key request =
-            not (navigationBranchExpanded key model)
+            key /= navigationBranchKey "workspace_root" Nothing
+                && not (navigationBranchExpanded key model)
                 && (request.inFlight || List.member key loading.navigationQueue)
         hiddenKeys =
             Dict.filter hidden loading.loadedNavigationBranches |> Dict.keys |> Set.fromList
@@ -708,8 +709,14 @@ beginRootNavigationPage entityKind model =
                 previousPresentation =
                     presentationFor previous model.dataLoading.rootNavigationPresentation
 
+                progress = Dict.get (navigationBranchKey "workspace_root" Nothing) model.dataLoading.navigationPasses
+                refreshing = progress |> Maybe.map .refreshing |> Maybe.withDefault False
+                projectPaused = progress |> Maybe.andThen .projectError |> (/=) Nothing
+                taskPaused = progress |> Maybe.andThen .taskError |> (/=) Nothing
                 retrying =
-                    not previous.succeeded
+                    if refreshing then
+                        (if entityKind == "project" then projectPaused || previous.projectRequestPending else taskPaused || previous.taskRequestPending)
+                    else not previous.succeeded
 
                 nextPresentation =
                     if retrying then
@@ -750,24 +757,33 @@ beginRootNavigationPage entityKind model =
                     else
                         previous.taskOffset
 
+                refreshRetry = retrying && refreshing
+
+                generation = if canLoad && refreshRetry then model.dataLoading.navigationGeneration + 1 else previous.generation
+
                 request =
                     { previous
-                        | projectOffset = projectOffset
+                        | generation = generation
+                        , projectOffset = projectOffset
                         , taskOffset = taskOffset
                         , inFlight = canLoad
                         , succeeded = if canLoad then False else previous.succeeded
-                        , projectRequestPending = if canLoad then (if retrying then previous.projectRequestPending else entityKind == "project") else previous.projectRequestPending
-                        , taskRequestPending = if canLoad then (if retrying then previous.taskRequestPending else entityKind == "task") else previous.taskRequestPending
+                        , projectRequestPending = if canLoad then (if retrying then (if projectPaused || taskPaused then entityKind == "project" && (projectPaused || previous.projectRequestPending) else previous.projectRequestPending) else entityKind == "project") else previous.projectRequestPending
+                        , taskRequestPending = if canLoad then (if retrying then (if projectPaused || taskPaused then entityKind == "task" && (taskPaused || previous.taskRequestPending) else previous.taskRequestPending) else entityKind == "task") else previous.taskRequestPending
                     }
 
-                loading =
-                    model.dataLoading
+                loading = model.dataLoading
+                extendDemand pass =
+                    let
+                        demand = pass.rootDemand |> Maybe.withDefault (previous.projectCardCount,previous.taskCardCount)
+                    in
+                    { pass | rootDemand = Just ( if request.projectRequestPending then max (Tuple.first demand) (projectOffset + transportPageSize) else Tuple.first demand, if request.taskRequestPending then max (Tuple.second demand) (taskOffset + transportPageSize) else Tuple.second demand ) }
             in
             if not canAdvance then
                 ( model, Cmd.none )
 
             else if canLoad then
-                ( { model | dataLoading = { loading | rootNavigationRequest = Just request, rootNavigationPresentation = Just nextPresentation } }
+                ( { model | dataLoading = { loading | navigationGeneration = if refreshRetry then generation else loading.navigationGeneration, rootNavigationRequest = Just request, rootNavigationPresentation = Just { nextPresentation | generation = generation }, navigationPasses = if refreshing && not retrying then Dict.update (navigationBranchKey "workspace_root" Nothing) (Maybe.map extendDemand) loading.navigationPasses else loading.navigationPasses } }
                 , Api.fetchNavigationBranch model.flags.apiUrl workspaceId "workspace_root" Nothing projectOffset taskOffset (navigationFilterQuery model)
                     (GotRootNavigation workspaceId model.sessionRequestEpoch Nothing request.generation request.filterFingerprint projectOffset taskOffset)
                 )
@@ -834,6 +850,7 @@ prepareRootNavigationRequest expectedWorkspace model =
                         in
                         { loading
                             | rootNavigationRequest = Just request
+                            , navigationPasses = Dict.remove (navigationBranchKey "workspace_root" Nothing) loading.navigationPasses
                             , rootNavigationPresentation = Just (initialPresentation request)
                             , navigationVisibilityActive = True
                         }
@@ -864,6 +881,11 @@ reloadNavigationForFilters model =
             let
                 current =
                     model.dataLoading
+
+                socket = model.webSocket
+                prefix = "workspace:" ++ workspaceId ++ "|navigation-summar"
+                retiredSocket =
+                    { socket | targetGenerations = Dict.map (\key revision -> if String.startsWith prefix key then revision + 1 else revision) socket.targetGenerations }
 
                 generation =
                     current.navigationGeneration + 1
@@ -911,7 +933,7 @@ reloadNavigationForFilters model =
                     }
 
                 resetModel =
-                    { model | dataLoading = resetLoading }
+                    { model | dataLoading = resetLoading, webSocket = retiredSocket }
             in
             ( resetModel
             , Api.fetchRootNavigation model.flags.apiUrl workspaceId (navigationFilterQuery resetModel)
@@ -980,6 +1002,98 @@ revalidateNavigationForAffectedBranches affectedProjects affectedTasks model =
             }
     in
     ( withPresentations, Cmd.batch (command :: replayCommands ++ affectedCommands) )
+
+
+{-| Summary invalidations own only affected direct lists. Keep unrelated passes,
+physical admissions and presentations intact; the allocator is not their lifetime.
+-}
+revalidateNavigationForChangedSummaries : Model -> Api.NavigationSummariesResponse -> Model -> ( Model, Cmd Msg )
+revalidateNavigationForChangedSummaries before summaries model =
+    let
+        filtered = before.search.filterShowOnly /= ShowAll || before.search.filterProjectStatuses /= [] || before.search.filterTaskStatuses /= [] || before.search.filterPriority /= AnyPriority || String.trim before.search.query /= ""
+        queried = String.trim before.search.query /= ""
+        projectOwner summary = summary.parentId |> Maybe.map (\id -> ( "project", id )) |> Maybe.withDefault ( "workspace_root", "root" )
+        taskOwner summary = case summary.parentId of
+            Just id -> ( "task", id )
+            Nothing -> summary.projectId |> Maybe.map (\id -> ( "project", id )) |> Maybe.withDefault ( "workspace_root", "root" )
+        ownerPath source visited owner =
+            if Set.member owner visited then []
+            else
+                let
+                    ancestors =
+                        if not filtered then []
+                        else case owner of
+                            ( "project", id ) -> Dict.get id source.dataLoading.projectCardSummaries |> Maybe.map (projectOwner >> ownerPath source (Set.insert owner visited)) |> Maybe.withDefault [ ( "workspace_root", "root" ) ]
+                            ( "task", id ) -> Dict.get id source.dataLoading.taskCardSummaries |> Maybe.map (taskOwner >> ownerPath source (Set.insert owner visited)) |> Maybe.withDefault [ ( "workspace_root", "root" ) ]
+                            _ -> []
+                in
+                owner :: ancestors
+        projectsChanged summary =
+            let old = Dict.get summary.id before.dataLoading.projectCardSummaries in
+            case old of
+                Nothing -> ownerPath model Set.empty (projectOwner summary)
+                Just previous ->
+                    let
+                        placement = previous.parentId /= summary.parentId || previous.status /= summary.status || previous.priority /= summary.priority || String.toLower previous.name /= String.toLower summary.name || queried
+                        children = previous.directProjectCount /= summary.directProjectCount || previous.directTaskCount /= summary.directTaskCount || previous.hasChildren /= summary.hasChildren
+                    in
+                    (if placement then ownerPath before Set.empty (projectOwner previous) ++ ownerPath model Set.empty (projectOwner summary) else [])
+                        ++ (if children then ownerPath model Set.empty ( "project", summary.id ) else [])
+        tasksChanged summary =
+            let old = Dict.get summary.id before.dataLoading.taskCardSummaries in
+            case old of
+                Nothing -> ownerPath model Set.empty (taskOwner summary)
+                Just previous ->
+                    let
+                        placement = previous.parentId /= summary.parentId || previous.projectId /= summary.projectId || previous.status /= summary.status || previous.priority /= summary.priority || String.toLower previous.title /= String.toLower summary.title || queried
+                        children = previous.directSubtaskCount /= summary.directSubtaskCount || previous.hasChildren /= summary.hasChildren
+                    in
+                    (if placement then ownerPath before Set.empty (taskOwner previous) ++ ownerPath model Set.empty (taskOwner summary) else [])
+                        ++ (if children then ownerPath model Set.empty ( "task", summary.id ) else [])
+        missingProjects = List.concatMap (\id -> Dict.get id before.dataLoading.projectCardSummaries |> Maybe.map (projectOwner >> ownerPath before Set.empty) |> Maybe.withDefault []) summaries.missingProjectIds
+        missingTasks = List.concatMap (\id -> Dict.get id before.dataLoading.taskCardSummaries |> Maybe.map (taskOwner >> ownerPath before Set.empty) |> Maybe.withDefault []) summaries.missingTaskIds
+        owners = Set.fromList (List.concatMap projectsChanged summaries.projects ++ List.concatMap tasksChanged summaries.tasks ++ missingProjects ++ missingTasks) |> Set.toList
+        replay owner ( current, commands ) =
+            let
+                loading = current.dataLoading
+                generation = loading.navigationGeneration + 1
+                fingerprint = navigationFilterFingerprint current
+                allocated = { current | dataLoading = { loading | navigationGeneration = generation } }
+            in
+            case ( current.selectedWorkspaceId, owner ) of
+                ( Just workspaceId, ( "workspace_root", _ ) ) ->
+                    case loading.rootNavigationRequest of
+                        Just previous ->
+                            let
+                                oldDemand = Dict.get (navigationBranchKey "workspace_root" Nothing) loading.navigationPasses |> Maybe.andThen .rootDemand |> Maybe.withDefault ( 0, 0 )
+                                demanded accepted offset pending inherited = max inherited (max accepted (if pending then offset + transportPageSize else 0))
+                                demand = ( demanded previous.projectCardCount previous.projectOffset previous.projectRequestPending (Tuple.first oldDemand), demanded previous.taskCardCount previous.taskOffset previous.taskRequestPending (Tuple.second oldDemand) )
+                                pass = emptyNavigationPass True
+                                rootPass = { pass | rootDemand = Just demand }
+                                request = { previous | generation = generation, projectOffset = 0, taskOffset = 0, inFlight = True, succeeded = False, projectRequestPending = True, taskRequestPending = True }
+                                nextLoading = allocated.dataLoading
+                                presentation = loading.rootNavigationPresentation |> Maybe.map (\value -> { value | generation = generation })
+                                next = { allocated | dataLoading = { nextLoading | rootNavigationRequest = Just request, rootNavigationPresentation = presentation, navigationPasses = Dict.insert (navigationBranchKey "workspace_root" Nothing) rootPass nextLoading.navigationPasses } }
+                            in
+                            ( next, Api.fetchRootNavigation current.flags.apiUrl workspaceId (navigationFilterQuery current) (GotRootNavigation workspaceId current.sessionRequestEpoch current.dataLoading.activeWorkspaceLoadToken generation fingerprint 0 0) :: commands )
+                        Nothing -> ( current, commands )
+                ( Just workspaceId, ( kind, id ) ) ->
+                    let key = navigationBranchKey kind (Just id) in
+                    if (kind == "project" && Dict.member id current.dataLoading.projectCardSummaries) || (kind == "task" && Dict.member id current.dataLoading.taskCardSummaries) then
+                        let
+                            previous = Dict.get key loading.loadedNavigationBranches |> Maybe.withDefault initialNavigationBranchState
+                            presentation = Dict.get key loading.navigationPresentations
+                            ( restarted, restartedCommands ) = replayBranch workspaceId generation fingerprint kind id previous allocated commands
+                            restartedLoading = restarted.dataLoading
+                            retained = presentation |> Maybe.map (\value -> { value | generation = generation })
+                        in
+                        ( { restarted | dataLoading = { restartedLoading | navigationPresentations = retained |> Maybe.map (\value -> Dict.insert key value restartedLoading.navigationPresentations) |> Maybe.withDefault restartedLoading.navigationPresentations } }, restartedCommands )
+                    else ( current, commands )
+                _ -> ( current, commands )
+        ( replayed, replayCommands ) = List.foldl replay ( model, [] ) owners
+        ( presented, detailCommand ) = ensureAllNavigationPresentations replayed
+    in
+    ( presented, Cmd.batch (detailCommand :: replayCommands) )
 
 
 {-| Retire pending bounded responses as soon as the scoped stream is invalidated,
@@ -2127,6 +2241,82 @@ acceptNavigationPage key navigation model =
         _ -> ( model, Cmd.none )
 
 
+{-| A live root refresh reconciles only pages already demanded by the user.
+Each kind keeps its displayed membership until its own staged span is complete.
+-}
+acceptRootRefresh : Maybe Int -> Api.NavigationBranchResponse -> Model -> ( Model, Cmd Msg )
+acceptRootRefresh maybeToken navigation model =
+    case model.dataLoading.rootNavigationRequest of
+        Nothing -> ( model, Cmd.none )
+        Just request ->
+            let
+                key = navigationBranchKey "workspace_root" Nothing
+                loading = model.dataLoading
+                pass = Dict.get key loading.navigationPasses |> Maybe.withDefault (emptyNavigationPass True)
+                demand = pass.rootDemand |> Maybe.withDefault ( request.projectCardCount, request.taskCardCount )
+                projects = if request.projectRequestPending then Dict.union (indexBy .id navigation.projects.items) pass.projects else pass.projects
+                tasks = if request.taskRequestPending then Dict.union (indexBy .id navigation.tasks.items) pass.tasks else pass.tasks
+                projectMore = if request.projectRequestPending then navigation.projects.hasMore else request.projectHasMore
+                taskMore = if request.taskRequestPending then navigation.tasks.hasMore else request.taskHasMore
+                pageError pending more offset oldCount newCount =
+                    if not pending || not more then Nothing
+                    else if newCount <= oldCount then Just "Navigation returned no new IDs; roots are incomplete"
+                    else if offset >= maxWorkspacePageOffset then Just "Navigation reached the client offset ceiling; roots are incomplete"
+                    else Nothing
+                projectError = if request.projectRequestPending then pageError True projectMore request.projectOffset (Dict.size pass.projects) (Dict.size projects) else pass.projectError
+                taskError = if request.taskRequestPending then pageError True taskMore request.taskOffset (Dict.size pass.tasks) (Dict.size tasks) else pass.taskError
+                projectContinue = request.projectRequestPending && projectMore && request.projectOffset + List.length navigation.projects.items < Tuple.first demand
+                taskContinue = request.taskRequestPending && taskMore && request.taskOffset + List.length navigation.tasks.items < Tuple.second demand
+                projectComplete = request.projectRequestPending && not projectContinue && projectError == Nothing
+                taskComplete = request.taskRequestPending && not taskContinue && taskError == Nothing
+                commitProjects source =
+                    let
+                        current = source.dataLoading
+                        retained = Dict.filter (\_ summary -> not (projectSummaryBelongsTo "workspace_root" Nothing summary)) current.projectCardSummaries
+                    in
+                    mergeNavigationSummaries (Dict.values projects) [] { source | dataLoading = { current | projectCardSummaries = retained, navigationVisibleProjectIds = Set.filter (\id -> Dict.member id retained) current.navigationVisibleProjectIds } }
+                commitTasks source =
+                    let
+                        current = source.dataLoading
+                        retained = Dict.filter (\_ summary -> not (taskSummaryBelongsTo "workspace_root" Nothing summary)) current.taskCardSummaries
+                    in
+                    mergeNavigationSummaries [] (Dict.values tasks) { source | dataLoading = { current | taskCardSummaries = retained, navigationVisibleTaskIds = Set.filter (\id -> Dict.member id retained) current.navigationVisibleTaskIds } }
+                committed = model |> (if projectComplete then commitProjects else identity) |> (if taskComplete then commitTasks else identity)
+                nextLoading = committed.dataLoading
+                pendingProject = projectContinue && projectError == Nothing
+                pendingTask = taskContinue && taskError == Nothing
+                dispatch = pendingProject || pendingTask
+                nextRequest =
+                    { request | inFlight = dispatch, succeeded = not pendingProject && not pendingTask && projectError == Nothing && taskError == Nothing
+                        , projectOffset = request.projectOffset + (if projectContinue && projectError == Nothing then List.length navigation.projects.items else 0)
+                        , taskOffset = request.taskOffset + (if taskContinue && taskError == Nothing then List.length navigation.tasks.items else 0)
+                        , projectHasMore = projectMore, taskHasMore = taskMore
+                        , projectRequestPending = pendingProject, taskRequestPending = pendingTask
+                        , projectCardCount = if projectComplete then Dict.size projects else request.projectCardCount
+                        , taskCardCount = if taskComplete then Dict.size tasks else request.taskCardCount
+                    }
+                nextPass = { pass | projects = projects, tasks = tasks, projectError = projectError, taskError = taskError }
+                accepted =
+                    { committed | dataLoading = { nextLoading
+                        | rootNavigationRequest = Just nextRequest
+                        , loadedNavigationBranches = Dict.insert key nextRequest nextLoading.loadedNavigationBranches
+                        , navigationPasses = if pendingProject || pendingTask || projectError /= Nothing || taskError /= Nothing then Dict.insert key nextPass nextLoading.navigationPasses else Dict.remove key nextLoading.navigationPasses
+                        } }
+                settled = if dispatch then accepted else { accepted | dataLoading = finishWorkspaceLoad maybeToken accepted.dataLoading }
+                ( presented, presentationCommand ) = ensureNavigationPresentation "workspace_root" Nothing settled
+                command =
+                    if dispatch then
+                        Api.fetchNavigationBranch model.flags.apiUrl request.workspaceId "workspace_root" Nothing nextRequest.projectOffset nextRequest.taskOffset (navigationFilterQuery model)
+                            (GotRootNavigation request.workspaceId request.sessionEpoch maybeToken request.generation request.filterFingerprint nextRequest.projectOffset nextRequest.taskOffset)
+                    else Cmd.none
+                ( notified, errorCommand ) =
+                    case List.head (List.filterMap identity [ projectError, taskError ]) of
+                        Just error -> addToast Error error presented
+                        Nothing -> ( presented, Cmd.none )
+            in
+            ( notified, Cmd.batch [ presentationCommand, command, errorCommand ] )
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     let
@@ -2347,6 +2537,9 @@ updateResponse msg model =
                     Ok navigation ->
                         if navigation.workspaceId /= wsId then
                             ( model, Cmd.none )
+
+                        else if Dict.get (navigationBranchKey "workspace_root" Nothing) model.dataLoading.navigationPasses |> Maybe.map .refreshing |> Maybe.withDefault False then
+                            acceptRootRefresh maybeToken navigation model
 
                         else
                             let

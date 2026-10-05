@@ -107,6 +107,7 @@ type alias CanonicalNavigationRequestGuard =
     { request : CanonicalRequestGuard
     , entityGenerations : Dict String Int
     , navigationGeneration : Int
+    , filterFingerprint : String
     }
 
 
@@ -164,6 +165,7 @@ commits when it reaches its own end; errors keep the last authoritative cards.
 -}
 type alias NavigationPass =
     { refreshing : Bool
+    , rootDemand : Maybe ( Int, Int )
     , projects : Dict String Api.ProjectCardSummary
     , tasks : Dict String Api.TaskCardSummary
     , projectError : Maybe String

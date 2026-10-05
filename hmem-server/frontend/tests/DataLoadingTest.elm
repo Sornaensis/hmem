@@ -9,6 +9,7 @@ import Feature.ChangeStream as ChangeStream
 import Feature.DataLoading as DataLoading
 import Feature.Dependencies as Dependencies
 import Feature.Mutations as Mutations
+import Feature.Search
 import Feature.WebSocket as WebSocket
 import Http
 import Json.Encode as Encode
@@ -2159,6 +2160,250 @@ suite =
                     , newWasChecked = newReplay /= Nothing
                     , staleCardRemoved = Dict.member "child" completed.dataLoading.projectCardSummaries |> not
                     }
+        , test "unknown live summary targets are fetched without retiring unrelated current navigation passes" <|
+            \_ ->
+                let
+                    base = syncModel [ project "parent" Nothing, project "other" Nothing ]
+                    opened = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") base |> Tuple.first
+                    continued = branchReply "project:parent" (List.range 1 50 |> List.map (\n -> project ("child-" ++ String.fromInt n) (Just "parent"))) [] True False opened
+                    before = DataLoading.beginNavigationBranch "project" workspaceId (Just "other") continued |> Tuple.first
+                    invalidated = requestSummaries "unknown-outside" [ ( "project", "outside" ), ( "task", "outside-task" ) ] before
+                in
+                Expect.equal
+                    { generation = before.dataLoading.navigationGeneration, branches = before.dataLoading.loadedNavigationBranches, passes = before.dataLoading.navigationPasses, admissions = before.dataLoading.navigationAdmissions, guarded = True }
+                    { generation = invalidated.dataLoading.navigationGeneration, branches = invalidated.dataLoading.loadedNavigationBranches, passes = invalidated.dataLoading.navigationPasses, admissions = invalidated.dataLoading.navigationAdmissions
+                    , guarded = Dict.member ("workspace:" ++ workspaceId ++ "|navigation-summary:project:outside") invalidated.webSocket.targetGenerations && Dict.member ("workspace:" ++ workspaceId ++ "|navigation-summary:task:outside-task") invalidated.webSocket.targetGenerations }
+        , test "unchanged filtered summary placement preserves completed and in-flight unrelated passes" <|
+            \_ ->
+                let
+                    base = syncModel [ project "parent" Nothing, project "other" Nothing ]
+                    search = base.search
+                    filtered = { base | search = { search | filterProjectStatuses = [ "active" ] } }
+                    opened = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") filtered |> Tuple.first
+                    child = project "child" (Just "parent")
+                    completed = branchReply "project:parent" [ child ] [] False False opened
+                    before = DataLoading.beginNavigationBranch "project" workspaceId (Just "other") completed |> Tuple.first
+                    invalidated = requestSummaries "unchanged-placement" [ ( "project", "child" ) ] before
+                    refreshed = summaryReply invalidated (batchGuard [ ( "project", "child" ) ] invalidated) [ "child" ] [] { projects = [ { child | updatedAt = "later" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } invalidated
+                in
+                Expect.equal { generation = before.dataLoading.navigationGeneration, branches = before.dataLoading.loadedNavigationBranches, passes = before.dataLoading.navigationPasses, timestamp = Just "later" }
+                    { generation = refreshed.dataLoading.navigationGeneration, branches = refreshed.dataLoading.loadedNavigationBranches, passes = refreshed.dataLoading.navigationPasses, timestamp = Dict.get "child" refreshed.dataLoading.projectCardSummaries |> Maybe.map .updatedAt }
+        , test "unknown cards outside loaded direct owners cannot start an unrelated root crawl after summary acceptance" <|
+            \_ ->
+                let
+                    before = syncModel [ project "parent" Nothing ]
+                    invalidated = requestSummaries "unknown-summary" [ ( "project", "outside" ) ] before
+                    outside = project "outside" (Just "unloaded-parent")
+                    refreshed = summaryReply invalidated (batchGuard [ ( "project", "outside" ) ] invalidated) [ "outside" ] [] { projects = [ outside ], tasks = [], missingProjectIds = [], missingTaskIds = [] } invalidated
+                in
+                Expect.equal { root = before.dataLoading.rootNavigationRequest, branches = before.dataLoading.loadedNavigationBranches, visible = False, parent = Just "unloaded-parent" }
+                    { root = refreshed.dataLoading.rootNavigationRequest, branches = refreshed.dataLoading.loadedNavigationBranches, visible = Set.member "outside" refreshed.dataLoading.navigationVisibleProjectIds, parent = Dict.get "outside" refreshed.dataLoading.projectCardSummaries |> Maybe.andThen .parentId }
+        , test "real Search filter ABA retires old summary callbacks even after roots complete" <|
+            \_ ->
+                let
+                    original = project "filter-aba" Nothing
+                    pending = requestSummaries "filter-aba-event" [ ( "project", original.id ) ] (syncModel [ original ])
+                    filtered = Feature.Search.update (ToggleFilterProjectStatus "active") pending |> Tuple.first
+                    returned = Feature.Search.update (ToggleFilterProjectStatus "active") filtered |> Tuple.first
+                    completed = replyRootSpan [ original ] [] False False returned
+                    stale = summaryReply pending (batchGuard [ ( "project", original.id ) ] pending) [ original.id ] [] { projects = [ { original | updatedAt = "stale-A" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } completed
+                in
+                Expect.equal (Just original.updatedAt) (Dict.get original.id stale.dataLoading.projectCardSummaries |> Maybe.map .updatedAt)
+        , test "selective root refresh stages unequal demanded spans and retains terminal-page retry membership" <|
+            \_ ->
+                let
+                    projects start end = List.range start end |> List.map (\n -> project ("span-project-" ++ String.fromInt n) Nothing)
+                    tasks start end = List.range start end |> List.map (\n -> task ("span-task-" ++ String.fromInt n) Nothing)
+                    initial = DataLoading.reloadNavigationForFilters (syncModel []) |> Tuple.first |> replyRootSpan (projects 1 50) (tasks 1 50) True True
+                    moreProjects = DataLoading.beginRootNavigationPage "project" initial |> Tuple.first |> replyRootSpan (projects 51 52) [] False True
+                    moreTasks = DataLoading.beginRootNavigationPage "task" moreProjects |> Tuple.first |> replyRootSpan [] (tasks 51 100) False True
+                    demanded = DataLoading.beginRootNavigationPage "task" moreTasks |> Tuple.first |> replyRootSpan [] (tasks 101 101) False False
+                    child = project "span-child" (Just "span-project-52")
+                    expanded = DataLoading.beginNavigationBranch "project" workspaceId (Just "span-project-52") demanded |> Tuple.first |> branchReply "project:span-project-52" [ child ] [] False False
+                    pending = requestSummaries "span-reorder" [ ( "project", "span-project-1" ) ] expanded
+                    refreshed = summaryReply pending (batchGuard [ ( "project", "span-project-1" ) ] pending) [ "span-project-1" ] [] { projects = [ project "span-project-1" Nothing |> (\p -> { p | name = "new-order" }) ], tasks = [], missingProjectIds = [], missingTaskIds = [] } pending
+                    first = replyRootSpan (projects 1 50) (tasks 1 50) True True refreshed
+                    duringDemand = DataLoading.beginRootNavigationPage "project" first |> Tuple.first
+                    second = replyRootSpan (projects 51 52) (tasks 51 100) True True first
+                    failed = case second.dataLoading.rootNavigationRequest of
+                        Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint request.projectOffset request.taskOffset (Err Http.NetworkError)) second |> Tuple.first
+                        Nothing -> second
+                    retried = DataLoading.beginRootNavigationPage "task" failed |> Tuple.first
+                    stale = case second.dataLoading.rootNavigationRequest of
+                        Just old -> DataLoading.update (GotRootNavigation workspaceId old.sessionEpoch Nothing old.generation old.filterFingerprint old.projectOffset old.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = True }, tasks = { items = [ task "stale-root" Nothing ], hasMore = False } })) retried |> Tuple.first
+                        Nothing -> retried
+                    terminal = replyRootSpan [] (tasks 101 101) True False stale
+                    snapshot source =
+                        { roots = List.length (List.filter (\p -> p.parentId == Nothing) (Dict.values source.dataLoading.projectCardSummaries))
+                        , tasks = Dict.size source.dataLoading.taskCardSummaries
+                        , child = Dict.member child.id source.dataLoading.projectCardSummaries
+                        , state = source.dataLoading.rootNavigationRequest |> Maybe.map (\r -> ( r.projectCardCount, r.taskCardCount, r.inFlight ))
+                        }
+                in
+                Expect.equal
+                    { first = { roots = 52, tasks = 101, child = True, state = Just (52,101,True) }
+                    , second = { roots = 52, tasks = 101, child = True, state = Just (52,101,True) }
+                    , failed = { roots = 52, tasks = 101, child = True, state = Just (52,101,False) }
+                    , terminal = { roots = 52, tasks = 101, child = True, state = Just (52,101,False) }
+                    , demandHeld = True, staleRejected = True
+                    , stopped = Just { projectMore = True, taskMore = False, projectPending = False, taskPending = False }
+                    }
+                    { first = snapshot first, second = snapshot second, failed = snapshot failed, terminal = snapshot terminal
+                    , demandHeld = duringDemand.dataLoading.rootNavigationRequest == first.dataLoading.rootNavigationRequest
+                    , staleRejected = stale.dataLoading.rootNavigationRequest == retried.dataLoading.rootNavigationRequest && not (Dict.member "stale-root" stale.dataLoading.taskCardSummaries)
+                    , stopped = terminal.dataLoading.rootNavigationRequest |> Maybe.map (\r -> { projectMore = r.projectHasMore, taskMore = r.taskHasMore, projectPending = r.projectRequestPending, taskPending = r.taskRequestPending })
+                    }
+        , test "a live root refresh preserves an admitted More page and rejects its retired response" <|
+            \_ ->
+                let
+                    roots start end = List.range start end |> List.map (\n -> project ("pending-root-" ++ String.fromInt n) Nothing)
+                    initial = DataLoading.reloadNavigationForFilters (syncModel []) |> Tuple.first |> replyRootSpan (roots 1 50) [] True False
+                    more = DataLoading.beginRootNavigationPage "project" initial |> Tuple.first
+                    pending = requestSummaries "pending-root-order" [ ( "project", "pending-root-1" ) ] more
+                    changed = project "pending-root-1" Nothing |> (\p -> { p | name = "new order" })
+                    refreshed = summaryReply pending (batchGuard [ ( "project", changed.id ) ] pending) [ changed.id ] [] { projects = [ changed ], tasks = [], missingProjectIds = [], missingTaskIds = [] } pending
+                    superseding = requestSummaries "pending-root-order-again" [ ( "project", changed.id ) ] refreshed
+                    newer = summaryReply superseding (batchGuard [ ( "project", changed.id ) ] superseding) [ changed.id ] [] { projects = [ { changed | name = "newer order" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } superseding
+                    oldReply = case more.dataLoading.rootNavigationRequest of
+                        Just old -> DataLoading.update (GotRootNavigation workspaceId old.sessionEpoch Nothing old.generation old.filterFingerprint old.projectOffset old.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [ project "old-poison" Nothing ], hasMore = False }, tasks = { items = [], hasMore = False } })) newer |> Tuple.first
+                        Nothing -> newer
+                    first = replyRootSpan (roots 1 50) [] True False oldReply
+                    terminal = replyRootSpan (roots 51 52) [] False False first
+                in
+                Expect.equal
+                    { held = Just (50,50,True), poison = False, inheritedDemand = Just 100, finalCount = Just 52, finalMember = True, ended = Just False }
+                    { held = first.dataLoading.rootNavigationRequest |> Maybe.map (\r -> ( r.projectOffset, r.projectCardCount, r.inFlight ))
+                    , inheritedDemand = Dict.get "workspace_root:root" newer.dataLoading.navigationPasses |> Maybe.andThen .rootDemand |> Maybe.map Tuple.first
+                    , poison = Dict.member "old-poison" oldReply.dataLoading.projectCardSummaries
+                    , finalCount = terminal.dataLoading.rootNavigationRequest |> Maybe.map .projectCardCount
+                    , finalMember = Set.member "pending-root-52" terminal.dataLoading.navigationVisibleProjectIds
+                    , ended = terminal.dataLoading.rootNavigationRequest |> Maybe.map .inFlight
+                    }
+        , test "a nonprogressing root kind pauses while the healthy demanded kind completes before explicit retry" <|
+            \_ ->
+                let
+                    roots start end = List.range start end |> List.map (\n -> project ("independent-root-" ++ String.fromInt n) Nothing)
+                    tasks start end = List.range start end |> List.map (\n -> task ("independent-task-" ++ String.fromInt n) Nothing)
+                    initial = DataLoading.reloadNavigationForFilters (syncModel []) |> Tuple.first |> replyRootSpan (roots 1 50) (tasks 1 50) True True
+                    p100 = DataLoading.beginRootNavigationPage "project" initial |> Tuple.first |> replyRootSpan (roots 51 100) [] False True
+                    t100 = DataLoading.beginRootNavigationPage "task" p100 |> Tuple.first |> replyRootSpan [] (tasks 51 100) False True
+                    demanded = DataLoading.beginRootNavigationPage "task" t100 |> Tuple.first |> replyRootSpan [] (tasks 101 150) False False
+                    pending = requestSummaries "independent-root-order" [ ( "project", "independent-root-1" ) ] demanded
+                    changed = project "independent-root-1" Nothing |> (\p -> { p | name = "new order" })
+                    refreshed = summaryReply pending (batchGuard [ ( "project", changed.id ) ] pending) [ changed.id ] [] { projects = [ changed ], tasks = [], missingProjectIds = [], missingTaskIds = [] } pending
+                    first = replyRootSpan (roots 1 50) (tasks 1 50) True True refreshed
+                    mixed = replyRootSpan (roots 1 50) (tasks 51 100) True True first
+                    networkPaused = case mixed.dataLoading.rootNavigationRequest of
+                        Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint request.projectOffset request.taskOffset (Err Http.NetworkError)) mixed |> Tuple.first
+                        Nothing -> mixed
+                    taskRetry = DataLoading.beginRootNavigationPage "task" networkPaused |> Tuple.first
+                    healthy = replyRootSpan [] (tasks 101 150) True False taskRetry
+                    retry = DataLoading.beginRootNavigationPage "project" healthy |> Tuple.first
+                    recovered = replyRootSpan (roots 51 100) [] False False retry
+                    state source = source.dataLoading.rootNavigationRequest |> Maybe.map (\r -> { projects = r.projectCardCount, tasks = r.taskCardCount, taskOffset = r.taskOffset, inFlight = r.inFlight, projectPending = r.projectRequestPending, taskPending = r.taskRequestPending, succeeded = r.succeeded })
+                in
+                Expect.equal
+                    { mixed = Just { projects = 100, tasks = 150, taskOffset = 100, inFlight = True, projectPending = False, taskPending = True, succeeded = False }
+                    , healthy = Just { projects = 100, tasks = 150, taskOffset = 100, inFlight = False, projectPending = False, taskPending = False, succeeded = False }
+                    , rootsRetained = True, taskRetryOnly = Just (False,True), healthyComplete = True, retryProjectOnly = Just (True,False), recovered = Just True }
+                    { mixed = state mixed, healthy = state healthy
+                    , taskRetryOnly = taskRetry.dataLoading.rootNavigationRequest |> Maybe.map (\r -> (r.projectRequestPending,r.taskRequestPending))
+                    , rootsRetained = Set.member "independent-root-100" healthy.dataLoading.navigationVisibleProjectIds
+                    , healthyComplete = Set.member "independent-task-150" healthy.dataLoading.navigationVisibleTaskIds
+                    , retryProjectOnly = retry.dataLoading.rootNavigationRequest |> Maybe.map (\r -> (r.projectRequestPending,r.taskRequestPending))
+                    , recovered = recovered.dataLoading.rootNavigationRequest |> Maybe.map .succeeded }
+        , test "independent summary replies survive another owner refresh and focus allocation but not filter retirement" <|
+            \_ ->
+                let
+                    base = syncModel [ project "p" Nothing, project "q" Nothing ]
+                    a = project "a" (Just "p")
+                    b = project "b" (Just "q")
+                    loaded = DataLoading.mergeNavigationSummaries [ a, b ] [] base
+                    opened = DataLoading.beginNavigationBranch "project" workspaceId (Just "p") loaded |> Tuple.first |> branchReply "project:p" [ a ] [] False False
+                    both = DataLoading.beginNavigationBranch "project" workspaceId (Just "q") opened |> Tuple.first |> branchReply "project:q" [ b ] [] False False
+                    pendingA = requestSummaries "independent-a" [ ( "project", "a" ) ] both
+                    pendingB = requestSummaries "independent-b" [ ( "project", "b" ) ] pendingA
+                    afterA = summaryReply pendingA (batchGuard [ ( "project", "a" ) ] pendingA) [ "a" ] [] { projects = [ { a | name = "reordered-a" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } pendingB
+                    focused = DataLoading.beginNavigationFocus workspaceId "project" "different-focus" afterA |> Tuple.first
+                    afterB = summaryReply pendingB (batchGuard [ ( "project", "b" ) ] pendingB) [ "b" ] [] { projects = [ { b | updatedAt = "accepted-b" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } focused
+                    search = focused.search
+                    changedFilter = { focused | search = { search | query = "new-filter" } }
+                    stale = summaryReply pendingB (batchGuard [ ( "project", "b" ) ] pendingB) [ "b" ] [] { projects = [ { b | updatedAt = "stale-b" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } changedFilter
+                in
+                Expect.equal { allocatorAdvanced = True, bAccepted = Just "accepted-b", unrelated = True, staleRejected = Just b.updatedAt }
+                    { allocatorAdvanced = focused.dataLoading.navigationGeneration > pendingB.dataLoading.navigationGeneration, bAccepted = Dict.get "b" afterB.dataLoading.projectCardSummaries |> Maybe.map .updatedAt
+                    , unrelated = Dict.get "project:q" afterB.dataLoading.loadedNavigationBranches == Dict.get "project:q" both.dataLoading.loadedNavigationBranches, staleRejected = Dict.get "b" stale.dataLoading.projectCardSummaries |> Maybe.map .updatedAt }
+        , test "live mixed-kind moves and deletion replay only old and new owners with authoritative counts" <|
+            \_ ->
+                let
+                    base = syncModel [ project "p" Nothing, project "q" Nothing, project "unrelated" Nothing ]
+                    child = project "child" (Just "p")
+                    originalTask = task "moving-task" Nothing
+                    childTask = { originalTask | projectId = Just "p" }
+                    opened = DataLoading.beginNavigationBranch "project" workspaceId (Just "p") base |> Tuple.first |> branchReply "project:p" [ child ] [ childTask ] False False
+                    other = DataLoading.beginNavigationBranch "project" workspaceId (Just "q") opened |> Tuple.first |> branchReply "project:q" [] [] False False
+                    before = DataLoading.beginNavigationBranch "project" workspaceId (Just "unrelated") other |> Tuple.first
+                    targets = [ ( "project", "child" ), ( "task", "moving-task" ) ]
+                    requested = requestSummaries "mixed-move" targets before
+                    moved = { child | parentId = Just "q" }
+                    movedTask = { childTask | projectId = Just "q" }
+                    updated = summaryReply requested (batchGuard targets requested) [ "child" ] [ "moving-task" ] { projects = [ moved ], tasks = [ movedTask ], missingProjectIds = [], missingTaskIds = [] } requested
+                    completed = updated |> branchReply "project:p" [] [] False False |> branchReply "project:q" [ moved ] [ movedTask ] False False
+                    deleteRequested = requestSummaries "mixed-delete" targets completed
+                    deleted = summaryReply deleteRequested (batchGuard targets deleteRequested) [ "child" ] [ "moving-task" ] { projects = [], tasks = [], missingProjectIds = [ "child" ], missingTaskIds = [ "moving-task" ] } deleteRequested |> branchReply "project:q" [] [] False False
+                    counts key source = Dict.get key source.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.projectCardCount, request.taskCardCount ))
+                in
+                Expect.equal { root = True, unrelated = True, old = Just ( 0, 0 ), new = Just ( 1, 1 ), removed = Just ( 0, 0 ), membership = False, bounded = True }
+                    { root = updated.dataLoading.rootNavigationRequest == before.dataLoading.rootNavigationRequest
+                    , unrelated = Dict.get "project:unrelated" deleted.dataLoading.loadedNavigationBranches == Dict.get "project:unrelated" before.dataLoading.loadedNavigationBranches
+                    , old = counts "project:p" completed, new = counts "project:q" completed, removed = counts "project:q" deleted
+                    , membership = Set.member "child" deleted.dataLoading.navigationVisibleProjectIds || Set.member "moving-task" deleted.dataLoading.navigationVisibleTaskIds
+                    , bounded = Dict.size updated.dataLoading.navigationAdmissions <= 4 }
+        , test "unknown filtered descendant admits its missing ancestor path only through authoritative root and branch replies" <|
+            \_ ->
+                let
+                    base = syncModel [ project "unrelated" Nothing ]
+                    search = base.search
+                    filtered = { base | search = { search | filterProjectStatuses = [ "completed" ] } }
+                    other = DataLoading.beginNavigationBranch "project" workspaceId (Just "unrelated") filtered |> Tuple.first
+                    pending = requestSummaries "filtered-new-path" [ ( "project", "new-child" ) ] other
+                    raw = project "new-child" (Just "new-parent")
+                    matching = { raw | status = Api.ProjCompleted }
+                    summarized = summaryReply pending (batchGuard [ ( "project", "new-child" ) ] pending) [ "new-child" ] [] { projects = [ matching ], tasks = [], missingProjectIds = [], missingTaskIds = [] } pending
+                    parent = project "new-parent" Nothing
+                    rooted = acceptRoot [ project "unrelated" Nothing, { parent | hasChildren = True } ] [] summarized
+                    completed = branchReply "project:new-parent" [ matching ] [] False False rooted
+                in
+                Expect.equal { hidden = False, rootPending = Just True, unrelated = True, parentRetained = True, admitted = True }
+                    { hidden = Set.member "new-child" summarized.dataLoading.navigationVisibleProjectIds
+                    , rootPending = summarized.dataLoading.rootNavigationRequest |> Maybe.map .inFlight
+                    , unrelated = Dict.get "project:unrelated" completed.dataLoading.loadedNavigationBranches == Dict.get "project:unrelated" other.dataLoading.loadedNavigationBranches
+                    , parentRetained = Set.member "new-parent" completed.dataLoading.navigationVisibleProjectIds
+                    , admitted = Set.member "new-child" completed.dataLoading.navigationVisibleProjectIds }
+        , test "a targeted refresh keeps an old physical page admitted until its exact stale completion" <|
+            \_ ->
+                let
+                    parent = project "p" Nothing
+                    base = syncModel [ parent, project "other" Nothing ]
+                    opened = DataLoading.beginNavigationBranch "project" workspaceId (Just "p") base |> Tuple.first
+                    summaries = List.range 1 50 |> List.map (\n -> project ("child-" ++ String.fromInt n) (Just "p"))
+                    continued = branchReply "project:p" summaries [] True False opened
+                    old = Dict.get "project:p" continued.dataLoading.loadedNavigationBranches
+                    before = DataLoading.beginNavigationBranch "project" workspaceId (Just "other") continued |> Tuple.first
+                    pending = requestSummaries "reorder-held" [ ( "project", "child-1" ) ] before
+                    changed = project "child-1" (Just "p")
+                    restarted = summaryReply pending (batchGuard [ ( "project", "child-1" ) ] pending) [ "child-1" ] [] { projects = [ { changed | name = "renamed" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } pending
+                    released = case old of
+                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:p" request.filterFingerprint request.projectOffset request.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [ project "retired-poison" (Just "p") ], hasMore = False }, tasks = { items = [], hasMore = False } })) restarted |> Tuple.first
+                        Nothing -> restarted
+                in
+                Expect.equal { held = True, queued = True, resumed = Just ( 0, True ), unrelated = True, poison = False, cacheRetained = True }
+                    { held = restarted.dataLoading.navigationAdmissions == before.dataLoading.navigationAdmissions
+                    , queued = List.member "project:p" restarted.dataLoading.navigationQueue
+                    , resumed = Dict.get "project:p" released.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.projectOffset, request.inFlight ))
+                    , unrelated = Dict.get "project:other" released.dataLoading.loadedNavigationBranches == Dict.get "project:other" before.dataLoading.loadedNavigationBranches
+                    , poison = Dict.member "retired-poison" released.dataLoading.projectCardSummaries
+                    , cacheRetained = Set.member "child-50" released.dataLoading.navigationVisibleProjectIds }
         , test "overlapping summary subsets preserve current members and apply unrelated older members" <|
             \_ ->
                 let
@@ -2200,15 +2445,22 @@ suite =
                     readyTask = case Dict.get "project:parent" expanded.dataLoading.loadedNavigationBranches of
                         Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) tasked |> Tuple.first
                         Nothing -> tasked
-                    rootReturned = acceptRoot [ project "parent" Nothing, project "new-root" Nothing ] [] rooted
+                    rootSummary = project "new-root" Nothing
+                    rootReady = summaryReply rooted (batchGuard [ ( "project", "new-root" ) ] rooted) [ "new-root" ] [] { projects = [ rootSummary ], tasks = [], missingProjectIds = [], missingTaskIds = [] } rooted
+                    rootReturned = acceptRoot [ project "parent" Nothing, rootSummary ] [] rootReady
                     taskBase = task "new-task" Nothing
-                    taskReturned = case Dict.get "project:parent" readyTask.dataLoading.loadedNavigationBranches of
+                    taskSummary = { taskBase | projectId = Just "parent" }
+                    taskSummarized = summaryReply tasked (batchGuard [ ( "task", "new-task" ) ] tasked) [] [ "new-task" ] { projects = [], tasks = [ taskSummary ], missingProjectIds = [], missingTaskIds = [] } tasked
+                    taskReady = case Dict.get "project:parent" tasked.dataLoading.loadedNavigationBranches of
+                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) taskSummarized |> Tuple.first
+                        Nothing -> taskSummarized
+                    taskReturned = case Dict.get "project:parent" taskReady.dataLoading.loadedNavigationBranches of
                         Just request ->
-                            DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ { taskBase | projectId = Just "parent" } ], hasMore = False } })) readyTask |> Tuple.first
-                        Nothing -> readyTask
+                            DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ { taskBase | projectId = Just "parent" } ], hasMore = False } })) taskReady |> Tuple.first
+                        Nothing -> taskReady
                 in
                 Expect.equal { pending = True, prematurelyInserted = False, root = True, task = True }
-                    { pending = rooted.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False, prematurelyInserted = Dict.member "new-root" rooted.projects, root = Set.member "new-root" rootReturned.dataLoading.navigationVisibleProjectIds, task = Set.member "new-task" taskReturned.dataLoading.navigationVisibleTaskIds }
+                    { pending = rootReady.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False, prematurelyInserted = Dict.member "new-root" rooted.projects, root = Set.member "new-root" rootReturned.dataLoading.navigationVisibleProjectIds, task = Set.member "new-task" taskReturned.dataLoading.navigationVisibleTaskIds }
         , test "a formerly filtered-out card becomes matching only after authoritative navigation" <|
             \_ ->
                 let
@@ -2217,10 +2469,11 @@ suite =
                     filtered = { base | search = { search | filterProjectStatuses = [ "completed" ] } }
                     pending = requestSummaries "became-matching" [ ( "project", "newly-matching" ) ] filtered
                     summary = project "newly-matching" Nothing
-                    accepted = acceptRoot [ { summary | status = Api.ProjCompleted } ] [] pending
+                    ready = summaryReply pending (batchGuard [ ( "project", "newly-matching" ) ] pending) [ "newly-matching" ] [] { projects = [ { summary | status = Api.ProjCompleted } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } pending
+                    accepted = acceptRoot [ { summary | status = Api.ProjCompleted } ] [] ready
                 in
                 Expect.equal ( True, True )
-                    ( pending.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False, Set.member "newly-matching" accepted.dataLoading.navigationVisibleProjectIds )
+                    ( ready.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False, Set.member "newly-matching" accepted.dataLoading.navigationVisibleProjectIds )
 
         , test "revalidation refills only the retained paginated root window" <|
             \_ ->
@@ -2746,7 +2999,7 @@ summaryGuard guard source projectIds taskIds =
         keys =
             List.map ((++) (guard.scopeKey ++ "|navigation-summary:project:")) projectIds ++ List.map ((++) (guard.scopeKey ++ "|navigation-summary:task:")) taskIds
     in
-    { request = guard, navigationGeneration = source.dataLoading.navigationGeneration, entityGenerations = Dict.filter (\key _ -> List.member key keys) source.webSocket.targetGenerations }
+    { request = guard, navigationGeneration = source.dataLoading.navigationGeneration, filterFingerprint = DataLoading.navigationFilterFingerprint source, entityGenerations = Dict.filter (\key _ -> List.member key keys) source.webSocket.targetGenerations }
 
 
 syncModel : List Api.ProjectCardSummary -> Model
@@ -2847,3 +3100,12 @@ reopenFailedBranchScenario staged =
     , oldRetained = Dict.member "old-51" completed.dataLoading.projectCardSummaries && Dict.member "old-51" completed.dataLoading.taskCardSummaries
     , freshComplete = Dict.get "project:parent" completed.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> not request.projectHasMore && not request.taskHasMore && not request.inFlight) |> Maybe.withDefault False
     }
+
+
+replyRootSpan : List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Bool -> Bool -> Model -> Model
+replyRootSpan projects tasks projectMore taskMore source =
+    case source.dataLoading.rootNavigationRequest of
+        Just request ->
+            DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch source.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint request.projectOffset request.taskOffset
+                (Ok { workspaceId = workspaceId, projects = { items = projects, hasMore = projectMore }, tasks = { items = tasks, hasMore = taskMore } })) source |> Tuple.first
+        Nothing -> source

@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import path from 'node:path'
+import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { createUsablePaintReadiness, createNavigationCompletionIndex, currentRootNavigationPass, currentNavigationPassComplete, logicalExpandedNavigationComplete, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { createEvidenceCapture, atomicEvidenceWrite, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, currentRootNavigationPass, currentNavigationPassComplete, logicalExpandedNavigationComplete, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, FIXTURE_SCHEMA_VERSION, FIXTURE_SEED, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_BUCKET_RESPONSE_MAX, TIMELINE_BUCKET_SQL_CAP, TIMELINE_DEFAULT_UI_QUERY, TimelineBucketRequestError, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, orderedTimelineBuckets, paginate, projectOverviewResponse, projectReadinessRollup, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, stableFixtureJson, taskOverviewResponse, taskReadinessRollup, validateFixture, workspaceShellSnapshotItems } from './fixtures.mjs'
 
-import { waitForFirstUsefulViewport, retryNavigationKind, createTracker, fixtureResponder } from './harness.mjs'
+import { untrackedFileDiff, waitForFirstUsefulViewport, retryNavigationKind, createTracker, fixtureResponder } from './harness.mjs'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 
@@ -1352,4 +1355,106 @@ test('paint receipt lifetimes reject retired callbacks, ABA and unsuccessful ful
   tracker.paintReadiness.completeSnapshot(staleShell, { profile: 'workspace_shell_v1', workspaceId: fixture.workspace.id, items: 1, complete: true }, performance.now())
   assert.equal(tracker.paintReadiness.readyAt(tracker.paintReadiness.lifetime(), observe()), false)
   assert.equal(tracker.requests.length, tracker.completed, 'failed fulfill still retires physical accounting')
+})
+
+const writerRepositoryRoot = path.resolve(here, '../../..')
+const writerScratchRoot = path.join(writerRepositoryRoot, '.scratch', 'expanded-navigation-perf')
+function withWriterScratch(action) {
+  fs.mkdirSync(writerScratchRoot, { recursive: true })
+  const directory = fs.mkdtempSync(path.join(writerScratchRoot, 'writer-'))
+  try { return action(directory) }
+  finally {
+    if (!path.resolve(directory).startsWith(path.resolve(writerScratchRoot) + path.sep)) throw new Error('Writer scratch escaped its owner')
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 2, retryDelay: 20 })
+  }
+}
+
+
+test('complete evidence writer retains real binary and multibyte no-index output above one MiB', () => {
+  withWriterScratch(directory => {
+    const binary = Buffer.alloc(1200000)
+    for (let offset = 0; offset < binary.length; offset += 32) createHash('sha256').update(String(offset)).digest().copy(binary, offset)
+    const text = Buffer.from(Array.from({ length: 26000 }, (_, i) => i.toString().padStart(8, '0') + ' 中文完整证据 ' + createHash('sha256').update(String(i)).digest('hex')).join('\n') + '\n')
+    for (const [name, bytes] of [['binary.dat', binary], ['multibyte.txt', text]]) {
+      const file = path.join(directory, name), expected = path.join(directory, name + '.diff')
+      fs.writeFileSync(file, bytes)
+      const descriptor = fs.openSync(expected, 'wx')
+      let result
+      try { result = spawnSync('git', ['diff', '--binary', '--no-index', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '--', '/dev/null', file], { cwd: writerRepositoryRoot, stdio: ['ignore', descriptor, 'pipe'], timeout: 30000, windowsHide: true }) }
+      finally { fs.closeSync(descriptor) }
+      assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, 1)
+      const independent = fs.readFileSync(expected)
+      assert.ok(independent.length > 1024 * 1024)
+      const actual = untrackedFileDiff(writerRepositoryRoot, file)
+      assert.deepEqual(actual, independent)
+      assert.equal(createHash('sha256').update(actual).digest('hex'), createHash('sha256').update(independent).digest('hex'))
+    }
+  })
+})
+
+test('complete evidence capture rejects overflow, timeout, failed exit and partial output', () => {
+  withWriterScratch(directory => {
+    const file = path.join(directory, 'bounded.txt')
+    fs.writeFileSync(file, Array.from({ length: 300 }, (_, i) => String(i) + ' 完整输出').join('\n'))
+    const tiny = { commandBytes: 512, totalBytes: 1024, commandTimeoutMs: 30000, totalTimeoutMs: 60000 }
+    assert.throws(() => untrackedFileDiff(writerRepositoryRoot, file, createEvidenceCapture({ cwd: writerRepositoryRoot, limits: tiny })), /bytes=.*512|ENOBUFS/)
+    let timedChild
+    const timed = createEvidenceCapture({ cwd: writerRepositoryRoot, limits: { ...tiny, commandBytes: 65536, commandTimeoutMs: 100 },
+      run: (_command, _args, options) => (timedChild = spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], options)) })
+    assert.throws(() => timed.read([], { label: 'owned timeout regression' }), /ETIMEDOUT|signal=/)
+    assert.ok(timedChild.error)
+    assert.throws(() => process.kill(timedChild.pid, 0), error => error.code === 'ESRCH', 'timed-out child is joined and absent')
+    const valid = { status: 1, signal: null, stdout: Buffer.from('complete'), stderr: Buffer.alloc(0) }
+    for (const result of [
+      { ...valid, error: Object.assign(new Error('overflow'), { code: 'ENOBUFS' }) },
+      { ...valid, status: 2 }, { ...valid, signal: 'SIGTERM' },
+      { ...valid, stdout: Buffer.alloc(0) }, { ...valid, stdout: 'decoded partial string' }
+    ]) {
+      const capture = createEvidenceCapture({ cwd: writerRepositoryRoot, run: () => result })
+      assert.throws(() => capture.read([], { acceptedExitCodes: [0, 1] }), /Evidence command failed/)
+    }
+    const aggregate = createEvidenceCapture({ cwd: writerRepositoryRoot, limits: { ...tiny, commandBytes: 100, totalBytes: 100 }, run: () => ({ ...valid, stdout: Buffer.alloc(60) }) })
+    aggregate.read([], { acceptedExitCodes: [1] })
+    assert.throws(() => aggregate.read([], { acceptedExitCodes: [1] }), /bytes=60.40/)
+    let time = 0
+    const expired = createEvidenceCapture({ cwd: writerRepositoryRoot, limits: tiny, now: () => time, run: () => valid })
+    time = tiny.totalTimeoutMs
+    assert.throws(() => expired.read([]), /collection limit reached/)
+  })
+})
+
+test('complete evidence persistence removes stale success and retains truthful failure after partial write', () => {
+  withWriterScratch(directory => {
+    const manifestPath = path.join(directory, 'manifest.json'), validationPath = path.join(directory, 'validation.json'), diffPath = path.join(directory, 'complete.diff')
+    const seedSuccess = () => {
+      fs.writeFileSync(manifestPath, JSON.stringify({ qualificationPassed: true }))
+      fs.writeFileSync(validationPath, JSON.stringify({ passed: true }))
+      fs.writeFileSync(diffPath, 'previous complete diff')
+    }
+    const options = { manifestPath, validationPath,
+      failureValidation: error => ({ passed: false, failure: error.message, commands: [{ exitCode: 2 }] }),
+      failureManifest: error => ({ qualificationPassed: false, failure: error.message }) }
+    seedSuccess()
+    assert.throws(() => persistEvidenceAttempt(options, () => {
+      atomicEvidenceWrite(diffPath, Buffer.from('new incomplete diff'), { write: (file, bytes) => {
+        fs.writeFileSync(file, bytes.subarray(0, 3)); throw new Error('fixture partial write')
+      } })
+    }), /fixture partial write/)
+    assert.equal(fs.readFileSync(diffPath, 'utf8'), 'previous complete diff')
+    assert.deepEqual(JSON.parse(fs.readFileSync(validationPath)), { passed: false, failure: 'fixture partial write', commands: [{ exitCode: 2 }] })
+    assert.equal(JSON.parse(fs.readFileSync(manifestPath)).qualificationPassed, false)
+    assert.deepEqual(fs.readdirSync(directory).sort(), ['complete.diff', 'manifest.json', 'validation.json'])
+    seedSuccess()
+    assert.throws(() => persistEvidenceAttempt({ ...options, write: () => { throw new Error('fixture receipt write failure') } }, () => { throw new Error('fixture collection failure') }), /failure receipt persistence failed/)
+    assert.equal(fs.existsSync(manifestPath), false)
+    assert.equal(fs.existsSync(validationPath), false)
+    seedSuccess()
+    persistEvidenceAttempt(options, () => {
+      atomicEvidenceWrite(diffPath, Buffer.from('complete new diff'))
+      atomicEvidenceWrite(validationPath, JSON.stringify({ passed: true }))
+      atomicEvidenceWrite(manifestPath, JSON.stringify({ qualificationPassed: true }))
+    })
+    assert.equal(fs.readFileSync(diffPath, 'utf8'), 'complete new diff')
+    assert.equal(JSON.parse(fs.readFileSync(manifestPath)).qualificationPassed, true)
+  })
 })

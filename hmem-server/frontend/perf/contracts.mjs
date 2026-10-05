@@ -1,4 +1,6 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
 
 export const BASE_COMMIT = 'ca04f51c3494c83c433d12bd7791f89be876daea'
 export const HARNESS_CONFIGURATION = Object.freeze({
@@ -547,5 +549,70 @@ export function createUsablePaintReadiness(workspaceId, expectedItems) {
         && snapshot && !snapshot.invalid && snapshot.workspaceId === workspaceId && snapshot.profile === 'workspace_shell_v1'
         && snapshot.items === expectedItems && snapshot.pages === 1 && time(snapshot.completeAt) && receivedBeforeFrame(snapshot, observation))
     }
+  }
+}
+
+export const EVIDENCE_OUTPUT_LIMITS = Object.freeze({
+  commandBytes: 32 * 1024 * 1024, totalBytes: 128 * 1024 * 1024,
+  commandTimeoutMs: 30000, totalTimeoutMs: 60000
+})
+
+// Every subprocess is joined by spawnSync; no-index exit 1 is a valid diff only
+// when the child returned complete bounded binary output without an error.
+export function createEvidenceCapture({ cwd, limits = EVIDENCE_OUTPUT_LIMITS, run = spawnSync, now = () => performance.now() }) {
+  for (const key of Object.keys(EVIDENCE_OUTPUT_LIMITS)) {
+    if (!Number.isSafeInteger(limits[key]) || limits[key] <= 0) throw new Error('Invalid evidence limit: ' + key)
+  }
+  const started = now()
+  let used = 0
+  return {
+    read(args, { label = args.join(' '), acceptedExitCodes = [0] } = {}) {
+      const remainingMs = Math.floor(limits.totalTimeoutMs - (now() - started))
+      const remainingBytes = Math.min(limits.commandBytes, limits.totalBytes - used)
+      if (remainingMs <= 0 || remainingBytes <= 0) throw new Error('Evidence collection limit reached before ' + label)
+      const result = run('git', args, { cwd, encoding: null, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+        maxBuffer: remainingBytes, timeout: Math.min(limits.commandTimeoutMs, remainingMs), killSignal: 'SIGKILL' })
+      const stdout = result.stdout, stderr = result.stderr
+      const byteCount = Buffer.isBuffer(stdout) && Buffer.isBuffer(stderr) ? stdout.length + stderr.length : null
+      if (result.error || result.signal || !acceptedExitCodes.includes(result.status) || byteCount === null
+        || byteCount > remainingBytes || (result.status === 1 && stdout.length === 0)
+        || now() - started > limits.totalTimeoutMs) {
+        throw new Error('Evidence command failed: ' + label + '; status=' + result.status + '; signal=' + result.signal
+          + '; bytes=' + byteCount + '/' + remainingBytes + '; timeoutMs=' + Math.min(limits.commandTimeoutMs, remainingMs)
+          + '; ' + (result.error?.code || result.error?.message || 'incomplete or unsuccessful output'), { cause: result.error })
+      }
+      used += byteCount
+      return stdout
+    },
+    bytes: () => used
+  }
+}
+
+export function atomicEvidenceWrite(file, bytes, { write = fs.writeFileSync, rename = fs.renameSync, remove = fs.unlinkSync } = {}) {
+  const temporary = file + '.' + randomUUID() + '.tmp'
+  try { write(temporary, bytes, { flag: 'wx' }); rename(temporary, file) }
+  finally {
+    try { remove(temporary) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
+}
+
+// Invalidate success before collection/writes. On any partial failure retain
+// explicit failure receipts, or remove old success if the filesystem rejects them.
+export function persistEvidenceAttempt({ manifestPath, validationPath, failureValidation, failureManifest,
+  write = atomicEvidenceWrite, remove = fs.unlinkSync }, action) {
+  const discard = file => { try { remove(file) } catch (error) { if (error.code !== 'ENOENT') throw error } }
+  try {
+    discard(manifestPath)
+    return action()
+  } catch (error) {
+    const failures = []
+    for (const file of [manifestPath, validationPath]) {
+      try { discard(file) } catch (failure) { failures.push(failure) }
+    }
+    for (const [file, receipt] of [[validationPath, failureValidation], [manifestPath, failureManifest]]) {
+      try { write(file, JSON.stringify(receipt(error), null, 2) + '\n') } catch (failure) { failures.push(failure) }
+    }
+    if (failures.length) throw new Error(error.message + '; failure receipt persistence failed: ' + failures.map(f => f.message).join('; '), { cause: error })
+    throw error
   }
 }

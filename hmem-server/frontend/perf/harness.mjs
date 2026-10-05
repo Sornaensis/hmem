@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
-import { createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { createEvidenceCapture, atomicEvidenceWrite, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -90,19 +90,15 @@ function normalizedRepositoryPath(file) {
   return path.relative(path.resolve(frontendRoot, '..', '..'), file).split(path.sep).join('/')
 }
 
-function untrackedFileDiff(repositoryRoot, relativePath) {
-  try {
-    return execFileSync('git', ['diff', '--binary', '--no-index', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '--', '/dev/null', relativePath], { cwd: repositoryRoot })
-  } catch (error) {
-    if (error.status === 1 && error.stdout) return error.stdout
-    throw error
-  }
+export function untrackedFileDiff(repositoryRoot, relativePath, capture = createEvidenceCapture({ cwd: repositoryRoot })) {
+  return capture.read(['diff', '--binary', '--no-index', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '--', '/dev/null', relativePath],
+    { label: 'untracked diff ' + relativePath, acceptedExitCodes: [0, 1] })
 }
 
-function sourceProvenance() {
+function sourceProvenance(capture = createEvidenceCapture({ cwd: path.resolve(frontendRoot, '..', '..') })) {
   const repositoryRoot = path.resolve(frontendRoot, '..', '..')
-  const headCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot, encoding: 'utf8' }).trim()
-  const orderedCommits = execFileSync('git', ['rev-list', '--reverse', evidenceBaseCommit + '..' + headCommit], { cwd: repositoryRoot, encoding: 'utf8' }).trim().split(/\r?\n/).filter(Boolean)
+  const headCommit = capture.read(['rev-parse', 'HEAD'], { label: 'current source revision' }).toString('utf8').trim()
+  const orderedCommits = capture.read(['rev-list', '--reverse', evidenceBaseCommit + '..' + headCommit], { label: 'ordered source commit chain' }).toString('utf8').trim().split(/\r?\n/).filter(Boolean)
   return { reviewBaseCommit: evidenceBaseCommit, headCommit, orderedCommits, workingTreeQualification: 'exact source and production-asset SHA-256 list; complete diff from review base retained separately' }
 }
 
@@ -121,6 +117,7 @@ function inputQualification() {
 
 function finalWorkingTreeEvidence() {
   const repositoryRoot = path.resolve(frontendRoot, '..', '..')
+  const capture = createEvidenceCapture({ cwd: repositoryRoot })
   // Review subjects deliberately exclude generated evidence from their source
   // patch. Retain v1 alongside v2 here so a historical artifact cannot leak
   // into the 04fd complete diff merely because it remains untracked locally.
@@ -130,18 +127,18 @@ function finalWorkingTreeEvidence() {
     path.join(here, `final-working-tree.evidence-manifest.${revision}.json`),
     path.join(here, `final-working-tree.validation-record.${revision}.json`)
   ]).concat([evidenceDiffPath, path.join(here, 'final-working-tree.complete.diff')]).map(normalizedRepositoryPath))
-  const trackedPaths = execFileSync('git', ['diff', '--name-only', evidenceBaseCommit, '--'], { cwd: repositoryRoot, encoding: 'utf8' })
+  const trackedPaths = capture.read(['diff', '--name-only', evidenceBaseCommit, '--'], { label: 'tracked path list' }).toString('utf8')
     .trim().split(/\r?\n/).filter(Boolean)
     .filter(relative => !artifactPaths.has(relative) && !relative.startsWith('.scratch/expanded-navigation-perf/'))
   const trackedDiff = trackedPaths.length === 0
     ? Buffer.alloc(0)
-    : execFileSync('git', ['diff', '--binary', '--no-ext-diff', evidenceBaseCommit, '--', ...trackedPaths], { cwd: repositoryRoot })
-  const untrackedPaths = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd: repositoryRoot, encoding: 'utf8' })
+    : capture.read(['diff', '--binary', '--no-ext-diff', evidenceBaseCommit, '--', ...trackedPaths], { label: 'tracked complete diff' })
+  const untrackedPaths = capture.read(['ls-files', '--others', '--exclude-standard'], { label: 'untracked path list' }).toString('utf8')
     .trim().split(/\r?\n/).filter(Boolean)
     .filter(relative => !artifactPaths.has(relative) && !relative.startsWith('.scratch/expanded-navigation-perf/'))
-  const diff = Buffer.concat([trackedDiff, ...untrackedPaths.map(relative => untrackedFileDiff(repositoryRoot, relative))])
-  fs.writeFileSync(evidenceDiffPath, diff)
-  const baselineAtBase = execFileSync('git', ['show', `${evidenceBaseCommit}:hmem-server/frontend/perf/baseline.v1.json`], { cwd: repositoryRoot })
+  const diff = Buffer.concat([trackedDiff, ...untrackedPaths.map(relative => untrackedFileDiff(repositoryRoot, relative, capture))])
+  atomicEvidenceWrite(evidenceDiffPath, diff)
+  const baselineAtBase = capture.read(['show', `${evidenceBaseCommit}:hmem-server/frontend/perf/baseline.v1.json`], { label: 'immutable baseline at review base' })
   const baselineNow = fs.readFileSync(baselinePath)
   const changedPaths = [...new Set([...trackedPaths, ...untrackedPaths])]
     .map(relative => path.join(repositoryRoot, relative))
@@ -160,7 +157,7 @@ function finalWorkingTreeEvidence() {
     taskId: evidenceTask?.taskId || null,
     parentTaskId: evidenceTask?.parentTaskId || null,
     measurementPhase: HARNESS_CONFIGURATION.scenarioIsolation,
-    sourceProvenance: sourceProvenance(),
+    sourceProvenance: sourceProvenance(capture),
     qualificationPassed: fs.existsSync(validationRecordPath) && JSON.parse(fs.readFileSync(validationRecordPath, 'utf8')).passed === true,
     evidenceBaseCommit,
     normalization: 'repository-relative POSIX paths; SHA-256 of exact file bytes; binary Git diff without external diff drivers; untracked source files represented by deterministic no-index additions; generated evidence artifacts separately hash-listed',
@@ -177,7 +174,7 @@ function finalWorkingTreeEvidence() {
     completeDiff: { path: normalizedRepositoryPath(evidenceDiffPath), sha256: sha256File(evidenceDiffPath), sizeBytes: fs.statSync(evidenceDiffPath).size }
   }
   if (!manifest.equality.byteForByteEqual) throw new Error('immutable baseline differs from evidence base')
-  fs.writeFileSync(evidenceManifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+  atomicEvidenceWrite(evidenceManifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 }
 
 // Bind proof intent to the actual source-ordered rendered Retry button, never DTO bytes.
@@ -1303,8 +1300,8 @@ function persistQualification(result, prerequisite, qualifiedInputs, command, re
   if (JSON.stringify(inputQualification()) !== JSON.stringify(qualifiedInputs)) throw new Error('qualification inputs changed before finalization')
   if (mode === 'record') {
     const traceManifest = { schemaVersion: 1, baseCommit: BASE_COMMIT, taskId: evidenceTask?.taskId || null, evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs, sourceProvenance: result.sourceProvenance, contracts: result.contracts, trace: result.trace, retirement }
-    fs.writeFileSync(recordOutputPath, JSON.stringify(result, null, 2) + '\n')
-    fs.writeFileSync(recordTraceManifestPath, JSON.stringify(traceManifest, null, 2) + '\n')
+    atomicEvidenceWrite(recordOutputPath, JSON.stringify(result, null, 2) + '\n')
+    atomicEvidenceWrite(recordTraceManifestPath, JSON.stringify(traceManifest, null, 2) + '\n')
     if (recordOutputPath !== baselinePath && evidenceRevision !== 'expanded-hierarchy.v1') finalWorkingTreeEvidence()
   }
   if (evidenceRevision === 'expanded-hierarchy.v1') {
@@ -1318,20 +1315,26 @@ function persistQualification(result, prerequisite, qualifiedInputs, command, re
       recordEvaluation: previous?.recordEvaluation || result.evaluation,
       check: mode === 'check' ? { environment: result.environment, runs: result.runs, aggregates: result.aggregates, evaluation: result.evaluation } : null
     }
-    fs.writeFileSync(validationRecordPath, JSON.stringify(validation, null, 2) + '\n')
+    atomicEvidenceWrite(validationRecordPath, JSON.stringify(validation, null, 2) + '\n')
     finalWorkingTreeEvidence()
   }
   if (mode === 'record') console.log('AUTHORIZED RECORD finalized after owned retirement: ' + recordOutputPath + '; actual budget evaluation is preserved.')
   if (mode === 'check' && evidenceTask && evidenceRevision !== 'expanded-hierarchy.v1' && result.evaluation.passed && fs.existsSync(validationRecordPath)) finalWorkingTreeEvidence()
 }
 
-function persistQualificationFailure(error, command, qualifiedInputs, retirement) {
-  if (evidenceRevision !== 'expanded-hierarchy.v1') return
-  const failed = { schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId, evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs, commands: [{ ...command, exitCode: 2 }], retirement, passed: false, failure: error.message }
-  fs.writeFileSync(validationRecordPath, JSON.stringify(failed, null, 2) + '\n')
-  // Invalidate even an older successful manifest when the new invocation fails.
-  fs.writeFileSync(evidenceManifestPath, JSON.stringify({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit, qualificationPassed: false, failure: error.message, retirement, validationRecord: { path: normalizedRepositoryPath(validationRecordPath), sha256: sha256File(validationRecordPath) } }, null, 2) + '\n')
+function qualificationAttempt(command, qualifiedInputs, retirement, action) {
+  if (evidenceRevision !== 'expanded-hierarchy.v1') return action()
+  return persistEvidenceAttempt({
+    manifestPath: evidenceManifestPath, validationPath: validationRecordPath,
+    failureValidation: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId,
+      evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs,
+      commands: [{ ...command, exitCode: 2 }], retirement, passed: false, failure: error.message }),
+    failureManifest: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit,
+      qualificationPassed: false, failure: error.message, retirement,
+      validationRecord: { path: normalizedRepositoryPath(validationRecordPath), sha256: sha256File(validationRecordPath) } })
+  }, action)
 }
+
 
 
 async function main() {
@@ -1487,12 +1490,11 @@ async function main() {
   }
   if (!retirement.passed) failure = new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; '))
   if (failure) {
-    persistQualificationFailure(failure, command, qualifiedInputs, retirement)
+    qualificationAttempt(command, qualifiedInputs, retirement, () => { throw failure })
     throw failure
   }
   measuredResult.retirement = retirement
-  try { persistQualification(measuredResult, prerequisite, qualifiedInputs, command, retirement) }
-  catch (error) { persistQualificationFailure(error, command, qualifiedInputs, retirement); throw error }
+  qualificationAttempt(command, qualifiedInputs, retirement, () => persistQualification(measuredResult, prerequisite, qualifiedInputs, command, retirement))
   if (mode === 'check' && !measuredResult.evaluation.passed) process.exitCode = 1
 }
 

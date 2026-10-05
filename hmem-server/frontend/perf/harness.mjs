@@ -188,8 +188,11 @@ export async function retryNavigationKind(page, tracker, owner, kind) {
       || (tracker.activeBranchOwners.get('workspace_root') || 0) !== 0 || tracker.activeSnapshots !== 0) throw new Error('Retry owner is unsettled before click')
   }
   assertQuiet()
-  const button = page.locator('.hierarchy-row[data-hierarchy-key=' + JSON.stringify('status:' + owner) + '] .card-description-error')
-    .getByRole('button', { name: 'Retry', exact: true }).nth(selection.buttonIndex)
+  const selector = owner === 'workspace_root'
+    ? '.hierarchy-row[data-hierarchy-key=' + JSON.stringify('root-status:' + kind) + ']'
+    : '.hierarchy-row[data-hierarchy-key=' + JSON.stringify('status:' + owner) + '] .card-description-error'
+  const button = page.locator(selector)
+    .getByRole('button', { name: owner === 'workspace_root' ? 'Retry loading ' + kind + 's' : 'Retry', exact: true }).nth(owner === 'workspace_root' ? 0 : selection.buttonIndex)
   await button.waitFor({ state: 'visible', timeout: 5000 })
   assertQuiet()
   tracker.navigationProof.armRetry(selection, true)
@@ -323,7 +326,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
       showOnly: url.searchParams.get('show_only'), projectStatuses: url.searchParams.getAll('project_status'), taskStatuses: url.searchParams.getAll('task_status'),
       priorityMode: url.searchParams.get('priority_mode'), priorityValue: url.searchParams.get('priority_value'), query: url.searchParams.get('query')
       })
-      return reply(route, request, options.navigationResponseTransform ? options.navigationResponseTransform(value, url) : value)
+      return reply(route, request, options.navigationResponseTransform ? options.navigationResponseTransform(value, url) : value, options.navigationResponseStatus ? options.navigationResponseStatus(url) : 200)
     }
     if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/navigation/summaries`) {
       const body = request.postDataJSON()

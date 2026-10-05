@@ -710,6 +710,53 @@ function referenceAcceptedOwnerComplete(pages, expected) {
   } catch { return false }
 }
 
+
+function referenceAcceptedRoots(pages, expected, retiredBefore) {
+  const demand = { project: new Set(), task: new Set() }, accepted = { project: new Map(), task: new Map() }
+  let state = null, unknown = true, retired = false, acceptedRoot = false, refreshing = false, wholeErrorMask = null
+  for (const page of pages) {
+    if (!retired && retiredBefore(page)) { state = null; accepted.project.clear(); accepted.task.clear(); retired = true; refreshing = true }
+    const selected = page.selectedRetryKind
+    if (!state || (!selected && page.projectOffset === 0 && page.taskOffset === 0 && !Object.values(state).some(kind => kind.paused))) {
+      refreshing = refreshing || acceptedRoot
+      wholeErrorMask = null
+      state = { project: { offset: 0, pending: true, paused: false }, task: { offset: 0, pending: true, paused: false } }
+      accepted.project.clear(); accepted.task.clear()
+    }
+    const selectionMatches = selected && state[selected].paused && page.projectOffset === state.project.offset && page.taskOffset === state.task.offset
+    const automatic = ['project', 'task'].filter(kind => state[kind].pending && state[kind].offset === page[kind + 'Offset'])
+    const manual = !selected && !automatic.length ? ['project', 'task'].filter(kind => !state[kind].paused && page[kind + 'Offset'] > state[kind].offset) : []
+    const retryMask = selectionMatches && wholeErrorMask && !Object.values(state).some(kind => kind.pauseReason === 'stream') ? wholeErrorMask : null
+    const eligible = selectionMatches ? retryMask || [selected] : selected ? [] : automatic.length ? automatic : manual
+    if (eligible.length) wholeErrorMask = null
+    unknown = eligible.length === 0
+    for (const kind of eligible) {
+      const offset = page[kind + 'Offset'], limit = page[kind + 'Limit'], stream = page[kind + 's'], wanted = expected[kind].slice(offset, offset + limit)
+      demand[kind].add(offset)
+      const valid = page.done && !page.error && stream && limit === 50 && JSON.stringify(stream.ids) === JSON.stringify(wanted) && stream.hasMore === (offset + 50 < expected[kind].length)
+      accepted[kind].set(offset, { offset, limit, stream, valid })
+      if (page.done) {
+        const pending = !!(refreshing && valid && stream.hasMore && [...demand[kind]].some(demanded => demanded >= offset + stream.ids.length))
+        state[kind] = { offset: offset + (pending ? 50 : 0), pending, paused: !valid, pauseReason: valid ? null : page.error ? 'http' : 'stream' }
+      }
+    }
+    if (page.done && page.error) { wholeErrorMask = eligible; for (const kind of ['project', 'task']) state[kind].pending = false }
+    else if (page.done) acceptedRoot = true
+  }
+  if (!state || unknown || Object.values(state).some(kind => kind.pending || kind.paused)) return null
+  const roots = []
+  for (const kind of ['project', 'task']) for (const offset of demand[kind]) {
+    const page = accepted[kind].get(offset)
+    if (!page) {
+      if ([...accepted[kind].values()].some(value => value.valid && !value.stream.hasMore && value.offset < offset && value.offset + value.stream.ids.length <= offset)) continue
+      return null
+    }
+    if (!page.valid) return null
+    roots.push(...page.stream.ids.map(id => kind + ':' + id))
+  }
+  return roots
+}
+
 function indexedProofControl(children, rootProjects, rootTasks) {
   let currentChildren = structuredClone(children), collapsed = [], session = 0, authorized = false
   const history = [], normal = 'normal'
@@ -722,14 +769,9 @@ function indexedProofControl(children, rootProjects, rootTasks) {
     for (let i = 0; i < lifetime.length; i++) if (lifetime[i].owner === 'workspace_root' && lifetime[i].context !== active) { active = lifetime[i].context; start = i }
     if (active !== normal) return false
     const current = lifetime.slice(start).filter(page => page.context === normal)
-    const root = currentRootNavigationPass(current.filter(page => page.owner === 'workspace_root').map(page => history.indexOf(page) < proofStart ? { ...page, done: false } : page))
-    if (!root) return false
-    const roots = []
-    for (const [kind, wanted] of [['project', rootProjects], ['task', rootTasks]]) for (const page of root[kind]) {
-      const stream = page[kind + 's'], offset = page[kind + 'Offset'], limit = page[kind + 'Limit']
-      if (page.error || limit !== 50 || JSON.stringify(stream.ids) !== JSON.stringify(wanted.slice(offset, offset + limit)) || stream.hasMore !== (offset + limit < wanted.length)) return false
-      roots.push(...stream.ids.map(id => kind + ':' + id))
-    }
+    if (!current.some(page => page.owner === 'workspace_root' && history.indexOf(page) >= proofStart)) return false
+    const roots = referenceAcceptedRoots(current.filter(page => page.owner === 'workspace_root'), { project: rootProjects, task: rootTasks }, page => proofStart > 0 && history.indexOf(page) >= proofStart)
+    if (!roots) return false
     const passes = {}
     for (const page of current) if (page.owner !== 'workspace_root' && history.indexOf(page) >= proofStart) (passes[page.owner] ||= []).push(page)
     const pending = [...roots], seen = new Set()
@@ -764,7 +806,7 @@ function indexedProofControl(children, rootProjects, rootTasks) {
       history.push(page); page.stamp = index.admit(page); check(); return page
     },
     complete(page, projects, tasks, status = 200, hasProjectMore = false, hasTaskMore = false) {
-      if (page.done || (page.owner !== 'workspace_root' && history.findLast(candidate => candidate.owner === page.owner && candidate.session === page.session && candidate.context === page.context) !== page)) { index.complete(page.stamp, { projects: { ids: projects, hasMore: hasProjectMore }, tasks: { ids: tasks, hasMore: hasTaskMore } }, status); check(); return }
+      if (page.done || history.findLast(candidate => candidate.owner === page.owner && candidate.session === page.session && candidate.context === page.context) !== page) { index.complete(page.stamp, { projects: { ids: projects, hasMore: hasProjectMore }, tasks: { ids: tasks, hasMore: hasTaskMore } }, status); check(); return }
       page.done = true; page.error = status >= 400
       page.projects = { ids: projects, hasMore: hasProjectMore }; page.tasks = { ids: tasks, hasMore: hasTaskMore }
       index.complete(page.stamp, { projects: page.projects, tasks: page.tasks }, status); check()
@@ -829,8 +871,11 @@ test('indexed root admission retires old terminal coverage and preserves indepen
   const continuation = control.admit('workspace_root', 50, 0)
   control.check(false)
   control.complete(continuation, ids.slice(50), []); control.check(true) // task zero companion doesn't retire project zero
+  const malformedRefresh = control.admit()
+  control.complete(malformedRefresh, ids.slice(0, 50), [], 200, true)
   const malformed = control.admit('workspace_root', 50, 0)
   control.complete(malformed, ids.slice(50).reverse(), []); control.check(false)
+  control.retry('workspace_root', 'project')
   const corrected = control.admit('workspace_root', 50, 0)
   control.complete(corrected, ids.slice(50), []); control.check(true)
   control.snapshot(); control.check(true)
@@ -1117,4 +1162,112 @@ test('retry intent is one-shot and retired by authoritative lifetime, pass, filt
   value.proof.complete(unstamped, { projects: { ids: [], hasMore: false }, tasks: { ids: Array.from({ length: 25 }, (_, i) => 'intent' + (i + 50)), hasMore: false } })
   assert.equal(value.proof.ready(), false, 'unmatched admission consumed intent; valid bytes do not infer retry')
   assert.throws(() => value.proof.armRetry(value.selection), /retired/)
+})
+
+
+test('actual root healthy companion stays incomplete until selected paused-root retry', async () => {
+  const base = generateFixture('small'), p = base.projects[0], t = base.tasks[0]
+  const fixture = { ...base, projects: Array.from({ length: 100 }, (_, i) => ({ ...p, id: 'RP' + i, parent_id: null, name: 'P' + String(i).padStart(3, '0'), status: 'active', priority: 0 })), tasks: Array.from({ length: 150 }, (_, i) => ({ ...t, id: 'RT' + i, parent_id: null, project_id: null, title: 'T' + String(i).padStart(3, '0'), status: 'todo', priority: 0 })), dependencies: [] }
+  let malformed = false
+  const tracker = createTracker(fixture), respond = fixtureResponder(fixture, tracker, {
+    navigationResponseTransform(value, url) {
+      if (malformed && url.searchParams.get('project_offset') === '50' && url.searchParams.get('task_offset') === '50') {
+        malformed = false
+        return { ...value, projects: { items: navigationBranchResponse(fixture).projects.items, has_more: true } }
+      }
+      return value
+    }
+  })
+  const reply = async (po, to) => {
+    const url = '/api/v1/workspaces/' + fixture.workspace.id + '/navigation?parent_kind=workspace_root&project_offset=' + po + '&task_offset=' + to + '&project_limit=50&task_limit=50&priority_mode=any'
+    const request = { url: () => 'http://fixture' + url, method: () => 'GET' }
+    await respond({ request: () => request, fulfill: async () => {} })
+  }
+  const session = { url: () => 'http://fixture/api/v1/session', method: () => 'GET' }
+  await respond({ request: () => session, fulfill: async () => {} })
+  await reply(0, 0); await reply(50, 0); await reply(50, 50); await reply(50, 100)
+  assert.equal(tracker.navigationProof.ready(), true)
+  await reply(0, 0)
+  malformed = true; await reply(50, 50)
+  assert.equal(tracker.navigationProof.ready(), false)
+  await reply(50, 100)
+  assert.equal(tracker.navigationProof.ready(), false, 'actual valid inactive project companion cannot clear its paused kind')
+  const page = { locator(selector) {
+    assert.equal(selector, '.hierarchy-row[data-hierarchy-key="root-status:project"]')
+    return { getByRole(role, options) {
+      assert.equal(role, 'button'); assert.equal(options.name, 'Retry loading projects')
+      return { nth() { return this }, async waitFor() {}, async click() { await reply(50, 100) } }
+    } }
+  } }
+  await retryNavigationKind(page, tracker, 'workspace_root', 'project')
+  assert.equal(tracker.navigationProof.ready(), true)
+  assert.equal(tracker.requests.length, tracker.completed)
+})
+
+
+test('root zero retry preserves independent terminal coverage and requires observable lifetime retirement', () => {
+  const control = indexedProofControl({ 'project:p': { projects: [], tasks: [] }, 'task:t': { projects: [], tasks: [] } }, ['p'], ['t'])
+  control.session()
+  const bootstrap = control.admit()
+  control.complete(bootstrap, ['p'], ['t']); control.check(true)
+  const badZero = control.admit()
+  control.complete(badZero, ['wrong'], ['t']); control.check(false)
+  const ambiguousZero = control.admit()
+  control.complete(ambiguousZero, ['p'], ['wrong']); control.check(false)
+  control.retry('workspace_root', 'project')
+  const selectedZero = control.admit()
+  control.complete(selectedZero, ['p'], ['wrong']); control.check(true) // terminal task companion ignored, not reset
+  control.snapshot(); control.check(true) // first shell preserves bootstrap
+  const held = control.admit('workspace_root', 50, 0)
+  control.snapshot(); control.check(false)
+  const genuinelyFresh = control.admit()
+  control.complete(genuinelyFresh, ['p'], ['t']); control.check(true) // short authoritative prefix satisfies retained demand
+  control.complete(held, [], ['wrong']); control.check(true)
+})
+
+
+test('actual bootstrap whole-root HTTP failure recovers both kinds through one rendered project Retry', async () => {
+  const base = generateFixture('small')
+  const fixture = { ...base, projects: [{ ...base.projects[0], id: 'initial-p', parent_id: null }], tasks: [{ ...base.tasks[0], id: 'initial-t', project_id: null, parent_id: null }], dependencies: [] }
+  let failedOnce = false, clicks = 0
+  const statuses = []
+  const tracker = createTracker(fixture), respond = fixtureResponder(fixture, tracker, { navigationResponseStatus() { if (!failedOnce) { failedOnce = true; return 500 } return 200 } })
+  const reply = async (url, body = null) => {
+    const request = { url: () => 'http://fixture' + url, method: () => body ? 'POST' : 'GET', postDataJSON: () => body }
+    await respond({ request: () => request, fulfill: async response => { statuses.push(response.status) } })
+  }
+  const navigation = '/api/v1/workspaces/' + fixture.workspace.id + '/navigation?parent_kind=workspace_root&project_offset=0&task_offset=0&project_limit=50&task_limit=50&priority_mode=any'
+  await reply('/api/v1/session')
+  await reply(navigation)
+  assert.equal(tracker.navigationProof.ready(), false)
+  await reply('/api/v1/change-stream/resync', { snapshot_profile: 'workspace_shell_v1', page_size: 100 })
+  assert.equal(tracker.navigationProof.ready(), false, 'first sparse shell preserves failed bootstrap ownership')
+  const page = { locator(selector) {
+    assert.equal(selector, '.hierarchy-row[data-hierarchy-key="root-status:project"]')
+    return { getByRole(role, options) {
+      assert.equal(options.name, 'Retry loading projects')
+      return { nth() { return this }, async waitFor() {}, async click() { clicks++; await reply(navigation) } }
+    } }
+  } }
+  await retryNavigationKind(page, tracker, 'workspace_root', 'project')
+  assert.equal(tracker.navigationProof.ready(), true, 'nonrefresh producer accepts both successful companion streams')
+  assert.equal(clicks, 1, 'no second task Retry is needed by the producer')
+  assert.equal(statuses.filter(status => status === 500).length, 1)
+  assert.equal(tracker.requests.length, tracker.completed)
+})
+
+
+test('manual nonrefresh root HTTP retry preserves its pre-error single-kind mask', () => {
+  const projects = Array.from({ length: 60 }, (_, i) => 'manual' + i)
+  const leaves = { ...Object.fromEntries(projects.map(id => ['project:' + id, { projects: [], tasks: [] }])), 'task:t': { projects: [], tasks: [] } }
+  const control = indexedProofControl(leaves, projects, ['t'])
+  control.session()
+  const bootstrap = control.admit()
+  control.complete(bootstrap, projects.slice(0, 50), ['t'], 200, true); control.check(true)
+  const projectPage = control.admit('workspace_root', 50, 0)
+  control.complete(projectPage, projects.slice(50), ['t'], 500); control.check(false)
+  control.retry('workspace_root', 'project')
+  const retry = control.admit('workspace_root', 50, 0)
+  assert.deepEqual(Object.keys(retry.stamp.slots), ['project'], 'terminal task companion is not re-admitted by a project-only failed request')
+  control.complete(retry, projects.slice(50), ['t']); control.check(true)
 })

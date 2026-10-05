@@ -268,6 +268,7 @@ export function currentRootNavigationPass(pages) {
 export function createNavigationCompletionIndex({ children, rootProjects, rootTasks, context }) {
   let epoch = 0, authorized = false, activeContext = null, rootEpoch = 0, revision = 0, checkedRevision = -1, cachedReady = false
   let owners = new Map(), rootCoverage = { project: new Map(), task: new Map() }, demand = { project: new Set(), task: new Set() }
+  let rootAccepted = false, authoritativeRootRefresh = false
   let rootResult = null, collapsed = new Set(), subtree = new Map(), parents = new Map()
   let snapshotEpoch = 0, acceptedSnapshotEpoch = -1, hasAcceptedSnapshot = false, retryIntents = new Map(), intentEpoch = 0
   const armedSelections = new WeakSet()
@@ -292,7 +293,7 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
   const resetContext = next => {
     activeContext = next; owners = new Map(); subtree = new Map(); retryIntents.clear(); intentEpoch++
     rootCoverage = { project: new Map(), task: new Map() }; demand = { project: new Set(), task: new Set() }
-    rootEpoch++; rootResult = null; revision++
+    rootEpoch++; rootAccepted = false; authoritativeRootRefresh = false; rootResult = null; revision++
   }
   const ownerComplete = key => {
     const expected = children[key], state = owners.get(key)
@@ -326,19 +327,21 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
     if (rootResult !== null) return rootResult
     const roots = []
     if (!demand.project.size && !demand.task.size) return false
+    const state = owners.get('workspace_root')
+    if (!state || state.unknown || Object.values(state.kinds).some(kind => kind.paused || kind.pending)) return false
     for (const [kind, expected] of [['project', rootProjects], ['task', rootTasks]]) for (const offset of demand[kind]) {
       const page = rootCoverage[kind].get(offset)
       if (!page) {
         const exhausted = [...rootCoverage[kind].values()].some(value => {
-          const stream = value[kind + 's']
-          return value.done && !value.error && stream && stream.hasMore === false && value[kind + 'Offset'] < offset
-            && value[kind + 'Offset'] + stream.ids.length <= offset
+          const stream = value.stream
+          return value.done && !value.error && stream && stream.hasMore === false && value.offset < offset
+            && value.offset + stream.ids.length <= offset
         })
         if (exhausted) continue
         return false
       }
-      const stream = page[kind + 's'], wanted = expected.slice(offset, offset + page[kind + 'Limit'])
-      if (!page.done || page.error || !stream || page[kind + 'Limit'] !== 50
+      const stream = page.stream, wanted = expected.slice(offset, offset + page.limit)
+      if (!page.done || page.error || !stream || page.limit !== 50
         || JSON.stringify(stream.ids) !== JSON.stringify(wanted) || stream.hasMore !== (offset + 50 < expected.length)) return false
       roots.push(...stream.ids.map(id => kind + ':' + id))
     }
@@ -362,7 +365,7 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
       if (initialShell) return
       // A later accepted authoritative snapshot revalidates every expanded owner.
       // Preserve manual root demand and effective collapse, but retire old callbacks.
-      owners = new Map(); subtree = new Map(); retryIntents.clear(); intentEpoch++; rootEpoch++
+      owners = new Map(); subtree = new Map(); retryIntents.clear(); intentEpoch++; rootEpoch++; authoritativeRootRefresh = true
       rootCoverage = { project: new Map(), task: new Map() }; rootResult = null; revision++
     },
     completeSession(stamp, canRead) { if (stamp !== epoch) return; authorized = canRead === true; revision++ },
@@ -371,14 +374,29 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
       if (request.owner === 'workspace_root' && request.context !== activeContext) resetContext(request.context)
       if (request.context !== activeContext) { stamp.retired = true; return stamp }
       if (request.owner === 'workspace_root') {
+        let state = owners.get(request.owner)
+        const intent = retryIntents.get(request.owner)
         retryIntents.clear(); intentEpoch++
-        if (request.projectOffset === 0 && request.taskOffset === 0) {
+        const selected = intent && intent.epoch === epoch && intent.context === activeContext && intent.state === state
+          && intent.projectOffset === request.projectOffset && intent.taskOffset === request.taskOffset ? intent.kind : null
+        const zero = request.projectOffset === 0 && request.taskOffset === 0
+        // An unstamped zero while paused is ambiguous with a selected-kind retry.
+        // Session/filter/accepted authoritative snapshot retirement removes state.
+        if (!state || (!selected && zero && !Object.values(state.kinds).some(kind => kind.paused))) {
           rootEpoch++; rootCoverage = { project: new Map(), task: new Map() }
+          state = { refreshing: rootAccepted || authoritativeRootRefresh, wholeErrorMask: null, kinds: { project: { offset: 0, pending: true, paused: false, more: true }, task: { offset: 0, pending: true, paused: false, more: true } }, latest: null, unknown: false }
+          owners.set(request.owner, state)
         }
-        stamp.rootEpoch = rootEpoch
-        for (const kind of ['project', 'task']) if (request[kind + 'Limit'] > 0) {
-          demand[kind].add(request[kind + 'Offset'])
-          rootCoverage[kind].set(request[kind + 'Offset'], stamp)
+        stamp.rootEpoch = rootEpoch; stamp.state = state; state.latest = stamp; stamp.slots = {}
+        const automatic = ['project', 'task'].filter(kind => state.kinds[kind].pending && state.kinds[kind].offset === request[kind + 'Offset'])
+        const manual = !selected && !automatic.length ? ['project', 'task'].filter(kind => !state.kinds[kind].paused && request[kind + 'Offset'] > state.kinds[kind].offset) : []
+        const retryMask = selected && state.wholeErrorMask && !Object.values(state.kinds).some(kind => kind.pauseReason === 'stream') ? state.wholeErrorMask : null
+        const eligible = selected ? retryMask || [selected] : automatic.length ? automatic : manual
+        if (eligible.length) state.wholeErrorMask = null
+        state.unknown = eligible.length === 0
+        for (const kind of eligible) if (request[kind + 'Limit'] > 0) {
+          const slot = { offset: request[kind + 'Offset'], limit: request[kind + 'Limit'], done: false, error: false, stream: null }
+          demand[kind].add(slot.offset); rootCoverage[kind].set(slot.offset, slot); stamp.slots[kind] = slot
         }
         rootResult = null; revision++
       } else {
@@ -405,11 +423,27 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
     },
     complete(stamp, streams, status = 200) {
       if (stamp.retired || stamp.epoch !== epoch || stamp.context !== activeContext) return
-      if (stamp.owner === 'workspace_root' ? stamp.rootEpoch !== rootEpoch : owners.get(stamp.owner) !== stamp.state || stamp.state.latest !== stamp) return
+      if (stamp.owner === 'workspace_root' ? stamp.rootEpoch !== rootEpoch || owners.get(stamp.owner) !== stamp.state || stamp.state.latest !== stamp : owners.get(stamp.owner) !== stamp.state || stamp.state.latest !== stamp) return
       if (stamp.done) return
       stamp.done = true; stamp.error = status >= 400 || !streams
       stamp.projects = streams?.projects || null; stamp.tasks = streams?.tasks || null
-      if (stamp.owner === 'workspace_root') { rootResult = null; revision++ }
+      if (stamp.owner === 'workspace_root') {
+        const state = stamp.state
+        for (const [kind, slot] of Object.entries(stamp.slots)) {
+          const stream = streams?.[kind + 's'], expected = kind === 'project' ? rootProjects : rootTasks
+          const valid = !stamp.error && stream && slot.limit === 50
+            && JSON.stringify(stream.ids) === JSON.stringify(expected.slice(slot.offset, slot.offset + slot.limit))
+            && stream.hasMore === (slot.offset + 50 < expected.length)
+          slot.done = true; slot.error = !valid; slot.stream = stream || null
+          const pending = !!(state.refreshing && valid && stream.hasMore && [...demand[kind]].some(offset => offset >= slot.offset + stream.ids.length))
+          state.kinds[kind] = { offset: slot.offset + (pending ? 50 : 0), pending, paused: !valid, pauseReason: valid ? null : stamp.error ? 'http' : 'stream', more: !!stream?.hasMore }
+        }
+        if (stamp.error) {
+          state.wholeErrorMask = Object.keys(stamp.slots)
+          for (const kind of ['project', 'task']) state.kinds[kind].pending = false
+        } else rootAccepted = true
+        rootResult = null; revision++
+      }
       else {
         const state = stamp.state, expected = children[stamp.owner]
         for (const [kind, slot] of Object.entries(stamp.slots)) {

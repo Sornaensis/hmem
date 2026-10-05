@@ -122,6 +122,17 @@ test('real Markdown and native Tab cross virtual rows, while removing the tab re
   const h = await openHierarchy()
   try {
     await h.start(); await h.idle()
+    await h.page.evaluate(() => {
+      window.hierarchyKeyboardPhases = []
+      document.addEventListener('keydown', event => {
+        if (event.key !== 'Tab') return
+        const active = document.activeElement, row = active?.closest('[data-hierarchy-key]')
+        window.hierarchyKeyboardPhases.push({ reverse: event.shiftKey, active: active?.outerHTML.slice(0, 600), row: row?.dataset.hierarchyKey,
+          previous: row?.dataset.hierarchyPrevious, next: row?.dataset.hierarchyNext, stamp: document.getElementById('hierarchy-viewport')?.dataset.hierarchyContext,
+          controls: [...(row?.querySelectorAll('a[href],button,input,textarea,select,[tabindex]') || [])].slice(0, 12).map(element => ({ html: element.outerHTML.slice(0, 300), tabIndex: element.tabIndex, disabled: !!element.disabled, rects: element.getClientRects().length, visibility: getComputedStyle(element).visibility, display: getComputedStyle(element).display })) })
+        window.hierarchyKeyboardPhases = window.hierarchyKeyboardPhases.slice(-3)
+      }, true)
+    })
     const root = h.page.locator('#entity-root-project')
     await root.locator('.btn-extras-toggle').click()
     const link = root.getByRole('link', { name: 'Markdown link', exact: true })
@@ -137,8 +148,15 @@ test('real Markdown and native Tab cross virtual rows, while removing the tab re
     assert.equal(await h.page.locator('[data-hierarchy-key="' + next.next + '"]').count(), 0, 'Keyboard successor must start outside the mounted window')
     await h.page.keyboard.press('Tab')
     await h.page.waitForFunction(key => document.activeElement?.closest('[data-hierarchy-key]')?.dataset.hierarchyKey === key, next.next)
+    const keyboardPhase = () => h.page.evaluate(() => {
+      const active = document.activeElement, row = active?.closest('[data-hierarchy-key]')
+      return { active: active?.outerHTML.slice(0, 600), row: row?.dataset.hierarchyKey, previous: row?.dataset.hierarchyPrevious,
+        stamp: document.getElementById('hierarchy-viewport')?.dataset.hierarchyContext,
+        controls: [...(row?.querySelectorAll('a[href],button,input,textarea,select,[tabindex]') || [])].slice(0, 12).map(element => ({ html: element.outerHTML.slice(0, 300), tabIndex: element.tabIndex, disabled: !!element.disabled, rects: element.getClientRects().length, visibility: getComputedStyle(element).visibility, display: getComputedStyle(element).display })) }
+    })
     await h.page.keyboard.press('Shift+Tab')
     await h.page.waitForFunction(key => document.activeElement?.closest('[data-hierarchy-key]')?.dataset.hierarchyKey === key, next.current)
+      .catch(async error => { throw new Error(error.message + '\n' + JSON.stringify({ expected: next, keydownPhases: await h.page.evaluate(() => window.hierarchyKeyboardPhases), afterBackward: await keyboardPhase() })) })
     await h.page.locator('.tabs button').nth(1).click()
     await h.page.locator('#hierarchy-viewport').waitFor({ state: 'detached' })
     await h.page.waitForFunction(() => window.hierarchyObserved.size === 0)

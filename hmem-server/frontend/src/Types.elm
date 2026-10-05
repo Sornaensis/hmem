@@ -5,6 +5,7 @@ import Browser
 import Browser.Navigation as Nav
 import Dict exposing (Dict)
 import Feature.ChangeStream
+import HierarchyViewport
 import Http
 import Json.Encode as Encode
 import Set exposing (Set)
@@ -127,6 +128,7 @@ type alias DataLoadingModel =
     , cardDetailAdmissions : Set Int
     , cardDetailRetries : Set ( String, String )
     , visibleDetailDemand : Maybe ( Set String, Set String )
+    , viewportDetailPins : Set ( String, String )
     , rootNavigationPresentation : Maybe NavigationPresentationState
     , navigationPresentations : Dict String NavigationPresentationState
     , projectCardSummaries : Dict String Api.ProjectCardSummary
@@ -400,7 +402,8 @@ type alias DependencyMutationCorrelation =
 
 
 type alias CardsModel =
-    { expandedCards : Dict String Bool
+    { viewport : HierarchyViewportState
+    , expandedCards : Dict String Bool
     , collapsedNodes : Dict String Bool
     , deleteConfirmation : Maybe DeleteConfirmation
     , lastFocusClick : Maybe FocusClick
@@ -410,6 +413,50 @@ type alias CardsModel =
     , projectNextTaskDiagnosticsLoading : Dict String Bool
     , projectNextTasksErrors : Dict String String
     , projectNextTaskDiagnosticsErrors : Dict String String
+    }
+
+
+type alias CardTreeProjection =
+    { projects : List Api.Project
+    , tasks : List Api.Task
+    , projectsById : Dict String Api.Project
+    , tasksById : Dict.Dict String Api.Task
+    , projectChildren : Dict.Dict String (List Api.Project)
+    , projectTasks : Dict.Dict String (List Api.Task)
+    , taskChildren : Dict.Dict String (List Api.Task)
+    , projectRollups : Dict.Dict String Api.ProjectReadinessRollup
+    , taskRollups : Dict.Dict String Api.TaskReadinessRollup
+    , projectAllowsOpenChildren : Dict.Dict String Bool
+    , taskHasClosedAncestor : Dict.Dict String Bool
+    , taskDirectOpenDependencyCounts : Dict.Dict String Int
+    , projectCriteriaMatches : Set String
+    , taskCriteriaMatches : Set String
+    }
+
+
+type alias HierarchyRow =
+    { key : String
+    , kind : String
+    , entityId : String
+    , depth : Int
+    , parentKind : String
+    , parentId : Maybe String
+    , zone : Maybe DropZoneInfo
+    }
+
+
+type alias HierarchyViewportState =
+    { workspaceId : Maybe String
+    , sessionEpoch : Int
+    , generation : Int
+    , revision : Int
+    , rows : Dict String HierarchyRow
+    , index : HierarchyViewport.Index
+    , projection : Maybe CardTreeProjection
+    , top : Float
+    , height : Float
+    , nativePins : Set String
+    , target : Maybe String
     }
 
 
@@ -981,6 +1028,7 @@ type Msg
     | ConfirmWorkspacePurge String
     | PerformWorkspacePurge
     | CancelWorkspacePurge
+    | HierarchyViewportChanged Encode.Value
     | MainContentScrolled Float
     | ClearPendingRequest String
       -- Audit log

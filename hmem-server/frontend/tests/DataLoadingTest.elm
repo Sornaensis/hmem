@@ -1296,7 +1296,7 @@ suite =
                     , branchProjects = Dict.get "project:parent" branchTaskTerminal.dataLoading.loadedNavigationBranches |> Maybe.map .projectCardCount |> Maybe.withDefault 0
                     , branchTasks = Dict.get "project:parent" branchTaskTerminal.dataLoading.loadedNavigationBranches |> Maybe.map .taskCardCount |> Maybe.withDefault 0
                     }
-        , test "root and branch retain the final partial cached window before requesting continuation" <|
+        , test "roots request transport immediately and repeated demand coalesces while branch cursors retain cache" <|
             \_ ->
                 let
                     rootPrepared =
@@ -1360,9 +1360,9 @@ suite =
                         Dict.get "project:parent" current.dataLoading.navigationPresentations |> Maybe.map .projectOffset
                 in
                 Expect.equal
-                    { rootAt25 = ( Just 25, Just ( 0, False ) )
-                    , rootAt50 = ( Just 50, Just ( 0, False ) )
-                    , rootContinuation = ( Just 51, Just ( 50, True ) )
+                    { rootAt25 = ( Just 25, Just ( 50, True ) )
+                    , rootAt50 = ( Just 25, Just ( 50, True ) )
+                    , rootContinuation = ( Just 25, Just ( 50, True ) )
                     , branchAt25 = ( Just 25, Just ( 50, True ) )
                     , branchAt50 = ( Just 50, Just ( 50, True ) )
                     , branchContinuation = ( Just 50, Just ( 50, True ) )

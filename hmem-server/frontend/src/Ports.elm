@@ -77,3 +77,12 @@ port localStorageReceived : (Encode.Value -> msg) -> Sub msg
 
 
 port onMainContentScroll : (Float -> msg) -> Sub msg
+
+
+port onHierarchyViewport : (Encode.Value -> msg) -> Sub msg
+
+
+port syncHierarchyViewport : Encode.Value -> Cmd msg
+
+
+port scrollHierarchyTarget : String -> Cmd msg

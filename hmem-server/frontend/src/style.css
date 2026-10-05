@@ -4138,3 +4138,10 @@ textarea.observation-edit-content {
   font-size: 0.875rem;
   margin: 0.5rem 0 1rem;
 }
+
+/* Every row owns its spacing, so measured heights equal spacer geometry. */
+.hierarchy-viewport { display: block; overflow-anchor: none; }
+.hierarchy-row { box-sizing: border-box; padding-bottom: 6px; }
+.hierarchy-row > .card, .hierarchy-row .tree-card { margin-bottom: 0; }
+.hierarchy-spacer { pointer-events: none; }
+.hierarchy-branch-status { min-height: 24px; font-size: 0.8rem; color: var(--text-muted); }

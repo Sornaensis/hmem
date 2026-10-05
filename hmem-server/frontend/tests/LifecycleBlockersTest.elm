@@ -103,14 +103,18 @@ suite =
                 Expect.equal
                     ( lifecycleModel.mutations.nextRequestId, lifecycleModel.mutations.nextRequestId + 1 )
                     ( (drop "drag").mutations.nextRequestId, (drop "done").mutations.nextRequestId )
-        , test "cancelled parent hides task-subtasks drop affordances for unfinished children" <|
-            \_ ->
-                lifecycleModel |> Feature.DragDrop.update (DragStartCard "task" "drag") |> Tuple.first
-                    |> Feature.Cards.viewProjectsTree "workspace-a"
-                    |> Query.fromHtml
-                    |> Query.find [ Selector.id "entity-parent" ]
-                    |> Query.findAll [ Selector.class "drop-zone" ]
-                    |> Query.count (Expect.equal 0)
+        , test "cancelled parent flat subtask drop rows reject unfinished children and permit done children" <| \_ ->
+            let
+                focus = lifecycleModel.focus
+                focused = { lifecycleModel | focus = { focus | focusedEntity = Just ( "task", "parent" ) } }
+                rendered id = focused |> Feature.DragDrop.update (DragStartCard "task" id) |> Tuple.first
+                    |> Feature.Cards.viewProjectsTree "workspace-a" |> Query.fromHtml
+            in
+            Expect.all
+                [ \_ -> rendered "drag" |> Query.find [ Selector.id "entity-parent" ] |> Query.has [ Selector.class "card-task" ]
+                , \_ -> rendered "drag" |> Query.findAll [ Selector.class "drop-zone" ] |> Query.count (Expect.equal 0)
+                , \_ -> rendered "done" |> Query.findAll [ Selector.class "drop-zone" ] |> Query.count (\count -> Expect.equal True (count > 0))
+                ] ()
         , test "project completion lifecycle errors use project-specific copy and counts" <|
             \_ ->
                 let

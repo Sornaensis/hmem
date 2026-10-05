@@ -20,12 +20,18 @@ module Feature.Cards exposing
     , taskStatusOptionDisabledReason
     , taskStatusOptionsForTask
     , update
+    , refreshViewport
+    , refreshViewportFor
+    , updateViewport
+    , logicalRows
+    , mountedViewportKeys
     , visibleTaskTreeForCriteria
     , viewDeleteConfirmModal
     , viewProjectsTree
     )
 
 import Api
+import Array
 import Char
 import Dict
 import Feature.DataLoading
@@ -40,6 +46,8 @@ import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Html.Keyed as Keyed
+import HierarchyViewport as Viewport
+import Json.Encode as Encode
 import Json.Decode as Decode
 import Ports exposing (copyToClipboard)
 import Set
@@ -49,7 +57,12 @@ import Types exposing (..)
 
 init : CardsModel
 init =
-    { expandedCards = Dict.empty
+    { viewport =
+        { workspaceId = Nothing, sessionEpoch = 0, generation = 0, revision = 0
+        , rows = Dict.empty, index = Viewport.build 160 Dict.empty [], projection = Nothing
+        , top = 0, height = 800, nativePins = Set.empty, target = Nothing
+        }
+    , expandedCards = Dict.empty
     , collapsedNodes = Dict.empty
     , deleteConfirmation = Nothing
     , lastFocusClick = Nothing
@@ -1050,22 +1063,11 @@ viewCompletionGateNote reason =
 -- VIEW
 
 
+
+
+
 type alias CardTreeProjection =
-    { projects : List Api.Project
-    , tasks : List Api.Task
-    , projectsById : Dict.Dict String Api.Project
-    , tasksById : Dict.Dict String Api.Task
-    , projectChildren : Dict.Dict String (List Api.Project)
-    , projectTasks : Dict.Dict String (List Api.Task)
-    , taskChildren : Dict.Dict String (List Api.Task)
-    , projectRollups : Dict.Dict String Api.ProjectReadinessRollup
-    , taskRollups : Dict.Dict String Api.TaskReadinessRollup
-    , projectAllowsOpenChildren : Dict.Dict String Bool
-    , taskHasClosedAncestor : Dict.Dict String Bool
-    , taskDirectOpenDependencyCounts : Dict.Dict String Int
-    , projectCriteriaMatches : Set.Set String
-    , taskCriteriaMatches : Set.Set String
-    }
+    Types.CardTreeProjection
 
 
 orderedProjects : List Api.Project -> List Api.Project
@@ -1383,6 +1385,11 @@ viewCardDescription model entityType entityId description =
 
 viewProjectsTree : String -> Model -> Html Msg
 viewProjectsTree wsId model =
+    viewHierarchyViewport wsId model
+
+
+viewProjectsTreeLegacy : String -> Model -> Html Msg
+viewProjectsTreeLegacy wsId model =
     let
         projection =
             cardTreeProjection wsId model
@@ -1550,6 +1557,11 @@ viewProjectsTree wsId model =
 
 viewProjectNode : CardTreeProjection -> Model -> Int -> Api.Project -> Bool -> String -> Html Msg
 viewProjectNode projection model depth project hasSearch query =
+    viewProjectNodeBody True projection model depth project hasSearch query
+
+
+viewProjectNodeBody : Bool -> CardTreeProjection -> Model -> Int -> Api.Project -> Bool -> String -> Html Msg
+viewProjectNodeBody descendants projection model depth project hasSearch query =
     let
         hasTreeCriteria =
             treeCriteriaActive query model
@@ -1569,9 +1581,10 @@ viewProjectNode projection model depth project hasSearch query =
         children =
             Dict.get project.id projection.projectChildren
                 |> Maybe.withDefault []
-                |> List.sortBy (\p -> ( Api.projectStatusOrder p.status, negate p.priority, String.toLower p.name ))
+                
 
         visibleChildren =
+            if not descendants then [] else
             children
                 |> (if applyLocalTreeCriteria then
                         List.filter (\child -> Set.member child.id projection.projectCriteriaMatches)
@@ -1594,9 +1607,10 @@ viewProjectNode projection model depth project hasSearch query =
         projectTasks =
             Dict.get project.id projection.projectTasks
                 |> Maybe.withDefault []
-                |> List.sortBy (\t -> ( Api.taskStatusOrder t.status, negate t.priority, String.toLower t.title ))
+                
 
         visibleTasks =
+            if not descendants then [] else
             projectTasks
                 |> (if applyLocalTreeCriteria then
                         List.filter (\task -> Set.member task.id projection.taskCriteriaMatches)
@@ -1801,7 +1815,7 @@ viewProjectNode projection model depth project hasSearch query =
                     ]
                 ]
             ]
-        , if not collapsed then
+        , if descendants && not collapsed then
             Keyed.node "div" [ class "tree-children" ]
                 (viewProjectsWithZones model (\c -> viewProjectNode projection model (depth + 1) c hasSearch query) (Just project.id) visibleChildren
                     ++ (if not (List.isEmpty visibleTasks) then
@@ -2118,6 +2132,11 @@ viewFocusedTaskNode projection model task =
 
 viewTaskCard : CardTreeProjection -> Bool -> Model -> Api.Task -> Html Msg
 viewTaskCard projection showProject model task =
+    viewTaskCardBody True projection showProject model task
+
+
+viewTaskCardBody : Bool -> CardTreeProjection -> Bool -> Model -> Api.Task -> Html Msg
+viewTaskCardBody descendants projection showProject model task =
     let
         projectName =
             task.projectId
@@ -2167,7 +2186,9 @@ viewTaskCard projection showProject model task =
                 |> Maybe.withDefault []
 
         maybeRollup =
-            Dict.get task.id projection.taskRollups
+            case Dict.get task.id projection.taskRollups of
+                Just rollup -> Just rollup
+                Nothing -> Dict.get task.id model.dataLoading.taskCardSummaries |> Maybe.map .readinessRollup
 
         openDependencyCount =
             maybeRollup
@@ -2288,14 +2309,14 @@ viewTaskCard projection showProject model task =
                 childTasksForTask
 
             remainingSubtasks =
-                maybeRollup
-                    |> Maybe.map .openSubtaskCount
-                    |> Maybe.withDefault (childTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length)
+                case maybeRollup of
+                    Just rollup -> rollup.openSubtaskCount
+                    Nothing -> if descendants then childTasks |> List.filter (\t -> t.status == Api.Todo || t.status == Api.InProgress || t.status == Api.Blocked) |> List.length else 0
 
             completedSubtasks =
-                maybeRollup
-                    |> Maybe.map (\rollup -> rollup.doneSubtaskCount + rollup.cancelledSubtaskCount)
-                    |> Maybe.withDefault (List.length childTasks - remainingSubtasks)
+                case maybeRollup of
+                    Just rollup -> rollup.doneSubtaskCount + rollup.cancelledSubtaskCount
+                    Nothing -> if descendants then List.length childTasks - remainingSubtasks else 0
 
             depCount =
                 task.dependencyCount
@@ -2342,7 +2363,7 @@ viewTaskCard projection showProject model task =
             text ""
         , let
             deps =
-                taskDependencySummariesForTask model task.id
+                if isExpanded model task.id then taskDependencySummariesForTask model task.id else []
 
             extrasExpanded =
                 isExpanded model task.id
@@ -2414,7 +2435,7 @@ viewTaskCard projection showProject model task =
                         text ""
                 ]
             ]
-        , if hasChildren && not collapsed then
+        , if descendants && hasChildren && not collapsed then
             let
                 childTasks =
                     childTasksForTask
@@ -3196,3 +3217,372 @@ countLabel remaining completed noun pluralNoun =
 
     else
         Just (String.fromInt remaining ++ "/" ++ String.fromInt total ++ " " ++ pluralNoun ++ " remaining")
+
+
+{-| One preorder spans all projects, tasks, branch status and logical drop
+boundaries. Cached transport pages never become independent DOM windows.
+-}
+logicalRows : CardTreeProjection -> Model -> List HierarchyRow
+logicalRows projection model =
+    let
+        query = String.toLower (String.trim model.search.query)
+        local = treeCriteriaActive query model && not model.dataLoading.navigationVisibilityActive
+        projectVisible value = not local || Set.member value.id projection.projectCriteriaMatches
+        taskVisible value = not local || Set.member value.id projection.taskCriteriaMatches
+        row kind id depth parentKind parentId =
+            { key = kind ++ ":" ++ id, kind = kind, entityId = id, depth = depth, parentKind = parentKind, parentId = parentId, zone = Nothing }
+        status kind id depth =
+            row "status" (kind ++ ":" ++ id) depth kind (Just id)
+        boundary key depth zone =
+            { key = "drop:" ++ key, kind = "drop", entityId = "", depth = depth, parentKind = zone.parentType, parentId = zone.parentId, zone = Just zone }
+        zones kind parent projectId depth values identify priority render tail =
+            let
+                above = Nothing :: List.map (priority >> Just) values
+                finalAbove = List.reverse values |> List.head |> Maybe.map priority
+                ending = if model.dragDrop.dragging == Nothing then tail else
+                    boundary (kind ++ ":" ++ Maybe.withDefault "root" projectId ++ ":" ++ Maybe.withDefault "root" parent ++ ":end") depth { parentType = kind, parentId = parent, projectId = projectId, abovePriority = finalAbove, belowPriority = Nothing } :: tail
+                prepend ( prior, item ) rest =
+                    if model.dragDrop.dragging == Nothing then render item rest else
+                        boundary (kind ++ ":" ++ identify item) depth { parentType = kind, parentId = parent, projectId = projectId, abovePriority = prior, belowPriority = Just (priority item) } :: render item rest
+            in
+            List.map2 Tuple.pair above values |> List.foldr prepend ending
+        tasks depth projectId parent visited values tail =
+            zones (if parent /= Nothing then "task-subtasks" else if projectId /= Nothing then "project-tasks" else "orphan") parent projectId depth values .id .priority (task depth visited) tail
+        task depth visited value tail =
+            if Set.member ("task:" ++ value.id) visited then tail else
+                let
+                    seen = Set.insert ("task:" ++ value.id) visited
+                    children = Dict.get value.id projection.taskChildren |> Maybe.withDefault [] |> List.filter taskVisible
+                in
+                row "task" value.id depth "task" value.parentId
+                    :: (if isCollapsed model ("task-" ++ value.id) then tail else
+                            tasks (depth + 1) value.projectId (Just value.id) seen children (status "task" value.id (depth + 1) :: tail))
+        projects depth parent visited values tail =
+            zones "project" parent Nothing depth values .id .priority (project depth visited) tail
+        project depth visited value tail =
+            if Set.member ("project:" ++ value.id) visited then tail else
+                let
+                    seen = Set.insert ("project:" ++ value.id) visited
+                    children = Dict.get value.id projection.projectChildren |> Maybe.withDefault [] |> List.filter projectVisible
+                    childrenTasks = Dict.get value.id projection.projectTasks |> Maybe.withDefault [] |> List.filter taskVisible
+                in
+                row "project" value.id depth "project" value.parentId
+                    :: (if isCollapsed model ("proj-" ++ value.id) then tail else
+                            projects (depth + 1) (Just value.id) seen children
+                                (if model.search.filterShowOnly == ShowProjectsOnly then status "project" value.id (depth + 1) :: tail
+                                 else tasks (depth + 1) (Just value.id) Nothing seen childrenTasks (status "project" value.id (depth + 1) :: tail)))
+        roots = projection.projects |> List.filter (\p -> p.parentId == Nothing && projectVisible p)
+        rootTasks = projection.tasks |> List.filter (\t -> t.parentId == Nothing && taskVisible t && (model.search.filterShowOnly == ShowTasksOnly || t.projectId == Nothing))
+        rootStatus kind = row "root-status" kind 0 "workspace_root" Nothing
+    in
+    case model.focus.focusedEntity of
+        Just ( "project", id ) -> Dict.get id model.projects |> Maybe.map (\value -> project 0 Set.empty value []) |> Maybe.withDefault []
+        Just ( "task", id ) -> Dict.get id model.tasks |> Maybe.map (\value -> task 0 Set.empty value []) |> Maybe.withDefault []
+        _ ->
+            let
+                taskRoots = if model.search.filterShowOnly == ShowProjectsOnly then [] else tasks 0 Nothing Nothing Set.empty rootTasks [ rootStatus "task" ]
+            in
+            if model.search.filterShowOnly == ShowTasksOnly then taskRoots else projects 0 Nothing Set.empty roots (rootStatus "project" :: taskRoots)
+
+
+
+viewportPins : Model -> Set.Set String
+viewportPins model =
+    let
+        entityKey ( kind, id ) = kind ++ ":" ++ id
+        inline =
+            case model.editing.inlineCreate of
+                Just (InlineCreateProject value) -> value.parentId |> Maybe.map (Tuple.pair "project")
+                Just (InlineCreateTask value) ->
+                    case value.parentId of
+                        Just id -> Just ( "task", id )
+                        Nothing -> value.projectId |> Maybe.map (Tuple.pair "project")
+                _ -> Nothing
+        drag = model.dragDrop.dragging |> Maybe.map (\value -> ( value.entityType, value.entityId ))
+        viewport = model.cards.viewport
+    in
+    [ model.focus.focusedEntity, editTarget model, inline, drag ]
+        |> List.filterMap identity |> List.map entityKey |> Set.fromList
+        |> Set.union viewport.nativePins
+        |> Set.union (viewport.target |> Maybe.map Set.singleton |> Maybe.withDefault Set.empty)
+
+
+mountedViewportKeys : Model -> List String
+mountedViewportKeys model =
+    let
+        viewport = model.cards.viewport
+    in
+    Viewport.window viewport.top viewport.height 300 25 (viewportPins model) viewport.index
+        |> List.filterMap (\piece -> case piece of
+            Viewport.Row _ key _ -> Just key
+            _ -> Nothing
+        )
+
+
+viewportDetailDemand : Model -> ( Model, Cmd Msg )
+viewportDetailDemand model =
+    let
+        rows = mountedViewportKeys model |> List.filterMap (\key -> Dict.get key model.cards.viewport.rows)
+        ids kind = rows |> List.filter (.kind >> (==) kind) |> List.map .entityId |> Set.fromList
+    in
+    case model.selectedWorkspaceId of
+        Just ws ->
+            if Set.isEmpty (ids "project") && Set.isEmpty (ids "task") && model.dataLoading.visibleDetailDemand == Nothing then ( model, Cmd.none )
+            else
+                let
+                    pins = viewportPins model |> Set.toList |> List.filterMap (\key -> Dict.get key model.cards.viewport.rows)
+                        |> List.filter (\row -> row.kind == "project" || row.kind == "task") |> List.map (\row -> ( row.kind, row.entityId )) |> Set.fromList
+                in
+                Feature.DataLoading.ensureViewportCardDetails ws model.sessionRequestEpoch model.dataLoading.navigationGeneration (ids "project") (ids "task") pins model
+        Nothing -> ( model, Cmd.none )
+
+
+refreshViewport : Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+refreshViewport previous result =
+    refreshViewportWithStatusChange False previous result
+
+
+refreshViewportFor : Msg -> Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+refreshViewportFor msg previous (( model, _ ) as result) =
+    let
+        affectedIds =
+            case msg of
+                CanonicalTaskFetched _ taskId _ -> [ taskId ]
+                GotTaskCardDetail _ taskId _ -> [ taskId ]
+                TaskCreated (Ok task) -> [ task.id ]
+                TaskUpdated (Ok mutation) -> mutation.task.id :: List.map (.task >> .id) mutation.dependencyEffects
+                DependencyMutationDone _ _ (Ok mutation) -> List.map (.task >> .id) mutation.affectedTasks
+                GotTasks _ _ _ (Ok page) -> List.map .id page.items
+                _ -> []
+
+        statusChanged =
+            List.any (\taskId -> (Dict.get taskId previous.tasks |> Maybe.map .status) /= (Dict.get taskId model.tasks |> Maybe.map .status)) affectedIds
+    in
+    refreshViewportWithStatusChange statusChanged previous result
+
+
+refreshViewportWithStatusChange : Bool -> Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) =
+    let
+        old = model.cards.viewport
+        changed =
+            old.workspaceId /= model.selectedWorkspaceId || old.sessionEpoch /= model.sessionRequestEpoch
+                || old.generation /= model.dataLoading.navigationGeneration || old.projection == Nothing
+                || previous.dataLoading.projectCardSummaries /= model.dataLoading.projectCardSummaries
+                || previous.dataLoading.taskCardSummaries /= model.dataLoading.taskCardSummaries
+                || previous.dataLoading.navigationVisibleProjectIds /= model.dataLoading.navigationVisibleProjectIds
+                || previous.dataLoading.navigationVisibleTaskIds /= model.dataLoading.navigationVisibleTaskIds
+                || previous.cards.collapsedNodes /= model.cards.collapsedNodes
+                || previous.focus.focusedEntity /= model.focus.focusedEntity
+                || previous.search.query /= model.search.query
+                || previous.search.filterShowOnly /= model.search.filterShowOnly
+                || previous.search.filterPriority /= model.search.filterPriority
+                || previous.search.filterProjectStatuses /= model.search.filterProjectStatuses
+                || previous.search.filterTaskStatuses /= model.search.filterTaskStatuses
+                || (previous.dragDrop.dragging == Nothing) /= (model.dragDrop.dragging == Nothing)
+                || (not model.dataLoading.navigationVisibilityActive && (previous.projects /= model.projects || previous.tasks /= model.tasks))
+        sameContext = old.workspaceId == model.selectedWorkspaceId && old.sessionEpoch == model.sessionRequestEpoch
+        active = model.auth.status == AuthReady && model.activeTab == ProjectsTab
+    in
+    if not active then
+        let
+            cards = model.cards
+            initial = init.viewport
+            viewport = { initial | workspaceId = model.selectedWorkspaceId, sessionEpoch = model.sessionRequestEpoch, generation = model.dataLoading.navigationGeneration, revision = old.revision + 1 }
+            retired = { model | cards = { cards | viewport = viewport } }
+        in
+        ( retired, Cmd.batch [ command, Ports.syncHierarchyViewport (viewportConfiguration retired Nothing 0) ] )
+    else if not changed then
+        if previous.dependencies.taskDependencyLinks /= model.dependencies.taskDependencyLinks || taskStatusesChanged then
+            let
+                cards = model.cards
+                viewport = cards.viewport
+                projection = viewport.projection |> Maybe.map (\cached -> { cached | taskDirectOpenDependencyCounts = directOpenDependencyCounts model.tasks model.dependencies.taskDependencyLinks })
+            in
+            ( { model | cards = { cards | viewport = { viewport | projection = projection } } }, command )
+        else
+            ( model, command )
+    else
+        case model.selectedWorkspaceId of
+            Nothing -> ( model, command )
+            Just ws ->
+                let
+                    projection = cardTreeProjection ws model
+                    rows = logicalRows projection model
+                    keys = List.map .key rows
+                    defaults = rows |> List.filter (.kind >> (\kind -> kind /= "project" && kind /= "task")) |> List.map (\row -> ( row.key, if row.kind == "drop" then 8 else 40 )) |> Dict.fromList
+                    measurements = if sameContext then Dict.union old.index.heights defaults else defaults
+                    index = Viewport.build 160 measurements keys
+                    anchorPosition = Viewport.positionAt old.top old.index
+                    anchor = Array.get anchorPosition old.index.keys
+                    delta = old.top - Viewport.offset anchorPosition old.index
+                    anchoredTop =
+                        if sameContext then
+                            anchor |> Maybe.andThen (\key -> Dict.get key index.positions) |> Maybe.map (\i -> Basics.max 0 (Viewport.offset i index + delta)) |> Maybe.withDefault old.top
+                        else 0
+                    viewport = { old | workspaceId = Just ws, sessionEpoch = model.sessionRequestEpoch, generation = model.dataLoading.navigationGeneration
+                        , revision = old.revision + 1, rows = rows |> List.map (\row -> ( row.key, row )) |> Dict.fromList
+                        , index = index, projection = Just projection, top = anchoredTop
+                        , nativePins = if sameContext then Set.filter (\key -> Dict.member key index.positions) old.nativePins else Set.empty
+                        , target = Nothing
+                        }
+                    cards = model.cards
+                    rebuilt = { model | cards = { cards | viewport = viewport } }
+                    ( demanded, details ) = viewportDetailDemand rebuilt
+                in
+                ( demanded, Cmd.batch [ command, details, Ports.syncHierarchyViewport (viewportConfiguration demanded (if sameContext then anchor else Nothing) delta) ] )
+
+
+viewportConfiguration : Model -> Maybe String -> Float -> Encode.Value
+viewportConfiguration model anchor delta =
+    let
+        viewport = model.cards.viewport
+    in
+    Encode.object
+        [ ( "workspace", Encode.string (Maybe.withDefault "" viewport.workspaceId) )
+        , ( "epoch", Encode.int viewport.sessionEpoch ), ( "generation", Encode.int viewport.generation ), ( "revision", Encode.int viewport.revision )
+        , ( "anchor", anchor |> Maybe.map Encode.string |> Maybe.withDefault Encode.null ), ( "delta", Encode.float delta )
+        , ( "top", Encode.float viewport.top ), ( "target", viewport.target |> Maybe.map Encode.string |> Maybe.withDefault Encode.null )
+        ]
+
+
+updateViewport : Encode.Value -> Model -> ( Model, Cmd Msg )
+updateViewport payload model =
+    let
+        viewport = model.cards.viewport
+        get name decoder fallback = Decode.decodeValue (Decode.field name decoder) payload |> Result.withDefault fallback
+        valid = get "workspace" Decode.string "" == Maybe.withDefault "!" model.selectedWorkspaceId
+            && get "epoch" Decode.int -1 == model.sessionRequestEpoch
+            && get "generation" Decode.int -1 == model.dataLoading.navigationGeneration
+            && get "revision" Decode.int -1 == viewport.revision
+        measured = get "measurements" (Decode.list (Decode.map2 Tuple.pair (Decode.field "key" Decode.string) (Decode.field "height" Decode.float))) []
+        incomingTop = Basics.max 0 (get "top" Decode.float viewport.top)
+        anchorPosition = Viewport.positionAt incomingTop viewport.index
+        anchorKey = Array.get anchorPosition viewport.index.keys
+        anchorDelta = incomingTop - Viewport.offset anchorPosition viewport.index
+        index = List.foldl (\( key, amount ) geometry -> if amount > 0 && amount < 100000 then Viewport.measure key amount geometry else geometry) viewport.index measured
+        target =
+            get "request" (Decode.nullable Decode.string) Nothing
+                |> Maybe.andThen (\requested ->
+                    let
+                        key = if String.startsWith "entity:" requested then
+                            let id = String.dropLeft 7 requested in
+                            if Dict.member ("project:" ++ id) viewport.rows then "project:" ++ id else "task:" ++ id
+                            else requested
+                    in
+                    if Dict.member key viewport.rows then Just key else Nothing
+                )
+        top = case target of
+            Just key -> Dict.get key index.positions |> Maybe.map (\i -> Viewport.offset i index) |> Maybe.withDefault viewport.top
+            Nothing ->
+                if List.isEmpty measured then Basics.max 0 (get "top" Decode.float viewport.top)
+                else anchorKey |> Maybe.andThen (\key -> Dict.get key index.positions) |> Maybe.map (\i -> Basics.max 0 (Viewport.offset i index + anchorDelta)) |> Maybe.withDefault viewport.top
+        next = { viewport | top = top, height = Basics.max 1 (get "height" Decode.float viewport.height), index = index
+            , nativePins = get "pins" (Decode.list Decode.string) [] |> List.take 1 |> Set.fromList |> Set.filter (\key -> Dict.member key viewport.rows)
+            , target = case target of
+                Just _ -> target
+                Nothing -> if get "acknowledged" Decode.bool False then Nothing else viewport.target
+            }
+        cards = model.cards
+        updated = { model | cards = { cards | viewport = next } }
+        ( demanded, details ) = viewportDetailDemand updated
+    in
+    if not valid || model.auth.status /= AuthReady then ( model, Cmd.none ) else
+        ( demanded, Cmd.batch [ details, if not (List.isEmpty measured) || target /= Nothing then Ports.syncHierarchyViewport (viewportConfiguration demanded anchorKey anchorDelta) else Cmd.none ] )
+
+
+viewHierarchyViewport : String -> Model -> Html Msg
+viewHierarchyViewport ws incoming =
+    let
+        model =
+            case incoming.cards.viewport.projection of
+                Just _ -> incoming
+                Nothing ->
+                    let
+                        initialProjection = cardTreeProjection ws incoming
+                        rows = logicalRows initialProjection incoming
+                        cards = incoming.cards
+                        old = cards.viewport
+                        initial = { old | workspaceId = Just ws, sessionEpoch = incoming.sessionRequestEpoch, generation = incoming.dataLoading.navigationGeneration
+                            , projection = Just initialProjection, rows = rows |> List.map (\row -> ( row.key, row )) |> Dict.fromList
+                            , index = Viewport.build 160 Dict.empty (List.map .key rows)
+                            }
+                    in
+                    { incoming | cards = { cards | viewport = initial } }
+        viewport = model.cards.viewport
+        projection =
+            case viewport.projection of
+                Just cached ->
+                    { cached | projectRollups = model.dependencies.projectReadinessRollups, taskRollups = model.dependencies.taskReadinessRollups }
+                Nothing -> cardTreeProjection ws model
+        config = viewportConfiguration model Nothing 0 |> Encode.encode 0
+        neighborEntity direction position =
+            case Array.get (position + direction) viewport.index.keys of
+                Nothing -> ""
+                Just key ->
+                    case Dict.get key viewport.rows of
+                        Just row -> if row.kind == "project" || row.kind == "task" then key else neighborEntity direction (position + direction)
+                        Nothing -> ""
+        pieceView piece =
+            case piece of
+                Viewport.Gap start amount ->
+                    ( "gap-" ++ String.fromInt start, div [ class "hierarchy-spacer", style "height" (String.fromFloat amount ++ "px"), attribute "aria-hidden" "true" ] [] )
+                Viewport.Row position key _ ->
+                    let
+                        row = Dict.get key viewport.rows
+                        content value =
+                            case value.kind of
+                                "project" -> Dict.get value.entityId model.projects |> Maybe.map (\project -> viewProjectNodeBody False projection model 0 project False "") |> Maybe.withDefault (text "")
+                                "task" -> Dict.get value.entityId model.tasks |> Maybe.map (viewTaskCardBody False projection False model) |> Maybe.withDefault (text "")
+                                "drop" -> value.zone |> Maybe.map (viewDropZone model) |> Maybe.withDefault (text "")
+                                "root-status" -> viewViewportRootStatus model value.entityId
+                                _ -> viewViewportBranchStatus model value.parentKind (Maybe.withDefault "" value.parentId)
+                    in
+                    ( key, div [ class "hierarchy-row", attribute "data-hierarchy-key" key, attribute "data-hierarchy-index" (String.fromInt position)
+                        , attribute "data-hierarchy-next" (neighborEntity 1 position)
+                        , attribute "data-hierarchy-previous" (neighborEntity -1 position)
+                        , style "padding-left" (String.fromInt (row |> Maybe.map .depth |> Maybe.withDefault 0 |> (\depth -> depth * 20)) ++ "px")
+                        ] [ row |> Maybe.map content |> Maybe.withDefault (text "") ] )
+    in
+    div [ class "tree-view" ]
+        [ div [ class "tree-toolbar" ]
+            [ button [ class "btn-small btn-ghost", onClick ExpandAllNodes ] [ text "Expand All" ]
+            , button [ class "btn-small btn-ghost", onClick CollapseAllNodes ] [ text "Collapse All" ]
+            ]
+        , Feature.Editing.viewInlineCreateInput model Nothing "project"
+        , Feature.Focus.viewFocusBreadcrumbBar model
+        , Keyed.node "div" [ class "hierarchy-viewport", id "hierarchy-viewport", attribute "data-hierarchy-context" config ]
+            (Viewport.window viewport.top viewport.height 300 25 (viewportPins model) viewport.index |> List.map pieceView)
+        ]
+
+
+viewViewportRootStatus : Model -> String -> Html Msg
+viewViewportRootStatus model kind =
+    case model.dataLoading.rootNavigationRequest of
+        Just request ->
+            let
+                more = if kind == "project" then request.projectHasMore else request.taskHasMore
+            in
+            if request.inFlight then div [ attribute "role" "status" ] [ text "Loading…" ]
+            else if more || not request.succeeded then
+                button [ class "navigation-load-more", onClick (LoadRootNavigationPage kind) ] [ text (if request.succeeded then "Load more " ++ kind ++ "s" else "Retry loading " ++ kind ++ "s") ]
+            else text ""
+        Nothing -> text ""
+
+
+viewViewportBranchStatus : Model -> String -> String -> Html Msg
+viewViewportBranchStatus model kind id =
+    let
+        key = kind ++ ":" ++ id
+        pass = Dict.get key model.dataLoading.navigationPasses
+        error stream = pass |> Maybe.andThen (if stream == "project" then .projectError else .taskError)
+        viewError stream = error stream |> Maybe.map (\message -> div [ class "card-description-error", attribute "role" "status" ]
+            [ text message, button [ class "btn-small btn-ghost", onClick (LoadNavigationBranchPage kind id stream) ] [ text "Retry" ] ]) |> Maybe.withDefault (text "")
+    in
+    case Dict.get key model.dataLoading.loadedNavigationBranches of
+        Nothing -> text ""
+        Just state -> div [ class "hierarchy-branch-status" ]
+            [ if state.inFlight || List.member key model.dataLoading.navigationQueue then span [ attribute "role" "status" ] [ text "Loading more…" ] else text ""
+            , viewError "project", viewError "task"
+            , if not state.inFlight && not state.projectHasMore && not state.taskHasMore then span [ class "hierarchy-end" ] [ text "All children loaded" ] else text ""
+            ]

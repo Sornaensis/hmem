@@ -120,6 +120,11 @@ finalizeInit page model =
 
 handleOwned : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )
 handleOwned ownedMsg model =
+    Feature.Cards.refreshViewport model (handleOwnedRaw ownedMsg model)
+
+
+handleOwnedRaw : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )
+handleOwnedRaw ownedMsg model =
     case ownedMsg of
         SelectWorkspaceMsg wsId ->
             ( model, pushUrl model.key ("/workspace/" ++ wsId) )
@@ -882,6 +887,7 @@ subscriptions =
         , authSessionError AuthSessionError
         , Browser.Events.onKeyDown (Decode.map GlobalKeyDown (Decode.field "keyCode" Decode.int))
         , localStorageReceived LocalStorageLoaded
+        , Ports.onHierarchyViewport HierarchyViewportChanged
         , onMainContentScroll MainContentScrolled
         ]
 

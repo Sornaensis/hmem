@@ -30,6 +30,19 @@ type MainOwnedMsg
 update : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 update msg model =
     case msg of
+        HierarchyViewportChanged payload ->
+            Ok (Feature.Cards.updateViewport payload model)
+
+        _ ->
+            route msg model |> Result.map (Feature.Cards.refreshViewportFor msg model)
+
+
+route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
+route msg model =
+    case msg of
+        HierarchyViewportChanged payload ->
+            Ok (Feature.Cards.updateViewport payload model)
+
         -- WebSocket
         WsConnectedMsg ->
             Ok (Feature.WebSocket.update msg model)

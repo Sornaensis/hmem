@@ -32,14 +32,32 @@ reports an incomplete branch and preserves `hasMore` rather than claiming an
 exhausted stream. The wire `hasMore` contract guarantees full 50-item pages;
 offsets advance by transport size while cached counts deduplicate IDs.
 
-Detail hydration admits at most six physical requests. Its ordinary demand is
-globally limited to 25 current presentation cards, with focus, edit, inline
-create, and explicit retry targets requested separately. Deep focus requests
-the target before ordinary cards; ancestor projection does not demand ancestor
-details. A guarded visible-ID demand interface is ready for the scroll
-viewport. The current renderer still uses moving 25-card presentation windows;
-a single scrolling viewport is the next integration step. Canonical snapshot
-and replay behavior remains governed by its separate transport contract.
+The hierarchy is one continuous logical preorder over all cached root and
+expanded child summaries. Loading another page adds reachable siblings; root
+**Load more** requests the next 50-item transport page directly. Branches
+continue automatically, and their end rows expose loading, completion or an
+incomplete/error state with Retry.
+
+Rendering mounts at most 25 ordinary rows across the entire viewport, plus a
+bounded set of active focus, editor, inline-create, drag and native DOM-focus
+pins. Every omitted run has a spacer, including runs around distant pins.
+Mounted row wrappers own their spacing and are measured with ResizeObserver;
+estimated geometry and mounted-only fallback measurements keep the initial
+render bounded when that API is absent. A cached height-sum index handles scroll
+and measurement updates without rebuilding the hierarchy. Structural changes
+preserve the current row and intrarow scroll anchor when it remains present.
+Offscreen focus and keyboard navigation first mount their logical target,
+then scroll/focus after the stamped DOM update. Drop boundaries use logical
+same-parent siblings, including neighbors outside the viewport.
+
+Detail hydration admits at most six physical requests. Ordinary demand comes
+from the globally bounded mounted/overscan set; active targets are prioritized
+separately. Deep focus requests the target rather than hydrating or mounting
+its entire ancestor chain. Workspace/session/generation/layout stamps reject
+stale measurement and focus work. Canonical snapshot and replay behavior
+remains governed by its separate transport contract. Production browser and
+performance compatibility is validated by the following integration task;
+these local layout and bridge tests do not replace those gates.
 
 ## Large-workspace performance baseline
 

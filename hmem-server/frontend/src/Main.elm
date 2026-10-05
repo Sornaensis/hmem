@@ -1,9 +1,10 @@
-module Main exposing (main)
+module Main exposing (main, update)
 
 import Api exposing (..)
 import AppShell
 import Browser
 import Browser.Navigation as Nav
+import Feature.Cards as Cards
 import Helpers exposing (parseFragment)
 import Json.Decode as Decode
 import Route exposing (handleUrlChange, handleUrlRequest, urlToPage)
@@ -125,7 +126,7 @@ update msg model =
                     handleUrlRequest urlRequest model
 
                 UpdateRouter.HandleUrlChange url ->
-                    handleUrlChange url model
+                    handleUrlChange url model |> Cards.refreshViewport model
 
                 UpdateRouter.HandleInAppShell ownedMsg ->
                     AppShell.handleOwned ownedMsg model

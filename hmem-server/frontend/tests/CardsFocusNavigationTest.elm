@@ -1,6 +1,12 @@
 module CardsFocusNavigationTest exposing (suite)
 
 import Api
+import Main
+import Html.Attributes
+import Array
+import HierarchyViewport as Viewport
+import Json.Encode as Encode
+import UpdateRouter
 import AppShell
 import Dict
 import Expect
@@ -13,7 +19,7 @@ import Set
 import Test exposing (Test, describe, test)
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
-import Types exposing (Flags, Model, Msg(..), Page(..), WorkspaceTab(..))
+import Types exposing (Flags, Model, Msg(..), Page(..), WorkspaceTab(..), AuthStatus(..))
 import Url
 
 
@@ -170,21 +176,215 @@ suite =
                     , missingInFlight = missing.dataLoading.activeNavigationFocus |> Maybe.map .inFlight |> Maybe.withDefault False
                     , knownHasNoRequest = Dict.member "project:inside-root-page" known.dataLoading.navigationFocuses |> not
                     }
-        , test "root presentation mounts one 25-card window while retaining the cached 50-card page" <|
-            \_ ->
-                let
-                    seeded =
-                        DataLoading.mergeNavigationSummaries (List.range 1 50 |> List.map (\number -> project ("root-" ++ String.fromInt number))) [] model
-
-                    rendered =
-                        Cards.viewProjectsTree workspaceId seeded |> Query.fromHtml
-                in
-                Expect.all
-                    [ \_ -> Query.findAll [ Selector.class "card-project" ] rendered |> Query.count (Expect.equal 25)
-                    , \_ -> Expect.equal 50 (Dict.size seeded.projects)
-                    , \_ -> Query.find [ Selector.class "navigation-load-more" ] rendered |> Query.has [ Selector.text "Load more projects" ]
-                    ]
-                    ()
+        , test "cached root rows remain scroll reachable with a bounded first paint" <| \_ ->
+            let
+                seeded = rootSeed (List.range 1 50 |> List.map (\number -> project ("root-" ++ String.padLeft 3 '0' (String.fromInt number))))
+                ready = viewportReady seeded
+                firstKeys = Cards.mountedViewportKeys ready
+                lastPosition = Dict.get "project:root-050" ready.cards.viewport.index.positions |> Maybe.withDefault 0
+                scrolled = Cards.updateViewport (viewportEvent ready (Viewport.offset lastPosition ready.cards.viewport.index) [] Nothing []) ready |> Tuple.first
+                earlier = Cards.updateViewport (viewportEvent scrolled 0 [] Nothing []) scrolled |> Tuple.first
+            in
+            Expect.all
+                [ \_ -> Expect.equal True (List.length firstKeys <= 25 && List.member "project:root-001" firstKeys)
+                , \_ -> Expect.equal True (List.member "project:root-050" (Cards.mountedViewportKeys scrolled))
+                , \_ -> Expect.equal True (List.member "project:root-001" (Cards.mountedViewportKeys earlier) && List.length (Cards.mountedViewportKeys earlier) <= 25)
+                , \_ -> Expect.equal 50 (Dict.size scrolled.projects)
+                , \_ -> Cards.viewProjectsTree workspaceId seeded |> Query.fromHtml |> Query.findAll [ Selector.class "hierarchy-row" ] |> Query.count (\count -> Expect.equal True (count <= 25))
+                , \_ -> Cards.viewProjectsTree workspaceId scrolled |> Query.fromHtml |> Query.find [ Selector.class "navigation-load-more" ] |> Query.has [ Selector.text "Load more projects" ]
+                ] ()
+        , test "root More requests the next transport page and appends without a presentation swap" <| \_ ->
+            let
+                seeded = rootSeed (List.range 1 50 |> List.map (\number -> project (String.fromInt number))) |> viewportReady
+                requested = routed (LoadRootNavigationPage "project") seeded
+                result = case requested.dataLoading.rootNavigationRequest of
+                    Just request -> routed (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint request.projectOffset request.taskOffset
+                        (Ok { workspaceId = workspaceId, projects = { items = [ project "51", project "52" ], hasMore = False }, tasks = { items = [], hasMore = False } })) requested
+                    Nothing -> requested
+            in
+            Expect.equal { offset = Just 50, inFlight = True, count = 52, earlier = True, later = True }
+                { offset = requested.dataLoading.rootNavigationRequest |> Maybe.map .projectOffset
+                , inFlight = requested.dataLoading.rootNavigationRequest |> Maybe.map .inFlight |> Maybe.withDefault False
+                , count = Dict.size result.projects
+                , earlier = Dict.member "project:1" result.cards.viewport.rows
+                , later = Dict.member "project:52" result.cards.viewport.rows
+                }
+        , test "a direct offscreen scroll mounts the actual target before acknowledged scrolling" <| \_ ->
+            let
+                ready = rootSeed (List.range 1 100 |> List.map (\n -> project ("p" ++ String.padLeft 3 '0' (String.fromInt n)))) |> viewportReady
+                mounted = Cards.updateViewport (viewportEvent ready 0 [] (Just "entity:p100") []) ready |> Tuple.first
+            in
+            Expect.equal ( Just "project:p100", True, True )
+                ( mounted.cards.viewport.target, List.member "project:p100" (Cards.mountedViewportKeys mounted), List.length (Cards.mountedViewportKeys mounted) <= 26 )
+        , test "native focus stays pinned independently of focus mode and stale context cannot replace it" <| \_ ->
+            let
+                ready = rootSeed (List.range 1 80 |> List.map (\n -> project ("p" ++ String.padLeft 3 '0' (String.fromInt n)))) |> viewportReady
+                pinned = Cards.updateViewport (viewportEvent ready 20000 [] Nothing [ "project:p001" ]) ready |> Tuple.first
+                stalePayload = Encode.object [ ( "workspace", Encode.string workspaceId ), ( "epoch", Encode.int pinned.sessionRequestEpoch ), ( "generation", Encode.int pinned.dataLoading.navigationGeneration ), ( "revision", Encode.int (pinned.cards.viewport.revision - 1) ), ( "top", Encode.float 0 ) ]
+                stale = Cards.updateViewport stalePayload pinned |> Tuple.first
+            in
+            Expect.equal { pinned = True, focus = Nothing, top = pinned.cards.viewport.top, revision = pinned.cards.viewport.revision }
+                { pinned = List.member "project:p001" (Cards.mountedViewportKeys stale), focus = stale.focus.focusedEntity, top = stale.cards.viewport.top, revision = stale.cards.viewport.revision }
+        , test "measuring an earlier row preserves the current key and intrarow anchor without rebuilding rows" <| \_ ->
+            let
+                ready = rootSeed (List.range 1 80 |> List.map (\n -> project ("p" ++ String.padLeft 3 '0' (String.fromInt n)))) |> viewportReady
+                position = Dict.get "project:p040" ready.cards.viewport.index.positions |> Maybe.withDefault 0
+                top = Viewport.offset position ready.cards.viewport.index + 15
+                scrolled = Cards.updateViewport (viewportEvent ready top [] Nothing []) ready |> Tuple.first
+                measured = Cards.updateViewport (viewportEvent scrolled top [ ( "project:p001", 300 ) ] Nothing []) scrolled |> Tuple.first
+            in
+            Expect.equal ( 15, scrolled.cards.viewport.revision, scrolled.cards.viewport.rows )
+                ( measured.cards.viewport.top - Viewport.offset position measured.cards.viewport.index, measured.cards.viewport.revision, measured.cards.viewport.rows )
+        , test "logical drop boundaries retain priorities from siblings outside the mounted viewport" <| \_ ->
+            let
+                ready = rootSeed (List.range 1 80 |> List.map (\n -> let base = project ("p" ++ String.padLeft 3 '0' (String.fromInt n)) in { base | priority = 81 - n })) |> viewportReady
+                dragging = { ready | dragDrop = { dragging = Just { entityType = "project", entityId = "p001" }, dragOver = Nothing, dropActionModal = Nothing } }
+                updated = Cards.refreshViewport ready ( dragging, Cmd.none ) |> Tuple.first
+                zone = Dict.get "drop:project:p040" updated.cards.viewport.rows |> Maybe.andThen .zone
+            in
+            Expect.equal ( Just ( Just 42, Just 41 ), True )
+                ( zone |> Maybe.map (\value -> ( value.abovePriority, value.belowPriority )), List.length (Cards.mountedViewportKeys updated) <= 26 )
+        , test "a pending offscreen target gets the next released detail slot before ordinary cards" <| \_ ->
+            let
+                ready = rootSeed (List.range 1 80 |> List.map (\n -> project ("p" ++ String.padLeft 3 '0' (String.fromInt n)))) |> viewportReady
+                targeted = Cards.updateViewport (viewportEvent ready 0 [] (Just "entity:p080") []) ready |> Tuple.first
+                completion = ready.dataLoading.projectCardDetailRequests |> Dict.toList |> List.head
+                released = case completion of
+                    Just ( id, request ) -> DataLoading.update (GotProjectCardDetail request id (Err Http.Timeout)) targeted |> Tuple.first
+                    Nothing -> targeted
+            in
+            Expect.equal ( True, True )
+                ( Dict.get "p080" released.dataLoading.projectCardDetailRequests |> Maybe.map .inFlight |> Maybe.withDefault False, Set.size released.dataLoading.cardDetailAdmissions <= 6 )
+        , test "active editing and drag targets survive scrolling without mounting ancestor paths" <| \_ ->
+            let
+                ready = rootSeed (List.range 1 80 |> List.map (\n -> project ("p" ++ String.padLeft 3 '0' (String.fromInt n)))) |> viewportReady
+                editing = ready.editing
+                pinned = { ready | editing = { editing | inlineCreate = Just (Types.InlineCreateProject { parentId = Just "p001", name = "" }) }, dragDrop = { dragging = Just { entityType = "project", entityId = "p002" }, dragOver = Nothing, dropActionModal = Nothing } }
+                scrolled = Cards.updateViewport (viewportEvent pinned 12000 [] Nothing []) pinned |> Tuple.first
+            in
+            Expect.equal ( True, True, True )
+                ( List.member "project:p001" (Cards.mountedViewportKeys scrolled), List.member "project:p002" (Cards.mountedViewportKeys scrolled), List.length (Cards.mountedViewportKeys scrolled) <= 27 )
+        , test "deep focus mounts and demands the target without its entire ancestor chain" <| \_ ->
+            let
+                summaries = List.range 1 100 |> List.map (\n -> let base = project ("deep-" ++ String.padLeft 3 '0' (String.fromInt n)) in { base | parentId = if n == 1 then Nothing else Just ("deep-" ++ String.padLeft 3 '0' (String.fromInt (n - 1))) })
+                seeded = rootSeed summaries
+                focused = routed (FocusEntity "project" "deep-100") { seeded | auth = { status = AuthReady, mode = Just "test" } }
+            in
+            Expect.equal ( True, True, True )
+                ( List.member "project:deep-100" (Cards.mountedViewportKeys focused)
+                , List.length (Cards.mountedViewportKeys focused) <= 25
+                , Dict.keys focused.dataLoading.projectCardDetailRequests |> List.all ((==) "deep-100")
+                )
+        , test "reorder retains the scroll anchor while delete and reparent retire old row membership" <| \_ ->
+            let
+                summaries = List.range 1 80 |> List.map (\n -> project ("p" ++ String.padLeft 3 '0' (String.fromInt n)))
+                ready = rootSeed summaries |> viewportReady
+                position = Dict.get "project:p040" ready.cards.viewport.index.positions |> Maybe.withDefault 0
+                top = Viewport.offset position ready.cards.viewport.index + 15
+                scrolled = Cards.updateViewport (viewportEvent ready top [] Nothing []) ready |> Tuple.first
+                promoted = let base = project "p040" in { base | priority = 10 }
+                reorderedSource = DataLoading.mergeNavigationSummaries [ promoted ] [] scrolled
+                reordered = Cards.refreshViewport scrolled ( reorderedSource, Cmd.none ) |> Tuple.first
+                newPosition = Dict.get "project:p040" reordered.cards.viewport.index.positions |> Maybe.withDefault 0
+                child = let base = project "p050" in { base | parentId = Just "p002" }
+                movedSource = DataLoading.mergeNavigationSummaries [ child ] [] reordered
+                moved = Cards.refreshViewport reordered ( movedSource, Cmd.none ) |> Tuple.first
+                loading = moved.dataLoading
+                deletedSource = { moved | projects = Dict.remove "p040" moved.projects, dataLoading = { loading | projectCardSummaries = Dict.remove "p040" loading.projectCardSummaries, navigationVisibleProjectIds = Set.remove "p040" loading.navigationVisibleProjectIds } }
+                deleted = Cards.refreshViewport moved ( deletedSource, Cmd.none ) |> Tuple.first
+            in
+            Expect.equal ( 15, Just (Just "p002"), False )
+                ( reordered.cards.viewport.top - Viewport.offset newPosition reordered.cards.viewport.index
+                , Dict.get "project:p050" moved.cards.viewport.rows |> Maybe.map .parentId
+                , Dict.member "project:p040" deleted.cards.viewport.rows
+                )
+        , test "content-only task detail response preserves cached viewport projection and geometry" <| \_ ->
+            let
+                seeded = DataLoading.mergeNavigationSummaries [] [ task "detail" Nothing ] model
+                loading = seeded.dataLoading
+                ready = viewportReady { seeded | dataLoading = { loading | navigationVisibilityActive = True, navigationVisibleTaskIds = Set.singleton "detail" } }
+                taskDetail = Api.taskFromCardSummary (task "detail" Nothing)
+            in
+            case Dict.get "detail" ready.dataLoading.taskCardDetailRequests of
+                Nothing -> Expect.fail "Expected a real admitted task detail request"
+                Just request ->
+                    let
+                        updated = routed (GotTaskCardDetail request "detail" (Ok { taskDetail | description = Just "New full description" })) ready
+                    in
+                    Expect.all
+                        [ \_ -> Expect.equal (Just (Just "New full description")) (Dict.get "detail" updated.tasks |> Maybe.map .description)
+                        , \_ -> Expect.equal ready.cards.viewport.projection updated.cards.viewport.projection
+                        , \_ -> Expect.equal ready.cards.viewport.index updated.cards.viewport.index
+                        , \_ -> Expect.equal ready.cards.viewport.revision updated.cards.viewport.revision
+                        ] ()
+        , test "canonical prerequisite status changes refresh Done eligibility with unchanged links and geometry" <| \_ ->
+            let
+                seeded = DataLoading.mergeNavigationSummaries [] [ task "dependent" Nothing, task "prerequisite" Nothing ] model
+                websocket = seeded.webSocket
+                dependencies = seeded.dependencies
+                loading = seeded.dataLoading
+                ready = viewportReady { seeded | dataLoading = { loading | navigationVisibilityActive = True, navigationVisibleTaskIds = Set.fromList [ "dependent", "prerequisite" ] }, sessionContext = Just editorSession, dependencies = { dependencies | taskDependencyLinks = [ { taskId = "dependent", dependsOnId = "prerequisite" } ] }, webSocket = { websocket | targetGenerations = Dict.singleton "workspace:workspace-1|task:prerequisite" 1 } }
+                guard = { scopeKey = "workspace:workspace-1", targetKey = "task:prerequisite", targetGeneration = 1, sessionEpoch = ready.sessionRequestEpoch, routeWorkspace = Just workspaceId, audienceId = "editor" }
+                prerequisite = Api.taskFromCardSummary (task "prerequisite" Nothing)
+                completed = routed (CanonicalTaskFetched guard "prerequisite" (Ok { prerequisite | status = Api.Done })) ready
+                reopened = routed (CanonicalTaskFetched guard "prerequisite" (Ok prerequisite)) completed
+                removed = routed (CanonicalTaskFetched guard "prerequisite" (Err (Http.BadStatus 404))) reopened
+                restored = routed (CanonicalTaskFetched guard "prerequisite" (Ok prerequisite)) removed
+                done source = Cards.viewProjectsTree workspaceId source |> Query.fromHtml |> Query.find [ Selector.id "entity-dependent" ] |> Query.findAll [ Selector.tag "option", Selector.attribute (Html.Attributes.value "done") ]
+            in
+            Expect.all
+                [ \_ -> done ready |> Query.count (Expect.equal 0)
+                , \_ -> done completed |> Query.count (Expect.equal 1)
+                , \_ -> done reopened |> Query.count (Expect.equal 0)
+                , \_ -> done removed |> Query.count (Expect.equal 1)
+                , \_ -> done restored |> Query.count (Expect.equal 0)
+                , \_ -> Expect.equal ready.cards.viewport.revision restored.cards.viewport.revision
+                , \_ -> Expect.equal ready.cards.viewport.index reopened.cards.viewport.index
+                ] ()
+        , test "canonical overview link changes refresh rendered Done eligibility without rebuilding viewport geometry" <| \_ ->
+            let
+                seeded = DataLoading.mergeNavigationSummaries [] [ task "dependent" Nothing, task "prerequisite" Nothing ] model
+                websocket = seeded.webSocket
+                ready = viewportReady { seeded | sessionContext = Just editorSession, webSocket = { websocket | targetGenerations = Dict.singleton "workspace:workspace-1|task-overview:dependent" 1 } }
+                guard = { scopeKey = "workspace:workspace-1", targetKey = "task-overview:dependent", targetGeneration = 1, sessionEpoch = ready.sessionRequestEpoch, routeWorkspace = Just workspaceId, audienceId = "editor" }
+                overview dependencies = { task = Dict.get "dependent" ready.tasks |> Maybe.withDefault (Api.taskFromCardSummary (task "dependent" Nothing)), dependencies = dependencies, readinessRollup = (task "dependent" Nothing).readinessRollup }
+                linked = routed (CanonicalTaskOverviewFetched guard "dependent" (Ok (overview [ { id = "prerequisite", name = "prerequisite" } ]))) ready
+                unlinked = routed (CanonicalTaskOverviewFetched guard "dependent" (Ok (overview []))) linked
+                done source = Cards.viewProjectsTree workspaceId source |> Query.fromHtml |> Query.find [ Selector.id "entity-dependent" ] |> Query.findAll [ Selector.tag "option", Selector.attribute (Html.Attributes.value "done") ]
+            in
+            Expect.all
+                [ \_ -> done ready |> Query.count (Expect.equal 1)
+                , \_ -> done linked |> Query.count (Expect.equal 0)
+                , \_ -> done unlinked |> Query.count (Expect.equal 1)
+                , \_ -> Expect.equal ready.cards.viewport.revision unlinked.cards.viewport.revision
+                , \_ -> Expect.equal ready.cards.viewport.index unlinked.cards.viewport.index
+                ] ()
+        , test "Main URL changes rebuild cached focused rows and restore roots when browser focus clears" <| \_ ->
+            let
+                seeded = viewportReady (DataLoading.mergeNavigationSummaries [ project "a", project "b" ] [] model)
+                focused = Main.update (UrlChanged { url | fragment = Just "tab=projects&focus=project:a" }) seeded |> Tuple.first
+                cleared = Main.update (UrlChanged { url | fragment = Just "tab=projects" }) focused |> Tuple.first
+                ids source = source.cards.viewport.rows |> Dict.values |> List.filter (\row -> row.kind == "project") |> List.map .entityId |> List.sort
+            in
+            Expect.equal { focused = [ "a" ], cleared = [ "a", "b" ], revisionChanged = True }
+                { focused = ids focused, cleared = ids cleared, revisionChanged = focused.cards.viewport.revision > seeded.cards.viewport.revision }
+        , test "each project owns a distinct terminal task drop boundary even for empty task lists" <| \_ ->
+            let
+                check populated =
+                    let
+                        taskA = let base = task "task-a" Nothing in { base | projectId = Just "a", priority = 8 }
+                        taskB = let base = task "task-b" Nothing in { base | projectId = Just "b", priority = 3 }
+                        seeded = DataLoading.mergeNavigationSummaries [ project "a", project "b" ] (if populated then [ taskA, taskB ] else []) model
+                        dragging = { seeded | auth = { status = AuthReady, mode = Just "test" }, dragDrop = { dragging = Just { entityType = "task", entityId = "task-a" }, dragOver = Nothing, dropActionModal = Nothing } }
+                        cached = Cards.refreshViewport seeded ( dragging, Cmd.none ) |> Tuple.first
+                    in
+                    cached.cards.viewport.rows |> Dict.values
+                        |> List.filterMap (\row -> row.zone |> Maybe.andThen (\zone -> if zone.parentType == "project-tasks" && zone.belowPriority == Nothing then Just ( row.key, zone.projectId, zone.abovePriority ) else Nothing))
+            in
+            Expect.equal
+                { empty = [ ( "drop:project-tasks:a:root:end", Just "a", Nothing ), ( "drop:project-tasks:b:root:end", Just "b", Nothing ) ]
+                , populated = [ ( "drop:project-tasks:a:root:end", Just "a", Just 8 ), ( "drop:project-tasks:b:root:end", Just "b", Just 3 ) ] }
+                { empty = check False, populated = check True }
         , test "collapsing a loaded branch unmounts its child cards without discarding branch membership" <|
             \_ ->
                 let
@@ -551,4 +751,52 @@ task id parentId =
     , directSubtaskCount = 0
     , hasChildren = False
     , readinessRollup = { openSubtaskCount = 0, doneSubtaskCount = 0, cancelledSubtaskCount = 0, blockedSubtaskCount = 0, dependencyBlockedTaskCount = 0, openDependencyCount = 0, completionReady = True }
+    }
+
+
+viewportReady : Model -> Model
+viewportReady source =
+    let
+        ready = { source | auth = { status = AuthReady, mode = Just "test" } }
+    in
+    Cards.refreshViewport source ( ready, Cmd.none ) |> Tuple.first
+
+
+rootSeed : List Api.ProjectCardSummary -> Model
+rootSeed summaries =
+    let
+        prepared = DataLoading.prepareRootNavigationRequest (Just workspaceId) model
+        seeded = DataLoading.mergeNavigationSummaries summaries [] prepared
+        loading = seeded.dataLoading
+    in
+    { seeded | dataLoading = { loading | rootNavigationRequest = Maybe.map (\request -> { request | inFlight = False, succeeded = True, projectHasMore = True, projectCardCount = List.length summaries, taskHasMore = False, projectRequestPending = False, taskRequestPending = False }) loading.rootNavigationRequest } }
+
+
+routed : Msg -> Model -> Model
+routed msg source =
+    case UpdateRouter.update msg source of
+        Ok result -> Tuple.first result
+        Err _ -> source
+
+
+viewportEvent : Model -> Float -> List ( String, Float ) -> Maybe String -> List String -> Encode.Value
+viewportEvent source top measurements target pins =
+    let
+        viewport = source.cards.viewport
+    in
+    Encode.object
+        [ ( "workspace", Encode.string workspaceId ), ( "epoch", Encode.int source.sessionRequestEpoch )
+        , ( "generation", Encode.int source.dataLoading.navigationGeneration ), ( "revision", Encode.int viewport.revision )
+        , ( "top", Encode.float top ), ( "height", Encode.float 600 )
+        , ( "measurements", Encode.list (\( key, amount ) -> Encode.object [ ( "key", Encode.string key ), ( "height", Encode.float amount ) ]) measurements )
+        , ( "request", target |> Maybe.map Encode.string |> Maybe.withDefault Encode.null ), ( "pins", Encode.list Encode.string pins )
+        ]
+
+
+editorSession : Api.SessionContext
+editorSession =
+    { authMode = "test"
+    , principal = { actorType = "user", actorId = "editor", actorLabel = "Editor", authority = "local", grantUserId = Nothing }
+    , globalPermissions = { createWorkspace = False, superadmin = False }
+    , workspace = Just { workspaceId = workspaceId, role = Just "edit", canRead = True, canEdit = True, canAdmin = False }
     }

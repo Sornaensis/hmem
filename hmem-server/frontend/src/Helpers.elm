@@ -1060,12 +1060,7 @@ focusElement elemId =
 
 scrollToElement : String -> Cmd Msg
 scrollToElement elemId =
-    Browser.Dom.getElement elemId
-        |> ElmTask.andThen
-            (\info ->
-                Browser.Dom.setViewportOf "main-content-scroll" 0 (info.element.y - 100)
-            )
-        |> ElmTask.attempt (\_ -> NoOp)
+    Ports.scrollHierarchyTarget elemId
 
 
 formatDate : String -> String

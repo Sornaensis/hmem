@@ -1,4 +1,4 @@
-module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
@@ -31,6 +31,7 @@ init =
     , cardDetailAdmissions = Set.empty
     , cardDetailRetries = Set.empty
     , visibleDetailDemand = Nothing
+                        , viewportDetailPins = Set.empty
     , rootNavigationPresentation = Nothing
     , navigationPresentations = Dict.empty
     , projectCardSummaries = Dict.empty
@@ -721,7 +722,7 @@ beginRootNavigationPage entityKind model =
                     if entityKind == "project" then previous.projectHasMore else previous.taskHasMore
 
                 needsTransport =
-                    retrying || presentationNeedsTransport "root" Nothing entityKind model nextPresentation previous
+                    retrying || hasMore
 
                 canAdvance =
                     not previous.inFlight && (retrying || not needsTransport || hasMore)
@@ -869,6 +870,7 @@ reloadNavigationForFilters model =
                         , navigationQueue = []
                         , navigationPasses = Dict.empty
                         , visibleDetailDemand = Nothing
+                        , viewportDetailPins = Set.empty
                         , cardDetailRetries = Set.empty
                         , rootNavigationPresentation = Nothing
                         , navigationPresentations = Dict.empty
@@ -1758,6 +1760,21 @@ ensureExpandedBranches model =
 {-| Only a current viewport can replace detail demand. Cached entities outside
 canonical membership cannot become demands through a stale layout callback.
 -}
+ensureViewportCardDetails : String -> Int -> Int -> Set.Set String -> Set.Set String -> Set.Set ( String, String ) -> Model -> ( Model, Cmd Msg )
+ensureViewportCardDetails workspaceId sessionEpoch generation projectIds taskIds pins model =
+    if model.selectedWorkspaceId /= Just workspaceId || model.sessionRequestEpoch /= sessionEpoch || model.dataLoading.navigationGeneration /= generation || model.auth.status /= AuthReady then
+        ( model, Cmd.none )
+    else
+        let
+            loading = model.dataLoading
+            current ( kind, id ) =
+                if kind == "project" then Set.member id loading.navigationVisibleProjectIds
+                else kind == "task" && Set.member id loading.navigationVisibleTaskIds
+            bounded = pins |> Set.filter current |> Set.toList |> List.take 6 |> Set.fromList
+        in
+        ensureVisibleCardDetails workspaceId sessionEpoch generation projectIds taskIds { model | dataLoading = { loading | viewportDetailPins = bounded } }
+
+
 ensureVisibleCardDetails : String -> Int -> Int -> Set.Set String -> Set.Set String -> Model -> ( Model, Cmd Msg )
 ensureVisibleCardDetails workspaceId sessionEpoch generation projectIds taskIds model =
     if model.selectedWorkspaceId /= Just workspaceId || model.sessionRequestEpoch /= sessionEpoch || model.dataLoading.navigationGeneration /= generation || model.auth.status /= AuthReady then
@@ -1794,7 +1811,7 @@ detailPinnedIds kind model =
     in
     [ model.focus.focusedEntity, edited, inline ]
         |> List.filterMap identity
-        |> (\pins -> pins ++ Set.toList model.dataLoading.cardDetailRetries)
+        |> (\pins -> pins ++ Set.toList model.dataLoading.cardDetailRetries ++ Set.toList model.dataLoading.viewportDetailPins)
         |> List.filter (Tuple.first >> (==) kind)
         |> List.map Tuple.second
         |> Set.fromList
@@ -1803,27 +1820,29 @@ detailPinnedIds kind model =
 ensurePresentedCardDetails : Model -> ( Model, Cmd Msg )
 ensurePresentedCardDetails model =
     let
-        branches =
-            ( "workspace_root", Nothing ) ::
-                (Dict.keys model.dataLoading.loadedNavigationBranches
-                    |> List.filter (\key -> navigationBranchExpanded key model)
-                    |> List.filterMap (\key -> case String.split ":" key of
-                        [ kind, id ] -> Just ( kind, Just id )
-                        _ -> Nothing))
-
-        presented =
-            List.concatMap (\( kind, parent ) ->
-                let
-                    ( presentedProjects, presentedTasks ) = presentedNavigationSummaries kind parent model
-                in
-                List.map (\item -> ( "project", item.id )) presentedProjects ++ List.map (\item -> ( "task", item.id )) presentedTasks
-                ) branches
-                |> List.take 25
-
         ( projectIds, taskIds ) =
             case model.dataLoading.visibleDetailDemand of
                 Just demand -> demand
                 Nothing ->
+                    let
+                        branches =
+                            ( "workspace_root", Nothing ) ::
+                                (Dict.keys model.dataLoading.loadedNavigationBranches
+                                    |> List.filter (\key -> navigationBranchExpanded key model)
+                                    |> List.filterMap (\key -> case String.split ":" key of
+                                        [ kind, id ] -> Just ( kind, Just id )
+                                        _ -> Nothing))
+                
+                        presented =
+                            List.concatMap (\( kind, parent ) ->
+                                let
+                                    ( presentedProjects, presentedTasks ) = presentedNavigationSummaries kind parent model
+                                in
+                                List.map (\item -> ( "project", item.id )) presentedProjects ++ List.map (\item -> ( "task", item.id )) presentedTasks
+                                ) branches
+                                |> List.take 25
+                
+                                    in
                     ( presented |> List.filter (Tuple.first >> (==) "project") |> List.map Tuple.second |> Set.fromList
                     , presented |> List.filter (Tuple.first >> (==) "task") |> List.map Tuple.second |> Set.fromList
                     )
@@ -2092,11 +2111,18 @@ update msg model =
         ( updated, responseCommand ) =
             updateResponse msg (releaseNavigationAdmission msg model)
 
+        detailsOnly =
+            case msg of
+                GotProjectCardDetail _ _ _ -> True
+                GotTaskCardDetail _ _ _ -> True
+                RetryCardDetail _ _ -> True
+                _ -> False
+
         ( expanded, branchCommand ) =
-            ensureExpandedBranches (retireHiddenNavigation updated)
+            if detailsOnly then ( updated, Cmd.none ) else ensureExpandedBranches (retireHiddenNavigation updated)
 
         ( pumped, navigationCommand ) =
-            pumpNavigation expanded
+            if detailsOnly then ( expanded, Cmd.none ) else pumpNavigation expanded
 
         ( hydrated, detailCommand ) =
             ensurePresentedCardDetails pumped

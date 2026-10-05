@@ -1,4 +1,4 @@
-module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
@@ -846,6 +846,14 @@ prepareRootNavigationRequest expectedWorkspace model =
             model
 
 
+rootNavigationContextMatches : String -> Model -> Bool
+rootNavigationContextMatches workspaceId model =
+    model.dataLoading.rootNavigationRequest
+        |> Maybe.map (\request -> request.workspaceId == workspaceId && request.sessionEpoch == model.sessionRequestEpoch && request.filterFingerprint == navigationFilterFingerprint model
+            && (request.inFlight || request.succeeded || request.projectRequestPending || request.taskRequestPending))
+        |> Maybe.withDefault False
+
+
 reloadNavigationForFilters : Model -> ( Model, Cmd Msg )
 reloadNavigationForFilters model =
     case model.selectedWorkspaceId of
@@ -996,7 +1004,7 @@ invalidateNavigationRequests model =
         | dataLoading =
             { loading
                 | navigationGeneration = generation
-                , rootNavigationRequest = Maybe.map retire loading.rootNavigationRequest
+                , rootNavigationRequest = Maybe.map (\request -> let retired = retire request in { retired | projectRequestPending = False, taskRequestPending = False }) loading.rootNavigationRequest
                 , loadedNavigationBranches = Dict.map (\_ -> retire) loading.loadedNavigationBranches
                 , navigationQueue = []
                 , navigationPasses = Dict.empty
@@ -1183,15 +1191,25 @@ requestNavigationFocus force workspaceId entityType entityId model =
         previousRequest =
             Dict.get requestKey model.dataLoading.navigationFocuses
 
+        matchesContext focusRequest =
+            focusRequest.workspaceId == workspaceId
+                && focusRequest.sessionEpoch == model.sessionRequestEpoch
+                && focusRequest.filterFingerprint == navigationFilterFingerprint model
+                && focusRequest.entityType == entityType
+                && focusRequest.entityId == entityId
+
+        currentRequest =
+            previousRequest |> Maybe.andThen (\focusRequest -> if matchesContext focusRequest then Just focusRequest else Nothing)
+
         requestedAncestorOffset =
             if force then
                 0
 
             else
-                previousRequest |> Maybe.map .ancestorOffset |> Maybe.withDefault 0
+                currentRequest |> Maybe.map .ancestorOffset |> Maybe.withDefault 0
 
         retryable =
-            previousRequest
+            currentRequest
                 |> Maybe.map (\previous -> not previous.inFlight && not previous.succeeded)
                 |> Maybe.withDefault False
 
@@ -1214,14 +1232,18 @@ requestNavigationFocus force workspaceId entityType entityId model =
             case currentDataLoading.activeNavigationFocus of
                 Just activeRequest ->
                     activeRequest.inFlight
-                        && activeRequest.workspaceId == workspaceId
-                        && activeRequest.entityType == entityType
-                        && activeRequest.entityId == entityId
+                        && matchesContext activeRequest
 
                 Nothing ->
                     False
+
+        alreadyCompleted =
+            currentRequest |> Maybe.map .succeeded |> Maybe.withDefault False
+
+        retiredRequest =
+            previousRequest /= Nothing && currentRequest == Nothing
     in
-    if (alreadyPresent && not retryable && not force) || (alreadyInFlight && not force) || (entityType /= "project" && entityType /= "task") then
+    if ((alreadyPresent && not retiredRequest && not retryable) || alreadyCompleted || alreadyInFlight) && not force || (entityType /= "project" && entityType /= "task") then
         ( model, Cmd.none )
 
     else
@@ -2187,42 +2209,36 @@ updateResponse msg model =
                                 currentLoading =
                                     model.dataLoading
 
-                                dataLoading =
-                                    { currentLoading
-                                        | loadingWorkspaceData = True
-                                        , pendingWorkspaceLoads =
-                                            if isRepository then
-                                                2
+                                rootContextRetained =
+                                    rootNavigationContextMatches expectedWsId model
 
-                                             else
-                                                 1
-                                         , rootNavigationRequest =
-                                             Just
-                                                 { workspaceId = expectedWsId
-                                                , sessionEpoch = model.sessionRequestEpoch
-                                                , generation = currentLoading.navigationGeneration
-                                                , filterFingerprint = navigationFilterFingerprint model
-                                                , projectOffset = 0
-                                                , taskOffset = 0
-                                                , inFlight = True
-                                                , succeeded = False
-                                                , projectHasMore = False
-                                                 , taskHasMore = False
-                                                 , projectCardCount = 0
-                                                 , taskCardCount = 0
-                                                 , projectRequestPending = True
-                                                 , taskRequestPending = True
-                                                 }
-                                         , rootNavigationPresentation =
-                                             Just
-                                                 { workspaceId = expectedWsId
-                                                 , sessionEpoch = model.sessionRequestEpoch
-                                                 , generation = currentLoading.navigationGeneration
-                                                 , filterFingerprint = navigationFilterFingerprint model
-                                                 , projectOffset = 0
-                                                 , taskOffset = 0
-                                                 }
-                                     }
+                                rootModel =
+                                    if rootContextRetained then
+                                        model
+
+                                    else
+                                        prepareRootNavigationRequest (Just expectedWsId)
+                                            { model | dataLoading = { currentLoading | navigationGeneration = currentLoading.navigationGeneration + 1 } }
+
+                                rootLoading =
+                                    rootModel.dataLoading
+
+                                initialRootPending =
+                                    rootLoading.rootNavigationRequest
+                                        |> Maybe.map (\request -> request.inFlight && request.projectOffset == 0 && request.taskOffset == 0 && request.projectRequestPending && request.taskRequestPending)
+                                        |> Maybe.withDefault False
+
+                                pendingLoads =
+                                    -- Demand pages are independent of the initial workspace load.
+                                    (if initialRootPending then 1 else 0) + (if isRepository then 1 else 0)
+
+                                dataLoading =
+                                    { rootLoading
+                                        | loadingWorkspaceData = pendingLoads > 0
+                                        , pendingWorkspaceLoads = pendingLoads
+                                        , activeWorkspaceLoadToken = if pendingLoads == 0 then Nothing else Just token
+                                        , cardHydrationLoaded = pendingLoads == 0
+                                    }
 
                                 currentObservations =
                                     model.observations
@@ -2243,19 +2259,10 @@ updateResponse msg model =
                                         }
 
                                 rootCommand =
-                                    Api.fetchRootNavigation model.flags.apiUrl expectedWsId (navigationFilterQuery model) (GotRootNavigation expectedWsId model.sessionRequestEpoch (Just token) model.dataLoading.navigationGeneration (navigationFilterFingerprint model) 0 0)
-
-                                focusCommand =
-                                    case model.focus.focusedEntity of
-                                        Just ( entityType, entityId ) ->
-                                            Api.fetchNavigationFocus model.flags.apiUrl expectedWsId entityType entityId 0
-                                                (GotNavigationFocus expectedWsId model.sessionRequestEpoch dataLoading.navigationGeneration (navigationFilterFingerprint model) entityType entityId 0)
-
-                                        Nothing ->
-                                            Cmd.none
+                                    if rootContextRetained then Cmd.none else beginRootNavigation rootModel
 
                                 commands =
-                                    [ rootCommand, focusCommand ]
+                                    [ rootCommand ]
                                         ++ (if isRepository then
                                                 [ Api.fetchObservations model.flags.apiUrl
                                                     (Feature.Observation.listQuery expectedWsId 0 observations)
@@ -2267,47 +2274,34 @@ updateResponse msg model =
                                            )
                             in
                             let
-                                navigationDataLoading =
-                                    case model.focus.focusedEntity of
-                                        Just ( entityType, entityId ) ->
-                                            { dataLoading
-                                                | activeNavigationFocus =
-                                                    Just
-                                                        { workspaceId = expectedWsId
-                                                        , sessionEpoch = model.sessionRequestEpoch
-                                                        , generation = dataLoading.navigationGeneration
-                                                        , filterFingerprint = navigationFilterFingerprint model
-                                                         , entityType = entityType
-                                                         , entityId = entityId
-                                                         , ancestorOffset = 0
-                                                         , inFlight = True
-                                                        , succeeded = False
-                                                        }
-                                            }
-
-                                        Nothing ->
-                                            dataLoading
-
                                 loadedModel =
                                     { model
                                         | workspaces = Dict.insert workspace.id workspace model.workspaces
-                                        , dataLoading = navigationDataLoading
+                                        , dataLoading = dataLoading
                                         , observations = observations
                                     }
+
+                                ( focusedModel, focusCmd ) =
+                                    case model.focus.focusedEntity of
+                                        Just ( entityType, entityId ) ->
+                                            beginNavigationFocus expectedWsId entityType entityId loadedModel
+
+                                        Nothing ->
+                                            ( loadedModel, Cmd.none )
 
                                 ( detailModel, detailCmd ) =
                                     if isRepository then
                                         case observations.selectedId of
                                             Just observationId ->
-                                                Feature.Observation.selectObservation observationId loadedModel
+                                                Feature.Observation.selectObservation observationId focusedModel
 
                                             Nothing ->
-                                                ( loadedModel, Cmd.none )
+                                                ( focusedModel, Cmd.none )
 
                                     else
-                                        ( loadedModel, Cmd.none )
+                                        ( focusedModel, Cmd.none )
                             in
-                            ( detailModel, Cmd.batch (detailCmd :: commands) )
+                            ( detailModel, Cmd.batch (detailCmd :: focusCmd :: commands) )
 
                         else
                             ( model, Cmd.none )

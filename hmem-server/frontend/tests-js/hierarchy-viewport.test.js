@@ -234,3 +234,109 @@ test('a delayed non-hierarchy target is retired by workspace or session context 
     h.bridge.dispose()
   }
 })
+
+function reverseFixture(mounted = true) {
+  const h = harness(), previous = h.row('project:a', 0), current = h.row('project:b', 700)
+  const last = { tabIndex: 0, closest: () => null, getClientRects: () => [{}], focus() { h.doc.activeElement = last } }
+  previous.querySelectorAll = () => [previous.button, last]
+  current.dataset.hierarchyPrevious = 'project:a'
+  h.setRows(mounted ? [previous, current] : [current]); h.flush()
+  const reverse = () => h.listeners.get('keydown')({ key: 'Tab', shiftKey: true, target: current.button, preventDefault() {} })
+  const layout = target => ({ ...h.stamp, anchor: null, top: 0, target })
+  return { h, previous, current, last, reverse, layout }
+}
+
+test('a mounted reverse keyboard target wins over an earlier admitted layout target', () => {
+  const { h, last, reverse, layout } = reverseFixture()
+  h.callbacks.sync(layout('project:b')); reverse(); h.flush()
+  assert.equal(h.doc.activeElement, last)
+  h.bridge.dispose()
+})
+
+test('an offscreen reverse keyboard target stays requested instead of the earlier layout target', () => {
+  const { h, reverse, layout } = reverseFixture(false)
+  h.callbacks.sync(layout('project:b')); reverse(); h.flush()
+  assert.equal(h.sent.at(-1).request, 'project:a')
+  assert.equal(h.doc.activeElement, null)
+  h.bridge.dispose()
+})
+
+test('a repeated same-stamp layout echo cannot become a newer keyboard intent', () => {
+  const { h, last, reverse, layout } = reverseFixture()
+  h.callbacks.sync(layout('project:b')); reverse(); h.callbacks.sync(layout('project:b')); h.flush()
+  assert.equal(h.doc.activeElement, last)
+  h.bridge.dispose()
+})
+
+test('a genuinely newer different layout target supersedes keyboard without borrowing its focus mode', () => {
+  const { h, current, reverse, layout } = reverseFixture()
+  const route = h.row('task:c', 1400)
+  h.setRows([current, route]); h.flush()
+  reverse(); h.callbacks.sync(layout('task:c')); h.flush()
+  assert.equal(h.scroller.scrollTop, 1400)
+  assert.equal(h.doc.activeElement, null)
+  assert.equal(h.sent.at(-1).acknowledged, true)
+  h.bridge.dispose()
+})
+
+test('a newer direct route target supersedes the pending keyboard predecessor', () => {
+  const { h, reverse } = reverseFixture()
+  reverse(); h.callbacks.target('entity-b'); h.flush()
+  assert.equal(h.scroller.scrollTop, 700)
+  assert.equal(h.doc.activeElement, null)
+  h.bridge.dispose()
+})
+
+test('a newer painted stamp retires the old keyboard target and accepts its layout target', () => {
+  const { h, reverse, layout } = reverseFixture()
+  reverse(); const next = { ...layout('project:b'), revision: h.stamp.revision + 1 }
+  h.callbacks.sync(next); h.setStamp(next); h.flush()
+  assert.equal(h.scroller.scrollTop, 700)
+  assert.equal(h.doc.activeElement, null)
+  assert.equal(h.sent.at(-1).request, null)
+  h.bridge.dispose()
+})
+
+
+test('a completed reverse target keeps its physical scroll and focus against a later old layout echo', () => {
+  const { h, last, reverse, layout } = reverseFixture()
+  h.callbacks.sync({ ...layout('project:b'), top: 700 }); reverse(); h.flush()
+  assert.equal(h.doc.activeElement, last); assert.equal(h.scroller.scrollTop, 0)
+  h.callbacks.sync({ ...layout('project:b'), top: 700 }); h.flush()
+  assert.equal(h.doc.activeElement, last); assert.equal(h.scroller.scrollTop, 0)
+  assert.equal(h.sent.at(-1).request, null); assert.equal(h.sent.at(-1).acknowledged, false)
+  h.bridge.dispose()
+})
+
+test('genuine pointer focus and history intents cannot reauthorize an older echoed target', () => {
+  for (const intent of ['pointer', 'focus', 'hashchange', 'popstate']) {
+    const { h, current, reverse, layout } = reverseFixture()
+    h.callbacks.sync({ ...layout('project:b'), top: 700 }); reverse(); h.flush()
+    h.scroller.scrollTop = 80; h.doc.activeElement = current.button
+    if (intent === 'pointer') h.listeners.get('pointerdown')({ target: current.button })
+    else if (intent === 'focus') h.listeners.get('focusin')({ target: current.button })
+    else h.windowListeners.get(intent)()
+    h.callbacks.sync({ ...layout('project:b'), top: 700 }); h.flush()
+    assert.equal(h.scroller.scrollTop, 80, intent)
+    assert.equal(h.doc.activeElement, current.button, intent)
+    assert.equal(h.sent.at(-1).acknowledged, false, intent)
+    h.bridge.dispose()
+  }
+})
+
+
+test('bridge-owned recovery emits native focusin without retiring a newer mounted or offscreen route target', () => {
+  for (const mounted of [true, false]) {
+    const h = harness(), retained = h.row('project:b', 0), route = h.row('task:c', 1400)
+    retained.button.focus = () => { h.doc.activeElement = retained.button; h.listeners.get('focusin')({ target: retained.button }) }
+    h.setRows([retained]); h.flush(); retained.button.focus()
+    h.doc.activeElement = null; h.listeners.get('focusout')({ target: retained.button, relatedTarget: null })
+    h.mutate([{ removedNodes: [retained], addedNodes: [retained] }])
+    if (mounted) h.setRows([retained, route])
+    h.callbacks.sync({ ...h.stamp, anchor: null, top: 0, target: 'task:c' }); h.flush()
+    assert.equal(h.doc.activeElement, retained.button)
+    if (mounted) { assert.equal(h.scroller.scrollTop, 1400); assert.equal(h.sent.at(-1).acknowledged, true) }
+    else assert.equal(h.sent.at(-1).request, 'task:c')
+    h.bridge.dispose()
+  }
+})

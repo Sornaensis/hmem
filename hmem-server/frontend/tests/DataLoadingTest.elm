@@ -5,6 +5,7 @@ import AppShell
 import Dict
 import Expect
 import Feature.Cards as Cards
+import Feature.ChangeStream as ChangeStream
 import Feature.DataLoading as DataLoading
 import Feature.Dependencies as Dependencies
 import Feature.Mutations as Mutations
@@ -79,8 +80,15 @@ suite =
                     source =
                         { branched | auth = { status = AuthReady, mode = Just "test" }, sessionContext = Just editorSession, focus = { focus | focusedEntity = Just ( "project", "parent" ) } }
 
+                    established =
+                        let
+                            initialStream = ChangeStream.init (ChangeStream.Workspace workspaceId) []
+                            socket = source.webSocket
+                        in
+                        { source | webSocket = { socket | streams = Dict.singleton ("workspace:" ++ workspaceId) { initialStream | snapshotApplied = True } } }
+
                     recovered =
-                        WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) source |> Tuple.first
+                        WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) established |> Tuple.first
                     resumed =
                         case Dict.get "project:parent" source.dataLoading.loadedNavigationBranches of
                             Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) recovered |> Tuple.first
@@ -1609,6 +1617,177 @@ suite =
                         )
                         staleMessages
                     )
+        , test "the first canonical shell before the root preserves actual AppShell bootstrap requests" <|
+            \_ ->
+                let
+                    initial = actualFocusBootstrap
+                    shell = WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) initial |> Tuple.first
+                    completed = rootHydrationPage [ project "bootstrap-root" Nothing ] [] False shell
+                in
+                Expect.equal { root = initial.dataLoading.rootNavigationRequest, focus = initial.dataLoading.activeNavigationFocus, loaded = True }
+                    { root = shell.dataLoading.rootNavigationRequest, focus = shell.dataLoading.activeNavigationFocus
+                    , loaded = not completed.dataLoading.loadingWorkspaceData && completed.dataLoading.activeWorkspaceLoadToken == Nothing }
+        , test "the first canonical shell after root completion preserves the actual focus continuation" <|
+            \_ ->
+                let
+                    initial = actualFocusBootstrap
+                    continued = focusPage 0 (Just 64) "ancestor-first" initial
+                    root = rootHydrationPage [ project "bootstrap-root" Nothing, project "ancestor-first" Nothing ] [] False continued
+                    shell = WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) root |> Tuple.first
+                    second = focusPage 64 (Just 128) "ancestor-second" shell
+                    completed = focusPage 128 Nothing "ancestor-last" second
+                in
+                Expect.equal { root = root.dataLoading.rootNavigationRequest, focus = continued.dataLoading.activeNavigationFocus, complete = True, loading = False }
+                    { root = shell.dataLoading.rootNavigationRequest, focus = shell.dataLoading.activeNavigationFocus
+                    , complete = completed.dataLoading.activeNavigationFocus == Nothing && List.all (\id -> Dict.member id completed.dataLoading.projectCardSummaries) [ "target", "ancestor-first", "ancestor-second", "ancestor-last" ]
+                    , loading = shell.dataLoading.loadingWorkspaceData }
+        , test "a first valid shell replaces a root retired by malformed snapshot or explicit resync" <|
+            \_ ->
+                let
+                    initial = actualFocusBootstrap
+                    malformed = Encode.object
+                        [ ( "schema_version", Encode.int 1 ), ( "transport", Encode.string "snapshot" )
+                        , ( "scope", Encode.object [ ( "scope", Encode.string "workspace" ), ( "workspace_id", Encode.string workspaceId ) ] )
+                        , ( "snapshot_profile", Encode.string "workspace_shell_v1" ), ( "items", Encode.list identity [] ), ( "resume_token", Encode.string "invalid-shell" ) ] |> Encode.encode 0
+                    resync = Encode.object
+                        [ ( "schema_version", Encode.int 1 ), ( "transport", Encode.string "frame" )
+                        , ( "scope", Encode.object [ ( "scope", Encode.string "workspace" ), ( "workspace_id", Encode.string workspaceId ) ] )
+                        , ( "frame", Encode.object [ ( "schema_version", Encode.int 1 ), ( "type", Encode.string "resync_required" ) ] ) ] |> Encode.encode 0
+                    outcome raw =
+                        let
+                            retired = WebSocket.update (WsMessageReceived raw) initial |> Tuple.first
+                            recovered = WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) retired |> Tuple.first
+                            accepted = rootHydrationPage [ project "recovered-root" Nothing ] [] False recovered
+                        in
+                        ( recovered.dataLoading.rootNavigationRequest |> Maybe.map .inFlight
+                        , Dict.member "recovered-root" accepted.dataLoading.projectCardSummaries
+                        , recovered.dataLoading.rootNavigationRequest /= retired.dataLoading.rootNavigationRequest )
+                in
+                Expect.equal [ ( Just True, True, True ), ( Just True, True, True ) ] (List.map outcome [ malformed, resync ])
+        , test "first canonical hydration preserves an explicitly paused root HTTP error" <|
+            \_ ->
+                let
+                    initial = actualFocusBootstrap
+                    paused = case initial.dataLoading.rootNavigationRequest of
+                        Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch (Just 1) request.generation request.filterFingerprint 0 0 (Err Http.Timeout)) initial |> Tuple.first
+                        Nothing -> initial
+                    shell = WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) paused |> Tuple.first
+                in
+                Expect.equal ( paused.dataLoading.rootNavigationRequest, Just False )
+                    ( shell.dataLoading.rootNavigationRequest, shell.dataLoading.rootNavigationRequest |> Maybe.map .inFlight )
+        , test "a later canonical shell genuinely revalidates completed navigation and focus" <|
+            \_ ->
+                let
+                    initial = actualFocusBootstrap
+                    first = WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) initial |> Tuple.first
+                    completed = first |> rootHydrationPage [ project "bootstrap-root" Nothing ] [] False |> focusPage 0 Nothing "ancestor-last"
+                    later = WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) completed |> Tuple.first
+                in
+                Expect.equal ( True, Just 0, Just True )
+                    ( later.dataLoading.navigationGeneration > completed.dataLoading.navigationGeneration
+                    , later.dataLoading.activeNavigationFocus |> Maybe.map .ancestorOffset
+                    , later.dataLoading.rootNavigationRequest |> Maybe.map .inFlight )
+        , test "workspace hydration preserves the held root identity even after focus advances the allocator" <|
+            \_ ->
+                let
+                    prepared = DataLoading.prepareRootNavigationRequest (Just workspaceId) focusHydrationModel
+                    focused = DataLoading.beginNavigationFocus workspaceId "project" "target" prepared |> Tuple.first
+                    hydrated = hydrateFocusWorkspace focused
+                in
+                Expect.equal ( focused.dataLoading.rootNavigationRequest, focused.dataLoading.rootNavigationPresentation )
+                    ( hydrated.dataLoading.rootNavigationRequest, hydrated.dataLoading.rootNavigationPresentation )
+        , test "workspace hydration preserves a demanded root page and independently exhausted task counts" <|
+            \_ ->
+                let
+                    seed = focusHydrationModel
+                    loading = seed.dataLoading
+                    prepared = DataLoading.prepareRootNavigationRequest (Just workspaceId) { seed | dataLoading = { loading | pendingWorkspaceLoads = 2 } }
+                    first = rootHydrationPage (List.range 1 50 |> List.map (\n -> project ("hydration-" ++ String.fromInt n) Nothing)) [ task "root-task" Nothing ] True prepared
+                    demanded = DataLoading.beginRootNavigationPage "project" first |> Tuple.first
+                    hydrated = hydrateFocusWorkspace demanded
+                in
+                Expect.equal { request = demanded.dataLoading.rootNavigationRequest, presentation = demanded.dataLoading.rootNavigationPresentation, projects = 50, tasks = 1 }
+                    { request = hydrated.dataLoading.rootNavigationRequest, presentation = hydrated.dataLoading.rootNavigationPresentation
+                    , projects = Dict.size hydrated.dataLoading.projectCardSummaries, tasks = Dict.size hydrated.dataLoading.taskCardSummaries }
+        , test "root metadata and observation arrival orders settle only their actual pending loads" <|
+            \_ ->
+                let
+                    seed = focusHydrationModel
+                    loading = seed.dataLoading
+                    prepared = DataLoading.prepareRootNavigationRequest (Just workspaceId) { seed | dataLoading = { loading | pendingWorkspaceLoads = 2 } }
+                    rootReply = rootHydrationPage [ project "hydrated-root" Nothing ] [] False
+                    observationReply source =
+                        DataLoading.update (GotObservations workspaceId (Just 1) source.observations.requestGeneration source.observations.queryFingerprint 0 (Ok { items = [], hasMore = False })) source |> Tuple.first
+                    results =
+                        [ prepared |> rootReply |> hydrateFocusWorkspace |> observationReply
+                        , prepared |> hydrateFocusWorkspace |> rootReply |> observationReply
+                        , prepared |> hydrateFocusWorkspace |> observationReply |> rootReply
+                        ]
+                    settled source =
+                        { workspace = Dict.member workspaceId source.workspaces, cached = Dict.member "hydrated-root" source.dataLoading.projectCardSummaries
+                        , pending = source.dataLoading.pendingWorkspaceLoads, loading = source.dataLoading.loadingWorkspaceData, token = source.dataLoading.activeWorkspaceLoadToken
+                        , request = source.dataLoading.rootNavigationRequest |> Maybe.map (\request -> ( request.inFlight, request.succeeded, request.projectCardCount )) }
+                in
+                Expect.equal (List.repeat 3 { workspace = True, cached = True, pending = 0, loading = False, token = Nothing, request = Just ( False, True, 1 ) }) (List.map settled results)
+        , test "workspace hydration allocates a fresh root generation for a retired session" <|
+            \_ ->
+                let
+                    prepared = DataLoading.prepareRootNavigationRequest (Just workspaceId) focusHydrationModel
+                    retired = { prepared | sessionRequestEpoch = prepared.sessionRequestEpoch + 1 }
+                    hydrated = hydrateFocusWorkspace retired
+                in
+                Expect.equal ( Just retired.sessionRequestEpoch, Just ( 0, 0 ), True )
+                    ( hydrated.dataLoading.rootNavigationRequest |> Maybe.map .sessionEpoch
+                    , hydrated.dataLoading.rootNavigationRequest |> Maybe.map (\request -> ( request.projectOffset, request.taskOffset ))
+                    , hydrated.dataLoading.rootNavigationRequest |> Maybe.map (\request -> request.generation > prepared.dataLoading.navigationGeneration) |> Maybe.withDefault False )
+        , test "workspace hydration preserves a held first focus request" <|
+            \_ ->
+                let
+                    requested = DataLoading.beginNavigationFocus workspaceId "project" "target" focusHydrationModel |> Tuple.first
+                    hydrated = hydrateFocusWorkspace requested
+                in
+                Expect.equal ( requested.dataLoading.activeNavigationFocus, True )
+                    ( hydrated.dataLoading.activeNavigationFocus, Dict.member workspaceId hydrated.workspaces )
+        , test "workspace hydration cannot rewind a focus continuation or discard its cached ancestors" <|
+            \_ ->
+                let
+                    requested = DataLoading.beginNavigationFocus workspaceId "project" "target" focusHydrationModel |> Tuple.first
+                    continued = focusPage 0 (Just 64) "ancestor-first" requested
+                    hydrated = hydrateFocusWorkspace continued
+                    second = focusPage 64 (Just 128) "ancestor-second" hydrated
+                    completed = focusPage 128 Nothing "ancestor-last" second
+                in
+                Expect.equal { first = Just 64, second = Just 128, completed = Nothing, cached = True }
+                    { first = hydrated.dataLoading.activeNavigationFocus |> Maybe.map .ancestorOffset
+                    , second = second.dataLoading.activeNavigationFocus |> Maybe.map .ancestorOffset
+                    , completed = completed.dataLoading.activeNavigationFocus
+                    , cached = List.all (\id -> Dict.member id completed.dataLoading.projectCardSummaries) [ "target", "ancestor-first", "ancestor-second", "ancestor-last" ]
+                    }
+        , test "workspace hydration preserves a completed focus and its successful cache" <|
+            \_ ->
+                let
+                    requested = DataLoading.beginNavigationFocus workspaceId "project" "target" focusHydrationModel |> Tuple.first
+                    completed = focusPage 0 Nothing "ancestor-last" requested
+                    hydrated = hydrateFocusWorkspace completed
+                in
+                Expect.equal ( Nothing, Just True, True )
+                    ( hydrated.dataLoading.activeNavigationFocus
+                    , Dict.get "project:target" hydrated.dataLoading.navigationFocuses |> Maybe.map .succeeded
+                    , Dict.member "target" hydrated.dataLoading.projectCardSummaries && Dict.member "ancestor-last" hydrated.dataLoading.projectCardSummaries
+                    )
+        , test "workspace hydration starts a fresh focus when the retained request belongs to an old session" <|
+            \_ ->
+                let
+                    requested = DataLoading.beginNavigationFocus workspaceId "project" "target" focusHydrationModel |> Tuple.first
+                    continued = focusPage 0 (Just 64) "ancestor-first" requested
+                    retired = { continued | sessionRequestEpoch = continued.sessionRequestEpoch + 1 }
+                    hydrated = hydrateFocusWorkspace retired
+                in
+                Expect.equal ( Just retired.sessionRequestEpoch, Just 0, True )
+                    ( hydrated.dataLoading.activeNavigationFocus |> Maybe.map .sessionEpoch
+                    , hydrated.dataLoading.activeNavigationFocus |> Maybe.map .ancestorOffset
+                    , hydrated.dataLoading.navigationGeneration > requested.dataLoading.navigationGeneration
+                    )
         , test "focus continuation accepts only the expected page and merges target plus ancestors" <|
             \_ ->
                 let
@@ -2357,6 +2536,55 @@ rootLoadModel =
             model.dataLoading
     in
     { model | dataLoading = { loading | activeWorkspaceLoadToken = Just 1, pendingWorkspaceLoads = 1, loadingWorkspaceData = True } }
+
+
+focusHydrationModel : Model
+focusHydrationModel =
+    let
+        focus = rootLoadModel.focus
+    in
+    { rootLoadModel | auth = { status = AuthReady, mode = Just "test" }, sessionContext = Just editorSession, focus = { focus | focusedEntity = Just ( "project", "target" ) } }
+
+
+actualFocusBootstrap : Model
+actualFocusBootstrap =
+    let
+        focus = model.focus
+        initial = { model | focus = { focus | focusedEntity = Just ( "project", "target" ) } }
+    in
+    AppShell.handleOwned (AppShell.SessionContextLoadedMsg initial.sessionRequestEpoch (Just workspaceId) (Ok editorSession)) initial |> Tuple.first
+
+
+hydrateFocusWorkspace : Model -> Model
+hydrateFocusWorkspace source =
+    DataLoading.update
+        (GotWorkspace workspaceId 1 (Ok { id = workspaceId, name = "Workspace", workspaceType = Api.Repository, ghOwner = Nothing, ghRepo = Nothing, createdAt = "now", updatedAt = "now" }))
+        source |> Tuple.first
+
+
+rootHydrationPage : List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Bool -> Model -> Model
+rootHydrationPage projects tasks projectMore source =
+    case source.dataLoading.rootNavigationRequest of
+        Just request ->
+            DataLoading.update
+                (GotRootNavigation workspaceId request.sessionEpoch source.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint request.projectOffset request.taskOffset
+                    (Ok { workspaceId = workspaceId, projects = { items = projects, hasMore = projectMore }, tasks = { items = tasks, hasMore = False } })) source |> Tuple.first
+
+        Nothing -> source
+
+
+focusPage : Int -> Maybe Int -> String -> Model -> Model
+focusPage offset next ancestor source =
+    case source.dataLoading.activeNavigationFocus of
+        Just request ->
+            DataLoading.update
+                (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint "project" "target" offset
+                    (Ok { workspaceId = workspaceId, target = Api.NavigationProjectSummary (project "target" (Just "ancestor-first")), ancestors = [ Api.NavigationProjectSummary (project ancestor Nothing) ], ancestorsTruncated = next /= Nothing, nextAncestorOffset = next })
+                )
+                source |> Tuple.first
+
+        Nothing ->
+            source
 
 
 rootResponse : Api.NavigationBranchResponse

@@ -15,7 +15,33 @@ import Url
 suite : Test
 suite =
     describe "canonical change stream policy"
-        [ test "both required scopes need terminal checkpoints in either arrival order" <|
+        [ test "only a valid accepted snapshot marks its scoped handoff complete" <|
+            \_ ->
+                let
+                    accepted = receiveMarkerSnapshot "global" [] streamModel
+                    malformed = receiveMarkerSnapshot "workspace" [] streamModel
+                    markerWorkspaceItem = Encode.object
+                        [ ( "schema_version", Encode.int 1 ), ( "kind", Encode.string "workspace" )
+                        , ( "data", Encode.object [ ( "id", Encode.string "a" ), ( "name", Encode.string "Workspace" ), ( "workspace_type", Encode.string "repository" ), ( "created_at", Encode.string "now" ), ( "updated_at", Encode.string "now" ) ] ) ]
+                    workspaceAccepted = receiveMarkerSnapshot "workspace" [ markerWorkspaceItem ] streamModel
+                    foreign = receiveMarkerSnapshot "workspace" [ markerWorkspaceItem ] { streamModel | selectedWorkspaceId = Just "other" }
+                    unauthorized = receiveMarkerSnapshot "workspace" [ markerWorkspaceItem ] { streamModel | auth = { status = AuthRequired, mode = Nothing } }
+                    marked scope source = Dict.get scope source.webSocket.streams |> Maybe.map .snapshotApplied |> Maybe.withDefault False
+                in
+                Expect.equal [ True, True, False, False, False ]
+                    [ marked "global" accepted, marked "workspace:a" workspaceAccepted, marked "workspace:a" malformed, marked "workspace:a" foreign, marked "workspace:a" unauthorized ]
+        , test "accepted snapshot identity survives reconnect and resync but fresh scope state resets it" <|
+            \_ ->
+                let
+                    accepted = receiveMarkerSnapshot "global" [] streamModel
+                    state = Dict.get "global" accepted.webSocket.streams |> Maybe.withDefault (ChangeStream.init ChangeStream.Global [])
+                    reconnect = ChangeStream.reduceFrame (Api.CanonicalStatus Api.GlobalScope "reconnecting") state |> Tuple.first
+                    resync = ChangeStream.reduceFrame Api.CanonicalResyncRequired reconnect |> Tuple.first
+                in
+                Expect.equal ( True, Nothing, [ False, False ] )
+                    ( resync.snapshotApplied, resync.resumeToken
+                    , [ (ChangeStream.init ChangeStream.Global []).snapshotApplied, (ChangeStream.init (ChangeStream.Workspace "a") []).snapshotApplied ] )
+        , test "both required scopes need terminal checkpoints in either arrival order" <|
             \_ ->
                 let
                     states order =
@@ -696,6 +722,17 @@ scopeValue scope =
                     []
                )
         )
+
+
+receiveMarkerSnapshot : String -> List Encode.Value -> Model -> Model
+receiveMarkerSnapshot scope items model =
+    receiveTransport
+        [ ( "transport", Encode.string "snapshot" )
+        , ( "scope", scopeValue scope )
+        , ( "snapshot_profile", Encode.string (if scope == "workspace" then "workspace_shell_v1" else "full_v1") )
+        , ( "items", Encode.list identity items )
+        , ( "resume_token", Encode.string "marker-token" )
+        ] model
 
 
 receiveStatus : String -> String -> Model -> Model

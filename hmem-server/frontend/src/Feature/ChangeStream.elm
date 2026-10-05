@@ -20,6 +20,7 @@ type alias State =
     { scope : Scope
     , eventIds : List String
     , resumeToken : Maybe String
+    , snapshotApplied : Bool
     , live : Bool
     , failure : Maybe String
     }
@@ -70,7 +71,7 @@ type Action
 
 init : Scope -> List String -> State
 init scope eventIds =
-    { scope = scope, eventIds = List.take 128 eventIds, resumeToken = Nothing, live = False, failure = Nothing }
+    { scope = scope, eventIds = List.take 128 eventIds, resumeToken = Nothing, snapshotApplied = False, live = False, failure = Nothing }
 
 
 scopeKey : Scope -> String

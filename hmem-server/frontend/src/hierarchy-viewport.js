@@ -14,8 +14,13 @@ export function installHierarchyViewport(app, options = {}) {
   let pendingLayout = null
   let layoutScrollTop = null
   let pendingTarget = null
+  let targetAdmission = 0
+  let latestTargetAdmission = 0
+  let layoutTargetIntent = null
+  let pendingLayoutTargetAdmission = 0
   let pendingElement = null
   let retainedFocus = null
+  let bridgeFocusedControl = null
   let lastReceipt = ''
   const observed = new Set()
   const heights = new Map()
@@ -32,6 +37,14 @@ export function installHierarchyViewport(app, options = {}) {
       return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse' && control.getClientRects().length > 0
     })
   }
+  function focusControl(control) {
+    if (!control) return
+    bridgeFocusedControl = control
+    try { control.focus({ preventScroll: true }) }
+    finally { bridgeFocusedControl = null }
+  }
+  function admitTarget() { return latestTargetAdmission = ++targetAdmission }
+  function retireTargetIntent() { pendingTarget = null; admitTarget() }
   function schedule() {
     if (frame == null) frame = raf(flush)
   }
@@ -53,7 +66,7 @@ export function installHierarchyViewport(app, options = {}) {
     if (!next || !scroll) {
       for (const row of observed) observer?.unobserve(row)
       observed.clear(); heights.clear(); context = null; container = null
-      pendingLayout = null; pendingTarget = null; retainedFocus = null; lastReceipt = ''
+      pendingLayout = null; pendingTarget = null; layoutTargetIntent = null; retainedFocus = null; lastReceipt = ''
       if (scroller) scroller.removeEventListener('scroll', schedule)
       scroller = null
       return
@@ -86,7 +99,7 @@ export function installHierarchyViewport(app, options = {}) {
       && (!doc.activeElement || doc.activeElement === doc.body)) {
       const saved = retainedFocus
       saved.lost = false; saved.removed = false; saved.added = false
-      saved.control.focus({ preventScroll: true })
+      focusControl(saved.control)
     }
     // A removal and a null-relatedTarget blur must belong to this one paint
     // episode. Neither receipt may authorize a later unrelated focus loss.
@@ -97,15 +110,20 @@ export function installHierarchyViewport(app, options = {}) {
     for (const row of observed) if (!active.has(row)) { observer?.unobserve(row); observed.delete(row); heights.delete(row.dataset.hierarchyKey) }
     for (const row of rows) if (!observed.has(row)) { observer?.observe(row); observed.add(row) }
     if (sameStamp(pendingLayout, stamp)) {
+      const currentTarget = !pendingLayout.target || pendingLayoutTargetAdmission >= latestTargetAdmission
       const anchor = rowFor(pendingLayout.anchor)
       // Sample at admission and compare the actual position before writing:
       // a newer scroll can arrive before its event is delivered. Layouts
       // admitted after our own clamped writes sample their resulting position.
-      if (layoutScrollTop == null || scroller.scrollTop === layoutScrollTop) {
+      if (currentTarget && (layoutScrollTop == null || scroller.scrollTop === layoutScrollTop)) {
         if (anchor) scroller.scrollTop = scroller.scrollTop + anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top + pendingLayout.delta
         else scroller.scrollTop = origin() + Math.max(0, pendingLayout.top)
       }
-      if (pendingLayout.target) pendingTarget = { key: pendingLayout.target, focus: pendingTarget?.focus || false, stamp }
+      if (pendingLayout.target && currentTarget) {
+        latestTargetAdmission = pendingLayoutTargetAdmission
+        const focus = pendingTarget?.key === pendingLayout.target ? pendingTarget.focus : false
+        pendingTarget = { key: pendingLayout.target, focus, stamp, admission: pendingLayoutTargetAdmission }
+      }
       pendingLayout = null
     } else if (pendingLayout && (pendingLayout.workspace !== stamp.workspace || pendingLayout.epoch !== stamp.epoch || pendingLayout.generation !== stamp.generation || pendingLayout.revision < stamp.revision)) pendingLayout = null
     let acknowledged = false
@@ -116,7 +134,7 @@ export function installHierarchyViewport(app, options = {}) {
         if (pendingTarget.focus) {
           const controls = tabbable(target)
           const control = pendingTarget.focus === 'last' ? controls.at(-1) : controls[0]
-          control?.focus({ preventScroll: true })
+          focusControl(control)
         }
         pendingTarget = null; acknowledged = true
       }
@@ -144,6 +162,14 @@ export function installHierarchyViewport(app, options = {}) {
     if (!sameLifetime(lifetime, layout)) { pendingElement = null; retainedFocus = null }
     lifetime = layout
     layoutScrollTop = doc.getElementById('main-content-scroll')?.scrollTop ?? null
+    // Repeated same-stamp target echoes retain their original admission.
+    // They cannot outrank a later keyboard intent merely by arriving again.
+    if (layout.target) {
+      if (!sameStamp(layoutTargetIntent?.stamp, layout) || layoutTargetIntent.key !== layout.target) {
+        layoutTargetIntent = { key: layout.target, stamp: layout, admission: ++targetAdmission }
+      }
+      pendingLayoutTargetAdmission = layoutTargetIntent.admission
+    } else layoutTargetIntent = null
     pendingLayout = layout; schedule()
   }
   function target(id) {
@@ -159,11 +185,11 @@ export function installHierarchyViewport(app, options = {}) {
     const element = doc.getElementById(id)
     if (element && !element.closest?.('[data-hierarchy-key]')) { element.scrollIntoView?.({ block: 'center' }); return }
     const row = element?.closest?.('[data-hierarchy-key]')
-    if (row) pendingTarget = { key: row.dataset.hierarchyKey, focus: false, stamp: context }
+    if (row) pendingTarget = { key: row.dataset.hierarchyKey, focus: false, stamp: context, admission: admitTarget() }
     else if (id.startsWith('entity-')) {
       const entity = id.slice(7)
       // The Elm handler resolves an ID request against its logical index.
-      pendingTarget = { key: 'entity:' + entity, focus: false, stamp: context }
+      pendingTarget = { key: 'entity:' + entity, focus: false, stamp: context, admission: admitTarget() }
     } else return
     schedule()
   }
@@ -178,9 +204,10 @@ export function installHierarchyViewport(app, options = {}) {
     const key = event.shiftKey ? row.dataset.hierarchyPrevious : row.dataset.hierarchyNext
     if (!key) return
     event.preventDefault()
-    pendingTarget = { key, focus: event.shiftKey ? 'last' : 'first', stamp: context }; schedule()
+    pendingTarget = { key, focus: event.shiftKey ? 'last' : 'first', stamp: context, admission: admitTarget() }; schedule()
   }
   function focusIn(event) {
+    if (event.target !== bridgeFocusedControl) retireTargetIntent()
     const control = event.target, row = control.closest?.('[data-hierarchy-key]')
     let stamp = null
     try { stamp = JSON.parse(container?.dataset.hierarchyContext) } catch {}
@@ -196,9 +223,10 @@ export function installHierarchyViewport(app, options = {}) {
     schedule()
   }
   function pointerIntent(event) {
+    retireTargetIntent()
     if (retainedFocus && event.target !== retainedFocus.control && !retainedFocus.control.contains?.(event.target)) retainedFocus = null
   }
-  function navigationIntent() { retainedFocus = null }
+  function navigationIntent() { retainedFocus = null; retireTargetIntent() }
   const mutations = MO ? new MO(records => {
     if (retainedFocus) for (const record of records) {
       const includesRow = nodes => Array.from(nodes || []).some(node => node === retainedFocus.row || node.contains?.(retainedFocus.row))

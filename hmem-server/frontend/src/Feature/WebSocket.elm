@@ -696,7 +696,7 @@ applyCanonicalSnapshot scope profile items token model =
                         |> Maybe.withDefault (ChangeStream.init scope [])
 
                 resumed =
-                    { stream | resumeToken = Just token, eventIds = [], live = False, failure = Nothing }
+                    { stream | resumeToken = Just token, snapshotApplied = True, eventIds = [], live = False, failure = Nothing }
 
                 withStream =
                     updateWebSocket (\webSocket -> { webSocket | streams = Dict.insert key resumed webSocket.streams, state = Connecting }) withoutStale
@@ -730,10 +730,16 @@ applyCanonicalSnapshot scope profile items token model =
                             shellModel =
                                 { withStream | workspaces = Dict.union snapshot.workspaces withStream.workspaces }
 
+                            initialHandoff =
+                                not stream.snapshotApplied
+
+                            retainedBootstrapRoot =
+                                Feature.DataLoading.rootNavigationContextMatches workspaceId shellModel
+
                             ( navigationModel, navigationCmd ) =
-                                if shellModel.dataLoading.activeWorkspaceLoadToken /= Nothing then
-                                    -- Initial bootstrap already owns a fresh bounded
-                                    -- root request and its blocking-load token.
+                                if initialHandoff && retainedBootstrapRoot then
+                                    -- The first shell completes the stream handoff;
+                                    -- root REST may already have completed independently.
                                     ( shellModel, Cmd.none )
 
                                 else
@@ -746,7 +752,11 @@ applyCanonicalSnapshot scope profile items token model =
                             Just ( entityType, entityId ) ->
                                 let
                                     ( focusedModel, focusCmd ) =
-                                        Feature.DataLoading.revalidateNavigationFocus workspaceId entityType entityId observationModel
+                                        if initialHandoff then
+                                            Feature.DataLoading.beginNavigationFocus workspaceId entityType entityId observationModel
+
+                                        else
+                                            Feature.DataLoading.revalidateNavigationFocus workspaceId entityType entityId observationModel
                                 in
                                 ( focusedModel, Cmd.batch [ navigationCmd, observationCmd, focusCmd ] )
 

@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M45GQPWSBV25H9WBPPXYARKB"
+relation = "amends"
+from_record = "R01M45GQPWS59XT5KQVVDKPTD6A"
+subject_adr = "A01M3KDKW8R8ZJ60DV727Y50S3Q"
+to_records = ["R01M3KDKWNE5BSXWZC18AKJAERT"]
++++
+
+Authorize bounded automatic hierarchy continuation while preserving scoped membership refresh, physical request occupancy, and the transitional presentation contract.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0ifSwiYiI6Ijg0ZWIwY2VjMTk2M2EyODdkNWI4ZGM2OTYxNmQ1NmRmMWFmOWY3NWIiLCJpIjoic2hhMjU2OnZ6dkFLei0xSzRXcXRZV1N4TnAxekhlVXFWLW50YjcyODN4UU1lS0pOVjQiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTQ1R1FQV1NCVjI1SDlXQlBQWFlBUktCIiwib3AiOiJPMDFNNDVHUVBXUzU5WFQ1S1FWVkRLUFRENkEiLCJwIjpbIlIwMU0zS0RLV05FNUJTWFdaQzE4QUtKQUVSVCJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjpBelRJdzZmZ0RXM0dhZHBpY0t1MzB0ZlRydG5SUDZwZ1QxTnQ2cVdzXzlnIiwidCI6MTc5MTE4NjY4ODkyMSwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

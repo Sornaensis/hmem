@@ -59,63 +59,86 @@ remains governed by its separate transport contract. Production browser and
 performance compatibility is validated by the following integration task;
 these local layout and bridge tests do not replace those gates.
 
-## Large-workspace performance baseline
+## Large-workspace performance qualification
 
-The versioned harness in `perf/` runs the real production `Main` application in
-the locked Chromium while Playwright intercepts HTTP and canonical WebSocket
-transport. It needs no backend or external network. Its fixed seed produces a
-small fixture (10 projects, 40 top-level tasks plus 20 subtasks, 24 dependency
-edges, 60 Observations, 40 timeline events, and 20 timeline buckets) and a large
-fixture (250 projects, 1,000 top-level tasks plus 500 subtasks, 1,200 dependency
-edges, 2,000 Observations, 1,000 events, 500 buckets, and 50 mixed live frames).
+The versioned harness in `perf/` runs production `Main` in locked Chromium
+with intercepted HTTP and canonical WebSocket transport. It requires no backend
+or external network. The unchanged seed produces the small and large fixtures
+recorded in `baseline.v1.json`; fixture cardinalities, route ordering, numeric
+budgets, two warmups, five samples, and nearest-rank p95 remain frozen.
 
-```sh
+For the expanded hierarchy qualification, select its immutable review base:
+
+```powershell
+$env:HMEM_EVIDENCE_BASE_COMMIT='d9ff753763f086fa4faef078b451f2e48ca1a7a4'
 npm run perf:self-check
-npm run perf:record
+npm run perf:record-after
 npm run perf:check
 ```
 
-`perf:record` explicitly authorizes a production rebuild and baseline
-replacement, takes two warmups and five measured runs at each scale, preserves
-the actual evaluation in `perf/baseline.v1.json`, and exits successfully when
-only target budgets fail. `perf:check` never writes: before opening Chromium it
-requires the exact fixture, configuration, and full-budget hashes recorded in
-the baseline and trace manifest, then repeats the measurement and exits nonzero
-on a budget violation. Each named interaction has five samples, its own
-nearest-rank p95, and a per-run `{ count, bytes, routes, routeBytes }` request
-delta retained in both raw and aggregate evidence; the live batch does too.
-Request, byte, DOM, rendered-row, selector/effect, and live-
-reload budgets are exact. Timing and representative retained-heap budgets are
-enforced only when the current OS/hardware/tool/browser fingerprint matches the
-recorded baseline; on a different machine they are printed as informational.
-Workspace readiness comes from complete current-protocol transport and stable
-representative anchors, not from requiring every entity in the DOM. The current
-resync route faithfully transports all 155 small items in two pages and all
-4,951 large items in 50 pages. Future bounded readiness stays dormant until the
-application invokes an actual bounded protocol. Direct focus uses a fresh,
-focus-first session while the untouched canonical resync is paused before its
-first response, leaving an empty coherent state. The target is a root project,
-so a focus-triggered entity response needs no missing ancestry. The harness
-records whether the product requests and renders it within 750 ms, then releases
-and verifies the complete byte/order-identical snapshot; no invalidation
-prehydrates the target. Live
-settlement permits zero follow-ups and excludes a separately enforced 500 ms
-no-in-flight-or-late-request window.
+Run the record/check pair only after production and harness sources are frozen.
+Both commands build production assets. Record writes distinct
+`final-working-tree.*.expanded-hierarchy.v1` evidence, including its own
+complete diff; it preserves `baseline.v1.json`, `budgets.v1.json`, the shared
+historical complete diff, and previous after records. The explicit record
+authorization preserves actual budget failures in the record; check exits
+nonzero on a budget violation. Check also requires the exact recorded fixture,
+configuration, budget, source, and production asset hashes before opening
+Chromium, and both modes reject input drift during measurement.
 
-Fixture self-checks also freeze production route fidelity: canonical snapshot
-kind-rank/identity order (including dependency pairs), capped list pagination,
-Project/Task DTO and overview ordering, Observation token-AND search and facet
-ordering, newest-first Timeline events, and requested UTC day/week/month/quarter
-bucket aggregation. The 20/500 backing bucket-source rows remain exact, while a
-fixed browser clock makes the real default weekly request return 13 ascending
-rows instead of rendering the entire backing set. The measured Observation
-query deliberately has one known result, so its ID and paging are deterministic
-without pretending to benchmark PostgreSQL ranking.
+Cold readiness ends at the accepted authorized `workspace_shell_v1` shell and
+first root-summary anchor visible in the scrolling viewport after two paints.
+The production shell contains one workspace item. Preserved legacy full-fixture
+resync records contain 155 small or 4,951 large items; their cold timing is not
+phase-comparable with this authorized painted-root cut.
+It counts all HTTP arrivals and fixture bytes before that cut, including
+responses held by an asynchronous gate. Active requests and response completion
+remain separate measurements. This phase differs from the historical full
+snapshot bootstrap; older phase/configuration hashes remain historical evidence,
+not equivalent measurements.
 
-The browser fixture isolates frontend scaling and transport amplification; it
-does not measure database or network latency. Generated Playwright traces live
-under ignored `perf/.artifacts/` and are removed after record verification. The
-checked baseline retains the raw five-run samples, per-scenario aggregates,
-environment/tool versions, and fixture/configuration/budget hashes;
-`perf/trace-manifest.v1.json` retains the twice-verified trace hash, size,
-capture point, and explicit non-retention policy.
+Background completion independently verifies exact project/task membership and
+order, terminal pagination for every effectively expanded non-leaf branch,
+bounded physical transport, and finite scroll reachability of every member.
+Collapsed cached branches remain lazy. The run captures DOM, hierarchy-row,
+observer, and physical-request high-water marks through drain, scrolling and
+subsequent interactions. Observation, Timeline, direct focus, local interactions,
+and the 50-frame live batch retain their separate five-sample request/byte
+deltas and p95 budgets. Live settlement excludes a separate 500 ms stability
+window. Timing and retained heap gates require the recorded environment
+fingerprint; a mismatch is explicitly informational under the unchanged policy.
+
+The fixture isolates frontend scaling and transport amplification; it does not
+measure database or real network latency. Source route-fidelity self-checks
+retain canonical ordering, list/overview DTOs, Observation token search and
+facets, and UTC Timeline aggregation. The fixed browser clock makes the default
+weekly Timeline request return 13 rows from the unchanged 20/500 backing sources.
+
+Versioned after, trace, validation and evidence manifests retain bounded raw
+samples, record/check evaluation, task/base/input provenance and verified trace
+fingerprints as historical qualification evidence. Command receipts label the measured
+Node harness phase explicitly; the preceding npm build is excluded from that
+duration. Success receipts are finalized only after independently bounded browser,
+owned Chromium process, server and trace retirement. A failed retirement attempts
+the remaining cleanup actions and persists a failed qualification receipt. Each
+required action must supply a callable `close` callback; a missing or invalid
+callback is a retirement failure.
+The transient trace is owned
+by this task under `.scratch/expanded-navigation-perf/` and removed after
+verification or failure cleanup; its manifest states that the archive is no
+longer available. These performance receipts complement the production browser
+tests and do not replace frontend or parent acceptance.
+
+Live-settle timing includes completion of the current root/filter lifetime and
+every effective-expanded descendant pass. New offset-zero admissions retire
+prior terminal coverage immediately; untouched cached passes and explicitly
+collapsed branches retain their scope. Both project and task streams must be
+terminal before two paints and the separate unchanged 500 ms stability check.
+
+Current navigation completion is indexed at request admission and response completion. Fresh passes retire old coverage before responses arrive; filter and session changes invalidate their lifetime. Changed branches dirty their ancestor proofs, while untouched completed subtrees retain their checked membership. The live-settle timer includes every new proof update and any affected subtree verification, followed by the unchanged 500 ms stability window. Independent replay self-checks cover queued descendants, stale completions, root demand, unequal streams and effective collapse.
+
+The first accepted sparse workspace shell preserves bootstrap navigation ownership. Later authoritative snapshots retire descendant coverage and old callbacks, while selective root refreshes preserve untouched branches. Explicit continuation retries replace current coverage at each kind's requested offset and retain its valid prefix, even when the companion kind has advanced; superseded callbacks cannot complete or poison the current attempt. The self-checks exercise the actual intercepted session, navigation and resync responder callbacks without starting a browser or qualification run.
+
+Paused navigation kinds remain incomplete even when a healthy companion response carries valid bytes for them. Unstamped continuations accept only automatic pending kinds. An explicitly selected retry also preserves any healthy automatic-pending sibling; errored and terminal companions remain unchanged. The Retry automation helper binds an explicit selected rendered Retry button to a one-shot owner, session, filter, pass and offset intent; it consumes that intent at matching admission and cancels it after click failure. Lifetime changes and collapse retire unused intents. Ambiguous unstamped retries fail closed.
+
+Retry automation rejects an owner with automatic work queued or physical branch/root/snapshot work still active. It checks quiescence before actionability and again before arming the click; snapshot/root admissions retire stale selections. This avoids an automatic companion consuming retry intent before the selected DOM handler fires, without a timing delay. Direct producer controls still cover selecting a retry while a healthy sibling is queued.

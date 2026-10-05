@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
-import { assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -27,14 +27,15 @@ const TASK_2503_BASE_COMMIT = '04fd7ba26b1a63b5f1c601939b046ef2fe5f51d6'
 const TASK_755_BASE_COMMIT = '1bdbe3d071d1fbbb994bc515841103adedff77ec'
 const evidenceTasks = new Map([
   [TASK_2503_BASE_COMMIT, { revision: 'v2', taskId: '2503e08f-ff82-4f2c-adff-24e14fec8299' }],
-  [TASK_755_BASE_COMMIT, { revision: 'v3', taskId: '755a7286-6da5-494e-9b9b-fa1edd43d0b0' }]
+  [TASK_755_BASE_COMMIT, { revision: 'v3', taskId: '755a7286-6da5-494e-9b9b-fa1edd43d0b0' }],
+  ['d9ff753763f086fa4faef078b451f2e48ca1a7a4', { revision: 'expanded-hierarchy.v1', taskId: '555ebf6e-8442-43f4-a75d-c33fcffc76f4', parentTaskId: '6a3f31c2-be12-4aa8-a460-8ec3274332a3' }]
 ])
 const evidenceTask = evidenceTasks.get(evidenceBaseCommit) || null
 const evidenceRevision = evidenceTask?.revision || 'v1'
 const legacyAfterArtifactPath = path.join(here, 'final-working-tree.after.v1.json')
 const legacyAfterTraceArtifactPath = path.join(here, 'final-working-tree.trace-manifest.v1.json')
 const evidenceManifestPath = path.join(here, `final-working-tree.evidence-manifest.${evidenceRevision}.json`)
-const evidenceDiffPath = path.join(here, 'final-working-tree.complete.diff')
+const evidenceDiffPath = path.join(here, evidenceRevision === 'expanded-hierarchy.v1' ? 'final-working-tree.complete.expanded-hierarchy.v1.diff' : 'final-working-tree.complete.diff')
 const validationRecordPath = path.join(here, `final-working-tree.validation-record.${evidenceRevision}.json`)
 const afterArtifactPath = path.join(here, `final-working-tree.after.${evidenceRevision}.json`)
 const afterTraceArtifactPath = path.join(here, `final-working-tree.trace-manifest.${evidenceRevision}.json`)
@@ -47,7 +48,8 @@ const recordTraceManifestPath = evidenceTask && requestedRecordTraceManifestPath
 const WARMUPS = HARNESS_CONFIGURATION.warmups
 const PRODUCTION_SNAPSHOT_PROFILE = 'workspace_shell_v1'
 const SAMPLES = HARNESS_CONFIGURATION.samples
-const tracePath = path.join(here, '.artifacts', 'large-baseline-trace.zip')
+const expandedScratch = path.resolve(frontendRoot, '..', '..', '.scratch', 'expanded-navigation-perf')
+const tracePath = evidenceRevision === 'expanded-hierarchy.v1' ? path.join(expandedScratch, 'large-expanded-trace.zip') : path.join(here, '.artifacts', 'large-baseline-trace.zip')
 
 if (!['record', 'check'].includes(mode)) throw new Error('usage: node perf/harness.mjs <record|check> [--output path --trace-output path]')
 if ((outputArgument !== -1 && !process.argv[outputArgument + 1]) || (traceOutputArgument !== -1 && !process.argv[traceOutputArgument + 1])) throw new Error('--output and --trace-output require paths')
@@ -75,7 +77,9 @@ function runTaskEvidencePrerequisites() {
   const command = platformExecutable('npm')
   const executable = process.platform === 'win32' && command.toLowerCase().endsWith('.cmd') ? (process.env.ComSpec || 'cmd.exe') : command
   const parameters = executable === command ? ['run', 'perf:self-check'] : ['/d', '/s', '/c', command, 'run', 'perf:self-check']
+  const startedAtUtc = new Date().toISOString(), started = performance.now()
   execFileSync(executable, parameters, { cwd: frontendRoot, stdio: 'inherit' })
+  return { command: 'npm run perf:self-check', exitCode: 0, startedAtUtc, finishedAtUtc: new Date().toISOString(), durationMs: Math.round(performance.now() - started) }
 }
 
 function sha256File(file) {
@@ -95,26 +99,46 @@ function untrackedFileDiff(repositoryRoot, relativePath) {
   }
 }
 
+function sourceProvenance() {
+  const repositoryRoot = path.resolve(frontendRoot, '..', '..')
+  const headCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot, encoding: 'utf8' }).trim()
+  const orderedCommits = execFileSync('git', ['rev-list', '--reverse', evidenceBaseCommit + '..' + headCommit], { cwd: repositoryRoot, encoding: 'utf8' }).trim().split(/\r?\n/).filter(Boolean)
+  return { reviewBaseCommit: evidenceBaseCommit, headCommit, orderedCommits, workingTreeQualification: 'exact source and production-asset SHA-256 list; complete diff from review base retained separately' }
+}
+
+function inputQualification() {
+  const collect = directory => fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+    const file = path.join(directory, entry.name)
+    return entry.isDirectory() ? collect(file) : [file]
+  }).sort()
+  const source = [...collect(path.join(frontendRoot, 'src')),
+    ...['harness.mjs', 'contracts.mjs', 'fixtures.mjs', 'fixtures.test.mjs'].map(name => path.join(here, name)),
+    ...['package.json', 'package-lock.json', 'README.md'].map(name => path.join(frontendRoot, name))]
+    .map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file) }))
+  const productionAssets = collect(staticRoot).map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file) }))
+  return { evidenceBaseCommit, source, productionAssets }
+}
+
 function finalWorkingTreeEvidence() {
   const repositoryRoot = path.resolve(frontendRoot, '..', '..')
   // Review subjects deliberately exclude generated evidence from their source
   // patch. Retain v1 alongside v2 here so a historical artifact cannot leak
   // into the 04fd complete diff merely because it remains untracked locally.
-  const artifactPaths = new Set(['v1', 'v2', 'v3'].flatMap(revision => [
+  const artifactPaths = new Set(['v1', 'v2', 'v3', 'expanded-hierarchy.v1'].flatMap(revision => [
     path.join(here, `final-working-tree.after.${revision}.json`),
     path.join(here, `final-working-tree.trace-manifest.${revision}.json`),
     path.join(here, `final-working-tree.evidence-manifest.${revision}.json`),
     path.join(here, `final-working-tree.validation-record.${revision}.json`)
-  ]).concat([evidenceDiffPath]).map(normalizedRepositoryPath))
+  ]).concat([evidenceDiffPath, path.join(here, 'final-working-tree.complete.diff')]).map(normalizedRepositoryPath))
   const trackedPaths = execFileSync('git', ['diff', '--name-only', evidenceBaseCommit, '--'], { cwd: repositoryRoot, encoding: 'utf8' })
     .trim().split(/\r?\n/).filter(Boolean)
-    .filter(relative => !artifactPaths.has(relative))
+    .filter(relative => !artifactPaths.has(relative) && !relative.startsWith('.scratch/expanded-navigation-perf/'))
   const trackedDiff = trackedPaths.length === 0
     ? Buffer.alloc(0)
     : execFileSync('git', ['diff', '--binary', '--no-ext-diff', evidenceBaseCommit, '--', ...trackedPaths], { cwd: repositoryRoot })
   const untrackedPaths = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd: repositoryRoot, encoding: 'utf8' })
     .trim().split(/\r?\n/).filter(Boolean)
-    .filter(relative => !artifactPaths.has(relative))
+    .filter(relative => !artifactPaths.has(relative) && !relative.startsWith('.scratch/expanded-navigation-perf/'))
   const diff = Buffer.concat([trackedDiff, ...untrackedPaths.map(relative => untrackedFileDiff(repositoryRoot, relative))])
   fs.writeFileSync(evidenceDiffPath, diff)
   const baselineAtBase = execFileSync('git', ['show', `${evidenceBaseCommit}:hmem-server/frontend/perf/baseline.v1.json`], { cwd: repositoryRoot })
@@ -134,6 +158,10 @@ function finalWorkingTreeEvidence() {
   const manifest = {
     schemaVersion: 1,
     taskId: evidenceTask?.taskId || null,
+    parentTaskId: evidenceTask?.parentTaskId || null,
+    measurementPhase: HARNESS_CONFIGURATION.scenarioIsolation,
+    sourceProvenance: sourceProvenance(),
+    qualificationPassed: fs.existsSync(validationRecordPath) && JSON.parse(fs.readFileSync(validationRecordPath, 'utf8')).passed === true,
     evidenceBaseCommit,
     normalization: 'repository-relative POSIX paths; SHA-256 of exact file bytes; binary Git diff without external diff drivers; untracked source files represented by deterministic no-index additions; generated evidence artifacts separately hash-listed',
     recipe: `HMEM_EVIDENCE_BASE_COMMIT=${evidenceBaseCommit} npm run perf:record-after`,
@@ -152,7 +180,24 @@ function finalWorkingTreeEvidence() {
   fs.writeFileSync(evidenceManifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 }
 
-function fixtureResponder(fixture, tracker, options = {}) {
+// Bind proof intent to the actual source-ordered rendered Retry button, never DTO bytes.
+export async function retryNavigationKind(page, tracker, owner, kind) {
+  const selection = tracker.navigationProof.retrySelection(owner, kind)
+  const assertQuiet = () => {
+    if (!tracker.navigationProof.retryOwnerQuiet(selection) || (tracker.activeBranchOwners.get(owner) || 0) !== 0
+      || (tracker.activeBranchOwners.get('workspace_root') || 0) !== 0 || tracker.activeSnapshots !== 0) throw new Error('Retry owner is unsettled before click')
+  }
+  assertQuiet()
+  const button = page.locator('.hierarchy-row[data-hierarchy-key=' + JSON.stringify('status:' + owner) + '] .card-description-error')
+    .getByRole('button', { name: 'Retry', exact: true }).nth(selection.buttonIndex)
+  await button.waitFor({ state: 'visible', timeout: 5000 })
+  assertQuiet()
+  tracker.navigationProof.armRetry(selection, true)
+  try { await button.click({ timeout: 5000 }) }
+  finally { tracker.navigationProof.cancelRetry(selection) }
+}
+
+export function fixtureResponder(fixture, tracker, options = {}) {
   const snapshots = options.snapshots || snapshotItems(fixture)
   const resyncGate = options.resyncGate || null
   const focusContinuationPause = options.focusContinuationPause || null
@@ -163,11 +208,14 @@ function fixtureResponder(fixture, tracker, options = {}) {
     const body = value == null ? '' : JSON.stringify(value)
     const key = explicitKey || perfApiRouteKey(request.url(), request.method())
     if (!key) throw new Error(`implemented perf response has no route contract: ${request.method()} ${request.url()}`)
-    tracker.active += 1
-    tracker.lastActivityAt = performance.now()
-    tracker.requests.push({ key, method: request.method(), url: request.url(), bytes: Buffer.byteLength(body), at: performance.now() })
-    tracker.counts[key] = (tracker.counts[key] || 0) + 1
-    tracker.bytes[key] = (tracker.bytes[key] || 0) + Buffer.byteLength(body)
+    const receipt = tracker.arrivals.get(request)
+    if (!receipt) throw new Error('response without registered arrival')
+    receipt.key = key
+    receipt.bytes = Buffer.byteLength(body)
+    tracker.bytes[key] = (tracker.bytes[key] || 0) + receipt.bytes
+    if (key === 'navigation:branch') receipt.navigation = value
+    const gate = receipt.gate
+    if (gate && !gate.used) { gate.used = true; gate.signalPaused(); await (gate.waitForRelease) }
     try {
       await route.fulfill({ status, contentType: 'application/json', body })
     } finally {
@@ -183,13 +231,28 @@ function fixtureResponder(fixture, tracker, options = {}) {
         tracker.model.snapshotItems += value.items.length
         tracker.model.snapshotPages += 1
         tracker.model.snapshotComplete = value.has_more === false
+        if (tracker.model.snapshotComplete) tracker.navigationProof?.completeSnapshot(receipt.proofSnapshot, value.snapshot_profile)
       }
       if (status < 400 && key === 'timeline:events') tracker.model.timelineEvents = value.items.length
       if (status < 400 && key === 'timeline:buckets') {
         tracker.model.timelineBuckets = value.buckets.length
         tracker.model.timelineBucketRequest = { since: value.since, until: value.until, bucket: value.bucket }
       }
+      if (receipt.proofSession !== undefined) tracker.navigationProof.completeSession(receipt.proofSession, status < 400 && value?.workspace?.can_read === true)
+      if (receipt.proofNavigation) tracker.navigationProof.complete(receipt.proofNavigation, value?.projects && value?.tasks ? {
+        projects: { ids: value.projects.items.map(item => item.id), hasMore: value.projects.has_more },
+        tasks: { ids: value.tasks.items.map(item => item.id), hasMore: value.tasks.has_more }
+      } : null, status)
+      receipt.done = true
       tracker.active -= 1
+      if (key === 'navigation:branch') {
+        tracker.activeBranches -= 1; tracker['active' + receipt.branchClass + 'Branches'] -= 1
+        const remaining = tracker.activeBranchOwners.get(receipt.branchOwner) - 1
+        if (remaining === 0) tracker.activeBranchOwners.delete(receipt.branchOwner)
+        else tracker.activeBranchOwners.set(receipt.branchOwner, remaining)
+      }
+      if (key === 'change-stream:resync') tracker.activeSnapshots -= 1
+      if (key.includes(':entity:') && (key.startsWith('projects:') || key.startsWith('tasks:'))) tracker.activeDetails -= 1
       tracker.completed += 1
       tracker.lastActivityAt = performance.now()
     }
@@ -199,6 +262,33 @@ function fixtureResponder(fixture, tracker, options = {}) {
     const url = new URL(request.url())
     const pathname = url.pathname
     const contractedKey = perfApiRouteKey(url, request.method())
+    const key = contractedKey || 'unimplemented:' + request.method() + ':' + pathname
+    const receipt = { key, method: request.method(), url: request.url(), bytes: 0, at: performance.now(), done: false }
+    if (tracker.navigationProof) {
+      if (key === 'session') receipt.proofSession = tracker.navigationProof.beginSession()
+      if (key === 'change-stream:resync') receipt.proofSnapshot = tracker.navigationProof.admitSnapshot(!request.postDataJSON().page_token)
+      if (key === 'navigation:branch' && pathname === '/api/v1/workspaces/' + tracker.workspaceId + '/navigation') {
+        const kind = url.searchParams.get('parent_kind')
+        receipt.proofNavigation = tracker.navigationProof.admit({
+          owner: kind === 'workspace_root' ? kind : kind + ':' + url.searchParams.get('parent_id'), context: navigationFilterContext(url),
+          ...Object.fromEntries(['project', 'task'].flatMap(kind => [['Offset', 'offset'], ['Limit', 'limit']].map(([field, parameter]) => [kind + field, Number(url.searchParams.get(kind + '_' + parameter))])))
+        })
+      }
+    }
+    tracker.requests.push(receipt); tracker.arrivals.set(request, receipt)
+    tracker.active += 1; tracker.lastActivityAt = receipt.at
+    tracker.counts[key] = (tracker.counts[key] || 0) + 1
+    if (key === 'change-stream:resync') tracker.activeSnapshots += 1
+    if (key === 'navigation:branch') {
+      const kind = url.searchParams.get('parent_kind')
+      receipt.branchOwner = kind === 'workspace_root' ? kind : kind + ':' + url.searchParams.get('parent_id')
+      tracker.activeBranchOwners.set(receipt.branchOwner, (tracker.activeBranchOwners.get(receipt.branchOwner) || 0) + 1)
+      receipt.branchClass = url.searchParams.get('parent_kind') === 'workspace_root' ? 'Root' : 'Expanded'
+      tracker.activeBranches += 1; tracker.maxBranches = Math.max(tracker.maxBranches, tracker.activeBranches)
+      tracker['active' + receipt.branchClass + 'Branches'] += 1
+      tracker['max' + receipt.branchClass + 'Branches'] = Math.max(tracker['max' + receipt.branchClass + 'Branches'], tracker['active' + receipt.branchClass + 'Branches'])
+    }
+    if (key.includes(':entity:') && (key.startsWith('projects:') || key.startsWith('tasks:'))) { tracker.activeDetails += 1; tracker.maxDetails = Math.max(tracker.maxDetails, tracker.activeDetails) }
     if (!contractedKey) {
       const exact = `${request.method()} ${request.url()}`
       tracker.unhandledApiRoutes.push(exact)
@@ -216,9 +306,7 @@ function fixtureResponder(fixture, tracker, options = {}) {
       const offset = body.page_token ? Number(String(body.page_token).split(':')[1]) : 0
       const pageSize = Number(body.page_size) || 100
       if (resyncGate && !resyncGate.used && offset === resyncGate.pauseOffset) {
-        resyncGate.used = true
-        resyncGate.signalPaused()
-        await resyncGate.waitForRelease
+        receipt.gate = resyncGate
       }
       const page = selectedSnapshots.slice(offset, offset + pageSize)
       const hasMore = offset + pageSize < selectedSnapshots.length
@@ -227,13 +315,16 @@ function fixtureResponder(fixture, tracker, options = {}) {
     if (pathname === '/api/v1/change-stream/ticket') return reply(route, request, { ticket: `fixture-${fixture.size}-ticket`, expires_at: '2099-01-01T00:00:00Z' })
     if (pathname === '/api/v1/workspaces') return reply(route, request, paginate([fixture.workspace], url.searchParams.get('offset'), url.searchParams.get('limit')))
     if (pathname === `/api/v1/workspaces/${fixture.workspace.id}`) return reply(route, request, fixture.workspace)
-    if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/navigation`) return reply(route, request, navigationBranchResponse(fixture, {
+    if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/navigation`) {
+      const value = navigationBranchResponse(fixture, {
       parentKind: url.searchParams.get('parent_kind'), parentId: url.searchParams.get('parent_id'),
       projectLimit: url.searchParams.get('project_limit'), projectOffset: url.searchParams.get('project_offset'),
       taskLimit: url.searchParams.get('task_limit'), taskOffset: url.searchParams.get('task_offset'),
       showOnly: url.searchParams.get('show_only'), projectStatuses: url.searchParams.getAll('project_status'), taskStatuses: url.searchParams.getAll('task_status'),
       priorityMode: url.searchParams.get('priority_mode'), priorityValue: url.searchParams.get('priority_value'), query: url.searchParams.get('query')
-    }))
+      })
+      return reply(route, request, options.navigationResponseTransform ? options.navigationResponseTransform(value, url) : value)
+    }
     if (pathname === `/api/v1/workspaces/${fixture.workspace.id}/navigation/summaries`) {
       const body = request.postDataJSON()
       const value = navigationSummariesResponse(fixture, body.project_ids || [], body.task_ids || [])
@@ -245,9 +336,7 @@ function fixtureResponder(fixture, tracker, options = {}) {
       const ancestorOffset = Number(url.searchParams.get('ancestor_offset') || 0)
       const value = navigationFocusResponse(fixture, navigationFocus[1], entityId, ancestorOffset)
       if (focusContinuationPause && !focusContinuationPause.used && navigationFocus[1] === focusContinuationPause.entityType && entityId === focusContinuationPause.entityId && ancestorOffset === focusContinuationPause.ancestorOffset) {
-        focusContinuationPause.used = true
-        focusContinuationPause.signalPaused()
-        await focusContinuationPause.waitForRelease
+        receipt.gate = focusContinuationPause
       }
       return reply(route, request, value || { error: 'not found' }, value ? 200 : 404)
     }
@@ -351,6 +440,15 @@ const fakeWebSocketScript = `
     removeEventListener(type, fn) { if (this['on'+type]===fn) this['on'+type]=null; }
     __emit(frame) { if (this.readyState===1 && this.onmessage) this.onmessage({data:JSON.stringify(frame)}); }
   }
+  window.__perfRenderMaximum={nodes:0,rows:0,hierarchyRows:0,observers:0};
+  const ledger=(${createHierarchyObserverLedger.toString()})();
+  const NativeObserver=window.ResizeObserver;
+  if(NativeObserver) window.ResizeObserver=class extends NativeObserver {
+    observe(row,...args){super.observe(row,...args);if(row.hasAttribute('data-hierarchy-key')) ledger.observe(this,row);window.__perfRenderMaximum.observers=ledger.metrics().maximum}
+    unobserve(row){super.unobserve(row);ledger.unobserve(this,row)}
+    disconnect(){super.disconnect();ledger.disconnect(this)}
+  };
+  new MutationObserver(()=>{const m=window.__perfRenderMaximum;m.nodes=Math.max(m.nodes,document.querySelectorAll('*').length);m.rows=Math.max(m.rows,document.querySelectorAll('.card-project,.card-task,.card-subtask,.observation-card,.timeline-event-card,.timeline-value-table tbody tr').length);m.hierarchyRows=Math.max(m.hierarchyRows,document.querySelectorAll('[data-hierarchy-key]').length)}).observe(document,{childList:true,subtree:true});
   window.WebSocket=PerfWebSocket;
   window.__perfPushFrames=(frames) => { const open=sockets.filter(socket => socket.readyState===1); const marker={frames:frames.length,sockets:open.length,resumeToken:'fixture-live-after',dispatchTurnComplete:false}; window.__perfLastPush=marker; for (const frame of frames) for (const socket of open) socket.__emit(frame); for (const socket of open) socket.__emit({schema_version:1,type:'checkpoint',catch_up:'complete',resume_token:'fixture-live-after'}); setTimeout(() => { marker.dispatchTurnComplete=true; }, 0); return open.length; };
 })();`
@@ -378,6 +476,7 @@ async function requiredDoubleFrameByText(page, selector, label) {
 }
 
 function assertNoUnhandledApiRoutes(tracker) {
+  assertNavigationCapacity({ aggregate: tracker.maxBranches, expanded: tracker.maxExpandedBranches, details: tracker.maxDetails })
   if (tracker.unhandledApiRoutes.length > 0) {
     throw new Error(`unimplemented perf API route(s): ${tracker.unhandledApiRoutes.join(', ')}`)
   }
@@ -440,21 +539,128 @@ async function waitForWorkspaceReady(page, tracker, fixture, anchorId, label) {
   throw new Error(`${label} readiness failed: ${tracker.model.snapshotProfile} snapshot ${tracker.model.snapshotItems}/${expectedSnapshotItems} shell items, ${tracker.model.snapshotPages}/${expectedPages} pages, complete=${tracker.model.snapshotComplete}, navigation=${tracker.counts['navigation:branch'] || 0}, active=${tracker.active}, anchor=${anchorId}`)
 }
 
+async function waitForFirstUsefulViewport(page, tracker, fixture, anchorId) {
+  const deadline = performance.now() + 30000
+  while (performance.now() < deadline) {
+    assertNoUnhandledApiRoutes(tracker)
+    const authorized = tracker.requests.some(request => request.key === 'session' && request.done)
+    const shell = tracker.model.snapshotComplete && tracker.model.snapshotProfile === PRODUCTION_SNAPSHOT_PROFILE && tracker.model.snapshotItems === workspaceShellSnapshotItems(fixture).length
+    const painted = await page.evaluate(async id => {
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+      const anchor = document.getElementById('entity-' + id), scroll = document.getElementById('main-content-scroll')
+      if (!anchor || !scroll) return false
+      const row = anchor.getBoundingClientRect(), viewport = scroll.getBoundingClientRect()
+      return row.height > 0 && row.bottom > viewport.top && row.top < viewport.bottom && !document.querySelector('.loading-indicator')
+    }, anchorId)
+    if (authorized && shell && painted) return
+  }
+  throw new Error('Authorized shell and first painted root anchor were not ready')
+}
+
+function completedExpandedMembership(tracker, fixture) {
+  const navigation = tracker.requests.filter(request => request.key === 'navigation:branch' && request.navigation)
+  const textOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0
+  const ordered = (kind, values) => [...values].sort((a, b) => {
+    const rank = kind === 'project' ? { active: 0, paused: 1, completed: 2, archived: 3 } : { todo: 0, in_progress: 1, blocked: 2, done: 3, cancelled: 4 }
+    const title = item => (kind === 'project' ? item.name : item.title).toLowerCase()
+    return (rank[a.status] - rank[b.status]) || b.priority - a.priority || textOrder(title(a), title(b)) || textOrder(a.id, b.id)
+  }).map(item => item.id)
+  const rootRequests = navigation.filter(request => new URL(request.url).searchParams.get('parent_kind') === 'workspace_root')
+  if (!rootRequests.length) throw new Error('Missing demand-driven root page')
+  const projectIds = new Set(), taskIds = new Set()
+  for (const request of rootRequests) {
+    const url = new URL(request.url)
+    for (const [kind, expected, collected] of [
+      ['project', ordered('project', fixture.projects.filter(item => item.parent_id == null)), projectIds],
+      ['task', ordered('task', fixture.tasks.filter(item => item.parent_id == null && item.project_id == null)), taskIds]
+    ]) {
+      const offset = Number(url.searchParams.get(kind + '_offset')), page = request.navigation[kind + 's']
+      if (!request.done || JSON.stringify(page.items.map(item => item.id)) !== JSON.stringify(expected.slice(offset, offset + 50))) throw new Error('Root membership/order mismatch: ' + kind)
+      for (const item of page.items) collected.add(item.id)
+    }
+  }
+  const pending = [...projectIds].map(id => ['project', id]).concat([...taskIds].map(id => ['task', id]))
+  const seen = new Set()
+  let expandedBranches = 0, terminalStreams = 0
+  for (let index = 0; index < pending.length; index++) {
+    const [kind, id] = pending[index], key = kind + ':' + id
+    if (seen.has(key)) continue
+    seen.add(key)
+    const expectedProjects = ordered('project', kind === 'project' ? fixture.projects.filter(item => item.parent_id === id) : [])
+    const expectedTasks = ordered('task', fixture.tasks.filter(item => kind === 'task' ? item.parent_id === id : item.parent_id == null && item.project_id === id))
+    // Leaves are rendered members, not expanded branches requiring an empty fetch.
+    if (expectedProjects.length === 0 && expectedTasks.length === 0) continue
+    expandedBranches += 1
+    const pages = navigation.filter(request => { const url = new URL(request.url); return url.searchParams.get('parent_kind') === kind && url.searchParams.get('parent_id') === id })
+    for (const [childKind, expected, collected] of [['project', expectedProjects, projectIds], ['task', expectedTasks, taskIds]]) {
+      const stream = assertCompleteNavigationStream(pages.map(request => {
+        const url = new URL(request.url), value = request.navigation[childKind + 's']
+        return { offset: Number(url.searchParams.get(childKind + '_offset')), limit: Number(url.searchParams.get(childKind + '_limit')), ids: value.items.map(item => item.id), hasMore: value.has_more, done: request.done }
+      }), expected, key + ':' + childKind)
+      terminalStreams += 1
+      for (const child of stream.ids) { collected.add(child); pending.push([childKind, child]) }
+    }
+  }
+  return { expandedBranches, projectIds: projectIds.size, taskIds: taskIds.size, terminalStreams, membershipOrdered: true, entityKeys: [...projectIds].map(id => 'project:' + id).concat([...taskIds].map(id => 'task:' + id)) }
+}
+
+async function scrollExpandedHierarchy(page, expectedKeys) {
+  const keys = new Set(), deadline = performance.now() + 30000
+  await page.locator('#main-content-scroll').evaluate(element => { element.scrollTop = 0 })
+  let end = false
+  while (performance.now() < deadline) {
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    for (const key of await page.locator('[data-hierarchy-key]').evaluateAll(rows => rows.map(row => row.dataset.hierarchyKey))) keys.add(key)
+    if (end) break
+    end = await page.locator('#main-content-scroll').evaluate(element => { const before = element.scrollTop; element.scrollTop += element.clientHeight / 2; return element.scrollTop === before })
+  }
+  if (!end) throw new Error('Finite expanded hierarchy scroll did not reach its end')
+  const missing = expectedKeys.filter(key => !keys.has(key))
+  if (missing.length) throw new Error('Expanded members were not scroll-reachable: ' + missing.slice(0, 5).join(', '))
+  if (!await page.getByText('All children loaded', {exact:true}).count()) throw new Error('Terminal hierarchy status was not scroll-reachable')
+  await page.locator('#main-content-scroll').evaluate(element => { element.scrollTop = 0 })
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  return { reachedEnd: true, distinctMountedKeys: keys.size }
+}
+
 async function restoreWorkspace(page, tracker, fixture, anchorId, label) {
   await page.evaluate(() => { window.location.hash = 'tab=projects' })
   await waitForWorkspaceReady(page, tracker, fixture, anchorId, label)
 }
 
-async function waitForLiveSettle(page, tracker, before, anchorId, timeoutMs = 30000) {
+
+function navigationFilterContext(url) {
+  return JSON.stringify(['show_only', 'priority_mode', 'priority_value', 'query', 'project_status', 'task_status'].map(key => [key, url.searchParams.getAll(key)]))
+}
+
+function expectedNavigationChildren(fixture) {
+  const children = { workspace_root: { projects: [], tasks: [] } }
+  for (const project of fixture.projects) children['project:' + project.id] = { projects: [], tasks: [] }
+  for (const task of fixture.tasks) children['task:' + task.id] = { projects: [], tasks: [] }
+  for (const project of fixture.projects) children[project.parent_id ? 'project:' + project.parent_id : 'workspace_root']?.projects.push(project)
+  for (const task of fixture.tasks) {
+    const owner = task.parent_id ? 'task:' + task.parent_id : task.project_id ? 'project:' + task.project_id : 'workspace_root'
+    if (owner) children[owner]?.tasks.push(task)
+  }
+  const order = (kind, values) => [...values].sort((a, b) => {
+    const rank = kind === 'project' ? { active: 0, paused: 1, completed: 2, archived: 3 } : { todo: 0, in_progress: 1, blocked: 2, done: 3, cancelled: 4 }
+    const title = item => (kind === 'project' ? item.name : item.title).toLowerCase()
+    const first = title(a), second = title(b)
+    return rank[a.status] - rank[b.status] || b.priority - a.priority || (first < second ? -1 : first > second ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  }).map(item => item.id)
+  return Object.fromEntries(Object.entries(children).map(([key, value]) => [key, { projects: order('project', value.projects), tasks: order('task', value.tasks) }]))
+}
+
+async function waitForLiveSettle(page, tracker, before, anchorId, logicalReady, timeoutMs = 30000) {
   const deadline = performance.now() + timeoutMs
   while (performance.now() < deadline) {
     assertNoUnhandledApiRoutes(tracker)
     const ui = await projectUiSignals(page, anchorId)
     const dispatchTurnComplete = await page.evaluate(() => window.__perfLastPush?.dispatchTurnComplete === true)
     const followUpRequests = tracker.requests.length - before.index
-    if (liveSettleReady({ dispatchTurnComplete, activeRequests: tracker.active, loading: ui.loading, focused: ui.focused, anchorVisible: ui.anchorVisible, followUpRequests })) {
+    if (liveSettleReady({ dispatchTurnComplete, activeRequests: tracker.active, loading: ui.loading, focused: ui.focused, anchorVisible: ui.anchorVisible, followUpRequests, logicalNavigationComplete: logicalReady() })) {
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
-      if (tracker.active === 0) return performance.now()
+      if (tracker.active === 0 && logicalReady()) return performance.now()
     }
     await page.waitForTimeout(10)
   }
@@ -532,7 +738,7 @@ async function measureLargeBranchExpandCollapse(page, tracker, fixture, anchorId
   const toggle = page.locator(toggleSelector)
   if (await toggle.count() !== 1) throw new Error(`large expand/collapse expected one root toggle, observed ${await toggle.count()}`)
 
-  // Bootstrap renders roots open but deliberately does not hydrate children.
+  // Bootstrap renders roots open and drains their expanded descendants.
   // Close once to create the user-visible lazy-load state; this preparatory
   // transition must remain local and cannot recursively fetch a branch.
   const prepareBefore = requestSnapshot(tracker)
@@ -546,9 +752,9 @@ async function measureLargeBranchExpandCollapse(page, tracker, fixture, anchorId
   const expandMs = await requiredDoubleFrame(page, toggleSelector)
   await page.waitForFunction(id => Boolean(document.querySelector(`#entity-${id}`)), descendantId, { timeout: 30000 })
   await waitForTransportQuiescence(page, tracker, 'large branch expansion')
-  assertSingleCappedBranchRequest(tracker, expandBefore, fixture.workspace.id, anchorId, 'large branch expansion')
+  for (const request of tracker.requests.slice(expandBefore.index).filter(request => request.key === 'navigation:branch')) { const url = new URL(request.url); if (url.searchParams.get('project_limit') !== '50' || url.searchParams.get('task_limit') !== '50') throw new Error('Expansion abandoned capped transport') }
   const expandedDom = await domMetrics(page)
-  if (expandedDom.rows <= collapsedDom.rows) throw new Error(`large branch expansion did not add rendered rows (${collapsedDom.rows} -> ${expandedDom.rows})`)
+  if (!await page.locator('#entity-' + descendantId).count()) throw new Error('Expansion did not mount the authoritative first child')
   const expand = {
     ms: expandMs,
     ...requestDelta(tracker, expandBefore),
@@ -563,7 +769,7 @@ async function measureLargeBranchExpandCollapse(page, tracker, fixture, anchorId
   const collapseDelta = requestDelta(tracker, collapseBefore)
   if (collapseDelta.count !== 0) throw new Error(`collapsing a loaded large branch issued ${collapseDelta.count} request(s)`)
   const recollapsedDom = await domMetrics(page)
-  if (recollapsedDom.rows >= expandedDom.rows) throw new Error(`large branch collapse retained descendant rows (${expandedDom.rows} -> ${recollapsedDom.rows})`)
+  if (await page.locator('#entity-' + descendantId).count()) throw new Error('Collapse retained the authoritative child')
   const collapse = {
     ms: collapseMs,
     ...collapseDelta,
@@ -596,9 +802,14 @@ function validateRequestDelta(delta, label) {
   return delta
 }
 
-function createTracker() {
-  return {
-    requests: [], counts: {}, bytes: {}, active: 0, completed: 0, lastActivityAt: performance.now(), unhandledApiRoutes: [],
+export function createTracker(fixture = null) {
+  const children = fixture && expectedNavigationChildren(fixture)
+  const navigationProof = fixture && createNavigationCompletionIndex({
+    children, rootProjects: children.workspace_root.projects, rootTasks: children.workspace_root.tasks,
+    context: navigationFilterContext(new URL('http://fixture?priority_mode=any'))
+  })
+  return { navigationProof, workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
+    requests: [], arrivals: new WeakMap(), counts: {}, bytes: {}, active: 0, activeBranches: 0, activeExpandedBranches: 0, activeRootBranches: 0, activeDetails: 0, maxBranches: 0, maxExpandedBranches: 0, maxRootBranches: 0, maxDetails: 0, completed: 0, lastActivityAt: performance.now(), unhandledApiRoutes: [],
     model: { snapshotGeneration: 0, snapshotItems: 0, snapshotPages: 0, snapshotComplete: false, snapshotProfile: null, timelineEvents: 0, timelineBuckets: 0, timelineBucketRequest: null }
   }
 }
@@ -684,14 +895,14 @@ async function measureDirectFocus(browser, origin, fixture) {
   const productFailureReason = requestedBeforeFullResync && renderedBeforeFullResync
     ? null
     : requestedBeforeFullResync
-      ? 'focus path requested the target but did not render its breadcrumb/card before full resync'
+      ? 'focus path requested the target but did not render its breadcrumb/card during focus-first shell bootstrap'
       : renderedBeforeFullResync
-        ? 'focus path rendered the target without issuing its direct entity request before full resync'
-        : 'focus path issued no direct entity request and rendered no target before full resync'
+        ? 'focus path rendered the target without issuing its direct entity request during focus-first shell bootstrap'
+        : 'focus path issued no direct entity request and rendered no target during focus-first shell bootstrap'
   const full = await waitForCurrentSnapshotTransport(page, tracker, fixture, 'direct-focus released shell resync')
   await page.waitForSelector('.focus-breadcrumb-bar', { timeout: 30000 })
   await page.waitForSelector(`#entity-${targetId}`, { timeout: 30000 })
-  const renderedAfterFullResync = true
+  const renderedAfterShellResync = true
   assertNoUnhandledApiRoutes(tracker)
   if (consoleErrors.length > 0) throw new Error(`direct-focus browser console error(s): ${consoleErrors.join(' | ')}`)
   await context.close()
@@ -702,8 +913,9 @@ async function measureDirectFocus(browser, origin, fixture) {
     targetAbsentBeforeCanonicalResync: true,
     targetId,
     targetParentId: direct.targetProject.parent_id,
-    pausedSnapshotItems: 0,
-    pausedSnapshotPages: 0,
+    initialSnapshotItems: 0,
+    initialSnapshotPages: 0,
+    snapshotPauseUsed: false,
     directFocusRequested: requestedBeforeFullResync,
     directFocusRendered: renderedBeforeFullResync,
     productFailureReason,
@@ -713,8 +925,10 @@ async function measureDirectFocus(browser, origin, fixture) {
     attemptRouteDelta: attemptDelta,
     canonicalSnapshotItems: full.items,
     canonicalSnapshotPages: full.pages,
-    canonicalSnapshotHash: snapshotHash(fixture),
-    renderedAfterFullResync
+    canonicalSnapshotProfile: PRODUCTION_SNAPSHOT_PROFILE,
+    canonicalSnapshotHash: hashJson(workspaceShellSnapshotItems(fixture)),
+    fullBackingCanonicalSnapshotHash: snapshotHash(fixture),
+    renderedAfterShellResync
   }
 }
 
@@ -786,7 +1000,7 @@ async function verifyStaleDeepFocusContinuation(browser, origin) {
   try {
     await page.route('**/api/v1/**', fixtureResponder(fixture, tracker, { snapshots: workspaceShellSnapshotItems(fixture), focusContinuationPause: pause }))
     await page.goto(`${origin}/workspace/${fixture.workspace.id}#tab=projects&focus=project:${deep.targetProject.id}`, { waitUntil: 'domcontentloaded' })
-    await paused
+    await requiredPromiseWithin(paused, 30000, 'stale focus continuation gate')
     await page.evaluate(projectId => { window.location.hash = `tab=projects&focus=project:${projectId}` }, replacement.id)
     await page.waitForSelector(`#entity-${replacement.id}`, { timeout: 30000 })
     releasePause()
@@ -800,13 +1014,14 @@ async function verifyStaleDeepFocusContinuation(browser, origin) {
     if (oldTerminalPageRequested) throw new Error('stale deep-focus continuation scheduled its old terminal page after the focus changed')
     return { staleContinuationRejected: true }
   } finally {
+    releasePause()
     await context.close()
   }
 }
 
 async function measureRun(browser, origin, fixture, measured, trace) {
   const anchors = representativeProjectAnchors(fixture)
-  const tracker = createTracker()
+  const tracker = createTracker(fixture)
   const context = await browser.newContext({ viewport: HARNESS_CONFIGURATION.viewport })
   await context.addInitScript(fakeWebSocketScript)
   if (trace) await context.tracing.start({ screenshots: true, snapshots: true, sources: false })
@@ -820,17 +1035,26 @@ async function measureRun(browser, origin, fixture, measured, trace) {
   const coldStart = performance.now()
   await page.goto(`${origin}/workspace/${fixture.workspace.id}`, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.tree-view', { timeout: 30000 })
-  await waitForWorkspaceReady(page, tracker, fixture, anchors.first, 'cold Projects model/anchor')
+  await waitForFirstUsefulViewport(page, tracker, fixture, anchors.first)
   const coldMs = performance.now() - coldStart
   const coldEnd = tracker.requests.length
   const coldRequests = tracker.requests.slice(0, coldEnd)
   const cold = {
+    phase: 'authorized-painted-root-viewport.v1', activeRequestsAtCut: tracker.active, completedRequestsAtCut: tracker.completed,
     ms: coldMs, requests: coldRequests.length, bytes: coldRequests.reduce((sum, request) => sum + request.bytes, 0),
     routeCounts: { ...tracker.counts }, routeBytes: { ...tracker.bytes },
     entityOverviewRequests: (tracker.counts['projects:overview'] || 0) + (tracker.counts['tasks:overview'] || 0),
     canonicalSnapshotItems: tracker.model.snapshotItems,
     canonicalSnapshotPages: tracker.counts['change-stream:resync'] || 0
   }
+  const backgroundStarted = performance.now()
+  await waitForWorkspaceReady(page, tracker, fixture, anchors.first, 'complete expanded hierarchy')
+  const completion = completedExpandedMembership(tracker, fixture)
+  const scrollCompletion = await scrollExpandedHierarchy(page, completion.entityKeys)
+  await waitForTransportQuiescence(page, tracker, 'expanded hierarchy scroll detail demand')
+  delete completion.entityKeys
+  const background = { ms: performance.now() - backgroundStarted, completeRequests: tracker.requests.length, completeBytes: tracker.requests.reduce((sum, request) => sum + request.bytes, 0), afterViewportRequests: tracker.requests.length - coldEnd, maxPhysicalBranches: tracker.maxBranches, maxPhysicalExpandedBranches: tracker.maxExpandedBranches, maxPhysicalRootBranches: tracker.maxRootBranches, maxPhysicalDetails: tracker.maxDetails, ...completion, ...scrollCompletion }
+  assertNavigationCapacity({ aggregate: background.maxPhysicalBranches, expanded: background.maxPhysicalExpandedBranches, details: background.maxPhysicalDetails })
   const dom = []
   dom.push({ tab: 'projects', ...(await domMetrics(page)) })
   const interactions = {}
@@ -915,12 +1139,15 @@ async function measureRun(browser, origin, fixture, measured, trace) {
 
   await restoreWorkspace(page, tracker, fixture, anchors.first, 'pre-live representative Projects restore')
 
+  const collapsedBranches = fixture.size === 'large' ? ['project:' + anchors.expanded] : []
+  tracker.navigationProof.setCollapsed(collapsedBranches)
+  const logicalReady = () => tracker.navigationProof.ready()
   const liveBefore = requestSnapshot(tracker)
   const liveStart = performance.now()
   const pushedSockets = await page.evaluate(frames => window.__perfPushFrames(frames), fixture.liveFrames)
   if (pushedSockets !== 1) throw new Error(`live fixture expected one open socket, observed ${pushedSockets}`)
   await page.waitForFunction(expected => window.__perfLastPush?.frames === expected && window.__perfLastPush?.resumeToken === 'fixture-live-after', fixture.liveFrames.length)
-  const settledAt = await waitForLiveSettle(page, tracker, liveBefore, anchors.first)
+  const settledAt = await waitForLiveSettle(page, tracker, liveBefore, anchors.first, logicalReady)
   const stability = await assertLiveStability(page, tracker, 500)
   const liveTiming = liveTimingSummary({ startedAt: liveStart, settledAt, stabilityStartedAt: stability.startedAt, stabilityEndedAt: stability.endedAt })
   const postLiveUi = await projectUiSignals(page, anchors.first)
@@ -946,9 +1173,12 @@ async function measureRun(browser, origin, fixture, measured, trace) {
   await cdp.send('HeapProfiler.collectGarbage')
   const heap = await cdp.send('Runtime.getHeapUsage')
   assertNoUnhandledApiRoutes(tracker)
+  const lifetimeRender = await page.evaluate(() => window.__perfRenderMaximum)
+  dom.push({tab: 'lifetime-high-water', nodes: lifetimeRender.nodes, rows: lifetimeRender.rows})
+  if (lifetimeRender.hierarchyRows > 31 || lifetimeRender.observers > 31) throw new Error('Mounted hierarchy/observer high-water exceeded 25 ordinary plus six active pins')
   const renderMaximums = renderMaximum(dom)
   const result = {
-    fixture: fixture.size, measured, cold, tabSwitches, filters, interactions, observationLoadMore, directFocus, liveBatch, dom,
+    fixture: fixture.size, measured, cold, background, lifetimeRender, tabSwitches, filters, interactions, observationLoadMore, directFocus, liveBatch, dom,
     maxDomNodes: renderMaximums.nodes, maxCollectionRows: renderMaximums.rows,
     attributableHeapBytes: Math.max(0, heap.usedSize - blankHeap),
     heapPoint: HARNESS_CONFIGURATION.heapPoint,
@@ -996,6 +1226,8 @@ function aggregates(runs) {
     routeBytes: run.liveBatch.routeBytes
   }, 'live batch'))
   return {
+    background: runs.map(run => run.background),
+    lifetimeRender: runs.map(run => run.lifetimeRender),
     cold: { rawMs: cold, medianMs: median(cold), p95Ms: nearestRankP95(cold), requestCounts: runs.map(run => run.cold.requests), fixtureBytes: runs.map(run => run.cold.bytes), entityOverviewRequests: runs.map(run => run.cold.entityOverviewRequests), canonicalSnapshotItems: runs.map(run => run.cold.canonicalSnapshotItems), canonicalSnapshotPages: runs.map(run => run.cold.canonicalSnapshotPages) },
     render: { maxDomNodes: Math.max(...runs.map(run => run.maxDomNodes)), maxCollectionRows: Math.max(...runs.map(run => run.maxCollectionRows)) },
     localInteractions: { scenarios: localScenarios, worstP95Ms: Math.max(...Object.values(localScenarios).map(value => value.p95Ms)) },
@@ -1053,12 +1285,51 @@ function evaluate(result, comparableEnvironment = true) {
   return { comparableEnvironment, passed: metrics.every(metric => metric.pass), metrics }
 }
 
+function persistQualification(result, prerequisite, qualifiedInputs, command, retirement) {
+  if (!retirement.passed) throw new Error('Cannot finalize qualification before every owned resource retires')
+  if (JSON.stringify(inputQualification()) !== JSON.stringify(qualifiedInputs)) throw new Error('qualification inputs changed before finalization')
+  if (mode === 'record') {
+    const traceManifest = { schemaVersion: 1, baseCommit: BASE_COMMIT, taskId: evidenceTask?.taskId || null, evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs, sourceProvenance: result.sourceProvenance, contracts: result.contracts, trace: result.trace, retirement }
+    fs.writeFileSync(recordOutputPath, JSON.stringify(result, null, 2) + '\n')
+    fs.writeFileSync(recordTraceManifestPath, JSON.stringify(traceManifest, null, 2) + '\n')
+    if (recordOutputPath !== baselinePath && evidenceRevision !== 'expanded-hierarchy.v1') finalWorkingTreeEvidence()
+  }
+  if (evidenceRevision === 'expanded-hierarchy.v1') {
+    const previous = mode === 'check' ? JSON.parse(fs.readFileSync(validationRecordPath, 'utf8')) : null
+    if (previous && (previous.taskId !== evidenceTask.taskId || JSON.stringify(previous.inputQualification) !== JSON.stringify(qualifiedInputs))) throw new Error('validation record does not match the qualified record inputs')
+    const commands = previous ? [...previous.commands, command] : [prerequisite, command]
+    const validation = {
+      schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId, evidenceBaseCommit, measurementRevision: evidenceRevision,
+      inputQualification: qualifiedInputs, sourceProvenance: result.sourceProvenance, commands, retirement,
+      passed: mode === 'check' && result.evaluation.passed && previous?.recordEvaluation.passed === true && commands.every(receipt => receipt.exitCode === 0),
+      recordEvaluation: previous?.recordEvaluation || result.evaluation,
+      check: mode === 'check' ? { environment: result.environment, runs: result.runs, aggregates: result.aggregates, evaluation: result.evaluation } : null
+    }
+    fs.writeFileSync(validationRecordPath, JSON.stringify(validation, null, 2) + '\n')
+    finalWorkingTreeEvidence()
+  }
+  if (mode === 'record') console.log('AUTHORIZED RECORD finalized after owned retirement: ' + recordOutputPath + '; actual budget evaluation is preserved.')
+  if (mode === 'check' && evidenceTask && evidenceRevision !== 'expanded-hierarchy.v1' && result.evaluation.passed && fs.existsSync(validationRecordPath)) finalWorkingTreeEvidence()
+}
+
+function persistQualificationFailure(error, command, qualifiedInputs, retirement) {
+  if (evidenceRevision !== 'expanded-hierarchy.v1') return
+  const failed = { schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId, evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs, commands: [{ ...command, exitCode: 2 }], retirement, passed: false, failure: error.message }
+  fs.writeFileSync(validationRecordPath, JSON.stringify(failed, null, 2) + '\n')
+  // Invalidate even an older successful manifest when the new invocation fails.
+  fs.writeFileSync(evidenceManifestPath, JSON.stringify({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit, qualificationPassed: false, failure: error.message, retirement, validationRecord: { path: normalizedRepositoryPath(validationRecordPath), sha256: sha256File(validationRecordPath) } }, null, 2) + '\n')
+}
+
+
 async function main() {
   // The final v2 write is deliberately last: its fixture/self-check validation
   // must succeed before any review artifact is replaced.
-  runTaskEvidencePrerequisites()
+  const commandStartedAtUtc = new Date().toISOString(), commandStarted = performance.now()
+  const prerequisite = runTaskEvidencePrerequisites()
   if (!fs.existsSync(path.join(staticRoot, 'index.html'))) throw new Error(`production build missing at ${staticRoot}; run npm run build first`)
   const fixtures = { small: generateFixture('small'), large: generateFixture('large') }
+  const qualifiedInputs = inputQualification()
+  const qualifiedProvenance = sourceProvenance()
   const contracts = {
     budgetsHash: hashJson(budgets),
     configurationHash: hashJson(HARNESS_CONFIGURATION),
@@ -1079,6 +1350,8 @@ async function main() {
     if (!fs.existsSync(afterArtifactPath) || !fs.existsSync(afterTraceArtifactPath)) throw new Error('final working-tree after evidence is missing; run npm run perf:record-after')
     recordedBaseline = JSON.parse(fs.readFileSync(afterArtifactPath, 'utf8'))
     recordedTraceManifest = JSON.parse(fs.readFileSync(afterTraceArtifactPath, 'utf8'))
+    if (JSON.stringify(recordedBaseline.inputQualification) !== JSON.stringify(qualifiedInputs)) throw new Error('recorded source/production asset fingerprints differ from current inputs')
+    if (JSON.stringify(recordedTraceManifest.inputQualification) !== JSON.stringify(qualifiedInputs)) throw new Error('trace input fingerprints differ from current inputs')
     if (recordedBaseline.baseCommit !== BASE_COMMIT) throw new Error(`after-artifact base commit mismatch: expected ${BASE_COMMIT}, observed ${recordedBaseline.baseCommit}`)
     if (JSON.stringify(recordedBaseline.contracts) !== JSON.stringify(contracts)) throw new Error(`baseline fixture/configuration/budget contracts do not match current inputs`)
     if (JSON.stringify(recordedTraceManifest.contracts) !== JSON.stringify(contracts)) throw new Error(`after trace manifest fixture/configuration/budget contracts do not match current inputs`)
@@ -1100,11 +1373,14 @@ async function main() {
     playwright: packageVersion(['@playwright', 'test'])
   }
   const server = await staticServer()
-  let browser = null
+  let browser = null, browserServer = null, measuredResult = null, failure = null, retirement = null
   try {
-    browser = await chromium.launch({ headless: true, args: ['--js-flags=--expose-gc', '--enable-precise-memory-info'] })
+    browserServer = await chromium.launchServer({ headless: true, args: ['--js-flags=--expose-gc', '--enable-precise-memory-info'] })
+    console.log('OWNED_CHROMIUM_PID=' + browserServer.process()?.pid)
+    browser = await chromium.connect(browserServer.wsEndpoint())
     const environment = {
       os: `${os.type()} ${os.release()} ${os.arch()}`, cpu: `${os.cpus()[0]?.model || 'unknown'} (${os.cpus().length} logical)`, ramBytes: os.totalmem(),
+      browserControl: 'Playwright BrowserServer/connect with explicit owned process retirement',
       ...toolVersions, chromium: browser.version(), viewport: `${HARNESS_CONFIGURATION.viewport.width}x${HARNESS_CONFIGURATION.viewport.height}`, headless: true
     }
     environment.fingerprint = hashJson(environment)
@@ -1135,7 +1411,7 @@ async function main() {
         sizeBytes: fs.statSync(tracePath).size,
         capturedRun: 'large sample 5/5 after two warmups',
         verifiedDuringRecord: true,
-        retention: 'generated under ignored perf/.artifacts, intentionally removed after record/check; this versioned manifest retains verified provenance and does not claim the opaque archive is available'
+        retention: evidenceRevision === 'expanded-hierarchy.v1' ? 'generated under task-owned .scratch/expanded-navigation-perf, intentionally removed by finite owned cleanup before success finalization; this versioned manifest retains verified provenance and does not claim the opaque archive is available' : 'generated under ignored perf/.artifacts, intentionally removed after record/check; this versioned manifest retains verified provenance and does not claim the opaque archive is available'
       }
     }
     const result = {
@@ -1144,6 +1420,8 @@ async function main() {
         ? (recordOutputPath === baselinePath ? 'explicit --authorize-baseline' : 'explicit --authorize-after-artifact')
         : recordedBaseline.recordAuthorization,
       environment, configuration: HARNESS_CONFIGURATION, contracts,
+      taskId: evidenceTask?.taskId || null, parentTaskId: evidenceTask?.parentTaskId || null, evidenceBaseCommit,
+      inputQualification: qualifiedInputs, sourceProvenance: qualifiedProvenance, measurementRevision: evidenceRevision,
       fixtures: {
         schemaVersion: 1, seed: fixtures.large.seed, directFocusContract: DIRECT_FOCUS_CONTRACT,
         deepFocusContinuation,
@@ -1160,20 +1438,49 @@ async function main() {
     let comparable = true
     if (mode === 'check') comparable = recordedBaseline.environment.fingerprint === environment.fingerprint
     result.evaluation = evaluate(result, comparable)
-    if (mode === 'record') {
-      const traceManifest = { schemaVersion: 1, baseCommit: BASE_COMMIT, contracts, trace }
-      fs.writeFileSync(recordOutputPath, `${JSON.stringify(result, null, 2)}\n`)
-      fs.writeFileSync(recordTraceManifestPath, `${JSON.stringify(traceManifest, null, 2)}\n`)
-      if (recordOutputPath !== baselinePath) finalWorkingTreeEvidence()
-    }
-    for (const metric of result.evaluation.metrics) console.log(`${metric.pass ? 'PASS' : 'FAIL'} ${metric.name}: ${metric.actual} (budget ${metric.expected}${metric.category === 'informational' ? ', informational environment' : ''})`)
-    if (mode === 'record') console.log(`AUTHORIZED RECORD wrote ${recordOutputPath} and ${recordTraceManifestPath}; evaluation is preserved, and budget failures do not fail explicitly authorized record mode.`)
-    if (mode === 'check' && !result.evaluation.passed) process.exitCode = 1
-    if (mode === 'check' && evidenceTask && result.evaluation.passed && fs.existsSync(validationRecordPath)) finalWorkingTreeEvidence()
+    if (JSON.stringify(inputQualification()) !== JSON.stringify(qualifiedInputs)) throw new Error('qualification inputs changed during measurement')
+    measuredResult = result
+    for (const metric of result.evaluation.metrics) console.log((metric.pass ? 'PASS' : 'FAIL') + ' ' + metric.name + ': ' + metric.actual + ' (budget ' + metric.expected + (metric.category === 'informational' ? ', informational environment' : '') + ')')
+  } catch (error) {
+    failure = error
   } finally {
-    if (browser) await browser.close()
-    await new Promise(resolve => server.server.close(resolve))
+    retirement = await retireOwnedResources([
+      { resource: 'browser connection', close: async () => { if (browser) await browser.close() } },
+      { resource: 'owned Chromium process', close: async () => {
+        if (browserServer) {
+          await browserServer.kill()
+          const child = browserServer.process()
+          if (child && child.exitCode == null && child.signalCode == null) throw new Error('Owned Chromium still alive after retirement')
+        }
+      } },
+      { resource: 'owned HTTP server', close: async () => {
+        server.server.closeAllConnections()
+        await new Promise((resolve, reject) => server.server.close(error => error ? reject(error) : resolve()))
+      } },
+      { resource: 'task trace', close: async () => {
+        if (evidenceRevision !== 'expanded-hierarchy.v1') return
+        await fs.promises.unlink(tracePath).catch(error => { if (error.code !== 'ENOENT') throw error })
+        const remaining = await fs.promises.readdir(expandedScratch).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+        if (remaining?.length === 0) await fs.promises.rmdir(expandedScratch)
+      } }
+    ], 5000)
   }
+  const command = {
+    command: 'node perf/harness.mjs ' + mode,
+    invocation: 'HMEM_EVIDENCE_BASE_COMMIT=' + evidenceBaseCommit + ' npm run perf:' + (mode === 'record' ? 'record-after' : 'check'),
+    measuredPhase: 'node harness only; preceding npm production build is excluded',
+    exitCode: mode === 'check' && measuredResult && !measuredResult.evaluation.passed ? 1 : 0,
+    startedAtUtc: commandStartedAtUtc, finishedAtUtc: new Date().toISOString(), durationMs: Math.round(performance.now() - commandStarted)
+  }
+  if (!retirement.passed) failure = new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; '))
+  if (failure) {
+    persistQualificationFailure(failure, command, qualifiedInputs, retirement)
+    throw failure
+  }
+  measuredResult.retirement = retirement
+  try { persistQualification(measuredResult, prerequisite, qualifiedInputs, command, retirement) }
+  catch (error) { persistQualificationFailure(error, command, qualifiedInputs, retirement); throw error }
+  if (mode === 'check' && !measuredResult.evaluation.passed) process.exitCode = 1
 }
 
-main().catch(error => { console.error(error.stack || error); process.exitCode = 2 })
+if (path.resolve(process.argv[1] || '') === fileURLToPath(import.meta.url)) main().catch(error => { console.error(error.stack || error); process.exitCode = 2 })

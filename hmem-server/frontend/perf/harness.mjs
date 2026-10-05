@@ -581,6 +581,11 @@ export async function waitForFirstUsefulViewport(page, tracker, fixture, anchorI
   throw new Error('Authorized shell and first painted root anchor were not ready')
 }
 
+export async function navigateToFirstUsefulViewport(page, origin, tracker, fixture, anchorId) {
+  await page.goto(`${origin}/workspace/${fixture.workspace.id}`, { waitUntil: 'domcontentloaded' })
+  await waitForFirstUsefulViewport(page, tracker, fixture, anchorId)
+}
+
 function completedExpandedMembership(tracker, fixture) {
   const navigation = tracker.requests.filter(request => request.key === 'navigation:branch' && request.navigation)
   const textOrder = (a, b) => a < b ? -1 : a > b ? 1 : 0
@@ -1060,9 +1065,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const cdp = await context.newCDPSession(page)
   const blankHeap = (await cdp.send('Runtime.getHeapUsage')).usedSize
   const coldStart = performance.now()
-  await page.goto(`${origin}/workspace/${fixture.workspace.id}`, { waitUntil: 'domcontentloaded' })
-  await page.waitForSelector('.tree-view', { timeout: 30000 })
-  await waitForFirstUsefulViewport(page, tracker, fixture, anchors.first)
+  await navigateToFirstUsefulViewport(page, origin, tracker, fixture, anchors.first)
   const coldMs = performance.now() - coldStart
   const coldEnd = tracker.requests.length
   tracker.coldDiagnostics.cut(performance.now(), coldEnd, tracker.completed, tracker.active)

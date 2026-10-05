@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { createColdDiagnostics, createEvidenceCapture, atomicEvidenceWrite, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, currentRootNavigationPass, currentNavigationPassComplete, logicalExpandedNavigationComplete, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, FIXTURE_SCHEMA_VERSION, FIXTURE_SEED, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_BUCKET_RESPONSE_MAX, TIMELINE_BUCKET_SQL_CAP, TIMELINE_DEFAULT_UI_QUERY, TimelineBucketRequestError, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, orderedTimelineBuckets, paginate, projectOverviewResponse, projectReadinessRollup, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, stableFixtureJson, taskOverviewResponse, taskReadinessRollup, validateFixture, workspaceShellSnapshotItems } from './fixtures.mjs'
 
-import { untrackedFileDiff, waitForFirstUsefulViewport, retryNavigationKind, createTracker, fixtureResponder } from './harness.mjs'
+import { untrackedFileDiff, navigateToFirstUsefulViewport, waitForFirstUsefulViewport, retryNavigationKind, createTracker, fixtureResponder } from './harness.mjs'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 
@@ -1532,6 +1532,31 @@ test('cold sampler diagnostics preserve unusable DOM short circuit and the exist
   assert.equal(history.total,2);assert.equal(history.retained[0].reason,'unusable-dom');assert.deepEqual(history.retained[0].observation.clock,{startedAt:10,frameAt:20,endedAt:21});
   assert.equal(history.retained[1].reason,'accepted');assert.equal(history.decisiveIndex,2);
   assert.ok(history.retained.every(e=>e.returnedAt>=e.startedAt));
+});
+
+test('cold navigation enters the authorized paint sampler without a selector prerequisite', async () => {
+  const fixture=generateFixture('small'), tracker=createTracker(fixture), proof=tracker.paintReadiness;
+  const url='http://fixture/api/v1/session', shellUrl='http://fixture/api/v1/change-stream/resync';
+  let evaluations=0;const sequence=[];
+  const page={
+    async goto(actual,options){sequence.push('goto');assert.equal(actual,`http://fixture/workspace/${fixture.workspace.id}`);assert.deepEqual(options,{waitUntil:'domcontentloaded'})},
+    async waitForSelector(){assert.fail('the sampler already rejects missing DOM; a selector must not delay admission')},
+    async evaluate(_sample,anchor){
+      sequence.push('sample');assert.equal(anchor,'anchor');evaluations++;
+      const observation={painted:evaluations!==1,anchorVisible:evaluations!==1,loading:evaluations===1,origin:'http://fixture',
+        clock:{startedAt:10,frameAt:20,endedAt:21},receipts:[]};
+      if(evaluations===2){
+        const session=proof.beginSession(1,'session',url);proof.completeSession(session,{canRead:true,workspaceId:fixture.workspace.id},2);
+        const shell=proof.admitSnapshot(true,3,'shell',shellUrl);proof.completeSnapshot(shell,{profile:'workspace_shell_v1',workspaceId:fixture.workspace.id,items:1,complete:true},4);
+      }
+      if(evaluations>=3) observation.receipts=[{id:'session',url,startTime:1,responseEnd:2},{id:'shell',url:shellUrl,startTime:3,responseEnd:evaluations===3?21:4}];
+      return observation;
+    }
+  };
+  await navigateToFirstUsefulViewport(page,'http://fixture',tracker,fixture,'anchor');
+  assert.deepEqual(sequence,['goto','sample','sample','sample','sample']);
+  assert.deepEqual(tracker.coldDiagnostics.snapshot().histories.evaluations.retained.map(e=>e.reason),
+    ['unusable-dom','retired-lifetime','snapshot-late-or-uncertain-timing','accepted']);
 });
 
 test('cold diagnostics survive failed persistence and owned cleanup without a stale success receipt', async () => {

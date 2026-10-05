@@ -96,6 +96,11 @@ Missing, duplicated, retired, unmatched or boundary-uncertain timing fails close
 no host/browser clock synchronization is assumed. A shell completed between the
 two frames may qualify the final paint; one completed after it cannot. Request
 and body-byte accounting still ends after the evaluation returns to the host.
+Cold sampling starts directly after `goto(domcontentloaded)`, without a separate
+tree-selector wait. Its existing two-frame observation rejects missing or loading
+DOM until the current authorized root is visible; the host accounting cut follows
+that observation unchanged.
+
 Each cold run retains passive request/completion identities and first, decisive,
 and latest readiness evaluations with explicit omission counts. Browser response
 and paint timestamps remain separate from host evaluation/return/cut timestamps.

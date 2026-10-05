@@ -4,6 +4,7 @@ import Api
 import AppShell exposing (AppShellOwnedMsg(..))
 import Dict
 import Expect
+import Feature.Cards as Cards
 import Feature.ChangeStream as ChangeStream
 import Feature.DataLoading as DataLoading
 import Feature.WebSocket as WebSocket
@@ -127,11 +128,11 @@ suite =
                , test "session retirement holds physical navigation and detail slots until stale completion" <|
                     \_ ->
                         let
-                            admitted = List.foldl (\id current -> DataLoading.beginNavigationBranch "project" "a" (Just id) current |> Tuple.first) (populated (WorkspacePage "a")) [ "one", "two", "three", "four" ]
+                            admitted = List.foldl (\id current -> DataLoading.beginNavigationBranch "project" "a" (Just id) current |> Tuple.first) (populated (WorkspacePage "a")) [ "one", "two", "three", "four" ] |> paintEmptyRoot
                             loading = admitted.dataLoading
                             before = { admitted | dataLoading = { loading | cardDetailAdmissions = Set.fromList [ 41, 42, 43, 44, 45, 46 ], nextCardDetailRequestId = 47 } }
                             retired = AppShell.handleOwned AuthUnauthorizedMsg before |> Tuple.first
-                            authorized = refresh superadmin retired
+                            authorized = refresh superadmin retired |> paintEmptyRoot
                             queued = DataLoading.beginNavigationBranch "project" "a" (Just "replacement") authorized |> Tuple.first
                             released = case Dict.get "project:one" before.dataLoading.loadedNavigationBranches of
                                 Just request -> DataLoading.update (GotNavigationBranch "a" request.sessionEpoch request.generation "project:one" request.filterFingerprint 0 0 (Err Http.Timeout)) queued |> Tuple.first
@@ -348,3 +349,18 @@ reader =
 workspace : Api.Workspace
 workspace =
     { id = "a", name = "Workspace", workspaceType = Api.Repository, ghOwner = Nothing, ghRepo = Nothing, createdAt = "now", updatedAt = "now" }
+
+
+paintEmptyRoot : Model -> Model
+paintEmptyRoot source =
+    let
+        prepared = DataLoading.prepareRootNavigationRequest (Just "a") source
+        loaded = case prepared.dataLoading.rootNavigationRequest of
+            Just request -> DataLoading.update (GotRootNavigation "a" request.sessionEpoch prepared.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint 0 0 (Ok { workspaceId = "a", projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })) prepared |> Cards.refreshViewport prepared |> Tuple.first
+            Nothing -> prepared
+        viewport = loaded.cards.viewport
+    in
+    Cards.updateViewport (Encode.object
+        [ ( "workspace", Encode.string "a" ), ( "epoch", Encode.int loaded.sessionRequestEpoch ), ( "generation", Encode.int loaded.dataLoading.navigationGeneration ), ( "revision", Encode.int viewport.revision )
+        , ( "paintNonce", Encode.int (DataLoading.backgroundPaintNonce loaded) ), ( "paintFilter", Encode.string (DataLoading.navigationFilterFingerprint loaded) )
+        ]) loaded |> Tuple.first

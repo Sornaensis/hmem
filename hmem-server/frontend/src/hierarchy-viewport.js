@@ -21,6 +21,10 @@ export function installHierarchyViewport(app, options = {}) {
   let pendingElement = null
   let retainedFocus = null
   let bridgeFocusedControl = null
+  let paintLayout = null
+  let paintFrame = null
+  let paintedPermit = null
+  let acknowledgedPermit = null
   let lastReceipt = ''
   const observed = new Set()
   const heights = new Map()
@@ -48,6 +52,39 @@ export function installHierarchyViewport(app, options = {}) {
   function schedule() {
     if (frame == null) frame = raf(flush)
   }
+  const permitKey = layout => layout && [layout.workspace, layout.epoch, layout.paintFilter, layout.paintNonce].join('|')
+  function cancelPaint() {
+    if (paintFrame != null) cancel(paintFrame)
+    paintFrame = null; paintedPermit = null
+  }
+  function visibleViewport(rows) {
+    const style = container && win.getComputedStyle(container)
+    const bounds = scroller?.getBoundingClientRect()
+    return container && bounds && style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse' && rows.some(row => {
+      const box = row.getBoundingClientRect()
+      return box.height > 0 && box.top < bounds.top + scroller.clientHeight && box.top + box.height > bounds.top
+    })
+  }
+  function requestPaint(stamp, rows) {
+    const layout = paintLayout
+    const visible = visibleViewport(rows)
+    if (!layout?.paintReady || !sameStamp(layout, stamp) || !visible || !Number.isInteger(layout.paintNonce)) { cancelPaint(); return }
+    const key = permitKey(layout)
+    if (acknowledgedPermit === key || paintFrame != null || paintedPermit) return
+    // The first frame leaves the admitted rows to paint; the following frame
+    // acknowledges that paint. Response callbacks cannot replenish this permit.
+    paintFrame = raf(() => {
+      paintFrame = raf(() => {
+        paintFrame = null
+        let current = null
+        try { current = JSON.parse(doc.getElementById('hierarchy-viewport')?.dataset.hierarchyContext) } catch {}
+        if (sameStamp(layout, current) && permitKey(paintLayout) === key) {
+          paintedPermit = { key, nonce: layout.paintNonce, filter: layout.paintFilter, stamp: layout }
+          flush()
+        } else schedule()
+      })
+    })
+  }
   function flush() {
     frame = null
     const next = doc.getElementById('hierarchy-viewport')
@@ -65,7 +102,7 @@ export function installHierarchyViewport(app, options = {}) {
     const scroll = doc.getElementById('main-content-scroll')
     if (!next || !scroll) {
       for (const row of observed) observer?.unobserve(row)
-      observed.clear(); heights.clear(); context = null; container = null
+      cancelPaint(); observed.clear(); heights.clear(); context = null; container = null
       pendingLayout = null; pendingTarget = null; layoutTargetIntent = null; retainedFocus = null; lastReceipt = ''
       if (scroller) scroller.removeEventListener('scroll', schedule)
       scroller = null
@@ -152,6 +189,11 @@ export function installHierarchyViewport(app, options = {}) {
     const receipt = { workspace: stamp.workspace, epoch: stamp.epoch, generation: stamp.generation, revision: stamp.revision,
       top: Math.max(0, scroller.scrollTop - origin()), height: scroller.clientHeight, measurements, pins,
       request: pendingTarget?.key || null, acknowledged }
+    if (paintedPermit && paintLayout?.paintReady && visibleViewport(rows) && sameStamp(paintedPermit.stamp, stamp) && permitKey(paintLayout) === paintedPermit.key) {
+      receipt.paintNonce = paintedPermit.nonce; receipt.paintFilter = paintedPermit.filter
+      acknowledgedPermit = paintedPermit.key; paintedPermit = null
+    }
+    requestPaint(stamp, rows)
     const serialized = JSON.stringify(receipt)
     if (serialized !== lastReceipt || measurements.length || acknowledged) {
       lastReceipt = serialized
@@ -161,6 +203,7 @@ export function installHierarchyViewport(app, options = {}) {
   function sync(layout) {
     if (!sameLifetime(lifetime, layout)) { pendingElement = null; retainedFocus = null }
     lifetime = layout
+    paintLayout = layout
     layoutScrollTop = doc.getElementById('main-content-scroll')?.scrollTop ?? null
     // Repeated same-stamp target echoes retain their original admission.
     // They cannot outrank a later keyboard intent merely by arriving again.
@@ -249,6 +292,7 @@ export function installHierarchyViewport(app, options = {}) {
   return {
     flush,
     dispose() {
+      cancelPaint()
       if (frame != null) cancel(frame)
       observer?.disconnect(); mutations?.disconnect()
       scroller?.removeEventListener('scroll', schedule)

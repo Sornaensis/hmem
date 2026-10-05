@@ -29,7 +29,7 @@ function harness({ resizeObserver = true } = {}) {
   }
   function flush() { const current = [...frames.values()]; frames.clear(); for (const fn of current) fn() }
   return { bridge, row, flush, sent, callbacks, stamp, scroller, doc, observers, listeners, windowListeners, elements,
-    setRows(value) { rows = value }, setStamp(value) { container.dataset.hierarchyContext = JSON.stringify(value) }, mutate(records) { for (const callback of mutationCallbacks) callback(records) }, hide() { viewport = false } }
+    setRows(value) { rows = value }, setStamp(value) { container.dataset.hierarchyContext = JSON.stringify(value) }, mutate(records) { for (const callback of mutationCallbacks) callback(records) }, hide() { viewport = false }, show() { viewport = true } }
 }
 
 test('only a proven same-row move restores the exact retained native control', () => {
@@ -337,6 +337,38 @@ test('bridge-owned recovery emits native focusin without retiring a newer mounte
     assert.equal(h.doc.activeElement, retained.button)
     if (mounted) { assert.equal(h.scroller.scrollTop, 1400); assert.equal(h.sent.at(-1).acknowledged, true) }
     else assert.equal(h.sent.at(-1).request, 'task:c')
+    h.bridge.dispose()
+  }
+})
+
+
+test('ordinary admission acknowledges one current completed-root viewport only after paint', () => {
+  const h = harness(), row = h.row('project:a', 0)
+  h.setRows([row]); h.callbacks.sync({ ...h.stamp, paintNonce: 7, paintFilter: 'all', paintReady: true, top: 0, anchor: null, delta: 0 }); h.flush()
+  assert.equal(h.sent.some(receipt => receipt.paintNonce === 7), false)
+  h.flush(); assert.equal(h.sent.some(receipt => receipt.paintNonce === 7), false)
+  h.flush(); assert.equal(h.sent.filter(receipt => receipt.paintNonce === 7).length, 1)
+  h.callbacks.sync({ ...h.stamp, paintNonce: 7, paintFilter: 'all', paintReady: true, top: 0, anchor: null, delta: 0 }); h.flush(); h.flush(); h.flush()
+  assert.equal(h.sent.filter(receipt => receipt.paintNonce === 7).length, 1)
+  h.bridge.dispose()
+})
+
+
+test('hidden and retired painted layouts cannot open a wave; a fresh visible empty-root status resumes', () => {
+  for (const retirement of ['hidden', 'context', 'css-hidden']) {
+    const h = harness(), row = h.row('root-status:projects', 0, 40)
+    h.setRows([row]); h.callbacks.sync({ ...h.stamp, paintNonce: 9, paintFilter: 'tasks', paintReady: true, top: 0, anchor: null, delta: 0 }); h.flush()
+    if (retirement === 'hidden') h.hide()
+    else if (retirement === 'css-hidden') row.getBoundingClientRect = () => ({ top: 0, height: 0 })
+    else { h.setStamp({ ...h.stamp, epoch: 2 }); h.callbacks.sync({ ...h.stamp, epoch: 2, paintNonce: 10, paintFilter: 'tasks', paintReady: false, top: 0 }) }
+    h.flush(); h.flush(); h.flush()
+    assert.equal(h.sent.some(receipt => receipt.paintNonce === 9), false, retirement)
+    if (retirement === 'hidden') h.show()
+    if (retirement === 'css-hidden') row.getBoundingClientRect = () => ({ top: 0, height: 40 })
+    const current = retirement === 'context' ? { ...h.stamp, epoch: 2 } : h.stamp
+    h.callbacks.sync({ ...current, paintNonce: 10, paintFilter: 'tasks', paintReady: true, top: 0, anchor: null, delta: 0 })
+    h.flush(); h.flush(); h.flush()
+    assert.equal(h.sent.filter(receipt => receipt.paintNonce === 10).length, 1, retirement)
     h.bridge.dispose()
   }
 })

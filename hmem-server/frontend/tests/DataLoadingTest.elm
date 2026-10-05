@@ -12,6 +12,8 @@ import Feature.Mutations as Mutations
 import Feature.Search
 import Feature.WebSocket as WebSocket
 import Http
+import HierarchyViewport as Viewport
+import Html.Attributes as Attributes
 import Json.Encode as Encode
 import Route
 import Set
@@ -26,7 +28,116 @@ import Url
 suite : Test
 suite =
     describe "bounded navigation response guards"
-        [ test "an expanded branch automatically continues both kinds past fifty siblings" <|
+        [ test "ordinary background waits for a usable viewport paint" <|
+            \_ ->
+                let
+                    seeded = loadRootUnpainted workspaceId [ (let parent = project "paint-parent" Nothing in { parent | hasChildren = True }) ] [] model
+                in
+                Expect.equal ( 0, 0 ) ( Dict.size seeded.dataLoading.navigationAdmissions, Set.size seeded.dataLoading.cardDetailAdmissions )
+
+        , test "one painted wave bounds combined ordinary work and ignores repeated receipts" <|
+            \_ ->
+                let
+                    parents = List.range 1 8 |> List.map (\n -> let parent = project ("paint-" ++ String.fromInt n) Nothing in { parent | hasChildren = True })
+                    waiting = loadRootUnpainted workspaceId parents [] model
+                    admitted = painted waiting
+                    duplicate = painted admitted
+                in
+                Expect.equal ( ( 2, 3 ), ( 2, 3 ), 0 )
+                    ( ( Dict.size admitted.dataLoading.navigationAdmissions, Set.size admitted.dataLoading.cardDetailAdmissions )
+                    , ( Dict.size duplicate.dataLoading.navigationAdmissions, Set.size duplicate.dataLoading.cardDetailAdmissions )
+                    , duplicate.dataLoading.backgroundAdmission.remaining
+                    )
+        , test "rapid branch and detail completion yields before replenishing ordinary credits" <|
+            \_ ->
+                let
+                    parents = List.range 1 8 |> List.map (\n -> let parent = project ("rapid-" ++ String.fromInt n) Nothing in { parent | hasChildren = True })
+                    admitted = loadRootUnpainted workspaceId parents [] model |> painted
+                    loading = admitted.dataLoading
+                    details = Dict.toList loading.projectCardDetailRequests
+                    settleDetail ( id, request ) current = DataLoading.update (GotProjectCardDetail request id (Err Http.Timeout)) current |> Tuple.first
+                    settleBranch ( key, request ) current = DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation (String.split "|" key |> List.head |> Maybe.withDefault "") request.filterFingerprint request.projectOffset request.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })) current |> Tuple.first
+                    settled = List.foldl settleDetail admitted details |> (\current -> List.foldl settleBranch current (Dict.toList loading.navigationAdmissions))
+                    resumed = painted settled
+                in
+                Expect.equal ( ( ( 0, 0 ), False, True ), ( 2, 3 ) )
+                    ( ( ( Dict.size settled.dataLoading.navigationAdmissions, Set.size settled.dataLoading.cardDetailAdmissions ), settled.dataLoading.backgroundAdmission.acknowledged, settled.dataLoading.backgroundAdmission.nonce > loading.backgroundAdmission.nonce )
+                    , ( Dict.size resumed.dataLoading.navigationAdmissions, Set.size resumed.dataLoading.cardDetailAdmissions )
+                    )
+
+        , test "usable root paint remains admitted while More is pending or failed" <|
+            \_ ->
+                let
+                    prepared = DataLoading.prepareRootNavigationRequest (Just workspaceId) model
+                    loaded = case prepared.dataLoading.rootNavigationRequest of
+                        Just request -> paintUpdate (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [ project "usable-root" Nothing ], hasMore = True }, tasks = { items = [], hasMore = False } })) prepared |> Tuple.first
+                        Nothing -> prepared
+                    pending = DataLoading.beginRootNavigationPage "project" loaded |> Tuple.first
+                    failed = case pending.dataLoading.rootNavigationRequest of
+                        Just request -> paintUpdate (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) pending |> Tuple.first
+                        Nothing -> pending
+                in
+                Expect.all (List.map (\current _ -> expectPaintReady True (Cards.refreshViewport current ( current, Cmd.none ) |> Tuple.first)) [ pending, failed ]) ()
+
+        , test "completed direct focus can paint without root cards but bootstrap and retired filters cannot" <|
+            \_ ->
+                let
+                    focus = model.focus
+                    source = { model | focus = { focus | focusedEntity = Just ( "project", "paint-target" ) } }
+                    requested = DataLoading.beginNavigationFocus workspaceId "project" "paint-target" source |> Tuple.first
+                    completed = case requested.dataLoading.activeNavigationFocus of
+                        Just request -> DataLoading.update (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint "project" "paint-target" 0 (Ok { workspaceId = workspaceId, target = Api.NavigationProjectSummary (project "paint-target" Nothing), ancestors = [], ancestorsTruncated = False, nextAncestorOffset = Nothing })) requested |> Tuple.first
+                        Nothing -> requested
+                    search = completed.search
+                    retired = { completed | search = { search | query = "different" } }
+                    check ready current _ = expectPaintReady ready (Cards.refreshViewport current ( current, Cmd.none ) |> Tuple.first)
+                in
+                Expect.all [ check True completed, check False model, check False retired ] ()
+
+        , test "a later established shell stages unequal accepted root spans independently" <|
+            \_ ->
+                let
+                    projects start end = List.range start end |> List.map (\n -> project ("shell-project-" ++ String.fromInt n) Nothing)
+                    tasks start end = List.range start end |> List.map (\n -> let item = task ("shell-task-" ++ String.fromInt n) Nothing in { item | projectId = Nothing })
+                    initial = DataLoading.reloadNavigationForFilters (syncModel []) |> Tuple.first |> replyRootSpan (projects 1 50) (tasks 1 50) True True
+                    projectEnd = DataLoading.beginRootNavigationPage "project" initial |> Tuple.first |> replyRootSpan (projects 51 52) [] False True
+                    taskSecond = DataLoading.beginRootNavigationPage "task" projectEnd |> Tuple.first |> replyRootSpan [] (tasks 51 100) False True
+                    accepted = DataLoading.beginRootNavigationPage "task" taskSecond |> Tuple.first |> replyRootSpan [] (tasks 101 101) False False
+                    positioned = DataLoading.beginRootNavigationPreviousPage "project" accepted |> Tuple.first
+                    refreshing = establishedShell positioned
+                    first = replyRootSpan (projects 1 50) (tasks 1 50) True True refreshing
+                    second = replyRootSpan (projects 51 52) (tasks 51 100) False True first
+                    terminal = replyRootSpan [] (tasks 101 101) False False second
+                    state current = current.dataLoading.rootNavigationRequest |> Maybe.map (\request -> ( ( request.projectCardCount, request.taskCardCount ), ( request.projectOffset, request.taskOffset ), request.inFlight ))
+                    cursor current = current.dataLoading.rootNavigationPresentation |> Maybe.map (\value -> ( value.projectOffset, value.taskOffset ))
+                in
+                Expect.equal
+                    { demand = Just (52,101), during = Just ((52,101),(50,50),True), second = Just ((52,101),(50,100),True), terminal = Just ((52,101),(50,100),False), retained = True, presentation = cursor positioned }
+                    { demand = Dict.get "workspace_root:root" refreshing.dataLoading.navigationPasses |> Maybe.andThen .rootDemand, during = state first, second = state second, terminal = state terminal
+                    , retained = Set.member "shell-project-52" first.dataLoading.navigationVisibleProjectIds && Set.member "shell-task-101" second.dataLoading.navigationVisibleTaskIds
+                    , presentation = cursor terminal }
+        , test "a held root More survives later shell retirement and superseding resync" <|
+            \_ ->
+                let
+                    projects start end = List.range start end |> List.map (\n -> project ("held-shell-" ++ String.fromInt n) Nothing)
+                    initial = DataLoading.reloadNavigationForFilters (syncModel []) |> Tuple.first |> replyRootSpan (projects 1 50) [] True False
+                    held = DataLoading.beginRootNavigationPage "project" initial |> Tuple.first
+                    invalidated = WebSocket.update (WsMessageReceived (scopedFrame (Encode.object [ ( "schema_version", Encode.int 1 ), ( "type", Encode.string "resync_required" ) ]))) held |> Tuple.first
+                    retired = establishedShell invalidated
+                    first = replyRootSpan (projects 1 50) [] True False retired
+                    againInvalidated = WebSocket.update (WsMessageReceived (scopedFrame (Encode.object [ ( "schema_version", Encode.int 1 ), ( "type", Encode.string "resync_required" ) ]))) first |> Tuple.first
+                    superseded = establishedShell againInvalidated
+                    late = case held.dataLoading.rootNavigationRequest of
+                        Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint 50 0 (Ok { workspaceId = workspaceId, projects = { items = [ project "retired-shell-poison" Nothing ], hasMore = False }, tasks = { items = [], hasMore = False } })) superseded |> Tuple.first
+                        Nothing -> superseded
+                    freshFirst = replyRootSpan (projects 1 50) [] True False late
+                    completed = replyRootSpan (projects 51 52) [] False False freshFirst
+                in
+                Expect.equal ( Just (100,0), Just (50,True), (True,False) )
+                    ( Dict.get "workspace_root:root" superseded.dataLoading.navigationPasses |> Maybe.andThen .rootDemand
+                    , freshFirst.dataLoading.rootNavigationRequest |> Maybe.map (\request -> (request.projectOffset,request.inFlight))
+                    , ( Set.member "held-shell-52" completed.dataLoading.navigationVisibleProjectIds, Dict.member "retired-shell-poison" completed.dataLoading.projectCardSummaries ) )
+        , test "an expanded branch automatically continues both kinds past fifty siblings" <|
             \_ ->
                 let
                     parent =
@@ -41,7 +152,7 @@ suite =
                     reply projectOffset taskOffset projects tasks projectMore taskMore source =
                         case Dict.get "project:parent" source.dataLoading.loadedNavigationBranches of
                             Just request ->
-                                DataLoading.update
+                                paintUpdate
                                     (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint projectOffset taskOffset
                                         (Ok { workspaceId = workspaceId, projects = { items = projects, hasMore = projectMore }, tasks = { items = tasks, hasMore = taskMore } })
                                     )
@@ -73,7 +184,7 @@ suite =
                         loadRoot workspaceId [ project "parent" Nothing ] [] model
 
                     ( branched, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") seeded
+                        paintBranch "project" workspaceId (Just "parent") seeded
 
                     focus =
                         branched.focus
@@ -92,7 +203,7 @@ suite =
                         WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) established |> Tuple.first
                     resumed =
                         case Dict.get "project:parent" source.dataLoading.loadedNavigationBranches of
-                            Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) recovered |> Tuple.first
+                            Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) recovered |> Tuple.first
                             Nothing -> recovered
                 in
                 Expect.equal
@@ -107,10 +218,10 @@ suite =
             \_ ->
                 let
                     ( requested, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+                        paintBranch "project" workspaceId (Just "parent") model
 
                     ( updated, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId requested.sessionRequestEpoch requested.dataLoading.navigationGeneration "project:parent" filterFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "child" (Just "parent") ], hasMore = True }, tasks = { items = [ task "child-task" (Just "parent") ], hasMore = False } })
                             )
@@ -144,7 +255,7 @@ suite =
                         DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
 
                     ( updated, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ expandedProject ], hasMore = False }, tasks = { items = [ unassignedTask ], hasMore = False } })
                             )
@@ -167,7 +278,7 @@ suite =
                         DataLoading.mergeNavigationSummaries [ summary ] [] model
 
                     ( requested, _ ) =
-                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+                        paintPresentation "workspace_root" Nothing seeded
 
                     firstRequest =
                         Dict.get summary.id requested.dataLoading.projectCardDetailRequests
@@ -182,7 +293,7 @@ suite =
                     applied =
                         case firstRequest of
                             Just request ->
-                                DataLoading.update (GotProjectCardDetail request summary.id (Ok firstDetail)) requested |> Tuple.first
+                                paintUpdate (GotProjectCardDetail request summary.id (Ok firstDetail)) requested |> Tuple.first
 
                             Nothing ->
                                 requested
@@ -192,12 +303,12 @@ suite =
 
                     ( superseded, _ ) =
                         DataLoading.mergeNavigationSummaries [ newerSummary ] [] applied
-                            |> DataLoading.ensureNavigationPresentation "workspace_root" Nothing
+                            |> paintPresentation "workspace_root" Nothing
 
                     afterLate =
                         case firstRequest of
                             Just request ->
-                                DataLoading.update (GotProjectCardDetail request summary.id (Ok firstDetail)) superseded |> Tuple.first
+                                paintUpdate (GotProjectCardDetail request summary.id (Ok firstDetail)) superseded |> Tuple.first
 
                             Nothing ->
                                 superseded
@@ -232,7 +343,7 @@ suite =
                         DataLoading.mergeNavigationSummaries [ projectSummary ] [ taskSummary ] model
 
                     ( requested, _ ) =
-                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+                        paintPresentation "workspace_root" Nothing seeded
 
                     projectRequest =
                         Dict.get projectSummary.id requested.dataLoading.projectCardDetailRequests
@@ -257,16 +368,16 @@ suite =
                                         { taskDetail | description = Just "newer task detail", updatedAt = "2026-01-05T00:00:00Z" }
                                 in
                                 requested
-                                    |> DataLoading.update (GotProjectCardDetail pendingProject projectSummary.id (Ok newerProject))
+                                    |> paintUpdate (GotProjectCardDetail pendingProject projectSummary.id (Ok newerProject))
                                     |> Tuple.first
-                                    |> DataLoading.update (GotTaskCardDetail pendingTask taskSummary.id (Ok newerTask))
+                                    |> paintUpdate (GotTaskCardDetail pendingTask taskSummary.id (Ok newerTask))
                                     |> Tuple.first
 
                             _ ->
                                 requested
 
                     ensured =
-                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing hydrated |> Tuple.first
+                        paintPresentation "workspace_root" Nothing hydrated |> Tuple.first
 
                     expanded =
                         Cards.update ExpandAllNodes ensured |> Tuple.first
@@ -314,7 +425,7 @@ suite =
                         DataLoading.mergeNavigationSummaries [ projectSummary ] [ taskSummary ] model
 
                     ( requested, _ ) =
-                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+                        paintPresentation "workspace_root" Nothing seeded
 
                     projectRequest =
                         Dict.get projectSummary.id requested.dataLoading.projectCardDetailRequests
@@ -333,9 +444,9 @@ suite =
                                         Api.projectFromCardSummary projectSummary
                                 in
                                 reloaded
-                                    |> DataLoading.update (GotProjectCardDetail oldProjectRequest projectSummary.id (Ok { detail | description = Just "stale" }))
+                                    |> paintUpdate (GotProjectCardDetail oldProjectRequest projectSummary.id (Ok { detail | description = Just "stale" }))
                                     |> Tuple.first
-                                    |> DataLoading.update (GotTaskCardDetail oldTaskRequest taskSummary.id (Err Http.Timeout))
+                                    |> paintUpdate (GotTaskCardDetail oldTaskRequest taskSummary.id (Err Http.Timeout))
                                     |> Tuple.first
 
                             _ ->
@@ -344,7 +455,7 @@ suite =
                     replaced =
                         case afterGap.dataLoading.rootNavigationRequest of
                             Just request ->
-                                DataLoading.update
+                                paintUpdate
                                     (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint 0 0
                                         (Ok { workspaceId = workspaceId, projects = { items = [ projectSummary ], hasMore = False }, tasks = { items = [ taskSummary ], hasMore = False } })
                                     )
@@ -405,13 +516,13 @@ suite =
                     partiallyHydratedA =
                         case oldProjectRequest of
                             Just request ->
-                                DataLoading.update (GotProjectCardDetail request projectA.id (Ok projectADetail)) loadedA |> Tuple.first
+                                paintUpdate (GotProjectCardDetail request projectA.id (Ok projectADetail)) loadedA |> Tuple.first
 
                             Nothing ->
                                 loadedA
 
                     ( withBranch, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just projectA.id) partiallyHydratedA
+                        paintBranch "project" workspaceId (Just projectA.id) partiallyHydratedA
 
                     loadingA =
                         withBranch.dataLoading
@@ -437,7 +548,7 @@ suite =
                     afterLateInBGap =
                         case oldTaskRequest of
                             Just request ->
-                                DataLoading.update (GotTaskCardDetail request taskA.id (Err Http.Timeout)) switchedToB |> Tuple.first
+                                paintUpdate (GotTaskCardDetail request taskA.id (Err Http.Timeout)) switchedToB |> Tuple.first
 
                             Nothing ->
                                 switchedToB
@@ -485,9 +596,9 @@ suite =
                         case ( oldProjectRequest, oldTaskRequest ) of
                             ( Just projectRequest, Just taskRequest ) ->
                                 returnedA
-                                    |> DataLoading.update (GotProjectCardDetail projectRequest projectA.id (Err Http.Timeout))
+                                    |> paintUpdate (GotProjectCardDetail projectRequest projectA.id (Err Http.Timeout))
                                     |> Tuple.first
-                                    |> DataLoading.update (GotTaskCardDetail taskRequest taskA.id (Ok taskADetail))
+                                    |> paintUpdate (GotTaskCardDetail taskRequest taskA.id (Ok taskADetail))
                                     |> Tuple.first
 
                             _ ->
@@ -569,7 +680,7 @@ suite =
                                     detail =
                                         Api.projectFromCardSummary summary
                                 in
-                                DataLoading.update (GotProjectCardDetail request summary.id (Ok { detail | description = Nothing })) loaded |> Tuple.first
+                                paintUpdate (GotProjectCardDetail request summary.id (Ok { detail | description = Nothing })) loaded |> Tuple.first
 
                             Nothing ->
                                 loaded
@@ -578,7 +689,7 @@ suite =
                         Route.handleUrlChange { url | fragment = Just "tab=projects" } hydratedEmpty |> Tuple.first
 
                     ensured =
-                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing sameWorkspace |> Tuple.first
+                        paintPresentation "workspace_root" Nothing sameWorkspace |> Tuple.first
 
                     home =
                         Route.handleUrlChange { url | path = "/" } ensured |> Tuple.first
@@ -622,7 +733,7 @@ suite =
                         DataLoading.mergeNavigationSummaries [ projectSummary ] [ taskSummary ] model
 
                     ( requested, _ ) =
-                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+                        paintPresentation "workspace_root" Nothing seeded
 
                     projectRequest =
                         Dict.get projectSummary.id requested.dataLoading.projectCardDetailRequests
@@ -653,9 +764,9 @@ suite =
                         case ( projectRequest, taskRequest ) of
                             ( Just staleProjectRequest, Just staleTaskRequest ) ->
                                 afterMutations
-                                    |> DataLoading.update (GotProjectCardDetail staleProjectRequest projectSummary.id (Ok { oldProject | description = Just "old project description" }))
+                                    |> paintUpdate (GotProjectCardDetail staleProjectRequest projectSummary.id (Ok { oldProject | description = Just "old project description" }))
                                     |> Tuple.first
-                                    |> DataLoading.update (GotTaskCardDetail staleTaskRequest taskSummary.id (Ok { oldTask | description = Just "old task description" }))
+                                    |> paintUpdate (GotTaskCardDetail staleTaskRequest taskSummary.id (Ok { oldTask | description = Just "old task description" }))
                                     |> Tuple.first
 
                             _ ->
@@ -689,7 +800,7 @@ suite =
                         DataLoading.mergeNavigationSummaries [ projectSummary ] [ taskSummary ] model
 
                     ( requested, _ ) =
-                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+                        paintPresentation "workspace_root" Nothing seeded
 
                     firstProjectRequest =
                         Dict.get projectSummary.id requested.dataLoading.projectCardDetailRequests
@@ -708,9 +819,9 @@ suite =
                                         Api.taskFromCardSummary taskSummary
                                 in
                                 requested
-                                    |> DataLoading.update (GotProjectCardDetail projectRequest projectSummary.id (Ok { projectDetail | description = Just "old project" }))
+                                    |> paintUpdate (GotProjectCardDetail projectRequest projectSummary.id (Ok { projectDetail | description = Just "old project" }))
                                     |> Tuple.first
-                                    |> DataLoading.update (GotTaskCardDetail taskRequest taskSummary.id (Ok { taskDetail | description = Just "old task" }))
+                                    |> paintUpdate (GotTaskCardDetail taskRequest taskSummary.id (Ok { taskDetail | description = Just "old task" }))
                                     |> Tuple.first
 
                             _ ->
@@ -792,17 +903,14 @@ suite =
 
                     prepare entityKind entityId projectItems taskItems =
                         let
-                            focus =
-                                model.focus
-
                             focused =
-                                { rootLoadModel | focus = { focus | focusedEntity = Just ( entityKind, entityId ) } }
+                                rootLoadModel
 
                             requestedRoot =
                                 DataLoading.prepareRootNavigationRequest (Just workspaceId) focused
 
                             loaded =
-                                DataLoading.update
+                                paintUpdate
                                     (GotRootNavigation workspaceId requestedRoot.sessionRequestEpoch (Just 1) requestedRoot.dataLoading.navigationGeneration filterFingerprint 0 0
                                         (Ok { workspaceId = workspaceId, projects = { items = projectItems, hasMore = False }, tasks = { items = taskItems, hasMore = False } })
                                     )
@@ -810,7 +918,7 @@ suite =
                                     |> Tuple.first
 
                             loading =
-                                loaded.dataLoading
+                                (settleOrdinaryDetails loaded).dataLoading
 
                             offsetPresentation =
                                 loading.rootNavigationPresentation
@@ -825,16 +933,14 @@ suite =
 
                             isolated =
                                 { loaded
-                                    | dataLoading =
+                                    | cards = let cards = loaded.cards in { cards | viewport = let viewport = cards.viewport in { viewport | nativePins = Set.singleton (entityKind ++ ":" ++ entityId) } }
+                                    , dataLoading =
                                         { loading
                                             | rootNavigationPresentation = offsetPresentation
-                                            , projectCardDetailRequests = Dict.empty
-                                            , taskCardDetailRequests = Dict.empty
-                                            , cardDetailAdmissions = Set.empty
                                         }
                                 }
                         in
-                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing isolated |> Tuple.first
+                        paintAt (entityKind ++ ":" ++ entityKind ++ "-025") isolated
 
                     projectPage =
                         prepare "project" "project-050" projects []
@@ -843,16 +949,16 @@ suite =
                         prepare "task" "task-050" [] tasks
 
                     projectRequestIds =
-                        projectPage.dataLoading.projectCardDetailRequests |> Dict.keys |> Set.fromList
+                        projectPage.dataLoading.projectCardDetailRequests |> Dict.filter (\_ request -> request.inFlight) |> Dict.keys |> Set.fromList
 
                     taskRequestIds =
-                        taskPage.dataLoading.taskCardDetailRequests |> Dict.keys |> Set.fromList
+                        taskPage.dataLoading.taskCardDetailRequests |> Dict.filter (\_ request -> request.inFlight) |> Dict.keys |> Set.fromList
 
                     expectedProjects =
-                        projects |> List.map .id |> Cards.presentationWindow identity (Set.singleton "project-050") 24 |> Set.fromList
+                        Cards.mountedViewportKeys projectPage |> List.filterMap (\key -> Dict.get key projectPage.cards.viewport.rows) |> List.filter (.kind >> (==) "project") |> List.map .entityId |> Set.fromList
 
                     expectedTasks =
-                        tasks |> List.map .id |> Cards.presentationWindow identity (Set.singleton "task-050") 24 |> Set.fromList
+                        Cards.mountedViewportKeys taskPage |> List.filterMap (\key -> Dict.get key taskPage.cards.viewport.rows) |> List.filter (.kind >> (==) "task") |> List.map .entityId |> Set.fromList
                 in
                 Expect.equal
                     { projectWindow = True, taskWindow = True, pinnedProjectHydrated = True, pinnedTaskHydrated = True }
@@ -879,7 +985,7 @@ suite =
                 Expect.equal True
                     (List.all
                         (\( _, message ) ->
-                            DataLoading.update message prepared
+                            paintUpdate message prepared
                                 |> Tuple.first
                                 |> .dataLoading
                                 |> .projectCardSummaries
@@ -905,7 +1011,7 @@ suite =
                         AppShell.handleOwned (AppShell.LocalStorageLoadedMsg stored) prepared
 
                     oldResponse =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0 (Ok rootResponse))
                             reloaded
                             |> Tuple.first
@@ -936,7 +1042,7 @@ suite =
                         WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) bootstrap |> Tuple.first
 
                     settleObservation result =
-                        DataLoading.update
+                        paintUpdate
                             (GotObservations workspaceId Nothing afterShell.observations.requestGeneration afterShell.observations.queryFingerprint 0 result)
                             afterShell
                             |> Tuple.first
@@ -944,7 +1050,7 @@ suite =
                     finishRoot afterObservation =
                         case afterObservation.dataLoading.rootNavigationRequest of
                             Just request ->
-                                DataLoading.update
+                                paintUpdate
                                     (GotRootNavigation workspaceId request.sessionEpoch (Just 1) request.generation request.filterFingerprint 0 0 (Ok rootResponse))
                                     afterObservation
                                     |> Tuple.first
@@ -985,7 +1091,7 @@ suite =
                         DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
 
                     ( updated, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0 (Ok rootResponse))
                             prepared
                 in
@@ -1000,20 +1106,20 @@ suite =
                         DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
 
                     ( firstPage, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "root-one" Nothing ], hasMore = True }, tasks = { items = [], hasMore = False } })
                             )
                             prepared
 
                     ( cachedWindow, _ ) =
-                        DataLoading.update (LoadRootNavigationPage "project") firstPage
+                        paintUpdate (LoadRootNavigationPage "project") firstPage
 
                     ( requested, _ ) =
-                        DataLoading.update (LoadRootNavigationPage "project") cachedWindow
+                        paintUpdate (LoadRootNavigationPage "project") cachedWindow
 
                     stale =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId requested.sessionRequestEpoch Nothing requested.dataLoading.navigationGeneration filterFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "stale-root-page" Nothing ], hasMore = False }, tasks = { items = [], hasMore = False } })
                             )
@@ -1021,7 +1127,7 @@ suite =
                             |> Tuple.first
 
                     ( completed, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId requested.sessionRequestEpoch Nothing requested.dataLoading.navigationGeneration filterFingerprint 50 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "root-two" Nothing ], hasMore = False }, tasks = { items = [], hasMore = False } })
                             )
@@ -1042,23 +1148,23 @@ suite =
                         DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
 
                     ( firstPage, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "retained" Nothing ], hasMore = True }, tasks = { items = [], hasMore = False } })
                             )
                             prepared
 
                     ( requested, _ ) =
-                        DataLoading.update (LoadRootNavigationPage "project") firstPage
+                        paintUpdate (LoadRootNavigationPage "project") firstPage
 
                     failed =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId requested.sessionRequestEpoch Nothing requested.dataLoading.navigationGeneration filterFingerprint 50 0 (Err (Http.BadUrl "fixture failure")))
                             requested
                             |> Tuple.first
 
                     retried =
-                        DataLoading.update (LoadRootNavigationPage "project") failed |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "project") failed |> Tuple.first
                 in
                 Expect.equal
                     { retriedProjectOffset = Just 50, retriedTaskOffset = Just 0, inFlight = True, retained = True }
@@ -1074,32 +1180,32 @@ suite =
                         DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
 
                     ( rootFirst, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ task "root-task-0" Nothing ], hasMore = True } })
                             )
                             prepared
 
                     ( rootCached, _ ) =
-                        DataLoading.update (LoadRootNavigationPage "task") rootFirst
+                        paintUpdate (LoadRootNavigationPage "task") rootFirst
 
                     ( rootRequested, _ ) =
-                        DataLoading.update (LoadRootNavigationPage "task") rootCached
+                        paintUpdate (LoadRootNavigationPage "task") rootCached
 
                     rootFailed =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId rootRequested.sessionRequestEpoch Nothing rootRequested.dataLoading.navigationGeneration filterFingerprint 0 50 (Err (Http.BadUrl "task root retry")))
                             rootRequested
                             |> Tuple.first
 
                     rootRetried =
-                        DataLoading.update (LoadRootNavigationPage "task") rootFailed |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "task") rootFailed |> Tuple.first
 
                     rootPrevious =
-                        DataLoading.update (ShowPreviousRootNavigationPage "task") rootRetried |> Tuple.first
+                        paintUpdate (ShowPreviousRootNavigationPage "task") rootRetried |> Tuple.first
 
                     ( branchInitial, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+                        paintBranch "project" workspaceId (Just "parent") model
 
                     branchFingerprint =
                         Dict.get "project:parent" branchInitial.dataLoading.loadedNavigationBranches
@@ -1107,26 +1213,26 @@ suite =
                             |> Maybe.withDefault ""
 
                     ( branchFirst, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId branchInitial.sessionRequestEpoch branchInitial.dataLoading.navigationGeneration "project:parent" branchFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ task "branch-task-0" Nothing ], hasMore = True } })
                             )
                             branchInitial
 
                     ( branchCached, _ ) =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchFirst
+                        paintBranchPage "project" "parent" "task" branchFirst
 
                     ( branchRequested, _ ) =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchCached
+                        paintBranchPage "project" "parent" "task" branchCached
 
                     branchFailed =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId branchRequested.sessionRequestEpoch branchRequested.dataLoading.navigationGeneration "project:parent" branchFingerprint 0 50 (Err (Http.BadUrl "task branch retry")))
                             branchRequested
                             |> Tuple.first
 
                     branchRetried =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchFailed |> Tuple.first
+                        paintBranchPage "project" "parent" "task" branchFailed |> Tuple.first
 
                     branchPrevious =
                         DataLoading.beginNavigationBranchPreviousPage "project" "parent" "task" branchRetried |> Tuple.first
@@ -1157,32 +1263,32 @@ suite =
                         DataLoading.prepareRootNavigationRequest (Just workspaceId) rootLoadModel
 
                     ( rootFirst, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId prepared.sessionRequestEpoch (Just 1) prepared.dataLoading.navigationGeneration filterFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-0" Nothing ], hasMore = True }, tasks = { items = [], hasMore = False } })
                             )
                             prepared
 
                     rootCached =
-                        DataLoading.update (LoadRootNavigationPage "project") rootFirst |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "project") rootFirst |> Tuple.first
 
                     rootRequested =
-                        DataLoading.update (LoadRootNavigationPage "project") rootCached |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "project") rootCached |> Tuple.first
 
                     rootFailed =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId rootRequested.sessionRequestEpoch Nothing rootRequested.dataLoading.navigationGeneration filterFingerprint 50 0 (Err (Http.BadUrl "root project retry")))
                             rootRequested
                             |> Tuple.first
 
                     rootRetried =
-                        DataLoading.update (LoadRootNavigationPage "project") rootFailed |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "project") rootFailed |> Tuple.first
 
                     rootPrevious =
-                        DataLoading.update (ShowPreviousRootNavigationPage "project") rootRetried |> Tuple.first
+                        paintUpdate (ShowPreviousRootNavigationPage "project") rootRetried |> Tuple.first
 
                     ( branchInitial, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+                        paintBranch "project" workspaceId (Just "parent") model
 
                     fingerprint =
                         Dict.get "project:parent" branchInitial.dataLoading.loadedNavigationBranches
@@ -1190,26 +1296,26 @@ suite =
                             |> Maybe.withDefault ""
 
                     ( branchFirst, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId branchInitial.sessionRequestEpoch branchInitial.dataLoading.navigationGeneration "project:parent" fingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-0" (Just "parent") ], hasMore = True }, tasks = { items = [], hasMore = False } })
                             )
                             branchInitial
 
                     branchCached =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchFirst |> Tuple.first
+                        paintBranchPage "project" "parent" "project" branchFirst |> Tuple.first
 
                     branchRequested =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchCached |> Tuple.first
+                        paintBranchPage "project" "parent" "project" branchCached |> Tuple.first
 
                     branchFailed =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId branchRequested.sessionRequestEpoch branchRequested.dataLoading.navigationGeneration "project:parent" fingerprint 50 0 (Err (Http.BadUrl "branch project retry")))
                             branchRequested
                             |> Tuple.first
 
                     branchRetried =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchFailed |> Tuple.first
+                        paintBranchPage "project" "parent" "project" branchFailed |> Tuple.first
 
                     branchPrevious =
                         DataLoading.beginNavigationBranchPreviousPage "project" "parent" "project" branchRetried |> Tuple.first
@@ -1250,7 +1356,7 @@ suite =
                         List.range 1 25 |> List.map (\number -> task ("root-task-" ++ String.fromInt number) Nothing)
 
                     rootLoaded =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId rootPrepared.sessionRequestEpoch (Just 1) rootPrepared.dataLoading.navigationGeneration rootFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = exactProjects, hasMore = False }, tasks = { items = exactTasks, hasMore = False } })
                             )
@@ -1258,19 +1364,19 @@ suite =
                             |> Tuple.first
 
                     rootProjectTerminal =
-                        DataLoading.update (LoadRootNavigationPage "project") rootLoaded |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "project") rootLoaded |> Tuple.first
 
                     rootTaskTerminal =
-                        DataLoading.update (LoadRootNavigationPage "task") rootProjectTerminal |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "task") rootProjectTerminal |> Tuple.first
 
                     ( branchInitial, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+                        paintBranch "project" workspaceId (Just "parent") model
 
                     branchFingerprint =
                         Dict.get "project:parent" branchInitial.dataLoading.loadedNavigationBranches |> Maybe.map .filterFingerprint |> Maybe.withDefault ""
 
                     branchLoaded =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId branchInitial.sessionRequestEpoch branchInitial.dataLoading.navigationGeneration "project:parent" branchFingerprint 0 0
                                 (Ok
                                     { workspaceId = workspaceId
@@ -1283,10 +1389,10 @@ suite =
                             |> Tuple.first
 
                     branchProjectTerminal =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchLoaded |> Tuple.first
+                        paintBranchPage "project" "parent" "project" branchLoaded |> Tuple.first
 
                     branchTaskTerminal =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "task" branchProjectTerminal |> Tuple.first
+                        paintBranchPage "project" "parent" "task" branchProjectTerminal |> Tuple.first
 
                     rootOffsets current =
                         current.dataLoading.rootNavigationPresentation
@@ -1315,7 +1421,7 @@ suite =
                         rootPrepared.dataLoading.rootNavigationRequest |> Maybe.map .filterFingerprint |> Maybe.withDefault ""
 
                     rootLoaded =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId rootPrepared.sessionRequestEpoch (Just 1) rootPrepared.dataLoading.navigationGeneration rootFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = List.range 1 51 |> List.map (\number -> project ("root-" ++ String.fromInt number) Nothing), hasMore = True }, tasks = { items = [], hasMore = False } })
                             )
@@ -1323,22 +1429,22 @@ suite =
                             |> Tuple.first
 
                     rootAt25 =
-                        DataLoading.update (LoadRootNavigationPage "project") rootLoaded |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "project") rootLoaded |> Tuple.first
 
                     rootAt50 =
-                        DataLoading.update (LoadRootNavigationPage "project") rootAt25 |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "project") rootAt25 |> Tuple.first
 
                     rootContinuation =
-                        DataLoading.update (LoadRootNavigationPage "project") rootAt50 |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "project") rootAt50 |> Tuple.first
 
                     ( branchInitial, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+                        paintBranch "project" workspaceId (Just "parent") model
 
                     branchFingerprint =
                         Dict.get "project:parent" branchInitial.dataLoading.loadedNavigationBranches |> Maybe.map .filterFingerprint |> Maybe.withDefault ""
 
                     branchLoaded =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId branchInitial.sessionRequestEpoch branchInitial.dataLoading.navigationGeneration "project:parent" branchFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = List.range 1 51 |> List.map (\number -> project ("branch-" ++ String.fromInt number) (Just "parent")), hasMore = True }, tasks = { items = [], hasMore = False } })
                             )
@@ -1346,13 +1452,13 @@ suite =
                             |> Tuple.first
 
                     branchAt25 =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchLoaded |> Tuple.first
+                        paintBranchPage "project" "parent" "project" branchLoaded |> Tuple.first
 
                     branchAt50 =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchAt25 |> Tuple.first
+                        paintBranchPage "project" "parent" "project" branchAt25 |> Tuple.first
 
                     branchContinuation =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" branchAt50 |> Tuple.first
+                        paintBranchPage "project" "parent" "project" branchAt50 |> Tuple.first
 
                     rootState current =
                         current.dataLoading.rootNavigationRequest
@@ -1393,7 +1499,7 @@ suite =
                         rootPrepared.dataLoading.rootNavigationRequest |> Maybe.map .filterFingerprint |> Maybe.withDefault ""
 
                     rootInitial =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId rootPrepared.sessionRequestEpoch (Just 1) rootPrepared.dataLoading.navigationGeneration rootFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-0" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-0" Nothing ], hasMore = True } })
                             )
@@ -1401,13 +1507,13 @@ suite =
                             |> Tuple.first
 
                     rootProjectRequest =
-                        DataLoading.update (LoadRootNavigationPage "project") rootInitial |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "project") rootInitial |> Tuple.first
 
                     rootProjectOffset =
                         rootProjectRequest.dataLoading.rootNavigationRequest |> Maybe.map .projectOffset |> Maybe.withDefault -1
 
                     rootProjectAccepted =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId rootProjectRequest.sessionRequestEpoch Nothing rootProjectRequest.dataLoading.navigationGeneration rootFingerprint rootProjectOffset 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-50" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-0" Nothing ], hasMore = True } })
                             )
@@ -1415,7 +1521,7 @@ suite =
                             |> Tuple.first
 
                     rootDuplicateIgnored =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId rootProjectAccepted.sessionRequestEpoch Nothing rootProjectAccepted.dataLoading.navigationGeneration rootFingerprint rootProjectOffset 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-50" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-0" Nothing ], hasMore = True } })
                             )
@@ -1423,13 +1529,13 @@ suite =
                             |> Tuple.first
 
                     rootTaskRequest =
-                        DataLoading.update (LoadRootNavigationPage "task") rootDuplicateIgnored |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "task") rootDuplicateIgnored |> Tuple.first
 
                     rootTaskOffset =
                         rootTaskRequest.dataLoading.rootNavigationRequest |> Maybe.map .taskOffset |> Maybe.withDefault -1
 
                     rootTaskAccepted =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId rootTaskRequest.sessionRequestEpoch Nothing rootTaskRequest.dataLoading.navigationGeneration rootFingerprint rootProjectOffset rootTaskOffset
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-50" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-50" Nothing ], hasMore = True } })
                             )
@@ -1437,13 +1543,13 @@ suite =
                             |> Tuple.first
 
                     rootProjectAgainRequest =
-                        DataLoading.update (LoadRootNavigationPage "project") rootTaskAccepted |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "project") rootTaskAccepted |> Tuple.first
 
                     rootProjectAgainOffset =
                         rootProjectAgainRequest.dataLoading.rootNavigationRequest |> Maybe.map .projectOffset |> Maybe.withDefault -1
 
                     rootProjectAgainAccepted =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId rootProjectAgainRequest.sessionRequestEpoch Nothing rootProjectAgainRequest.dataLoading.navigationGeneration rootFingerprint rootProjectAgainOffset rootTaskOffset
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-100" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-50" Nothing ], hasMore = True } })
                             )
@@ -1451,13 +1557,13 @@ suite =
                             |> Tuple.first
 
                     rootTaskAgainRequest =
-                        DataLoading.update (LoadRootNavigationPage "task") rootProjectAgainAccepted |> Tuple.first
+                        paintUpdate (LoadRootNavigationPage "task") rootProjectAgainAccepted |> Tuple.first
 
                     rootTaskAgainOffset =
                         rootTaskAgainRequest.dataLoading.rootNavigationRequest |> Maybe.map .taskOffset |> Maybe.withDefault -1
 
                     rootTaskAgainAccepted =
-                        DataLoading.update
+                        paintUpdate
                             (GotRootNavigation workspaceId rootTaskAgainRequest.sessionRequestEpoch Nothing rootTaskAgainRequest.dataLoading.navigationGeneration rootFingerprint rootProjectAgainOffset rootTaskAgainOffset
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "root-project-100" Nothing ], hasMore = True }, tasks = { items = [ task "root-task-100" Nothing ], hasMore = True } })
                             )
@@ -1465,13 +1571,13 @@ suite =
                             |> Tuple.first
 
                     ( branchInitial, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+                        paintBranch "project" workspaceId (Just "parent") model
 
                     branchFingerprint =
                         Dict.get "project:parent" branchInitial.dataLoading.loadedNavigationBranches |> Maybe.map .filterFingerprint |> Maybe.withDefault ""
 
                     branchLoaded =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId branchInitial.sessionRequestEpoch branchInitial.dataLoading.navigationGeneration "project:parent" branchFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "branch-project-0" (Just "parent") ], hasMore = True }, tasks = { items = [ task "branch-task-0" Nothing ], hasMore = True } })
                             )
@@ -1481,13 +1587,13 @@ suite =
                     branchPage number taskMore projectMore source =
                         case Dict.get "project:parent" source.dataLoading.loadedNavigationBranches of
                             Just request ->
-                                DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset
+                                paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset
                                     (Ok { workspaceId = workspaceId, projects = { items = [ project ("branch-project-" ++ String.fromInt number) (Just "parent") ], hasMore = projectMore }, tasks = { items = [ task ("branch-task-" ++ String.fromInt number) Nothing ], hasMore = taskMore } })) source |> Tuple.first
                             Nothing -> source
 
                     branchProjectAccepted = branchPage 50 True True branchLoaded
                     branchDuplicateIgnored =
-                        DataLoading.update (GotNavigationBranch workspaceId branchLoaded.sessionRequestEpoch branchLoaded.dataLoading.navigationGeneration "project:parent" branchFingerprint 50 50
+                        paintUpdate (GotNavigationBranch workspaceId branchLoaded.sessionRequestEpoch branchLoaded.dataLoading.navigationGeneration "project:parent" branchFingerprint 50 50
                             (Ok { workspaceId = workspaceId, projects = { items = [ project "duplicate" (Just "parent") ], hasMore = True }, tasks = { items = [ task "duplicate" Nothing ], hasMore = True } })) branchProjectAccepted |> Tuple.first
                     branchTaskAccepted = branchPage 100 False True branchDuplicateIgnored
                     branchProjectAgainAccepted = branchPage 150 True True branchTaskAccepted
@@ -1542,7 +1648,7 @@ suite =
             \_ ->
                 let
                     ( branchRequest, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model
+                        paintBranch "project" workspaceId (Just "parent") model
 
                     staleBranchMessages =
                         [ GotNavigationBranch "other-workspace" branchRequest.sessionRequestEpoch branchRequest.dataLoading.navigationGeneration "project:parent" filterFingerprint 0 0 (Ok staleResponse)
@@ -1555,15 +1661,15 @@ suite =
                         ]
 
                     ( firstPage, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId branchRequest.sessionRequestEpoch branchRequest.dataLoading.navigationGeneration "project:parent" filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [ project "page-one" (Just "parent") ], hasMore = True }, tasks = { items = [], hasMore = False } }))
                             branchRequest
 
                     ( cachedWindow, _ ) =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" firstPage
+                        paintBranchPage "project" "parent" "project" firstPage
 
                     ( pageRequest, _ ) =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" cachedWindow
+                        paintBranchPage "project" "parent" "project" cachedWindow
 
                     stalePageMessages =
                         [ GotNavigationBranch "other-workspace" pageRequest.sessionRequestEpoch pageRequest.dataLoading.navigationGeneration "project:parent" filterFingerprint 50 0 (Ok staleResponse)
@@ -1576,7 +1682,7 @@ suite =
                         ]
 
                     leavesStaleOut message source =
-                        DataLoading.update message source
+                        paintUpdate message source
                             |> Tuple.first
                             |> .dataLoading
                             |> .projectCardSummaries
@@ -1609,7 +1715,7 @@ suite =
                 Expect.equal True
                     (List.all
                         (\message ->
-                            DataLoading.update message requested
+                            paintUpdate message requested
                                 |> Tuple.first
                                 |> .dataLoading
                                 |> .projectCardSummaries
@@ -1670,7 +1776,7 @@ suite =
                 let
                     initial = actualFocusBootstrap
                     paused = case initial.dataLoading.rootNavigationRequest of
-                        Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch (Just 1) request.generation request.filterFingerprint 0 0 (Err Http.Timeout)) initial |> Tuple.first
+                        Just request -> paintUpdate (GotRootNavigation workspaceId request.sessionEpoch (Just 1) request.generation request.filterFingerprint 0 0 (Err Http.Timeout)) initial |> Tuple.first
                         Nothing -> initial
                     shell = WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) paused |> Tuple.first
                 in
@@ -1718,7 +1824,7 @@ suite =
                     prepared = DataLoading.prepareRootNavigationRequest (Just workspaceId) { seed | dataLoading = { loading | pendingWorkspaceLoads = 2 } }
                     rootReply = rootHydrationPage [ project "hydrated-root" Nothing ] [] False
                     observationReply source =
-                        DataLoading.update (GotObservations workspaceId (Just 1) source.observations.requestGeneration source.observations.queryFingerprint 0 (Ok { items = [], hasMore = False })) source |> Tuple.first
+                        paintUpdate (GotObservations workspaceId (Just 1) source.observations.requestGeneration source.observations.queryFingerprint 0 (Ok { items = [], hasMore = False })) source |> Tuple.first
                     results =
                         [ prepared |> rootReply |> hydrateFocusWorkspace |> observationReply
                         , prepared |> hydrateFocusWorkspace |> rootReply |> observationReply
@@ -1796,21 +1902,21 @@ suite =
                         DataLoading.beginNavigationFocus workspaceId "project" "target" model
 
                     ( continued, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationFocus workspaceId requested.sessionRequestEpoch requested.dataLoading.navigationGeneration filterFingerprint "project" "target" 0
                                 (Ok { workspaceId = workspaceId, target = Api.NavigationProjectSummary (project "target" (Just "ancestor-1")), ancestors = [ Api.NavigationProjectSummary (project "ancestor-1" Nothing) ], ancestorsTruncated = True, nextAncestorOffset = Just 64 })
                             )
                             requested
 
                     ( ignored, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationFocus workspaceId requested.sessionRequestEpoch requested.dataLoading.navigationGeneration filterFingerprint "project" "target" 0
                                 (Ok { workspaceId = workspaceId, target = Api.NavigationProjectSummary (project "target" (Just "wrong")), ancestors = [ Api.NavigationProjectSummary (project "wrong" Nothing) ], ancestorsTruncated = False, nextAncestorOffset = Nothing })
                             )
                             continued
 
                     ( completed, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationFocus workspaceId requested.sessionRequestEpoch requested.dataLoading.navigationGeneration filterFingerprint "project" "target" 64
                                 (Ok { workspaceId = workspaceId, target = Api.NavigationProjectSummary (project "target" (Just "ancestor-1")), ancestors = [ Api.NavigationProjectSummary (project "ancestor-2" Nothing) ], ancestorsTruncated = False, nextAncestorOffset = Nothing })
                             )
@@ -1974,10 +2080,10 @@ suite =
                         DataLoading.mergeNavigationSummaries [ matchingRoot, parent, matchingChild ] [] filtered
 
                     ( opened, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") seeded
+                        paintBranch "project" workspaceId (Just "parent") seeded
 
                     ( loaded, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId opened.sessionRequestEpoch opened.dataLoading.navigationGeneration "project:parent"
                                 (opened.dataLoading.loadedNavigationBranches |> Dict.get "project:parent" |> Maybe.map .filterFingerprint |> Maybe.withDefault "")
                                 0 0
@@ -1994,7 +2100,7 @@ suite =
                     rootCompleted =
                         case rootRequest of
                             Just request ->
-                                DataLoading.update
+                                paintUpdate
                                     (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint 0 0
                                         (Ok { workspaceId = workspaceId, projects = { items = [ parent ], hasMore = False }, tasks = { items = [], hasMore = False } })
                                     )
@@ -2010,7 +2116,7 @@ suite =
                     completed =
                         case branchRequest of
                             Just request ->
-                                DataLoading.update
+                                paintUpdate
                                     (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0
                                         (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })
                                     )
@@ -2034,7 +2140,7 @@ suite =
                         DataLoading.mergeNavigationSummaries [ project "parent" Nothing ] [] model
 
                     ( initialRequest, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") seeded
+                        paintBranch "project" workspaceId (Just "parent") seeded
 
                     initialFingerprint =
                         Dict.get "project:parent" initialRequest.dataLoading.loadedNavigationBranches
@@ -2042,17 +2148,17 @@ suite =
                             |> Maybe.withDefault ""
 
                     ( firstPage, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId initialRequest.sessionRequestEpoch initialRequest.dataLoading.navigationGeneration "project:parent" initialFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "project-0" (Just "parent") ], hasMore = True }, tasks = { items = [ task "task-0" Nothing ], hasMore = True } })
                             )
                             initialRequest
 
                     ( projectCachedWindow, _ ) =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" firstPage
+                        paintBranchPage "project" "parent" "project" firstPage
 
                     ( projectPageRequest, _ ) =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "project" projectCachedWindow
+                        paintBranchPage "project" "parent" "project" projectCachedWindow
 
                     projectPageFingerprint =
                         Dict.get "project:parent" projectPageRequest.dataLoading.loadedNavigationBranches
@@ -2060,17 +2166,17 @@ suite =
                             |> Maybe.withDefault ""
 
                     ( projectPage, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId projectPageRequest.sessionRequestEpoch projectPageRequest.dataLoading.navigationGeneration "project:parent" projectPageFingerprint 50 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "project-50" (Just "parent") ], hasMore = False }, tasks = { items = [ task "task-0" Nothing ], hasMore = True } })
                             )
                             projectPageRequest
 
                     ( taskCachedWindow, _ ) =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "task" projectPage
+                        paintBranchPage "project" "parent" "task" projectPage
 
                     ( taskPageRequest, _ ) =
-                        DataLoading.beginNavigationBranchPage "project" "parent" "task" taskCachedWindow
+                        paintBranchPage "project" "parent" "task" taskCachedWindow
 
                     taskPageFingerprint =
                         Dict.get "project:parent" taskPageRequest.dataLoading.loadedNavigationBranches
@@ -2078,7 +2184,7 @@ suite =
                             |> Maybe.withDefault ""
 
                     ( completed, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId taskPageRequest.sessionRequestEpoch taskPageRequest.dataLoading.navigationGeneration "project:parent" taskPageFingerprint 50 50
                                 (Ok { workspaceId = workspaceId, projects = { items = [ project "project-50" (Just "parent") ], hasMore = False }, tasks = { items = [ task "task-50" Nothing ], hasMore = False } })
                             )
@@ -2099,7 +2205,7 @@ suite =
                         DataLoading.mergeNavigationSummaries [ project "old-parent" Nothing, project "new-parent" Nothing, child ] [] model
 
                     ( oldRequest, _ ) =
-                        DataLoading.beginNavigationBranch "project" workspaceId (Just "old-parent") seeded
+                        paintBranch "project" workspaceId (Just "old-parent") seeded
 
                     oldFingerprint =
                         Dict.get "project:old-parent" oldRequest.dataLoading.loadedNavigationBranches
@@ -2107,7 +2213,7 @@ suite =
                             |> Maybe.withDefault ""
 
                     ( oldLoaded, _ ) =
-                        DataLoading.update
+                        paintUpdate
                             (GotNavigationBranch workspaceId oldRequest.sessionRequestEpoch oldRequest.dataLoading.navigationGeneration "project:old-parent" oldFingerprint 0 0
                                 (Ok { workspaceId = workspaceId, projects = { items = [ child ], hasMore = False }, tasks = { items = [], hasMore = False } })
                             )
@@ -2131,7 +2237,7 @@ suite =
                     afterOld =
                         case oldReplay of
                             Just request ->
-                                DataLoading.update
+                                paintUpdate
                                     (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:old-parent" request.filterFingerprint 0 0
                                         (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })
                                     )
@@ -2144,7 +2250,7 @@ suite =
                     completed =
                         case newReplay of
                             Just request ->
-                                DataLoading.update
+                                paintUpdate
                                     (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:new-parent" request.filterFingerprint 0 0
                                         (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })
                                     )
@@ -2164,9 +2270,9 @@ suite =
             \_ ->
                 let
                     base = syncModel [ project "parent" Nothing, project "other" Nothing ]
-                    opened = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") base |> Tuple.first
+                    opened = paintBranch "project" workspaceId (Just "parent") base |> Tuple.first
                     continued = branchReply "project:parent" (List.range 1 50 |> List.map (\n -> project ("child-" ++ String.fromInt n) (Just "parent"))) [] True False opened
-                    before = DataLoading.beginNavigationBranch "project" workspaceId (Just "other") continued |> Tuple.first
+                    before = paintBranch "project" workspaceId (Just "other") continued |> Tuple.first
                     invalidated = requestSummaries "unknown-outside" [ ( "project", "outside" ), ( "task", "outside-task" ) ] before
                 in
                 Expect.equal
@@ -2179,10 +2285,10 @@ suite =
                     base = syncModel [ project "parent" Nothing, project "other" Nothing ]
                     search = base.search
                     filtered = { base | search = { search | filterProjectStatuses = [ "active" ] } }
-                    opened = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") filtered |> Tuple.first
+                    opened = paintBranch "project" workspaceId (Just "parent") filtered |> Tuple.first
                     child = project "child" (Just "parent")
                     completed = branchReply "project:parent" [ child ] [] False False opened
-                    before = DataLoading.beginNavigationBranch "project" workspaceId (Just "other") completed |> Tuple.first
+                    before = paintBranch "project" workspaceId (Just "other") completed |> Tuple.first
                     invalidated = requestSummaries "unchanged-placement" [ ( "project", "child" ) ] before
                     refreshed = summaryReply invalidated (batchGuard [ ( "project", "child" ) ] invalidated) [ "child" ] [] { projects = [ { child | updatedAt = "later" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } invalidated
                 in
@@ -2219,18 +2325,18 @@ suite =
                     moreTasks = DataLoading.beginRootNavigationPage "task" moreProjects |> Tuple.first |> replyRootSpan [] (tasks 51 100) False True
                     demanded = DataLoading.beginRootNavigationPage "task" moreTasks |> Tuple.first |> replyRootSpan [] (tasks 101 101) False False
                     child = project "span-child" (Just "span-project-52")
-                    expanded = DataLoading.beginNavigationBranch "project" workspaceId (Just "span-project-52") demanded |> Tuple.first |> branchReply "project:span-project-52" [ child ] [] False False
+                    expanded = paintBranch "project" workspaceId (Just "span-project-52") demanded |> Tuple.first |> branchReply "project:span-project-52" [ child ] [] False False
                     pending = requestSummaries "span-reorder" [ ( "project", "span-project-1" ) ] expanded
                     refreshed = summaryReply pending (batchGuard [ ( "project", "span-project-1" ) ] pending) [ "span-project-1" ] [] { projects = [ project "span-project-1" Nothing |> (\p -> { p | name = "new-order" }) ], tasks = [], missingProjectIds = [], missingTaskIds = [] } pending
                     first = replyRootSpan (projects 1 50) (tasks 1 50) True True refreshed
                     duringDemand = DataLoading.beginRootNavigationPage "project" first |> Tuple.first
                     second = replyRootSpan (projects 51 52) (tasks 51 100) True True first
                     failed = case second.dataLoading.rootNavigationRequest of
-                        Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint request.projectOffset request.taskOffset (Err Http.NetworkError)) second |> Tuple.first
+                        Just request -> paintUpdate (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint request.projectOffset request.taskOffset (Err Http.NetworkError)) second |> Tuple.first
                         Nothing -> second
                     retried = DataLoading.beginRootNavigationPage "task" failed |> Tuple.first
                     stale = case second.dataLoading.rootNavigationRequest of
-                        Just old -> DataLoading.update (GotRootNavigation workspaceId old.sessionEpoch Nothing old.generation old.filterFingerprint old.projectOffset old.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = True }, tasks = { items = [ task "stale-root" Nothing ], hasMore = False } })) retried |> Tuple.first
+                        Just old -> paintUpdate (GotRootNavigation workspaceId old.sessionEpoch Nothing old.generation old.filterFingerprint old.projectOffset old.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = True }, tasks = { items = [ task "stale-root" Nothing ], hasMore = False } })) retried |> Tuple.first
                         Nothing -> retried
                     terminal = replyRootSpan [] (tasks 101 101) True False stale
                     snapshot source =
@@ -2265,7 +2371,7 @@ suite =
                     superseding = requestSummaries "pending-root-order-again" [ ( "project", changed.id ) ] refreshed
                     newer = summaryReply superseding (batchGuard [ ( "project", changed.id ) ] superseding) [ changed.id ] [] { projects = [ { changed | name = "newer order" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } superseding
                     oldReply = case more.dataLoading.rootNavigationRequest of
-                        Just old -> DataLoading.update (GotRootNavigation workspaceId old.sessionEpoch Nothing old.generation old.filterFingerprint old.projectOffset old.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [ project "old-poison" Nothing ], hasMore = False }, tasks = { items = [], hasMore = False } })) newer |> Tuple.first
+                        Just old -> paintUpdate (GotRootNavigation workspaceId old.sessionEpoch Nothing old.generation old.filterFingerprint old.projectOffset old.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [ project "old-poison" Nothing ], hasMore = False }, tasks = { items = [], hasMore = False } })) newer |> Tuple.first
                         Nothing -> newer
                     first = replyRootSpan (roots 1 50) [] True False oldReply
                     terminal = replyRootSpan (roots 51 52) [] False False first
@@ -2294,7 +2400,7 @@ suite =
                     first = replyRootSpan (roots 1 50) (tasks 1 50) True True refreshed
                     mixed = replyRootSpan (roots 1 50) (tasks 51 100) True True first
                     networkPaused = case mixed.dataLoading.rootNavigationRequest of
-                        Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint request.projectOffset request.taskOffset (Err Http.NetworkError)) mixed |> Tuple.first
+                        Just request -> paintUpdate (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint request.projectOffset request.taskOffset (Err Http.NetworkError)) mixed |> Tuple.first
                         Nothing -> mixed
                     taskRetry = DataLoading.beginRootNavigationPage "task" networkPaused |> Tuple.first
                     healthy = replyRootSpan [] (tasks 101 150) True False taskRetry
@@ -2319,8 +2425,8 @@ suite =
                     a = project "a" (Just "p")
                     b = project "b" (Just "q")
                     loaded = DataLoading.mergeNavigationSummaries [ a, b ] [] base
-                    opened = DataLoading.beginNavigationBranch "project" workspaceId (Just "p") loaded |> Tuple.first |> branchReply "project:p" [ a ] [] False False
-                    both = DataLoading.beginNavigationBranch "project" workspaceId (Just "q") opened |> Tuple.first |> branchReply "project:q" [ b ] [] False False
+                    opened = paintBranch "project" workspaceId (Just "p") loaded |> Tuple.first |> branchReply "project:p" [ a ] [] False False
+                    both = paintBranch "project" workspaceId (Just "q") opened |> Tuple.first |> branchReply "project:q" [ b ] [] False False
                     pendingA = requestSummaries "independent-a" [ ( "project", "a" ) ] both
                     pendingB = requestSummaries "independent-b" [ ( "project", "b" ) ] pendingA
                     afterA = summaryReply pendingA (batchGuard [ ( "project", "a" ) ] pendingA) [ "a" ] [] { projects = [ { a | name = "reordered-a" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } pendingB
@@ -2340,9 +2446,9 @@ suite =
                     child = project "child" (Just "p")
                     originalTask = task "moving-task" Nothing
                     childTask = { originalTask | projectId = Just "p" }
-                    opened = DataLoading.beginNavigationBranch "project" workspaceId (Just "p") base |> Tuple.first |> branchReply "project:p" [ child ] [ childTask ] False False
-                    other = DataLoading.beginNavigationBranch "project" workspaceId (Just "q") opened |> Tuple.first |> branchReply "project:q" [] [] False False
-                    before = DataLoading.beginNavigationBranch "project" workspaceId (Just "unrelated") other |> Tuple.first
+                    opened = paintBranch "project" workspaceId (Just "p") base |> Tuple.first |> branchReply "project:p" [ child ] [ childTask ] False False
+                    other = paintBranch "project" workspaceId (Just "q") opened |> Tuple.first |> branchReply "project:q" [] [] False False
+                    before = paintBranch "project" workspaceId (Just "unrelated") other |> Tuple.first
                     targets = [ ( "project", "child" ), ( "task", "moving-task" ) ]
                     requested = requestSummaries "mixed-move" targets before
                     moved = { child | parentId = Just "q" }
@@ -2365,7 +2471,7 @@ suite =
                     base = syncModel [ project "unrelated" Nothing ]
                     search = base.search
                     filtered = { base | search = { search | filterProjectStatuses = [ "completed" ] } }
-                    other = DataLoading.beginNavigationBranch "project" workspaceId (Just "unrelated") filtered |> Tuple.first
+                    other = paintBranch "project" workspaceId (Just "unrelated") filtered |> Tuple.first
                     pending = requestSummaries "filtered-new-path" [ ( "project", "new-child" ) ] other
                     raw = project "new-child" (Just "new-parent")
                     matching = { raw | status = Api.ProjCompleted }
@@ -2385,23 +2491,23 @@ suite =
                 let
                     parent = project "p" Nothing
                     base = syncModel [ parent, project "other" Nothing ]
-                    opened = DataLoading.beginNavigationBranch "project" workspaceId (Just "p") base |> Tuple.first
+                    opened = paintBranch "project" workspaceId (Just "p") base |> Tuple.first
                     summaries = List.range 1 50 |> List.map (\n -> project ("child-" ++ String.fromInt n) (Just "p"))
                     continued = branchReply "project:p" summaries [] True False opened
                     old = Dict.get "project:p" continued.dataLoading.loadedNavigationBranches
-                    before = DataLoading.beginNavigationBranch "project" workspaceId (Just "other") continued |> Tuple.first
+                    before = paintBranch "project" workspaceId (Just "other") continued |> Tuple.first
                     pending = requestSummaries "reorder-held" [ ( "project", "child-1" ) ] before
                     changed = project "child-1" (Just "p")
                     restarted = summaryReply pending (batchGuard [ ( "project", "child-1" ) ] pending) [ "child-1" ] [] { projects = [ { changed | name = "renamed" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } pending
                     released = case old of
-                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:p" request.filterFingerprint request.projectOffset request.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [ project "retired-poison" (Just "p") ], hasMore = False }, tasks = { items = [], hasMore = False } })) restarted |> Tuple.first
+                        Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:p" request.filterFingerprint request.projectOffset request.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [ project "retired-poison" (Just "p") ], hasMore = False }, tasks = { items = [], hasMore = False } })) restarted |> Tuple.first
                         Nothing -> restarted
                 in
                 Expect.equal { held = True, queued = True, resumed = Just ( 0, True ), unrelated = True, poison = False, cacheRetained = True }
                     { held = restarted.dataLoading.navigationAdmissions == before.dataLoading.navigationAdmissions
                     , queued = List.member "project:p" restarted.dataLoading.navigationQueue
                     , resumed = Dict.get "project:p" released.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.projectOffset, request.inFlight ))
-                    , unrelated = Dict.get "project:other" released.dataLoading.loadedNavigationBranches == Dict.get "project:other" before.dataLoading.loadedNavigationBranches
+                    , unrelated = Dict.get "project:other" restarted.dataLoading.loadedNavigationBranches == Dict.get "project:other" before.dataLoading.loadedNavigationBranches
                     , poison = Dict.member "retired-poison" released.dataLoading.projectCardSummaries
                     , cacheRetained = Set.member "child-50" released.dataLoading.navigationVisibleProjectIds }
         , test "overlapping summary subsets preserve current members and apply unrelated older members" <|
@@ -2439,11 +2545,11 @@ suite =
             \_ ->
                 let
                     base = syncModel [ project "parent" Nothing ]
-                    expanded = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") base |> Tuple.first
+                    expanded = paintBranch "project" workspaceId (Just "parent") base |> Tuple.first
                     rooted = requestSummaries "foreign-project" [ ( "project", "new-root" ) ] expanded
                     tasked = requestSummaries "foreign-task" [ ( "task", "new-task" ) ] expanded
                     readyTask = case Dict.get "project:parent" expanded.dataLoading.loadedNavigationBranches of
-                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) tasked |> Tuple.first
+                        Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) tasked |> Tuple.first
                         Nothing -> tasked
                     rootSummary = project "new-root" Nothing
                     rootReady = summaryReply rooted (batchGuard [ ( "project", "new-root" ) ] rooted) [ "new-root" ] [] { projects = [ rootSummary ], tasks = [], missingProjectIds = [], missingTaskIds = [] } rooted
@@ -2452,11 +2558,11 @@ suite =
                     taskSummary = { taskBase | projectId = Just "parent" }
                     taskSummarized = summaryReply tasked (batchGuard [ ( "task", "new-task" ) ] tasked) [] [ "new-task" ] { projects = [], tasks = [ taskSummary ], missingProjectIds = [], missingTaskIds = [] } tasked
                     taskReady = case Dict.get "project:parent" tasked.dataLoading.loadedNavigationBranches of
-                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) taskSummarized |> Tuple.first
+                        Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) taskSummarized |> Tuple.first
                         Nothing -> taskSummarized
                     taskReturned = case Dict.get "project:parent" taskReady.dataLoading.loadedNavigationBranches of
                         Just request ->
-                            DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ { taskBase | projectId = Just "parent" } ], hasMore = False } })) taskReady |> Tuple.first
+                            paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ { taskBase | projectId = Just "parent" } ], hasMore = False } })) taskReady |> Tuple.first
                         Nothing -> taskReady
                 in
                 Expect.equal { pending = True, prematurelyInserted = False, root = True, task = True }
@@ -2485,7 +2591,7 @@ suite =
                     page offset count source =
                         case source.dataLoading.rootNavigationRequest of
                             Just request ->
-                                DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint offset 0 (Ok { workspaceId = workspaceId, projects = { items = List.range (offset + 1) (offset + count) |> List.map (\index -> project (String.fromInt index) Nothing), hasMore = True }, tasks = { items = [], hasMore = False } })) source |> Tuple.first
+                                paintUpdate (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint offset 0 (Ok { workspaceId = workspaceId, projects = { items = List.range (offset + 1) (offset + count) |> List.map (\index -> project (String.fromInt index) Nothing), hasMore = True }, tasks = { items = [], hasMore = False } })) source |> Tuple.first
                             Nothing -> source
                     firstPage = page 0 50 refreshing
                     restored = page 50 50 firstPage
@@ -2502,13 +2608,18 @@ suite =
                     positioned = { seeded | focus = { focus | focusedEntity = Just ( "project", "001" ) }, dataLoading = { loading | rootNavigationPresentation = Maybe.map (\presentation -> { presentation | projectOffset = 49 }) loading.rootNavigationPresentation } }
                     refreshing = DataLoading.revalidateNavigationForFilters positioned |> Tuple.first
                     page offset source = case source.dataLoading.rootNavigationRequest of
-                        Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint offset 0 (Ok { workspaceId = workspaceId, projects = { items = List.drop offset summaries |> List.take 50, hasMore = offset == 0 }, tasks = { items = [], hasMore = False } })) source |> Tuple.first
+                        Just request -> paintUpdate (GotRootNavigation workspaceId request.sessionEpoch Nothing request.generation request.filterFingerprint offset 0 (Ok { workspaceId = workspaceId, projects = { items = List.drop offset summaries |> List.take 50, hasMore = offset == 0 }, tasks = { items = [], hasMore = False } })) source |> Tuple.first
                         Nothing -> source
                     first = page 0 refreshing
                     restored = page 50 first
                     resumed =
                         Dict.toList seeded.dataLoading.projectCardDetailRequests
-                            |> List.foldl (\( id, request ) source -> DataLoading.update (GotProjectCardDetail request id (Err Http.Timeout)) source |> Tuple.first) restored
+                            |> List.foldl (\( id, request ) source -> paintUpdate (GotProjectCardDetail request id (Err Http.Timeout)) source |> Tuple.first) restored
+                            |> (\state -> let returnedFocus = state.focus
+                                              cards = state.cards
+                                              viewport = cards.viewport
+                                          in Cards.refreshViewport state ( { state | focus = { returnedFocus | focusedEntity = Nothing }, cards = { cards | viewport = { viewport | nativePins = Set.singleton "project:001" } } }, Cmd.none ) |> Tuple.first)
+                            |> paintAt "project:051"
                 in
                 Expect.equal ( Just ( True, 50 ), Just 49, True )
                     ( first.dataLoading.rootNavigationRequest |> Maybe.map (\request -> ( request.inFlight, request.projectOffset ))
@@ -2522,9 +2633,9 @@ suite =
                     moving = project "moving" Nothing
                     others = List.range 1 48 |> List.map (\n -> project ("root-" ++ String.fromInt n) Nothing)
                     base = syncModel (parent :: moving :: others)
-                    expanded = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") base |> Tuple.first
+                    expanded = paintBranch "project" workspaceId (Just "parent") base |> Tuple.first
                     before = case Dict.get "project:parent" expanded.dataLoading.loadedNavigationBranches of
-                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })) expanded |> Tuple.first
+                        Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })) expanded |> Tuple.first
                         Nothing -> expanded
                     changed = requestSummariesWithInvalidations "loaded-move" [ ( "project", "moving" ) ]
                         [ Encode.object [ ( "kind", Encode.string "tree" ), ( "target", Encode.string ("workspace:" ++ workspaceId) ) ]
@@ -2533,12 +2644,12 @@ suite =
                     summarized = summaryReply changed (batchGuard [ ( "project", "moving" ) ] changed) [ "moving" ] [] { projects = [ { moving | parentId = Just "parent" } ], tasks = [], missingProjectIds = [], missingTaskIds = [] } changed
                     rooted = acceptRoot (parent :: project "replacement" Nothing :: others) [] summarized
                     branched = case Dict.get "project:parent" rooted.dataLoading.loadedNavigationBranches of
-                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [ { moving | parentId = Just "parent" } ], hasMore = False }, tasks = { items = [], hasMore = False } })) rooted |> Tuple.first
+                        Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [ { moving | parentId = Just "parent" } ], hasMore = False }, tasks = { items = [], hasMore = False } })) rooted |> Tuple.first
                         Nothing -> rooted
                 in
                 Expect.equal { rootPending = Just True, branchPending = Just True, root = Just ( 50, False, ( False, True ) ), branch = Just [ "moving" ] }
                     { rootPending = changed.dataLoading.rootNavigationRequest |> Maybe.map .inFlight
-                    , branchPending = Dict.get "project:parent" changed.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                    , branchPending = Dict.get "project:parent" rooted.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
                     , root = branched.dataLoading.rootNavigationRequest |> Maybe.map (\request -> ( request.projectCardCount, request.projectHasMore, ( Set.member "moving" branched.dataLoading.navigationVisibleProjectIds && (Dict.get "moving" branched.dataLoading.projectCardSummaries |> Maybe.andThen .parentId) == Nothing, Set.member "replacement" branched.dataLoading.navigationVisibleProjectIds ) ))
                     , branch = Dict.get "project:parent" branched.dataLoading.loadedNavigationBranches |> Maybe.map (\_ -> Dict.values branched.dataLoading.projectCardSummaries |> List.filter (\summary -> summary.parentId == Just "parent" && Set.member summary.id branched.dataLoading.navigationVisibleProjectIds) |> List.map .id)
                     }
@@ -2561,13 +2672,13 @@ suite =
                 let
                     parents = List.range 1 9 |> List.map (\n -> let summary = project ("p" ++ String.fromInt n) Nothing in { summary | hasChildren = True })
                     seeded = loadRoot workspaceId parents [] model
-                    continued = branchReply "project:p1" (List.range 1 50 |> List.map (\n -> project ("child" ++ String.fromInt n) (Just "p1"))) [] True False seeded
+                    continued = branchReply "project:p1" (List.range 1 50 |> List.map (\n -> project ("child" ++ String.fromInt n) (Just "p1"))) [] True False seeded |> branchReply "project:p2" [] [] False False
                 in
-                Expect.equal { first = 4, waiting = 5, physical = 4, sibling = Just True, continuation = Just False, queued = True }
+                Expect.equal { first = 2, waiting = 7, physical = 2, sibling = Just True, continuation = Just False, queued = True }
                     { first = Dict.size seeded.dataLoading.navigationAdmissions
                     , waiting = List.length seeded.dataLoading.navigationQueue
                     , physical = Dict.size continued.dataLoading.navigationAdmissions
-                    , sibling = Dict.get "project:p5" continued.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                    , sibling = Dict.get "project:p3" continued.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
                     , continuation = Dict.get "project:p1" continued.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
                     , queued = List.member "project:p1" continued.dataLoading.navigationQueue
                     }
@@ -2581,9 +2692,12 @@ suite =
                     old = Dict.get "project:parent" first.dataLoading.loadedNavigationBranches
                     collapsed = Cards.update (ToggleTreeNode "proj-parent") first |> Tuple.first
                     reopened = Cards.update (ToggleTreeNode "proj-parent") collapsed |> Tuple.first
-                    afterOld = case old of
-                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [ project "late-hidden" (Just "parent") ], hasMore = False }, tasks = { items = [], hasMore = False } })) reopened |> Tuple.first
+                    childReleased = case Dict.get "project:child" first.dataLoading.loadedNavigationBranches of
+                        Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:child" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) reopened |> Tuple.first
                         Nothing -> reopened
+                    afterOld = case old of
+                        Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [ project "late-hidden" (Just "parent") ], hasMore = False }, tasks = { items = [], hasMore = False } })) childReleased |> Tuple.first
+                        Nothing -> childReleased
                 in
                 Expect.equal { held = True, hidden = Just False, pending = Just True, queued = True, resumed = Just ( 50, True ), childVisible = True, staleAbsent = True }
                     { held = Dict.size collapsed.dataLoading.navigationAdmissions == Dict.size first.dataLoading.navigationAdmissions
@@ -2597,13 +2711,13 @@ suite =
         , test "request errors stay paused across unrelated success until explicit retry" <|
             \_ ->
                 let
-                    initial = DataLoading.beginNavigationBranch "project" workspaceId (Just "a") model |> Tuple.first
-                    both = DataLoading.beginNavigationBranch "project" workspaceId (Just "b") initial |> Tuple.first
+                    initial = paintBranch "project" workspaceId (Just "a") model |> Tuple.first
+                    both = paintBranch "project" workspaceId (Just "b") initial |> Tuple.first
                     failed = case Dict.get "project:a" both.dataLoading.loadedNavigationBranches of
-                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:a" request.filterFingerprint 0 0 (Err Http.Timeout)) both |> Tuple.first
+                        Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:a" request.filterFingerprint 0 0 (Err Http.Timeout)) both |> Tuple.first
                         Nothing -> both
                     other = branchReply "project:b" [ project "other" (Just "b") ] [] False False failed
-                    retried = DataLoading.beginNavigationBranchPage "project" "a" "project" other |> Tuple.first
+                    retried = paintBranchPage "project" "a" "project" other |> Tuple.first
                 in
                 Expect.equal ( Just ( False, False, False ), True, Just True )
                     ( Dict.get "project:a" other.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.inFlight, request.projectRequestPending, request.taskRequestPending ))
@@ -2613,9 +2727,9 @@ suite =
         , test "same-filter refresh stages each kind to exhaustion without page-one truncation" <|
             \_ ->
                 let
-                    seeded = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") (DataLoading.mergeNavigationSummaries [ project "parent" Nothing ] [] model) |> Tuple.first
+                    seeded = paintBranch "project" workspaceId (Just "parent") (DataLoading.mergeNavigationSummaries [ project "parent" Nothing ] [] model) |> Tuple.first
                     loaded = branchReply "project:parent" [ project "old-a" (Just "parent"), project "old-b" (Just "parent") ] [ task "old-task" Nothing ] False False seeded
-                    fresh = DataLoading.revalidateNavigationForFilters loaded |> Tuple.first
+                    fresh = DataLoading.revalidateNavigationForFilters loaded |> Tuple.first |> replyRootSpan [ project "parent" Nothing ] [] False False
                     first = branchReply "project:parent" (List.range 1 50 |> List.map (\n -> project ("fresh-" ++ String.fromInt n) (Just "parent"))) [ task "fresh-task" Nothing ] True False fresh
                     final = branchReply "project:parent" [ project "fresh-51" (Just "parent") ] [ task "ignored-other-kind" Nothing ] False True first
                 in
@@ -2630,13 +2744,13 @@ suite =
         , test "coalesced live refresh discards the shifted pass and restarts at offset zero" <|
             \_ ->
                 let
-                    initial = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") (DataLoading.mergeNavigationSummaries [ project "parent" Nothing ] [] model) |> Tuple.first
+                    initial = paintBranch "project" workspaceId (Just "parent") (DataLoading.mergeNavigationSummaries [ project "parent" Nothing ] [] model) |> Tuple.first
                     first = branchReply "project:parent" [ project "old" (Just "parent") ] [] True False initial
                     old = Dict.get "project:parent" first.dataLoading.loadedNavigationBranches
                     once = DataLoading.revalidateNavigationForFilters first |> Tuple.first
                     twice = DataLoading.revalidateNavigationForFilters once |> Tuple.first
                     released = case old of
-                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) twice |> Tuple.first
+                        Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) twice |> Tuple.first
                         Nothing -> twice
                     complete = branchReply "project:parent" [ project "replacement" (Just "parent") ] [] False False released
                 in
@@ -2650,7 +2764,7 @@ suite =
         , test "duplicate nonprogress stops one kind while the other continues" <|
             \_ ->
                 let
-                    seeded = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model |> Tuple.first
+                    seeded = paintBranch "project" workspaceId (Just "parent") model |> Tuple.first
                     first = branchReply "project:parent" [ project "duplicate" (Just "parent") ] [ task "task-one" Nothing ] True True seeded
                     second = branchReply "project:parent" [ project "duplicate" (Just "parent") ] [ task "task-two" Nothing ] True True first
                     final = branchReply "project:parent" [ project "ignored" (Just "parent") ] [ task "task-three" Nothing ] True False second
@@ -2661,10 +2775,32 @@ suite =
                     , projects = Dict.size final.dataLoading.projectCardSummaries
                     , tasks = Dict.size final.dataLoading.taskCardSummaries
                     }
+        , test "retrying a failed kind preserves its paint-queued healthy companion" <|
+            \_ ->
+                let
+                    seeded = paintBranch "project" workspaceId (Just "parent") model |> Tuple.first
+                    first = branchReply "project:parent" [ project "duplicate" (Just "parent") ] [ task "task-one" Nothing ] True True seeded
+                    queued = case Dict.get "project:parent" first.dataLoading.loadedNavigationBranches of
+                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Ok { workspaceId = workspaceId, projects = { items = [ project "duplicate" (Just "parent") ], hasMore = True }, tasks = { items = [ task "task-two" Nothing ], hasMore = True } })) first |> Tuple.first
+                        Nothing -> first
+                    retry = DataLoading.beginNavigationBranchPage "project" "parent" "project" queued |> Tuple.first
+                    admitted = retry |> settleOrdinaryDetails |> painted
+                    stale = case Dict.get "project:parent" queued.dataLoading.loadedNavigationBranches of
+                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) admitted |> Tuple.first
+                        Nothing -> admitted
+                    completed = branchReply "project:parent" [ project "recovered-project" (Just "parent") ] [ task "task-three" Nothing ] False False stale
+                    state source = Dict.get "project:parent" source.dataLoading.loadedNavigationBranches |> Maybe.map (\request -> ( request.inFlight, request.projectRequestPending, request.taskRequestPending ))
+                in
+                Expect.equal
+                    { queued = Just (False,False,True), retry = Just (False,True,True), completed = Just (False,False,False), admitted = Just True, staleFenced = True, healthyComplete = True }
+                    { queued = state queued, retry = state retry, completed = state completed
+                    , admitted = Dict.get "project:parent" admitted.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
+                    , staleFenced = stale.dataLoading.navigationAdmissions == admitted.dataLoading.navigationAdmissions && Dict.get "project:parent" stale.dataLoading.loadedNavigationBranches == Dict.get "project:parent" admitted.dataLoading.loadedNavigationBranches
+                    , healthyComplete = Dict.member "task-three" completed.dataLoading.taskCardSummaries }
         , test "the client ceiling retains truthful has-more and stops without issuing an illegal offset" <|
             \_ ->
                 let
-                    seeded = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model |> Tuple.first
+                    seeded = paintBranch "project" workspaceId (Just "parent") model |> Tuple.first
                     loading = seeded.dataLoading
                     atBoundary = { seeded | dataLoading = { loading | loadedNavigationBranches = Dict.update "project:parent" (Maybe.map (\request -> { request | projectOffset = 10000 })) loading.loadedNavigationBranches } }
                     result = branchReply "project:parent" (List.range 1 50 |> List.map (\n -> project ("ceiling-" ++ String.fromInt n) (Just "parent"))) [] True False atBoundary
@@ -2678,11 +2814,14 @@ suite =
             \_ ->
                 let
                     summaries = List.range 1 50 |> List.map (\n -> project ("detail-" ++ String.fromInt n) Nothing)
-                    seeded = loadRoot workspaceId summaries [] { model | auth = { status = AuthReady, mode = Just "test" } }
+                    ordinary = loadRoot workspaceId summaries [] { model | auth = { status = AuthReady, mode = Just "test" } }
+                    focus = ordinary.focus
+                    foreground = { ordinary | focus = { focus | focusedEntity = Just ( "project", "detail-50" ) } }
+                    seeded = DataLoading.ensureVisibleCardDetails workspaceId foreground.sessionRequestEpoch foreground.dataLoading.navigationGeneration (Set.fromList (List.map .id summaries)) Set.empty foreground |> Tuple.first
                     reloaded = DataLoading.reloadNavigationForFilters seeded |> Tuple.first
                     newWorkspace = { reloaded | selectedWorkspaceId = Just "other" }
                     requested = DataLoading.ensureVisibleCardDetails workspaceId seeded.sessionRequestEpoch seeded.dataLoading.navigationGeneration (Set.fromList (List.map .id summaries)) Set.empty newWorkspace |> Tuple.first
-                    released = Dict.toList seeded.dataLoading.projectCardDetailRequests |> List.foldl (\( id, request ) source -> DataLoading.update (GotProjectCardDetail request id (Err Http.Timeout)) source |> Tuple.first) requested
+                    released = Dict.toList seeded.dataLoading.projectCardDetailRequests |> List.foldl (\( id, request ) source -> paintUpdate (GotProjectCardDetail request id (Err Http.Timeout)) source |> Tuple.first) requested
                 in
                 Expect.equal { first = 6, held = 6, stale = Nothing, released = 0 }
                     { first = Set.size seeded.dataLoading.cardDetailAdmissions
@@ -2699,7 +2838,7 @@ suite =
                     focused = { seeded | focus = { focus | focusedEntity = Just ( "project", "deep-100" ) } }
                     demanded = DataLoading.ensureVisibleCardDetails workspaceId focused.sessionRequestEpoch focused.dataLoading.navigationGeneration Set.empty Set.empty focused |> Tuple.first
                     complete = case ( Dict.get "deep-100" demanded.dataLoading.projectCardDetailRequests, Dict.get "deep-100" demanded.dataLoading.projectCardSummaries ) of
-                        ( Just request, Just summary ) -> DataLoading.update (GotProjectCardDetail request summary.id (Ok (Api.projectFromCardSummary summary))) demanded |> Tuple.first
+                        ( Just request, Just summary ) -> paintUpdate (GotProjectCardDetail request summary.id (Ok (Api.projectFromCardSummary summary))) demanded |> Tuple.first
                         _ -> demanded
                 in
                 Expect.equal ( [ "deep-100" ], [ "deep-100" ], 0 )
@@ -2716,14 +2855,15 @@ suite =
                     seeded = loadRoot workspaceId [ { parent | hasChildren = True } ] [] model
                     children = branchReply "project:p" [ { child | hasChildren = True } ] [] False False seeded
                     descendants = branchReply "project:c" [ { grandchild | hasChildren = True } ] [] True False children
-                    old = Dict.get "project:g" descendants.dataLoading.loadedNavigationBranches
-                    freshParent = DataLoading.beginNavigationBranch "project" workspaceId (Just "p") descendants |> Tuple.first
+                    fullyAdmitted = branchReply "project:c" [ { grandchild | hasChildren = True } ] [] False False descendants
+                    old = Dict.get "project:g" fullyAdmitted.dataLoading.loadedNavigationBranches
+                    freshParent = paintBranch "project" workspaceId (Just "p") fullyAdmitted |> Tuple.first
                     removed = branchReply "project:p" [] [] False False freshParent
                     afterOld = case old of
-                        Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:g" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [ project "late-grandchild" (Just "g") ], hasMore = True }, tasks = { items = [], hasMore = False } })) removed |> Tuple.first
+                        Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:g" request.filterFingerprint 0 0 (Ok { workspaceId = workspaceId, projects = { items = [ project "late-grandchild" (Just "g") ], hasMore = True }, tasks = { items = [], hasMore = False } })) removed |> Tuple.first
                         Nothing -> removed
                 in
-                Expect.equal { parentApplied = True, childRetired = Just False, grandchildRetired = Just False, fenced = True, held = 2, released = 1, lateAbsent = True, queued = [] }
+                Expect.equal { parentApplied = True, childRetired = Just False, grandchildRetired = Just False, fenced = True, held = 1, released = 0, lateAbsent = True, queued = [] }
                     { parentApplied = not (Dict.member "c" removed.dataLoading.projectCardSummaries)
                     , childRetired = Dict.get "project:c" removed.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
                     , grandchildRetired = Dict.get "project:g" removed.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight
@@ -2738,15 +2878,15 @@ suite =
         , test "explicit branch retry fences old error and success callbacks at the same offsets" <|
             \_ ->
                 let
-                    initial = DataLoading.beginNavigationBranch "project" workspaceId (Just "parent") model |> Tuple.first
+                    initial = paintBranch "project" workspaceId (Just "parent") model |> Tuple.first
                     old = Dict.get "project:parent" initial.dataLoading.loadedNavigationBranches
                     message result = case old of
                         Just request -> GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint 0 0 result
                         Nothing -> LoadRootNavigationPage "project"
-                    failed = DataLoading.update (message (Err Http.Timeout)) initial |> Tuple.first
-                    retry = DataLoading.beginNavigationBranchPage "project" "parent" "project" failed |> Tuple.first
-                    lateError = DataLoading.update (message (Err Http.Timeout)) retry |> Tuple.first
-                    lateSuccess = DataLoading.update (message (Ok { workspaceId = workspaceId, projects = { items = [ project "old-payload" (Just "parent") ], hasMore = False }, tasks = { items = [], hasMore = False } })) lateError |> Tuple.first
+                    failed = paintUpdate (message (Err Http.Timeout)) initial |> Tuple.first
+                    retry = paintBranchPage "project" "parent" "project" failed |> Tuple.first
+                    lateError = paintUpdate (message (Err Http.Timeout)) retry |> Tuple.first
+                    lateSuccess = paintUpdate (message (Ok { workspaceId = workspaceId, projects = { items = [ project "old-payload" (Just "parent") ], hasMore = False }, tasks = { items = [], hasMore = False } })) lateError |> Tuple.first
                 in
                 Expect.equal ( True, Just True, ( 1, False ) )
                     ( case ( old, Dict.get "project:parent" retry.dataLoading.loadedNavigationBranches ) of
@@ -2780,6 +2920,7 @@ model : Model
 model =
     AppShell.initModel Nothing url (WorkspacePage workspaceId) flags Nothing { tab = ProjectsTab, focus = Nothing, observationId = Nothing }
         |> AppShell.finalizeInit (WorkspacePage workspaceId)
+        |> (\initial -> { initial | auth = { status = AuthReady, mode = Just "test" } })
 
 
 rootLoadModel : Model
@@ -2810,7 +2951,7 @@ actualFocusBootstrap =
 
 hydrateFocusWorkspace : Model -> Model
 hydrateFocusWorkspace source =
-    DataLoading.update
+    paintUpdate
         (GotWorkspace workspaceId 1 (Ok { id = workspaceId, name = "Workspace", workspaceType = Api.Repository, ghOwner = Nothing, ghRepo = Nothing, createdAt = "now", updatedAt = "now" }))
         source |> Tuple.first
 
@@ -2819,7 +2960,7 @@ rootHydrationPage : List Api.ProjectCardSummary -> List Api.TaskCardSummary -> B
 rootHydrationPage projects tasks projectMore source =
     case source.dataLoading.rootNavigationRequest of
         Just request ->
-            DataLoading.update
+            paintUpdate
                 (GotRootNavigation workspaceId request.sessionEpoch source.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint request.projectOffset request.taskOffset
                     (Ok { workspaceId = workspaceId, projects = { items = projects, hasMore = projectMore }, tasks = { items = tasks, hasMore = False } })) source |> Tuple.first
 
@@ -2830,7 +2971,7 @@ focusPage : Int -> Maybe Int -> String -> Model -> Model
 focusPage offset next ancestor source =
     case source.dataLoading.activeNavigationFocus of
         Just request ->
-            DataLoading.update
+            paintUpdate
                 (GotNavigationFocus workspaceId request.sessionEpoch request.generation request.filterFingerprint "project" "target" offset
                     (Ok { workspaceId = workspaceId, target = Api.NavigationProjectSummary (project "target" (Just "ancestor-first")), ancestors = [ Api.NavigationProjectSummary (project ancestor Nothing) ], ancestorsTruncated = next /= Nothing, nextAncestorOffset = next })
                 )
@@ -2877,6 +3018,15 @@ url =
 loadRoot : String -> List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Model -> Model
 loadRoot workspace projects tasks source =
     let
+        session = { editorSession | workspace = Just { workspaceId = workspace, role = Just "edit", canRead = True, canEdit = True, canAdmin = False } }
+        authorized = if source.auth.status == AuthReady && (source.sessionContext |> Maybe.andThen .workspace |> Maybe.map .workspaceId) == Just workspace then source else AppShell.handleOwned (AppShell.SessionContextLoadedMsg source.sessionRequestEpoch (Just workspace) (Ok session)) source |> Tuple.first
+    in
+    loadRootUnpainted workspace projects tasks (if authorized.activeTab == ProjectsTab then authorized else AppShell.handleOwned (AppShell.SwitchTabMsg ProjectsTab) authorized |> Tuple.first) |> painted
+
+
+loadRootUnpainted : String -> List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Model -> Model
+loadRootUnpainted workspace projects tasks source =
+    let
         prepared =
             DataLoading.prepareRootNavigationRequest (Just workspace) source
     in
@@ -2887,6 +3037,7 @@ loadRoot workspace projects tasks source =
                     (Ok { workspaceId = workspace, projects = { items = projects, hasMore = False }, tasks = { items = tasks, hasMore = False } })
                 )
                 prepared
+                |> Cards.refreshViewport prepared
                 |> Tuple.first
 
         Nothing ->
@@ -2909,9 +3060,9 @@ hydrateDescriptions projectDescription taskDescription projectSummary taskSummar
                     Api.taskFromCardSummary taskSummary
             in
             source
-                |> DataLoading.update (GotProjectCardDetail projectRequest projectSummary.id (Ok { projectDetail | description = Just projectDescription }))
+                |> paintUpdate (GotProjectCardDetail projectRequest projectSummary.id (Ok { projectDetail | description = Just projectDescription }))
                 |> Tuple.first
-                |> DataLoading.update (GotTaskCardDetail taskRequest taskSummary.id (Ok { taskDetail | description = Just taskDescription }))
+                |> paintUpdate (GotTaskCardDetail taskRequest taskSummary.id (Ok { taskDetail | description = Just taskDescription }))
                 |> Tuple.first
 
         _ ->
@@ -3014,7 +3165,7 @@ acceptRoot : List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Model ->
 acceptRoot projects tasks source =
     case source.dataLoading.rootNavigationRequest of
         Just request ->
-            DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch source.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint request.projectOffset request.taskOffset (Ok { workspaceId = workspaceId, projects = { items = projects, hasMore = False }, tasks = { items = tasks, hasMore = False } })) source |> Tuple.first
+            paintUpdate (GotRootNavigation workspaceId request.sessionEpoch source.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint request.projectOffset request.taskOffset (Ok { workspaceId = workspaceId, projects = { items = projects, hasMore = False }, tasks = { items = tasks, hasMore = False } })) source |> Tuple.first
         Nothing -> source
 
 
@@ -3060,7 +3211,7 @@ branchReply : String -> List Api.ProjectCardSummary -> List Api.TaskCardSummary 
 branchReply key projects tasks projectMore taskMore source =
     case Dict.get key source.dataLoading.loadedNavigationBranches of
         Just request ->
-            DataLoading.update (GotNavigationBranch request.workspaceId request.sessionEpoch request.generation key request.filterFingerprint request.projectOffset request.taskOffset
+            paintUpdate (GotNavigationBranch request.workspaceId request.sessionEpoch request.generation key request.filterFingerprint request.projectOffset request.taskOffset
                 (Ok { workspaceId = request.workspaceId, projects = { items = projects, hasMore = projectMore }, tasks = { items = tasks, hasMore = taskMore } })) source |> Tuple.first
         Nothing -> source
 
@@ -3075,10 +3226,10 @@ reopenFailedBranchScenario staged =
         second = branchReply "project:parent" (projectPage "old-" 51 51) (taskPage "old-" 51 51) (not staged) (not staged) first
         pending =
             if staged then
-                DataLoading.revalidateNavigationForFilters second |> Tuple.first |> branchReply "project:parent" (projectPage "fresh-" 1 50) (taskPage "fresh-" 1 50) True True
+                DataLoading.revalidateNavigationForFilters second |> Tuple.first |> replyRootSpan [ { parent | hasChildren = True } ] [] False False |> branchReply "project:parent" (projectPage "fresh-" 1 50) (taskPage "fresh-" 1 50) True True
             else second
         failed = case Dict.get "project:parent" pending.dataLoading.loadedNavigationBranches of
-            Just request -> DataLoading.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) pending |> Tuple.first
+            Just request -> paintUpdate (GotNavigationBranch workspaceId request.sessionEpoch request.generation "project:parent" request.filterFingerprint request.projectOffset request.taskOffset (Err Http.Timeout)) pending |> Tuple.first
             Nothing -> pending
         collapsed = Cards.update (ToggleTreeNode "proj-parent") failed |> Tuple.first
         reopened = Cards.update (ToggleTreeNode "proj-parent") collapsed |> Tuple.first
@@ -3106,6 +3257,113 @@ replyRootSpan : List Api.ProjectCardSummary -> List Api.TaskCardSummary -> Bool 
 replyRootSpan projects tasks projectMore taskMore source =
     case source.dataLoading.rootNavigationRequest of
         Just request ->
-            DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch source.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint request.projectOffset request.taskOffset
+            paintUpdate (GotRootNavigation workspaceId request.sessionEpoch source.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint request.projectOffset request.taskOffset
                 (Ok { workspaceId = workspaceId, projects = { items = projects, hasMore = projectMore }, tasks = { items = tasks, hasMore = taskMore } })) source |> Tuple.first
         Nothing -> source
+
+
+{-| The response-only fixture driver explicitly delivers the current painted
+viewport receipt. Branch fixtures settle their ordinary detail requests with
+real timeout callbacks before advancing their independent summary pages.
+-}
+painted : Model -> Model
+painted source =
+    let
+        current = Cards.refreshViewport source ( source, Cmd.none ) |> Tuple.first
+        viewport = current.cards.viewport
+    in
+    Cards.updateViewport
+        (Encode.object
+            [ ( "workspace", Encode.string (Maybe.withDefault "" current.selectedWorkspaceId) )
+            , ( "epoch", Encode.int current.sessionRequestEpoch )
+            , ( "generation", Encode.int current.dataLoading.navigationGeneration )
+            , ( "revision", Encode.int viewport.revision )
+            , ( "paintNonce", Encode.int (DataLoading.backgroundPaintNonce current) )
+            , ( "paintFilter", Encode.string (DataLoading.navigationFilterFingerprint current) )
+            , ( "pins", Encode.list Encode.string (Set.toList viewport.nativePins) )
+            ]) current |> Tuple.first
+
+
+paintUpdate : Msg -> Model -> ( Model, Cmd Msg )
+paintUpdate msg source =
+    let
+        prepared = case msg of
+            GotNavigationBranch _ _ _ _ _ _ _ _ -> settleOrdinaryDetails source
+            _ -> source
+        ( updated, command ) = DataLoading.update msg prepared |> Cards.refreshViewport prepared
+        completed = case msg of
+            GotNavigationBranch _ _ _ _ _ _ _ _ -> settleOrdinaryDetails updated
+            _ -> updated
+    in
+    ( painted completed, command )
+
+
+settleOrdinaryDetails : Model -> Model
+settleOrdinaryDetails current =
+    let
+        ordinary request = request.inFlight && Set.member request.requestId current.dataLoading.backgroundAdmission.detailRequests
+        projects = Dict.toList current.dataLoading.projectCardDetailRequests |> List.filter (Tuple.second >> ordinary)
+        tasks = Dict.toList current.dataLoading.taskCardDetailRequests |> List.filter (Tuple.second >> ordinary)
+    in
+    List.foldl (\( id, request ) state -> DataLoading.update (GotProjectCardDetail request id (Err Http.Timeout)) state |> Tuple.first) current projects
+        |> (\state -> List.foldl (\( id, request ) next -> DataLoading.update (GotTaskCardDetail request id (Err Http.Timeout)) next |> Tuple.first) state tasks)
+
+
+paintBranch : String -> String -> Maybe String -> Model -> ( Model, Cmd Msg )
+paintBranch kind workspace parent source =
+    let
+        ready = source |> settleOrdinaryDetails |> painted
+        ( updated, command ) = DataLoading.beginNavigationBranch kind workspace parent ready |> Cards.refreshViewport ready
+    in
+    ( painted updated, command )
+
+
+paintPresentation : String -> Maybe String -> Model -> ( Model, Cmd Msg )
+paintPresentation kind parent source =
+    let ( updated, command ) = DataLoading.ensureNavigationPresentation kind parent source |> Cards.refreshViewport source in
+    ( painted updated, command )
+
+
+paintAt : String -> Model -> Model
+paintAt key source =
+    let
+        current = Cards.refreshViewport source ( source, Cmd.none ) |> Tuple.first
+        viewport = current.cards.viewport
+        top = Dict.get key viewport.index.positions |> Maybe.map (\position -> Viewport.offset position viewport.index) |> Maybe.withDefault 0
+    in
+    Cards.updateViewport (Encode.object
+        [ ( "workspace", Encode.string (Maybe.withDefault "" current.selectedWorkspaceId) )
+        , ( "epoch", Encode.int current.sessionRequestEpoch ), ( "generation", Encode.int current.dataLoading.navigationGeneration ), ( "revision", Encode.int viewport.revision )
+        , ( "top", Encode.float top ), ( "height", Encode.float 600 ), ( "pins", Encode.list Encode.string (Set.toList viewport.nativePins) )
+        ]) current |> Tuple.first |> settleOrdinaryDetails |> painted
+
+
+paintBranchPage : String -> String -> String -> Model -> ( Model, Cmd Msg )
+paintBranchPage kind parent entity source =
+    let ( updated, command ) = DataLoading.beginNavigationBranchPage kind parent entity source |> Cards.refreshViewport source in
+    ( painted updated, command )
+
+
+expectPaintReady : Bool -> Model -> Expect.Expectation
+expectPaintReady ready current =
+    let
+        viewport = current.cards.viewport
+        configuration = Encode.object
+            [ ( "paintReady", Encode.bool ready ), ( "paintNonce", Encode.int (DataLoading.backgroundPaintNonce current) ), ( "paintFilter", Encode.string (DataLoading.navigationFilterFingerprint current) )
+            , ( "workspace", Encode.string (Maybe.withDefault "" viewport.workspaceId) ), ( "epoch", Encode.int viewport.sessionEpoch ), ( "generation", Encode.int viewport.generation ), ( "revision", Encode.int viewport.revision )
+            , ( "anchor", Encode.null ), ( "delta", Encode.float 0 ), ( "top", Encode.float viewport.top ), ( "target", viewport.target |> Maybe.map Encode.string |> Maybe.withDefault Encode.null )
+            ]
+    in
+    Cards.viewProjectsTree workspaceId current |> Query.fromHtml
+        |> Query.find [ Selector.attribute (Attributes.id "hierarchy-viewport") ]
+        |> Query.has [ Selector.attribute (Attributes.attribute "data-hierarchy-context" (Encode.encode 0 configuration)) ]
+
+
+establishedShell : Model -> Model
+establishedShell source =
+    let
+        websocket = source.webSocket
+        state = Dict.get ("workspace:" ++ workspaceId) websocket.streams |> Maybe.withDefault (ChangeStream.init (ChangeStream.Workspace workspaceId) [])
+        established = { source | webSocket = { websocket | streams = Dict.insert ("workspace:" ++ workspaceId) { state | snapshotApplied = True } websocket.streams } }
+    in
+    WebSocket.update (WsMessageReceived workspaceShellSnapshotWire) established |> Tuple.first

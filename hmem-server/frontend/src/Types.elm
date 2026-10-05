@@ -126,6 +126,7 @@ type alias DataLoadingModel =
     , navigationQueue : List String
     , navigationAdmissions : Dict String NavigationBranchState
     , navigationPasses : Dict String NavigationPass
+    , backgroundAdmission : BackgroundAdmission
     , cardDetailAdmissions : Set Int
     , cardDetailRetries : Set ( String, String )
     , visibleDetailDemand : Maybe ( Set String, Set String )
@@ -146,6 +147,24 @@ type alias DataLoadingModel =
     , navigationVisibilityActive : Bool
     , activeNavigationFocus : Maybe NavigationFocusRequest
     , navigationFocuses : Dict String NavigationFocusRequest
+    }
+
+
+{-| One fair ordinary-work wave is admitted by one current painted viewport.
+Physical request ledgers outlive this logical permit.
+-}
+type alias BackgroundAdmission =
+    { workspaceId : Maybe String
+    , sessionEpoch : Int
+    , filterFingerprint : String
+    , rootGeneration : Maybe Int
+    , nonce : Int
+    , acknowledged : Bool
+    , remaining : Int
+    , branches : Int
+    , details : Int
+    , branchRequests : Set String
+    , detailRequests : Set Int
     }
 
 

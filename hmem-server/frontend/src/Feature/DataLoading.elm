@@ -1,4 +1,4 @@
-module Feature.DataLoading exposing (navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
@@ -28,6 +28,7 @@ init =
     , navigationQueue = []
     , navigationAdmissions = Dict.empty
     , navigationPasses = Dict.empty
+    , backgroundAdmission = { workspaceId = Nothing, sessionEpoch = -1, filterFingerprint = "", rootGeneration = Nothing, nonce = 1, acknowledged = False, remaining = 0, branches = 0, details = 0, branchRequests = Set.empty, detailRequests = Set.empty }
     , cardDetailAdmissions = Set.empty
     , cardDetailRetries = Set.empty
     , visibleDetailDemand = Nothing
@@ -217,9 +218,82 @@ navigationBranchExpanded key model =
         _ -> False
 
 
+
+prepareBackgroundAdmission : Model -> Model
+prepareBackgroundAdmission model =
+    let
+        loading = model.dataLoading
+        permit = loading.backgroundAdmission
+        fingerprint = navigationFilterFingerprint model
+        rootGeneration = loading.rootNavigationRequest |> Maybe.map .generation
+    in
+    if permit.rootGeneration == rootGeneration && permit.workspaceId == model.selectedWorkspaceId && permit.sessionEpoch == model.sessionRequestEpoch && permit.filterFingerprint == fingerprint then model
+    else { model | dataLoading = { loading | backgroundAdmission = { workspaceId = model.selectedWorkspaceId, sessionEpoch = model.sessionRequestEpoch, filterFingerprint = fingerprint, rootGeneration = rootGeneration, nonce = permit.nonce + 1, acknowledged = False, remaining = 0, branches = 0, details = 0, branchRequests = Set.empty, detailRequests = Set.empty } } }
+
+
+backgroundPaintNonce : Model -> Int
+backgroundPaintNonce model =
+    (prepareBackgroundAdmission model).dataLoading.backgroundAdmission.nonce
+
+
+yieldBackgroundAdmission : Model -> Model
+yieldBackgroundAdmission source =
+    let
+        model = prepareBackgroundAdmission source
+        loading = model.dataLoading
+        permit = loading.backgroundAdmission
+    in
+    if permit.acknowledged && permit.remaining < 5 && Set.isEmpty (Set.intersect permit.branchRequests (Set.fromList (Dict.keys loading.navigationAdmissions))) && Set.isEmpty (Set.intersect permit.detailRequests loading.cardDetailAdmissions) then
+        { model | dataLoading = { loading | backgroundAdmission = { permit | nonce = permit.nonce + 1, acknowledged = False, remaining = 0, branches = 0, details = 0, branchRequests = Set.empty, detailRequests = Set.empty } } }
+    else model
+
+
+acceptBackgroundPaint : Int -> Model -> ( Model, Cmd Msg )
+acceptBackgroundPaint nonce source =
+    let
+        model = prepareBackgroundAdmission source
+        loading = model.dataLoading
+        permit = loading.backgroundAdmission
+    in
+    if nonce /= permit.nonce || permit.acknowledged || model.activeTab /= ProjectsTab || model.auth.status /= AuthReady then ( model, Cmd.none )
+    else
+        let
+            opened = { model | dataLoading = { loading | backgroundAdmission = { permit | acknowledged = True, remaining = 5 } } }
+            ( branched, branchCommand ) = pumpNavigation opened
+            ( detailed, detailCommand ) = ensurePresentedCardDetails branched
+        in
+        ( detailed, Cmd.batch [ branchCommand, detailCommand ] )
+
+
+consumeBackground : Maybe String -> Model -> Model
+consumeBackground branchKey model =
+    let
+        loading = model.dataLoading
+        permit = loading.backgroundAdmission
+        branch = branchKey /= Nothing
+    in
+    { model | dataLoading = { loading | backgroundAdmission = { permit | branchRequests = Maybe.map (\key -> Set.insert key permit.branchRequests) branchKey |> Maybe.withDefault permit.branchRequests, detailRequests = if branch then permit.detailRequests else Set.insert (loading.nextCardDetailRequestId - 1) permit.detailRequests, remaining = permit.remaining - 1, branches = permit.branches + (if branch then 1 else 0), details = permit.details + (if branch then 0 else 1) } } }
+
+
+ordinaryDetailsPending : Model -> Bool
+ordinaryDetailsPending model =
+    let
+        loading = model.dataLoading
+        ( projects, tasks ) = Maybe.withDefault ( loading.navigationVisibleProjectIds, loading.navigationVisibleTaskIds ) loading.visibleDetailDemand
+        pending summaries requests cached id =
+            case Dict.get id summaries of
+                Nothing -> False
+                Just summary ->
+                    case Dict.get id requests of
+                        Nothing -> True
+                        Just request -> not (request.inFlight || request.expectedUpdatedAt == summary.updatedAt || (Dict.get id cached |> Maybe.map .updatedAt) == Just request.expectedUpdatedAt)
+    in
+    List.any (pending loading.projectCardSummaries loading.projectCardDetailRequests model.projects) (Set.toList projects |> List.take 25)
+        || List.any (pending loading.taskCardSummaries loading.taskCardDetailRequests model.tasks) (Set.toList tasks |> List.take 25)
+
 pumpNavigation : Model -> ( Model, Cmd Msg )
 pumpNavigation model =
-    pumpNavigationQueue (List.length model.dataLoading.navigationQueue) model
+    pumpNavigationQueue (List.length model.dataLoading.navigationQueue) (prepareBackgroundAdmission model)
 
 
 pumpNavigationQueue : Int -> Model -> ( Model, Cmd Msg )
@@ -227,7 +301,7 @@ pumpNavigationQueue budget model =
     let
         loading = model.dataLoading
     in
-    if budget <= 0 || Dict.size loading.navigationAdmissions >= navigationConcurrency then
+    if budget <= 0 || Dict.size loading.navigationAdmissions >= navigationConcurrency || model.activeTab /= ProjectsTab || loading.backgroundAdmission.remaining <= 0 || (loading.backgroundAdmission.branches >= 2 && ordinaryDetailsPending model) then
         ( model, Cmd.none )
     else
         case loading.navigationQueue of
@@ -248,7 +322,7 @@ pumpNavigationQueue budget model =
                             let
                                 request = { previous | inFlight = True }
                                 poppedLoading = popped.dataLoading
-                                admitted = { popped | dataLoading = { poppedLoading | loadedNavigationBranches = Dict.insert key request poppedLoading.loadedNavigationBranches, navigationAdmissions = Dict.insert (navigationAdmissionKey key request) request poppedLoading.navigationAdmissions } }
+                                admitted = consumeBackground (Just (navigationAdmissionKey key request)) { popped | dataLoading = { poppedLoading | loadedNavigationBranches = Dict.insert key request poppedLoading.loadedNavigationBranches, navigationAdmissions = Dict.insert (navigationAdmissionKey key request) request poppedLoading.navigationAdmissions } }
                                 ( next, commands ) = pumpNavigationQueue (budget - 1) admitted
                             in
                             ( next, Cmd.batch [ commands, Api.fetchNavigationBranch model.flags.apiUrl request.workspaceId kind (Just id) request.projectOffset request.taskOffset (navigationFilterQuery model) (GotNavigationBranch request.workspaceId request.sessionEpoch request.generation key request.filterFingerprint request.projectOffset request.taskOffset) ] )
@@ -603,6 +677,15 @@ beginNavigationBranchPage parentKind parentId entityKind model =
                 canLoad =
                     canAdvance && needsTransport && not previous.inFlight
 
+                previousPass =
+                    Dict.get key model.dataLoading.navigationPasses
+
+                healthyProjectPending =
+                    previous.projectRequestPending && (previousPass |> Maybe.andThen .projectError) == Nothing
+
+                healthyTaskPending =
+                    previous.taskRequestPending && (previousPass |> Maybe.andThen .taskError) == Nothing
+
                 projectOffset =
                     if retrying then
                         previous.projectOffset
@@ -630,8 +713,8 @@ beginNavigationBranchPage parentKind parentId entityKind model =
                         , generation = if retrying && canLoad then model.dataLoading.navigationGeneration + 1 else previous.generation
                         , inFlight = False
                         , succeeded = if canLoad then False else previous.succeeded
-                        , projectRequestPending = if canLoad then entityKind == "project" else previous.projectRequestPending
-                        , taskRequestPending = if canLoad then entityKind == "task" else previous.taskRequestPending
+                        , projectRequestPending = if canLoad then entityKind == "project" || healthyProjectPending else previous.projectRequestPending
+                        , taskRequestPending = if canLoad then entityKind == "task" || healthyTaskPending else previous.taskRequestPending
                     }
 
                 currentLoading =
@@ -969,6 +1052,38 @@ revalidateNavigationForAffectedBranches affectedProjects affectedTasks model =
         loading =
             reloaded.dataLoading
 
+        retainedRoot =
+            case ( preserved.rootNavigationRequest, loading.rootNavigationRequest ) of
+                ( Just previous, Just current ) ->
+                    if previous.workspaceId == current.workspaceId && previous.sessionEpoch == current.sessionEpoch && previous.filterFingerprint == current.filterFingerprint then
+                        Just
+                            ( { current
+                                | projectCardCount = previous.projectCardCount
+                                , taskCardCount = previous.taskCardCount
+                                , projectHasMore = previous.projectHasMore
+                                , taskHasMore = previous.taskHasMore
+                              }
+                            , rootRefreshDemand preserved previous
+                            )
+
+                    else
+                        Nothing
+
+                _ ->
+                    Nothing
+
+        refreshedPasses =
+            case retainedRoot of
+                Just ( _, demand ) ->
+                    let
+                        pass =
+                            emptyNavigationPass True
+                    in
+                    Dict.insert (navigationBranchKey "workspace_root" Nothing) { pass | rootDemand = Just demand } loading.navigationPasses
+
+                Nothing ->
+                    loading.navigationPasses
+
         preservedModel =
             { reloaded
                 | dataLoading =
@@ -977,6 +1092,8 @@ revalidateNavigationForAffectedBranches affectedProjects affectedTasks model =
                         , taskCardSummaries = preserved.taskCardSummaries
                         , navigationVisibleProjectIds = preserved.navigationVisibleProjectIds
                         , navigationVisibleTaskIds = preserved.navigationVisibleTaskIds
+                        , rootNavigationRequest = retainedRoot |> Maybe.map (Tuple.first >> Just) |> Maybe.withDefault loading.rootNavigationRequest
+                        , navigationPasses = refreshedPasses
                     }
             }
 
@@ -1002,6 +1119,22 @@ revalidateNavigationForAffectedBranches affectedProjects affectedTasks model =
             }
     in
     ( withPresentations, Cmd.batch (command :: replayCommands ++ affectedCommands) )
+
+
+rootRefreshDemand : DataLoadingModel -> NavigationBranchState -> ( Int, Int )
+rootRefreshDemand loading previous =
+    let
+        inherited =
+            Dict.get (navigationBranchKey "workspace_root" Nothing) loading.navigationPasses
+                |> Maybe.andThen .rootDemand
+                |> Maybe.withDefault ( 0, 0 )
+
+        demanded accepted offset pending old =
+            max old (max accepted (if pending then offset + transportPageSize else 0))
+    in
+    ( demanded previous.projectCardCount previous.projectOffset previous.projectRequestPending (Tuple.first inherited)
+    , demanded previous.taskCardCount previous.taskOffset previous.taskRequestPending (Tuple.second inherited)
+    )
 
 
 {-| Summary invalidations own only affected direct lists. Keep unrelated passes,
@@ -1065,9 +1198,7 @@ revalidateNavigationForChangedSummaries before summaries model =
                     case loading.rootNavigationRequest of
                         Just previous ->
                             let
-                                oldDemand = Dict.get (navigationBranchKey "workspace_root" Nothing) loading.navigationPasses |> Maybe.andThen .rootDemand |> Maybe.withDefault ( 0, 0 )
-                                demanded accepted offset pending inherited = max inherited (max accepted (if pending then offset + transportPageSize else 0))
-                                demand = ( demanded previous.projectCardCount previous.projectOffset previous.projectRequestPending (Tuple.first oldDemand), demanded previous.taskCardCount previous.taskOffset previous.taskRequestPending (Tuple.second oldDemand) )
+                                demand = rootRefreshDemand loading previous
                                 pass = emptyNavigationPass True
                                 rootPass = { pass | rootDemand = Just demand }
                                 request = { previous | generation = generation, projectOffset = 0, taskOffset = 0, inFlight = True, succeeded = False, projectRequestPending = True, taskRequestPending = True }
@@ -1113,6 +1244,22 @@ invalidateNavigationRequests model =
 
         retain presentation =
             { presentation | generation = generation }
+
+        retainedRootDemand =
+            case loading.rootNavigationRequest of
+                Just request ->
+                    if Just request.workspaceId == model.selectedWorkspaceId && request.sessionEpoch == model.sessionRequestEpoch && request.filterFingerprint == navigationFilterFingerprint model then
+                        let
+                            pass =
+                                emptyNavigationPass True
+                        in
+                        Dict.singleton (navigationBranchKey "workspace_root" Nothing) { pass | rootDemand = Just (rootRefreshDemand loading request) }
+
+                    else
+                        Dict.empty
+
+                Nothing ->
+                    Dict.empty
     in
     { model
         | dataLoading =
@@ -1121,7 +1268,7 @@ invalidateNavigationRequests model =
                 , rootNavigationRequest = Maybe.map (\request -> let retired = retire request in { retired | projectRequestPending = False, taskRequestPending = False }) loading.rootNavigationRequest
                 , loadedNavigationBranches = Dict.map (\_ -> retire) loading.loadedNavigationBranches
                 , navigationQueue = []
-                , navigationPasses = Dict.empty
+                , navigationPasses = retainedRootDemand
                 , rootNavigationPresentation = Maybe.map retain loading.rootNavigationPresentation
                 , navigationPresentations = Dict.map (\_ -> retain) loading.navigationPresentations
                 , projectCardDetailRequests = Dict.empty
@@ -1954,8 +2101,9 @@ detailPinnedIds kind model =
 
 
 ensurePresentedCardDetails : Model -> ( Model, Cmd Msg )
-ensurePresentedCardDetails model =
+ensurePresentedCardDetails source =
     let
+        model = prepareBackgroundAdmission source
         ( projectIds, taskIds ) =
             case model.dataLoading.visibleDetailDemand of
                 Just demand -> demand
@@ -1998,8 +2146,14 @@ ensurePresentedCardDetails model =
                 _ -> ( model, [] )
         ( pinnedProjects, pinnedProjectCommands ) = List.foldl beginProjectCardDetail ( focused, focusedCommands ) (List.filter (\summary -> Set.member summary.id projectPins) projects)
         ( pinned, pinCommands ) = List.foldl beginTaskCardDetail ( pinnedProjects, pinnedProjectCommands ) (List.filter (\summary -> Set.member summary.id taskPins) tasks)
-        ( hydratedProjects, projectCommands ) = List.foldl beginProjectCardDetail ( pinned, pinCommands ) projects
-        ( hydrated, commands ) = List.foldl beginTaskCardDetail ( hydratedProjects, projectCommands ) tasks
+        ordinary begin summary ( current, accumulated ) =
+            let permit = current.dataLoading.backgroundAdmission in
+            if current.activeTab /= ProjectsTab || permit.remaining <= 0 || (permit.details >= 3 && not (List.isEmpty current.dataLoading.navigationQueue)) then ( current, accumulated )
+            else
+                let ( next, nextCommands ) = begin summary ( current, accumulated ) in
+                if Set.size next.dataLoading.cardDetailAdmissions > Set.size current.dataLoading.cardDetailAdmissions then ( consumeBackground Nothing next, nextCommands ) else ( next, nextCommands )
+        ( hydratedProjects, projectCommands ) = List.foldl (ordinary beginProjectCardDetail) ( pinned, pinCommands ) projects
+        ( hydrated, commands ) = List.foldl (ordinary beginTaskCardDetail) ( hydratedProjects, projectCommands ) tasks
     in
     ( hydrated, Cmd.batch commands )
 
@@ -2339,7 +2493,7 @@ update msg model =
         ( hydrated, detailCommand ) =
             ensurePresentedCardDetails pumped
     in
-    ( hydrated, Cmd.batch [ responseCommand, branchCommand, navigationCommand, detailCommand ] )
+    ( yieldBackgroundAdmission hydrated, Cmd.batch [ responseCommand, branchCommand, navigationCommand, detailCommand ] )
 
 
 updateResponse : Msg -> Model -> ( Model, Cmd Msg )

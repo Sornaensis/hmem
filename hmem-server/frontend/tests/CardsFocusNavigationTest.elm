@@ -77,7 +77,7 @@ suite =
 
                     expanded =
                         Cards.update (ToggleCardExpand "parent") seeded
-                            |> Tuple.first
+                            |> Tuple.first |> rootPaint
                 in
                 case Dict.get "project:parent" expanded.dataLoading.loadedNavigationBranches of
                     Just request ->
@@ -100,7 +100,7 @@ suite =
                         { seeded | cards = { cards | collapsedNodes = Dict.singleton "proj-expand-all-parent" True } }
 
                     expanded =
-                        Cards.update ExpandAllNodes collapsed |> Tuple.first
+                        Cards.update ExpandAllNodes collapsed |> Tuple.first |> rootPaint
                 in
                 Expect.equal
                     { collapsed = False, branchInFlight = True, detailInFlight = True }
@@ -118,7 +118,7 @@ suite =
                         DataLoading.mergeNavigationSummaries [ summary ] [] model
 
                     ( requested, _ ) =
-                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded
+                        DataLoading.ensureNavigationPresentation "workspace_root" Nothing seeded |> (\( next, command ) -> ( rootPaint next, command ))
 
                     pendingView =
                         Cards.viewProjectsTree workspaceId requested |> Query.fromHtml
@@ -314,7 +314,7 @@ suite =
             let
                 seeded = DataLoading.mergeNavigationSummaries [] [ task "detail" Nothing ] model
                 loading = seeded.dataLoading
-                ready = viewportReady { seeded | dataLoading = { loading | navigationVisibilityActive = True, navigationVisibleTaskIds = Set.singleton "detail" } }
+                ready = rootPaint { seeded | dataLoading = { loading | navigationVisibilityActive = True, navigationVisibleTaskIds = Set.singleton "detail" } }
                 taskDetail = Api.taskFromCardSummary (task "detail" Nothing)
             in
             case Dict.get "detail" ready.dataLoading.taskCardDetailRequests of
@@ -812,3 +812,19 @@ editorSession =
     , globalPermissions = { createWorkspace = False, superadmin = False }
     , workspace = Just { workspaceId = workspaceId, role = Just "edit", canRead = True, canEdit = True, canAdmin = False }
     }
+
+
+rootPaint : Model -> Model
+rootPaint source =
+    let
+        prepared = DataLoading.prepareRootNavigationRequest (Just workspaceId) { source | auth = { status = AuthReady, mode = Just "test" } }
+        response = { workspaceId = workspaceId, projects = { items = Dict.values source.dataLoading.projectCardSummaries |> List.filter (\summary -> summary.parentId == Nothing), hasMore = False }, tasks = { items = Dict.values source.dataLoading.taskCardSummaries |> List.filter (\summary -> summary.parentId == Nothing && summary.projectId == Nothing), hasMore = False } }
+        loaded = case prepared.dataLoading.rootNavigationRequest of
+            Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch prepared.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint 0 0 (Ok response)) prepared |> Cards.refreshViewport prepared |> Tuple.first
+            Nothing -> prepared
+        viewport = loaded.cards.viewport
+    in
+    Cards.updateViewport (Encode.object
+        [ ( "workspace", Encode.string workspaceId ), ( "epoch", Encode.int loaded.sessionRequestEpoch ), ( "generation", Encode.int loaded.dataLoading.navigationGeneration ), ( "revision", Encode.int viewport.revision )
+        , ( "paintNonce", Encode.int (DataLoading.backgroundPaintNonce loaded) ), ( "paintFilter", Encode.string (DataLoading.navigationFilterFingerprint loaded) )
+        ]) loaded |> Tuple.first

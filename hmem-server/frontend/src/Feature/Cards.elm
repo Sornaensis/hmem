@@ -3396,15 +3396,18 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
         in
         ( retired, Cmd.batch [ command, Ports.syncHierarchyViewport (viewportConfiguration retired Nothing 0) ] )
     else if not changed then
+        let
+            metadataCommand = Cmd.batch [ command, if previous.dataLoading.backgroundAdmission /= model.dataLoading.backgroundAdmission then Ports.syncHierarchyViewport (viewportConfiguration model Nothing 0) else Cmd.none ]
+        in
         if previous.dependencies.taskDependencyLinks /= model.dependencies.taskDependencyLinks || taskStatusesChanged then
             let
                 cards = model.cards
                 viewport = cards.viewport
                 projection = viewport.projection |> Maybe.map (\cached -> { cached | taskDirectOpenDependencyCounts = directOpenDependencyCounts model.tasks model.dependencies.taskDependencyLinks })
             in
-            ( { model | cards = { cards | viewport = { viewport | projection = projection } } }, command )
+            ( { model | cards = { cards | viewport = { viewport | projection = projection } } }, metadataCommand )
         else
-            ( model, command )
+            ( model, metadataCommand )
     else
         case model.selectedWorkspaceId of
             Nothing -> ( model, command )
@@ -3440,13 +3443,27 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                 ( demanded, Cmd.batch [ command, details, Ports.syncHierarchyViewport (viewportConfiguration demanded (if sameContext then anchor else Nothing) delta) ] )
 
 
+viewportBackgroundReady : Model -> Bool
+viewportBackgroundReady model =
+    let
+        fingerprint = Feature.DataLoading.navigationFilterFingerprint model
+        current request = Just request.workspaceId == model.selectedWorkspaceId && request.sessionEpoch == model.sessionRequestEpoch && request.filterFingerprint == fingerprint
+        rootReady = model.dataLoading.rootNavigationRequest |> Maybe.map (\request -> current request && (request.succeeded || request.projectCardCount > 0 || request.taskCardCount > 0)) |> Maybe.withDefault False
+        focusReady = model.focus.focusedEntity |> Maybe.andThen (\( kind, id ) -> Dict.get (kind ++ ":" ++ id) model.dataLoading.navigationFocuses) |> Maybe.map (\request -> current request && request.succeeded) |> Maybe.withDefault False
+    in
+    model.auth.status == AuthReady && model.activeTab == ProjectsTab && (rootReady || focusReady)
+
+
 viewportConfiguration : Model -> Maybe String -> Float -> Encode.Value
 viewportConfiguration model anchor delta =
     let
         viewport = model.cards.viewport
     in
     Encode.object
-        [ ( "workspace", Encode.string (Maybe.withDefault "" viewport.workspaceId) )
+        [ ( "paintReady", Encode.bool (viewportBackgroundReady model) )
+        , ( "paintNonce", Encode.int (Feature.DataLoading.backgroundPaintNonce model) )
+        , ( "paintFilter", Encode.string (Feature.DataLoading.navigationFilterFingerprint model) )
+        , ( "workspace", Encode.string (Maybe.withDefault "" viewport.workspaceId) )
         , ( "epoch", Encode.int viewport.sessionEpoch ), ( "generation", Encode.int viewport.generation ), ( "revision", Encode.int viewport.revision )
         , ( "anchor", anchor |> Maybe.map Encode.string |> Maybe.withDefault Encode.null ), ( "delta", Encode.float delta )
         , ( "top", Encode.float viewport.top ), ( "target", viewport.target |> Maybe.map Encode.string |> Maybe.withDefault Encode.null )
@@ -3495,7 +3512,10 @@ updateViewport payload model =
         ( demanded, details ) = viewportDetailDemand updated
     in
     if not valid || model.auth.status /= AuthReady then ( model, Cmd.none ) else
-        ( demanded, Cmd.batch [ details, if not (List.isEmpty measured) || target /= Nothing then Ports.syncHierarchyViewport (viewportConfiguration demanded anchorKey anchorDelta) else Cmd.none ] )
+        let
+            ( admitted, waveCommand ) = Feature.DataLoading.acceptBackgroundPaint (if get "paintFilter" Decode.string "" == Feature.DataLoading.navigationFilterFingerprint demanded then get "paintNonce" Decode.int -1 else -1) demanded
+        in
+        refreshViewport demanded ( admitted, Cmd.batch [ details, waveCommand, if not (List.isEmpty measured) || target /= Nothing then Ports.syncHierarchyViewport (viewportConfiguration admitted anchorKey anchorDelta) else Cmd.none ] )
 
 
 viewHierarchyViewport : String -> Model -> Html Msg

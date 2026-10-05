@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
-import { createEvidenceCapture, atomicEvidenceWrite, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { createColdDiagnostics, createEvidenceCapture, atomicEvidenceWrite, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -260,6 +260,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
       if (key.includes(':entity:') && (key.startsWith('projects:') || key.startsWith('tasks:'))) tracker.activeDetails -= 1
       tracker.completed += 1
       tracker.lastActivityAt = performance.now()
+      tracker.coldDiagnostics.completion({ at: tracker.lastActivityAt, requestId: receipt.requestId, key, bytes: receipt.bytes, status, fulfilled, paintReceiptId: receipt.paintReceiptId ?? null, lifetime: tracker.paintReadiness?.lifetime() })
     }
   }
   return async route => {
@@ -268,7 +269,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
     const pathname = url.pathname
     const contractedKey = perfApiRouteKey(url, request.method())
     const key = contractedKey || 'unimplemented:' + request.method() + ':' + pathname
-    const receipt = { key, method: request.method(), url: request.url(), bytes: 0, at: performance.now(), done: false }
+    const receipt = { requestId: tracker.requests.length + 1, key, method: request.method(), url: request.url(), bytes: 0, at: performance.now(), done: false }
     if (tracker.navigationProof) {
       if (key === 'session' || key === 'change-stream:resync') receipt.paintReceiptId = tracker.paintRunId + '-' + tracker.requests.length
       if (key === 'session') { receipt.proofSession = tracker.navigationProof.beginSession(); receipt.paintSession = tracker.paintReadiness.beginSession(receipt.at, receipt.paintReceiptId, request.url()) }
@@ -281,6 +282,7 @@ export function fixtureResponder(fixture, tracker, options = {}) {
         })
       }
     }
+    tracker.coldDiagnostics.arrival({ at: receipt.at, requestId: tracker.requests.length + 1, key, url: request.url(), paintReceiptId: receipt.paintReceiptId ?? null, lifetime: tracker.paintReadiness?.lifetime() });
     tracker.requests.push(receipt); tracker.arrivals.set(request, receipt)
     tracker.active += 1; tracker.lastActivityAt = receipt.at
     tracker.counts[key] = (tracker.counts[key] || 0) + 1
@@ -549,6 +551,7 @@ export async function waitForFirstUsefulViewport(page, tracker, fixture, anchorI
   const deadline = performance.now() + 30000
   while (performance.now() < deadline) {
     assertNoUnhandledApiRoutes(tracker)
+    const startedAt = performance.now()
     const observedLifetime = tracker.paintReadiness.lifetime()
     const observation = await page.evaluate(async id => {
       const startedAt = performance.now()
@@ -556,13 +559,24 @@ export async function waitForFirstUsefulViewport(page, tracker, fixture, anchorI
       const frameAt = performance.now()
       const anchor = document.getElementById('entity-' + id), scroll = document.getElementById('main-content-scroll')
       const row = anchor?.getBoundingClientRect(), viewport = scroll?.getBoundingClientRect()
-      const painted = !!(row && viewport && row.height > 0 && row.bottom > viewport.top && row.top < viewport.bottom && !document.querySelector('.loading-indicator'))
+      const anchorVisible = !!(row && viewport && row.height > 0 && row.bottom > viewport.top && row.top < viewport.bottom)
+      const loading = !!document.querySelector('.loading-indicator')
+      const painted = anchorVisible && !loading
       const receipts = performance.getEntriesByType('resource').flatMap(entry => (entry.serverTiming || [])
         .filter(metric => metric.name === 'hmem_receipt')
         .map(metric => ({ id: metric.description, url: entry.name, startTime: entry.startTime, responseEnd: entry.responseEnd })))
-      return { painted, origin: location.origin, receipts, clock: { startedAt, frameAt, endedAt: performance.now() } }
+      let domStamp = null
+      try { domStamp = JSON.parse(document.getElementById('hierarchy-viewport')?.dataset.hierarchyContext) } catch {}
+      return { painted, anchorVisible, loading, domStamp, origin: location.origin, receipts, clock: { startedAt, frameAt, endedAt: performance.now() } }
     }, anchorId)
-    if (observation?.painted && tracker.paintReadiness.readyAt(observedLifetime, observation)) return
+    const returnedAt = performance.now()
+    const ready = observation?.painted && tracker.paintReadiness.readyAt(observedLifetime, observation)
+    tracker.coldDiagnostics.evaluation({ startedAt, returnedAt, ready: ready === true,
+      ...(observation?.painted ? tracker.paintDecision() : { reason: 'unusable-dom', observedLifetime, currentLifetime: tracker.paintReadiness.lifetime(),
+        observation: { clock: observation?.clock, origin: observation?.origin, receipts: observation?.receipts?.slice(0, 8),
+          receiptCount: observation?.receipts?.length ?? 0, omittedReceipts: Math.max(0, (observation?.receipts?.length ?? 0) - 8) } }),
+      dom: { anchorVisible: observation?.anchorVisible, loading: observation?.loading, stamp: observation?.domStamp } })
+    if (ready) return
   }
   throw new Error('Authorized shell and first painted root anchor were not ready')
 }
@@ -813,12 +827,14 @@ function validateRequestDelta(delta, label) {
 }
 
 export function createTracker(fixture = null) {
+  let paintDecision = null
+  const coldDiagnostics = createColdDiagnostics()
   const children = fixture && expectedNavigationChildren(fixture)
   const navigationProof = fixture && createNavigationCompletionIndex({
     children, rootProjects: children.workspace_root.projects, rootTasks: children.workspace_root.tasks,
     context: navigationFilterContext(new URL('http://fixture?priority_mode=any'))
   })
-  return { navigationProof, paintRunId: randomUUID(), paintReadiness: fixture && createUsablePaintReadiness(fixture.workspace.id, workspaceShellSnapshotItems(fixture).length), workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
+  return { navigationProof, coldDiagnostics, paintDecision: () => paintDecision, paintRunId: randomUUID(), paintReadiness: fixture && createUsablePaintReadiness(fixture.workspace.id, workspaceShellSnapshotItems(fixture).length, decision => { paintDecision = decision }), workspaceId: fixture?.workspace.id, activeBranchOwners: new Map(), activeSnapshots: 0,
     requests: [], arrivals: new WeakMap(), counts: {}, bytes: {}, active: 0, activeBranches: 0, activeExpandedBranches: 0, activeRootBranches: 0, activeDetails: 0, maxBranches: 0, maxExpandedBranches: 0, maxRootBranches: 0, maxDetails: 0, completed: 0, lastActivityAt: performance.now(), unhandledApiRoutes: [],
     model: { snapshotGeneration: 0, snapshotItems: 0, snapshotPages: 0, snapshotComplete: false, snapshotProfile: null, timelineEvents: 0, timelineBuckets: 0, timelineBucketRequest: null }
   }
@@ -1029,9 +1045,10 @@ async function verifyStaleDeepFocusContinuation(browser, origin) {
   }
 }
 
-async function measureRun(browser, origin, fixture, measured, trace) {
+async function measureRun(browser, origin, fixture, measured, trace, diagnosticRuns) {
   const anchors = representativeProjectAnchors(fixture)
   const tracker = createTracker(fixture)
+  diagnosticRuns.push({ fixture: fixture.size, measured, trace, diagnostics: tracker.coldDiagnostics })
   const context = await browser.newContext({ viewport: HARNESS_CONFIGURATION.viewport })
   await context.addInitScript(fakeWebSocketScript)
   if (trace) await context.tracing.start({ screenshots: true, snapshots: true, sources: false })
@@ -1048,8 +1065,10 @@ async function measureRun(browser, origin, fixture, measured, trace) {
   await waitForFirstUsefulViewport(page, tracker, fixture, anchors.first)
   const coldMs = performance.now() - coldStart
   const coldEnd = tracker.requests.length
+  tracker.coldDiagnostics.cut(performance.now(), coldEnd, tracker.completed, tracker.active)
   const coldRequests = tracker.requests.slice(0, coldEnd)
   const cold = {
+    diagnostics: tracker.coldDiagnostics.snapshot(),
     phase: 'authorized-painted-root-viewport.v1', activeRequestsAtCut: tracker.active, completedRequestsAtCut: tracker.completed,
     ms: coldMs, requests: coldRequests.length, bytes: coldRequests.reduce((sum, request) => sum + request.bytes, 0),
     routeCounts: { ...tracker.counts }, routeBytes: { ...tracker.bytes },
@@ -1322,13 +1341,13 @@ function persistQualification(result, prerequisite, qualifiedInputs, command, re
   if (mode === 'check' && evidenceTask && evidenceRevision !== 'expanded-hierarchy.v1' && result.evaluation.passed && fs.existsSync(validationRecordPath)) finalWorkingTreeEvidence()
 }
 
-function qualificationAttempt(command, qualifiedInputs, retirement, action) {
+function qualificationAttempt(command, qualifiedInputs, retirement, action, coldDiagnostics = []) {
   if (evidenceRevision !== 'expanded-hierarchy.v1') return action()
   return persistEvidenceAttempt({
     manifestPath: evidenceManifestPath, validationPath: validationRecordPath,
     failureValidation: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId,
       evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs,
-      commands: [{ ...command, exitCode: 2 }], retirement, passed: false, failure: error.message }),
+      commands: [{ ...command, exitCode: 2 }], retirement, coldDiagnostics, passed: false, failure: error.message }),
     failureManifest: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit,
       qualificationPassed: false, failure: error.message, retirement,
       validationRecord: { path: normalizedRepositoryPath(validationRecordPath), sha256: sha256File(validationRecordPath) } })
@@ -1390,6 +1409,7 @@ async function main() {
   }
   const server = await staticServer()
   let browser = null, browserServer = null, measuredResult = null, failure = null, retirement = null
+  const diagnosticRuns = []
   try {
     browserServer = await chromium.launchServer({ headless: true, args: ['--js-flags=--expose-gc', '--enable-precise-memory-info'] })
     console.log('OWNED_CHROMIUM_PID=' + browserServer.process()?.pid)
@@ -1410,7 +1430,7 @@ async function main() {
         const measured = index >= WARMUPS
         process.stdout.write(`${size} ${measured ? `sample ${index - WARMUPS + 1}/${SAMPLES}` : `warmup ${index + 1}/${WARMUPS}`}... `)
         const captureTrace = mode === 'record' && size === 'large' && measured && index === WARMUPS + SAMPLES - 1
-        const result = await measureRun(browser, server.origin, fixtures[size], measured, captureTrace)
+        const result = await measureRun(browser, server.origin, fixtures[size], measured, captureTrace, diagnosticRuns)
         if (measured) runs[size].push(result)
         process.stdout.write(`${Math.round(result.cold.ms)}ms, ${result.cold.requests} requests\n`)
       }
@@ -1490,11 +1510,11 @@ async function main() {
   }
   if (!retirement.passed) failure = new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; '))
   if (failure) {
-    qualificationAttempt(command, qualifiedInputs, retirement, () => { throw failure })
+    qualificationAttempt(command, qualifiedInputs, retirement, () => { throw failure }, diagnosticRuns.map(run => ({ ...run, diagnostics: run.diagnostics.snapshot() })))
     throw failure
   }
   measuredResult.retirement = retirement
-  qualificationAttempt(command, qualifiedInputs, retirement, () => persistQualification(measuredResult, prerequisite, qualifiedInputs, command, retirement))
+  qualificationAttempt(command, qualifiedInputs, retirement, () => persistQualification(measuredResult, prerequisite, qualifiedInputs, command, retirement), diagnosticRuns.map(run => ({ ...run, diagnostics: run.diagnostics.snapshot() })))
   if (mode === 'check' && !measuredResult.evaluation.passed) process.exitCode = 1
 }
 

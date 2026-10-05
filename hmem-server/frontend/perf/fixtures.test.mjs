@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { createEvidenceCapture, atomicEvidenceWrite, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, currentRootNavigationPass, currentNavigationPassComplete, logicalExpandedNavigationComplete, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { createColdDiagnostics, createEvidenceCapture, atomicEvidenceWrite, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, currentRootNavigationPass, currentNavigationPassComplete, logicalExpandedNavigationComplete, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, FIXTURE_SCHEMA_VERSION, FIXTURE_SEED, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_BUCKET_RESPONSE_MAX, TIMELINE_BUCKET_SQL_CAP, TIMELINE_DEFAULT_UI_QUERY, TimelineBucketRequestError, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, orderedTimelineBuckets, paginate, projectOverviewResponse, projectReadinessRollup, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, stableFixtureJson, taskOverviewResponse, taskReadinessRollup, validateFixture, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 import { untrackedFileDiff, waitForFirstUsefulViewport, retryNavigationKind, createTracker, fixtureResponder } from './harness.mjs'
@@ -1458,3 +1458,94 @@ test('complete evidence persistence removes stale success and retains truthful f
     assert.equal(JSON.parse(fs.readFileSync(manifestPath)).qualificationPassed, true)
   })
 })
+
+
+test('cold diagnostics preserve current between-frame acceptance and late/missing rejection reasons', () => {
+  const decisions=[], url='http://fixture/api/v1/session', shellUrl='http://fixture/api/v1/change-stream/resync';
+  const initialize=proof=>{
+    const session=proof.beginSession(100,'session',url);proof.completeSession(session,{canRead:true,workspaceId:'w'},102);
+    const shell=proof.admitSnapshot(true,103,'shell',shellUrl);proof.completeSnapshot(shell,{profile:'workspace_shell_v1',workspaceId:'w',items:1,complete:true},237);
+  };
+  const plain=createUsablePaintReadiness('w',1), observed=createUsablePaintReadiness('w',1,decision=>decisions.push(decision));
+  initialize(plain);initialize(observed);
+  const base={painted:true,origin:'http://fixture',clock:{startedAt:223,frameAt:246,endedAt:247},receipts:[
+    {id:'session',url,startTime:90,responseEnd:102},{id:'shell',url:shellUrl,startTime:103,responseEnd:237}]};
+  const controls=[
+    [base,true,'accepted'],
+    [{...base,receipts:base.receipts.map(r=>r.id==='shell'?{...r,responseEnd:248}:r)},false,'snapshot-late-or-uncertain-timing'],
+    [{...base,receipts:[base.receipts[0]]},false,'snapshot-missing-timing'],
+    [{...base,receipts:[...base.receipts,base.receipts[1]]},false,'snapshot-duplicate-timing'],
+    [{...base,origin:'http://other'},false,'session-foreign-origin'],
+    [{...base,clock:{startedAt:247,frameAt:246,endedAt:248}},false,'invalid-clock']
+  ];
+  for(const [observation,expected,reason] of controls){
+    assert.equal(plain.readyAt(plain.lifetime(),observation),expected);
+    assert.equal(observed.readyAt(observed.lifetime(),observation),expected);
+    assert.equal(decisions.at(-1).reason,reason);
+  }
+  assert.equal(decisions.length,controls.length,'one decision record per existing readyAt call');
+  assert.deepEqual(decisions[0].observation.clock,base.clock);
+  assert.equal(decisions[0].session.receiptId,'session');assert.equal(decisions[0].snapshot.receiptId,'shell');
+  assert.equal(decisions[0].observation.receipts[1].responseEnd,237);
+});
+
+test('cold diagnostics distinguish ABA lifetime retirement from invalid current metadata', () => {
+  const decisions=[], proof=createUsablePaintReadiness('w',1,decision=>decisions.push(decision));
+  const url='http://fixture/api/v1/session',shellUrl='http://fixture/api/v1/change-stream/resync';
+  const oldSession=proof.beginSession(10,'old-session',url), oldLifetime=proof.lifetime();
+  proof.beginSession(20,'new-session',url);proof.completeSession(oldSession,{canRead:true,workspaceId:'w'},21);
+  const observation={origin:'http://fixture',clock:{startedAt:20,frameAt:30,endedAt:31},receipts:[]};
+  assert.equal(proof.readyAt(oldLifetime,observation),false);assert.equal(decisions.at(-1).reason,'retired-lifetime');
+  assert.equal(proof.readyAt(proof.lifetime(),observation),false);assert.equal(decisions.at(-1).reason,'session-metadata');
+  const session=proof.beginSession(40,'current-session',url);proof.completeSession(session,{canRead:true,workspaceId:'w'},41);
+  const shell=proof.admitSnapshot(true,42,'current-shell',shellUrl);proof.completeSnapshot(shell,{profile:'full_v1',workspaceId:'w',items:1,complete:true},43);
+  const current={origin:'http://fixture',clock:{startedAt:40,frameAt:50,endedAt:51},receipts:[{id:'current-session',url,startTime:40,responseEnd:41}]};
+  assert.equal(proof.readyAt(proof.lifetime(),current),false);assert.equal(decisions.at(-1).reason,'snapshot-metadata');
+  assert.equal(decisions.at(-1).snapshot.profile,'full_v1');
+});
+
+test('cold diagnostics retain bounded first decisive latest chronology and freeze at the host cut', () => {
+  const diagnostics=createColdDiagnostics();
+  for(let i=1;i<=1000;i++){diagnostics.arrival({requestId:i,at:i});diagnostics.completion({requestId:i,at:i+1,bytes:3})}
+  for(let i=1;i<=100;i++)diagnostics.evaluation({ready:i===7,reason:i===7?'accepted':'unusable-dom',startedAt:i,returnedAt:i+1});
+  diagnostics.cut(1200,1000,999,1);const before=diagnostics.snapshot();
+  diagnostics.arrival({requestId:1001,at:1201});diagnostics.completion({requestId:1000,at:1202});diagnostics.evaluation({ready:true});
+  assert.deepEqual(diagnostics.snapshot(),before,'post-cut traffic cannot be relabeled pre-cut');
+  assert.equal(before.histories.arrivals.total,1000);assert.equal(before.histories.arrivals.retained.length,9);assert.equal(before.histories.arrivals.omitted,991);
+  assert.deepEqual(before.histories.arrivals.retained.map(r=>r.requestId),[1,993,994,995,996,997,998,999,1000]);
+  assert.equal(before.histories.evaluations.total,100);assert.equal(before.histories.evaluations.decisiveIndex,7);assert.equal(before.histories.evaluations.omitted,94);
+  assert.deepEqual(before.cut,{at:1200,requestCount:1000,completedCount:999,activeCount:1});
+  assert.match(before.paintAcknowledgements,/not observed/);
+});
+
+test('cold sampler diagnostics preserve unusable DOM short circuit and the existing evaluation count', async () => {
+  const fixture=generateFixture('small'),tracker=createTracker(fixture),proof=tracker.paintReadiness;
+  const url='http://fixture/api/v1/session',shellUrl='http://fixture/api/v1/change-stream/resync';
+  const session=proof.beginSession(1,'session',url);proof.completeSession(session,{canRead:true,workspaceId:fixture.workspace.id},2);
+  const shell=proof.admitSnapshot(true,3,'shell',shellUrl);proof.completeSnapshot(shell,{profile:'workspace_shell_v1',workspaceId:fixture.workspace.id,items:1,complete:true},4);
+  let evaluations=0,decisions=0;const originalReady=proof.readyAt;proof.readyAt=(...args)=>{decisions++;return originalReady(...args)};
+  const page={async evaluate(){evaluations++;return {painted:evaluations===2,anchorVisible:evaluations===2,loading:evaluations===1,origin:'http://fixture',
+    clock:{startedAt:10,frameAt:20,endedAt:21},receipts:[{id:'session',url,startTime:1,responseEnd:2},{id:'shell',url:shellUrl,startTime:3,responseEnd:4}]}}};
+  await waitForFirstUsefulViewport(page,tracker,fixture,'anchor');
+  assert.equal(evaluations,2);assert.equal(decisions,1);
+  const history=tracker.coldDiagnostics.snapshot().histories.evaluations;
+  assert.equal(history.total,2);assert.equal(history.retained[0].reason,'unusable-dom');assert.deepEqual(history.retained[0].observation.clock,{startedAt:10,frameAt:20,endedAt:21});
+  assert.equal(history.retained[1].reason,'accepted');assert.equal(history.decisiveIndex,2);
+  assert.ok(history.retained.every(e=>e.returnedAt>=e.startedAt));
+});
+
+test('cold diagnostics survive failed persistence and owned cleanup without a stale success receipt', async () => {
+  const diagnostics=createColdDiagnostics();diagnostics.arrival({requestId:1,at:10,paintReceiptId:'current'});diagnostics.evaluation({ready:false,reason:'snapshot-missing-timing',returnedAt:20});
+  const retirement=await retireOwnedResources([{resource:'browser',close:async()=>{throw new Error('fixture cleanup failure')}},{resource:'server',close:async()=>{}}],100);
+  withWriterScratch(directory=>{
+    const manifestPath=path.join(directory,'manifest.json'),validationPath=path.join(directory,'validation.json');
+    fs.writeFileSync(manifestPath,JSON.stringify({qualificationPassed:true}));
+    assert.throws(()=>persistEvidenceAttempt({manifestPath,validationPath,
+      failureValidation:error=>({passed:false,failure:error.message,retirement,coldDiagnostics:[diagnostics.snapshot()]}),
+      failureManifest:error=>({qualificationPassed:false,failure:error.message})},()=>{throw new Error('fixture persistence failure')}),/fixture persistence failure/);
+    const failed=JSON.parse(fs.readFileSync(validationPath));assert.equal(failed.passed,false);assert.equal(failed.retirement.passed,false);
+    assert.equal(failed.coldDiagnostics[0].histories.evaluations.firstIndex,1);
+    assert.equal(failed.coldDiagnostics[0].histories.evaluations.retained[0].reason,'snapshot-missing-timing');
+    assert.equal(JSON.parse(fs.readFileSync(manifestPath)).qualificationPassed,false);
+  });
+});

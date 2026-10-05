@@ -499,22 +499,52 @@ export function createNavigationCompletionIndex({ children, rootProjects, rootTa
 // Same-browser-clock response/paint comparison. A 1 ms allowance for each
 // Chromium reading exceeds its supported 100 µs TimeClamper granularity.
 // Boundary uncertainty fails closed; it adds no wait and changes no accounting cut.
-export function createUsablePaintReadiness(workspaceId, expectedItems) {
+export function createColdDiagnostics() {
+  const histories = Object.fromEntries(['arrivals', 'completions', 'evaluations'].map(kind => [kind, { total: 0, first: null, decisive: null, latest: [] }]))
+  let cut = null
+  const record = (kind, value, decisive = false) => {
+    if (cut) return
+    const history = histories[kind], entry = { index: ++history.total, ...value }
+    if (!history.first) history.first = entry
+    if (decisive && !history.decisive) history.decisive = entry
+    history.latest.push(entry)
+    if (history.latest.length > (kind === 'evaluations' ? 4 : 8)) history.latest.shift()
+  }
+  return {
+    arrival: value => record('arrivals', value),
+    completion: value => record('completions', value),
+    evaluation: value => record('evaluations', value, value.ready),
+    cut(at, requestCount, completedCount, activeCount) { if (!cut) cut = { at, requestCount, completedCount, activeCount } },
+    snapshot() {
+      return { schemaVersion: 1, clocks: { host: 'Node performance.now; same run only', browser: 'page performance.now; compare resource responseEnd only within its evaluation' },
+        paintAcknowledgements: 'not observed; no nonce/ACK inference from DOM stamps', cut,
+        histories: Object.fromEntries(Object.entries(histories).map(([kind, history]) => {
+          const retained = new Map([history.first, history.decisive, ...history.latest].filter(Boolean).map(entry => [entry.index, entry]))
+          return [kind, { total: history.total, omitted: history.total - retained.size, firstIndex: history.first?.index ?? null,
+            decisiveIndex: history.decisive?.index ?? null, latestIndex: history.latest.at(-1)?.index ?? null,
+            retained: [...retained.values()].sort((a, b) => a.index - b.index) }]
+        })) }
+    }
+  }
+}
+
+export function createUsablePaintReadiness(workspaceId, expectedItems, onDecision = null) {
   let sessionEpoch = 0, snapshotEpoch = 0, session = null, snapshot = null
   const time = at => Number.isFinite(at) && at >= 0
   const lifetime = () => ({ workspaceId, sessionEpoch, snapshotEpoch })
-  const receivedBeforeFrame = (receipt, observation) => {
-    if (!receipt || typeof receipt.receiptId !== 'string' || !receipt.receiptId || !Array.isArray(observation.receipts)) return false
+  const receiptFailure = (receipt, observation) => {
+    if (!receipt || typeof receipt.receiptId !== 'string' || !receipt.receiptId || !Array.isArray(observation.receipts)) return 'missing-receipt'
     let expectedUrl
     try {
       expectedUrl = new URL(receipt.url)
-      if (expectedUrl.origin !== observation.origin) return false
-    } catch { return false }
+      if (expectedUrl.origin !== observation.origin) return 'foreign-origin'
+    } catch { return 'invalid-url' }
     const matches = observation.receipts.filter(entry => entry?.id === receipt.receiptId)
-    if (matches.length !== 1) return false
+    if (matches.length !== 1) return matches.length ? 'duplicate-timing' : 'missing-timing'
     const entry = matches[0]
-    return entry.url === expectedUrl.href && time(entry.startTime) && time(entry.responseEnd) && entry.responseEnd > 0
-      && entry.startTime <= entry.responseEnd && entry.responseEnd <= observation.clock.frameAt - 2
+    if (entry.url !== expectedUrl.href) return 'unmatched-url'
+    if (!time(entry.startTime) || !time(entry.responseEnd) || entry.responseEnd <= 0 || entry.startTime > entry.responseEnd) return 'invalid-timing'
+    return entry.responseEnd <= observation.clock.frameAt - 2 ? null : 'late-or-uncertain-timing'
   }
   return {
     lifetime,
@@ -543,11 +573,27 @@ export function createUsablePaintReadiness(workspaceId, expectedItems) {
     },
     readyAt(observedLifetime, observation) {
       const clock = observation?.clock
-      if (![clock?.startedAt, clock?.frameAt, clock?.endedAt].every(time) || clock.startedAt > clock.frameAt || clock.frameAt > clock.endedAt
-        || observedLifetime?.workspaceId !== workspaceId || observedLifetime?.sessionEpoch !== sessionEpoch || observedLifetime?.snapshotEpoch !== snapshotEpoch) return false
-      return !!(session?.canRead && session.workspaceId === workspaceId && time(session.completeAt) && receivedBeforeFrame(session, observation)
-        && snapshot && !snapshot.invalid && snapshot.workspaceId === workspaceId && snapshot.profile === 'workspace_shell_v1'
-        && snapshot.items === expectedItems && snapshot.pages === 1 && time(snapshot.completeAt) && receivedBeforeFrame(snapshot, observation))
+      const finish = reason => {
+        if (onDecision) {
+          const ids = [session?.receiptId, snapshot?.receiptId]
+          const receipts = Array.isArray(observation?.receipts) ? observation.receipts : []
+          const matched = receipts.filter(entry => ids.includes(entry?.id)).slice(0, 8)
+          onDecision({ ready: reason === null, reason: reason || 'accepted', observedLifetime, currentLifetime: lifetime(),
+            session: session && { ...session }, snapshot: snapshot && { ...snapshot },
+            observation: { painted: observation?.painted, origin: observation?.origin, clock,
+              receipts: matched, receiptCount: receipts.length, omittedReceipts: receipts.length - matched.length } })
+        }
+        return reason === null
+      }
+      if (![clock?.startedAt, clock?.frameAt, clock?.endedAt].every(time) || clock.startedAt > clock.frameAt || clock.frameAt > clock.endedAt) return finish('invalid-clock')
+      if (observedLifetime?.workspaceId !== workspaceId || observedLifetime?.sessionEpoch !== sessionEpoch || observedLifetime?.snapshotEpoch !== snapshotEpoch) return finish('retired-lifetime')
+      if (!session?.canRead || session.workspaceId !== workspaceId || !time(session.completeAt)) return finish('session-metadata')
+      const sessionFailure = receiptFailure(session, observation)
+      if (sessionFailure) return finish('session-' + sessionFailure)
+      if (!snapshot || snapshot.invalid || snapshot.workspaceId !== workspaceId || snapshot.profile !== 'workspace_shell_v1'
+        || snapshot.items !== expectedItems || snapshot.pages !== 1 || !time(snapshot.completeAt)) return finish('snapshot-metadata')
+      const snapshotFailure = receiptFailure(snapshot, observation)
+      return finish(snapshotFailure ? 'snapshot-' + snapshotFailure : null)
     }
   }
 }

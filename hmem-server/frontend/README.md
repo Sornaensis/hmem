@@ -96,6 +96,14 @@ Missing, duplicated, retired, unmatched or boundary-uncertain timing fails close
 no host/browser clock synchronization is assumed. A shell completed between the
 two frames may qualify the final paint; one completed after it cannot. Request
 and body-byte accounting still ends after the evaluation returns to the host.
+Each cold run retains passive request/completion identities and first, decisive,
+and latest readiness evaluations with explicit omission counts. Browser response
+and paint timestamps remain separate from host evaluation/return/cut timestamps.
+The accounting cut is saved before diagnostic formatting; post-cut traffic does
+not enter its history. Failed writer or owned-cleanup receipts retain this bounded
+chronology too. Paint permits and acknowledgments are not observed by these
+diagnostics, and a DOM stamp does not prove an acknowledgment. These diagnostics
+add no evaluation, wait, request, predicate, or performance metric.
 The production shell contains one workspace item. Preserved legacy full-fixture
 resync records contain 155 small or 4,951 large items; their cold timing is not
 phase-comparable with this authorized painted-root cut.

@@ -28,6 +28,7 @@ import Text.Read (readMaybe)
 
 import HMem.DB.Auth qualified as Auth
 import HMem.DB.ChangeStream
+import HMem.DB.Migration qualified as Migration
 import HMem.DB.Pool (DBException(..), checkPgvector, runSession, runTransaction, withConn)
 import HMem.DB.Observation qualified as Observation
 import HMem.DB.Project (createProject)
@@ -42,6 +43,71 @@ import HMem.Types
 -- ephemeral PostgreSQL sandbox is still discarded by SpecHook after the run.
 spec :: Spec
 spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
+  it "retires only tokenless full Observation snapshots and their complete resume lineages in V031" $ \env -> do
+    workspace <- createTestWorkspace env "snapshot-version-upgrade"
+    original <- Observation.createObservation env.pool CreateObservation
+      { workspaceId = workspace.id, subjects = [ObservationSubject SubjectFile "src/Upgrade.hs"]
+      , gitSha = T.replicate 40 "a", content = "historical snapshot content" }
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "snapshot-version-upgrade"
+        item kind value = object ["schema_version" .= (1 :: Int), "kind" .= (kind :: T.Text), "data" .= value]
+        canonical = item "observation" (toJSON original)
+        legacy = item "observation" (case toJSON original of Object fields -> Object (KeyMap.delete "content_version" fields); value -> value)
+        root = item "workspace" (toJSON workspace)
+        unwrap = either (fail . show) pure
+        begin key profile values = beginResyncWithStartKeyAndProfile env.pool 60 scope audience key 1 profile (pure values) >>= unwrap
+        page token = readSnapshotPageWithStoredTtls env.pool 60 600 scope audience token >>= unwrap
+        resume value = maybe (fail "terminal snapshot omitted resume bearer") pure value.snapshotResumeToken
+    incompatible <- begin "version-upgrade-incompatible-start" FullV1 [root, legacy]
+    first <- page incompatible.snapshotToken
+    next <- maybe (fail "expected continuation page") pure first.snapshotNextToken
+    terminal <- page next
+    oldResume <- resume terminal
+    rotated <- replayAndRotateResumeToken env.pool 600 scope audience oldResume 100 >>= unwrap
+    successor <- replayAndRotateResumeToken env.pool 600 scope audience rotated.replayPageResumeToken 100 >>= unwrap
+    preserved <- mapM (\(key, profile, values) -> do
+      started <- begin key profile values
+      saved <- page started.snapshotToken
+      pure (started, saved))
+      [ ("version-upgrade-valid-start", FullV1, [canonical])
+      , ("version-upgrade-shell-start", WorkspaceShellV1, [root])
+      , ("version-upgrade-unrelated-start", FullV1, [root]) ]
+    global <- beginResyncWithStartKeyAndProfile env.pool 60 GlobalScope audience "version-upgrade-global-start" 1 FullV1 (pure [root]) >>= unwrap
+    globalPage <- readSnapshotPageWithStoredTtls env.pool 60 600 GlobalScope audience global.snapshotToken >>= unwrap
+    auditBefore <- getAuditLogRows env.pool "observation" (T.pack (show original.id))
+    outboxBefore <- listOutboxAfter env.pool scope 0 100
+    -- Model a populated pre-V031 database without changing historical items.
+    runSession env.pool $ Session.sql "DELETE FROM schema_migrations WHERE version = 31"
+    upgraded <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
+    upgraded.failed `shouldBe` Nothing
+    upgraded.applied `shouldBe` ["V031__retire_unversioned_observation_snapshots.sql"]
+    mapM_ (\token -> readSnapshotPageWithStoredTtls env.pool 60 600 scope audience token `shouldReturn` Left SnapshotNotFound)
+      [incompatible.snapshotToken, next]
+    mapM_ (\token -> replayUnacknowledgedResumeToken env.pool scope audience token 100 `shouldReturn` Left ResumeNotFound)
+      [oldResume, rotated.replayPageResumeToken, successor.replayPageResumeToken]
+    runSession env.pool (Session.statement workspace.id countSnapshotSessionsStatement) `shouldReturn` 3
+    runSession env.pool (Session.statement workspace.id countSnapshotPageTokensStatement) `shouldReturn` 3
+    mapM_ (\(started, saved) -> do
+      page started.snapshotToken `shouldReturn` saved
+      token <- resume saved
+      replayUnacknowledgedResumeToken env.pool scope audience token 100 >>= (`shouldSatisfy` isRight)) preserved
+    readSnapshotPageWithStoredTtls env.pool 60 600 GlobalScope audience global.snapshotToken `shouldReturn` Right globalPage
+    globalResume <- resume globalPage
+    replayUnacknowledgedResumeToken env.pool GlobalScope audience globalResume 100 >>= (`shouldSatisfy` isRight)
+    Observation.getObservation env.pool workspace.id original.id `shouldReturn` Just original
+    getAuditLogRows env.pool "observation" (T.pack (show original.id)) `shouldReturn` auditBefore
+    listOutboxAfter env.pool scope 0 100 `shouldReturn` outboxBefore
+    fresh <- begin "version-upgrade-incompatible-start" FullV1 [canonical]
+    fresh.snapshotToken `shouldNotBe` incompatible.snapshotToken
+    freshPage <- page fresh.snapshotToken
+    freshPage.snapshotPageItems `shouldBe` [canonical]
+    freshResume <- resume freshPage
+    freshResume `shouldNotBe` oldResume
+    replayUnacknowledgedResumeToken env.pool scope audience freshResume 100 >>= (`shouldSatisfy` isRight)
+    repeated <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
+    repeated.failed `shouldBe` Nothing
+    repeated.applied `shouldBe` []
+
   it "cascade status intent rejects historical unfinished child moves without silently cancelling them" $ \env -> do
     workspace <- createTestWorkspace env "cascade-legacy-move-intent"
     source <- createProject env.pool (CreateProject workspace.id Nothing "source" Nothing Nothing Nothing)

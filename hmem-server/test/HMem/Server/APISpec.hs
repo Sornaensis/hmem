@@ -5,6 +5,7 @@ import Control.Concurrent.Async (poll, wait, withAsync)
 import Control.Exception (bracket_, onException)
 import Control.Monad (forM, forM_, void)
 import Data.Aeson (Value(..), decode, encode, object, toJSON, (.=))
+import Data.Aeson qualified
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
@@ -902,6 +903,67 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       membershipActions `shouldBe` [Just (String "created"), Just (String "deleted")]
 
   describe "Canonical change-stream resync" $ do
+    it "transports versioned Observation full snapshots with immutable materialized content" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "versioned-full-snapshot"
+      created <- postJson app "/api/v1/observations" (object
+        [ "workspace_id" .= workspace.id
+        , "subjects" .= [ObservationSubject SubjectGlob "src/**", ObservationSubject SubjectFile "src/Version.hs"]
+        , "git_sha" .= T.replicate 40 "a", "content" .= ("snapshot original" :: T.Text) ])
+      responseStatus created `shouldBe` status200
+      original <- maybe (fail "expected canonical Observation") pure (decode (responseBody created) :: Maybe Observation)
+      let start key profile = postJson app "/api/v1/change-stream/resync" (object
+            [ "scope" .= object ["scope" .= ("workspace" :: T.Text), "workspace_id" .= workspace.id]
+            , "page_size" .= (20 :: Int), "snapshot_profile" .= (profile :: T.Text)
+            , "start_idempotency_key" .= (key :: T.Text) ])
+          body response = maybe (fail "invalid snapshot JSON") pure (decode (responseBody response) :: Maybe Value)
+          observations response = do
+            value <- body response
+            case jsonField "items" value of
+              Just (Array items) -> mapM (\item -> case jsonField "data" item of
+                Just fields -> case Data.Aeson.fromJSON fields of
+                  Data.Aeson.Success observation -> pure observation
+                  Data.Aeson.Error message -> fail message
+                Nothing -> fail "snapshot item omitted data")
+                [ item | item <- toList items, jsonField "kind" item == Just (String "observation") ]
+              _ -> fail "snapshot omitted items"
+      first <- start "versioned-full-snapshot-first-key" "full_v1"
+      responseStatus first `shouldBe` status200
+      observations first `shouldReturn` [original]
+      firstBody <- body first
+      case jsonField "items" firstBody of
+        Just (Array items) -> do
+          map (jsonField "kind") (toList items) `shouldBe` [Just (String "workspace"), Just (String "observation")]
+          mapM_ (\item -> do
+            jsonPath ["data", "embedding"] item `shouldBe` Nothing
+            jsonPath ["data", "search_vector"] item `shouldBe` Nothing
+            jsonPath ["data", "subject_set_open"] item `shouldBe` Nothing) items
+        _ -> fail "snapshot omitted items"
+      let path = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show original.id))
+      updated <- requestWithHeaders app methodPut path [("If-Match", quotedContentVersion original.contentVersion)]
+        (encode (object ["content" .= ("snapshot successor" :: T.Text)]))
+      responseStatus updated `shouldBe` status200
+      latest <- maybe (fail "expected successor Observation") pure (decode (responseBody updated) :: Maybe Observation)
+      latest.contentVersion `shouldNotBe` original.contentVersion
+      latest.subjects `shouldBe` original.subjects
+      latest.gitSha `shouldBe` original.gitSha
+      latest.createdAt `shouldBe` original.createdAt
+      retry <- start "versioned-full-snapshot-first-key" "full_v1"
+      responseBody retry `shouldBe` responseBody first
+      observations retry `shouldReturn` [original]
+      fresh <- start "versioned-full-snapshot-fresh-key" "full_v1"
+      observations fresh `shouldReturn` [latest]
+      shell <- start "versioned-full-snapshot-shell-key" "workspace_shell_v1"
+      responseStatus shell `shouldBe` status200
+      observations shell `shouldReturn` ([] :: [Observation])
+      shellBody <- body shell
+      fmap (fmap (jsonField "kind") . toList) (case jsonField "items" shellBody of Just (Array items) -> Just items; _ -> Nothing)
+        `shouldBe` Just [Just (String "workspace")]
+      global <- postJson app "/api/v1/change-stream/resync" (object
+        [ "scope" .= object ["scope" .= ("global" :: T.Text)], "page_size" .= (1000 :: Int)
+        , "start_idempotency_key" .= ("versioned-full-snapshot-global-key" :: T.Text) ])
+      responseStatus global `shouldBe` status200
+      observations global `shouldReturn` ([] :: [Observation])
+
     it "returns allowlisted snapshot items and an opaque terminal token without a cursor" $ \(env, app) -> do
       workspace <- createTestWorkspace env "canonical-resync"
       let start = object

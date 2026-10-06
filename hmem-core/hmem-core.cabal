@@ -1,6 +1,6 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.38.1.
+-- This file has been generated from package.yaml by hpack version 0.39.6.
 --
 -- see: https://github.com/sol/hpack
 
@@ -91,6 +91,7 @@ test-suite hmem-core-test
       HMem.DB.ChangeStreamSpec
       HMem.DB.EmbeddingSpec
       HMem.DB.ObservationSpec
+      HMem.DB.ObservationVersionSpec
       HMem.DB.OverviewSpec
       HMem.DB.ProjectSpec
       HMem.DB.SearchSpec

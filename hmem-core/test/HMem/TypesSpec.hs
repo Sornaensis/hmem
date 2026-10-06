@@ -1,6 +1,7 @@
 module HMem.TypesSpec (spec) where
 
-import Data.Aeson (Value(Null), eitherDecode, encode, object, (.=))
+import Data.Aeson (Value(Null, Object), eitherDecode, encode, object, toJSON, (.=))
+import Data.Aeson.KeyMap qualified as KM
 import Data.Either (isLeft)
 import Data.Text qualified as T
 import Data.Time (UTCTime)
@@ -69,6 +70,18 @@ spec = do
       eitherDecode (encode legacyMatch) `shouldBe` Right matchValue { pathMatches = [] }
     it "round-trips canonical path-correlated evidence while retaining legacy arrays" $
       eitherDecode (encode matchValue) `shouldBe` Right matchValue
+  describe "Observation content version JSON" $ do
+    it "round-trips the opaque UUID token" $
+      eitherDecode (encode observationValue) `shouldBe` Right observationValue
+    it "rejects missing and malformed canonical read tokens" $ do
+      case toJSON observationValue of
+        Object fields -> do
+          eitherDecode (encode (Object (KM.delete "content_version" fields))) `shouldSatisfy` (isLeft :: Either String Observation -> Bool)
+          eitherDecode (encode (Object (KM.insert "content_version" (toJSON ("not-a-uuid" :: String)) fields))) `shouldSatisfy` (isLeft :: Either String Observation -> Bool)
+        _ -> expectationFailure "Observation must encode an object"
+    it "retains content-only unconditional update JSON and rejects token mutation" $ do
+      eitherDecode "{\"content\":\"compatible replacement\"}" `shouldBe` Right (UpdateObservation "compatible replacement")
+      eitherDecode "{\"content\":\"replacement\",\"content_version\":\"00000000-0000-0000-0000-000000000001\"}" `shouldSatisfy` (isLeft :: Either String UpdateObservation -> Bool)
   where
     workspace = read "00000000-0000-0000-0000-000000000001" :: UUID
     observationSearch = UnifiedSearchQuery
@@ -77,7 +90,7 @@ spec = do
       , projectStatus = Nothing, taskStatus = Nothing, taskPriority = Nothing, projectId = Nothing }
     savedView = CreateSavedView workspace "view" Nothing "activity" Null
     observedAt = read "2026-01-02 03:04:05 UTC" :: UTCTime
-    observationValue = Observation workspace workspace create.subjects canonicalSha "body" observedAt observedAt
+    observationValue = Observation workspace workspace create.subjects canonicalSha "body" observedAt observedAt workspace
     matchValue = ObservationMatch
       { observation = observationValue
       , pathMatches =

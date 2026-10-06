@@ -1,5 +1,6 @@
 module HMem.Types
   ( jsonOptions, camelToSnake
+  , ObservationUpdateResult(..)
   , SubjectKind(..), subjectKindToText, subjectKindFromText
   , ObservationSubject(..), Observation(..), CreateObservation(..), UpdateObservation(..), ObservationQuery(..), ObservationSubjectFacetQuery(..), ObservationSubjectFacet(..), SimilarObservationQuery(..), SimilarObservation(..), ObservationMatchQuery(..), ObservationPathMatch(..), ObservationMatch(..)
   , maxObservationSubjectBytes, maxObservationSubjects, maxObservationSubjectBytesTotal, maxObservationContentBytes, observationEmbeddingDimensions
@@ -389,6 +390,7 @@ data Observation = Observation
   , content     :: Text
   , createdAt   :: UTCTime
   , updatedAt   :: UTCTime
+  , contentVersion :: UUID
   } deriving (Show, Eq, Generic)
 
 instance ToJSON Observation where
@@ -397,11 +399,20 @@ instance ToJSON Observation where
     , "subjects" .= observation.subjects, "git_sha" .= observation.gitSha
     , "content" .= observation.content, "created_at" .= observation.createdAt
     , "updated_at" .= observation.updatedAt
+    , "content_version" .= observation.contentVersion
     ] <> legacySubjectPairs observation.subjects
 instance FromJSON Observation where
   parseJSON = withObject "Observation" $ \o -> Observation
     <$> o .: "id" <*> o .: "workspace_id" <*> parseSubjects o <*> o .: "git_sha"
-    <*> o .: "content" <*> o .: "created_at" <*> o .: "updated_at"
+    <*> o .: "content" <*> o .: "created_at" <*> o .: "updated_at" <*> o .: "content_version"
+
+-- | Conditional content writes distinguish a stale base from an absent row.
+-- The token is opaque: it has no ordering or timestamp semantics.
+data ObservationUpdateResult
+  = ObservationUpdated Observation
+  | ObservationVersionMismatch Observation
+  | ObservationNotFound
+  deriving (Show, Eq)
 
 -- | Provenance is supplied once, on creation, and is immutable thereafter.
 data CreateObservation = CreateObservation

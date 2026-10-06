@@ -31,6 +31,7 @@ content. Its immutable ordered repository subjects are stored in
 | `workspace_id` | `UUID` | Required foreign key to `workspaces(id)`; deleting the workspace cascades |
 | `git_sha` | `TEXT` | Required lowercase 40-character Git SHA |
 | `content` | `TEXT` | Required Observation content |
+| `content_version` | `UUID` | Opaque content precondition; defaults to a fresh UUID and advances on every accepted content write |
 | `search_vector` | `TSVECTOR` | Required internal full-text index value; defaults to an empty vector |
 | `created_at` | `TIMESTAMPTZ` | Required; defaults to `now()` |
 | `updated_at` | `TIMESTAMPTZ` | Required; defaults to `now()` and is maintained by a trigger |
@@ -57,6 +58,18 @@ mutation, so a vector made from old content is never reused silently. The
 optional embedding is written through a separate pgvector operation. Changing
 the repository, subject, kind, or revision requires a new Observation. Deleting
 an Observation is a hard delete, not a soft-delete lifecycle state.
+
+Core reads return `content_version`. Conditional updates compare the expected
+UUID with the workspace and Observation ID atomically. They return the applied
+canonical Observation, a version mismatch with the latest canonical Observation,
+or an absent record. A mismatch produces no content, embedding, job, audit, or
+outbox mutation. A caller can consciously rebase against the returned version.
+The existing content-only core update remains deliberately unconditional for
+compatible callers. Every accepted content write, including identical bytes and
+unconditional updates, advances the token. Embedding-only writes leave it intact;
+direct token replacement is rejected. Versions carry no ordering, clock, Git
+revision, or request-ID meaning. V030 backfills existing records and registers
+the schema migration within its transaction.
 
 `search_vector` is maintained from every subject and content. pgvector is optional:
 without the extension, the `embedding` column and vector index are absent and

@@ -1984,6 +1984,26 @@ a:hover {
   border-radius: 0.5rem;
 }
 
+.observation-discovery-controls {
+  display: grid;
+  gap: 0.625rem;
+  min-width: 0;
+}
+
+.observation-advanced-filters[hidden],
+.observation-file-composer[hidden] {
+  display: none;
+}
+
+.observation-file-composer h3 {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.observation-file-composer .form-help {
+  overflow-wrap: anywhere;
+}
+
 .observation-filters .observation-filter-group {
   flex: 1 1 11rem;
   min-width: 0;

@@ -52,7 +52,7 @@ import Dict
 import Helpers exposing (beginTrackedMutation, focusElement, formatDate, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (..)
-import Html.Events exposing (custom, onClick, onInput, stopPropagationOn)
+import Html.Events exposing (custom, onClick, onInput, onSubmit, stopPropagationOn)
 import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
@@ -76,6 +76,8 @@ init =
     , selectedFacet = Nothing
     , gitSha = ""
     , requestMode = ObservationFlatMode
+    , fileComposerOpen = False
+    , advancedFiltersOpen = False
     , appliedQuery = Nothing
     , failedRequest = Nothing
     , matchPathsInput = ""
@@ -230,6 +232,15 @@ update msg model =
 
         SetObservationMatchPaths value ->
             ( updateObservation (\state -> { state | matchPathsInput = value, matchValidationError = Nothing }) model, Cmd.none )
+
+        OpenObservationFileComposer ->
+            ( updateObservation (\state -> { state | fileComposerOpen = True }) model, focusElement "observation-match-paths" )
+
+        CloseObservationFileComposer ->
+            ( updateObservation (\state -> { state | fileComposerOpen = False }) model, focusElement "observation-for-files" )
+
+        ToggleObservationAdvancedFilters ->
+            ( updateObservation (\state -> { state | advancedFiltersOpen = not state.advancedFiltersOpen }) model, Cmd.none )
 
         ApplyObservationMatch ->
             matchObservations model
@@ -3127,20 +3138,40 @@ viewFilters state =
 
 viewFilterInputs : ObservationModel -> Html Msg
 viewFilterInputs state =
-    div [ class "filter-bar observation-filters" ]
-        [ div [ class "filter-group observation-filter-group" ]
-            [ label [ class "filter-label", for "observation-query" ] [ text "Search" ]
-            , input
-                [ id "observation-query"
-                , class "form-input observation-filter-input"
-                , type_ "search"
-                , placeholder "Full-text search"
-                , value state.query
-                , onInput SetObservationQuery
+    div [ class "observation-discovery-controls" ]
+        [ Html.form [ class "filter-bar observation-filters observation-search", onSubmit ApplyObservationFilters ]
+            [ div [ class "filter-group observation-filter-group" ]
+                [ label [ class "filter-label", for "observation-query" ] [ text "Search observations" ]
+                , input
+                    [ id "observation-query"
+                    , class "form-input observation-filter-input"
+                    , type_ "search"
+                    , placeholder "Search observation text"
+                    , value state.query
+                    , onInput SetObservationQuery
+                    ]
+                    []
                 ]
-                []
+            , button [ class "btn btn-primary observation-filter-apply", type_ "submit", disabled state.loading ] [ text "Apply filters" ]
+            , button
+                [ id "observation-advanced-toggle"
+                , class "btn btn-secondary"
+                , type_ "button"
+                , onClick ToggleObservationAdvancedFilters
+                , attribute "aria-expanded" (if state.advancedFiltersOpen then "true" else "false")
+                , attribute "aria-controls" "observation-advanced-filters"
+                ]
+                [ text "Advanced filters" ]
             ]
-        , div [ class "filter-group observation-filter-group observation-filter-kind" ]
+        , viewAdvancedFilters state
+        , viewFileComposer state
+        ]
+
+
+viewAdvancedFilters : ObservationModel -> Html Msg
+viewAdvancedFilters state =
+    div [ id "observation-advanced-filters", class "filter-bar observation-filters observation-advanced-filters", hidden (not state.advancedFiltersOpen) ]
+        [ div [ class "filter-group observation-filter-group observation-filter-kind" ]
             [ label [ class "filter-label", for "observation-subject-kind" ]
                 [ text
                     (if state.requestMode == ObservationExactSubjectMode then
@@ -3199,9 +3230,16 @@ viewFilterInputs state =
                 ]
                 []
             ]
-        , button [ class "btn btn-primary observation-filter-apply", type_ "button", onClick ApplyObservationFilters, disabled state.loading ] [ text "Apply filters" ]
-        , div [ class "filter-group observation-filter-group observation-match-input" ]
-            [ label [ class "filter-label", for "observation-match-paths" ] [ text "Match repository files" ]
+        ]
+
+
+viewFileComposer : ObservationModel -> Html Msg
+viewFileComposer state =
+    section [ id "observation-file-composer", class "filter-bar observation-filters observation-file-composer", hidden (not state.fileComposerOpen), attribute "aria-labelledby" "observation-file-composer-heading" ]
+        [ div [ class "filter-group observation-filter-group observation-match-input" ]
+            [ h3 [ id "observation-file-composer-heading" ] [ text "Find observations for files" ]
+            , p [ class "form-help" ] [ text "The displayed results stay unchanged until you select Match files." ]
+            , label [ class "filter-label", for "observation-match-paths" ] [ text "Repository file paths" ]
             , textarea
                 [ id "observation-match-paths"
                 , class "form-input observation-filter-input"
@@ -3212,7 +3250,7 @@ viewFilterInputs state =
                 , attribute "aria-describedby" "observation-match-help"
                 ]
                 []
-            , p [ id "observation-match-help", class "form-help" ] [ text "Matches stored file subjects and globs. Paths are not expanded from the repository." ]
+            , p [ id "observation-match-help", class "form-help" ] [ text "For example: src/Main.elm. Enter one concrete repository-relative file path per line. Matches saved file and glob subjects; wildcards are not accepted as input and no checkout is scanned." ]
             , case state.matchValidationError of
                 Just message ->
                     p [ class "form-error", attribute "role" "alert" ] [ text message ]
@@ -3226,6 +3264,7 @@ viewFilterInputs state =
 
           else
             text ""
+        , button [ class "btn btn-secondary", type_ "button", onClick CloseObservationFileComposer ] [ text "Close file composer" ]
         ]
 
 
@@ -3304,23 +3343,38 @@ viewModeNavigation state =
         headingText =
             case state.requestMode of
                 ObservationFlatMode ->
-                    "Flat observations"
+                    "All observations"
 
                 ObservationFacetMode ->
-                    "Shared subjects"
+                    "Stored subjects"
 
                 ObservationExactSubjectMode ->
                     "Exact subject results"
 
                 ObservationMatchMode ->
-                    "Concrete path matches"
+                    "File matches"
     in
     section [ class "observation-mode-navigation", attribute "aria-labelledby" "observation-mode-heading" ]
         [ div [ class "observation-mode-actions", attribute "role" "group", attribute "aria-label" "Observation browse mode" ]
-            [ modeButton ObservationFlatMode "Flat observations"
-            , modeButton ObservationFacetMode "Shared subjects"
+            [ modeButton ObservationFlatMode "All observations"
+            , modeButton ObservationFacetMode "By subject"
+            , button
+                [ id "observation-for-files", class "btn btn-secondary observation-mode-button", type_ "button", onClick OpenObservationFileComposer
+                , attribute "aria-expanded" (if state.fileComposerOpen then "true" else "false")
+                , attribute "aria-controls" "observation-file-composer"
+                ]
+                [ text "For files" ]
             ]
         , h2 [ id "observation-mode-heading", class "observation-mode-heading", tabindex -1 ] [ text headingText ]
+        , p [ class "form-help" ]
+            [ text
+                (case state.requestMode of
+                    ObservationFlatMode -> "Search text across all saved observations."
+                    ObservationFacetMode -> "Browse saved file and glob subjects. Choose one to see its exact observations."
+                    ObservationExactSubjectMode -> "Results stay locked to the selected saved subject."
+                    ObservationMatchMode -> "Results match the applied concrete file paths. Open For files to change them."
+                )
+            ]
         , p [ class "observation-mode-announcement", attribute "aria-live" "polite" ]
             [ text
                 (case state.requestMode of

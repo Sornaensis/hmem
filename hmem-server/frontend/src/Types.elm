@@ -332,6 +332,8 @@ type alias ObservationModel =
     , selectedFacet : Maybe Api.ObservationSubject
     , gitSha : String
     , requestMode : ObservationRequestMode
+    , fileComposerOpen : Bool
+    , advancedFiltersOpen : Bool
     , appliedQuery : Maybe ObservationAppliedQuery
     , failedRequest : Maybe ObservationFailedRequest
     , matchPathsInput : String
@@ -950,6 +952,9 @@ type Msg
     | SetObservationBrowseMode ObservationRequestMode
     | SelectObservationFacet Api.SubjectKind String
     | SetObservationMatchPaths String
+    | OpenObservationFileComposer
+    | CloseObservationFileComposer
+    | ToggleObservationAdvancedFilters
     | ApplyObservationMatch
     | ClearObservationMatch
     | LoadMoreObservations

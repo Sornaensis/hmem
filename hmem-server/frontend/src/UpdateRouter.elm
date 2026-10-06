@@ -332,6 +332,15 @@ route msg model =
         SetObservationMatchPaths _ ->
             Ok (Feature.Observation.update msg model)
 
+        OpenObservationFileComposer ->
+            Ok (Feature.Observation.update msg model)
+
+        CloseObservationFileComposer ->
+            Ok (Feature.Observation.update msg model)
+
+        ToggleObservationAdvancedFilters ->
+            Ok (Feature.Observation.update msg model)
+
         ApplyObservationMatch ->
             Ok (Feature.Observation.update msg model)
 

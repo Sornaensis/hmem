@@ -47,7 +47,7 @@ test('production keyboard detail entry and return restore the exact card and phy
 test('production repeated match cards and same-ID activation retain editor ownership and exact origin', { timeout: 60000 }, async () => {
   const h = await openObservations()
   try {
-    await h.start(); await h.page.locator('#observation-match-paths').fill(h.path)
+    await h.start(); await h.page.getByRole('button', { name: 'For files', exact: true }).click(); await h.page.locator('#observation-match-paths').fill(h.path)
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
     const toggles = h.page.locator('.observation-subject-group-toggle')
     assert.equal(await toggles.count(), 2)

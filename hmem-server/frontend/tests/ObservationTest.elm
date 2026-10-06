@@ -9,7 +9,7 @@ import Feature.DataLoading
 import Feature.Observation
 import Feature.WebSocket
 import Helpers
-import Html.Attributes exposing (attribute, tabindex)
+import Html.Attributes exposing (attribute, hidden, tabindex)
 import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
@@ -1887,7 +1887,8 @@ suite =
                             |> Query.fromHtml
                 in
                 Expect.all
-                    [ \_ -> view |> Query.find [ Selector.class "observation-filters" ] |> Query.has [ Selector.class "filter-bar" ]
+                    [ \_ -> view |> Query.find [ Selector.class "observation-search" ] |> Query.has [ Selector.class "filter-bar" ]
+                    , \_ -> view |> Query.findAll [ Selector.class "observation-filters" ] |> Query.count (Expect.equal 3)
                     , \_ -> view |> Query.findAll [ Selector.class "observation-filter-input" ] |> Query.count (Expect.equal 4)
                     , \_ -> view |> Query.find [ Selector.class "observation-filter-select" ] |> Query.has [ Selector.tag "select", Selector.class "filter-select" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-filter-apply" ] |> Query.has [ Selector.tag "button", Selector.class "btn", Selector.class "btn-primary", Selector.text "Apply filters" ]
@@ -1896,6 +1897,65 @@ suite =
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.tag "article", Selector.class "card", Selector.class "observation-detail-content", Selector.class "observation-detail-meta", Selector.text fullSha ]
                     ]
                     ()
+        , test "discovery disclosures preserve applied requests, retained drafts, and pagination in every mode" <|
+            \_ ->
+                let
+                    unchanged mode =
+                        let
+                            loaded =
+                                appliedModeModel mode
+
+                            pending =
+                                Feature.Observation.update RefreshObservationResults loaded |> Tuple.first
+
+                            original =
+                                applyObservationPage (observationPageMessage 0 (Err Http.NetworkError) pending) pending |> draftQueryInputs
+
+                            edited =
+                                Feature.Observation.update StartObservationEdit original |> Tuple.first
+                                    |> (\model -> Feature.Observation.update (SetObservationDraft "Protected discovery draft") model |> Tuple.first)
+
+                            saving =
+                                Feature.Observation.update SaveObservationEdit edited |> Tuple.first
+
+                            preserved protected =
+                                let
+                                    opened =
+                                        [ OpenObservationFileComposer, ToggleObservationAdvancedFilters ]
+                                            |> List.foldl (\message model -> Feature.Observation.update message model |> Tuple.first) protected
+
+                                    closed =
+                                        [ CloseObservationFileComposer, ToggleObservationAdvancedFilters ]
+                                            |> List.foldl (\message model -> Feature.Observation.update message model |> Tuple.first) opened
+
+                                    openedState =
+                                        opened.observations
+                                in
+                                closed == protected
+                                    && { openedState | fileComposerOpen = False, advancedFiltersOpen = False } == protected.observations
+                        in
+                        edited.observations.edit /= Nothing
+                            && edited.observations.failedRequest /= Nothing
+                            && (saving.observations.edit |> Maybe.map .saving) == Just True
+                            && List.all preserved [ edited, saving ]
+                in
+                [ ObservationFlatMode, ObservationFacetMode, ObservationExactSubjectMode, ObservationMatchMode ]
+                    |> List.all unchanged
+                    |> Expect.equal True
+        , test "native discovery controls expose disclosure state and explicit search submission" <|
+            \_ ->
+                let
+                    initial = Feature.Observation.init
+                    view state = Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) state |> Query.fromHtml
+                    opened = { initial | fileComposerOpen = True, advancedFiltersOpen = True }
+                in
+                Expect.all
+                    [ \_ -> view initial |> Query.find [ Selector.id "observation-for-files" ] |> Query.has [ Selector.attribute (attribute "aria-expanded" "false"), Selector.attribute (attribute "aria-controls" "observation-file-composer") ]
+                    , \_ -> view opened |> Query.find [ Selector.id "observation-advanced-toggle" ] |> Query.has [ Selector.attribute (attribute "aria-expanded" "true"), Selector.attribute (attribute "aria-controls" "observation-advanced-filters") ]
+                    , \_ -> view initial |> Query.find [ Selector.id "observation-file-composer" ] |> Query.has [ Selector.attribute (hidden True) ]
+                    , \_ -> view initial |> Query.find [ Selector.class "observation-search" ] |> Event.simulate Event.submit |> Event.expect ApplyObservationFilters
+                    , \_ -> view initial |> Query.find [ Selector.id "observation-for-files" ] |> Event.simulate Event.click |> Event.expect OpenObservationFileComposer
+                    ] ()
         , test "presentation states expose scoped loading, error, empty, and disabled pagination classes" <|
             \_ ->
                 let
@@ -3303,7 +3363,7 @@ suite =
                         Feature.Observation.observationCardDomId globGroup repeated.id
                 in
                 Expect.all
-                    [ \_ -> facetView |> Query.find [ Selector.class "observation-mode-button", Selector.class "btn-primary" ] |> Query.has [ Selector.text "Shared subjects" ]
+                    [ \_ -> facetView |> Query.find [ Selector.class "observation-mode-button", Selector.class "btn-primary" ] |> Query.has [ Selector.text "By subject" ]
                     , \_ -> facetView |> Query.has [ Selector.text "123 observations", Selector.text "Latest update: 2026-08-30", Selector.text "Load more shared subjects", Selector.attribute (attribute "aria-live" "polite") ]
                     , \_ -> facetView |> Query.hasNot [ Selector.id "observation-subject" ]
                     , \_ -> collapsed |> Query.findAll [ Selector.class "observation-card" ] |> Query.count (Expect.equal 0)

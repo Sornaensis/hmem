@@ -65,6 +65,14 @@ Unapplied filter changes pause paging until Apply filters or Revert filters;
 unapplied path input leaves the previously matched files active. The displayed
 applied filters describe the query behind the current results.
 
+All observations searches saved text; By subject lists stored file and glob
+subjects with exact provenance results. For files opens a composer without
+changing those results. Match files applies its trimmed, deduplicated concrete
+paths and filter drafts; wildcard input is rejected. Advanced filters toggles
+the kind, exact subject, and Git SHA controls without resetting their values or
+the applied query. Search also submits with Enter. A selected subject stays
+locked while filtering its exact results.
+
 Failed page or refresh requests keep previously loaded results visible. Retry
 results repeats the failed applied query and offset with a fresh request identity,
 even when filter inputs have changed. A successful page-zero refresh replaces

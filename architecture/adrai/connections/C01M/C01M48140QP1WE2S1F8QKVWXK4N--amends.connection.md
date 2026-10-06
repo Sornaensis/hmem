@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M48140QP1WE2S1F8QKVWXK4N"
+relation = "amends"
+from_record = "R01M48140QPDRRS113KC3AERB1H"
+subject_adr = "A01M3KDKW8R8ZJ60DV727Y50S3Q"
+to_records = ["R01M45GQPWS59XT5KQVVDKPTD6A"]
++++
+
+Describe the installed global hierarchy viewport and retain separate production browser and performance qualification limits.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0ifSwiYiI6ImVlNDJhMDEwNmUyNjIzMGM0NWY2YTdmYjVkN2EzYTZkYWZmMzFjYzIiLCJpIjoic2hhMjU2OlBrOUQ5WFk5YmhtTVlmWmNzRU5KVjZ4UXNrWU44YTk0X0Q5N1hJZFV4bzAiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTQ4MTQwUVAxV0UyUzFGOFFLVldYSzROIiwib3AiOiJPMDFNNDgxNDBRUERSUlMxMTNLQzNBRVJCMUgiLCJwIjpbIlIwMU00NUdRUFdTNTlYVDVLUVZWREtQVEQ2QSJdLCJyIjoibWFzdGVyIiwicyI6InNoYTI1NjptZktuOWlGWlFoQ1FWUkkxdEUwMXZfTzFPMHdzVmZ1RVJtWVdOOUF6WWlrIiwidCI6MTc5MTI3MDk3ODI5NCwidiI6MSwieCI6ImFkcmFpLzEuMC4wIn0 -->

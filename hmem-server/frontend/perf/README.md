@@ -19,7 +19,9 @@ baseline (direct record invocation additionally requires
 `--authorize-baseline`). It always preserves the actual PASS/FAIL evaluation in
 `baseline.v1.json` and exits zero when only target budgets fail; harness,
 selector, schema, build, and runtime errors still fail. Record is therefore not
-a way to silently normalize a product violation. Check mode never writes. It
+a way to silently normalize a product violation. Task-qualified check mode writes
+its validation/evidence receipts; it preserves the recorded measurement and the
+historical baseline. It
 verifies the complete budget, harness-configuration, and small/large fixture
 hashes against both the baseline and trace manifest before opening a browser.
 The frozen provenance also hashes the direct-focus contract and each canonical
@@ -144,6 +146,78 @@ Search ranking is a deterministic fixture approximation of PostgreSQL
 `ts_rank`; the intentionally single-result measured query avoids rank ambiguity.
 Bucket counts are aggregated in JavaScript from deterministic hourly source
 rows rather than by executing PostgreSQL, while matching its requested range,
-calendar boundaries, ordering, and cap. The path-match endpoint returns an empty
-valid page and is not entered by a measured scenario. These test-transport
+calendar boundaries, ordering, and cap. Historical profiles return an empty
+valid path-match page. The Observation profile below uses a nonempty deterministic
+matcher and measures that workflow. These test-transport
 simplifications exclude database and network latency.
+
+## Observation scaling profile
+
+Set `HMEM_EVIDENCE_BASE_COMMIT=c5230077a643d06e7ca5a4ff6b5616cfb90862ec`
+for task `b9f1de65-f016-4178-89a0-ac13a5d7fff8`, then run
+`npm run perf:self-check`, `npm run perf:record-after`, and `npm run perf:check`.
+Record/check require an explicit mapped base; unknown revisions fail before
+measurement. The after-record script's historical argument spelling is mapped
+to this profile's fresh paths; arbitrary output redirection is rejected. Baseline
+recording is unavailable under this task profile. Review the runner before
+measurement, and qualify success only after check passes on matching inputs.
+
+The five retained artifacts are under the operating-system temporary directory,
+in `hmem-observation-scaling-b9f1de65-f016-4178-89a0-ac13a5d7fff8`:
+`final-working-tree.after.observation-scaling.v1.json`,
+`final-working-tree.trace-manifest.observation-scaling.v1.json`,
+`final-working-tree.validation-record.observation-scaling.v1.json`,
+`final-working-tree.evidence-manifest.observation-scaling.v1.json`, and
+`final-working-tree.complete.observation-scaling.v1.diff`. The frontend owner
+retains these reproducibility artifacts until project closure plus 30 days,
+then disposes of them. Each retained file is bounded to 64 MiB. Temporary trace
+`temporary/large-observation-trace.zip` is retired before successful finalization;
+its verified digest/size remain in the manifest. Only bounded unresolved failure
+diagnostics remain until resolution. Historical artifacts and budget bytes remain
+unchanged. Check validates task/base/revision, complete source/assets/contracts,
+recorded evaluation, and retirement before issuing qualified success.
+This profile captures the complete final large-sample interval with DOM/network
+snapshots enabled, source capture disabled, and optional screenshot timeline
+previews disabled. Historical/default capture options remain unchanged. Exact
+options are fingerprinted by the scaling contract and recorded in trace metadata;
+the actual archive is still double-hashed, sized, and retired. A future size
+rejection reports the exact actual bytes, 64 MiB limit and capture options in
+bounded failure metadata before removal. Omitting previews is a storage strategy,
+not a guarantee that the archive fits or a change to any performance budget.
+Existing failed trace diagnostics survive startup. Until a fresh full-interval
+archive passes size/double-hash verification and owned retirement, a subsequent
+failure leaves those files intact and reports its bounded phase/size/options
+through the tool output. After verification/retirement resolves that issue,
+normal current evidence replaces the old diagnostics. Prior success qualification
+is still invalidated at startup; no additional diagnostic files or journal are
+created.
+Every evidence write/removal, including atomic rename/temporary cleanup and
+failure-receipt persistence, revalidates the admitted physical parent/root
+lifetime and contained paths. Rejected ownership stops persistence; the command
+reports the failure without writing fallback receipts into redirected storage.
+Check exits nonzero whenever the complete record/check/prerequisite/retirement
+qualification fails, even if the latest check's informational timing passes.
+
+The schema-2 overlay keeps the original generator intact and adds deterministic
+multiline evidence, one exact 512 KiB value, and ordered overlapping file/glob
+subjects for two concrete paths. Its matcher reuses list ranking/text/SHA filters,
+preserves caller-path and matched-subject order, and supports exactly the declared
+fixture glob. Large samples load 50, 100, then 150 observations; small samples
+terminate at 60. All subject groups expand, counting repeated mounted cards
+without ID deduplication. The native reader exposes the boundary value, editing
+preserves its draft through 50 real-shaped mocked canonical invalidations, and
+the original Projects heap/mixed-live phases still run separately.
+
+Existing unconditional DOM (2500) and collection-card (250) ceilings cover every
+new stage and lifetime high-water. Match load-more has the same complete-settle
+endpoint as flat load-more: at most two requests unconditionally, and nearest-rank
+p95 at most 500 ms only with complete environment comparability. Initial Match
+application/detail batching is excluded from that phase. Disclosure/editor/input
+paint records activation through two animation frames without waiting for HTTP;
+the existing comparable-environment 100 ms local ceiling applies. Two warmups and
+five measured samples remain unchanged. Active-editor heap and Observation-only
+live follow-ups are separately reported research triggers at 64 MiB/12 requests;
+they require evidence review rather than inventing additional acceptance gates.
+Record exiting zero alone does not establish budget compliance. These deterministic
+transport measurements make no database, network, native zoom, assistive-technology,
+or human-usability claim.

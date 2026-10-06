@@ -6,7 +6,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
-import { createColdDiagnostics, createEvidenceCapture, atomicEvidenceWrite, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
+import { evidenceProfile, scalingRecordOutputs, assertEvidenceIdentity, prepareScalingScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
+import { OBSERVATION_SCALING_CONTRACT, generateObservationScalingFixture, queryObservationScalingMatches, observationScalingFrames, aggregateObservationScaling, observationScalingMetrics, observationTraceCaptureOptions, traceAdmissionReceipt } from './observation-scaling.mjs'
+import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
 import { DIRECT_FOCUS_CONTRACT, OBSERVATION_MEASURED_QUERY, TIMELINE_BROWSER_NOW, TIMELINE_DEFAULT_UI_QUERY, deepFocusFixture, directFocusFixture, fixtureHash, generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, paginate, projectOverviewResponse, queryObservationFacets, queryObservations, queryProjects, queryTasks, queryTimelineBuckets, queryTimelineEvents, snapshotHash, snapshotItems, taskOverviewResponse, workspaceShellSnapshotItems } from './fixtures.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -23,33 +25,28 @@ const traceOutputArgument = process.argv.indexOf('--trace-output')
 // A task-local evidence run can name its immutable review base without
 // changing the approved baseline or the default compatibility record.
 const evidenceBaseCommit = process.env.HMEM_EVIDENCE_BASE_COMMIT || '818cc3cc634bfa8c0ebe14c13fc70b4c2d059e83'
-const TASK_2503_BASE_COMMIT = '04fd7ba26b1a63b5f1c601939b046ef2fe5f51d6'
-const TASK_755_BASE_COMMIT = '1bdbe3d071d1fbbb994bc515841103adedff77ec'
-const evidenceTasks = new Map([
-  [TASK_2503_BASE_COMMIT, { revision: 'v2', taskId: '2503e08f-ff82-4f2c-adff-24e14fec8299' }],
-  [TASK_755_BASE_COMMIT, { revision: 'v3', taskId: '755a7286-6da5-494e-9b9b-fa1edd43d0b0' }],
-  ['d9ff753763f086fa4faef078b451f2e48ca1a7a4', { revision: 'expanded-hierarchy.v1', taskId: '555ebf6e-8442-43f4-a75d-c33fcffc76f4', parentTaskId: '6a3f31c2-be12-4aa8-a460-8ec3274332a3' }]
-])
-const evidenceTask = evidenceTasks.get(evidenceBaseCommit) || null
-const evidenceRevision = evidenceTask?.revision || 'v1'
+const evidencePlan = evidenceProfile(evidenceBaseCommit, frontendRoot, os.tmpdir())
+const evidenceTask = evidencePlan.task
+const evidenceRevision = evidencePlan.revision
+const evidenceOperations = createEvidenceOperations(evidencePlan, os.tmpdir())
+let attemptState = null
 const legacyAfterArtifactPath = path.join(here, 'final-working-tree.after.v1.json')
 const legacyAfterTraceArtifactPath = path.join(here, 'final-working-tree.trace-manifest.v1.json')
-const evidenceManifestPath = path.join(here, `final-working-tree.evidence-manifest.${evidenceRevision}.json`)
-const evidenceDiffPath = path.join(here, evidenceRevision === 'expanded-hierarchy.v1' ? 'final-working-tree.complete.expanded-hierarchy.v1.diff' : 'final-working-tree.complete.diff')
-const validationRecordPath = path.join(here, `final-working-tree.validation-record.${evidenceRevision}.json`)
-const afterArtifactPath = path.join(here, `final-working-tree.after.${evidenceRevision}.json`)
-const afterTraceArtifactPath = path.join(here, `final-working-tree.trace-manifest.${evidenceRevision}.json`)
+const evidenceManifestPath = evidencePlan.files.manifest
+const evidenceDiffPath = evidencePlan.files.diff
+const validationRecordPath = evidencePlan.files.validation
+const afterArtifactPath = evidencePlan.files.after
+const afterTraceArtifactPath = evidencePlan.files.traceManifest
 const requestedRecordOutputPath = outputArgument === -1 ? baselinePath : path.resolve(frontendRoot, process.argv[outputArgument + 1] || '')
 const requestedRecordTraceManifestPath = traceOutputArgument === -1 ? traceManifestPath : path.resolve(frontendRoot, process.argv[traceOutputArgument + 1] || '')
-// Keep the v1 package command usable for the previous task while preventing it
-// from recreating v1 evidence when the 04fd review subject is selected.
-const recordOutputPath = evidenceTask && requestedRecordOutputPath === legacyAfterArtifactPath ? afterArtifactPath : requestedRecordOutputPath
-const recordTraceManifestPath = evidenceTask && requestedRecordTraceManifestPath === legacyAfterTraceArtifactPath ? afterTraceArtifactPath : requestedRecordTraceManifestPath
+const scalingOutputs = mode === 'record' ? scalingRecordOutputs(evidencePlan, requestedRecordOutputPath, requestedRecordTraceManifestPath, legacyAfterArtifactPath, legacyAfterTraceArtifactPath) : null
+const recordOutputPath = scalingOutputs?.output || (evidenceTask && requestedRecordOutputPath === legacyAfterArtifactPath ? afterArtifactPath : requestedRecordOutputPath)
+const recordTraceManifestPath = scalingOutputs?.traceManifest || (evidenceTask && requestedRecordTraceManifestPath === legacyAfterTraceArtifactPath ? afterTraceArtifactPath : requestedRecordTraceManifestPath)
 const WARMUPS = HARNESS_CONFIGURATION.warmups
 const PRODUCTION_SNAPSHOT_PROFILE = 'workspace_shell_v1'
 const SAMPLES = HARNESS_CONFIGURATION.samples
 const expandedScratch = path.resolve(frontendRoot, '..', '..', '.scratch', 'expanded-navigation-perf')
-const tracePath = evidenceRevision === 'expanded-hierarchy.v1' ? path.join(expandedScratch, 'large-expanded-trace.zip') : path.join(here, '.artifacts', 'large-baseline-trace.zip')
+const tracePath = evidencePlan.trace || (evidenceRevision === 'expanded-hierarchy.v1' ? path.join(expandedScratch, 'large-expanded-trace.zip') : path.join(here, '.artifacts', 'large-baseline-trace.zip'))
 
 if (!['record', 'check'].includes(mode)) throw new Error('usage: node perf/harness.mjs <record|check> [--output path --trace-output path]')
 if ((outputArgument !== -1 && !process.argv[outputArgument + 1]) || (traceOutputArgument !== -1 && !process.argv[traceOutputArgument + 1])) throw new Error('--output and --trace-output require paths')
@@ -90,16 +87,24 @@ function normalizedRepositoryPath(file) {
   return path.relative(path.resolve(frontendRoot, '..', '..'), file).split(path.sep).join('/')
 }
 
+function evidenceArtifactPath(file) {
+  return evidencePlan.scaling ? path.resolve(file) : normalizedRepositoryPath(file)
+}
+
+function writeEvidence(file, bytes) {
+  evidenceOperations.write(file, bytes)
+}
+
 export function untrackedFileDiff(repositoryRoot, relativePath, capture = createEvidenceCapture({ cwd: repositoryRoot })) {
   return capture.read(['diff', '--binary', '--no-index', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '--', '/dev/null', relativePath],
     { label: 'untracked diff ' + relativePath, acceptedExitCodes: [0, 1] })
 }
 
-function sourceProvenance(capture = createEvidenceCapture({ cwd: path.resolve(frontendRoot, '..', '..') })) {
+function sourceProvenance(capture = createEvidenceCapture({ cwd: path.resolve(frontendRoot, '..', '..') }), baseCommit = evidenceBaseCommit) {
   const repositoryRoot = path.resolve(frontendRoot, '..', '..')
   const headCommit = capture.read(['rev-parse', 'HEAD'], { label: 'current source revision' }).toString('utf8').trim()
-  const orderedCommits = capture.read(['rev-list', '--reverse', evidenceBaseCommit + '..' + headCommit], { label: 'ordered source commit chain' }).toString('utf8').trim().split(/\r?\n/).filter(Boolean)
-  return { reviewBaseCommit: evidenceBaseCommit, headCommit, orderedCommits, workingTreeQualification: 'exact source and production-asset SHA-256 list; complete diff from review base retained separately' }
+  const orderedCommits = capture.read(['rev-list', '--reverse', baseCommit + '..' + headCommit], { label: 'ordered source commit chain' }).toString('utf8').trim().split(/\r?\n/).filter(Boolean)
+  return { reviewBaseCommit: baseCommit, headCommit, orderedCommits, workingTreeQualification: 'exact source and production-asset SHA-256 list; complete diff from review base retained separately' }
 }
 
 function inputQualification() {
@@ -108,16 +113,20 @@ function inputQualification() {
     return entry.isDirectory() ? collect(file) : [file]
   }).sort()
   const source = [...collect(path.join(frontendRoot, 'src')),
-    ...['harness.mjs', 'contracts.mjs', 'fixtures.mjs', 'fixtures.test.mjs'].map(name => path.join(here, name)),
+    ...fs.readdirSync(here).filter(name => name.endsWith('.mjs')).sort().map(name => path.join(here, name)),
     ...['package.json', 'package-lock.json', 'README.md'].map(name => path.join(frontendRoot, name))]
     .map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file) }))
   const productionAssets = collect(staticRoot).map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file) }))
   return { evidenceBaseCommit, source, productionAssets }
 }
 
-function finalWorkingTreeEvidence() {
+export function finalWorkingTreeEvidence({ plan = evidencePlan, io = fs, write = writeEvidence,
+  capture = createEvidenceCapture({ cwd: path.resolve(frontendRoot, '..', '..') }) } = {}) {
+  const evidenceBaseCommit = plan.baseCommit, evidenceTask = plan.task
+  const evidenceDiffPath = plan.files.diff, evidenceManifestPath = plan.files.manifest, validationRecordPath = plan.files.validation
+  const sha256File = file => createHash('sha256').update(io.readFileSync(file)).digest('hex')
+  const evidenceArtifactPath = file => plan.scaling ? path.resolve(file) : normalizedRepositoryPath(file)
   const repositoryRoot = path.resolve(frontendRoot, '..', '..')
-  const capture = createEvidenceCapture({ cwd: repositoryRoot })
   // Review subjects deliberately exclude generated evidence from their source
   // patch. Retain v1 alongside v2 here so a historical artifact cannot leak
   // into the 04fd complete diff merely because it remains untracked locally.
@@ -137,28 +146,29 @@ function finalWorkingTreeEvidence() {
     .trim().split(/\r?\n/).filter(Boolean)
     .filter(relative => !artifactPaths.has(relative) && !relative.startsWith('.scratch/expanded-navigation-perf/'))
   const diff = Buffer.concat([trackedDiff, ...untrackedPaths.map(relative => untrackedFileDiff(repositoryRoot, relative, capture))])
-  atomicEvidenceWrite(evidenceDiffPath, diff)
+  write(evidenceDiffPath, diff)
   const baselineAtBase = capture.read(['show', `${evidenceBaseCommit}:hmem-server/frontend/perf/baseline.v1.json`], { label: 'immutable baseline at review base' })
-  const baselineNow = fs.readFileSync(baselinePath)
+  const baselineNow = io.readFileSync(baselinePath)
   const changedPaths = [...new Set([...trackedPaths, ...untrackedPaths])]
     .map(relative => path.join(repositoryRoot, relative))
-    .filter(fs.existsSync)
+    .filter(io.existsSync)
     .map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file) }))
   // `check` has no record CLI output arguments, so its final manifest refresh
   // must still hash the selected task-local after artifacts rather than the
   // immutable baseline inputs.
-  const evidenceRecordPath = evidenceTask ? afterArtifactPath : recordOutputPath
-  const evidenceTracePath = evidenceTask ? afterTraceArtifactPath : recordTraceManifestPath
+  const evidenceRecordPath = evidenceTask ? plan.files.after : recordOutputPath
+  const evidenceTracePath = evidenceTask ? plan.files.traceManifest : recordTraceManifestPath
   const artifacts = [evidenceRecordPath, evidenceTracePath, evidenceDiffPath]
-    .concat(fs.existsSync(validationRecordPath) ? [validationRecordPath] : [])
-    .map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file), sizeBytes: fs.statSync(file).size }))
+    .concat(io.existsSync(validationRecordPath) ? [validationRecordPath] : [])
+    .map(file => ({ path: evidenceArtifactPath(file), sha256: sha256File(file), sizeBytes: io.statSync(file).size }))
   const manifest = {
     schemaVersion: 1,
     taskId: evidenceTask?.taskId || null,
     parentTaskId: evidenceTask?.parentTaskId || null,
+    measurementRevision: plan.revision,
     measurementPhase: HARNESS_CONFIGURATION.scenarioIsolation,
-    sourceProvenance: sourceProvenance(capture),
-    qualificationPassed: fs.existsSync(validationRecordPath) && JSON.parse(fs.readFileSync(validationRecordPath, 'utf8')).passed === true,
+    sourceProvenance: sourceProvenance(capture, evidenceBaseCommit),
+    qualificationPassed: io.existsSync(validationRecordPath) && JSON.parse(io.readFileSync(validationRecordPath, 'utf8')).passed === true,
     evidenceBaseCommit,
     normalization: 'repository-relative POSIX paths; SHA-256 of exact file bytes; binary Git diff without external diff drivers; untracked source files represented by deterministic no-index additions; generated evidence artifacts separately hash-listed',
     recipe: `HMEM_EVIDENCE_BASE_COMMIT=${evidenceBaseCommit} npm run perf:record-after`,
@@ -171,10 +181,11 @@ function finalWorkingTreeEvidence() {
     },
     artifacts,
     changedPaths,
-    completeDiff: { path: normalizedRepositoryPath(evidenceDiffPath), sha256: sha256File(evidenceDiffPath), sizeBytes: fs.statSync(evidenceDiffPath).size }
+    retention: plan.retention,
+    completeDiff: { path: evidenceArtifactPath(evidenceDiffPath), sha256: sha256File(evidenceDiffPath), sizeBytes: io.statSync(evidenceDiffPath).size }
   }
   if (!manifest.equality.byteForByteEqual) throw new Error('immutable baseline differs from evidence base')
-  atomicEvidenceWrite(evidenceManifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+  write(evidenceManifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 }
 
 // Bind proof intent to the actual source-ordered rendered Retry button, never DTO bytes.
@@ -366,7 +377,8 @@ export function fixtureResponder(fixture, tracker, options = {}) {
       query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), gitSha: url.searchParams.get('git_sha'),
       offset: url.searchParams.get('offset'), limit: url.searchParams.get('limit')
     }))
-    if (pathname === '/api/v1/observations/match') return reply(route, request, { items: [], has_more: false })
+    if (pathname === '/api/v1/observations/match') return reply(route, request, fixture.observationScaling
+      ? queryObservationScalingMatches(fixture, request.postDataJSON()) : { items: [], has_more: false })
     const projectOverview = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/overview$/)
     if (projectOverview) {
       return reply(route, request, projectOverviewResponse(fixture, decodeURIComponent(projectOverview[1])))
@@ -1050,13 +1062,90 @@ async function verifyStaleDeepFocusContinuation(browser, origin) {
   }
 }
 
+async function measureObservationScaling(page, tracker, fixture, cdp, blankHeap, dom, interactions) {
+  const contract = fixture.observationScaling
+  await requiredDoubleFrameByText(page, '#observation-panel button', 'For files')
+  await page.locator('#observation-match-paths').fill(contract.paths.join('\n'))
+  await page.locator('.observation-match-apply').click()
+  const waitLoaded = async count => {
+    await page.waitForFunction(expected => document.querySelector('.observation-mode-announcement')?.textContent.includes(expected + ' matching observations loaded'), count)
+    await waitForTransportQuiescence(page, tracker, 'ordered Observation match page')
+  }
+  await waitLoaded(50)
+  const pages = []
+  for (let count = 50; count < Math.min(contract.largeLoaded, fixture.observations.length);) {
+    const before = requestSnapshot(tracker), started = performance.now()
+    await page.locator('.observation-load-more').click()
+    count = Math.min(count + 50, fixture.observations.length)
+    await waitLoaded(count)
+    pages.push({ loaded: count, ms: performance.now() - started, ...requestDelta(tracker, before) })
+    dom.push({ tab: 'match-loaded-' + count, ...(await domMetrics(page)) })
+  }
+  const controls = await page.locator('.observation-subject-group-toggle').evaluateAll(elements => elements.map(element => element.getAttribute('aria-controls')))
+  if (controls.length < 4 || new Set(controls).size !== controls.length) throw new Error('Expected distinct overlapping subject groups across both ordered paths')
+  for (const [index, id] of controls.entries()) {
+    const before = requestSnapshot(tracker)
+    const ms = await requiredDoubleFrame(page, '.observation-subject-group-toggle[aria-controls="' + id + '"]')
+    const delta = requestDelta(tracker, before)
+    if (delta.count !== 0) throw new Error('Subject disclosure unexpectedly requested HTTP')
+    interactions['observationGroup' + index + 'Ms'] = { ms, ...delta }
+    dom.push({ tab: 'match-expanded-' + index, ...(await domMetrics(page)) })
+  }
+  const boundary = fixture.observations.find(value => value.id === contract.boundaryId)
+  const card = page.locator('.observation-card').filter({ hasText: boundary.content.slice(0, 17) }).first()
+  await card.click()
+  await page.locator('#observation-content-reader').waitFor()
+  await waitForTransportQuiescence(page, tracker, '512 KiB Observation detail')
+  if (await page.locator('#observation-content-reader').inputValue() !== boundary.content) throw new Error('Large native reader did not expose the exact fixture content')
+  dom.push({ tab: 'boundary-detail', ...(await domMetrics(page)) })
+  const editBefore = requestSnapshot(tracker)
+  const editMs = await requiredDoubleFrame(page, '#observation-edit')
+  interactions.observationEditorOpenMs = { ms: editMs, ...requestDelta(tracker, editBefore) }
+  const draftBefore = requestSnapshot(tracker)
+  const draft = boundary.content.slice(0, -1) + 'y'
+  const draftMs = await page.evaluate(async content => {
+    const input = document.querySelector('#observation-edit-content')
+    if (!input) throw new Error('Boundary editor missing')
+    const start = performance.now()
+    input.value = content; input.dispatchEvent(new Event('input', { bubbles: true }))
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    return performance.now() - start
+  }, draft)
+  const draftDelta = requestDelta(tracker, draftBefore)
+  if (draftDelta.count !== 0) throw new Error('Draft input unexpectedly requested HTTP')
+  interactions.observationBoundaryDraftMs = { ms: draftMs, ...draftDelta }
+  dom.push({ tab: 'boundary-editor', ...(await domMetrics(page)) })
+  await cdp.send('HeapProfiler.collectGarbage')
+  const activeEditorHeapBytes = Math.max(0, (await cdp.send('Runtime.getHeapUsage')).usedSize - blankHeap)
+  const liveBefore = requestSnapshot(tracker), liveStart = performance.now()
+  // A real-shaped canonical invalidation batch, backed by updated fixture DTOs.
+  boundary.content = boundary.content.slice(0, -1) + 'z'
+  boundary.content_version = '20000000-0000-4000-8000-000000000001'
+  boundary.updated_at = '2027-01-01T00:00:00Z'
+  const frames = observationScalingFrames(fixture)
+  if (await page.evaluate(values => window.__perfPushFrames(values), frames) !== 1) throw new Error('Observation batch requires one socket')
+  await page.waitForFunction(() => window.__perfLastPush?.dispatchTurnComplete === true && document.querySelector('.observation-edit-conflict'))
+  await waitForTransportQuiescence(page, tracker, 'Observation live batch with protected editor')
+  const live = { frames: frames.length, ms: performance.now() - liveStart, ...requestDelta(tracker, liveBefore) }
+  if (await page.locator('#observation-edit-content').inputValue() !== draft) throw new Error('Observation live batch replaced the protected draft')
+  dom.push({ tab: 'boundary-editor-post-live', ...(await domMetrics(page)) })
+  await requiredDoubleFrameByText(page, '.observation-edit-actions button', 'Cancel')
+  await requiredDoubleFrameByText(page, '#observation-panel button', 'All observations')
+  await page.waitForFunction(() => document.querySelectorAll('.observation-card').length === 50)
+  await waitForTransportQuiescence(page, tracker, 'flat Observation restore after scaling research')
+  return { contract: OBSERVATION_SCALING_CONTRACT, loaded: Math.min(contract.largeLoaded, fixture.observations.length), expandedGroups: controls.length,
+    pages, activeEditorHeapBytes, live,
+    researchTriggers: { activeEditorHeap: activeEditorHeapBytes > contract.researchTriggers.activeEditorHeapBytes, observationLiveFollowUps: live.count > contract.researchTriggers.observationLiveFollowUps } }
+}
+
 async function measureRun(browser, origin, fixture, measured, trace, diagnosticRuns) {
+  if (fixture.observationScaling) fixture = { ...fixture, observations: fixture.observations.map(value => ({ ...value })) }
   const anchors = representativeProjectAnchors(fixture)
   const tracker = createTracker(fixture)
   diagnosticRuns.push({ fixture: fixture.size, measured, trace, diagnostics: tracker.coldDiagnostics })
   const context = await browser.newContext({ viewport: HARNESS_CONFIGURATION.viewport })
   await context.addInitScript(fakeWebSocketScript)
-  if (trace) await context.tracing.start({ screenshots: true, snapshots: true, sources: false })
+  if (trace) await context.tracing.start(observationTraceCaptureOptions(!!fixture.observationScaling))
   const page = await context.newPage()
   const consoleErrors = []
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
@@ -1145,6 +1234,8 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   interactions.observationFilterResetMs = { ms: observationFilterResetMs, ...requestDelta(tracker, observationFilterResetBefore) }
   filters.observationReset = interactions.observationFilterResetMs
 
+  const observationScaling = fixture.observationScaling ? await measureObservationScaling(page, tracker, fixture, cdp, blankHeap, dom, interactions) : null
+
   const timelineTabBefore = requestSnapshot(tracker)
   const timelineTabMs = await requiredDoubleFrame(page, '.tabs button:nth-child(3)')
   await page.waitForSelector('.timeline-panel')
@@ -1210,7 +1301,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   if (lifetimeRender.hierarchyRows > 31 || lifetimeRender.observers > 31) throw new Error('Mounted hierarchy/observer high-water exceeded 25 ordinary plus six active pins')
   const renderMaximums = renderMaximum(dom)
   const result = {
-    fixture: fixture.size, measured, cold, background, lifetimeRender, tabSwitches, filters, interactions, observationLoadMore, directFocus, liveBatch, dom,
+    fixture: fixture.size, measured, cold, background, lifetimeRender, tabSwitches, filters, interactions, observationLoadMore, observationScaling, directFocus, liveBatch, dom,
     maxDomNodes: renderMaximums.nodes, maxCollectionRows: renderMaximums.rows,
     attributableHeapBytes: Math.max(0, heap.usedSize - blankHeap),
     heapPoint: HARNESS_CONFIGURATION.heapPoint,
@@ -1218,7 +1309,9 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
     consoleErrors
   }
   if (trace) {
+    evidenceOperations.verify()
     fs.mkdirSync(path.dirname(tracePath), { recursive: true })
+    evidenceOperations.verify()
     await context.tracing.stop({ path: tracePath })
   }
   await context.close()
@@ -1258,6 +1351,7 @@ function aggregates(runs) {
     routeBytes: run.liveBatch.routeBytes
   }, 'live batch'))
   return {
+    observationScaling: aggregateObservationScaling(runs),
     background: runs.map(run => run.background),
     lifetimeRender: runs.map(run => run.lifetimeRender),
     cold: { rawMs: cold, medianMs: median(cold), p95Ms: nearestRankP95(cold), requestCounts: runs.map(run => run.cold.requests), fixtureBytes: runs.map(run => run.cold.bytes), entityOverviewRequests: runs.map(run => run.cold.entityOverviewRequests), canonicalSnapshotItems: runs.map(run => run.cold.canonicalSnapshotItems), canonicalSnapshotPages: runs.map(run => run.cold.canonicalSnapshotPages) },
@@ -1301,6 +1395,7 @@ function evaluate(result, comparableEnvironment = true) {
   add('direct focus requested', large.directFocus.requested.every(Boolean), target.directFocus.requireRequested, large.directFocus.requested.every(Boolean) === target.directFocus.requireRequested)
   add('direct focus rendered', large.directFocus.rendered.every(Boolean), target.directFocus.requireRendered, large.directFocus.rendered.every(Boolean) === target.directFocus.requireRendered)
   add('Observation load-more requests', Math.max(...large.observationLoadMore.requestCounts), target.observationLoadMore.maxRequests, Math.max(...large.observationLoadMore.requestCounts) <= target.observationLoadMore.maxRequests)
+  metrics.push(...observationScalingMetrics(large.observationScaling, target.observationLoadMore, comparableEnvironment))
   add('live follow-up requests', Math.max(...large.liveBatch.requestCounts), target.liveBatch.maxFollowUpRequests, Math.max(...large.liveBatch.requestCounts) <= target.liveBatch.maxFollowUpRequests)
   add('live whole-workspace reload', large.liveBatch.wholeWorkspaceReload, false, !large.liveBatch.wholeWorkspaceReload)
   add('live repeated-target duplicate requests', Math.max(...large.liveBatch.duplicateRequests), target.liveBatch.maxDuplicateRequestsPerRepeatedTarget, Math.max(...large.liveBatch.duplicateRequests) <= target.liveBatch.maxDuplicateRequestsPerRepeatedTarget)
@@ -1322,56 +1417,76 @@ function persistQualification(result, prerequisite, qualifiedInputs, command, re
   if (JSON.stringify(inputQualification()) !== JSON.stringify(qualifiedInputs)) throw new Error('qualification inputs changed before finalization')
   if (mode === 'record') {
     const traceManifest = { schemaVersion: 1, baseCommit: BASE_COMMIT, taskId: evidenceTask?.taskId || null, evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs, sourceProvenance: result.sourceProvenance, contracts: result.contracts, trace: result.trace, retirement }
-    atomicEvidenceWrite(recordOutputPath, JSON.stringify(result, null, 2) + '\n')
-    atomicEvidenceWrite(recordTraceManifestPath, JSON.stringify(traceManifest, null, 2) + '\n')
-    if (recordOutputPath !== baselinePath && evidenceRevision !== 'expanded-hierarchy.v1') finalWorkingTreeEvidence()
+    writeEvidence(recordOutputPath, JSON.stringify(result, null, 2) + '\n')
+    writeEvidence(recordTraceManifestPath, JSON.stringify(traceManifest, null, 2) + '\n')
+    if (recordOutputPath !== baselinePath && !evidencePlan.qualifiedRetirement) finalWorkingTreeEvidence()
   }
-  if (evidenceRevision === 'expanded-hierarchy.v1') {
+  if (evidencePlan.qualifiedRetirement) {
     const previous = mode === 'check' ? JSON.parse(fs.readFileSync(validationRecordPath, 'utf8')) : null
+    if (previous) assertEvidenceIdentity(evidencePlan, previous)
     if (previous && (previous.taskId !== evidenceTask.taskId || JSON.stringify(previous.inputQualification) !== JSON.stringify(qualifiedInputs))) throw new Error('validation record does not match the qualified record inputs')
     const commands = previous ? [...previous.commands, command] : [prerequisite, command]
     const validation = {
       schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId, evidenceBaseCommit, measurementRevision: evidenceRevision,
       inputQualification: qualifiedInputs, sourceProvenance: result.sourceProvenance, commands, retirement,
-      passed: mode === 'check' && result.evaluation.passed && previous?.recordEvaluation.passed === true && commands.every(receipt => receipt.exitCode === 0),
+      passed: mode === 'check' && checkQualification({ recordEvaluation: previous?.recordEvaluation, checkEvaluation: result.evaluation, commands, retirement }).passed,
       recordEvaluation: previous?.recordEvaluation || result.evaluation,
       check: mode === 'check' ? { environment: result.environment, runs: result.runs, aggregates: result.aggregates, evaluation: result.evaluation } : null
     }
-    atomicEvidenceWrite(validationRecordPath, JSON.stringify(validation, null, 2) + '\n')
+    writeEvidence(validationRecordPath, JSON.stringify(validation, null, 2) + '\n')
     finalWorkingTreeEvidence()
   }
   if (mode === 'record') console.log('AUTHORIZED RECORD finalized after owned retirement: ' + recordOutputPath + '; actual budget evaluation is preserved.')
-  if (mode === 'check' && evidenceTask && evidenceRevision !== 'expanded-hierarchy.v1' && result.evaluation.passed && fs.existsSync(validationRecordPath)) finalWorkingTreeEvidence()
+  if (mode === 'check' && evidenceTask && !evidencePlan.qualifiedRetirement && result.evaluation.passed && fs.existsSync(validationRecordPath)) finalWorkingTreeEvidence()
 }
 
 function qualificationAttempt(command, qualifiedInputs, retirement, action, coldDiagnostics = []) {
-  if (evidenceRevision !== 'expanded-hierarchy.v1') return action()
+  if (!evidencePlan.qualifiedRetirement) return action()
   return persistEvidenceAttempt({
+    write: writeEvidence,
+    remove: file => evidenceOperations.remove(file),
+    verify: evidenceOperations.verify,
     manifestPath: evidenceManifestPath, validationPath: validationRecordPath,
     failureValidation: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, parentTaskId: evidenceTask.parentTaskId,
       evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs,
-      commands: [{ ...command, exitCode: 2 }], retirement, coldDiagnostics, passed: false, failure: error.message }),
-    failureManifest: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit,
+      commands: [{ ...command, exitCode: 2 }], retirement, coldDiagnostics, passed: false, failure: error.message,
+      ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}) }),
+    failureManifest: error => ({ schemaVersion: 1, taskId: evidenceTask.taskId, evidenceBaseCommit, measurementRevision: evidenceRevision,
       qualificationPassed: false, failure: error.message, retirement,
-      validationRecord: { path: normalizedRepositoryPath(validationRecordPath), sha256: sha256File(validationRecordPath) } })
+      ...(error.traceAdmission ? { traceAdmission: error.traceAdmission } : {}),
+      validationRecord: { path: evidenceArtifactPath(validationRecordPath), sha256: sha256File(validationRecordPath) } })
   }, action)
 }
 
 
 
 async function main() {
+  attemptState = { startedAtUtc: new Date().toISOString(), started: performance.now(), phase: 'startup', pendingFailure: false, traceVerified: false, retirement: null }
+  if (!process.env.HMEM_EVIDENCE_BASE_COMMIT) throw new Error('Set HMEM_EVIDENCE_BASE_COMMIT explicitly before record or check; no implicit historical evidence writes')
+  prepareScalingScratch(evidencePlan, os.tmpdir())
+  if (evidencePlan.scaling) {
+    evidenceOperations.verify()
+    const manifest = fs.existsSync(evidenceManifestPath) ? JSON.parse(fs.readFileSync(evidenceManifestPath, 'utf8')) : null
+    if (manifest) assertEvidenceIdentity(evidencePlan, manifest)
+    const disposition = startupEvidenceDisposition(manifest)
+    attemptState.pendingFailure = disposition.pendingFailure
+    if (disposition.invalidate) evidenceOperations.remove(evidenceManifestPath)
+  }
   // The final v2 write is deliberately last: its fixture/self-check validation
   // must succeed before any review artifact is replaced.
   const commandStartedAtUtc = new Date().toISOString(), commandStarted = performance.now()
+  attemptState.phase = 'prerequisite self-check'
   const prerequisite = runTaskEvidencePrerequisites()
   if (!fs.existsSync(path.join(staticRoot, 'index.html'))) throw new Error(`production build missing at ${staticRoot}; run npm run build first`)
-  const fixtures = { small: generateFixture('small'), large: generateFixture('large') }
+  const generate = evidencePlan.scaling ? generateObservationScalingFixture : generateFixture
+  const fixtures = { small: generate('small'), large: generate('large') }
   const qualifiedInputs = inputQualification()
   const qualifiedProvenance = sourceProvenance()
   const contracts = {
     budgetsHash: hashJson(budgets),
     configurationHash: hashJson(HARNESS_CONFIGURATION),
     directFocusContractHash: hashJson(DIRECT_FOCUS_CONTRACT),
+    ...(evidencePlan.scaling ? { observationScalingContractHash: hashJson(OBSERVATION_SCALING_CONTRACT) } : {}),
     fixtures: { small: fixtureHash(fixtures.small), large: fixtureHash(fixtures.large) },
     snapshots: { small: snapshotHash(fixtures.small), large: snapshotHash(fixtures.large) }
   }
@@ -1388,6 +1503,8 @@ async function main() {
     if (!fs.existsSync(afterArtifactPath) || !fs.existsSync(afterTraceArtifactPath)) throw new Error('final working-tree after evidence is missing; run npm run perf:record-after')
     recordedBaseline = JSON.parse(fs.readFileSync(afterArtifactPath, 'utf8'))
     recordedTraceManifest = JSON.parse(fs.readFileSync(afterTraceArtifactPath, 'utf8'))
+    assertEvidenceIdentity(evidencePlan, recordedBaseline)
+    assertEvidenceIdentity(evidencePlan, recordedTraceManifest)
     if (JSON.stringify(recordedBaseline.inputQualification) !== JSON.stringify(qualifiedInputs)) throw new Error('recorded source/production asset fingerprints differ from current inputs')
     if (JSON.stringify(recordedTraceManifest.inputQualification) !== JSON.stringify(qualifiedInputs)) throw new Error('trace input fingerprints differ from current inputs')
     if (recordedBaseline.baseCommit !== BASE_COMMIT) throw new Error(`after-artifact base commit mismatch: expected ${BASE_COMMIT}, observed ${recordedBaseline.baseCommit}`)
@@ -1410,6 +1527,7 @@ async function main() {
     vite: packageVersion(['vite']),
     playwright: packageVersion(['@playwright', 'test'])
   }
+  attemptState.phase = 'browser setup'
   const server = await staticServer()
   let browser = null, browserServer = null, measuredResult = null, failure = null, retirement = null
   const diagnosticRuns = []
@@ -1433,6 +1551,7 @@ async function main() {
         const measured = index >= WARMUPS
         process.stdout.write(`${size} ${measured ? `sample ${index - WARMUPS + 1}/${SAMPLES}` : `warmup ${index + 1}/${WARMUPS}`}... `)
         const captureTrace = mode === 'record' && size === 'large' && measured && index === WARMUPS + SAMPLES - 1
+        attemptState.phase = size + ' ' + (measured ? 'sample ' + (index - WARMUPS + 1) : 'warmup ' + (index + 1))
         const result = await measureRun(browser, server.origin, fixtures[size], measured, captureTrace, diagnosticRuns)
         if (measured) runs[size].push(result)
         process.stdout.write(`${Math.round(result.cold.ms)}ms, ${result.cold.requests} requests\n`)
@@ -1440,17 +1559,27 @@ async function main() {
     }
     let trace = recordedBaseline?.trace || null
     if (mode === 'record') {
+      attemptState.phase = 'trace verification'
+      evidenceOperations.verify()
       if (!fs.existsSync(tracePath)) throw new Error(`record trace was not created: ${tracePath}`)
+      const traceSizeBytes = fs.statSync(tracePath).size
+      if (evidencePlan.scaling) {
+        const admission = traceAdmissionReceipt(traceSizeBytes, 64 * 1024 * 1024, observationTraceCaptureOptions(true))
+        console.log('TRACE_ARCHIVE_ADMISSION=' + JSON.stringify(admission))
+        if (!admission.withinLimit) throw Object.assign(new Error('Observation temporary trace exceeds its 64 MiB bound: ' + traceSizeBytes + ' bytes'), { traceAdmission: admission })
+      }
       const firstHash = sha256File(tracePath)
       const secondHash = sha256File(tracePath)
       if (firstHash !== secondHash) throw new Error('record trace hash was not reproducible during verification')
+      attemptState.traceVerified = true
       trace = {
         logicalName: 'large measured sample 5/5 Playwright trace',
         sha256: firstHash,
-        sizeBytes: fs.statSync(tracePath).size,
+        sizeBytes: traceSizeBytes,
+        ...(evidencePlan.scaling ? { captureOptions: observationTraceCaptureOptions(true), temporaryLimitBytes: 64 * 1024 * 1024 } : {}),
         capturedRun: 'large sample 5/5 after two warmups',
         verifiedDuringRecord: true,
-        retention: evidenceRevision === 'expanded-hierarchy.v1' ? 'generated under task-owned .scratch/expanded-navigation-perf, intentionally removed by finite owned cleanup before success finalization; this versioned manifest retains verified provenance and does not claim the opaque archive is available' : 'generated under ignored perf/.artifacts, intentionally removed after record/check; this versioned manifest retains verified provenance and does not claim the opaque archive is available'
+        retention: evidencePlan.scaling ? 'temporary trace under the verified outside-repository task directory; removed before successful qualification; verified provenance remains in the retained trace manifest' : evidenceRevision === 'expanded-hierarchy.v1' ? 'generated under task-owned .scratch/expanded-navigation-perf, intentionally removed by finite owned cleanup before success finalization; this versioned manifest retains verified provenance and does not claim the opaque archive is available' : 'generated under ignored perf/.artifacts, intentionally removed after record/check; this versioned manifest retains verified provenance and does not claim the opaque archive is available'
       }
     }
     const result = {
@@ -1477,6 +1606,7 @@ async function main() {
     let comparable = true
     if (mode === 'check') comparable = recordedBaseline.environment.fingerprint === environment.fingerprint
     result.evaluation = evaluate(result, comparable)
+    attemptState.phase = 'budget evaluation and input verification'
     if (JSON.stringify(inputQualification()) !== JSON.stringify(qualifiedInputs)) throw new Error('qualification inputs changed during measurement')
     measuredResult = result
     for (const metric of result.evaluation.metrics) console.log((metric.pass ? 'PASS' : 'FAIL') + ' ' + metric.name + ': ' + metric.actual + ' (budget ' + metric.expected + (metric.category === 'informational' ? ', informational environment' : '') + ')')
@@ -1497,8 +1627,16 @@ async function main() {
         await new Promise((resolve, reject) => server.server.close(error => error ? reject(error) : resolve()))
       } },
       { resource: 'task trace', close: async () => {
-        if (evidenceRevision !== 'expanded-hierarchy.v1') return
-        await fs.promises.unlink(tracePath).catch(error => { if (error.code !== 'ENOENT') throw error })
+        if (!evidencePlan.qualifiedRetirement) return
+        if (evidencePlan.scaling) evidenceOperations.verify()
+        try { evidenceOperations.remove(tracePath) } catch (error) { if (error.code !== 'ENOENT') throw error }
+        if (evidencePlan.scaling) {
+          const temporary = path.dirname(tracePath)
+          const contents = await fs.promises.readdir(temporary).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+          if (contents?.length === 0) { evidenceOperations.verify(); await fs.promises.rmdir(temporary) }
+          else if (contents) throw new Error('Unexpected temporary trace remains in task scratch')
+          return
+        }
         const remaining = await fs.promises.readdir(expandedScratch).catch(error => { if (error.code === 'ENOENT') return null; throw error })
         if (remaining?.length === 0) await fs.promises.rmdir(expandedScratch)
       } }
@@ -1511,14 +1649,35 @@ async function main() {
     exitCode: mode === 'check' && measuredResult && !measuredResult.evaluation.passed ? 1 : 0,
     startedAtUtc: commandStartedAtUtc, finishedAtUtc: new Date().toISOString(), durationMs: Math.round(performance.now() - commandStarted)
   }
-  if (!retirement.passed) failure = new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; '))
+  attemptState.retirement = retirement
+  if (mode === 'check' && measuredResult && !failure && retirement.passed && evidencePlan.qualifiedRetirement) {
+    evidenceOperations.verify()
+    const previous = JSON.parse(fs.readFileSync(validationRecordPath, 'utf8'))
+    assertEvidenceIdentity(evidencePlan, previous)
+    command.exitCode = checkQualification({ recordEvaluation: previous.recordEvaluation, checkEvaluation: measuredResult.evaluation,
+      commands: [...previous.commands, command], retirement }).exitCode
+  }
+  if (!retirement.passed) failure = Object.assign(new Error((failure ? failure.message + '; ' : '') + 'owned cleanup failed: ' + retirement.receipts.filter(receipt => !receipt.passed).map(receipt => receipt.resource + ': ' + receipt.error).join('; ')), failure?.traceAdmission ? { traceAdmission: failure.traceAdmission } : {})
   if (failure) {
-    qualificationAttempt(command, qualifiedInputs, retirement, () => { throw failure }, diagnosticRuns.map(run => ({ ...run, diagnostics: run.diagnostics.snapshot() })))
+    persistOrRetainFailureDiagnostics(attemptState, () => qualificationAttempt(command, qualifiedInputs, retirement, () => { throw failure }, diagnosticRuns.map(run => ({ ...run, diagnostics: run.diagnostics.snapshot() }))))
     throw failure
   }
   measuredResult.retirement = retirement
-  qualificationAttempt(command, qualifiedInputs, retirement, () => persistQualification(measuredResult, prerequisite, qualifiedInputs, command, retirement), diagnosticRuns.map(run => ({ ...run, diagnostics: run.diagnostics.snapshot() })))
-  if (mode === 'check' && !measuredResult.evaluation.passed) process.exitCode = 1
+  attemptState.phase = 'evidence persistence'
+  const persistence = persistOrRetainFailureDiagnostics(attemptState, () => qualificationAttempt(command, qualifiedInputs, retirement, () => persistQualification(measuredResult, prerequisite, qualifiedInputs, command, retirement), diagnosticRuns.map(run => ({ ...run, diagnostics: run.diagnostics.snapshot() }))))
+  if (persistence.preserved) throw new Error('Previous failed diagnostics remain unresolved; no evidence replaced')
+  if (mode === 'check') process.exitCode = command.exitCode
 }
 
-if (path.resolve(process.argv[1] || '') === fileURLToPath(import.meta.url)) main().catch(error => { console.error(error.stack || error); process.exitCode = 2 })
+if (path.resolve(process.argv[1] || '') === fileURLToPath(import.meta.url)) main().catch(error => {
+  console.error(error.stack || error)
+  if (evidencePlan.scaling) console.error('BOUNDED_FAILURE_RECEIPT=' + JSON.stringify({
+    taskId: evidenceTask.taskId, evidenceBaseCommit, phase: attemptState?.phase,
+    startedAtUtc: attemptState?.startedAtUtc, elapsedMs: attemptState ? Math.round(performance.now() - attemptState.started) : null,
+    failure: error.message.slice(0, 1000), traceAdmission: error.traceAdmission || null,
+    captureOptions: observationTraceCaptureOptions(true), retirement: attemptState?.retirement,
+    priorFailureDiagnosticsPreserved: !!attemptState?.pendingFailure && !(attemptState.traceVerified && attemptState.retirement?.passed),
+    retainedPaths: [validationRecordPath, evidenceManifestPath]
+  }))
+  process.exitCode = 2
+})

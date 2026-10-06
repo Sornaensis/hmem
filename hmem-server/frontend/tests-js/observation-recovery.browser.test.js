@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
 
-test('production cached incremental failure retries the exact applied offset and refresh replaces page zero', { timeout: 60000 }, async () => {
+test('production cached incremental failure retries the exact applied offset and changed-query Apply replaces page zero', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
     const observed = []

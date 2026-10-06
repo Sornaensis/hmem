@@ -645,17 +645,21 @@ export function atomicEvidenceWrite(file, bytes, { write = fs.writeFileSync, ren
 // Invalidate success before collection/writes. On any partial failure retain
 // explicit failure receipts, or remove old success if the filesystem rejects them.
 export function persistEvidenceAttempt({ manifestPath, validationPath, failureValidation, failureManifest,
-  write = atomicEvidenceWrite, remove = fs.unlinkSync }, action) {
-  const discard = file => { try { remove(file) } catch (error) { if (error.code !== 'ENOENT') throw error } }
+  write = atomicEvidenceWrite, remove = fs.unlinkSync, verify = () => {} }, action) {
+  const discard = file => { verify(); try { remove(file) } catch (error) { if (error.code !== 'ENOENT') throw error } }
   try {
     discard(manifestPath)
     return action()
   } catch (error) {
+    // An ownership failure forbids even failure-receipt fallback persistence.
+    verify()
     const failures = []
     for (const file of [manifestPath, validationPath]) {
+      verify()
       try { discard(file) } catch (failure) { failures.push(failure) }
     }
     for (const [file, receipt] of [[validationPath, failureValidation], [manifestPath, failureManifest]]) {
+      verify()
       try { write(file, JSON.stringify(receipt(error), null, 2) + '\n') } catch (failure) { failures.push(failure) }
     }
     if (failures.length) throw new Error(error.message + '; failure receipt persistence failed: ' + failures.map(f => f.message).join('; '), { cause: error })

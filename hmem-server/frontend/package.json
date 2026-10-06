@@ -13,6 +13,7 @@
     "test:timeline-fixture": "elm make src/TimelineFixture.elm --output .timeline-fixture-test.js && node --test tests-js/timeline-fixture.browser.test.js",
     "test:timeline-live": "node --test tests-js/timeline-live-refresh.integration.test.js",
     "test:observation-navigation": "npm run build && node --test tests-js/observation-navigation.test.js tests-js/observation-navigation.browser.test.js",
+    "test:observation-conditional": "stack build hmem-server:exe:hmem-test-harness && node --test tests-js/observation-conditional.browser.test.js",
     "test:browser:install": "playwright install chromium",
     "test:clean-install": "npm ci && npm run test:browser:install && npm test",
     "perf:self-check": "node --test --test-isolation=none perf/*.test.mjs",

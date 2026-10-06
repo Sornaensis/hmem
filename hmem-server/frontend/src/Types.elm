@@ -294,6 +294,7 @@ type alias ObservationEditState =
     , sessionEpoch : Int
     , contextToken : Int
     , baseContent : String
+    , baseContentVersion : String
     , baseUpdatedAt : String
     , draft : String
     , latestCanonical : Api.Observation
@@ -301,6 +302,8 @@ type alias ObservationEditState =
     , saving : Bool
     , error : Maybe String
     , activeRequest : Maybe ObservationMutationRequest
+    , activeCanonicalRequest : Maybe ObservationMutationRequest
+    , canonicalProvisional : Bool
     }
 
 
@@ -963,7 +966,8 @@ type Msg
     | CancelObservationEdit
     | ReloadObservationEdit
     | RebaseObservationEdit
-    | ObservationUpdated ObservationMutationRequest (Result Http.Error Api.Observation)
+    | ObservationUpdated ObservationMutationRequest (Result Api.ObservationUpdateError Api.Observation)
+    | ObservationConflictCanonicalFetched ObservationMutationRequest String (Result Http.Error Api.Observation)
     | OpenObservationDelete
     | ConfirmObservationDelete
     | CancelObservationDelete

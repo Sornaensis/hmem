@@ -31,6 +31,24 @@ Leaving the Observation tab retires its card origin; a subsequently reopened
 detail returns to results. The compact workspace header scrolls with Observation
 content so keyboard targets remain visible.
 
+Each content save sends the opaque version captured when editing began. A
+competing write produces a conflict and preserves the draft, even before its
+live notification arrives. Keep my draft explicitly adopts the latest version
+as the next save base; Use latest version replaces the draft with that content.
+If a delayed reply disagrees with an already observed version, those choices wait
+for one current-version check. A failed check preserves the draft and explicitly
+offers the retained version; retrying that version remains conditional and can
+conflict again.
+Workspace, ordered subjects, Git SHA, and creation time remain immutable.
+Current scaling fixtures use DTO schema 2 with required deterministic content
+version UUIDs; preserved historical performance evidence describes earlier inputs.
+
+`npm run test:observation-conditional` rebuilds the native test harness and runs
+production Elm against an isolated PostgreSQL-backed API with an independent
+writer and delayed genuine WebSocket deliveries. It requires the configured
+test PostgreSQL tools and locked Playwright Chromium. Its fixture expires within
+ten minutes and removes its browser, server, PostgreSQL process, and sandbox.
+
 `npm run test:observation-navigation` builds production assets and checks the
 navigation bridge and populated browser flows. It covers keyboard entry/return,
 repeated cards, off-page links, long paths, edit/delete controls, 320 CSS-pixel

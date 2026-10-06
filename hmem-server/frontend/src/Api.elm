@@ -157,6 +157,8 @@ module Api exposing
     , navigationSummariesBody
     , navigationSummariesDecoder
     , observationDecoder
+    , ObservationUpdateError(..)
+    , decodeObservationUpdateResponse
     , observationListUrl
     , observationMatchBody
     , observationMatchDecoder
@@ -418,9 +420,15 @@ type alias Observation =
     , subject : String
     , gitSha : String
     , content : String
+    , contentVersion : String
     , createdAt : String
     , updatedAt : String
     }
+
+
+type ObservationUpdateError
+    = ObservationContentConflict Observation
+    | ObservationUpdateHttpError Http.Error
 
 
 type alias ObservationSubject =
@@ -1517,12 +1525,13 @@ observationDecoder =
         |> custom observationSubjectsDecoder
         |> required "git_sha" D.string
         |> required "content" D.string
+        |> required "content_version" observationContentVersionDecoder
         |> required "created_at" D.string
         |> required "updated_at" D.string
 
 
-observationFromFields : String -> String -> List ObservationSubject -> String -> String -> String -> String -> Observation
-observationFromFields id workspaceId subjects gitSha content createdAt updatedAt =
+observationFromFields : String -> String -> List ObservationSubject -> String -> String -> String -> String -> String -> Observation
+observationFromFields id workspaceId subjects gitSha content contentVersion createdAt updatedAt =
     case subjects of
         primary :: _ ->
             { id = id
@@ -1532,6 +1541,7 @@ observationFromFields id workspaceId subjects gitSha content createdAt updatedAt
             , subject = primary.subject
             , gitSha = gitSha
             , content = content
+            , contentVersion = contentVersion
             , createdAt = createdAt
             , updatedAt = updatedAt
             }
@@ -1545,9 +1555,29 @@ observationFromFields id workspaceId subjects gitSha content createdAt updatedAt
             , subject = ""
             , gitSha = gitSha
             , content = content
+            , contentVersion = contentVersion
             , createdAt = createdAt
             , updatedAt = updatedAt
             }
+
+
+observationContentVersionDecoder : Decoder String
+observationContentVersionDecoder =
+    D.string
+        |> D.andThen
+            (\version ->
+                let
+                    chunks =
+                        String.split "-" version
+
+                    hexadecimal char =
+                        Char.isDigit char || String.contains (String.fromChar char) "abcdefABCDEF"
+                in
+                if List.map String.length chunks == [ 8, 4, 4, 4, 12 ] && List.all (String.toList >> List.all hexadecimal) chunks then
+                    D.succeed version
+                else
+                    D.fail "Observation content_version must be an opaque UUID."
+            )
 
 
 observationSubjectsDecoder : Decoder (List ObservationSubject)
@@ -2889,17 +2919,54 @@ observationUpdateBody content =
     E.object [ ( "content", E.string content ) ]
 
 
-updateObservation : String -> String -> String -> String -> (Result Http.Error Observation -> msg) -> Cmd msg
-updateObservation apiUrl observationId content requestId toMsg =
+updateObservation : String -> String -> String -> String -> String -> (Result ObservationUpdateError Observation -> msg) -> Cmd msg
+updateObservation apiUrl observationId content contentVersion requestId toMsg =
     Http.request
         { method = "PUT"
-        , headers = [ Http.header "X-Request-Id" requestId ]
+        , headers = [ Http.header "X-Request-Id" requestId, Http.header "If-Match" ("\"" ++ contentVersion ++ "\"") ]
         , url = apiUrl ++ "/api/v1/observations/" ++ Url.percentEncode observationId
         , body = Http.jsonBody (observationUpdateBody content)
-        , expect = Http.expectJson toMsg observationDecoder
+        , expect = Http.expectStringResponse toMsg decodeObservationUpdateResponse
         , timeout = Nothing
         , tracker = Nothing
         }
+
+
+decodeObservationUpdateResponse : Http.Response String -> Result ObservationUpdateError Observation
+decodeObservationUpdateResponse response =
+    case response of
+        Http.BadUrl_ url ->
+            Err (ObservationUpdateHttpError (Http.BadUrl url))
+
+        Http.Timeout_ ->
+            Err (ObservationUpdateHttpError Http.Timeout)
+
+        Http.NetworkError_ ->
+            Err (ObservationUpdateHttpError Http.NetworkError)
+
+        Http.BadStatus_ metadata body ->
+            if metadata.statusCode == 409 then
+                case D.decodeString observationContentConflictDecoder body of
+                    Ok latest -> Err (ObservationContentConflict latest)
+                    Err _ -> Err (ObservationUpdateHttpError (Http.BadStatus metadata.statusCode))
+            else
+                Err (ObservationUpdateHttpError (Http.BadStatus metadata.statusCode))
+
+        Http.GoodStatus_ _ body ->
+            D.decodeString observationDecoder body
+                |> Result.mapError (D.errorToString >> Http.BadBody >> ObservationUpdateHttpError)
+
+
+observationContentConflictDecoder : Decoder Observation
+observationContentConflictDecoder =
+    D.field "code" D.string
+        |> D.andThen
+            (\code ->
+                if code == "observation_content_conflict" then
+                    D.field "latest" observationDecoder
+                else
+                    D.fail "Not an Observation content-version conflict."
+            )
 
 
 deleteObservation : String -> String -> String -> (Result Http.Error () -> msg) -> Cmd msg

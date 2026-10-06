@@ -21,6 +21,7 @@ export async function openObservations(viewport = { width: 1440, height: 900 }) 
   await h.page.setViewportSize(viewport)
   const receipts = [], controls = [], held = new Set()
   const values = new Map([...fixture.observations, offPage].map(value => [value.id, value]))
+  let nextVersion = 100
   await h.page.route('**/api/v1/observations**', async route => {
     const request = route.request(), url = new URL(request.url()), endpoint = url.pathname
     const receipt = { endpoint, method: request.method(), offset: Number(url.searchParams.get('offset') || 0), done: false }
@@ -43,7 +44,8 @@ export async function openObservations(viewport = { width: 1440, height: 900 }) 
         if (!body) { status = 404; body = { error: 'Missing controlled observation' } }
         else if (request.method() === 'PUT') {
           const update = request.postDataJSON(); assert.deepEqual(Object.keys(update), ['content'])
-          body = { ...body, content: update.content, updated_at: '2026-01-02T00:00:00Z' }; values.set(id, body)
+          assert.equal(request.headers()['if-match'], '"' + body.content_version + '"')
+          body = { ...body, content: update.content, content_version: '20000000-0000-4000-8000-' + String(nextVersion++).padStart(12, '0'), updated_at: '2026-01-02T00:00:00Z' }; values.set(id, body)
         } else if (request.method() === 'DELETE') { values.delete(id); body = {} }
         else assert.equal(request.method(), 'GET')
       }

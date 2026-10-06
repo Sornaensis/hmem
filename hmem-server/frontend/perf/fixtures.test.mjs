@@ -35,11 +35,26 @@ for (const size of ['small', 'large']) {
     assert.equal(stableFixtureJson(first), stableFixtureJson(second))
     assert.equal(fixtureHash(first), fixtureHash(second))
     assert.equal(fixtureHash(first), {
-      small: '827312e056054ad5f144284fe198e22d4f8bac97980afa0ecb3142b9d86e0851',
-      large: '1ae208983d613c84b9a96500c477615c0b3e27686ff08f03bb20f15f99b35a08'
+      small: '7b9002d3d7666610ee4c93becab2c139f8414387501d96d2c79c1c802a90dff9',
+      large: '5517d465140405f6eecf2de94b45b6383557df0e1cb01539e6b23b9197119b3c'
     }[size])
   })
 }
+
+test('Observation content versions are required deterministic UUIDs in the current fixture DTO', () => {
+  assert.equal(FIXTURE_SCHEMA_VERSION, 2)
+  for (const size of ['small', 'large']) {
+    const fixture = generateFixture(size)
+    const versions = fixture.observations.map(item => item.content_version)
+    assert.deepEqual(versions, fixture.observations.map((_, index) => `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`))
+    assert.equal(new Set(versions).size, versions.length)
+    assert.deepEqual(snapshotItems(fixture).filter(item => item.kind === 'observation').map(item => item.data.content_version), versions)
+    for (const invalid of [undefined, 'not-a-uuid', '10000000-0000-4000-8000-00000000000g', '"10000000-0000-4000-8000-000000000000"']) {
+      const broken = { ...fixture, observations: fixture.observations.map((item, index) => index === 0 ? { ...item, content_version: invalid } : item) }
+      assert.ok(validateFixture(broken).includes('observation content version DTO'))
+    }
+  }
+})
 
 test('fixture cardinalities, hierarchy, DAG, pagination, direct focus and live mix stay frozen', () => {
   const small = generateFixture('small')

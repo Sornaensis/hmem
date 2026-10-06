@@ -383,6 +383,9 @@ route msg model =
         ObservationUpdated _ _ ->
             Ok (Feature.Observation.update msg model)
 
+        ObservationConflictCanonicalFetched _ _ _ ->
+            Ok (Feature.Observation.update msg model)
+
         OpenObservationDelete ->
             Ok (Feature.Observation.update msg model)
 

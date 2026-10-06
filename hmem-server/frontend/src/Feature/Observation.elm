@@ -348,6 +348,9 @@ update msg model =
         ObservationUpdated request result ->
             handleUpdateResponse request result model
 
+        ObservationConflictCanonicalFetched request knownVersion result ->
+            handleConflictCanonicalResponse request knownVersion result model
+
         OpenObservationDelete ->
             openDeleteConfirmation model
 
@@ -444,6 +447,7 @@ startEdit model =
                         , sessionEpoch = model.sessionRequestEpoch
                         , contextToken = contextToken
                         , baseContent = observation.content
+                        , baseContentVersion = observation.contentVersion
                         , baseUpdatedAt = observation.updatedAt
                         , draft = observation.content
                         , latestCanonical = observation
@@ -451,6 +455,8 @@ startEdit model =
                         , saving = False
                         , error = Nothing
                         , activeRequest = Nothing
+                        , activeCanonicalRequest = Nothing
+                        , canonicalProvisional = False
                         }
                 in
                 ( updateObservation
@@ -476,7 +482,7 @@ saveEdit : Model -> ( Model, Cmd Msg )
 saveEdit model =
     case model.observations.edit of
         Just edit ->
-            if not (editContextIsCurrent edit model) || edit.saving || edit.conflict then
+            if not (editContextIsCurrent edit model) || edit.saving || edit.conflict || edit.activeCanonicalRequest /= Nothing then
                 ( model, Cmd.none )
 
             else
@@ -517,7 +523,7 @@ saveEdit model =
                         ( tracked
                         , Cmd.batch
                             [ clearCmd
-                            , Api.updateObservation model.flags.apiUrl edit.observationId edit.draft requestId (ObservationUpdated request)
+                            , Api.updateObservation model.flags.apiUrl edit.observationId edit.draft edit.baseContentVersion requestId (ObservationUpdated request)
                             ]
                         )
 
@@ -532,14 +538,19 @@ reloadEdit state =
             state.edit
                 |> Maybe.map
                     (\edit ->
+                        if edit.saving || edit.activeCanonicalRequest /= Nothing then
+                            edit
+                        else
                         { edit
                             | baseContent = edit.latestCanonical.content
+                            , baseContentVersion = edit.latestCanonical.contentVersion
                             , baseUpdatedAt = edit.latestCanonical.updatedAt
                             , draft = edit.latestCanonical.content
                             , conflict = False
                             , saving = False
                             , error = Nothing
                             , activeRequest = Nothing
+                            , canonicalProvisional = False
                         }
                     )
     }
@@ -552,19 +563,24 @@ rebaseEdit state =
             state.edit
                 |> Maybe.map
                     (\edit ->
+                        if edit.saving || edit.activeCanonicalRequest /= Nothing then
+                            edit
+                        else
                         { edit
                             | baseContent = edit.latestCanonical.content
+                            , baseContentVersion = edit.latestCanonical.contentVersion
                             , baseUpdatedAt = edit.latestCanonical.updatedAt
                             , conflict = False
                             , saving = False
                             , error = Nothing
                             , activeRequest = Nothing
+                            , canonicalProvisional = False
                         }
                     )
     }
 
 
-handleUpdateResponse : ObservationMutationRequest -> Result Http.Error Api.Observation -> Model -> ( Model, Cmd Msg )
+handleUpdateResponse : ObservationMutationRequest -> Result Api.ObservationUpdateError Api.Observation -> Model -> ( Model, Cmd Msg )
 handleUpdateResponse request result model =
     if not (mutationResponseMatches request model) then
         ( model, Cmd.none )
@@ -575,8 +591,8 @@ handleUpdateResponse request result model =
                 if observation.id /= request.observationId || observation.workspaceId /= request.workspaceId || not (sameObservationProvenance edit.latestCanonical observation) then
                     ( finishEditFailure "The server returned mismatched immutable provenance. Retry after reloading." edit model, Cmd.none )
 
-                else if observationIsOlderThan edit.latestCanonical observation then
-                    ( updateObservation
+                else if edit.latestCanonical.contentVersion /= edit.baseContentVersion && edit.latestCanonical.contentVersion /= observation.contentVersion then
+                    refreshPendingAppliedResults (updateObservation
                         (\state ->
                             { state
                                 | edit =
@@ -585,23 +601,22 @@ handleUpdateResponse request result model =
                                             | latestCanonical = edit.latestCanonical
                                             , conflict = True
                                             , saving = False
-                                            , error = Just "A newer version arrived while this save was in flight. Choose how to continue."
+                                            , error = Just "Another canonical version arrived while this save was in flight. Choose how to continue."
                                             , activeRequest = Nothing
                                         }
                             }
                         )
-                        model
-                    , Cmd.none
+                        (retireObservationReads request model)
                     )
 
                 else
                     let
                         accepted =
                             updateObservation
-                                (applyCanonicalObservation observation
+                                (applyCanonicalObservationWithProof True observation
                                     >> (\state -> { state | edit = Nothing })
                                 )
-                                model
+                                (retireObservationReads request model)
 
                         ( refreshing, refreshCmd ) =
                             refreshActiveResults accepted
@@ -611,7 +626,41 @@ handleUpdateResponse request result model =
                     in
                     ( toasted, Cmd.batch [ refreshCmd, toastCmd ] )
 
-            ( Just edit, Err (Http.BadStatus 404) ) ->
+            ( Just edit, Err (Api.ObservationContentConflict latest) ) ->
+                if latest.id /= request.observationId || latest.workspaceId /= request.workspaceId || not (sameObservationProvenance edit.latestCanonical latest) || latest.contentVersion == edit.baseContentVersion then
+                    ( finishEditFailure "The server returned an inconsistent content-version conflict. Your draft is preserved." edit model, Cmd.none )
+                else
+                    let
+                        ambiguous =
+                            edit.latestCanonical.contentVersion /= edit.baseContentVersion
+                                && edit.latestCanonical.contentVersion /= latest.contentVersion
+                                && compareTimestamps edit.latestCanonical.updatedAt latest.updatedAt /= Just LT
+
+                        canonical =
+                            if ambiguous then
+                                edit.latestCanonical
+                            else
+                                latest
+
+                        conflicted =
+                            updateObservation
+                                (applyCanonicalObservationWithProof True canonical
+                                    >> (\state -> { state | edit = Just { edit | latestCanonical = canonical, conflict = True, saving = False, error = Nothing, activeRequest = Nothing, canonicalProvisional = ambiguous } })
+                                ) (retireObservationReads request model)
+                    in
+                    if ambiguous then
+                        let
+                            ( checking, checkCmd ) =
+                                checkConflictCanonical conflicted
+
+                            ( refreshing, refreshCmd ) =
+                                refreshPendingAppliedResults checking
+                        in
+                        ( refreshing, Cmd.batch [ checkCmd, refreshCmd ] )
+                    else
+                        refreshPendingAppliedResults conflicted
+
+            ( Just edit, Err (Api.ObservationUpdateHttpError (Http.BadStatus 404)) ) ->
                 deletedAfterMutation "This observation was already deleted." request.observationId model
 
             ( Just edit, Err _ ) ->
@@ -619,6 +668,107 @@ handleUpdateResponse request result model =
 
             _ ->
                 ( model, Cmd.none )
+
+
+{-| A matching conditional response retires reads admitted before that response.
+An equal timestamp and content cannot establish the age of an opaque version.
+-}
+retireObservationReads : ObservationMutationRequest -> Model -> Model
+retireObservationReads request model =
+    let
+        webSocket =
+            model.webSocket
+
+        target =
+            "workspace:" ++ request.workspaceId ++ "|entity:observation:" ++ request.observationId
+
+        generation =
+            Dict.get target webSocket.targetGenerations |> Maybe.withDefault 0 |> (+) 1
+
+        retireDetail state =
+            if state.activeDetailRequest |> Maybe.map (\active -> active.workspaceId == request.workspaceId && active.observationId == request.observationId) |> Maybe.withDefault False then
+                { state | activeDetailRequest = Nothing, detailLoading = False, detailError = Nothing }
+            else
+                state
+    in
+    { model | webSocket = { webSocket | targetGenerations = Dict.insert target generation webSocket.targetGenerations } }
+        |> updateObservation retireDetail
+
+
+checkConflictCanonical : Model -> ( Model, Cmd Msg )
+checkConflictCanonical model =
+    case model.observations.edit of
+        Just edit ->
+            let
+                token =
+                    model.observations.nextMutationRequestToken
+
+                request =
+                    { workspaceId = edit.workspaceId, observationId = edit.observationId, sessionEpoch = edit.sessionEpoch, contextToken = edit.contextToken, requestToken = token }
+
+                checking =
+                    updateObservation
+                        (\state -> { state | edit = Just { edit | activeCanonicalRequest = Just request, error = Just "Checking the current version before choosing how to continue. Your draft is preserved." }, nextMutationRequestToken = token + 1 })
+                        model
+            in
+            ( checking, Api.fetchObservation model.flags.apiUrl edit.observationId (ObservationConflictCanonicalFetched request edit.latestCanonical.contentVersion) )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
+handleConflictCanonicalResponse : ObservationMutationRequest -> String -> Result Http.Error Api.Observation -> Model -> ( Model, Cmd Msg )
+handleConflictCanonicalResponse request knownVersion result model =
+    case model.observations.edit of
+        Just edit ->
+            if model.auth.status /= AuthReady || not (editContextIsCurrent edit model) || edit.activeCanonicalRequest /= Just request || request.workspaceId /= edit.workspaceId || request.observationId /= edit.observationId || request.sessionEpoch /= edit.sessionEpoch || request.contextToken /= edit.contextToken then
+                ( model, Cmd.none )
+            else
+                case result of
+                    Ok canonical ->
+                        if canonical.id /= request.observationId || canonical.workspaceId /= request.workspaceId || not (sameObservationProvenance edit.latestCanonical canonical) then
+                            ( finishConflictCheck "The server returned mismatched immutable provenance. The retained version is provisional; retrying it can conflict again." edit model, Cmd.none )
+                        else if edit.latestCanonical.contentVersion /= knownVersion && edit.latestCanonical.contentVersion /= canonical.contentVersion then
+                            ( finishConflictCheck "Another canonical version arrived during the check. The retained version is provisional; retrying it can conflict again." edit model, Cmd.none )
+                        else
+                            updateObservation
+                                (applyCanonicalObservationWithProof True canonical
+                                    >> (\state -> { state | edit = Just { edit | latestCanonical = canonical, activeCanonicalRequest = Nothing, canonicalProvisional = False, error = Nothing } })
+                                )
+                                (retireObservationReads request model)
+                                |> refreshPendingAppliedResults
+
+                    Err (Http.BadStatus 404) ->
+                        deletedAfterMutation "This observation was already deleted." request.observationId model
+
+                    Err _ ->
+                        ( finishConflictCheck "Failed to check the current version. Your draft is preserved; the retained version is provisional and a conditional retry can conflict again." edit model, Cmd.none )
+
+        Nothing ->
+            ( model, Cmd.none )
+
+
+finishConflictCheck : String -> ObservationEditState -> Model -> Model
+finishConflictCheck message edit =
+    updateObservation (\state -> { state | edit = Just { edit | activeCanonicalRequest = Nothing, error = Just message } })
+
+
+refreshPendingAppliedResults : Model -> ( Model, Cmd Msg )
+refreshPendingAppliedResults model =
+    let
+        state =
+            model.observations
+
+        pending =
+            if state.requestMode == ObservationFacetMode then
+                state.facetLoading && state.facetExpectedOffset /= Nothing
+            else
+                state.loading && state.expectedOffset /= Nothing
+    in
+    if pending then
+        refreshActiveResults model
+    else
+        ( model, Cmd.none )
 
 
 finishEditFailure : String -> ObservationEditState -> Model -> Model
@@ -2348,14 +2498,6 @@ sameObservationProvenance left right =
         && timestampsEquivalent left.createdAt right.createdAt
 
 
-observationIsOlderThan : Api.Observation -> Api.Observation -> Bool
-observationIsOlderThan current candidate =
-    preferNewerObservation candidate current
-        == current
-        && candidate
-        /= current
-
-
 withRetainedCanonical : String -> ObservationModel -> Maybe Api.Observation -> Maybe Api.Observation
 withRetainedCanonical observationId state existing =
     case state.edit of
@@ -2375,6 +2517,14 @@ withRetainedCanonical observationId state existing =
 
 applyCanonicalObservation : Api.Observation -> ObservationModel -> ObservationModel
 applyCanonicalObservation candidate state =
+    applyCanonicalObservationWithProof False candidate state
+
+
+{-| Only a matching, provenance-checked mutation or owned conflict revalidation
+response can bypass cache freshness. Its request causality has already been fenced.
+-}
+applyCanonicalObservationWithProof : Bool -> Api.Observation -> ObservationModel -> ObservationModel
+applyCanonicalObservationWithProof conditionalProof candidate state =
     let
         existing =
             case ( Dict.get candidate.id state.items, state.selectedDetail ) of
@@ -2399,10 +2549,13 @@ applyCanonicalObservation candidate state =
                     Nothing
 
         accepted =
-            existing
-                |> withRetainedCanonical candidate.id state
-                |> Maybe.map (preferNewerObservation candidate)
-                |> Maybe.withDefault candidate
+            if conditionalProof then
+                candidate
+            else
+                existing
+                    |> withRetainedCanonical candidate.id state
+                    |> Maybe.map (preferNewerObservation candidate)
+                    |> Maybe.withDefault candidate
 
         acceptedCandidate =
             accepted == candidate
@@ -2541,12 +2694,13 @@ reconcileEditWithCanonical observation maybeEdit =
                 if edit.workspaceId /= observation.workspaceId || edit.observationId /= observation.id then
                     edit
 
-                else if timestampsEquivalent observation.updatedAt edit.latestCanonical.updatedAt && observation.content == edit.latestCanonical.content then
+                else if observation.contentVersion == edit.latestCanonical.contentVersion && timestampsEquivalent observation.updatedAt edit.latestCanonical.updatedAt && observation.content == edit.latestCanonical.content then
                     edit
 
                 else if edit.draft == edit.baseContent && not edit.saving then
                     { edit
                         | baseContent = observation.content
+                        , baseContentVersion = observation.contentVersion
                         , baseUpdatedAt = observation.updatedAt
                         , draft = observation.content
                         , latestCanonical = observation
@@ -2557,7 +2711,7 @@ reconcileEditWithCanonical observation maybeEdit =
                 else
                     { edit
                         | latestCanonical = observation
-                        , conflict = not (timestampsEquivalent observation.updatedAt edit.baseUpdatedAt) || observation.content /= edit.baseContent
+                        , conflict = observation.contentVersion /= edit.baseContentVersion || not (timestampsEquivalent observation.updatedAt edit.baseUpdatedAt) || observation.content /= edit.baseContent
                         , error = Nothing
                     }
             )
@@ -3626,14 +3780,17 @@ viewDetailContent canEdit observation maybeEdit =
                                 div [ id "observation-edit-status", class "observation-edit-conflict", attribute "role" "alert" ]
                                     [ p []
                                         [ text
-                                            (Maybe.withDefault
-                                                "This observation changed elsewhere. Your draft is preserved; choose how to continue before saving."
-                                                edit.error
+                                            (if edit.activeCanonicalRequest /= Nothing then
+                                                "Checking the current version before choosing how to continue. Your draft is preserved."
+                                             else
+                                                Maybe.withDefault
+                                                    "This observation changed elsewhere. Your draft is preserved; choose how to continue before saving."
+                                                    edit.error
                                             )
                                         ]
                                     , div [ class "observation-conflict-actions" ]
-                                        [ button [ class "btn btn-secondary", type_ "button", onClick ReloadObservationEdit, disabled edit.saving ] [ text "Use latest version" ]
-                                        , button [ class "btn btn-secondary", type_ "button", onClick RebaseObservationEdit, disabled edit.saving ] [ text "Keep my draft" ]
+                                        [ button [ class "btn btn-secondary", type_ "button", onClick ReloadObservationEdit, disabled (edit.saving || edit.activeCanonicalRequest /= Nothing) ] [ text (if edit.canonicalProvisional then "Use retained version" else "Use latest version") ]
+                                        , button [ class "btn btn-secondary", type_ "button", onClick RebaseObservationEdit, disabled (edit.saving || edit.activeCanonicalRequest /= Nothing) ] [ text "Keep my draft" ]
                                         ]
                                     ]
 

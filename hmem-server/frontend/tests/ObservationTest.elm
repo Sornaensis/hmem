@@ -137,6 +137,422 @@ suite =
                 Api.observationUpdateBody "revised"
                     |> Encode.encode 0
                     |> Expect.equal "{\"content\":\"revised\"}"
+        , test "content versions are required opaque UUIDs on canonical observations" <|
+            \_ ->
+                [ fileFixture
+                , String.replace "10000000-0000-4000-8000-000000000000" "not-a-uuid" fileFixture
+                , String.replace "\"content_version\":\"10000000-0000-4000-8000-000000000000\"," "" fileFixture
+                ]
+                    |> List.map (Decode.decodeString Api.observationDecoder >> isOk)
+                    |> Expect.equal [ True, False, False ]
+        , test "only an actual409 with exact version-conflict code and valid canonical latest is a content conflict" <|
+            \_ ->
+                let
+                    latest =
+                        fixtureObservation "curated" "2026-01-01T00:00:00Z"
+
+                    body code =
+                        Encode.object [ ( "code", Encode.string code ), ( "latest", observationValue latest ) ] |> Encode.encode 0
+
+                    response status payload =
+                        Http.BadStatus_ { url = "http://fixture", statusCode = status, statusText = "", headers = Dict.empty } payload
+                in
+                Expect.all
+                    [ \_ -> Api.decodeObservationUpdateResponse (response 409 (body "observation_content_conflict")) |> Expect.equal (Err (Api.ObservationContentConflict latest))
+                    , \_ -> Api.decodeObservationUpdateResponse (response 403 (body "observation_content_conflict")) |> Expect.equal (Err (Api.ObservationUpdateHttpError (Http.BadStatus 403)))
+                    , \_ -> Api.decodeObservationUpdateResponse (response 409 (body "other_conflict")) |> Expect.equal (Err (Api.ObservationUpdateHttpError (Http.BadStatus 409)))
+                    , \_ -> Api.decodeObservationUpdateResponse (response 409 "{\"code\":\"observation_content_conflict\",\"latest\":null}") |> Expect.equal (Err (Api.ObservationUpdateHttpError (Http.BadStatus 409)))
+                    , \_ -> Api.decodeObservationUpdateResponse (response 404 "{}") |> Expect.equal (Err (Api.ObservationUpdateHttpError (Http.BadStatus 404)))
+                    , \_ -> Api.decodeObservationUpdateResponse Http.Timeout_ |> Expect.equal (Err (Api.ObservationUpdateHttpError Http.Timeout))
+                    ] ()
+        , test "delayed-notification409 preserves draft and immutable provenance, and explicit rebase saves with a new token at the same timestamp" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "My retained draft"
+
+                    latest =
+                        { baseline | content = "Competing writer", contentVersion = "10000000-0000-4000-8000-000000000001" }
+
+                    baseline =
+                        fixtureObservation "curated" "2026-01-01T00:00:00Z"
+                in
+                case saving.observations.edit |> Maybe.andThen .activeRequest of
+                    Nothing -> Expect.fail "Expected owned save request"
+                    Just request ->
+                        let
+                            conflicted =
+                                Feature.Observation.update (ObservationUpdated request (Err (Api.ObservationContentConflict latest))) saving |> Tuple.first
+
+                            rebased =
+                                Feature.Observation.update RebaseObservationEdit conflicted |> Tuple.first
+
+                            retried =
+                                Feature.Observation.update SaveObservationEdit rebased |> Tuple.first
+
+                            accepted =
+                                { latest | content = "My retained draft", contentVersion = "10000000-0000-4000-8000-000000000002" }
+
+                            completed =
+                                retried.observations.edit |> Maybe.andThen .activeRequest |> Maybe.map (\next -> Feature.Observation.update (ObservationUpdated next (Ok accepted)) retried |> Tuple.first)
+
+                            useLatest =
+                                Feature.Observation.update ReloadObservationEdit conflicted |> Tuple.first
+                        in
+                        Expect.all
+                            [ \_ -> conflicted.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.conflict, edit.saving )) |> Expect.equal (Just ( "My retained draft", True, False ))
+                            , \_ -> conflicted.observations.edit |> Maybe.map .baseContentVersion |> Expect.equal (Just baseline.contentVersion)
+                            , \_ -> rebased.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.baseContentVersion, edit.conflict )) |> Expect.equal (Just ( "My retained draft", latest.contentVersion, False ))
+                            , \_ -> useLatest.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.baseContentVersion )) |> Expect.equal (Just ( latest.content, latest.contentVersion ))
+                            , \_ -> completed |> Maybe.andThen (.observations >> .selectedDetail) |> Expect.equal (Just accepted)
+                            , \_ -> completed |> Maybe.andThen (.observations >> .edit) |> Expect.equal Nothing
+                            , \_ -> Feature.Observation.update (ObservationUpdated request (Err (Api.ObservationContentConflict latest))) { saving | sessionRequestEpoch = saving.sessionRequestEpoch + 1 } |> Tuple.first |> .observations |> Expect.equal saving.observations
+                            ] ()
+        , test "an equal-content equal-timestamp version advance remains a conflict for an owned dirty draft" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "Dirty content"
+
+                    original =
+                        fixtureObservation "curated" "2026-01-01T00:00:00Z"
+
+                    next =
+                        { original | contentVersion = "ffffffff-ffff-4fff-8fff-ffffffffffff" }
+
+                    after =
+                        Feature.Observation.applyCanonicalObservation next saving.observations
+                in
+                after.edit |> Maybe.map (\edit -> { base = edit.baseContentVersion, latest = edit.latestCanonical.contentVersion, conflict = edit.conflict, draft = edit.draft }) |> Expect.equal (Just { base = original.contentVersion, latest = next.contentVersion, conflict = True, draft = "Dirty content" })
+        , test "guarded409 updates an older known token and revalidates an ambiguous equal or later observed token" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "Draft with known version"
+
+                    baseline =
+                        fixtureObservation "curated" "2026-01-01T00:00:00Z"
+
+                    latest =
+                        { baseline | content = "HTTP conflict canonical", contentVersion = "10000000-0000-4000-8000-000000000001", updatedAt = "2026-01-02T00:00:00Z" }
+
+                    check timestamp =
+                        let
+                            known =
+                                { baseline | content = "Observed canonical", contentVersion = "ffffffff-ffff-4fff-8fff-ffffffffffff", updatedAt = timestamp }
+
+                            prepared =
+                                { saving | observations = Feature.Observation.applyCanonicalObservation known saving.observations }
+                        in
+                        prepared.observations.edit |> Maybe.andThen .activeRequest |> Maybe.map (\owned -> Feature.Observation.update (ObservationUpdated owned (Err (Api.ObservationContentConflict latest))) prepared |> Tuple.first |> .observations |> .edit |> Maybe.map .latestCanonical |> Maybe.map .content)
+                in
+                [ check "2026-01-01T00:00:01Z", check latest.updatedAt, check "2026-01-03T00:00:00Z" ] |> Expect.equal [ Just (Just latest.content), Just (Just "Observed canonical"), Just (Just "Observed canonical") ]
+        , test "conditional success fences old equal-content equal-time canonical, detail and result reads before the next edit" <|
+            \_ ->
+                let
+                    original =
+                        fixtureObservation "curated" "2026-01-01T00:00:00Z"
+
+                    saving =
+                        savingEditModel original.content
+
+                    snapshot =
+                        Feature.WebSocket.update (WsMessageReceived (observationSnapshotWire original)) saving |> Tuple.first
+
+                    invalidated =
+                        Feature.WebSocket.update (WsMessageReceived (observationInvalidationWire original.id)) snapshot |> Tuple.first
+
+                    prepared =
+                        let
+                            current =
+                                invalidated.observations
+                        in
+                        Feature.Observation.update RetryObservationDetail { invalidated | observations = { current | detailError = Just "Prior detail needs revalidation" } } |> Tuple.first
+
+                    target =
+                        "workspace:workspace-1|entity:observation:curated"
+
+                    generation =
+                        Dict.get target prepared.webSocket.targetGenerations |> Maybe.withDefault -1
+
+                    guard =
+                        { scopeKey = "workspace:workspace-1", targetKey = "entity:observation:curated", targetGeneration = generation, sessionEpoch = 3, routeWorkspace = Just "workspace-1", audienceId = "editor" }
+
+                    accepted =
+                        { original | contentVersion = "ffffffff-ffff-4fff-8fff-ffffffffffff" }
+                in
+                case ( prepared.observations.edit |> Maybe.andThen .activeRequest, prepared.observations.activeDetailRequest ) of
+                    ( Just request, Just detail ) ->
+                        let
+                            completed =
+                                Feature.Observation.update (ObservationUpdated request (Ok accepted)) prepared |> Tuple.first
+
+                            lateCanonical =
+                                Feature.WebSocket.update (CanonicalObservationFetched guard "workspace-1" original.id (Ok original)) completed |> Tuple.first
+
+                            lateDetail =
+                                Feature.Observation.update (GotObservationDetail detail.workspaceId detail.observationId detail.sessionEpoch detail.token (Ok original)) completed |> Tuple.first
+
+                            latePage =
+                                Feature.DataLoading.update (GotObservations "workspace-1" Nothing prepared.observations.requestGeneration prepared.observations.queryFingerprint 0 (Ok { items = [ original ], hasMore = False })) completed |> Tuple.first
+
+                            nextEdit =
+                                Feature.Observation.update StartObservationEdit lateCanonical |> Tuple.first
+
+                            nextSave =
+                                Feature.Observation.update (SetObservationDraft "Next genuine draft") nextEdit |> Tuple.first |> Feature.Observation.update SaveObservationEdit |> Tuple.first
+
+                            freshGuard =
+                                { guard | targetGeneration = generation + 2 }
+
+                            socket =
+                                completed.webSocket
+
+                            freshModel =
+                                { completed | webSocket = { socket | targetGenerations = Dict.insert target (generation + 2) socket.targetGenerations } }
+
+                            freshCanonical =
+                                { accepted | contentVersion = "00000000-0000-4000-8000-000000000003" }
+
+                            fresh =
+                                Feature.WebSocket.update (CanonicalObservationFetched freshGuard "workspace-1" original.id (Ok freshCanonical)) freshModel |> Tuple.first
+                        in
+                        Expect.all
+                            [ \_ -> (generation > 0) |> Expect.equal True
+                            , \_ -> Dict.get target completed.webSocket.targetGenerations |> Expect.equal (Just (generation + 1))
+                            , \_ -> [ lateCanonical.observations, lateDetail.observations, latePage.observations ] |> Expect.equal (List.repeat 3 completed.observations)
+                            , \_ -> [ Http.BadStatus 404, Http.Timeout ] |> List.map (\error -> Feature.WebSocket.update (CanonicalObservationFetched guard "workspace-1" original.id (Err error)) completed |> Tuple.first |> .observations) |> Expect.equal (List.repeat 2 completed.observations)
+                            , \_ -> completed.observations.selectedDetail |> Expect.equal (Just accepted)
+                            , \_ -> Dict.get original.id completed.observations.items |> Expect.equal (Just accepted)
+                            , \_ -> Dict.get original.id completed.observations.matchEvidence |> Maybe.map (.observation >> .contentVersion) |> Expect.equal (Just accepted.contentVersion)
+                            , \_ -> nextSave.observations.edit |> Maybe.map .baseContentVersion |> Expect.equal (Just accepted.contentVersion)
+                            , \_ -> fresh.observations.selectedDetail |> Expect.equal (Just freshCanonical)
+                            ] ()
+                    _ ->
+                        Expect.fail "Save and detail read must both be genuinely admitted"
+        , test "delayed equal-time409 cannot regress an observed non-base version and one guarded GET enables explicit choices" <|
+            \_ ->
+                let
+                    original =
+                        fixtureObservation "curated" "2026-01-01T00:00:00Z"
+
+                    saving =
+                        savingEditModel "Preserved delayed conflict draft"
+
+                    known =
+                        { original | contentVersion = "ffffffff-ffff-4fff-8fff-ffffffffffff" }
+
+                    stale =
+                        { original | contentVersion = "10000000-0000-4000-8000-000000000001" }
+
+                    observed =
+                        { saving | observations = Feature.Observation.applyCanonicalObservation known saving.observations }
+                in
+                case observed.observations.edit |> Maybe.andThen .activeRequest of
+                    Nothing ->
+                        Expect.fail "Save must remain owned after observing another canonical version"
+                    Just request ->
+                        let
+                            checking =
+                                Feature.Observation.update (ObservationUpdated request (Err (Api.ObservationContentConflict stale))) observed |> Tuple.first
+
+                            view =
+                                Feature.Observation.viewObservationsStateWithPermission True (observationWorkspace Api.Repository) checking.observations |> Query.fromHtml
+                        in
+                        case checking.observations.edit |> Maybe.andThen .activeCanonicalRequest of
+                            Nothing ->
+                                Expect.fail "Ambiguous conflict must issue one fresh owned canonical check"
+                            Just refresh ->
+                                let
+                                    checked =
+                                        Feature.Observation.update (ObservationConflictCanonicalFetched refresh known.contentVersion (Ok known)) checking |> Tuple.first
+
+                                    rebased =
+                                        Feature.Observation.update RebaseObservationEdit checked |> Tuple.first |> Feature.Observation.update SaveObservationEdit |> Tuple.first
+
+                                    useLatest =
+                                        Feature.Observation.update ReloadObservationEdit checked |> Tuple.first
+
+                                    newer =
+                                        { known | contentVersion = "00000000-0000-4000-8000-000000000003", content = "Fresh GET changed content at the same timestamp" }
+
+                                    freshlyChanged =
+                                        Feature.Observation.update (ObservationConflictCanonicalFetched refresh known.contentVersion (Ok newer)) checking |> Tuple.first
+
+                                    intervening =
+                                        { checking | observations = Feature.Observation.applyCanonicalObservation { known | contentVersion = newer.contentVersion } checking.observations }
+
+                                    superseded =
+                                        Feature.Observation.update (ObservationConflictCanonicalFetched refresh known.contentVersion (Ok known)) intervening |> Tuple.first
+                                in
+                                Expect.all
+                                    [ \_ -> checking.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.latestCanonical.contentVersion, edit.canonicalProvisional )) |> Expect.equal (Just ( "Preserved delayed conflict draft", known.contentVersion, True ))
+                                    , \_ -> checking.observations.selectedDetail |> Maybe.map .contentVersion |> Expect.equal (Just known.contentVersion)
+                                    , \_ -> Feature.Observation.update RebaseObservationEdit checking |> Tuple.first |> .observations |> Expect.equal checking.observations
+                                    , \_ -> Feature.Observation.update ReloadObservationEdit checking |> Tuple.first |> .observations |> Expect.equal checking.observations
+                                    , \_ -> view |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Keep my draft" ] ] |> Query.has [ Selector.disabled True ]
+                                    , \_ -> view |> Query.has [ Selector.text "Checking the current version", Selector.text "Use retained version" ]
+                                    , \_ -> checked.observations.edit |> Maybe.map (\edit -> ( edit.activeCanonicalRequest, edit.canonicalProvisional, edit.draft )) |> Expect.equal (Just ( Nothing, False, "Preserved delayed conflict draft" ))
+                                    , \_ -> rebased.observations.edit |> Maybe.map .baseContentVersion |> Expect.equal (Just known.contentVersion)
+                                    , \_ -> useLatest.observations.edit |> Maybe.map (\edit -> ( edit.baseContentVersion, edit.draft )) |> Expect.equal (Just ( known.contentVersion, known.content ))
+                                    , \_ -> freshlyChanged.observations.edit |> Maybe.map .latestCanonical |> Expect.equal (Just newer)
+                                    , \_ -> freshlyChanged.observations.selectedDetail |> Expect.equal (Just newer)
+                                    , \_ -> superseded.observations.edit |> Maybe.map (\edit -> ( edit.latestCanonical.contentVersion, edit.canonicalProvisional, edit.draft )) |> Expect.equal (Just ( newer.contentVersion, True, "Preserved delayed conflict draft" ))
+                                    , \_ -> Feature.Observation.update (ObservationUpdated request (Err (Api.ObservationContentConflict stale))) checking |> Tuple.first |> .observations |> Expect.equal checking.observations
+                                    , \_ -> Feature.Observation.update (ObservationConflictCanonicalFetched refresh known.contentVersion (Ok known)) { checking | sessionRequestEpoch = checking.sessionRequestEpoch + 1 } |> Tuple.first |> .observations |> Expect.equal checking.observations
+                                    , \_ -> Feature.Observation.reconcileCurationPermission { checking | sessionContext = Just readOnlySession } |> Feature.Observation.update (ObservationConflictCanonicalFetched refresh known.contentVersion (Ok known)) |> Tuple.first |> .observations |> .edit |> Expect.equal Nothing
+                                    , \_ -> Feature.Observation.update CancelObservationEdit checking |> Tuple.first |> Feature.Observation.update (ObservationConflictCanonicalFetched refresh known.contentVersion (Ok known)) |> Tuple.first |> .observations |> .edit |> Expect.equal Nothing
+                                    ] ()
+        , test "hidden-owner ambiguity checks preserve B and a failed check permits a safe repeated conditional conflict" <|
+            \_ ->
+                let
+                    original =
+                        fixtureObservation "curated" "2026-01-01T00:00:00Z"
+
+                    saving =
+                        savingEditModel "Hidden conditional draft"
+
+                    known =
+                        { original | contentVersion = "ffffffff-ffff-4fff-8fff-ffffffffffff" }
+
+                    stale =
+                        { original | contentVersion = "10000000-0000-4000-8000-000000000001" }
+
+                    hidden =
+                        Feature.Observation.selectObservation "other" saving |> Tuple.first
+
+                    observed =
+                        { hidden | observations = Feature.Observation.applyCanonicalObservation known hidden.observations }
+                in
+                case observed.observations.edit |> Maybe.andThen .activeRequest of
+                    Nothing ->
+                        Expect.fail "Expected hidden save owner"
+                    Just request ->
+                        let
+                            checking =
+                                Feature.Observation.update (ObservationUpdated request (Err (Api.ObservationContentConflict stale))) observed |> Tuple.first
+                        in
+                        case checking.observations.edit |> Maybe.andThen .activeCanonicalRequest of
+                            Nothing ->
+                                Expect.fail "Expected hidden canonical check"
+                            Just refresh ->
+                                let
+                                    failed =
+                                        Feature.Observation.update (ObservationConflictCanonicalFetched refresh known.contentVersion (Err Http.Timeout)) checking |> Tuple.first
+
+                                    retry =
+                                        Feature.Observation.update RebaseObservationEdit failed |> Tuple.first |> Feature.Observation.update SaveObservationEdit |> Tuple.first
+
+                                    newest =
+                                        { known | contentVersion = "00000000-0000-4000-8000-000000000003", content = "Current after another competing write" }
+
+                                    conflictedAgain =
+                                        retry.observations.edit |> Maybe.andThen .activeRequest |> Maybe.map (\next -> Feature.Observation.update (ObservationUpdated next (Err (Api.ObservationContentConflict newest))) retry |> Tuple.first)
+                                in
+                                Expect.all
+                                    [ \_ -> checking.observations.selectedId |> Expect.equal (Just "other")
+                                    , \_ -> checking.observations.activeDetailRequest |> Expect.equal observed.observations.activeDetailRequest
+                                    , \_ -> checking.observations.orderedIds |> Expect.equal observed.observations.orderedIds
+                                    , \_ -> failed.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.canonicalProvisional, edit.activeCanonicalRequest )) |> Expect.equal (Just ( "Hidden conditional draft", True, Nothing ))
+                                    , \_ -> failed.observations.edit |> Maybe.andThen .error |> Maybe.map (String.contains "provisional") |> Expect.equal (Just True)
+                                    , \_ -> retry.observations.edit |> Maybe.map .baseContentVersion |> Expect.equal (Just known.contentVersion)
+                                    , \_ -> conflictedAgain |> Maybe.andThen (.observations >> .edit) |> Maybe.map (\edit -> ( edit.draft, edit.latestCanonical.contentVersion, edit.conflict )) |> Expect.equal (Just ( "Hidden conditional draft", newest.contentVersion, True ))
+                                    , \_ -> conflictedAgain |> Maybe.andThen (.observations >> .edit) |> Maybe.andThen .activeCanonicalRequest |> Expect.equal Nothing
+                                    ] ()
+        , test "conditional conflict retires only current in-flight applied pages in flat, exact, match and facet modes" <|
+            \_ ->
+                let
+                    original =
+                        fixtureObservation "curated" "2026-01-01T00:00:00Z"
+
+                    latest =
+                        { original | contentVersion = "10000000-0000-4000-8000-000000000001" }
+
+                    saving =
+                        savingEditModel "Draft during page load"
+
+                    facet =
+                        facetFixture Api.SubjectFile original.subject 2 original.updatedAt
+
+                    facetKey =
+                        Feature.Observation.facetKey facet.subjectKind facet.subject
+
+                    check mode =
+                        let
+                            state =
+                                saving.observations
+
+                            prepared =
+                                { saving | observations = { state | requestMode = mode, matchAppliedPaths = [ original.subject ], matchPathsInput = original.subject, selectedFacet = Just { subjectKind = Api.SubjectFile, subject = original.subject }, facets = Dict.singleton facetKey facet, facetKeys = [ facetKey ] } }
+                                    |> Feature.Observation.refreshActiveResults
+                                    |> Tuple.first
+                        in
+                        case prepared.observations.edit |> Maybe.andThen .activeRequest of
+                            Nothing ->
+                                False
+                            Just request ->
+                                let
+                                    completed =
+                                        Feature.Observation.update (ObservationUpdated request (Err (Api.ObservationContentConflict latest))) prepared |> Tuple.first
+
+                                    stale =
+                                        case mode of
+                                            ObservationFacetMode ->
+                                                Feature.Observation.update (GotObservationSubjectFacets "workspace-1" 3 prepared.observations.facetRequestGeneration prepared.observations.facetFingerprint 0 (Ok { items = [ { facet | observationCount = 999 } ], hasMore = False })) completed |> Tuple.first
+                                            ObservationMatchMode ->
+                                                Feature.Observation.update (GotObservationMatches "workspace-1" 3 prepared.observations.requestGeneration prepared.observations.queryFingerprint 0 (Ok { items = [ matchFixture original [] ], hasMore = False })) completed |> Tuple.first
+                                            _ ->
+                                                Feature.DataLoading.update (GotObservations "workspace-1" Nothing prepared.observations.requestGeneration prepared.observations.queryFingerprint 0 (Ok { items = [ original ], hasMore = False })) completed |> Tuple.first
+
+                                    generationRetired =
+                                        if mode == ObservationFacetMode then
+                                            completed.observations.facetRequestGeneration == prepared.observations.facetRequestGeneration + 1
+                                        else
+                                            completed.observations.requestGeneration == prepared.observations.requestGeneration + 1
+                                in
+                                generationRetired
+                                    && stale.observations == completed.observations
+                                    && completed.observations.orderedIds == prepared.observations.orderedIds
+                                    && completed.observations.selectedDetail == Just latest
+                                    && completed.observations.appliedQuery == prepared.observations.appliedQuery
+                                    && (completed.observations.edit |> Maybe.map .draft) == Just "Draft during page load"
+                in
+                [ ObservationFlatMode, ObservationExactSubjectMode, ObservationMatchMode, ObservationFacetMode ] |> List.map check |> Expect.equal [ True, True, True, True ]
+        , test "hidden save owner accepts a provenance-checked409 without selecting or admitting its observation, and rejects mismatched latest" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "Hidden preserved draft"
+
+                    hidden =
+                        Feature.Observation.selectObservation "other" saving |> Tuple.first
+
+                    baseline =
+                        fixtureObservation "curated" "2026-01-01T00:00:00Z"
+
+                    latest =
+                        { baseline | content = "Foreign canonical", contentVersion = "10000000-0000-4000-8000-000000000001" }
+                in
+                case hidden.observations.edit |> Maybe.andThen .activeRequest of
+                    Nothing -> Expect.fail "Hidden save owner must remain active"
+                    Just owned ->
+                        let
+                            accepted =
+                                Feature.Observation.update (ObservationUpdated owned (Err (Api.ObservationContentConflict latest))) hidden |> Tuple.first
+
+                            mismatch =
+                                Feature.Observation.update (ObservationUpdated owned (Err (Api.ObservationContentConflict { latest | gitSha = "different" }))) hidden |> Tuple.first
+
+                            deleted =
+                                Feature.Observation.update (ObservationUpdated owned (Err (Api.ObservationUpdateHttpError (Http.BadStatus 404)))) hidden |> Tuple.first
+                        in
+                        Expect.all
+                            [ \_ -> accepted.observations.selectedId |> Expect.equal (Just "other")
+                            , \_ -> accepted.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.conflict, edit.latestCanonical )) |> Expect.equal (Just ( "Hidden preserved draft", True, latest ))
+                            , \_ -> mismatch.observations.edit |> Maybe.map .latestCanonical |> Expect.equal (Just baseline)
+                            , \_ -> mismatch.observations.edit |> Maybe.map .draft |> Expect.equal (Just "Hidden preserved draft")
+                            , \_ -> deleted.observations.edit |> Expect.equal Nothing
+                            ] ()
         , test "gates mutation controls and keeps provenance immutable in the render tree" <|
             \_ ->
                 let
@@ -244,7 +660,7 @@ suite =
                     Just request ->
                         let
                             failed =
-                                Feature.Observation.update (ObservationUpdated request (Err Http.Timeout)) saving
+                                Feature.Observation.update (ObservationUpdated request (Err (Api.ObservationUpdateHttpError Http.Timeout))) saving
                                     |> Tuple.first
                         in
                         Expect.equal
@@ -304,7 +720,7 @@ suite =
                         fixtureObservation "curated" "2026-01-01T00:00:00Z"
 
                     foreign =
-                        { original | content = "foreign wins", updatedAt = "2026-01-03T00:00:00Z" }
+                        { original | content = "foreign wins", contentVersion = "10000000-0000-4000-8000-000000000002", updatedAt = "2026-01-03T00:00:00Z" }
 
                     afterEvent =
                         { saving | observations = Feature.Observation.applyCanonicalObservation foreign saving.observations }
@@ -316,7 +732,7 @@ suite =
                     Just request ->
                         let
                             staleResponse =
-                                { original | content = "local draft", updatedAt = "2026-01-02T00:00:00Z" }
+                                { original | content = "local draft", contentVersion = "10000000-0000-4000-8000-000000000001", updatedAt = "2026-01-02T00:00:00Z" }
 
                             afterResponse =
                                 Feature.Observation.update (ObservationUpdated request (Ok staleResponse)) afterEvent |> Tuple.first
@@ -1141,7 +1557,7 @@ suite =
                                 Feature.Observation.update (ObservationUpdated request (Ok { saved | content = "saved retained draft", updatedAt = "2026-01-02T00:00:00Z" })) browsing |> Tuple.first
 
                             failed =
-                                Feature.Observation.update (ObservationUpdated request (Err Http.NetworkError)) browsing |> Tuple.first
+                                Feature.Observation.update (ObservationUpdated request (Err (Api.ObservationUpdateHttpError Http.NetworkError))) browsing |> Tuple.first
 
                             revoked =
                                 Feature.Observation.reconcileCurationPermission { browsing | sessionContext = Just readOnlySession }
@@ -1287,7 +1703,7 @@ suite =
                                     && (Feature.Observation.update RetryObservationResults model |> Tuple.first |> .observations) == model.observations
                                     && (applyObservationPage (observationPageMessage 0 (Err Http.NetworkError) saving) model).observations == model.observations
                                     && (Feature.Observation.update (ObservationUpdated request (Ok canonical)) model |> Tuple.first |> .observations) == model.observations
-                                    && (Feature.Observation.update (ObservationUpdated request (Err Http.NetworkError)) model |> Tuple.first |> .observations) == model.observations
+                                    && (Feature.Observation.update (ObservationUpdated request (Err (Api.ObservationUpdateHttpError Http.NetworkError))) model |> Tuple.first |> .observations) == model.observations
                         in
                         Expect.all
                             [ \_ -> List.map inert retired |> Expect.equal [ True, True, True, True ]
@@ -1529,7 +1945,7 @@ suite =
             \_ ->
                 let
                     canonical =
-                        """{"id":"multi","workspace_id":"workspace-1","subjects":[{"subject_kind":"glob","subject":"src/**/*.elm"},{"subject_kind":"file","subject":"src/Main.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content":"Evidence","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"""
+                        """{"id":"multi","workspace_id":"workspace-1","subjects":[{"subject_kind":"glob","subject":"src/**/*.elm"},{"subject_kind":"file","subject":"src/Main.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Evidence","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"""
 
                     canonicalSubjects =
                         Decode.decodeString Api.observationDecoder canonical
@@ -1541,12 +1957,12 @@ suite =
                 in
                 [ canonicalSubjects == Ok [ "src/**/*.elm", "src/Main.elm" ]
                 , legacySubjects == Ok [ "src/Main.elm" ]
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[],\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[{\"subject_kind\":\"other\",\"subject\":\"x\"}],\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":\"not-an-array\",\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[],\"subject_kind\":\"file\",\"subject\":\"src/legacy.elm\",\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":\"not-an-array\",\"subject_kind\":\"file\",\"subject\":\"src/legacy.elm\",\"git_sha\":\"x\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[],\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[{\"subject_kind\":\"other\",\"subject\":\"x\"}],\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":\"not-an-array\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[],\"subject_kind\":\"file\",\"subject\":\"src/legacy.elm\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":\"not-an-array\",\"subject_kind\":\"file\",\"subject\":\"src/legacy.elm\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
                 ]
                     |> Expect.equal [ True, True, True, True, True, True, True, True ]
         , test "normalizes bounded concrete match paths and encodes the match request" <|
@@ -1633,7 +2049,7 @@ suite =
             \_ ->
                 let
                     response =
-                        """{"items":[{"observation":{"id":"v020","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Legacy.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content":"Legacy","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Legacy.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Legacy.elm"}]},{"observation":{"id":"v021","workspace_id":"workspace-1","subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content":"Canonical","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Main.elm"],"matched_subjects":[{"subject_kind":"glob","subject":"src/**/*.elm"}]}],"has_more":true}"""
+                        """{"items":[{"observation":{"id":"v020","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Legacy.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Legacy","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Legacy.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Legacy.elm"}]},{"observation":{"id":"v021","workspace_id":"workspace-1","subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Canonical","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Main.elm"],"matched_subjects":[{"subject_kind":"glob","subject":"src/**/*.elm"}]}],"has_more":true}"""
 
                     decoded =
                         Decode.decodeString (Api.paginatedDecoder Api.observationMatchDecoder) response
@@ -1882,10 +2298,10 @@ suite =
             \_ ->
                 let
                     canonical =
-                        """{"observation":{"id":"canonical","workspace_id":"workspace-1","subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content":"Canonical","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Main.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"path_matches":[{"path":"src/Main.elm","matched_subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}]}]}"""
+                        """{"observation":{"id":"canonical","workspace_id":"workspace-1","subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Canonical","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Main.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"path_matches":[{"path":"src/Main.elm","matched_subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}]}]}"""
 
                     legacy =
-                        """{"observation":{"id":"legacy","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Legacy.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content":"Legacy","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Legacy.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Legacy.elm"}]}"""
+                        """{"observation":{"id":"legacy","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Legacy.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Legacy","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Legacy.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Legacy.elm"}]}"""
                 in
                 Expect.all
                     [ \_ ->
@@ -3004,7 +3420,7 @@ fullSha =
 
 fileFixture : String
 fileFixture =
-    """{"id":"observation-file","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Main.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content":"File observation","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}"""
+    """{"id":"observation-file","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Main.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"File observation","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}"""
 
 
 routeFlags : Flags
@@ -3165,6 +3581,7 @@ fixtureObservation id createdAt =
     , subject = "src/Main.elm"
     , gitSha = fullSha
     , content = "Observation"
+    , contentVersion = "10000000-0000-4000-8000-000000000000"
     , createdAt = createdAt
     , updatedAt = createdAt
     }
@@ -3181,6 +3598,7 @@ observationWithSubjects observationId subjects =
             , subject = first.subject
             , gitSha = fullSha
             , content = "Observation " ++ observationId
+            , contentVersion = "10000000-0000-4000-8000-000000000000"
             , createdAt = "2026-01-01T00:00:00Z"
             , updatedAt = "2026-01-01T00:00:00Z"
             }
@@ -3323,6 +3741,7 @@ observationValue observation =
           )
         , ( "git_sha", Encode.string observation.gitSha )
         , ( "content", Encode.string observation.content )
+        , ( "content_version", Encode.string observation.contentVersion )
         , ( "created_at", Encode.string observation.createdAt )
         , ( "updated_at", Encode.string observation.updatedAt )
         ]
@@ -3335,7 +3754,7 @@ paginatedFixture hasMore =
 
 globFixture : String
 globFixture =
-    """{"id":"observation-glob","workspace_id":"workspace-1","subject_kind":"glob","subject":"src/**/*.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content":"Glob observation","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}"""
+    """{"id":"observation-glob","workspace_id":"workspace-1","subject_kind":"glob","subject":"src/**/*.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Glob observation","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}"""
 
 
 isErr : Result error value -> Bool

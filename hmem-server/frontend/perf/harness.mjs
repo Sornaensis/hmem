@@ -1462,7 +1462,7 @@ async function main() {
       taskId: evidenceTask?.taskId || null, parentTaskId: evidenceTask?.parentTaskId || null, evidenceBaseCommit,
       inputQualification: qualifiedInputs, sourceProvenance: qualifiedProvenance, measurementRevision: evidenceRevision,
       fixtures: {
-        schemaVersion: 1, seed: fixtures.large.seed, directFocusContract: DIRECT_FOCUS_CONTRACT,
+        schemaVersion: fixtures.large.schemaVersion, seed: fixtures.large.seed, directFocusContract: DIRECT_FOCUS_CONTRACT,
         deepFocusContinuation,
         small: { hash: fixtureHash(fixtures.small), snapshotHash: snapshotHash(fixtures.small), scale: fixtures.small.scale, directFocusTarget: directFocusFixture(fixtures.small).targetProject },
         large: { hash: fixtureHash(fixtures.large), snapshotHash: snapshotHash(fixtures.large), scale: fixtures.large.scale, directFocusTarget: directFocusFixture(fixtures.large).targetProject }

@@ -1353,6 +1353,7 @@ observation id =
     , subject = "src/Main.elm"
     , gitSha = "0123456789abcdef0123456789abcdef01234567"
     , content = id
+    , contentVersion = "10000000-0000-4000-8000-000000000000"
     , createdAt = "2026-01-01T00:00:00Z"
     , updatedAt = "2026-01-01T00:00:00Z"
     }

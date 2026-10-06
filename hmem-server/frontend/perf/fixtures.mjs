@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 
-export const FIXTURE_SCHEMA_VERSION = 1
+export const FIXTURE_SCHEMA_VERSION = 2
 export const FIXTURE_SEED = 'hmem-large-workspace-v1'
 export const OBSERVATION_MEASURED_QUERY = 'Observation 00001 evidence'
 export const TIMELINE_BROWSER_NOW = '2026-08-30T12:00:00Z'
@@ -215,6 +215,7 @@ function makeObservations(workspaceId, count) {
       subjects,
       git_sha: createHash('sha1').update(`${FIXTURE_SEED}:observation:${index}`).digest('hex'),
       content: `Observation ${String(index + 1).padStart(5, '0')} records deterministic repository evidence.`,
+      content_version: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
       subject_kind: subjects[0].subject_kind,
       subject: subjects[0].subject,
       created_at: timestamp(index),
@@ -802,6 +803,7 @@ export function validateFixture(fixture) {
   }
   assert(edgeKeys.size === fixture.dependencies.length, 'dependency uniqueness')
   assert(fixture.observations.every(item => item.subjects.length >= 2 && item.subjects.length <= 4), 'observation subjects')
+  assert(fixture.observations.every(item => typeof item.content_version === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item.content_version)), 'observation content version DTO')
   assert(fixture.observations.some(item => item.subjects.some(subject => subject.subject_kind === 'file')), 'file subjects')
   assert(fixture.observations.some(item => item.subjects.some(subject => subject.subject_kind === 'glob')), 'glob subjects')
   assert(fixture.projects.every(project => project.metadata != null && typeof project.metadata === 'object'), 'project metadata DTO')

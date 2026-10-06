@@ -8,6 +8,7 @@ module Feature.Observation exposing
     , clearSelection
     , deleteDialogFocusTarget
     , detailResponseMatches
+    , failResultPage
     , facetKey
     , facetQuery
     , facetResponseMatches
@@ -75,6 +76,7 @@ init =
     , gitSha = ""
     , requestMode = ObservationFlatMode
     , appliedQuery = Nothing
+    , failedRequest = Nothing
     , matchPathsInput = ""
     , matchAppliedPaths = []
     , matchValidationError = Nothing
@@ -198,6 +200,21 @@ update msg model =
 
         RefreshObservationResults ->
             refreshActiveResults model
+
+        RetryObservationResults ->
+            retryResults model
+
+        RetryObservationDetail ->
+            case model.observations.selectedId of
+                Just observationId ->
+                    if model.observations.detailError /= Nothing && not model.observations.detailLoading then
+                        selectObservation observationId model
+
+                    else
+                        ( model, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
 
         SetObservationBrowseMode mode ->
             switchBrowseMode mode model
@@ -379,7 +396,7 @@ update msg model =
                         ( updateObservation (mergeMatchPage offset paginated) model, Cmd.none )
 
                     Err _ ->
-                        ( updateObservation (\state -> { state | loading = False, error = Just "Failed to match repository files.", expectedOffset = Nothing }) model, Cmd.none )
+                        ( updateObservation (failResultPage workspaceId offset "Failed to match repository files.") model, Cmd.none )
 
         GotObservationSubjectFacets workspaceId sessionEpoch generation fingerprint offset result ->
             if model.selectedWorkspaceId /= Just workspaceId || model.sessionRequestEpoch /= sessionEpoch || not (facetResponseMatches sessionEpoch generation fingerprint offset model.observations) then
@@ -391,7 +408,7 @@ update msg model =
                         ( updateObservation (mergeFacetPage offset paginated) model, Cmd.none )
 
                     Err _ ->
-                        ( updateObservation (\state -> { state | facetLoading = False, facetError = Just "Failed to load shared subjects.", facetExpectedOffset = Nothing }) model, Cmd.none )
+                        ( updateObservation (failResultPage workspaceId offset "Failed to load shared subjects.") model, Cmd.none )
 
         _ ->
             ( model, Cmd.none )
@@ -1185,9 +1202,14 @@ refreshActiveResults model =
 
 
 startResultRefresh : ObservationRequestMode -> Int -> String -> ObservationModel -> ObservationModel
-startResultRefresh mode sessionEpoch workspaceId state =
+startResultRefresh mode sessionEpoch workspaceId input =
+    let
+        state =
+            ensureAppliedQuery input
+    in
     { state
         | loading = True
+        , failedRequest = Nothing
         , resultsStale = False
         , error = Nothing
         , requestGeneration = state.requestGeneration + 1
@@ -1199,9 +1221,14 @@ startResultRefresh mode sessionEpoch workspaceId state =
 
 
 startMatchRefresh : Int -> String -> ObservationModel -> ObservationModel
-startMatchRefresh sessionEpoch workspaceId state =
+startMatchRefresh sessionEpoch workspaceId input =
+    let
+        state =
+            ensureAppliedQuery input
+    in
     { state
         | loading = True
+        , failedRequest = Nothing
         , resultsStale = False
         , error = Nothing
         , requestGeneration = state.requestGeneration + 1
@@ -1234,9 +1261,14 @@ startFacetReload sessionEpoch workspaceId draftState =
 
 
 startFacetRefresh : Int -> String -> ObservationModel -> ObservationModel
-startFacetRefresh sessionEpoch workspaceId state =
+startFacetRefresh sessionEpoch workspaceId input =
+    let
+        state =
+            ensureAppliedQuery input
+    in
     { state
         | resultsStale = False
+        , failedRequest = Nothing
         , facetLoading = True
         , facetError = Nothing
         , facetRequestGeneration = state.facetRequestGeneration + 1
@@ -1545,6 +1577,7 @@ matchFingerprint sessionEpoch workspaceId inputState =
 canLoadMore : String -> ObservationModel -> Bool
 canLoadMore workspaceId state =
     not state.loading
+        && state.failedRequest == Nothing
         && not (hasUnappliedFilters state)
         && state.hasMore
         && state.expectedOffset
@@ -1557,6 +1590,7 @@ canLoadMoreFacets : String -> ObservationModel -> Bool
 canLoadMoreFacets workspaceId state =
     state.requestMode == ObservationFacetMode
         && not state.facetLoading
+        && state.failedRequest == Nothing
         && not (hasUnappliedFilters state)
         && state.facetHasMore
         && state.facetExpectedOffset == Nothing
@@ -1566,17 +1600,111 @@ canLoadMoreFacets workspaceId state =
 commitAppliedQuery : ObservationModel -> ObservationModel
 commitAppliedQuery state =
     { state
-        | appliedQuery =
-            Just
-                { requestMode = state.requestMode
-                , query = state.query
-                , subjectKind = state.subjectKind
-                , subject = state.subject
-                , selectedFacet = state.selectedFacet
-                , gitSha = state.gitSha
-                , matchAppliedPaths = state.matchAppliedPaths
-                }
+        | appliedQuery = Just (querySnapshot { state | appliedQuery = Nothing })
+        , failedRequest = Nothing
     }
+
+
+querySnapshot : ObservationModel -> ObservationAppliedQuery
+querySnapshot input =
+    let
+        state =
+            appliedState input
+    in
+    { requestMode = state.requestMode
+    , query = state.query
+    , subjectKind = state.subjectKind
+    , subject = state.subject
+    , selectedFacet = state.selectedFacet
+    , gitSha = state.gitSha
+    , matchAppliedPaths = state.matchAppliedPaths
+    }
+
+
+ensureAppliedQuery : ObservationModel -> ObservationModel
+ensureAppliedQuery state =
+    if state.appliedQuery == Nothing then
+        commitAppliedQuery state
+    else
+        state
+
+
+{-| Called only after the response's workspace/session/generation/offset guards
+have accepted it. Keep the failed request independent of edited filter inputs.
+-}
+failResultPage : String -> Int -> String -> ObservationModel -> ObservationModel
+failResultPage workspaceId offset message state =
+    let
+        facets =
+            state.requestMode == ObservationFacetMode
+
+        failed =
+            { workspaceId = workspaceId
+            , sessionEpoch = if facets then state.facetRequestSessionEpoch else state.requestSessionEpoch
+            , generation = if facets then state.facetRequestGeneration else state.requestGeneration
+            , fingerprint = if facets then state.facetFingerprint else state.queryFingerprint
+            , offset = offset
+            , query = querySnapshot state
+            }
+
+        hasCached =
+            if facets then not (List.isEmpty state.facetKeys) else not (List.isEmpty state.orderedIds)
+    in
+    { state
+        | failedRequest = Just failed
+        , resultsStale = state.resultsStale || (offset == 0 && hasCached)
+        , loading = if facets then state.loading else False
+        , error = if facets then state.error else Just message
+        , expectedOffset = if facets then state.expectedOffset else Nothing
+        , facetLoading = if facets then False else state.facetLoading
+        , facetError = if facets then Just message else state.facetError
+        , facetExpectedOffset = if facets then Nothing else state.facetExpectedOffset
+    }
+
+
+retryResults : Model -> ( Model, Cmd Msg )
+retryResults model =
+    case ( repositoryWorkspaceId model, model.observations.failedRequest ) of
+        ( Just workspaceId, Just failed ) ->
+            let
+                state =
+                    model.observations
+
+                facets =
+                    failed.query.requestMode == ObservationFacetMode
+
+                valid =
+                    failed.workspaceId == workspaceId
+                        && failed.sessionEpoch == model.sessionRequestEpoch
+                        && failed.query == querySnapshot state
+                        && state.requestMode == failed.query.requestMode
+                        && (if facets then
+                                not state.facetLoading && state.facetExpectedOffset == Nothing
+                                    && failed.generation == state.facetRequestGeneration && failed.fingerprint == state.facetFingerprint
+                            else
+                                not state.loading && state.expectedOffset == Nothing
+                                    && failed.generation == state.requestGeneration && failed.fingerprint == state.queryFingerprint
+                           )
+
+                prepared =
+                    updateObservation
+                        (\current ->
+                            if facets then
+                                { current | failedRequest = Nothing, facetRequestGeneration = current.facetRequestGeneration + 1 }
+                            else
+                                { current | failedRequest = Nothing, requestGeneration = current.requestGeneration + 1 }
+                        ) model
+            in
+            if not valid then
+                ( model, Cmd.none )
+            else
+                case failed.query.requestMode of
+                    ObservationFacetMode -> fetchFacetPage failed.offset prepared
+                    ObservationMatchMode -> fetchMatchPage failed.offset failed.query.matchAppliedPaths prepared
+                    _ -> fetchPage failed.offset prepared
+
+        _ ->
+            ( model, Cmd.none )
 
 
 appliedState : ObservationModel -> ObservationModel
@@ -2534,6 +2662,7 @@ mergeFacetPage offset paginated state =
         , facetExpectedOffset = Nothing
         , facetNextOffset = offset + List.length paginated.items
         , resultsStale = if offset == 0 then False else state.resultsStale
+        , failedRequest = Nothing
     }
 
 
@@ -2592,6 +2721,7 @@ mergeMatchPage offset paginated state =
         , expectedOffset = Nothing
         , nextOffset = offset + List.length paginated.items
         , matchEvidence = matchesById
+        , failedRequest = Nothing
         , resultsStale = if offset == 0 then False else state.resultsStale
     }
         |> (\merged -> List.foldl applyAuthoritativeObservation merged observations)
@@ -3013,10 +3143,7 @@ viewObservationResults workspaceId ariaLabel emptyHeading state =
             text ""
         , case state.error of
             Just message ->
-                div [ class "empty-state observation-state observation-state-error", attribute "role" "alert" ]
-                    [ h3 [] [ text "Unable to load observations" ]
-                    , p [] [ text message ]
-                    ]
+                viewRequestError "Unable to load observations" message (not (List.isEmpty observations)) state
 
             Nothing ->
                 if not state.loading && List.isEmpty observations then
@@ -3026,8 +3153,13 @@ viewObservationResults workspaceId ariaLabel emptyHeading state =
                         ]
 
                 else
-                    div [ class "observation-list-rows", attribute "aria-label" ariaLabel ]
-                        (List.map (viewObservationRow state.selectedId context) observations)
+                    text ""
+        , div [ class "observation-list-rows", attribute "aria-label" ariaLabel ]
+            (List.map (viewObservationRow state.selectedId context) observations)
+        , if state.loading && not (List.isEmpty observations) then
+            viewPageLoading state.expectedOffset "observations"
+          else
+            text ""
         , if state.hasMore then
             div [ class "observation-pagination" ]
                 [ button [ class "btn btn-secondary observation-load-more", type_ "button", onClick LoadMoreObservations, disabled (not (canLoadMore workspaceId state)) ]
@@ -3058,6 +3190,37 @@ viewStaleResultsNotice state =
         text ""
 
 
+viewRequestError : String -> String -> Bool -> ObservationModel -> Html Msg
+viewRequestError heading message hasCached state =
+    div
+        [ classList [ ( "observation-state observation-state-error", True ), ( "empty-state", not hasCached ) ]
+        , attribute "role" "alert"
+        ]
+        [ h3 [] [ text heading ]
+        , p [] [ text message ]
+        , if hasCached then
+            p [] [ text "Previously loaded results remain available; the last request failed." ]
+          else
+            text ""
+        , button
+            [ class "btn btn-secondary observation-retry", type_ "button", onClick RetryObservationResults
+            , disabled ((if state.requestMode == ObservationFacetMode then state.facetLoading else state.loading) || state.failedRequest == Nothing)
+            ] [ text "Retry results" ]
+        ]
+
+
+viewPageLoading : Maybe Int -> String -> Html Msg
+viewPageLoading offset labelText =
+    p [ class "observation-loading-page", attribute "role" "status", attribute "aria-live" "polite" ]
+        [ text
+            (if offset == Just 0 then
+                "Refreshing " ++ labelText ++ "..."
+             else
+                "Loading more " ++ labelText ++ "..."
+            )
+        ]
+
+
 viewFacetCatalogue : String -> ObservationModel -> Html Msg
 viewFacetCatalogue workspaceId state =
     let
@@ -3073,10 +3236,7 @@ viewFacetCatalogue workspaceId state =
             text ""
         , case state.facetError of
             Just message ->
-                div [ class "empty-state observation-state observation-state-error", attribute "role" "alert" ]
-                    [ h3 [] [ text "Unable to load shared subjects" ]
-                    , p [] [ text message ]
-                    ]
+                viewRequestError "Unable to load shared subjects" message (not (List.isEmpty facets)) state
 
             Nothing ->
                 if not state.facetLoading && List.isEmpty facets then
@@ -3086,8 +3246,12 @@ viewFacetCatalogue workspaceId state =
                         ]
 
                 else
-                    div [ class "observation-facet-rows", attribute "aria-label" "Shared subjects" ]
-                        (List.map viewFacet facets)
+                    text ""
+        , div [ class "observation-facet-rows", attribute "aria-label" "Shared subjects" ] (List.map viewFacet facets)
+        , if state.facetLoading && not (List.isEmpty facets) then
+            viewPageLoading state.facetExpectedOffset "shared subjects"
+          else
+            text ""
         , if state.facetHasMore then
             div [ class "observation-pagination" ]
                 [ button [ class "btn btn-secondary observation-facet-load-more", type_ "button", onClick LoadMoreObservationFacets, disabled (not (canLoadMoreFacets workspaceId state)) ]
@@ -3148,10 +3312,7 @@ viewMatchResults workspaceId state =
             text ""
         , case state.error of
             Just message ->
-                div [ class "empty-state observation-state observation-state-error", attribute "role" "alert" ]
-                    [ h3 [] [ text "Unable to match repository files" ]
-                    , p [] [ text message ]
-                    ]
+                viewRequestError "Unable to match repository files" message (not (List.isEmpty state.orderedIds)) state
 
             Nothing ->
                 div []
@@ -3165,10 +3326,13 @@ viewMatchResults workspaceId state =
                       else
                         []
                      )
-                        ++ List.map (viewPathGroup state) pathGroups
                     )
+        , if state.error == Nothing || not (List.isEmpty state.orderedIds) then
+            div [] (List.map (viewPathGroup state) pathGroups)
+          else
+            text ""
         , if state.loading && not (List.isEmpty state.orderedIds) then
-            p [ class "observation-match-loading-more", attribute "role" "status", attribute "aria-live" "polite" ] [ text "Loading more path matches..." ]
+            viewPageLoading state.expectedOffset "path matches"
 
           else
             text ""
@@ -3309,7 +3473,10 @@ viewDetail canEdit state =
                     text ""
                 , case state.detailError of
                     Just message ->
-                        div [ class "empty-state observation-state observation-state-error observation-detail-state", attribute "role" "alert" ] [ text message ]
+                        div [ class "observation-state observation-state-error observation-detail-state", attribute "role" "alert" ]
+                            [ text message
+                            , button [ class "btn btn-secondary", type_ "button", onClick RetryObservationDetail, disabled state.detailLoading ] [ text "Retry detail" ]
+                            ]
 
                     Nothing ->
                         text ""

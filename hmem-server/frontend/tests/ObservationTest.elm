@@ -1237,7 +1237,11 @@ suite =
             \_ ->
                 let
                     saving =
-                        savingEditModel "retirement draft"
+                        let
+                            requested =
+                                Feature.Observation.update RefreshObservationResults (savingEditModel "retirement draft") |> Tuple.first
+                        in
+                        applyObservationPage (observationPageMessage 0 (Err Http.NetworkError) requested) requested
 
                     hidden =
                         Feature.Observation.selectObservation "other" saving |> Tuple.first
@@ -1278,7 +1282,10 @@ suite =
 
                             inert model =
                                 model.observations.edit == Nothing
+                                    && model.observations.failedRequest == Nothing
                                     && model.sessionRequestEpoch == hidden.sessionRequestEpoch + 1
+                                    && (Feature.Observation.update RetryObservationResults model |> Tuple.first |> .observations) == model.observations
+                                    && (applyObservationPage (observationPageMessage 0 (Err Http.NetworkError) saving) model).observations == model.observations
                                     && (Feature.Observation.update (ObservationUpdated request (Ok canonical)) model |> Tuple.first |> .observations) == model.observations
                                     && (Feature.Observation.update (ObservationUpdated request (Err Http.NetworkError)) model |> Tuple.first |> .observations) == model.observations
                         in
@@ -1286,6 +1293,7 @@ suite =
                             [ \_ -> List.map inert retired |> Expect.equal [ True, True, True, True ]
                             , \_ -> unrelated.observations.edit |> Expect.equal hidden.observations.edit
                             , \_ -> unrelated.sessionRequestEpoch |> Expect.equal hidden.sessionRequestEpoch
+                            , \_ -> unrelated.observations.failedRequest |> Expect.equal hidden.observations.failedRequest
                             ]
                             ()
 
@@ -2544,6 +2552,204 @@ suite =
                 in
                 Feature.Observation.listQuery "workspace-1" 0 restored.observations
                     |> Expect.equal (Feature.Observation.listQuery "workspace-1" 0 original.observations)
+        , describe "failed pages retain results and retry the recorded applied request"
+            (List.concatMap
+                (\mode -> List.map
+                    (\offset -> test (Debug.toString mode ++ " offset " ++ String.fromInt offset) <| \_ ->
+                        let
+                            loaded =
+                                appliedModeModel mode
+
+                            loadedState =
+                                loaded.observations
+
+                            withCursor =
+                                { loaded | observations = { loadedState | nextOffset = 50, facetNextOffset = 50 } }
+
+                            requested =
+                                Feature.Observation.update
+                                    (if offset == 0 then RefreshObservationResults else if mode == ObservationFacetMode then LoadMoreObservationFacets else LoadMoreObservations)
+                                    withCursor |> Tuple.first
+
+                            oldError =
+                                observationPageMessage offset (Err Http.NetworkError) requested
+
+                            failed =
+                                applyObservationPage oldError requested |> draftQueryInputs
+
+                            failedState =
+                                failed.observations
+
+                            movedCursor =
+                                { failed | observations = { failedState | nextOffset = 999, facetNextOffset = 999 } }
+
+                            retried =
+                                Feature.Observation.update RetryObservationResults movedCursor |> Tuple.first
+
+                            newGeneration =
+                                if mode == ObservationFacetMode then retried.observations.facetRequestGeneration else retried.observations.requestGeneration
+
+                            oldGeneration =
+                                if mode == ObservationFacetMode then requested.observations.facetRequestGeneration else requested.observations.requestGeneration
+
+                            recovered =
+                                applyObservationPage (observationPageMessage offset (Ok (fixtureObservation "replacement" "2026-01-02T00:00:00Z")) retried) retried
+
+                            view =
+                                Feature.Observation.viewObservations (observationWorkspace Api.Repository) failed |> Query.fromHtml
+
+                            cachedSelector =
+                                case mode of
+                                    ObservationFacetMode -> "observation-facet-card"
+                                    ObservationMatchMode -> "observation-subject-group-toggle"
+                                    _ -> "observation-card"
+                        in
+                        Expect.all
+                            [ \_ -> view |> Query.findAll [ Selector.class cachedSelector ] |> Query.count (Expect.equal 1)
+                            , \_ -> view |> Query.has [ Selector.text "Previously loaded results remain available; the last request failed." ]
+                            , \_ -> view |> Query.find [ Selector.class "observation-retry" ] |> Event.simulate Event.click |> Event.expect RetryObservationResults
+                            , \_ -> failed.observations.failedRequest |> Maybe.map .offset |> Expect.equal (Just offset)
+                            , \_ -> failed.observations.resultsStale |> Expect.equal (offset == 0)
+                            , \_ -> newGeneration > oldGeneration |> Expect.equal True
+                            , \_ -> (if mode == ObservationFacetMode then retried.observations.facetExpectedOffset else retried.observations.expectedOffset) |> Expect.equal (Just offset)
+                            , \_ -> Feature.Observation.listQuery "workspace-1" offset retried.observations |> Expect.equal (Feature.Observation.listQuery "workspace-1" offset loaded.observations)
+                            , \_ -> Feature.Observation.facetQuery "workspace-1" offset retried.observations |> Expect.equal (Feature.Observation.facetQuery "workspace-1" offset loaded.observations)
+                            , \_ -> Feature.Observation.matchQuery "workspace-1" [] offset retried.observations |> Expect.equal (Feature.Observation.matchQuery "workspace-1" [] offset loaded.observations)
+                            , \_ -> retried.observations.query |> Expect.equal "draft search"
+                            , \_ -> (applyObservationPage oldError retried).observations |> Expect.equal retried.observations
+                            , \_ -> (applyObservationPage (observationPageMessage offset (Ok (fixtureObservation "stale" "2026-01-02T00:00:00Z")) requested) retried).observations |> Expect.equal retried.observations
+                            , \_ -> recovered.observations.failedRequest |> Expect.equal Nothing
+                            , \_ -> (if mode == ObservationFacetMode then recovered.observations.facetKeys else recovered.observations.orderedIds) |> List.length |> Expect.equal (if offset == 0 then 1 else 2)
+                            , \_ -> if offset == 0 && mode /= ObservationFacetMode then Dict.member "curated" recovered.observations.items |> Expect.equal False else Expect.pass
+                            , \_ -> recovered.observations.resultsStale |> Expect.equal False
+                            ] ()
+                    ) [ 0, 50 ]
+                ) observationModes)
+        , test "initial failures remain distinct from empty results and new queries retire retry ownership" <|
+            \_ ->
+                let
+                    check mode =
+                        let
+                            model =
+                                appliedModeModel mode
+
+                            state =
+                                model.observations
+
+                            empty =
+                                { model | observations = { state | items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty, facets = Dict.empty, facetKeys = [], selectedId = Nothing, selectedDetail = Nothing } }
+
+                            requested =
+                                Feature.Observation.update RefreshObservationResults empty |> Tuple.first
+
+                            failed =
+                                applyObservationPage (observationPageMessage 0 (Err Http.Timeout) requested) requested
+
+                            applied =
+                                draftQueryInputs failed |> Feature.Observation.update ApplyObservationFilters |> Tuple.first
+
+                            view =
+                                Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml
+                        in
+                        Expect.all
+                            [ \_ -> view |> Query.has [ Selector.class "observation-state-error", Selector.class "empty-state", Selector.text "Retry results" ]
+                            , \_ -> view |> Query.hasNot [ Selector.class "observation-state-empty" ]
+                            , \_ -> failed.observations.resultsStale |> Expect.equal False
+                            , \_ -> applied.observations.failedRequest |> Expect.equal Nothing
+                            , \_ -> (Feature.Observation.update RetryObservationResults applied |> Tuple.first).observations |> Expect.equal applied.observations
+                            ] ()
+                in
+                Expect.all (List.map (\mode _ -> check mode) observationModes) ()
+        , test "off-page detail retry has a fresh token and stale detail errors and successes stay inert" <|
+            \_ ->
+                let
+                    selected =
+                        Feature.Observation.selectObservation "off-page" (editableModel Feature.Observation.init) |> Tuple.first
+                in
+                case selected.observations.activeDetailRequest of
+                    Nothing -> Expect.fail "Expected initial linked detail request"
+                    Just request ->
+                        let
+                            failure =
+                                GotObservationDetail "workspace-1" "off-page" 3 request.token (Err Http.NetworkError)
+
+                            failed =
+                                Feature.Observation.update failure selected |> Tuple.first
+
+                            retried =
+                                Feature.Observation.update RetryObservationDetail failed |> Tuple.first
+
+                            canonical =
+                                fixtureObservation "off-page" "2026-01-01T00:00:00Z"
+
+                            received =
+                                retried.observations.activeDetailRequest
+                                    |> Maybe.map (\fresh -> Feature.Observation.update (GotObservationDetail "workspace-1" "off-page" 3 fresh.token (Ok canonical)) retried |> Tuple.first)
+                        in
+                        Expect.all
+                            [ \_ -> Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Retry detail" ] ] |> Event.simulate Event.click |> Event.expect RetryObservationDetail
+                            , \_ -> retried.observations.activeDetailRequest |> Maybe.map (\fresh -> fresh.token > request.token) |> Expect.equal (Just True)
+                            , \_ -> (Feature.Observation.update failure retried |> Tuple.first).observations |> Expect.equal retried.observations
+                            , \_ -> (Feature.Observation.update (GotObservationDetail "workspace-1" "off-page" 3 request.token (Ok canonical)) retried |> Tuple.first).observations |> Expect.equal retried.observations
+                            , \_ -> received |> Maybe.andThen (.observations >> .selectedDetail) |> Expect.equal (Just canonical)
+                            , \_ -> received |> Maybe.map (.observations >> .orderedIds) |> Expect.equal (Just [])
+                            ] ()
+        , test "retrying retained detail revalidation keeps draft and curation controls usable" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "retained retry draft"
+
+                    state =
+                        saving.observations
+
+                    dirty =
+                        { saving | observations = { state | edit = Maybe.map (\edit -> { edit | saving = False, activeRequest = Nothing }) state.edit } }
+
+                    returned =
+                        Feature.Observation.selectObservation "other" dirty |> Tuple.first
+                            |> Feature.Observation.update ReturnToObservationDraft |> Tuple.first
+                in
+                case returned.observations.activeDetailRequest of
+                    Nothing -> Expect.fail "Expected retained detail revalidation request"
+                    Just request ->
+                        let
+                            failed =
+                                Feature.Observation.update (GotObservationDetail "workspace-1" "curated" 3 request.token (Err Http.Timeout)) returned |> Tuple.first
+
+                            retried =
+                                Feature.Observation.update RetryObservationDetail failed |> Tuple.first
+
+                            view =
+                                Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml
+                        in
+                        Expect.all
+                            [ \_ -> Feature.Observation.viewObservations (observationWorkspace Api.Repository) failed |> Query.fromHtml |> Query.has [ Selector.class "observation-edit-form", Selector.text "Save content", Selector.text "Cancel", Selector.text "Retry detail" ]
+                            , \_ -> retried.observations.edit |> Expect.equal dirty.observations.edit
+                            , \_ -> retried.observations.activeDetailRequest |> Maybe.map (\fresh -> fresh.token > request.token) |> Expect.equal (Just True)
+                            , \_ -> retried.observations.detailError |> Expect.equal Nothing
+                            ] ()
+        , test "first preserving request freezes an applied query before a failed retry with changed inputs" <|
+            \_ ->
+                let
+                    model =
+                        editableModel Feature.Observation.init
+
+                    requested =
+                        Feature.Observation.update RefreshObservationResults model |> Tuple.first
+
+                    failed =
+                        applyObservationPage (observationPageMessage 0 (Err Http.NetworkError) requested) requested |> draftQueryInputs
+
+                    retried =
+                        Feature.Observation.update RetryObservationResults failed |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> requested.observations.appliedQuery /= Nothing |> Expect.equal True
+                    , \_ -> retried.observations.expectedOffset |> Expect.equal (Just 0)
+                    , \_ -> Feature.Observation.listQuery "workspace-1" 0 retried.observations |> Expect.equal (Feature.Observation.listQuery "workspace-1" 0 requested.observations)
+                    , \_ -> retried.observations.query |> Expect.equal "draft search"
+                    ] ()
         , test "facet catalogue and match disclosures expose accessible modes while bounding repeated card DOM" <|
             \_ ->
                 let
@@ -2624,6 +2830,31 @@ suite =
                     ]
                     ()
         ]
+
+
+observationPageMessage : Int -> Result Http.Error Api.Observation -> Model -> Msg
+observationPageMessage offset result model =
+    let
+        state =
+            model.observations
+    in
+    case state.requestMode of
+        ObservationFacetMode ->
+            GotObservationSubjectFacets "workspace-1" model.sessionRequestEpoch state.facetRequestGeneration state.facetFingerprint offset
+                (Result.map (\observation -> { items = [ facetFixture observation.subjectKind observation.subject 1 observation.updatedAt ], hasMore = False }) result)
+        ObservationMatchMode ->
+            GotObservationMatches "workspace-1" model.sessionRequestEpoch state.requestGeneration state.queryFingerprint offset
+                (Result.map (\observation -> { items = [ matchFixture observation [ { path = "src/Main.elm", matchedSubjects = observation.subjects } ] ], hasMore = False }) result)
+        _ ->
+            GotObservations "workspace-1" Nothing state.requestGeneration state.queryFingerprint offset
+                (Result.map (\observation -> { items = [ observation ], hasMore = False }) result)
+
+
+applyObservationPage : Msg -> Model -> Model
+applyObservationPage message model =
+    case message of
+        GotObservations _ _ _ _ _ _ -> Feature.DataLoading.update message model |> Tuple.first
+        _ -> Feature.Observation.update message model |> Tuple.first
 
 
 observationModes : List ObservationRequestMode

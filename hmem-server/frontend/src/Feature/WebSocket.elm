@@ -1135,7 +1135,7 @@ applyAction scope action ( model, accumulated ) =
                         | workspaces = Dict.remove workspaceId model.workspaces
                         , projects = Dict.empty
                         , tasks = Dict.empty
-                        , observations = Observation.clearSelection { observations | items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty, edit = Nothing }
+                        , observations = Observation.clearSelection { observations | items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty, edit = Nothing, failedRequest = Nothing }
                         , dependencies = Dependencies.resetCache model.dependencies
                         , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
                         , sessionRequestEpoch = model.sessionRequestEpoch + 1

@@ -317,6 +317,12 @@ route msg model =
         RefreshObservationResults ->
             Ok (Feature.Observation.update msg model)
 
+        RetryObservationResults ->
+            Ok (Feature.Observation.update msg model)
+
+        RetryObservationDetail ->
+            Ok (Feature.Observation.update msg model)
+
         SetObservationBrowseMode _ ->
             Ok (Feature.Observation.update msg model)
 

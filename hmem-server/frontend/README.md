@@ -31,6 +31,12 @@ Unapplied filter changes pause paging until Apply filters or Revert filters;
 unapplied path input leaves the previously matched files active. The displayed
 applied filters describe the query behind the current results.
 
+Failed page or refresh requests keep previously loaded results visible. Retry
+results repeats the failed applied query and offset with a fresh request identity,
+even when filter inputs have changed. A successful page-zero refresh replaces
+membership. Retry detail can recover linked observations outside the loaded page
+while keeping an owned content draft available.
+
 ## Expanded hierarchy loading
 
 Navigation transports 50 summaries per kind per request. Expanded nodes whose

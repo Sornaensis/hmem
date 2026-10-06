@@ -3230,7 +3230,7 @@ updateResponse msg model =
                                 model.observations
 
                             observations =
-                                { currentObservations | loading = False, error = Just "Failed to load observations.", expectedOffset = Nothing }
+                                Feature.Observation.failResultPage wsId offset "Failed to load observations." currentObservations
 
                             updatedDataLoading =
                                 finishWorkspaceLoad maybeToken model.dataLoading
@@ -3299,5 +3299,6 @@ mergeObservationPage offset paginated observations =
         , expectedOffset = Nothing
         , nextOffset = offset + List.length paginated.items
         , resultsStale = if offset == 0 then False else observations.resultsStale
+        , failedRequest = Nothing
     }
         |> (\merged -> List.foldl Feature.Observation.applyAuthoritativeObservation merged paginated.items)

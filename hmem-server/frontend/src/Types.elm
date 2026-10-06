@@ -330,6 +330,7 @@ type alias ObservationModel =
     , gitSha : String
     , requestMode : ObservationRequestMode
     , appliedQuery : Maybe ObservationAppliedQuery
+    , failedRequest : Maybe ObservationFailedRequest
     , matchPathsInput : String
     , matchAppliedPaths : List String
     , matchValidationError : Maybe String
@@ -382,6 +383,16 @@ type alias ObservationAppliedQuery =
     , selectedFacet : Maybe Api.ObservationSubject
     , gitSha : String
     , matchAppliedPaths : List String
+    }
+
+
+type alias ObservationFailedRequest =
+    { workspaceId : String
+    , sessionEpoch : Int
+    , generation : Int
+    , fingerprint : String
+    , offset : Int
+    , query : ObservationAppliedQuery
     }
 
 
@@ -928,6 +939,8 @@ type Msg
     | ApplyObservationFilters
     | RevertObservationFilters
     | RefreshObservationResults
+    | RetryObservationResults
+    | RetryObservationDetail
     | SetObservationBrowseMode ObservationRequestMode
     | SelectObservationFacet Api.SubjectKind String
     | SetObservationMatchPaths String

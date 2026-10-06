@@ -8,7 +8,7 @@ const patterns = new Map([
   ['src/**/*.js', /^src\/(?:[^/]+\/)*[^/]+\.js$/],
   ['docs/**/*.md', /^docs\/(?:[^/]+\/)*[^/]+\.md$/]
 ])
-export async function openDiscovery(viewport = { width: 1440, height: 900 }) {
+export async function openDiscovery(viewport = { width: 1440, height: 900 }, transformObservations = values => values) {
   const fixture = hierarchyFixture()
   fixture.projects = []; fixture.tasks = []
   const sha = '0123456789abcdef0123456789abcdef01234567'
@@ -23,6 +23,7 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }) {
     observation('other-js', 'src/Other.js', 'src/**/*.js', 'Unrelated JavaScript evidence', 3),
     ...Array.from({ length: 61 }, (_, index) => observation('guide-' + index, 'docs/Guide-' + String(index).padStart(3, '0') + '.md', 'docs/**/*.md', 'Documentation guide ' + index, index + 4))
   ]
+  fixture.observations = transformObservations(fixture.observations)
   const h = await openHierarchy(fixture)
   await h.page.setViewportSize(viewport)
   const receipts = []

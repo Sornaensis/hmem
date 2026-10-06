@@ -73,6 +73,19 @@ the kind, exact subject, and Git SHA controls without resetting their values or
 the applied query. Search also submits with Enter. A selected subject stays
 locked while filtering its exact results.
 
+Cards show whitespace-collapsed plain-text previews of at most 240 Unicode
+codepoints and three lines. The primary subject uses at most 96 codepoints and
+two lines; selection button names use at most 180 codepoints. Full content stays
+in detail. Each card's separate provenance disclosure exposes the full revision
+and ordered subjects, including copy actions, outside the selection button.
+The compact revision uses 12 SHA characters. Content update metadata includes
+time and timezone; the immutable provenance revision does not imply automatic
+staleness or change when content is edited.
+Content above 16 KiB uses a labelled native read-only detail reader with its
+exact full value available for scrolling, selection, and copying.
+Native text fields normalize line endings for display; Copy full content copies
+the canonical stored text, preserving its line endings.
+
 Failed page or refresh requests keep previously loaded results visible. Retry
 results repeats the failed applied query and offset with a fresh request identity,
 even when filter inputs have changed. A successful page-zero refresh replaces

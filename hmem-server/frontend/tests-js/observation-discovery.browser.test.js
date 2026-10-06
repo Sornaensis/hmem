@@ -64,7 +64,7 @@ test('production By subject paginates populated facets and locks exact provenanc
   try {
     await h.start(); await h.page.getByRole('button', { name: 'By subject', exact: true }).click(); await h.idle()
     assert.equal(await h.page.locator('.observation-facet-card').count(), 50)
-    await h.page.getByRole('button', { name: 'Load more shared subjects', exact: true }).click(); await h.idle()
+    await h.page.getByRole('button', { name: 'Load more subjects', exact: true }).click(); await h.idle()
     assert.ok(await h.page.locator('.observation-facet-card').count() > 50)
     assert.equal(h.receipts.filter(value => value.endpoint.endsWith('/subject-facets')).at(-1).params.offset, '50')
     await h.page.locator('.observation-facet-card').filter({ hasText: 'src/**/*.elm' }).click(); await h.idle()

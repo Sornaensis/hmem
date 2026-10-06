@@ -1858,7 +1858,7 @@ suite =
                     , \_ -> Feature.Observation.viewObservationsState repository { empty | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Loading observations..." ]
                     , \_ -> Feature.Observation.viewObservationsState repository empty |> Query.fromHtml |> Query.has [ Selector.text "No observations found" ]
                     , \_ -> Feature.Observation.viewObservationsState repository { empty | error = Just "Failed to load observations." } |> Query.fromHtml |> Query.has [ Selector.text "Unable to load observations", Selector.text "Failed to load observations." ]
-                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text ("Git SHA: " ++ fullSha), Selector.text "Observation detail", Selector.text "Subject kind", Selector.text "File", Selector.text "Subject", Selector.text "src/Main.elm" ]
+                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Provenance revision (Git SHA)", Selector.text fullSha, Selector.text "Observation detail", Selector.text "Subject kind", Selector.text "File", Selector.text "Subject", Selector.text "src/Main.elm" ]
                     , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Load more" ] ] |> Query.hasNot [ Selector.disabled True ]
                     , \_ -> Feature.Observation.viewObservationsState repository paginating |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Loading..." ] ] |> Query.has [ Selector.disabled True ]
                     , \_ -> Feature.Observation.viewObservationsState repository detailLoading |> Query.fromHtml |> Query.has [ Selector.text "Loading detail..." ]
@@ -1955,6 +1955,48 @@ suite =
                     , \_ -> view initial |> Query.find [ Selector.id "observation-file-composer" ] |> Query.has [ Selector.attribute (hidden True) ]
                     , \_ -> view initial |> Query.find [ Selector.class "observation-search" ] |> Event.simulate Event.submit |> Event.expect ApplyObservationFilters
                     , \_ -> view initial |> Query.find [ Selector.id "observation-for-files" ] |> Event.simulate Event.click |> Event.expect OpenObservationFileComposer
+                    ] ()
+        , test "preview excerpts bound Unicode names while preserving full content and ordered provenance outside selection" <|
+            \_ ->
+                let
+                    content = String.repeat 400 "Line <script> 😀\n" ++ "Full content end"
+                    original = observationWithSubjects "preview"
+                        [ { subjectKind = Api.SubjectFile, subject = String.repeat 120 "😀" ++ ".elm" }
+                        , { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }
+                        , { subjectKind = Api.SubjectFile, subject = "src/Second.elm" }
+                        ]
+                    observation = { original | content = content }
+                    view = Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) (selectedObservationState observation) |> Query.fromHtml
+                in
+                Expect.all
+                    [ \_ -> Helpers.plainTextExcerpt 3 "😀 😀 😀" |> Expect.equal "😀 …"
+                    , \_ -> Helpers.plainTextExcerpt 240 content |> String.toList |> List.length |> Expect.equal 240
+                    , \_ -> view |> Query.find [ Selector.class "observation-card" ] |> Query.hasNot [ Selector.tag "details", Selector.tag "script", Selector.class "observation-sha-copy" ]
+                    , \_ -> view |> Query.find [ Selector.class "observation-summary" ] |> Query.has [ Selector.text (Helpers.plainTextExcerpt 240 content) ]
+                    , \_ -> view |> Query.find [ Selector.class "observation-detail-content" ] |> Query.has [ Selector.text content ]
+                    , \_ -> view |> Query.find [ Selector.class "observation-card-provenance" ] |> Query.has [ Selector.text "Provenance and 3 subjects", Selector.text "src/**/*.elm", Selector.text "src/Second.elm", Selector.text fullSha ]
+                    , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "Provenance revision (Git SHA)", Selector.text "Content updated", Selector.text "Copy full revision" ]
+                    ] ()
+        , test "Observation timestamps retain useful UTC update time and explicit non-UTC offsets" <|
+            \_ ->
+                [ Helpers.formatObservationTimestamp "2026-10-06T12:34:56.123Z"
+                , Helpers.formatObservationTimestamp "2026-10-06T12:35:56+00:00"
+                , Helpers.formatObservationTimestamp "2026-10-06T12:34:56+02:00"
+                ] |> Expect.equal [ "2026-10-06 12:34:56.123 UTC", "2026-10-06 12:35:56 UTC", "2026-10-06 12:34:56+02:00" ]
+        , test "large detail reader uses the UTF-8 threshold and retains an exact read-only value" <|
+            \_ ->
+                let
+                    original = fixtureObservation "reader" "2026-01-01T00:00:00Z"
+                    view content =
+                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository)
+                            (selectedObservationState { original | content = content }) |> Query.fromHtml
+                    large = String.repeat 4097 "😀"
+                in
+                Expect.all
+                    [ \_ -> view (String.repeat 16383 "a") |> Query.findAll [ Selector.id "observation-content-reader" ] |> Query.count (Expect.equal 0)
+                    , \_ -> view (String.repeat 16384 "a") |> Query.findAll [ Selector.id "observation-content-reader" ] |> Query.count (Expect.equal 0)
+                    , \_ -> view (String.repeat 4096 "😀") |> Query.findAll [ Selector.id "observation-content-reader" ] |> Query.count (Expect.equal 0)
+                    , \_ -> view large |> Query.find [ Selector.id "observation-content-reader" ] |> Query.has [ Selector.tag "textarea", Selector.attribute (Html.Attributes.readonly True), Selector.attribute (Html.Attributes.value large) ]
                     ] ()
         , test "presentation states expose scoped loading, error, empty, and disabled pagination classes" <|
             \_ ->
@@ -3364,7 +3406,7 @@ suite =
                 in
                 Expect.all
                     [ \_ -> facetView |> Query.find [ Selector.class "observation-mode-button", Selector.class "btn-primary" ] |> Query.has [ Selector.text "By subject" ]
-                    , \_ -> facetView |> Query.has [ Selector.text "123 observations", Selector.text "Latest update: 2026-08-30", Selector.text "Load more shared subjects", Selector.attribute (attribute "aria-live" "polite") ]
+                    , \_ -> facetView |> Query.has [ Selector.text "123 observations", Selector.text "Latest update: 2026-08-30", Selector.text "Load more subjects", Selector.attribute (attribute "aria-live" "polite") ]
                     , \_ -> facetView |> Query.hasNot [ Selector.id "observation-subject" ]
                     , \_ -> collapsed |> Query.findAll [ Selector.class "observation-card" ] |> Query.count (Expect.equal 0)
                     , \_ -> collapsed |> Query.findAll [ Selector.class "observation-subject-group-toggle", Selector.attribute (attribute "aria-expanded" "false") ] |> Query.count (Expect.equal 2)

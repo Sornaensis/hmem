@@ -2293,6 +2293,65 @@ button.observation-card.observation-card-selected {
   white-space: pre-wrap;
 }
 
+.observation-card .observation-summary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  max-height: 4.5em;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.observation-card-header .observation-subject {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  flex: 1 1 8rem;
+  line-height: 1.35;
+  max-height: 2.7em;
+  overflow: hidden;
+}
+
+.observation-card-provenance {
+  margin: 0.25rem 0 0.75rem;
+  min-width: 0;
+  font-size: 0.75rem;
+}
+
+.observation-card-provenance summary {
+  cursor: pointer;
+  color: var(--accent-hover);
+}
+
+.observation-card-provenance summary:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+}
+
+.observation-card-provenance .observation-detail-meta {
+  margin-top: 0.5rem;
+}
+
+.observation-detail-sha code {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.observation-sha-copy {
+  margin-top: 0.375rem;
+}
+
+.observation-detail-reader {
+  width: 100%;
+  min-height: 0;
+  height: min(16rem, 70vh);
+  max-height: 70vh;
+  resize: vertical;
+  font: inherit;
+  line-height: 1.5;
+  overflow: auto;
+}
+
 .observation-detail-actions,
 .observation-edit-actions,
 .observation-conflict-actions {

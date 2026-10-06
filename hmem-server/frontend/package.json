@@ -14,6 +14,7 @@
     "test:timeline-live": "node --test tests-js/timeline-live-refresh.integration.test.js",
     "test:observation-navigation": "npm run build && node --test tests-js/observation-navigation.test.js tests-js/observation-navigation.browser.test.js",
     "test:observation-discovery": "npm run build && node --test tests-js/observation-discovery.browser.test.js",
+    "test:observation-preview": "npm run build && node --test tests-js/observation-preview.browser.test.js",
     "test:observation-conditional": "stack build hmem-server:exe:hmem-test-harness && node --test tests-js/observation-conditional.browser.test.js",
     "test:browser:install": "playwright install chromium",
     "test:clean-install": "npm ci && npm run test:browser:install && npm test",

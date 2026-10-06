@@ -102,7 +102,7 @@ test('production direct off-page detail has a useful results fallback and late h
     await returnToResults(h.page)
     await h.page.waitForFunction(() => document.activeElement?.id === 'observation-results')
     const held = h.holdDetail('observation-0')
-    await keyboardActivate(h.page, h.page.locator('.observation-card').filter({ hasText: /Observation 0\n/ }).first())
+    await keyboardActivate(h.page, h.page.locator('.observation-card').filter({ hasText: /Observation 0 Long/ }).first())
     await h.bounded(held.arrived, 10000, 'Held detail request')
     await returnToResults(h.page)
     const before = await focusId(h.page)

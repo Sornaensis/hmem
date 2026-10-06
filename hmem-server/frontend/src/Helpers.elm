@@ -1068,6 +1068,40 @@ formatDate dateStr =
     String.left 10 dateStr
 
 
+{-| Observation metadata keeps the content-update time separate from revision
+provenance. Preserve non-UTC offsets instead of inventing a timezone conversion.
+-}
+formatObservationTimestamp : String -> String
+formatObservationTimestamp timestamp =
+    if String.endsWith "Z" timestamp then
+        String.dropRight 1 timestamp |> String.replace "T" " " |> (\value -> value ++ " UTC")
+
+    else if String.endsWith "+00:00" timestamp then
+        String.dropRight 6 timestamp |> String.replace "T" " " |> (\value -> value ++ " UTC")
+
+    else
+        String.replace "T" " " timestamp
+
+
+{-| Bound plain text by Unicode codepoints, including the ellipsis, without
+splitting a surrogate pair. The full value remains in canonical detail.
+-}
+plainTextExcerpt : Int -> String -> String
+plainTextExcerpt limit value =
+    let
+        characters =
+            value |> String.words |> String.join " " |> String.toList
+    in
+    if limit <= 0 then
+        ""
+
+    else if List.length characters > limit then
+        String.fromList (List.take (limit - 1) characters) ++ "…"
+
+    else
+        String.fromList characters
+
+
 truncateText : Int -> String -> String
 truncateText maxLen str =
     if String.length str > maxLen then

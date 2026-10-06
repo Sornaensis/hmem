@@ -49,7 +49,7 @@ module Feature.Observation exposing
 import Api
 import Char
 import Dict
-import Helpers exposing (beginTrackedMutation, focusElement, formatDate, replaceFragment)
+import Helpers exposing (beginTrackedMutation, focusElement, formatDate, formatObservationTimestamp, plainTextExcerpt, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (custom, onClick, onInput, onSubmit, stopPropagationOn)
@@ -307,6 +307,29 @@ update msg model =
                     addToast Success "Repository subject copied to clipboard" model
             in
             ( updated, Cmd.batch [ copyToClipboard subject, toastCmd ] )
+
+        CopyObservationGitSha gitSha ->
+            let
+                ( updated, toastCmd ) =
+                    addToast Success "Provenance revision copied to clipboard" model
+            in
+            ( updated, Cmd.batch [ copyToClipboard gitSha, toastCmd ] )
+
+        CopyObservationContent observationId ->
+            case currentSelectedObservation model.observations of
+                Just observation ->
+                    if observation.id == observationId then
+                        let
+                            ( updated, toastCmd ) =
+                                addToast Success "Full observation content copied to clipboard" model
+                        in
+                        ( updated, Cmd.batch [ copyToClipboard observation.content, toastCmd ] )
+
+                    else
+                        ( model, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
 
         StartObservationEdit ->
             if hasProtectedEdit model then
@@ -3531,13 +3554,13 @@ viewFacetCatalogue workspaceId state =
             Nothing ->
                 if not state.facetLoading && List.isEmpty facets then
                     div [ class "empty-state observation-state observation-state-empty" ]
-                        [ h3 [] [ text "No shared subjects found" ]
+                        [ h3 [] [ text "No subjects found" ]
                         , p [] [ text "Try clearing or changing the shared search, kind, or Git SHA filters." ]
                         ]
 
                 else
                     text ""
-        , div [ class "observation-facet-rows", attribute "aria-label" "Shared subjects" ] (List.map viewFacet facets)
+        , div [ class "observation-facet-rows", attribute "aria-label" "By subject" ] (List.map viewFacet facets)
         , if state.facetLoading && not (List.isEmpty facets) then
             viewPageLoading state.facetExpectedOffset "shared subjects"
           else
@@ -3550,7 +3573,7 @@ viewFacetCatalogue workspaceId state =
                             "Loading..."
 
                          else
-                            "Load more shared subjects"
+                            "Load more subjects"
                         )
                     ]
                 ]
@@ -3711,37 +3734,48 @@ viewObservationRow selectedId context observation =
         isSelected =
             selectedId == Just observation.id
     in
-    button
-        [ id (observationCardDomId context observation.id)
-        , classList
-            [ ( "card", True )
-            , ( "observation-card", True )
-            , ( "observation-card-selected", isSelected )
-            ]
-        , type_ "button"
-        , attribute "aria-current"
-            (if isSelected then
-                "true"
+    div [ class "observation-result" ]
+        [ button
+            [ id (observationCardDomId context observation.id)
+            , classList
+                [ ( "card", True )
+                , ( "observation-card", True )
+                , ( "observation-card-selected", isSelected )
+                ]
+            , type_ "button"
+            , attribute "aria-label"
+                (plainTextExcerpt 180 ("Open " ++ subjectKindLabel observation.subjectKind ++ " observation: " ++ plainTextExcerpt 96 observation.subject ++ ". " ++ plainTextExcerpt 60 observation.content))
+            , attribute "aria-current"
+                (if isSelected then
+                    "true"
 
-             else
-                "false"
-            )
-        , onClick (SelectObservationFrom observation.id (observationCardDomId context observation.id))
-        ]
-        [ div [ class "card-header observation-card-header" ]
-            [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel observation.subjectKind) ]
-            , span [ class "observation-subject" ] [ text observation.subject ]
-            , if List.length observation.subjects > 1 then
-                span [ class "card-meta observation-subject-count", attribute "aria-label" (String.fromInt (List.length observation.subjects - 1) ++ " additional subjects") ] [ text ("+" ++ String.fromInt (List.length observation.subjects - 1)) ]
-
-              else
-                text ""
+                 else
+                    "false"
+                )
+            , onClick (SelectObservationFrom observation.id (observationCardDomId context observation.id))
             ]
-        , div [ class "card-body observation-summary" ] [ text observation.content ]
-        , div [ class "card-meta-group observation-card-meta" ]
-            [ div [ class "card-meta-row" ]
-                [ span [ class "card-meta observation-sha" ] [ text ("Git SHA: " ++ observation.gitSha) ]
-                , span [ class "card-meta" ] [ text ("Created: " ++ formatDate observation.createdAt) ]
+            [ div [ class "card-header observation-card-header" ]
+                [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel observation.subjectKind) ]
+                , span [ class "observation-subject" ] [ text (plainTextExcerpt 96 observation.subject) ]
+                , if List.length observation.subjects > 1 then
+                    span [ class "card-meta observation-subject-count", attribute "aria-label" (String.fromInt (List.length observation.subjects - 1) ++ " additional subjects") ] [ text ("+" ++ String.fromInt (List.length observation.subjects - 1)) ]
+
+                  else
+                    text ""
+                ]
+            , div [ class "card-body observation-summary" ] [ text (plainTextExcerpt 240 observation.content) ]
+            , div [ class "card-meta-group observation-card-meta" ]
+                [ div [ class "card-meta-row" ]
+                    [ span [ class "card-meta observation-sha" ] [ text ("Provenance revision: " ++ String.left 12 observation.gitSha ++ "…") ]
+                    , span [ class "card-meta observation-updated" ] [ text ("Content updated: " ++ formatObservationTimestamp observation.updatedAt) ]
+                    ]
+                ]
+            ]
+        , details [ class "observation-card-provenance" ]
+            [ summary [] [ text ("Provenance and " ++ String.fromInt (List.length observation.subjects) ++ " subjects") ]
+            , dl [ class "observation-detail-meta" ]
+                [ viewProvenanceRevision observation.gitSha
+                , viewSubjects observation.subjects
                 ]
             ]
         ]
@@ -3780,10 +3814,11 @@ viewDetail canEdit state =
                             , dl [ class "observation-detail-meta" ]
                                 [ viewDetailMeta "Workspace ID" observation.workspaceId "observation-detail-workspace"
                                 , viewSubjects observation.subjects
-                                , viewDetailMeta "Git SHA" observation.gitSha "observation-detail-sha"
-                                , viewDetailMeta "Created" (formatDate observation.createdAt) ""
-                                , viewDetailMeta "Updated" (formatDate observation.updatedAt) ""
+                                , viewProvenanceRevision observation.gitSha
+                                , viewDetailMeta "Created" (formatObservationTimestamp observation.createdAt) ""
+                                , viewDetailMeta "Content updated" (formatObservationTimestamp observation.updatedAt) ""
                                 ]
+                            , p [ class "form-help observation-provenance-help" ] [ text "Provenance revision identifies where this evidence was recorded. Content updated is the last content update time; the revision is unchanged by editing and does not indicate automatic staleness." ]
                             , if canEdit && Maybe.map .observationId state.edit /= Just observation.id then
                                 div [ class "observation-detail-actions" ]
                                     [ button [ id "observation-edit", class "btn btn-secondary", type_ "button", onClick StartObservationEdit ] [ text "Edit content" ]
@@ -3824,7 +3859,7 @@ viewDetailContent canEdit observation maybeEdit =
                         , attribute "aria-describedby" "observation-edit-help observation-edit-status"
                         ]
                         []
-                    , p [ id "observation-edit-help", class "form-help" ] [ text "Only content can be edited. Workspace, subjects, Git SHA, subject order, and timestamps are immutable provenance." ]
+                    , p [ id "observation-edit-help", class "form-help" ] [ text "Only content can be edited. Workspace, subjects, Git SHA, and subject order are immutable provenance; the server records the content update time." ]
                     , case validationError of
                         Just message ->
                             p [ id "observation-edit-status", class "form-error", attribute "role" "alert" ] [ text message ]
@@ -3883,10 +3918,31 @@ viewDetailContent canEdit observation maybeEdit =
                     ]
 
             else
-                p [ class "observation-detail-content" ] [ text observation.content ]
+                viewFullObservationContent observation
 
         Nothing ->
-            p [ class "observation-detail-content" ] [ text observation.content ]
+            viewFullObservationContent observation
+
+
+{-| Values above 16 KiB use a native read-only reader instead of a document-sized
+paragraph. Its exact full value stays available for keyboard scrolling/selection.
+-}
+viewFullObservationContent : Api.Observation -> Html Msg
+viewFullObservationContent observation =
+    if utf8Bytes observation.content > 16384 then
+        div [ class "observation-full-content" ]
+            [ label [ class "filter-label", for "observation-content-reader" ] [ text "Full observation content (read only)" ]
+            , textarea
+                [ id "observation-content-reader", class "form-input observation-detail-content observation-detail-reader"
+                , readonly True, value observation.content, attribute "rows" "10"
+                , attribute "aria-describedby" "observation-content-reader-help"
+                ] []
+            , p [ id "observation-content-reader-help", class "form-help" ] [ text "Scroll within this read-only field to read the full content. Use Copy full content to preserve stored line endings." ]
+            , button [ class "btn btn-secondary observation-content-copy", type_ "button", onClick (CopyObservationContent observation.id) ] [ text "Copy full content" ]
+            ]
+
+    else
+        p [ class "observation-detail-content" ] [ text observation.content ]
 
 
 viewDeleteConfirmation : Bool -> ObservationModel -> Html Msg
@@ -3997,6 +4053,17 @@ viewDetailMeta labelText valueText valueClass =
         ]
 
 
+viewProvenanceRevision : String -> Html Msg
+viewProvenanceRevision gitSha =
+    div [ class "observation-detail-meta-row" ]
+        [ dt [ class "observation-detail-meta-label" ] [ text "Provenance revision (Git SHA)" ]
+        , dd [ class "observation-detail-meta-value observation-detail-sha" ]
+            [ code [] [ text gitSha ]
+            , button [ class "btn btn-secondary observation-sha-copy", type_ "button", onClick (CopyObservationGitSha gitSha) ] [ text "Copy full revision" ]
+            ]
+        ]
+
+
 viewSubjects : List Api.ObservationSubject -> Html Msg
 viewSubjects subjects =
     div [ class "observation-detail-meta-row observation-detail-subjects" ]
@@ -4014,7 +4081,7 @@ viewSubject subject =
             [ class "observation-subject-copy"
             , type_ "button"
             , onClick (CopyObservationSubject subject.subject)
-            , attribute "aria-label" ("Copy repository subject " ++ subject.subject)
+            , attribute "aria-label" ("Copy repository subject " ++ plainTextExcerpt 96 subject.subject)
             ]
             [ text subject.subject ]
         ]

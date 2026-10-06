@@ -368,6 +368,12 @@ route msg model =
         CopyObservationSubject _ ->
             Ok (Feature.Observation.update msg model)
 
+        CopyObservationGitSha _ ->
+            Ok (Feature.Observation.update msg model)
+
+        CopyObservationContent _ ->
+            Ok (Feature.Observation.update msg model)
+
         StartObservationEdit ->
             Ok (Feature.Observation.update msg model)
 

@@ -964,6 +964,8 @@ type Msg
     | SelectObservationFrom String String
     | ReturnObservationResults
     | CopyObservationSubject String
+    | CopyObservationGitSha String
+    | CopyObservationContent String
     | StartObservationEdit
     | ReturnToObservationDraft
     | SetObservationDraft String

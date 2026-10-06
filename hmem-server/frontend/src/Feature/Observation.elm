@@ -12,6 +12,7 @@ module Feature.Observation exposing
     , facetResponseMatches
     , groupPathMatches
     , init
+    , hasProtectedEdit
     , isLoadedOrSelected
     , markResultsStale
     , listQuery
@@ -28,6 +29,7 @@ module Feature.Observation exposing
     , reconcileCurationPermission
     , reconcileDeletedObservation
     , refreshActiveResults
+    , refuseContextExit
     , reload
     , removeObservation
     , selectObservation
@@ -38,6 +40,7 @@ module Feature.Observation exposing
     , viewObservations
     , viewObservationsState
     , viewObservationsStateWithPermission
+    , viewRetainedDraft
     )
 
 import Api
@@ -111,9 +114,53 @@ clearSelection state =
         , detailLoading = False
         , detailError = Nothing
         , activeDetailRequest = Nothing
-        , edit = Nothing
+        , edit = retainedEdit state.edit
         , deleteConfirmation = Nothing
     }
+
+
+retainedEdit : Maybe ObservationEditState -> Maybe ObservationEditState
+retainedEdit maybeEdit =
+    Maybe.andThen
+        (\edit ->
+            if edit.saving || edit.draft /= edit.baseContent then
+                Just edit
+
+            else
+                Nothing
+        )
+        maybeEdit
+
+
+hasProtectedEdit : Model -> Bool
+hasProtectedEdit model =
+    model.observations.edit
+        |> retainedEdit
+        |> Maybe.map (\edit -> editContextIsCurrent edit model)
+        |> Maybe.withDefault False
+
+
+refuseContextExit : Model -> ( Model, Cmd Msg )
+refuseContextExit model =
+    addToast Warning "Save or discard your Observation draft before leaving this workspace. An in-flight save must finish first." model
+
+
+returnToDraft : Model -> ( Model, Cmd Msg )
+returnToDraft model =
+    case model.observations.edit of
+        Just edit ->
+            if editContextIsCurrent edit model then
+                let
+                    ( selected, selectionCmd ) =
+                        selectObservation edit.observationId { model | activeTab = ObservationsTab }
+                in
+                ( selected, Cmd.batch [ selectionCmd, replaceFragment selected, focusElement "observation-edit-content" ] )
+
+            else
+                ( model, Cmd.none )
+
+        Nothing ->
+            ( model, Cmd.none )
 
 
 selectionForTab : WorkspaceTab -> ObservationModel -> ObservationModel
@@ -213,7 +260,14 @@ update msg model =
             ( updated, Cmd.batch [ copyToClipboard subject, toastCmd ] )
 
         StartObservationEdit ->
-            startEdit model
+            if hasProtectedEdit model then
+                returnToDraft model
+
+            else
+                startEdit model
+
+        ReturnToObservationDraft ->
+            returnToDraft model
 
         SetObservationDraft value ->
             ( updateObservation
@@ -221,7 +275,14 @@ update msg model =
                     { state
                         | edit =
                             state.edit
-                                |> Maybe.map (\edit -> { edit | draft = value, error = Nothing })
+                                |> Maybe.map
+                                    (\edit ->
+                                        if edit.saving then
+                                            edit
+
+                                        else
+                                            { edit | draft = value, error = Nothing }
+                                    )
                     }
                 )
                 model
@@ -232,9 +293,13 @@ update msg model =
             saveEdit model
 
         CancelObservationEdit ->
-            ( updateObservation (\state -> { state | edit = Nothing }) model
-            , focusElement "observation-edit"
-            )
+            if Maybe.map .saving model.observations.edit == Just True then
+                ( model, Cmd.none )
+
+            else
+                ( updateObservation (\state -> { state | edit = Nothing }) model
+                , focusElement "observation-edit"
+                )
 
         ReloadObservationEdit ->
             ( updateObservation reloadEdit model, Cmd.none )
@@ -527,6 +592,15 @@ finishEditFailure message edit model =
 
 openDeleteConfirmation : Model -> ( Model, Cmd Msg )
 openDeleteConfirmation model =
+    if hasProtectedEdit model then
+        returnToDraft model
+
+    else
+        openDeleteConfirmationWithoutDraft model
+
+
+openDeleteConfirmationWithoutDraft : Model -> ( Model, Cmd Msg )
+openDeleteConfirmationWithoutDraft model =
     case currentSelectedObservation model.observations of
         Just observation ->
             if canMutateObservation observation model then
@@ -1604,6 +1678,21 @@ on the active observations page or under its current filters.
 -}
 selectObservation : String -> Model -> ( Model, Cmd Msg )
 selectObservation observationId model =
+    if
+        model.observations.selectedId
+            == Just observationId
+            && model.observations.detailError
+            == Nothing
+            && (model.observations.selectedDetail /= Nothing || model.observations.activeDetailRequest /= Nothing)
+    then
+        ( model, Cmd.none )
+
+    else
+        selectDifferentObservation observationId model
+
+
+selectDifferentObservation : String -> Model -> ( Model, Cmd Msg )
+selectDifferentObservation observationId model =
     case model.selectedWorkspaceId of
         Just workspaceId ->
             let
@@ -1625,12 +1714,26 @@ selectObservation observationId model =
                         (\current ->
                             { current
                                 | selectedId = Just observationId
-                                , selectedDetail = Nothing
+                                , selectedDetail =
+                                    current.edit
+                                        |> Maybe.andThen
+                                            (\edit ->
+                                                if edit.observationId == observationId then
+                                                    Just edit.latestCanonical
+
+                                                else
+                                                    Nothing
+                                            )
                                 , detailLoading = True
                                 , detailError = Nothing
                                 , activeDetailRequest = Just request
                                 , nextDetailRequestToken = token + 1
-                                , edit = Nothing
+                                , edit =
+                                    if current.selectedId == Just observationId then
+                                        current.edit
+
+                                    else
+                                        retainedEdit current.edit
                                 , deleteConfirmation = Nothing
                             }
                         )
@@ -1930,6 +2033,23 @@ observationIsOlderThan current candidate =
         /= current
 
 
+withRetainedCanonical : String -> ObservationModel -> Maybe Api.Observation -> Maybe Api.Observation
+withRetainedCanonical observationId state existing =
+    case state.edit of
+        Just edit ->
+            if edit.observationId == observationId then
+                existing
+                    |> Maybe.map (preferNewerObservation edit.latestCanonical)
+                    |> Maybe.withDefault edit.latestCanonical
+                    |> Just
+
+            else
+                existing
+
+        Nothing ->
+            existing
+
+
 applyCanonicalObservation : Api.Observation -> ObservationModel -> ObservationModel
 applyCanonicalObservation candidate state =
     let
@@ -1957,6 +2077,7 @@ applyCanonicalObservation candidate state =
 
         accepted =
             existing
+                |> withRetainedCanonical candidate.id state
                 |> Maybe.map (preferNewerObservation candidate)
                 |> Maybe.withDefault candidate
 
@@ -2037,6 +2158,7 @@ applyAuthoritativeObservation candidate state =
 
         accepted =
             existing
+                |> withRetainedCanonical candidate.id state
                 |> Maybe.map (preferNewerObservation candidate)
                 |> Maybe.withDefault candidate
 
@@ -2080,6 +2202,7 @@ isLoadedOrSelected observationId state =
     Dict.member observationId state.items
         || state.selectedId == Just observationId
         || Maybe.map .id state.selectedDetail == Just observationId
+        || Maybe.map .observationId state.edit == Just observationId
 
 
 markResultsStale : ObservationModel -> ObservationModel
@@ -2492,6 +2615,26 @@ viewObservationsStateWithPermission canEdit workspace state =
                 ]
             , viewDeleteConfirmation canEdit state
             ]
+
+
+viewRetainedDraft : Model -> Html Msg
+viewRetainedDraft model =
+    case model.observations.edit of
+        Just edit ->
+            if hasProtectedEdit model && (model.activeTab /= ObservationsTab || model.observations.selectedId /= Just edit.observationId) then
+                div [ class "observation-retained-draft", attribute "role" "status" ]
+                    [ p [] [ text "Your Observation draft is retained. Save or discard it before leaving this workspace or editing another observation." ]
+                    , button [ class "btn btn-secondary", type_ "button", onClick ReturnToObservationDraft ] [ text "Return to draft" ]
+                    , button [ class "btn btn-primary", type_ "button", onClick SaveObservationEdit, disabled (edit.saving || edit.conflict || observationContentError edit.draft /= Nothing) ]
+                        [ text (if edit.saving then "Saving..." else "Save draft") ]
+                    , button [ class "btn btn-secondary", type_ "button", onClick CancelObservationEdit, disabled edit.saving ] [ text "Discard draft" ]
+                    ]
+
+            else
+                text ""
+
+        Nothing ->
+            text ""
 
 
 viewFilters : ObservationModel -> Html Msg
@@ -2998,29 +3141,34 @@ viewDetail canEdit state =
                         div [ class "empty-state observation-state observation-state-error observation-detail-state", attribute "role" "alert" ] [ text message ]
 
                     Nothing ->
-                        case state.selectedDetail of
-                            Just observation ->
-                                article [ class "card observation-detail-card" ]
-                                    [ viewDetailContent canEdit observation state.edit
-                                    , dl [ class "observation-detail-meta" ]
-                                        [ viewDetailMeta "Workspace ID" observation.workspaceId "observation-detail-workspace"
-                                        , viewSubjects observation.subjects
-                                        , viewDetailMeta "Git SHA" observation.gitSha "observation-detail-sha"
-                                        , viewDetailMeta "Created" (formatDate observation.createdAt) ""
-                                        , viewDetailMeta "Updated" (formatDate observation.updatedAt) ""
-                                        ]
-                                    , if canEdit && state.edit == Nothing then
-                                        div [ class "observation-detail-actions" ]
-                                            [ button [ id "observation-edit", class "btn btn-secondary", type_ "button", onClick StartObservationEdit ] [ text "Edit content" ]
-                                            , button [ id "observation-delete", class "btn btn-danger", type_ "button", onClick OpenObservationDelete ] [ text "Delete observation" ]
-                                            ]
+                        text ""
+                , case state.selectedDetail of
+                    Just observation ->
+                        article [ class "card observation-detail-card" ]
+                            [ viewDetailContent canEdit observation state.edit
+                            , dl [ class "observation-detail-meta" ]
+                                [ viewDetailMeta "Workspace ID" observation.workspaceId "observation-detail-workspace"
+                                , viewSubjects observation.subjects
+                                , viewDetailMeta "Git SHA" observation.gitSha "observation-detail-sha"
+                                , viewDetailMeta "Created" (formatDate observation.createdAt) ""
+                                , viewDetailMeta "Updated" (formatDate observation.updatedAt) ""
+                                ]
+                            , if canEdit && Maybe.map .observationId state.edit /= Just observation.id then
+                                div [ class "observation-detail-actions" ]
+                                    [ button [ id "observation-edit", class "btn btn-secondary", type_ "button", onClick StartObservationEdit ] [ text "Edit content" ]
+                                    , if state.edit == Nothing then
+                                        button [ id "observation-delete", class "btn btn-danger", type_ "button", onClick OpenObservationDelete ] [ text "Delete observation" ]
 
                                       else
                                         text ""
                                     ]
 
-                            Nothing ->
+                              else
                                 text ""
+                            ]
+
+                    Nothing ->
+                        text ""
                 ]
 
 

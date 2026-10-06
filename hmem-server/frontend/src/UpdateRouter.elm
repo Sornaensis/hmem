@@ -344,6 +344,9 @@ route msg model =
         StartObservationEdit ->
             Ok (Feature.Observation.update msg model)
 
+        ReturnToObservationDraft ->
+            Ok (Feature.Observation.update msg model)
+
         SetObservationDraft _ ->
             Ok (Feature.Observation.update msg model)
 

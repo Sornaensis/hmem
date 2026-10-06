@@ -2,6 +2,7 @@ module ObservationTest exposing (suite)
 
 import Api
 import AppShell
+import Browser
 import Dict
 import Expect
 import Feature.DataLoading
@@ -15,6 +16,7 @@ import Json.Encode as Encode
 import Route
 import Test exposing (..)
 import Test.Html.Query as Query
+import Test.Html.Event as Event
 import Test.Html.Selector as Selector
 import Types exposing (AuthStatus(..), Flags, Model, Msg(..), ObservationModel, ObservationRequestMode(..), Page(..), WorkspaceTab(..))
 import Url
@@ -919,6 +921,399 @@ suite =
                 , Feature.DataLoading.nextPageOffset 0 { items = [], hasMore = True } == Nothing
                 ]
                     |> Expect.equal [ True, True, True, True, True, True ]
+        , test "same-observation selection preserves dirty and in-flight edit identity" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "protected draft"
+
+                    dirty =
+                        saving.observations.edit
+                            |> Maybe.map (\edit -> { edit | saving = False, activeRequest = Nothing })
+
+                    dirtyState =
+                        saving.observations
+
+                    models =
+                        [ saving, { saving | observations = { dirtyState | edit = dirty } } ]
+                in
+                List.map
+                    (\model -> Feature.Observation.selectObservation "curated" model |> Tuple.first |> .observations)
+                    models
+                    |> Expect.equal (List.map .observations models)
+        , test "URL-seeded and failed same-selection details hydrate without retiring the retained owner" <|
+            \_ ->
+                let
+                    initial =
+                        Feature.Observation.init
+
+                    seeded =
+                        editableModel { initial | selectedId = Just "off-page-link" }
+
+                    hydrated =
+                        Feature.Observation.selectObservation "off-page-link" seeded |> Tuple.first
+
+                    failedSeedState =
+                        hydrated.observations
+
+                    failedSeed =
+                        { hydrated | observations = { failedSeedState | selectedDetail = Nothing, detailLoading = False, detailError = Just "Failed", activeDetailRequest = Nothing } }
+
+                    retriedSeed =
+                        Feature.Observation.selectObservation "off-page-link" failedSeed |> Tuple.first
+
+                    saving =
+                        savingEditModel "owned retry"
+
+                    failedOwnerState =
+                        saving.observations
+
+                    failedOwner =
+                        { saving | observations = { failedOwnerState | selectedDetail = Nothing, detailLoading = False, detailError = Just "Failed", activeDetailRequest = Nothing } }
+
+                    retriedOwner =
+                        Feature.Observation.selectObservation "curated" failedOwner |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> hydrated.observations.activeDetailRequest |> Expect.equal (Just { workspaceId = "workspace-1", observationId = "off-page-link", sessionEpoch = seeded.sessionRequestEpoch, token = 1 })
+                    , \_ -> hydrated.observations.items |> Expect.equal Dict.empty
+                    , \_ -> retriedSeed.observations.activeDetailRequest |> Maybe.map .token |> Expect.equal (Just 2)
+                    , \_ -> retriedSeed.observations.detailError |> Expect.equal Nothing
+                    , \_ -> retriedOwner.observations.detailLoading |> Expect.equal True
+                    , \_ -> retriedOwner.observations.edit |> Expect.equal saving.observations.edit
+                    , \_ -> retriedOwner.observations.selectedDetail |> Expect.equal (saving.observations.edit |> Maybe.map .latestCanonical)
+                    ]
+                    ()
+        , test "failed detail revalidation after returning keeps draft and conflict controls reachable" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "editable retained draft"
+
+                    state =
+                        saving.observations
+
+                    dirty =
+                        { saving | observations = { state | edit = Maybe.map (\edit -> { edit | saving = False, activeRequest = Nothing, conflict = True }) state.edit } }
+
+                    browsing =
+                        Feature.Observation.selectObservation "other" dirty |> Tuple.first
+
+                    returned =
+                        Feature.Observation.update ReturnToObservationDraft browsing |> Tuple.first
+                in
+                case returned.observations.activeDetailRequest of
+                    Just request ->
+                        let
+                            failed =
+                                Feature.Observation.update (GotObservationDetail request.workspaceId request.observationId request.sessionEpoch request.token (Err Http.NetworkError)) returned |> Tuple.first
+
+                            view =
+                                Feature.Observation.viewObservationsStateWithPermission True (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml
+                        in
+                        Expect.all
+                            [ \_ -> failed.observations.edit |> Expect.equal dirty.observations.edit
+                            , \_ -> view |> Query.has [ Selector.text "Failed to load observation detail.", Selector.text "Save content", Selector.text "Cancel", Selector.text "Keep my draft", Selector.text "Use latest version" ]
+                            , \_ -> view |> Query.find [ Selector.id "observation-edit-content" ] |> Query.has [ Selector.attribute (Html.Attributes.value "editable retained draft") ]
+                            , \_ -> Feature.Observation.update CancelObservationEdit failed |> Tuple.first |> .observations |> .edit |> Expect.equal Nothing
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "Return should revalidate the protected owner"
+        , test "one retained owner survives rows, tabs, Back, Apply and another edit action" <|
+            \_ ->
+                let
+                    original =
+                        savingEditModel "retained draft"
+
+                    state =
+                        original.observations
+
+                    dirty =
+                        { original | observations = { state | edit = Maybe.map (\edit -> { edit | saving = False, activeRequest = Nothing }) state.edit } }
+
+                    other =
+                        Feature.Observation.selectObservation "other" dirty |> Tuple.first
+
+                    tabbed =
+                        AppShell.handleOwned (AppShell.SwitchTabMsg ProjectsTab) other |> Tuple.first
+
+                    back =
+                        Route.handleUrlChange (workspaceUrl "tab=observations&observation=other") tabbed |> Tuple.first
+
+                    applied =
+                        Feature.Observation.update ApplyObservationFilters back |> Tuple.first
+
+                    resumed =
+                        Feature.Observation.update StartObservationEdit applied |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> List.map (.observations >> .edit) [ other, tabbed, back, applied, resumed ] |> Expect.equal (List.repeat 5 dirty.observations.edit)
+                    , \_ -> resumed.observations.selectedId |> Expect.equal (Just "curated")
+                    , \_ -> resumed.activeTab |> Expect.equal ObservationsTab
+                    , \_ -> resumed.observations.selectedDetail |> Maybe.map .id |> Expect.equal (Just "curated")
+                    ]
+                    ()
+        , test "dirty and saving context exits preserve selection, workspace, session and canonical URL" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "protected exit"
+
+                    state =
+                        saving.observations
+
+                    dirty =
+                        { saving | observations = { state | edit = Maybe.map (\edit -> { edit | saving = False, activeRequest = Nothing }) state.edit } }
+
+                    target path =
+                        Url.fromString ("https://example.test" ++ path) |> Maybe.withDefault saving.url
+
+                    unchanged model after =
+                        after.observations == model.observations
+                            && after.url == model.url
+                            && after.page == model.page
+                            && after.selectedWorkspaceId == model.selectedWorkspaceId
+                            && after.sessionRequestEpoch == model.sessionRequestEpoch
+
+                    stays model =
+                        List.all
+                            (\url ->
+                                unchanged model (Route.handleUrlChange url model |> Tuple.first)
+                                    && unchanged model (Route.handleUrlRequest (Browser.Internal url) model |> Tuple.first)
+                            )
+                            [ target "/", target "/audit", target "/workspace/workspace-2", target "/missing" ]
+                            && unchanged model (Route.handleUrlRequest (Browser.External "https://elsewhere.test") model |> Tuple.first)
+                            && unchanged model (AppShell.handleOwned (AppShell.SelectWorkspaceMsg "workspace-2") model |> Tuple.first)
+                in
+                [ stays saving, stays dirty ] |> Expect.equal [ True, True ]
+        , test "retained draft controls remain reachable on other tabs and cannot interrupt a save" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "reachable draft"
+
+                    tabbed =
+                        AppShell.handleOwned (AppShell.SwitchTabMsg ProjectsTab) saving |> Tuple.first
+
+                    notice =
+                        Feature.Observation.viewRetainedDraft tabbed |> Query.fromHtml
+
+                    returned =
+                        Feature.Observation.update ReturnToObservationDraft tabbed |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> notice |> Query.has [ Selector.text "Return to draft", Selector.text "Discard draft", Selector.text "Saving..." ]
+                    , \_ -> notice |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Return to draft" ] ] |> Event.simulate Event.click |> Event.expect ReturnToObservationDraft
+                    , \_ -> notice |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Discard draft" ] ] |> Query.has [ Selector.attribute (Html.Attributes.disabled True) ]
+                    , \_ -> Feature.Observation.update CancelObservationEdit tabbed |> Tuple.first |> .observations |> .edit |> Expect.equal saving.observations.edit
+                    , \_ -> Feature.Observation.update (SetObservationDraft "unexpected input") tabbed |> Tuple.first |> .observations |> .edit |> Expect.equal saving.observations.edit
+                    , \_ -> returned.activeTab |> Expect.equal ObservationsTab
+                    , \_ -> returned.observations.selectedId |> Expect.equal (Just "curated")
+                    ]
+                    ()
+        , test "background save completion owns only the retained edit and preserves the new selection" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "saved retained draft"
+
+                    other =
+                        Feature.Observation.selectObservation "other" saving |> Tuple.first
+
+                    otherObservation =
+                        fixtureObservation "other" "2026-01-01T00:00:00Z"
+
+                    otherState =
+                        other.observations
+
+                    browsing =
+                        { other | observations = { otherState | selectedDetail = Just otherObservation, detailLoading = False } }
+                in
+                case saving.observations.edit |> Maybe.andThen .activeRequest of
+                    Just request ->
+                        let
+                            saved =
+                                saving.observations.edit |> Maybe.map .latestCanonical |> Maybe.withDefault otherObservation
+
+                            completed =
+                                Feature.Observation.update (ObservationUpdated request (Ok { saved | content = "saved retained draft", updatedAt = "2026-01-02T00:00:00Z" })) browsing |> Tuple.first
+
+                            failed =
+                                Feature.Observation.update (ObservationUpdated request (Err Http.NetworkError)) browsing |> Tuple.first
+
+                            revoked =
+                                Feature.Observation.reconcileCurationPermission { browsing | sessionContext = Just readOnlySession }
+
+                            deleted =
+                                Feature.Observation.reconcileDeletedObservation "curated" browsing |> Tuple.first
+                        in
+                        Expect.all
+                            [ \_ -> completed.observations.edit |> Expect.equal Nothing
+                            , \_ -> completed.observations.selectedId |> Expect.equal (Just "other")
+                            , \_ -> completed.observations.selectedDetail |> Expect.equal (Just otherObservation)
+                            , \_ -> failed.observations.edit |> Maybe.map .draft |> Expect.equal (Just "saved retained draft")
+                            , \_ -> Feature.Observation.update (ObservationUpdated request (Ok saved)) revoked |> Tuple.first |> .observations |> .edit |> Expect.equal Nothing
+                            , \_ -> Feature.Observation.update (ObservationUpdated request (Ok saved)) deleted |> Tuple.first |> .observations |> .edit |> Expect.equal Nothing
+                            , \_ -> Feature.Observation.isLoadedOrSelected "curated" { otherState | items = Dict.empty } |> Expect.equal True
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "Expected retained save ownership"
+        , test "full snapshots reconcile hidden dirty and saving owners without admitting unrelated membership" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "hidden draft"
+
+                    selected =
+                        Feature.Observation.selectObservation "other" saving |> Tuple.first
+
+                    state =
+                        selected.observations
+
+                    other =
+                        fixtureObservation "other" "2026-01-01T00:00:00Z"
+
+                    hidden =
+                        { selected | observations = { state | items = Dict.empty, orderedIds = [], selectedDetail = Just other } }
+
+                    original =
+                        saving.observations.edit |> Maybe.map .latestCanonical |> Maybe.withDefault other
+
+                    changed =
+                        { original | content = "new canonical content", updatedAt = "2026-01-02T00:00:00Z" }
+
+                    apply rows model =
+                        Feature.WebSocket.update (WsMessageReceived (observationSnapshotWireMany rows)) model |> Tuple.first
+
+                    updated =
+                        apply [ changed, other, fixtureObservation "unrelated" "2026-01-01T00:00:00Z" ] hidden
+
+                    dirtyState =
+                        hidden.observations
+
+                    dirty =
+                        { hidden | observations = { dirtyState | edit = Maybe.map (\edit -> { edit | saving = False, activeRequest = Nothing }) dirtyState.edit } }
+
+                    changedDirty =
+                        apply [ changed, other ] dirty
+
+                    older =
+                        apply [ original, other ] updated
+
+                    deleted =
+                        apply [ other ] hidden
+
+                    sparseWire =
+                        observationSnapshotWireMany [] |> String.replace "\"transport\":\"snapshot\"" "\"transport\":\"snapshot\",\"snapshot_profile\":\"workspace_shell_v1\""
+
+                    sparse =
+                        Feature.WebSocket.update (WsMessageReceived sparseWire) hidden |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> updated.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.latestCanonical.content, edit.conflict )) |> Expect.equal (Just ( "hidden draft", "new canonical content", True ))
+                    , \_ -> updated.observations.edit |> Maybe.andThen .activeRequest |> Expect.equal (saving.observations.edit |> Maybe.andThen .activeRequest)
+                    , \_ -> changedDirty.observations.edit |> Maybe.map .conflict |> Expect.equal (Just True)
+                    , \_ -> updated.observations.selectedId |> Expect.equal (Just "other")
+                    , \_ -> updated.observations.selectedDetail |> Expect.equal (Just other)
+                    , \_ -> updated.observations.items |> Expect.equal Dict.empty
+                    , \_ -> older.observations.edit |> Expect.equal updated.observations.edit
+                    , \_ -> deleted.observations.edit |> Expect.equal Nothing
+                    , \_ -> deleted.observations.selectedId |> Expect.equal (Just "other")
+                    , \_ -> sparse.observations.edit |> Expect.equal hidden.observations.edit
+                    , \_ ->
+                        case saving.observations.edit |> Maybe.andThen .activeRequest of
+                            Just request ->
+                                Feature.Observation.update (ObservationUpdated request (Ok changed)) deleted |> Tuple.first |> .observations |> Expect.equal deleted.observations
+
+                            Nothing ->
+                                Expect.fail "Expected original request"
+                    ]
+                    ()
+        , test "authoritative workspace retirement clears hidden dirty and saving owners and fences callbacks" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "retirement draft"
+
+                    hidden =
+                        Feature.Observation.selectObservation "other" saving |> Tuple.first
+
+                    state =
+                        hidden.observations
+
+                    dirty =
+                        { hidden | observations = { state | edit = Maybe.map (\edit -> { edit | saving = False, activeRequest = Nothing }) state.edit } }
+
+                    revokedWire workspaceId =
+                        "{\"schema_version\":1,\"transport\":\"frames\",\"scope\":{\"scope\":\"workspace\",\"workspace_id\":\"" ++ workspaceId ++ "\"},\"frames\":[{\"schema_version\":1,\"type\":\"access_revoked\",\"workspace_id\":\"" ++ workspaceId ++ "\"}]}"
+
+                    deletedWire =
+                        observationInvalidationWire "workspace-1"
+                            |> String.replace "\"type\":\"observation\"" "\"type\":\"workspace\""
+                            |> String.replace "\"action\":\"updated\"" "\"action\":\"deleted\""
+                            |> String.replace "\"scope\":{\"scope\":\"workspace\",\"workspace_id\":\"workspace-1\"}" "\"scope\":{\"scope\":\"global\"}"
+                            |> String.replace "\"scope\":\"workspace\"" "\"scope\":\"global\""
+                            |> String.replace "\"workspace_id\":\"workspace-1\"" "\"workspace_id\":null"
+                            |> String.replace "observation:workspace-1" "workspace:workspace-1"
+                            |> String.replace "{\"kind\":\"collection\",\"target\":\"observations:workspace-1\"}" "{\"kind\":\"catalogue\",\"target\":\"workspace-catalog\"}"
+
+                    retire wire model =
+                        Feature.WebSocket.update (WsMessageReceived wire) model |> Tuple.first
+
+                    retired =
+                        List.concatMap (\model -> List.map (\wire -> retire wire model) [ revokedWire "workspace-1", deletedWire ]) [ hidden, dirty ]
+
+                    unrelated =
+                        retire (revokedWire "other-workspace") hidden
+                in
+                case saving.observations.edit |> Maybe.andThen .activeRequest of
+                    Just request ->
+                        let
+                            canonical =
+                                saving.observations.edit |> Maybe.map .latestCanonical |> Maybe.withDefault (fixtureObservation "curated" "2026-01-01T00:00:00Z")
+
+                            inert model =
+                                model.observations.edit == Nothing
+                                    && model.sessionRequestEpoch == hidden.sessionRequestEpoch + 1
+                                    && (Feature.Observation.update (ObservationUpdated request (Ok canonical)) model |> Tuple.first |> .observations) == model.observations
+                                    && (Feature.Observation.update (ObservationUpdated request (Err Http.NetworkError)) model |> Tuple.first |> .observations) == model.observations
+                        in
+                        Expect.all
+                            [ \_ -> List.map inert retired |> Expect.equal [ True, True, True, True ]
+                            , \_ -> unrelated.observations.edit |> Expect.equal hidden.observations.edit
+                            , \_ -> unrelated.sessionRequestEpoch |> Expect.equal hidden.sessionRequestEpoch
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "Expected original owned save request"
+        , test "clean or explicitly discarded edits allow immediate context navigation" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "draft to discard"
+
+                    state =
+                        saving.observations
+
+                    dirty =
+                        { saving | observations = { state | edit = Maybe.map (\edit -> { edit | saving = False, activeRequest = Nothing }) state.edit } }
+
+                    discarded =
+                        Feature.Observation.update CancelObservationEdit dirty |> Tuple.first
+
+                    clean =
+                        Feature.Observation.update StartObservationEdit discarded |> Tuple.first
+
+                    destination =
+                        Url.fromString "https://example.test/" |> Maybe.withDefault clean.url
+                in
+                List.map (\model -> Route.handleUrlChange destination model |> Tuple.first |> .page) [ discarded, clean ]
+                    |> Expect.equal [ HomePage, HomePage ]
         , test "same-workspace route exits clear stale Observation detail state" <|
             \_ ->
                 let

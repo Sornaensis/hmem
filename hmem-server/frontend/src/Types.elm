@@ -923,6 +923,7 @@ type Msg
     | SelectObservation String
     | CopyObservationSubject String
     | StartObservationEdit
+    | ReturnToObservationDraft
     | SetObservationDraft String
     | SaveObservationEdit
     | CancelObservationEdit

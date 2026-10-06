@@ -829,30 +829,18 @@ reconcileSnapshotObservations canonicalById observations =
                 , activeDetailRequest = Nothing
             }
     in
-    case observations.selectedId of
-        Just observationId ->
-            case Dict.get observationId canonicalById of
-                Just canonical ->
-                    let
-                        wasCached =
-                            Dict.member observationId retainedItems
+    List.filterMap identity [ observations.selectedId, Maybe.map .observationId observations.edit ]
+        |> Set.fromList
+        |> Set.toList
+        |> List.foldl
+            (\observationId current ->
+                case Dict.get observationId canonicalById of
+                    Just canonical ->
+                        Observation.applyCanonicalObservation canonical current
 
-                        reconciled =
-                            Observation.applyCanonicalObservation canonical retained
-                    in
-                    if wasCached then
-                        reconciled
-
-                    else
-                        { reconciled
-                            | items = Dict.remove observationId reconciled.items
-                            , orderedIds = List.filter ((/=) observationId) reconciled.orderedIds
-                        }
-
-                Nothing ->
-                    Observation.removeObservation observationId retained
-
-        Nothing ->
+                    Nothing ->
+                        Observation.removeObservation observationId current
+            )
             retained
 
 
@@ -1147,7 +1135,7 @@ applyAction scope action ( model, accumulated ) =
                         | workspaces = Dict.remove workspaceId model.workspaces
                         , projects = Dict.empty
                         , tasks = Dict.empty
-                        , observations = Observation.clearSelection { observations | items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty }
+                        , observations = Observation.clearSelection { observations | items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty, edit = Nothing }
                         , dependencies = Dependencies.resetCache model.dependencies
                         , cards = { cards | projectNextTasks = Dict.empty, projectNextTaskDiagnostics = Dict.empty, projectNextTasksLoading = Dict.empty, projectNextTaskDiagnosticsLoading = Dict.empty, projectNextTasksErrors = Dict.empty, projectNextTaskDiagnosticsErrors = Dict.empty }
                         , sessionRequestEpoch = model.sessionRequestEpoch + 1

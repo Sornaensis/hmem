@@ -12,6 +12,16 @@ npm test
 
 `test:browser:install` provisions the exact Chromium revision required by the locked Playwright version. The timeline browser test starts from a new, empty browser context and runs the compiled production Elm fixture without authentication or backend dependencies.
 
+## Observation drafts
+
+Observation editing retains one dirty or saving draft during same-workspace row,
+tab, and Back navigation. Return to draft, Save draft, and Discard draft remain
+reachable when browsing elsewhere. Editing another observation returns to the
+retained draft. Leaving the workspace requires saving or explicitly discarding
+it; discard cannot interrupt an in-flight save. Permission/session revocation
+and authoritative deletion retire unavailable editing. This bounded in-session
+retention does not persist through a full reload or closing the tab.
+
 ## Expanded hierarchy loading
 
 Navigation transports 50 summaries per kind per request. Expanded nodes whose

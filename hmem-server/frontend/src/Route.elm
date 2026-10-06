@@ -9,7 +9,7 @@ import Feature.Dependencies
 import Feature.Editing
 import Feature.Observation
 import Feature.Timeline
-import Helpers exposing (localStorageKey, parseFragment, pushUrl)
+import Helpers exposing (localStorageKey, parseFragment, pushUrl, replaceFragment)
 import Permissions
 import Ports exposing (disconnectWebSocket, requestLocalStorage)
 import Set
@@ -55,14 +55,41 @@ handleUrlRequest : Browser.UrlRequest -> Model -> ( Model, Cmd Msg )
 handleUrlRequest urlRequest model =
     case urlRequest of
         Browser.Internal url ->
-            ( model, pushUrl model.key (Url.toString url) )
+            if observationContextExit url model then
+                Feature.Observation.refuseContextExit model
+
+            else
+                ( model, pushUrl model.key (Url.toString url) )
 
         Browser.External href ->
-            ( model, Nav.load href )
+            if Feature.Observation.hasProtectedEdit model then
+                Feature.Observation.refuseContextExit model
+
+            else
+                ( model, Nav.load href )
 
 
 handleUrlChange : Url.Url -> Model -> ( Model, Cmd Msg )
 handleUrlChange url model =
+    if observationContextExit url model then
+        let
+            ( preserved, noticeCmd ) =
+                Feature.Observation.refuseContextExit model
+        in
+        ( preserved, Cmd.batch [ noticeCmd, replaceFragment preserved ] )
+
+    else
+        handleUrlChangeWithoutProtectedExit url model
+
+
+observationContextExit : Url.Url -> Model -> Bool
+observationContextExit url model =
+    Feature.Observation.hasProtectedEdit model
+        && (urlToPage url /= model.page || url.host /= model.url.host || url.protocol /= model.url.protocol || url.port_ /= model.url.port_)
+
+
+handleUrlChangeWithoutProtectedExit : Url.Url -> Model -> ( Model, Cmd Msg )
+handleUrlChangeWithoutProtectedExit url model =
     let
         page =
             urlToPage url

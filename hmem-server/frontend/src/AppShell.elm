@@ -127,7 +127,11 @@ handleOwnedRaw : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )
 handleOwnedRaw ownedMsg model =
     case ownedMsg of
         SelectWorkspaceMsg wsId ->
-            ( model, pushUrl model.key ("/workspace/" ++ wsId) )
+            if Feature.Observation.hasProtectedEdit model && model.selectedWorkspaceId /= Just wsId then
+                Feature.Observation.refuseContextExit model
+
+            else
+                ( model, pushUrl model.key ("/workspace/" ++ wsId) )
 
         SwitchTabMsg tab ->
             let
@@ -904,7 +908,9 @@ viewDocument model =
                 text ""
             , Keyed.node "div"
                 [ class "main-content", id "main-content-scroll" ]
-                [ ( pageKey model.page, viewPage model ) ]
+                [ ( "retained-observation-draft", Feature.Observation.viewRetainedDraft model )
+                , ( pageKey model.page, viewPage model )
+                ]
             , Toast.view model.toast
             , viewConnectionStatus model.webSocket.state
             , if model.auth.status == AuthReady then

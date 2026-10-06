@@ -350,6 +350,12 @@ route msg model =
         SelectObservation _ ->
             Ok (Feature.Observation.update msg model)
 
+        SelectObservationFrom _ _ ->
+            Ok (Feature.Observation.update msg model)
+
+        ReturnObservationResults ->
+            Ok (Feature.Observation.update msg model)
+
         CopyObservationSubject _ ->
             Ok (Feature.Observation.update msg model)
 

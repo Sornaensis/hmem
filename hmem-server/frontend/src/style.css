@@ -1926,6 +1926,7 @@ a:hover {
 
 .observation-mode-navigation {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.625rem;
   min-width: 0;
   padding: 0.75rem;
@@ -1943,6 +1944,14 @@ a:hover {
 .observation-mode-heading,
 .observation-mode-announcement {
   margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.observation-mode-button {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
 }
 
 .observation-mode-heading {
@@ -2440,6 +2449,44 @@ textarea.observation-edit-content {
 
 .observation-detail-state {
   padding: 1rem;
+}
+
+.observation-detail-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.observation-detail-navigation .observation-detail-heading {
+  margin: 0;
+  flex: 1 1 10rem;
+}
+
+.observation-detail-heading:focus-visible,
+.observation-return:focus-visible,
+#observation-results:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+}
+
+.observation-return {
+  min-width: 0;
+  white-space: normal;
+}
+
+/* Detail navigation targets must remain unobscured by the compact header. */
+.app:has(#observation-panel) .sticky-workspace-bar {
+  position: static;
+}
+
+/* Keep both navigation and detail reachable in short, enlarged-text layouts. */
+@media (max-width: 700px) and (max-height: 480px) {
+  .app:has(#observation-panel) .sidebar {
+    max-height: 40dvh;
+  }
+
 }
 
 @media (max-width: 800px) {

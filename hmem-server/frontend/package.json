@@ -12,6 +12,7 @@
     "test": "elm-test && elm make src/TimelineFixture.elm --output .timeline-fixture-test.js && elm make src/DependenciesFixture.elm --output .dependencies-fixture-test.js && node --test tests-js/change-stream.test.js && node --test tests-js/timeline-fixture.browser.test.js && node --test tests-js/dependencies.browser.test.js && node --test tests-js/hierarchy-viewport.test.js && npm run build && node --test tests-js/hierarchy-loading.browser.test.js",
     "test:timeline-fixture": "elm make src/TimelineFixture.elm --output .timeline-fixture-test.js && node --test tests-js/timeline-fixture.browser.test.js",
     "test:timeline-live": "node --test tests-js/timeline-live-refresh.integration.test.js",
+    "test:observation-navigation": "npm run build && node --test tests-js/observation-navigation.test.js tests-js/observation-navigation.browser.test.js",
     "test:browser:install": "playwright install chromium",
     "test:clean-install": "npm ci && npm run test:browser:install && npm test",
     "perf:self-check": "node --test --test-isolation=none perf/*.test.mjs",

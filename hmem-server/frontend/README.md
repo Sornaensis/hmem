@@ -22,6 +22,22 @@ it; discard cannot interrupt an in-flight save. Permission/session revocation
 and authoritative deletion retire unavailable editing. This bounded in-session
 retention does not persist through a full reload or closing the tab.
 
+Activating an Observation card by keyboard or pointer focuses and reveals the
+detail heading. Back to results restores the exact originating card and scroll
+position, including cards repeated in file-match groups; if a save has moved the
+card, it reveals that same card at its new position. Direct links or removed
+cards return focus to results. This navigation keeps the retained draft available.
+Leaving the Observation tab retires its card origin; a subsequently reopened
+detail returns to results. The compact workspace header scrolls with Observation
+content so keyboard targets remain visible.
+
+`npm run test:observation-navigation` builds production assets and checks the
+navigation bridge and populated browser flows. It covers keyboard entry/return,
+repeated cards, off-page links, long paths, edit/delete controls, 320 CSS-pixel
+reflow (equivalent to a 1280 CSS-pixel viewport at 400 percent zoom), and enlarged
+text. These automated checks do not qualify native browser zoom or assistive
+technology behavior.
+
 ## Observation queries
 
 Observation requests keep a complete applied query separate from filter inputs.

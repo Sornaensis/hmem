@@ -55,6 +55,7 @@ import Html.Attributes exposing (..)
 import Html.Events exposing (custom, onClick, onInput, stopPropagationOn)
 import Http
 import Json.Decode as Decode
+import Json.Encode as Encode
 import Permissions
 import Ports exposing (copyToClipboard)
 import Toast exposing (addToast)
@@ -104,6 +105,9 @@ init =
     , detailError = Nothing
     , activeDetailRequest = Nothing
     , nextDetailRequestToken = 1
+    , detailNavigationEpoch = 0
+    , detailNavigationToken = 0
+    , detailReturnTarget = Nothing
     , edit = Nothing
     , deleteConfirmation = Nothing
     , nextCurationContextToken = 1
@@ -119,6 +123,8 @@ clearSelection state =
         , detailLoading = False
         , detailError = Nothing
         , activeDetailRequest = Nothing
+        , detailNavigationToken = state.detailNavigationToken + 1
+        , detailReturnTarget = Nothing
         , edit = retainedEdit state.edit
         , deleteConfirmation = Nothing
     }
@@ -276,7 +282,13 @@ update msg model =
             )
 
         SelectObservation observationId ->
-            selectObservation observationId model
+            activateObservation observationId Nothing model
+
+        SelectObservationFrom observationId originId ->
+            activateObservation observationId (Just originId) model
+
+        ReturnObservationResults ->
+            returnToResults model
 
         CopyObservationSubject subject ->
             let
@@ -1936,6 +1948,72 @@ selectObservation observationId model =
         selectDifferentObservation observationId model
 
 
+activateObservation : String -> Maybe String -> Model -> ( Model, Cmd Msg )
+activateObservation observationId origin model =
+    case repositoryWorkspaceId model of
+        Nothing ->
+            ( model, Cmd.none )
+
+        Just workspaceId ->
+            let
+                priorState =
+                    model.observations
+
+                ( selected, selectionCmd ) =
+                    selectObservation observationId model
+
+                updated =
+                    updateObservation
+                        (\state -> { state | detailNavigationEpoch = model.sessionRequestEpoch, detailNavigationToken = state.detailNavigationToken + 1, detailReturnTarget = origin })
+                        selected
+            in
+            ( updated, Cmd.batch [ selectionCmd, navigateDetail "detail" workspaceId origin { priorState | detailNavigationEpoch = model.sessionRequestEpoch } updated.observations ] )
+
+
+returnToResults : Model -> ( Model, Cmd Msg )
+returnToResults model =
+    case ( repositoryWorkspaceId model, model.observations.selectedId ) of
+        ( Just workspaceId, Just _ ) ->
+            let
+                priorState =
+                    model.observations
+
+                previous =
+                    { priorState | detailNavigationEpoch = model.sessionRequestEpoch }
+
+                updated =
+                    updateObservation
+                        (clearSelection >> (\state -> { state | detailNavigationEpoch = model.sessionRequestEpoch }))
+                        model
+            in
+            ( updated, Cmd.batch [ replaceFragment updated, navigateDetail "return" workspaceId previous.detailReturnTarget previous updated.observations ] )
+
+        _ ->
+            ( model, Cmd.none )
+
+
+navigationStamp : String -> ObservationModel -> Encode.Value
+navigationStamp workspaceId state =
+    Encode.object
+        [ ( "workspaceId", Encode.string workspaceId )
+        , ( "sessionEpoch", Encode.int state.detailNavigationEpoch )
+        , ( "token", Encode.int state.detailNavigationToken )
+        , ( "selectedId", state.selectedId |> Maybe.map Encode.string |> Maybe.withDefault Encode.null )
+        ]
+
+
+navigateDetail : String -> String -> Maybe String -> ObservationModel -> ObservationModel -> Cmd Msg
+navigateDetail intent workspaceId origin previous destination =
+    Ports.navigateObservationDetail
+        (Encode.object
+            [ ( "intent", Encode.string intent )
+            , ( "originId", origin |> Maybe.map Encode.string |> Maybe.withDefault Encode.null )
+            , ( "previous", navigationStamp workspaceId previous )
+            , ( "destination", navigationStamp workspaceId destination )
+            ]
+        )
+
+
 selectDifferentObservation : String -> Model -> ( Model, Cmd Msg )
 selectDifferentObservation observationId model =
     case model.selectedWorkspaceId of
@@ -2821,7 +2899,11 @@ domToken value =
 
 viewObservations : Api.Workspace -> Model -> Html Msg
 viewObservations workspace model =
-    viewObservationsStateWithPermission (Permissions.canEditCurrentWorkspace model) workspace model.observations
+    let
+        state =
+            model.observations
+    in
+    viewObservationsStateWithPermission (Permissions.canEditCurrentWorkspace model) workspace { state | detailNavigationEpoch = model.sessionRequestEpoch }
 
 
 viewObservationsState : Api.Workspace -> ObservationModel -> Html Msg
@@ -2838,7 +2920,7 @@ viewObservationsStateWithPermission canEdit workspace state =
             ]
 
     else
-        div [ class "observations-panel" ]
+        div [ id "observation-panel", class "observations-panel", attribute "data-observation-context" (Encode.encode 0 (navigationStamp workspace.id state)) ]
             [ div
                 ([ class "observation-curation-background" ]
                     ++ (if canEdit && state.deleteConfirmation /= Nothing then
@@ -3436,7 +3518,7 @@ viewObservationRow selectedId context observation =
              else
                 "false"
             )
-        , onClick (SelectObservation observation.id)
+        , onClick (SelectObservationFrom observation.id (observationCardDomId context observation.id))
         ]
         [ div [ class "card-header observation-card-header" ]
             [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel observation.subjectKind) ]
@@ -3465,7 +3547,10 @@ viewDetail canEdit state =
 
         Just _ ->
             section [ id "observation-detail", class "observation-detail", attribute "aria-labelledby" "observation-detail-heading" ]
-                [ h3 [ id "observation-detail-heading", class "observation-detail-heading" ] [ text "Observation detail" ]
+                [ div [ class "observation-detail-navigation" ]
+                    [ h3 [ id "observation-detail-heading", class "observation-detail-heading", tabindex -1 ] [ text "Observation detail" ]
+                    , button [ class "btn btn-secondary observation-return", type_ "button", onClick ReturnObservationResults ] [ text "Back to results" ]
+                    ]
                 , if state.detailLoading then
                     div [ class "loading-indicator observation-state observation-detail-state", attribute "role" "status", attribute "aria-live" "polite" ] [ text "Loading detail..." ]
 

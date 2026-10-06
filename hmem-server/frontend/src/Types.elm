@@ -358,6 +358,9 @@ type alias ObservationModel =
     , detailError : Maybe String
     , activeDetailRequest : Maybe ObservationDetailRequest
     , nextDetailRequestToken : Int
+    , detailNavigationEpoch : Int
+    , detailNavigationToken : Int
+    , detailReturnTarget : Maybe String
     , edit : Maybe ObservationEditState
     , deleteConfirmation : Maybe ObservationDeleteState
     , nextCurationContextToken : Int
@@ -950,6 +953,8 @@ type Msg
     | LoadMoreObservationFacets
     | ToggleObservationMatchGroup String
     | SelectObservation String
+    | SelectObservationFrom String String
+    | ReturnObservationResults
     | CopyObservationSubject String
     | StartObservationEdit
     | ReturnToObservationDraft

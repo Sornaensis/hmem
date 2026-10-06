@@ -86,3 +86,6 @@ port syncHierarchyViewport : Encode.Value -> Cmd msg
 
 
 port scrollHierarchyTarget : String -> Cmd msg
+
+
+port navigateObservationDetail : Encode.Value -> Cmd msg

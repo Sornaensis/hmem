@@ -2750,6 +2750,76 @@ suite =
                     , \_ -> Feature.Observation.listQuery "workspace-1" 0 retried.observations |> Expect.equal (Feature.Observation.listQuery "workspace-1" 0 requested.observations)
                     , \_ -> retried.observations.query |> Expect.equal "draft search"
                     ] ()
+        , test "same-ID user activation refocuses navigation while preserving saving edit and detail request identity" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "navigation owner"
+
+                    activated =
+                        Feature.Observation.update (SelectObservationFrom "curated" "duplicate-card") saving |> Tuple.first
+
+                    returned =
+                        Feature.Observation.update ReturnObservationResults activated |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> activated.observations.edit |> Expect.equal saving.observations.edit
+                    , \_ -> activated.observations.activeDetailRequest |> Expect.equal saving.observations.activeDetailRequest
+                    , \_ -> activated.observations.detailReturnTarget |> Expect.equal (Just "duplicate-card")
+                    , \_ -> activated.observations.detailNavigationToken |> Expect.equal (saving.observations.detailNavigationToken + 1)
+                    , \_ -> returned.observations.selectedId |> Expect.equal Nothing
+                    , \_ -> returned.observations.edit |> Expect.equal saving.observations.edit
+                    , \_ -> returned.observations.detailNavigationToken |> Expect.equal (activated.observations.detailNavigationToken + 1)
+                    , \_ -> returned.observations.detailReturnTarget |> Expect.equal Nothing
+                    ] ()
+        , test "originating repeated card uses its exact DOM ID and detail exposes native return with focusable heading" <|
+            \_ ->
+                let
+                    model =
+                        appliedModeModel ObservationFlatMode
+
+                    observation =
+                        fixtureObservation "curated" "2026-01-01T00:00:00Z"
+
+                    view =
+                        Feature.Observation.viewObservations (observationWorkspace Api.Repository) model |> Query.fromHtml
+                in
+                Expect.all
+                    [ \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Event.simulate Event.click |> Event.expect (SelectObservationFrom observation.id (Feature.Observation.observationCardDomId "flat" observation.id))
+                    , \_ -> view |> Query.find [ Selector.id "observation-detail-heading" ] |> Query.has [ Selector.attribute (tabindex -1) ]
+                    , \_ -> view |> Query.find [ Selector.class "observation-return" ] |> Event.simulate Event.click |> Event.expect ReturnObservationResults
+                    ] ()
+        , test "direct user selection chooses results fallback instead of inheriting an earlier card origin" <|
+            \_ ->
+                let
+                    model =
+                        appliedModeModel ObservationFlatMode
+
+                    selected =
+                        Feature.Observation.update (SelectObservationFrom "curated" "original-card") model |> Tuple.first
+
+                    direct =
+                        Feature.Observation.update (SelectObservation "linked-outside-page") selected |> Tuple.first
+                in
+                direct.observations.detailReturnTarget |> Expect.equal Nothing
+        , test "clearing selection retires navigation identity without retiring a protected saving owner" <|
+            \_ ->
+                let
+                    saving =
+                        savingEditModel "navigation retirement"
+
+                    activated =
+                        Feature.Observation.update (SelectObservationFrom "curated" "original-card") saving |> Tuple.first
+
+                    cleared =
+                        Feature.Observation.clearSelection activated.observations
+                in
+                Expect.all
+                    [ \_ -> cleared.detailNavigationToken |> Expect.equal (activated.observations.detailNavigationToken + 1)
+                    , \_ -> cleared.detailReturnTarget |> Expect.equal Nothing
+                    , \_ -> cleared.edit |> Expect.equal activated.observations.edit
+                    , \_ -> cleared.activeDetailRequest |> Expect.equal Nothing
+                    ] ()
         , test "facet catalogue and match disclosures expose accessible modes while bounding repeated card DOM" <|
             \_ ->
                 let

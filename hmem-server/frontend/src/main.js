@@ -1,4 +1,5 @@
 import { installHierarchyViewport } from './hierarchy-viewport.js'
+import { installObservationNavigation } from './observation-navigation.js'
 import { Elm } from './Main.elm'
 import { createCanonicalFrameBatcher, createCanonicalStateHandler, createChangeStreamManager } from './change-stream.js'
 
@@ -637,3 +638,4 @@ app.ports.requestLocalStorage.subscribe(function (key) {
 })()
 
 installHierarchyViewport(app)
+installObservationNavigation(app)

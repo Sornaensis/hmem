@@ -53,14 +53,20 @@ type AppShellOwnedMsg
 
 
 initModel : Maybe Nav.Key -> Url.Url -> Page -> Flags -> Maybe Decode.Value -> { tab : WorkspaceTab, focus : Maybe ( String, String ), observationId : Maybe String } -> Model
-initModel key url page flags storedFilters frag =
+initModel key url page flags storedFilters legacyFrag =
     let
+        context =
+            Helpers.observationUrlContext url
+
+        frag =
+            if url.fragment == Nothing then legacyFrag else context.fragment
+
         initialObservations =
             let
                 observations =
                     Feature.Observation.init
             in
-            { observations | selectedId = frag.observationId }
+            Helpers.restoreObservationQuery context.query { observations | selectedId = frag.observationId, linkNotice = context.notice }
 
         baseModel =
             { key = key
@@ -175,7 +181,11 @@ handleOwnedRaw ownedMsg model =
                 finalModel =
                     { newModel | auditLog = auditLog, timeline = timeline }
             in
-            ( finalModel, Cmd.batch [ replaceFragment finalModel, auditCmd, timelineCmd ] )
+            let
+                ( linked, linkCmd ) =
+                    if tab == model.activeTab then ( finalModel, Cmd.none ) else Helpers.writeObservationHistory True finalModel
+            in
+            ( linked, Cmd.batch [ linkCmd, auditCmd, timelineCmd ] )
 
         SessionContextLoadedMsg epoch expectedWorkspace result ->
             if sessionEpochMatches epoch model.sessionRequestEpoch && sessionContextResponseMatches expectedWorkspace model then
@@ -187,6 +197,7 @@ handleOwnedRaw ownedMsg model =
                                     |> Feature.Observation.reconcileCurationPermission
                                     |> updateLoadingAfterSession model expectedWorkspace sessionContext
                                     |> prepareSessionNavigation model expectedWorkspace sessionContext
+                                    |> restoreObservationUrlOnAdmission model expectedWorkspace sessionContext
 
                             sessionBootstrapCmd =
                                 bootstrapAfterSession model expectedWorkspace sessionContext sessionReadyModel
@@ -631,6 +642,34 @@ prepareSessionNavigation previous expectedWorkspace sessionContext model =
         Feature.DataLoading.prepareRootNavigationRequest expectedWorkspace model
 
 
+{-| Reauthorization may follow a complete cache/owner retirement while the
+public URL remains. Reconstruct only that validated context after admission;
+healthy retained sessions keep their live drafts and request identities.
+-}
+restoreObservationUrlOnAdmission : Model -> Maybe String -> Api.SessionContext -> Model -> Model
+restoreObservationUrlOnAdmission previous expectedWorkspace sessionContext model =
+    case ( expectedWorkspace, model.page ) of
+        ( Just workspaceId, WorkspacePage currentWorkspaceId ) ->
+            if workspaceId == currentWorkspaceId && sessionCanReadWorkspace workspaceId sessionContext && not (sessionScopeRetained (Feature.ChangeStream.Workspace workspaceId) sessionContext previous) then
+                let
+                    context =
+                        Helpers.observationUrlContext model.url
+
+                    state =
+                        Feature.Observation.retireSessionState model.observations
+                in
+                { model
+                    | observations = Helpers.restoreObservationQuery context.query { state | selectedId = context.fragment.observationId, linkNotice = context.notice }
+                    , activeTab = if model.url.fragment == Nothing then model.activeTab else context.fragment.tab
+                    , focus = if model.url.fragment == Nothing then model.focus else Feature.Focus.init context.fragment.focus
+                }
+            else
+                model
+
+        _ ->
+            model
+
+
 retireSessionScopes : Api.SessionContext -> Model -> Cmd Msg
 retireSessionScopes sessionContext previous =
     case previous.sessionContext of
@@ -849,7 +888,7 @@ clearSessionScopedState model =
         , projects = Dict.empty
         , tasks = Dict.empty
         , memories = Dict.empty
-        , observations = Feature.Observation.init
+        , observations = Feature.Observation.retireSessionState model.observations
         , dataLoading = stopAllLoading model.dataLoading
         , search = Feature.Search.init
         , editing = Feature.Editing.init

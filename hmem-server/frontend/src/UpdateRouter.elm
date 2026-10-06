@@ -16,6 +16,7 @@ import Feature.Search
 import Feature.Timeline
 import Feature.WebSocket
 import Feature.WorkspaceAdmin
+import Helpers
 import Toast
 import Types exposing (..)
 import Url
@@ -370,6 +371,12 @@ route msg model =
 
         CopyObservationGitSha _ ->
             Ok (Feature.Observation.update msg model)
+
+        CopyObservationLink ->
+            Ok (Feature.Observation.update msg model)
+
+        SynchronizeWorkspaceFragment ->
+            Ok (Helpers.writeObservationHistory False model)
 
         CopyObservationContent _ ->
             Ok (Feature.Observation.update msg model)

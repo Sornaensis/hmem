@@ -79,7 +79,15 @@ handleUrlChange url model =
         ( preserved, Cmd.batch [ noticeCmd, replaceFragment preserved ] )
 
     else
-        handleUrlChangeWithoutProtectedExit url model
+        let
+            state = model.observations
+            ownEcho = state.pendingExcludedLink |> Maybe.map (\echo -> echo.url == Url.toString url && model.selectedWorkspaceId == Just echo.workspaceId && model.sessionRequestEpoch == echo.sessionEpoch && state.requestGeneration == echo.generation && state.facetRequestGeneration == echo.facetGeneration) |> Maybe.withDefault False
+            retired = { model | observations = { state | pendingExcludedLink = Nothing } }
+        in
+        if ownEcho then
+            ( { retired | url = url }, Cmd.none )
+        else
+            handleUrlChangeWithoutProtectedExit url retired
 
 
 observationContextExit : Url.Url -> Model -> Bool
@@ -112,8 +120,11 @@ handleUrlChangeWithoutProtectedExit url model =
                 -- Only reset focusHistory when the focus actually changed
                 -- externally (browser back/forward), not from our own handlers.
                 let
+                    context =
+                        Helpers.observationUrlContext url
+
                     frag =
-                        parseFragment url.fragment
+                        context.fragment
 
                     focusChangedExternally =
                         frag.focus /= model.focus.focusedEntity
@@ -209,21 +220,36 @@ handleUrlChangeWithoutProtectedExit url model =
                         }
                             |> clearRouteConfirmations True
 
+                    queryChanged =
+                        context.query /= Helpers.observationAppliedQuery model.observations
+
+                    queryInput =
+                        if queryChanged then Feature.DataLoading.retireInitialObservationLoad updatedModel else updatedModel
+
+                    routeState =
+                        if queryChanged then Helpers.restoreObservationQuery context.query queryInput.observations else queryInput.observations
+
+                    ( queryModel, queryCmd ) =
+                        let
+                            restored = { queryInput | observations = { routeState | linkNotice = if context.notice == Nothing && not queryChanged then routeState.linkNotice else context.notice } }
+                        in
+                        if queryChanged then Feature.Observation.restoreRouteResults restored else ( restored, Cmd.none )
+
                     ( observationModel, observationCmd ) =
                         if frag.tab == ObservationsTab then
                             if frag.observationId /= model.observations.selectedId then
                                 case frag.observationId of
                                     Just observationId ->
-                                        Feature.Observation.selectObservation observationId updatedModel
+                                        Feature.Observation.selectObservation observationId queryModel
 
                                     Nothing ->
-                                        ( { updatedModel | observations = Feature.Observation.clearSelection updatedModel.observations }, Cmd.none )
+                                        ( { queryModel | observations = Feature.Observation.clearSelection queryModel.observations }, Cmd.none )
 
                             else
-                                ( updatedModel, Cmd.none )
+                                ( queryModel, Cmd.none )
 
                         else
-                            ( { updatedModel | observations = reconcileSameWorkspaceObservationRoute frag.tab updatedModel.observations }, Cmd.none )
+                            ( { queryModel | observations = reconcileSameWorkspaceObservationRoute frag.tab queryModel.observations }, Cmd.none )
 
                     ( auditModel, auditCmd ) =
                         prepareWorkspaceAuditFromRoute wsId frag.tab observationModel
@@ -239,26 +265,36 @@ handleUrlChangeWithoutProtectedExit url model =
                             Nothing ->
                                 ( finalModel, Cmd.none )
                 in
-                ( focusedModel, Cmd.batch [ observationCmd, auditCmd, timelineCmd, focusCmd ] )
+                if context.notice /= Nothing && context.notice /= Just Helpers.excludedObservationNotice then
+                    let
+                        ( repaired, repairCmd ) = Helpers.writeObservationHistory False focusedModel
+                    in
+                    ( repaired, Cmd.batch [ repairCmd, queryCmd, observationCmd, auditCmd, timelineCmd, focusCmd ] )
+                else
+                    ( focusedModel, Cmd.batch [ queryCmd, observationCmd, auditCmd, timelineCmd, focusCmd ] )
 
             else
                 let
+                    context =
+                        Helpers.observationUrlContext url
+
                     frag =
-                        parseFragment url.fragment
+                        context.fragment
 
                     initialObservations =
                         let
                             observations =
                                 Feature.Observation.init
                         in
-                        { observations | selectedId = frag.observationId }
+                        Helpers.restoreObservationQuery context.query { observations | selectedId = frag.observationId, linkNotice = context.notice }
 
                     currentDataLoading =
                         model.dataLoading
 
                     updatedDataLoading =
                         { currentDataLoading
-                            | loadingWorkspaceData = True
+                            | initialObservationLoad = Nothing
+                            , loadingWorkspaceData = True
                             , pendingWorkspaceLoads = 0
                              , activeWorkspaceLoadToken = Just currentDataLoading.nextWorkspaceLoadToken
                              , nextWorkspaceLoadToken = currentDataLoading.nextWorkspaceLoadToken + 1

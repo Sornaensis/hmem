@@ -73,6 +73,33 @@ the kind, exact subject, and Git SHA controls without resetting their values or
 the applied query. Search also submits with Enter. A selected subject stays
 locked while filtering its exact results.
 
+Copy link shares the complete applied mode, search, kind, manual subject, revision,
+locked facet, ordered matched paths, and selected Observation. Filter/path drafts,
+content drafts, disclosures, and cached pages stay local. Version 1 fragments use
+`ov=1` and a percent-encoded eight-position JSON `oq` tuple:
+`[mode, search, kind, manualSubject, gitSha, facetKind, facetSubject, paths]`.
+Modes are `flat`, `facets`, `exact`, and `match`; absent kind/facet values are null.
+Legacy tab, focus, and Observation links remain supported. Invalid versioned
+contexts restore default results atomically and show a notice.
+
+Changed Apply, mode, facet, selection, return, and tab actions push history entries;
+canonical cleanup replaces them. Back restores applied context with fresh request
+guards when its query changes, retaining protected drafts in the same workspace.
+Observation hits in unified search use the same intentional history behavior.
+After reauthorization, validated public URL context is restored with fresh requests;
+retired drafts and caches remain cleared. Reload does not persist content drafts.
+Complete encoded URLs are limited to 4096
+UTF-8 bytes. Larger valid queries remain active in the page and disable Copy link.
+They replace the current entry with a bounded, fresh `ox` marker, carrying only
+navigation context. Further oversized transitions replace that entry; a smaller
+complete context pushes a new entry. Back, reload, and shared markers restore
+default filters with an explicit notice rather than partially restoring paths.
+No query history is stored outside the URL and the current page state.
+
+`npm run test:observation-url` builds production assets and checks populated
+restoration, history, clipboard payloads, malformed links, oversized queries,
+selection cleanup, and permission admission in controlled browser fixtures.
+
 Cards show whitespace-collapsed plain-text previews of at most 240 Unicode
 codepoints and three lines. The primary subject uses at most 96 codepoints and
 two lines; selection button names use at most 180 codepoints. Full content stays

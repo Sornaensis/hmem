@@ -7,6 +7,7 @@ import Dict
 import Expect
 import Feature.DataLoading
 import Feature.Observation
+import Feature.Search
 import Feature.WebSocket
 import Helpers
 import Html.Attributes exposing (attribute, hidden, tabindex)
@@ -25,7 +26,9 @@ import Url
 suite : Test
 suite =
     describe "observation API boundary"
-        [ test "decodes server-shaped file and glob observations" <|
+        [ describe "URL reauthorization, search intent and bootstrap ownership" observationUrlReviewTests
+        , describe "bounded applied URL context" observationUrlTests
+        , test "decodes server-shaped file and glob observations" <|
             \_ ->
                 [ Decode.decodeString Api.observationDecoder fileFixture
                     |> Result.map (\observation -> ( observation.subjectKind, observation.subject, observation.gitSha ))
@@ -3891,3 +3894,224 @@ largePathInput count bytesPerPath =
                 prefix ++ String.repeat (bytesPerPath - String.length prefix) "a"
             )
         |> String.join "\n"
+
+
+observationUrlTests : List Test
+observationUrlTests =
+    [ ObservationFlatMode, ObservationFacetMode, ObservationExactSubjectMode, ObservationMatchMode ]
+        |> List.concatMap (\mode ->
+            [ test ("complete applied URL round-trips Unicode and reserved values in " ++ Debug.toString mode) <| \_ ->
+                let
+                    query = { requestMode = mode, query = "café & #+%= 🙂", subjectKind = Just Api.SubjectGlob, subject = "manual & value", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, gitSha = fullSha, matchAppliedPaths = if mode == ObservationMatchMode then [ "src/é& #+.elm", "src/View.elm" ] else [] }
+                    state = Helpers.restoreObservationQuery query Feature.Observation.init
+                    draft = { state | query = "unapplied secret", matchPathsInput = "unapplied path" }
+                    model = editableModel draft
+                    restored = Helpers.completeObservationUrl model |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.map Helpers.observationUrlContext
+                in
+                Expect.equal (Just query) (Maybe.map .query restored)
+            , test ("authorized bootstrap preserves mode and closes initial loading accounting in " ++ Debug.toString mode) <| \_ ->
+                let
+                    query = { requestMode = mode, query = "Cache", subjectKind = Nothing, subject = "", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm" ] else [] }
+                    original = editableModel (Helpers.restoreObservationQuery query Feature.Observation.init)
+                    loading = original.dataLoading
+                    initial = { original | dataLoading = { loading | activeWorkspaceLoadToken = Just 44 } }
+                    after = Feature.DataLoading.update (GotWorkspace "workspace-1" 44 (Ok (observationWorkspace Api.Repository))) initial |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> Helpers.observationAppliedQuery after.observations |> Expect.equal query
+                    , \_ -> (after.observations.requestMode, after.observations.expectedOffset, after.observations.facetExpectedOffset) |> Expect.equal ( mode, if mode == ObservationFacetMode then Nothing else Just 0, if mode == ObservationFacetMode then Just 0 else Nothing )
+                    , \_ -> after.dataLoading.pendingWorkspaceLoads |> Expect.equal (if List.member mode [ ObservationFlatMode, ObservationExactSubjectMode ] then 2 else 1)
+                    ] ()
+            ])
+        |> (\modeTests -> modeTests ++
+            [ test "malformed, duplicate, unknown, unsupported and invalid-path links restore atomically" <| \_ ->
+                let
+                    encoded = Helpers.encodeObservationQuery Helpers.defaultObservationQuery
+                    fragments = [ "tab=observations&observation=a&ov=9&oq=" ++ encoded, "tab=observations&ov=1&ov=1&oq=" ++ encoded, "tab=observations&ov=1&oq=" ++ encoded ++ "&unknown=x", "tab=observations&ov=1&oq=%ZZ", "tab=observations&ov=1&oq=" ++ Url.percentEncode "[\"match\",\"\",null,\"\",\"\",null,null,[\"../bad\"]]", "tab=observations&ov=1&oq=" ++ encoded ++ "&focus=bad", "tab=observations&ox=" ]
+                    contexts = List.map (workspaceUrl >> Helpers.observationUrlContext) fragments
+                in
+                contexts |> List.all (\context -> context.query == Helpers.defaultObservationQuery && context.fragment.observationId == Nothing && context.fragment.focus == Nothing && context.notice /= Nothing) |> Expect.equal True
+            , test "complete encoded URL cap accepts 4096 and rejects 4097 bytes" <| \_ ->
+                let
+                    model = editableModel Feature.Observation.init
+                    base = Helpers.observationUrl model ("&ov=1&oq=" ++ Helpers.encodeObservationQuery Helpers.defaultObservationQuery)
+                    defaultQuery = Helpers.defaultObservationQuery
+                    atQuery = { defaultQuery | query = String.repeat (4096 - Helpers.observationUrlBytes base) "a" }
+                    at = { model | observations = Helpers.restoreObservationQuery atQuery model.observations }
+                    aboveQuery = { atQuery | query = atQuery.query ++ "a" }
+                in
+                Expect.equal ( True, True ) ( Helpers.completeObservationUrl at |> isOk, Helpers.completeObservationUrl { model | observations = Helpers.restoreObservationQuery aboveQuery model.observations } |> isErr )
+            , test "shell refresh hydrates missing restored detail once and keeps its request ownership" <| \_ ->
+                let
+                    state = Feature.Observation.init
+                    model = editableModel { state | selectedId = Just "off-page" }
+                    first = Feature.Observation.refreshActiveResults model |> Tuple.first
+                    second = Feature.Observation.refreshActiveResults first |> Tuple.first
+                in
+                Expect.equal ( Just "off-page", first.observations.activeDetailRequest, first.observations.nextDetailRequestToken ) ( second.observations.selectedId, second.observations.activeDetailRequest, second.observations.nextDetailRequestToken )
+            , test "match links normalize ordered paths and preserve the legacy off-page selection" <| \_ ->
+                let
+                    url = workspaceUrl ("tab=observations&observation=off%26page&ov=1&oq=" ++ Url.percentEncode "[\"match\",\"\",null,\"\",\"\",null,null,[\" src/Main.elm \",\"src/View.elm\",\"src/Main.elm\"]]")
+                    context = Helpers.observationUrlContext url
+                    legacy = Helpers.observationUrlContext (workspaceUrl "observation=off%26page")
+                in
+                Expect.equal ( [ "src/Main.elm", "src/View.elm" ], Just "off&page", Just "off&page" ) (context.query.matchAppliedPaths, context.fragment.observationId, legacy.fragment.observationId)
+            , test "oversized own replacement proof is consumed once and does not resurrect on Back or ABA" <| \_ ->
+                let
+                    query = { requestMode = ObservationMatchMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", matchAppliedPaths = [ "src/" ++ String.repeat 1800 "é" ++ ".elm" ] }
+                    original = editableModel (Helpers.restoreObservationQuery query Feature.Observation.init)
+                    issued = Helpers.writeObservationHistory True original |> Tuple.first
+                    url = issued.observations.pendingExcludedLink |> Maybe.andThen (.url >> Url.fromString) |> Maybe.withDefault original.url
+                    consumed = Route.handleUrlChange url issued |> Tuple.first
+                    back = Route.handleUrlChange url consumed |> Tuple.first
+                    superseded = Route.handleUrlChange (workspaceUrl "tab=observations") issued |> Tuple.first
+                    aba = Route.handleUrlChange url superseded |> Tuple.first
+                    next = Helpers.writeObservationHistory True issued |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> Helpers.completeObservationUrl original |> isErr |> Expect.equal True
+                    , \_ -> Helpers.observationAppliedQuery consumed.observations |> Expect.equal query
+                    , \_ -> consumed.observations.pendingExcludedLink |> Expect.equal Nothing
+                    , \_ -> Helpers.observationAppliedQuery back.observations |> Expect.equal Helpers.defaultObservationQuery
+                    , \_ -> Helpers.observationAppliedQuery aba.observations |> Expect.equal Helpers.defaultObservationQuery
+                    , \_ -> Maybe.map .url next.observations.pendingExcludedLink == Maybe.map .url issued.observations.pendingExcludedLink |> Expect.equal False
+                    ] ()
+            , test "same applied route preserves unapplied controls and unchanged request identity" <| \_ ->
+                let
+                    query = { requestMode = ObservationFlatMode, query = "applied", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", matchAppliedPaths = [] }
+                    state = Helpers.restoreObservationQuery query Feature.Observation.init
+                    model = editableModel { state | query = "unapplied", requestGeneration = 99, selectedId = Nothing }
+                    url = Helpers.completeObservationUrl model |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.withDefault model.url
+                    after = Route.handleUrlChange url model |> Tuple.first
+                in
+                Expect.equal ( "unapplied", 99, Just query ) (after.observations.query, after.observations.requestGeneration, after.observations.appliedQuery)
+            , test "changed URL query fences old pages without mutating the protected owner" <| \_ ->
+                let
+                    initialState = Feature.Observation.init
+                    selected = fixtureObservation "selected-observation" "2026-01-01T00:00:00Z"
+                    original = editableModel ({ initialState | selectedId = Just selected.id, selectedDetail = Just selected, items = Dict.singleton selected.id selected, orderedIds = [ selected.id ] }) |> Feature.Observation.update StartObservationEdit |> Tuple.first |> Feature.Observation.update (SetObservationDraft "protected URL draft") |> Tuple.first
+                    old = Feature.Observation.update ApplyObservationFilters original |> Tuple.first
+                    query = { requestMode = ObservationFlatMode, query = "changed", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", matchAppliedPaths = [] }
+                    target = Helpers.completeObservationUrl { old | observations = Helpers.restoreObservationQuery query old.observations } |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.withDefault old.url
+                    after = Route.handleUrlChange target old |> Tuple.first
+                    late = Feature.DataLoading.update (GotObservations "workspace-1" Nothing old.observations.requestGeneration old.observations.queryFingerprint 0 (Ok { items = [ fixtureObservation "old-row" "2026-01-01T00:00:00Z" ], hasMore = False })) after |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> after.observations.edit |> Expect.equal old.observations.edit
+                    , \_ -> after.observations.requestGeneration > old.observations.requestGeneration |> Expect.equal True
+                    , \_ -> Dict.member "old-row" late.observations.items |> Expect.equal False
+                    ] ()
+            ])
+
+
+observationUrlReviewTests : List Test
+observationUrlReviewTests =
+    [ ObservationExactSubjectMode, ObservationMatchMode ]
+        |> List.concatMap (\mode ->
+            [ "unauthorized", "session401", "token", "read-regrant" ] |> List.map (\boundary ->
+                test ("fresh URL admission after " ++ boundary ++ " restores " ++ Debug.toString mode ++ " with no retired private state or stale callback") <| \_ ->
+                    let
+                        state = Helpers.restoreObservationQuery (urlReviewQuery mode) Feature.Observation.init
+                        selected = fixtureObservation "off-page" "2026-01-01T00:00:00Z"
+                        beforeDetail = Feature.Observation.selectObservation selected.id (editableModel { state | selectedId = Just selected.id }) |> Tuple.first
+                        oldRequest = beforeDetail.observations.activeDetailRequest |> Maybe.withDefault { workspaceId = "workspace-1", observationId = selected.id, sessionEpoch = beforeDetail.sessionRequestEpoch, token = 0 }
+                        loaded = Feature.Observation.update (GotObservationDetail "workspace-1" selected.id oldRequest.sessionEpoch oldRequest.token (Ok selected)) beforeDetail |> Tuple.first
+                        edited = loaded |> Feature.Observation.update StartObservationEdit |> Tuple.first |> Feature.Observation.update (SetObservationDraft "private retired draft") |> Tuple.first
+                        sourceUrl = Helpers.completeObservationUrl edited |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.withDefault edited.url
+                        source = { edited | url = sourceUrl }
+                        deniedWorkspace = editorSession.workspace |> Maybe.map (\permission -> { permission | canRead = False, canEdit = False, canAdmin = False })
+                        retired = AppShell.handleOwned
+                            (case boundary of
+                                "session401" -> AppShell.SessionContextLoadedMsg source.sessionRequestEpoch (Just "workspace-1") (Err (Http.BadStatus 401))
+                                "token" -> AppShell.AuthTokenChangedMsg True
+                                "read-regrant" -> AppShell.SessionContextLoadedMsg source.sessionRequestEpoch (Just "workspace-1") (Ok { editorSession | workspace = deniedWorkspace })
+                                _ -> AppShell.AuthUnauthorizedMsg
+                            ) source |> Tuple.first
+                        admitted = AppShell.handleOwned (AppShell.SessionContextLoadedMsg retired.sessionRequestEpoch (Just "workspace-1") (Ok editorSession)) retired |> Tuple.first
+                        workspace = observationWorkspace Api.Repository
+                        freshWorkspace = { admitted | workspaces = Dict.singleton workspace.id workspace }
+                        fresh = Feature.Observation.refreshActiveResults freshWorkspace |> Tuple.first
+                        lateSuccess = Feature.Observation.update (GotObservationDetail "workspace-1" selected.id oldRequest.sessionEpoch oldRequest.token (Ok selected)) fresh |> Tuple.first
+                        lateError = Feature.Observation.update (GotObservationDetail "workspace-1" selected.id oldRequest.sessionEpoch oldRequest.token (Err Http.NetworkError)) fresh |> Tuple.first
+                    in
+                    Expect.all
+                        [ \_ -> Helpers.observationAppliedQuery admitted.observations |> Expect.equal (urlReviewQuery mode)
+                        , \_ -> (admitted.observations.selectedId, admitted.observations.edit, admitted.observations.activeDetailRequest) |> Expect.equal (Just selected.id, Nothing, Nothing)
+                        , \_ -> admitted.observations.pendingExcludedLink |> Expect.equal Nothing
+                        , \_ -> Dict.isEmpty admitted.observations.items |> Expect.equal True
+                        , \_ -> fresh.observations.activeDetailRequest |> Maybe.map .token |> Maybe.map ((<) oldRequest.token) |> Expect.equal (Just True)
+                        , \_ -> lateSuccess.observations |> Expect.equal fresh.observations
+                        , \_ -> lateError.observations |> Expect.equal fresh.observations
+                        , \_ -> if boundary == "read-regrant" then retired.sessionRequestEpoch |> Expect.equal source.sessionRequestEpoch else Expect.pass
+                        ] ()
+            ))
+        |> (\admissionTests -> admissionTests ++
+            ([ ObservationFlatMode, ObservationExactSubjectMode ] |> List.concatMap (\initialMode ->
+                [ ObservationFacetMode, ObservationMatchMode ] |> List.concatMap (\targetMode ->
+                    [ True, False ] |> List.map (\success ->
+                        test ("superseded tagged " ++ Debug.toString initialMode ++ " bootstrap settles once before " ++ Debug.toString targetMode ++ " and old " ++ (if success then "success" else "error")) <| \_ ->
+                            let
+                                original = editableModel (Helpers.restoreObservationQuery (urlReviewQuery initialMode) Feature.Observation.init)
+                                loading = original.dataLoading
+                                initial = { original | dataLoading = { loading | activeWorkspaceLoadToken = Just 99 } }
+                                bootstrapped = Feature.DataLoading.update (GotWorkspace "workspace-1" 99 (Ok (observationWorkspace Api.Repository))) initial |> Tuple.first
+                                old = bootstrapped.observations
+                                query = urlReviewQuery targetMode
+                                targetUrl = Helpers.completeObservationUrl { bootstrapped | observations = Helpers.restoreObservationQuery query old } |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.withDefault bootstrapped.url
+                                routed = Route.handleUrlChange targetUrl bootstrapped |> Tuple.first
+                                rootCompleted = case routed.dataLoading.rootNavigationRequest of
+                                    Just request -> Feature.DataLoading.update (GotRootNavigation "workspace-1" request.sessionEpoch (Just 99) request.generation request.filterFingerprint 0 0 (Ok { workspaceId = "workspace-1", projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })) routed |> Tuple.first
+                                    Nothing -> routed
+                                lateResult = if success then Ok { items = [ fixtureObservation "retired-row" "2026-01-01T00:00:00Z" ], hasMore = False } else Err Http.NetworkError
+                                late = Feature.DataLoading.update (GotObservations "workspace-1" (Just 99) old.requestGeneration old.queryFingerprint 0 lateResult) rootCompleted |> Tuple.first
+                                completed = if targetMode == ObservationFacetMode then Feature.Observation.update (GotObservationSubjectFacets "workspace-1" late.sessionRequestEpoch late.observations.facetRequestGeneration late.observations.facetFingerprint 0 (Ok { items = [], hasMore = False })) late |> Tuple.first else Feature.Observation.update (GotObservationMatches "workspace-1" late.sessionRequestEpoch late.observations.requestGeneration late.observations.queryFingerprint 0 (Ok { items = [], hasMore = False })) late |> Tuple.first
+                                repetition = Feature.DataLoading.update (GotObservations "workspace-1" (Just 99) old.requestGeneration old.queryFingerprint 0 lateResult) completed |> Tuple.first
+                            in
+                            Expect.all
+                                [ \_ -> routed.dataLoading.pendingWorkspaceLoads |> Expect.equal 1
+                                , \_ -> routed.dataLoading.initialObservationLoad |> Expect.equal Nothing
+                                , \_ -> late.observations |> Expect.equal rootCompleted.observations
+                                , \_ -> (completed.dataLoading.pendingWorkspaceLoads, completed.dataLoading.loadingWorkspaceData, completed.dataLoading.activeWorkspaceLoadToken) |> Expect.equal (0, False, Nothing)
+                                , \_ -> repetition |> Expect.equal completed
+                                ] ()
+                    )))) ++
+            [ test "initial obligation cannot settle another workspace, session, token or superseding load" <| \_ ->
+                let
+                    original = editableModel Feature.Observation.init
+                    loading = original.dataLoading
+                    initial = { original | dataLoading = { loading | activeWorkspaceLoadToken = Just 91 } }
+                    bootstrapped = Feature.DataLoading.update (GotWorkspace "workspace-1" 91 (Ok (observationWorkspace Api.Repository))) initial |> Tuple.first
+                    old = bootstrapped.observations
+                    callback model = Feature.DataLoading.update (GotObservations "workspace-1" (Just 91) old.requestGeneration old.queryFingerprint 0 (Err Http.NetworkError)) model |> Tuple.first
+                    newerLoading = bootstrapped.dataLoading
+                    cases = [ { bootstrapped | selectedWorkspaceId = Just "other" }, { bootstrapped | sessionRequestEpoch = bootstrapped.sessionRequestEpoch + 1 }, { bootstrapped | dataLoading = { newerLoading | activeWorkspaceLoadToken = Just 92, initialObservationLoad = newerLoading.initialObservationLoad |> Maybe.map (\request -> { request | token = 92 }) } } ]
+                in
+                let
+                    evidence model =
+                        ( model.dataLoading.pendingWorkspaceLoads, model.dataLoading.activeWorkspaceLoadToken, model.dataLoading.initialObservationLoad )
+                in
+                List.map (callback >> evidence) cases |> Expect.equal (List.map evidence cases)
+            , test "unified search Observation intent pushes changed selection/tab once and replaces oversized contexts" <| \_ ->
+                let
+                    selected = fixtureObservation "a" "2026-01-01T00:00:00Z"
+                    state = Feature.Observation.init
+                    original = editableModel { state | selectedId = Just selected.id, selectedDetail = Just selected }
+                    unchanged = Feature.Search.update (NavigateToSearchResult "observation" selected.id) original |> Tuple.first
+                    fromTab = Feature.Search.update (NavigateToSearchResult "observation" selected.id) { original | activeTab = ProjectsTab } |> Tuple.first
+                    changed = Feature.Search.update (NavigateToSearchResult "observation" "b") original |> Tuple.first
+                    query = urlReviewQuery ObservationMatchMode
+                    oversizedQuery = { query | matchAppliedPaths = [ "src/" ++ String.repeat 1800 "é" ++ ".elm" ] }
+                    oversized = Feature.Search.update (NavigateToSearchResult "observation" "b") { original | observations = Helpers.restoreObservationQuery oversizedQuery original.observations } |> Tuple.first
+                in
+                Expect.all
+                    [ \_ -> unchanged.observations.nextLinkToken |> Expect.equal original.observations.nextLinkToken
+                    , \_ -> fromTab.observations.nextLinkToken |> Expect.equal (original.observations.nextLinkToken + 1)
+                    , \_ -> changed.observations.nextLinkToken |> Expect.equal (original.observations.nextLinkToken + 1)
+                    , \_ -> oversized.observations.pendingExcludedLink /= Nothing |> Expect.equal True
+                    ] ()
+            ])
+
+
+urlReviewQuery : ObservationRequestMode -> Types.ObservationAppliedQuery
+urlReviewQuery mode =
+    { requestMode = mode, query = "Cache", subjectKind = Just Api.SubjectGlob, subject = "manual", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm", "src/View.elm" ] else [] }

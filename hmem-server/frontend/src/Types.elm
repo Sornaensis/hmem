@@ -118,6 +118,7 @@ type alias DataLoadingModel =
     , loadingWorkspaceData : Bool
     , pendingWorkspaceLoads : Int
     , activeWorkspaceLoadToken : Maybe Int
+    , initialObservationLoad : Maybe ObservationBootstrapLoad
     , nextWorkspaceLoadToken : Int
     , cardHydrationLoaded : Bool
     , navigationGeneration : Int
@@ -335,6 +336,9 @@ type alias ObservationModel =
     , fileComposerOpen : Bool
     , advancedFiltersOpen : Bool
     , appliedQuery : Maybe ObservationAppliedQuery
+    , linkNotice : Maybe String
+    , nextLinkToken : Int
+    , pendingExcludedLink : Maybe ObservationLinkEcho
     , failedRequest : Maybe ObservationFailedRequest
     , matchPathsInput : String
     , matchAppliedPaths : List String
@@ -391,6 +395,24 @@ type alias ObservationAppliedQuery =
     , selectedFacet : Maybe Api.ObservationSubject
     , gitSha : String
     , matchAppliedPaths : List String
+    }
+
+
+type alias ObservationLinkEcho =
+    { url : String
+    , workspaceId : String
+    , sessionEpoch : Int
+    , generation : Int
+    , facetGeneration : Int
+    }
+
+
+type alias ObservationBootstrapLoad =
+    { workspaceId : String
+    , sessionEpoch : Int
+    , token : Int
+    , generation : Int
+    , fingerprint : String
     }
 
 
@@ -966,6 +988,8 @@ type Msg
     | CopyObservationSubject String
     | CopyObservationGitSha String
     | CopyObservationContent String
+    | CopyObservationLink
+    | SynchronizeWorkspaceFragment
     | StartObservationEdit
     | ReturnToObservationDraft
     | SetObservationDraft String

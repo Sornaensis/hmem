@@ -24,7 +24,8 @@
     "perf:check": "npm run build && node perf/harness.mjs check",
     "perf:freeze-v2": "node perf/freeze-v2.mjs",
     "perf:freeze-v3": "node perf/freeze-v3.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:observation-url": "npm run build && node --test tests-js/observation-url.browser.test.js"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",

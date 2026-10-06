@@ -14,6 +14,7 @@ module Feature.Observation exposing
     , facetResponseMatches
     , groupPathMatches
     , init
+    , retireSessionState
     , hasProtectedEdit
     , hasUnappliedFilters
     , isLoadedOrSelected
@@ -32,6 +33,8 @@ module Feature.Observation exposing
     , reconcileCurationPermission
     , reconcileDeletedObservation
     , refreshActiveResults
+    , restoreRouteResults
+    , bootstrapObservation
     , refuseContextExit
     , reload
     , removeObservation
@@ -79,6 +82,9 @@ init =
     , fileComposerOpen = False
     , advancedFiltersOpen = False
     , appliedQuery = Nothing
+    , linkNotice = Nothing
+    , nextLinkToken = 1
+    , pendingExcludedLink = Nothing
     , failedRequest = Nothing
     , matchPathsInput = ""
     , matchAppliedPaths = []
@@ -114,6 +120,22 @@ init =
     , deleteConfirmation = Nothing
     , nextCurationContextToken = 1
     , nextMutationRequestToken = 1
+    }
+
+
+{-| Read permission may be revoked and regranted within the same session epoch.
+Retire private state while keeping request/navigation identities monotonic.
+-}
+retireSessionState : ObservationModel -> ObservationModel
+retireSessionState previous =
+    { init
+        | requestGeneration = previous.requestGeneration + 1
+        , facetRequestGeneration = previous.facetRequestGeneration + 1
+        , nextDetailRequestToken = previous.nextDetailRequestToken
+        , nextCurationContextToken = previous.nextCurationContextToken
+        , nextMutationRequestToken = previous.nextMutationRequestToken
+        , detailNavigationToken = previous.detailNavigationToken + 1
+        , nextLinkToken = previous.nextLinkToken + 1
     }
 
 
@@ -167,7 +189,7 @@ returnToDraft model =
                     ( selected, selectionCmd ) =
                         selectObservation edit.observationId { model | activeTab = ObservationsTab }
                 in
-                ( selected, Cmd.batch [ selectionCmd, replaceFragment selected, focusElement "observation-edit-content" ] )
+                ( selected, Cmd.batch [ selectionCmd, focusElement "observation-edit-content" ] )
 
             else
                 ( model, Cmd.none )
@@ -187,6 +209,34 @@ selectionForTab tab state =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
+    let
+        ( updated, command ) =
+            updateRaw msg model
+
+        intentional =
+            case msg of
+                ApplyObservationFilters -> True
+                SetObservationBrowseMode _ -> True
+                SelectObservationFacet _ _ -> True
+                ApplyObservationMatch -> True
+                ClearObservationMatch -> True
+                SelectObservation _ -> True
+                SelectObservationFrom _ _ -> True
+                ReturnObservationResults -> True
+                ReturnToObservationDraft -> True
+                _ -> False
+    in
+    if intentional && (Helpers.observationAppliedQuery updated.observations /= Helpers.observationAppliedQuery model.observations || updated.observations.selectedId /= model.observations.selectedId || updated.activeTab /= model.activeTab) then
+        let
+            ( linked, linkCmd ) = Helpers.writeObservationHistory True updated
+        in
+        ( linked, Cmd.batch [ command, linkCmd ] )
+    else
+        ( updated, command )
+
+
+updateRaw : Msg -> Model -> ( Model, Cmd Msg )
+updateRaw msg model =
     case msg of
         SetObservationQuery value ->
             ( updateObservation (\state -> { state | query = value }) model, Cmd.none )
@@ -330,6 +380,16 @@ update msg model =
 
                 Nothing ->
                     ( model, Cmd.none )
+
+        CopyObservationLink ->
+            case Helpers.completeObservationUrl model of
+                Ok url ->
+                    let
+                        ( updated, toastCmd ) = addToast Success "Observation link copied to clipboard" model
+                    in
+                    ( updated, Cmd.batch [ copyToClipboard url, toastCmd ] )
+                Err message ->
+                    addToast Warning message model
 
         StartObservationEdit ->
             if hasProtectedEdit model then
@@ -1355,6 +1415,32 @@ reloadFacets model =
 
 refreshActiveResults : Model -> ( Model, Cmd Msg )
 refreshActiveResults model =
+    let
+        ( refreshed, resultsCmd ) =
+            refreshActiveResultsRaw model
+
+        state =
+            refreshed.observations
+
+        ( hydrated, detailCmd ) =
+            if state.selectedDetail == Nothing && state.activeDetailRequest == Nothing && state.detailError == Nothing then
+                case state.selectedId of
+                    Just observationId -> selectObservation observationId refreshed
+                    Nothing -> ( refreshed, Cmd.none )
+            else
+                ( refreshed, Cmd.none )
+
+        ( repaired, linkCmd ) =
+            if state.linkNotice /= Nothing && state.linkNotice /= Just Helpers.excludedObservationNotice then
+                Helpers.writeObservationHistory False hydrated
+            else
+                ( hydrated, Cmd.none )
+    in
+    ( repaired, Cmd.batch [ resultsCmd, detailCmd, linkCmd ] )
+
+
+refreshActiveResultsRaw : Model -> ( Model, Cmd Msg )
+refreshActiveResultsRaw model =
     case repositoryWorkspaceId model of
         Just workspaceId ->
             case model.observations.requestMode of
@@ -2007,87 +2093,8 @@ nonEmpty value =
 
 
 normalizeMatchPaths : String -> Result String (List String)
-normalizeMatchPaths rawInput =
-    let
-        paths =
-            rawInput
-                |> String.lines
-                |> List.map String.trim
-                |> List.filter (not << String.isEmpty)
-                |> deduplicateFirst
-    in
-    if List.isEmpty paths then
-        Err "Enter at least one repository-relative file path."
-
-    else if List.length paths > 256 then
-        Err "Match repository files accepts at most 256 paths."
-
-    else if List.sum (List.map utf8Bytes paths) > 262144 then
-        Err "Match repository files accepts at most 262144 UTF-8 bytes in total."
-
-    else
-        case List.filter (not << isConcreteRepositoryPath) paths |> List.head of
-            Just invalidPath ->
-                Err ("Invalid concrete repository path: " ++ invalidPath)
-
-            Nothing ->
-                Ok paths
-
-
-deduplicateFirst : List String -> List String
-deduplicateFirst paths =
-    List.foldl
-        (\path unique ->
-            if List.member path unique then
-                unique
-
-            else
-                unique ++ [ path ]
-        )
-        []
-        paths
-
-
-isConcreteRepositoryPath : String -> Bool
-isConcreteRepositoryPath path =
-    not (String.startsWith "/" path)
-        && not (String.contains "\\" path)
-        && not (String.contains "*" path)
-        && not (String.contains "?" path)
-        && not (windowsAbsolute path)
-        && utf8Bytes path
-        <= 4096
-        && List.all (not << controlCharacter) (String.toList path)
-        && List.all (\segment -> not (String.isEmpty segment) && segment /= "." && segment /= "..") (String.split "/" path)
-
-
-windowsAbsolute : String -> Bool
-windowsAbsolute path =
-    case String.toList path of
-        drive :: ':' :: '/' :: _ ->
-            asciiLetter drive
-
-        _ ->
-            False
-
-
-asciiLetter : Char -> Bool
-asciiLetter character =
-    let
-        code =
-            Char.toCode character
-    in
-    (code >= Char.toCode 'A' && code <= Char.toCode 'Z')
-        || (code >= Char.toCode 'a' && code <= Char.toCode 'z')
-
-
-controlCharacter : Char -> Bool
-controlCharacter character =
-    let
-        code =
-            Char.toCode character
-    in
-    code < 32 || code == 127
+normalizeMatchPaths =
+    Helpers.normalizeObservationPaths
 
 
 utf8Bytes : String -> Int
@@ -2170,7 +2177,7 @@ returnToResults model =
                         (clearSelection >> (\state -> { state | detailNavigationEpoch = model.sessionRequestEpoch }))
                         model
             in
-            ( updated, Cmd.batch [ replaceFragment updated, navigateDetail "return" workspaceId previous.detailReturnTarget previous updated.observations ] )
+            ( updated, Cmd.batch [ navigateDetail "return" workspaceId previous.detailReturnTarget previous updated.observations ] )
 
         _ ->
             ( model, Cmd.none )
@@ -2249,7 +2256,6 @@ selectDifferentObservation observationId model =
             ( updated
             , Cmd.batch
                 [ Api.fetchObservation model.flags.apiUrl observationId (GotObservationDetail workspaceId observationId model.sessionRequestEpoch token)
-                , replaceFragment updated
                 ]
             )
 
@@ -3091,7 +3097,24 @@ viewObservations workspace model =
         state =
             model.observations
     in
-    viewObservationsStateWithPermission (Permissions.canEditCurrentWorkspace model) workspace { state | detailNavigationEpoch = model.sessionRequestEpoch }
+    div [ class "observation-workspace-view" ]
+        [ if workspace.workspaceType == Api.Repository then
+            div
+                ([ class "observation-share-controls" ]
+                    ++ (if Permissions.canEditCurrentWorkspace model && state.deleteConfirmation /= Nothing then
+                            [ attribute "inert" "", attribute "aria-hidden" "true" ]
+                        else
+                            []
+                       )
+                )
+                [ button [ class "btn btn-secondary observation-link-copy", type_ "button", onClick CopyObservationLink, disabled (Result.toMaybe (Helpers.completeObservationUrl model) == Nothing) ] [ text "Copy link" ]
+                , case state.linkNotice of
+                    Just message -> p [ class "form-help", attribute "role" "status" ] [ text message ]
+                    Nothing -> if Result.toMaybe (Helpers.completeObservationUrl model) == Nothing then p [ class "form-help", attribute "role" "status" ] [ text Helpers.excludedObservationNotice ] else text ""
+                ]
+          else text ""
+        , viewObservationsStateWithPermission (Permissions.canEditCurrentWorkspace model) workspace { state | detailNavigationEpoch = model.sessionRequestEpoch }
+        ]
 
 
 viewObservationsState : Api.Workspace -> ObservationModel -> Html Msg
@@ -3238,7 +3261,7 @@ viewAdvancedFilters state =
                         p [ class "form-error", attribute "role" "alert" ] [ text "No exact shared subject is selected." ]
 
             ObservationFacetMode ->
-                p [ class "form-help observation-filter-mode-help" ] [ text "Shared subjects ignores the manual exact-subject filter and uses the shared search, kind, and Git SHA filters." ]
+                p [ class "form-help observation-filter-mode-help" ] [ text "By subject ignores the manual exact-subject filter and uses the shared search, kind, and Git SHA filters." ]
 
             ObservationMatchMode ->
                 p [ class "form-help observation-filter-mode-help" ] [ text "Concrete path matching uses the shared search, kind, and Git SHA filters and ignores manual exact-subject filtering." ]
@@ -4095,3 +4118,26 @@ subjectKindLabel subjectKind =
 
         Api.SubjectGlob ->
             "Glob"
+
+
+restoreRouteResults : Model -> ( Model, Cmd Msg )
+restoreRouteResults model =
+    case model.observations.requestMode of
+        ObservationFacetMode -> reloadFacets model
+        ObservationMatchMode -> reloadAppliedMatch model
+        mode -> reloadResultMode mode model
+
+
+bootstrapObservation : Int -> Model -> ( Model, Cmd Msg )
+bootstrapObservation token model =
+    case repositoryWorkspaceId model of
+        Just workspaceId ->
+            case model.observations.requestMode of
+                ObservationFacetMode -> reloadFacets model
+                ObservationMatchMode -> reloadAppliedMatch model
+                mode ->
+                    let
+                        state = startResultReload mode model.sessionRequestEpoch workspaceId model.observations
+                    in
+                    ( { model | observations = state }, Api.fetchObservations model.flags.apiUrl (listQuery workspaceId 0 state) (GotObservations workspaceId (Just token) state.requestGeneration state.queryFingerprint 0) )
+        Nothing -> ( model, Cmd.none )

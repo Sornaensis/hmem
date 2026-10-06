@@ -3,6 +3,7 @@ module Helpers exposing (..)
 import Api
 import Browser.Dom
 import Browser.Navigation as Nav
+import Char
 import Dict exposing (Dict)
 import Json.Decode as Decode
 import Json.Encode as Encode
@@ -12,6 +13,7 @@ import Set
 import String
 import Task as ElmTask
 import Types exposing (..)
+import Url
 
 
 presentationWindowSize : Int
@@ -75,7 +77,7 @@ parseFragment fragment =
                             (\s ->
                                 case String.split "=" s of
                                     [ k, v ] ->
-                                        Just ( k, v )
+                                        Maybe.map2 Tuple.pair (Url.percentDecode k) (Url.percentDecode v)
 
                                     _ ->
                                         Nothing
@@ -166,7 +168,7 @@ buildFragment tab focus observationId =
         focusPart =
             case focus of
                 Just ( t, id ) ->
-                    "&focus=" ++ t ++ ":" ++ id
+                    "&focus=" ++ Url.percentEncode (t ++ ":" ++ id)
 
                 Nothing ->
                     ""
@@ -174,7 +176,7 @@ buildFragment tab focus observationId =
         observationPart =
             case observationId of
                 Just selectedId ->
-                    "&observation=" ++ selectedId
+                    "&observation=" ++ Url.percentEncode selectedId
 
                 Nothing ->
                     ""
@@ -195,8 +197,8 @@ pushUrl maybeKey url =
 replaceFragment : Model -> Cmd Msg
 replaceFragment model =
     case ( model.selectedWorkspaceId, model.key ) of
-        ( Just wsId, Just key ) ->
-            Nav.replaceUrl key ("/workspace/" ++ wsId ++ "#" ++ buildFragment model.activeTab model.focus.focusedEntity model.observations.selectedId)
+        ( Just _, Just _ ) ->
+            ElmTask.perform (\_ -> SynchronizeWorkspaceFragment) (ElmTask.succeed ())
 
         _ ->
             Cmd.none
@@ -204,6 +206,192 @@ replaceFragment model =
 
 
 -- FILTER PERSISTENCE
+
+
+defaultObservationQuery : ObservationAppliedQuery
+defaultObservationQuery =
+    { requestMode = ObservationFlatMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", matchAppliedPaths = [] }
+
+
+observationAppliedQuery : ObservationModel -> ObservationAppliedQuery
+observationAppliedQuery state =
+    Maybe.withDefault
+        { requestMode = state.requestMode, query = state.query, subjectKind = state.subjectKind, subject = state.subject, selectedFacet = state.selectedFacet, gitSha = state.gitSha, matchAppliedPaths = state.matchAppliedPaths }
+        state.appliedQuery
+
+
+restoreObservationQuery : ObservationAppliedQuery -> ObservationModel -> ObservationModel
+restoreObservationQuery query state =
+    { state | requestMode = query.requestMode, query = query.query, subjectKind = query.subjectKind, subject = query.subject, selectedFacet = query.selectedFacet, gitSha = query.gitSha, matchAppliedPaths = query.matchAppliedPaths, matchPathsInput = String.join "\n" query.matchAppliedPaths, appliedQuery = Just query, matchValidationError = Nothing, failedRequest = Nothing, pendingExcludedLink = Nothing }
+
+
+type alias ObservationUrlContext =
+    { fragment : { tab : WorkspaceTab, focus : Maybe ( String, String ), observationId : Maybe String }
+    , query : ObservationAppliedQuery
+    , notice : Maybe String
+    }
+
+
+excludedObservationNotice : String
+excludedObservationNotice =
+    "This history entry excludes filters exceeding the 4096-byte link limit. Oversized filters stay active only in their original page state; they are not restored by Back, reload, or a shared link. Apply a smaller query to share its complete context."
+
+
+observationUrlContext : Url.Url -> ObservationUrlContext
+observationUrlContext url =
+    let
+        fallback message =
+            { fragment = { tab = ObservationsTab, focus = Nothing, observationId = Nothing }, query = defaultObservationQuery, notice = Just message }
+
+        parts =
+            url.fragment |> Maybe.withDefault "" |> String.split "&"
+
+        pair part =
+            case String.split "=" part of
+                [ key, value ] ->
+                    Maybe.map2 Tuple.pair (Url.percentDecode key) (Url.percentDecode value)
+
+                _ ->
+                    Nothing
+
+        pairs =
+            List.filterMap pair parts
+
+        keys =
+            List.map Tuple.first pairs
+
+        versioned =
+            List.any (\key -> List.member key [ "ov", "ox", "oq" ]) keys
+                || List.any (\part -> String.startsWith "ov=" part || String.startsWith "ox=" part || String.startsWith "oq=" part) parts
+
+        lookup key =
+            pairs |> List.filter (Tuple.first >> (==) key) |> List.head |> Maybe.map Tuple.second
+
+        validFields =
+            List.length pairs == List.length parts
+                && List.length keys == Set.size (Set.fromList keys)
+                && List.all (\key -> List.member key [ "tab", "focus", "observation", "ov", "oq", "ox" ]) keys
+                && (lookup "tab" |> Maybe.map (\tab -> List.member tab [ "projects", "observations", "timeline", "audit" ]) |> Maybe.withDefault True)
+                && (lookup "focus" |> Maybe.map (\focus -> case String.split ":" focus of
+                        [ kind, entityId ] -> List.member kind [ "project", "task", "memory" ] && not (String.isEmpty entityId)
+                        _ -> False
+                    ) |> Maybe.withDefault True)
+                && (lookup "observation" |> Maybe.map (not << String.isEmpty) |> Maybe.withDefault True)
+    in
+    if observationUrlBytes (Url.toString url) > 4096 then
+        fallback "This Observation URL exceeds the 4096-byte limit. No filters or selection were restored."
+
+    else if not versioned then
+        { fragment = parseFragment url.fragment, query = defaultObservationQuery, notice = Nothing }
+
+    else if not validFields then
+        fallback "Invalid Observation link. No filters or selection were restored."
+
+    else if (lookup "ox" |> Maybe.map (\nonce -> not (String.isEmpty nonce) && String.length nonce <= 160) |> Maybe.withDefault False) && lookup "ov" == Nothing && lookup "oq" == Nothing then
+        { fragment = parseFragment url.fragment, query = defaultObservationQuery, notice = Just excludedObservationNotice }
+
+    else if lookup "ov" /= Just "1" || lookup "ox" /= Nothing then
+        fallback "Unsupported Observation link. No filters or selection were restored."
+
+    else
+        case lookup "oq" |> Maybe.map (Decode.decodeString observationQueryDecoder) of
+            Just (Ok query) ->
+                { fragment = parseFragment url.fragment, query = query, notice = Nothing }
+
+            _ ->
+                fallback "Invalid Observation link. No filters or selection were restored."
+
+
+observationQueryDecoder : Decode.Decoder ObservationAppliedQuery
+observationQueryDecoder =
+    let
+        kind =
+            Decode.nullable Decode.string |> Decode.andThen (\value -> case value of
+                Nothing -> Decode.succeed Nothing
+                Just name -> case Api.subjectKindFromString name of
+                    Just parsed -> Decode.succeed (Just parsed)
+                    Nothing -> Decode.fail "Invalid subject kind"
+                )
+
+        mode =
+            Decode.string |> Decode.andThen (\name -> case name of
+                "flat" -> Decode.succeed ObservationFlatMode
+                "facets" -> Decode.succeed ObservationFacetMode
+                "exact" -> Decode.succeed ObservationExactSubjectMode
+                "match" -> Decode.succeed ObservationMatchMode
+                _ -> Decode.fail "Invalid mode"
+                )
+
+        tuple =
+            Decode.map8 (\requestMode query subjectKind subject gitSha facetKind facetSubject paths ->
+                ( { requestMode = requestMode, query = query, subjectKind = subjectKind, subject = subject, gitSha = gitSha, selectedFacet = Maybe.map2 (\k s -> { subjectKind = k, subject = s }) facetKind facetSubject, matchAppliedPaths = paths }, (facetKind == Nothing) == (facetSubject == Nothing) ))
+                (Decode.index 0 mode) (Decode.index 1 Decode.string) (Decode.index 2 kind) (Decode.index 3 Decode.string) (Decode.index 4 Decode.string) (Decode.index 5 kind) (Decode.index 6 (Decode.nullable Decode.string)) (Decode.index 7 (Decode.list Decode.string))
+    in
+    Decode.list Decode.value |> Decode.andThen (\values ->
+        if List.length values /= 8 then Decode.fail "Invalid query tuple" else
+        tuple |> Decode.andThen (\( query, pairedFacet ) ->
+            if not pairedFacet || (query.requestMode == ObservationExactSubjectMode && query.selectedFacet == Nothing) then Decode.fail "Invalid exact facet" else
+            if query.requestMode == ObservationMatchMode then
+                case normalizeObservationPaths (String.join "\n" query.matchAppliedPaths) of
+                    Ok paths -> Decode.succeed { query | matchAppliedPaths = paths }
+                    Err message -> Decode.fail message
+            else if not (List.isEmpty query.matchAppliedPaths) then Decode.fail "Paths require match mode" else Decode.succeed query
+            )
+        )
+
+
+encodeObservationQuery : ObservationAppliedQuery -> String
+encodeObservationQuery query =
+    let
+        kind value =
+            value |> Maybe.map (Api.subjectKindToString >> Encode.string) |> Maybe.withDefault Encode.null
+
+        mode =
+            case query.requestMode of
+                ObservationFlatMode -> "flat"
+                ObservationFacetMode -> "facets"
+                ObservationExactSubjectMode -> "exact"
+                ObservationMatchMode -> "match"
+    in
+    Encode.list identity [ Encode.string mode, Encode.string query.query, kind query.subjectKind, Encode.string query.subject, Encode.string query.gitSha, kind (Maybe.map .subjectKind query.selectedFacet), query.selectedFacet |> Maybe.map (.subject >> Encode.string) |> Maybe.withDefault Encode.null, Encode.list Encode.string query.matchAppliedPaths ] |> Encode.encode 0 |> Url.percentEncode
+
+
+observationUrl : Model -> String -> String
+observationUrl model context =
+    let
+        url = model.url
+    in
+    Url.toString { url | path = "/workspace/" ++ Url.percentEncode (Maybe.withDefault "" model.selectedWorkspaceId), query = Nothing, fragment = Just (buildFragment model.activeTab model.focus.focusedEntity model.observations.selectedId ++ context) }
+
+
+completeObservationUrl : Model -> Result String String
+completeObservationUrl model =
+    let
+        url =
+            observationUrl model ("&ov=1&oq=" ++ encodeObservationQuery (observationAppliedQuery model.observations))
+    in
+    if observationUrlBytes url <= 4096 then Ok url else Err excludedObservationNotice
+
+
+observationHistoryUrl : Model -> String
+observationHistoryUrl model =
+    case completeObservationUrl model of
+        Ok url -> url
+        Err _ -> observationUrl model ("&ox=" ++ Url.percentEncode (model.flags.sessionId ++ "-" ++ String.fromInt model.sessionRequestEpoch ++ "-" ++ String.fromInt model.observations.nextLinkToken))
+
+
+writeObservationHistory : Bool -> Model -> ( Model, Cmd Msg )
+writeObservationHistory intentional model =
+    let
+        state = model.observations
+        target = observationHistoryUrl model
+        oversized = Result.toMaybe (completeObservationUrl model) == Nothing
+        updated = { model | observations = { state | nextLinkToken = state.nextLinkToken + 1, pendingExcludedLink = if oversized then Just { url = target, workspaceId = Maybe.withDefault "" model.selectedWorkspaceId, sessionEpoch = model.sessionRequestEpoch, generation = state.requestGeneration, facetGeneration = state.facetRequestGeneration } else Nothing, linkNotice = if oversized then Just excludedObservationNotice else if intentional then Nothing else state.linkNotice } }
+        command = case model.key of
+            Just key -> if target == Url.toString model.url then Cmd.none else if intentional && not oversized then Nav.pushUrl key target else Nav.replaceUrl key target
+            Nothing -> Cmd.none
+    in
+    ( updated, command )
 
 
 localStorageKey : String -> String
@@ -1220,3 +1408,94 @@ passesPriorityFilter filter priority =
 
         BelowPriority v ->
             priority <= v
+
+
+normalizeObservationPaths : String -> Result String (List String)
+normalizeObservationPaths rawInput =
+    let
+        paths =
+            rawInput
+                |> String.lines
+                |> List.map String.trim
+                |> List.filter (not << String.isEmpty)
+                |> deduplicateFirst
+    in
+    if List.isEmpty paths then
+        Err "Enter at least one repository-relative file path."
+
+    else if List.length paths > 256 then
+        Err "Match repository files accepts at most 256 paths."
+
+    else if List.sum (List.map observationUrlBytes paths) > 262144 then
+        Err "Match repository files accepts at most 262144 UTF-8 bytes in total."
+
+    else
+        case List.filter (not << isConcreteRepositoryPath) paths |> List.head of
+            Just invalidPath ->
+                Err ("Invalid concrete repository path: " ++ invalidPath)
+
+            Nothing ->
+                Ok paths
+
+
+deduplicateFirst : List String -> List String
+deduplicateFirst paths =
+    List.foldl
+        (\path unique ->
+            if List.member path unique then
+                unique
+
+            else
+                unique ++ [ path ]
+        )
+        []
+        paths
+
+
+isConcreteRepositoryPath : String -> Bool
+isConcreteRepositoryPath path =
+    not (String.startsWith "/" path)
+        && not (String.contains "\\" path)
+        && not (String.contains "*" path)
+        && not (String.contains "?" path)
+        && not (windowsAbsolute path)
+        && observationUrlBytes path
+        <= 4096
+        && List.all (not << controlCharacter) (String.toList path)
+        && List.all (\segment -> not (String.isEmpty segment) && segment /= "." && segment /= "..") (String.split "/" path)
+
+
+windowsAbsolute : String -> Bool
+windowsAbsolute path =
+    case String.toList path of
+        drive :: ':' :: '/' :: _ ->
+            asciiLetter drive
+
+        _ ->
+            False
+
+
+asciiLetter : Char -> Bool
+asciiLetter character =
+    let
+        code =
+            Char.toCode character
+    in
+    (code >= Char.toCode 'A' && code <= Char.toCode 'Z')
+        || (code >= Char.toCode 'a' && code <= Char.toCode 'z')
+
+
+controlCharacter : Char -> Bool
+controlCharacter character =
+    let
+        code =
+            Char.toCode character
+    in
+    code < 32 || code == 127
+
+
+observationUrlBytes : String -> Int
+observationUrlBytes value =
+    String.toList value
+        |> List.map (\character -> let code = Char.toCode character in if code <= 0x7F then 1 else if code <= 0x07FF then 2 else if code <= 0xFFFF then 3 else 4)
+        |> List.sum

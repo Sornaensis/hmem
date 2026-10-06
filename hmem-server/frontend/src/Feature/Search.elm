@@ -433,10 +433,16 @@ navigateToSearchResult entityType entityId model =
         let
             ( detailModel, detailCmd ) =
                 Feature.Observation.selectObservation entityId nextModel
+
+            ( linkedModel, linkCmd ) =
+                if detailModel.observations.selectedId /= model.observations.selectedId || detailModel.activeTab /= model.activeTab then
+                    Helpers.writeObservationHistory True detailModel
+                else
+                    ( detailModel, Cmd.none )
         in
-        ( detailModel
+        ( linkedModel
         , Cmd.batch
-            [ replaceFragment detailModel
+            [ linkCmd
             , detailCmd
             , scrollToElement "observation-detail"
             ]

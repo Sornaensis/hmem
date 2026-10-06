@@ -1,4 +1,4 @@
-module Feature.DataLoading exposing (acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
+module Feature.DataLoading exposing (acceptBackgroundPaint, backgroundPaintNonce, navigationFilterFingerprint, revalidateNavigationForChangedSummaries, acceptWorkspaceLoad, beginNavigationBranch, beginNavigationBranchPage, beginNavigationBranchPreviousPage, beginNavigationFocus, revalidateNavigationFocus, invalidateNavigationRequests, beginRootNavigation, beginRootNavigationPage, beginRootNavigationPreviousPage, ensureAllNavigationPresentations, ensureNavigationPresentation, ensureVisibleCardDetails, ensureViewportCardDetails, finishWorkspaceLoad, retireInitialObservationLoad, init, listObservationResponseMatches, mergeNavigationSummaries, mergeObservationPage, nextPageOffset, observationResponseMatches, prepareForPageLoad, prepareRootNavigationRequest, rootNavigationContextMatches, resetNavigationPresentations, revalidateNavigationForFilters, revalidateNavigationForAffectedBranches, reloadNavigationForFilters, update)
 
 import Api
 import Dict
@@ -20,6 +20,7 @@ init =
     , loadingWorkspaceData = False
     , pendingWorkspaceLoads = 0
     , activeWorkspaceLoadToken = Nothing
+    , initialObservationLoad = Nothing
     , nextWorkspaceLoadToken = 1
     , cardHydrationLoaded = False
     , navigationGeneration = 0
@@ -2574,7 +2575,7 @@ updateResponse msg model =
 
                                 pendingLoads =
                                     -- Demand pages are independent of the initial workspace load.
-                                    (if initialRootPending then 1 else 0) + (if isRepository then 1 else 0)
+                                    (if initialRootPending then 1 else 0) + (if isRepository && List.member model.observations.requestMode [ ObservationFlatMode, ObservationExactSubjectMode ] then 1 else 0)
 
                                 dataLoading =
                                     { rootLoading
@@ -2589,7 +2590,7 @@ updateResponse msg model =
 
                                 observations =
                                     if isRepository then
-                                        Feature.Observation.startReloadForSession model.sessionRequestEpoch expectedWsId currentObservations
+                                        currentObservations
 
                                     else
                                         { currentObservations
@@ -2607,15 +2608,6 @@ updateResponse msg model =
 
                                 commands =
                                     [ rootCommand ]
-                                        ++ (if isRepository then
-                                                [ Api.fetchObservations model.flags.apiUrl
-                                                    (Feature.Observation.listQuery expectedWsId 0 observations)
-                                                    (GotObservations expectedWsId (Just token) observations.requestGeneration observations.queryFingerprint 0)
-                                                ]
-
-                                            else
-                                                []
-                                           )
                             in
                             let
                                 loadedModel =
@@ -2625,13 +2617,28 @@ updateResponse msg model =
                                         , observations = observations
                                     }
 
+                                ( startedObservationModel, observationCmd ) =
+                                    if isRepository then Feature.Observation.bootstrapObservation token loadedModel else ( loadedModel, Cmd.none )
+
+                                observationModel =
+                                    let
+                                        loading = startedObservationModel.dataLoading
+                                        state = startedObservationModel.observations
+                                    in
+                                    { startedObservationModel | dataLoading = { loading | initialObservationLoad =
+                                        if isRepository && List.member state.requestMode [ ObservationFlatMode, ObservationExactSubjectMode ] then
+                                            Just { workspaceId = expectedWsId, sessionEpoch = model.sessionRequestEpoch, token = token, generation = state.requestGeneration, fingerprint = state.queryFingerprint }
+                                        else
+                                            Nothing
+                                        } }
+
                                 ( focusedModel, focusCmd ) =
                                     case model.focus.focusedEntity of
                                         Just ( entityType, entityId ) ->
-                                            beginNavigationFocus expectedWsId entityType entityId loadedModel
+                                            beginNavigationFocus expectedWsId entityType entityId observationModel
 
                                         Nothing ->
-                                            ( loadedModel, Cmd.none )
+                                            ( observationModel, Cmd.none )
 
                                 ( detailModel, detailCmd ) =
                                     if isRepository then
@@ -2645,7 +2652,13 @@ updateResponse msg model =
                                     else
                                         ( focusedModel, Cmd.none )
                             in
-                            ( detailModel, Cmd.batch (detailCmd :: focusCmd :: commands) )
+                            if detailModel.observations.linkNotice /= Nothing && detailModel.observations.linkNotice /= Just Helpers.excludedObservationNotice then
+                                let
+                                    ( repaired, repairCmd ) = Helpers.writeObservationHistory False detailModel
+                                in
+                                ( repaired, Cmd.batch (repairCmd :: observationCmd :: detailCmd :: focusCmd :: commands) )
+                            else
+                                ( detailModel, Cmd.batch (observationCmd :: detailCmd :: focusCmd :: commands) )
 
                         else
                             ( model, Cmd.none )
@@ -3207,7 +3220,7 @@ updateResponse msg model =
 
         GotObservations wsId maybeToken generation fingerprint offset result ->
             if model.selectedWorkspaceId /= Just wsId || model.observations.requestSessionEpoch /= model.sessionRequestEpoch || not (acceptWorkspaceLoad maybeToken model.dataLoading) || not (listObservationResponseMatches generation fingerprint offset model.observations) then
-                ( model, Cmd.none )
+                ( settleInitialObservationResponse wsId maybeToken generation fingerprint offset model, Cmd.none )
 
             else
                 case result of
@@ -3220,7 +3233,7 @@ updateResponse msg model =
                                 mergeObservationPage offset paginated currentObservations
 
                             updatedDataLoading =
-                                finishWorkspaceLoad maybeToken model.dataLoading
+                                completeObservationWorkspaceLoad wsId maybeToken generation fingerprint offset model
                         in
                         ( { model | observations = observations, dataLoading = updatedDataLoading }, Cmd.none )
 
@@ -3233,7 +3246,7 @@ updateResponse msg model =
                                 Feature.Observation.failResultPage wsId offset "Failed to load observations." currentObservations
 
                             updatedDataLoading =
-                                finishWorkspaceLoad maybeToken model.dataLoading
+                                completeObservationWorkspaceLoad wsId maybeToken generation fingerprint offset model
                         in
                         ( { model | observations = observations, dataLoading = updatedDataLoading }, Cmd.none )
 
@@ -3302,3 +3315,52 @@ mergeObservationPage offset paginated observations =
         , failedRequest = Nothing
     }
         |> (\merged -> List.foldl Feature.Observation.applyAuthoritativeObservation merged paginated.items)
+
+
+{-| The initial Observation page is one workspace-load obligation, separate
+from later untagged pages. Route supersession retires that exact obligation;
+a late response may settle it, but can never contribute records or errors.
+-}
+retireInitialObservationLoad : Model -> Model
+retireInitialObservationLoad model =
+    case model.dataLoading.initialObservationLoad of
+        Just request ->
+            if model.selectedWorkspaceId == Just request.workspaceId && model.sessionRequestEpoch == request.sessionEpoch then
+                let
+                    loading = finishWorkspaceLoad (Just request.token) model.dataLoading
+                in
+                { model | dataLoading = { loading | initialObservationLoad = Nothing } }
+            else
+                model
+        Nothing ->
+            model
+
+
+completeObservationWorkspaceLoad : String -> Maybe Int -> Int -> String -> Int -> Model -> DataLoadingModel
+completeObservationWorkspaceLoad workspaceId maybeToken generation fingerprint offset model =
+    let
+        loading =
+            finishWorkspaceLoad maybeToken model.dataLoading
+
+        initial =
+            model.dataLoading.initialObservationLoad
+                |> Maybe.andThen (\request ->
+                    if request.workspaceId == workspaceId && request.sessionEpoch == model.sessionRequestEpoch && maybeToken == Just request.token && request.generation == generation && request.fingerprint == fingerprint && offset == 0 then
+                        Nothing
+                    else
+                        Just request
+                    )
+    in
+    { loading | initialObservationLoad = initial }
+
+
+settleInitialObservationResponse : String -> Maybe Int -> Int -> String -> Int -> Model -> Model
+settleInitialObservationResponse workspaceId maybeToken generation fingerprint offset model =
+    case model.dataLoading.initialObservationLoad of
+        Just request ->
+            if request.workspaceId == workspaceId && maybeToken == Just request.token && request.generation == generation && request.fingerprint == fingerprint && offset == 0 then
+                retireInitialObservationLoad model
+            else
+                model
+        Nothing ->
+            model

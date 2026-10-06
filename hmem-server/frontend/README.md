@@ -49,6 +49,20 @@ writer and delayed genuine WebSocket deliveries. It requires the configured
 test PostgreSQL tools and locked Playwright Chromium. Its fixture expires within
 ten minutes and removes its browser, server, PostgreSQL process, and sandbox.
 
+Set `HMEM_CONFIG.workspaceSnapshotProfile` before the application starts to
+`full_v1` to load complete canonical workspace snapshots in bounded pages.
+The default is `workspace_shell_v1`; these are the only accepted values.
+The setting is read once at startup and does not alter global snapshots or
+ordinary REST pagination. A reload requests a fresh snapshot rather than proving
+that the previous in-memory projection can resume.
+
+`npm run test:observation-populated` uses the installed native test harness
+relinked after the versioned snapshot migration. It seeds an isolated repository,
+checks real multipage full snapshots and canonical updates through production
+Elm, and separately exercises controlled request failures and permission
+retirement. It uses the same finite fixture lifetime and cleanup as the
+conditional test. The command builds production assets for the controlled cases.
+
 `npm run test:observation-navigation` builds production assets and checks the
 navigation bridge and populated browser flows. It covers keyboard entry/return,
 repeated cards, off-page links, long paths, edit/delete controls, 320 CSS-pixel

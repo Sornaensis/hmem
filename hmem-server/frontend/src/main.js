@@ -12,6 +12,12 @@ function createSessionId() {
 }
 
 const runtimeConfig = window.HMEM_CONFIG || {}
+const workspaceSnapshotProfile = runtimeConfig.workspaceSnapshotProfile === undefined
+  ? 'workspace_shell_v1'
+  : runtimeConfig.workspaceSnapshotProfile
+if (workspaceSnapshotProfile !== 'workspace_shell_v1' && workspaceSnapshotProfile !== 'full_v1') {
+  throw new Error('HMEM_CONFIG.workspaceSnapshotProfile must be workspace_shell_v1 or full_v1')
+}
 const authTokenStorageKey = runtimeConfig.authTokenStorageKey || 'hmem-auth-token'
 const authTokenStorageMode = normalizeAuthTokenStorageMode(runtimeConfig.authTokenStorage || runtimeConfig.authTokenStorageMode || 'local')
 const runtimeMode = runtimeConfig.authMode || runtimeConfig.runtimeMode || import.meta.env.VITE_HMEM_AUTH_MODE || 'unknown'
@@ -533,7 +539,7 @@ app.ports.connectWebSocket.subscribe(function (config) {
     audienceId: config.audienceId,
     scope: config.scope,
     workspaceId: streamWorkspaceId,
-    snapshotProfile: config.snapshotProfile,
+    snapshotProfile: config.scope === 'workspace' ? workspaceSnapshotProfile : config.snapshotProfile,
     headers: { ...authHeaderObject(), ...csrfHeaderObject() }
   })
 })

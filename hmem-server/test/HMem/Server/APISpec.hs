@@ -24,7 +24,7 @@ import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
-import Network.HTTP.Types (Header, methodDelete, methodGet, methodPost, methodPut, parseQuery, status200, status400, status401, status403, status404, status409, status503)
+import Network.HTTP.Types (Header, methodDelete, methodGet, methodOptions, methodPost, methodPut, parseQuery, status200, status400, status401, status403, status404, status409, status503)
 import Network.HTTP.Types qualified
 import Network.Wai (Application, defaultRequest)
 import Network.Wai qualified as Wai
@@ -41,13 +41,13 @@ import HMem.DB.Project qualified as Project
 import HMem.DB.Task qualified as Task
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withPrincipalContext)
-import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
+import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace, getAuditLogRows)
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.API (HMemAPI, server)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.Event (ChangeEvent(..), ChangeType(..), EntityType(..), entityTypeToText)
 import HMem.Server.App (mkApp)
-import HMem.Server.TestHarness (DeployedSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, withDeployedSandboxAppContext, withLocalSandboxAppEnv)
+import HMem.Server.TestHarness (DeployedSandboxApp(..), createDeployedSandboxAuthSession, createDeployedSandboxUser, issueDeployedSandboxPAT, withDeployedSandboxAppContext, withDeployedSandboxCrossOriginAppContext, withLocalSandboxAppEnv)
 import HMem.Server.WebSocket (WorkspaceSubscription(..), consumeTicket, eventVisibleToSubscription, newWSState, ticketEventVisible)
 import HMem.Types
 
@@ -148,6 +148,18 @@ recordingObservationApp env = do
         { actorType = ActorUser, actorId = "observation-event-test", actorLabel = "Observation Event Test"
         , authority = PrincipalSyntheticLocalSuperadmin }
   pure $ \req respond -> withPrincipalContext (Just localSuperadmin) (app req respond)
+
+quotedContentVersion :: UUID -> BS.ByteString
+quotedContentVersion version = "\"" <> Text.encodeUtf8 (T.pack (show version)) <> "\""
+
+createVersionObservation :: TestEnv -> Application -> T.Text -> IO Observation
+createVersionObservation env app name = do
+  workspace <- createTestWorkspace env name
+  response <- postJson app "/api/v1/observations" (object
+    [ "workspace_id" .= workspace.id, "subjects" .= [ObservationSubject SubjectFile "src/Version.hs"]
+    , "git_sha" .= T.replicate 40 "a", "content" .= ("base content" :: T.Text) ])
+  responseStatus response `shouldBe` status200
+  maybe (expectationFailure "expected canonical Observation" >> fail "unreachable") pure (decode (responseBody response))
 
 spec :: Spec
 spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app))) $ do
@@ -1328,6 +1340,137 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         requestWithHeaders ctx.deployedApplication methodGet bucketPath (authHeader superadminToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
 
   describe "Observation HTTP contract" $ do
+    it "transports opaque versions, rejects stale writes without effects, and accepts conscious rebase or deliberate unconditional compatibility" $ \(env, app) -> do
+      original <- createVersionObservation env app "observation-version-http"
+      let path = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show original.id))
+          body content = encode (object ["content" .= (content :: T.Text)])
+          put version content = requestWithHeaders app methodPut path
+            [("If-Match", quotedContentVersion version), ("X-Request-Id", "shared-correlation")] (body content)
+      readResponse <- request app methodGet path ""
+      decode (responseBody readResponse) `shouldBe` Just original
+      listed <- request app methodGet ("/api/v1/observations?workspace_id=" <> Text.encodeUtf8 (T.pack (show original.workspaceId))) ""
+      let Just page = decode (responseBody listed) :: Maybe (PaginatedResult Observation)
+      map (.contentVersion) page.items `shouldBe` [original.contentVersion]
+      matched <- postJson app "/api/v1/observations/match" (object
+        ["workspace_id" .= original.workspaceId, "paths" .= (["src/Version.hs"] :: [T.Text])])
+      let Just matches = decode (responseBody matched) :: Maybe (PaginatedResult ObservationMatch)
+      map (.observation.contentVersion) matches.items `shouldBe` [original.contentVersion]
+      accepted <- put original.contentVersion "first accepted"
+      responseStatus accepted `shouldBe` status200
+      let Just latest = decode (responseBody accepted) :: Maybe Observation
+      latest.contentVersion `shouldNotBe` original.contentVersion
+      latest.subjects `shouldBe` original.subjects
+      latest.gitSha `shouldBe` original.gitSha
+      auditBefore <- getAuditLogRows env.pool "observation" (T.pack (show original.id))
+      outboxBefore <- listOutboxAfter env.pool (WorkspaceScope original.workspaceId) 0 100
+      rejected <- put original.contentVersion "stale overwrite"
+      responseStatus rejected `shouldBe` status409
+      lookup "Content-Type" rejected.simpleHeaders `shouldBe` Just "application/json"
+      let Just conflict = decode (responseBody rejected) :: Maybe Value
+      jsonField "code" conflict `shouldBe` Just (String "observation_content_conflict")
+      jsonField "latest" conflict `shouldBe` Just (toJSON latest)
+      getAuditLogRows env.pool "observation" (T.pack (show original.id)) `shouldReturn` auditBefore
+      listOutboxAfter env.pool (WorkspaceScope original.workspaceId) 0 100 `shouldReturn` outboxBefore
+      unchanged <- request app methodGet path ""
+      decode (responseBody unchanged) `shouldBe` Just latest
+      rebased <- put latest.contentVersion "conscious rebase"
+      responseStatus rebased `shouldBe` status200
+      let Just rebase = decode (responseBody rebased) :: Maybe Observation
+      rebase.contentVersion `shouldNotBe` latest.contentVersion
+      unconditional <- requestWithHeaders app methodPut path [("X-Request-Id", quotedContentVersion original.contentVersion)] (body "legacy overwrite")
+      responseStatus unconditional `shouldBe` status200
+      let Just legacy = decode (responseBody unconditional) :: Maybe Observation
+      legacy.content `shouldBe` "legacy overwrite"
+      legacy.contentVersion `shouldNotBe` rebase.contentVersion
+      deleted <- request app methodDelete path ""
+      responseStatus deleted `shouldBe` status200
+      put legacy.contentVersion "deleted" >>= (\response -> responseStatus response `shouldBe` status404)
+      requestWithHeaders app methodPut "/api/v1/observations/00000000-0000-0000-0000-000000000000"
+        [("If-Match", quotedContentVersion legacy.contentVersion)] (body "missing") >>= (\response -> responseStatus response `shouldBe` status404)
+
+    it "rejects malformed and duplicate If-Match values while preserving other PUT routes" $ \(env, app) -> do
+      original <- createVersionObservation env app "observation-version-malformed"
+      let path = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show original.id))
+          valid = quotedContentVersion original.contentVersion
+          body = encode (object ["content" .= ("must not apply" :: T.Text)])
+          malformed = ["", "*", "not-a-uuid", Text.encodeUtf8 (T.pack (show original.contentVersion)), "W/" <> valid
+                      , valid <> "," <> valid, "\"00000000-0000-0000-0000-00000000AAAA\"", "\"not-a-uuid\"", "\"\"", "\" " <> valid <> "\""]
+          duplicates = [[("If-Match", valid), ("if-match", valid)]
+                       , [("If-Match", valid), ("IF-MATCH", "\"00000000-0000-0000-0000-000000000000\"")]
+                       , [("If-Match", ""), ("If-Match", valid)]
+                       , [("If-Match", valid), ("If-Match", "")]
+                       , [("If-Match", ""), ("If-Match", "")]]
+      auditBefore <- getAuditLogRows env.pool "observation" (T.pack (show original.id))
+      outboxBefore <- listOutboxAfter env.pool (WorkspaceScope original.workspaceId) 0 100
+      forM_ (map (\value -> [("If-Match", value)]) malformed <> duplicates) $ \headers -> do
+        response <- requestWithHeaders app methodPut path headers body
+        responseStatus response `shouldBe` status400
+      unchanged <- request app methodGet path ""
+      decode (responseBody unchanged) `shouldBe` Just original
+      getAuditLogRows env.pool "observation" (T.pack (show original.id)) `shouldReturn` auditBefore
+      listOutboxAfter env.pool (WorkspaceScope original.workspaceId) 0 100 `shouldReturn` outboxBefore
+      outerWhitespace <- requestWithHeaders app methodPut path [("If-Match", " \t" <> valid <> "\t ")] body
+      responseStatus outerWhitespace `shouldBe` status200
+      unrelated <- requestWithHeaders app methodPut ("/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show original.workspaceId)))
+        [("If-Match", ""), ("If-Match", "bad-token")] (encode (object ["name" .= ("unrelated rename" :: T.Text)]))
+      responseStatus unrelated `shouldBe` status200
+
+    it "keeps conditional conflict data behind deployed edit authorization and cookie CSRF" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "observation-version-authorized"
+        foreignWorkspace <- createTestWorkspace ctx.deployedEnv "observation-version-foreign"
+        editorId <- createDeployedSandboxUser ctx.deployedEnv False False
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        outsiderId <- createDeployedSandboxUser ctx.deployedEnv False False
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership editorId Auth.WorkspaceRoleEdit) Nothing
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool foreignWorkspace.id (Auth.UpsertWorkspaceMembership outsiderId Auth.WorkspaceRoleEdit) Nothing
+        editor <- issueDeployedSandboxPAT ctx.deployedEnv editorId "Conditional editor"
+        reader <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Conditional reader"
+        outsider <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Conditional foreign editor"
+        let auth token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            createInput = encode (object ["workspace_id" .= workspace.id, "subjects" .= [ObservationSubject SubjectFile "src/Private.hs"], "git_sha" .= T.replicate 40 "a", "content" .= ("private base" :: T.Text)])
+        createdResponse <- requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations" (auth editor) createInput
+        responseStatus createdResponse `shouldBe` status200
+        let Just original = decode (responseBody createdResponse) :: Maybe Observation
+            path = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show original.id))
+            conditional = [("If-Match", quotedContentVersion original.contentVersion)]
+            duplicate = conditional <> conditional
+            body = encode (object ["content" .= ("authorized correction" :: T.Text)])
+        forM_ [conditional, duplicate, [("If-Match", "bad-token")]] $ \condition -> do
+          unauthenticated <- requestWithHeaders ctx.deployedApplication methodPut path condition body
+          responseStatus unauthenticated `shouldBe` status401
+          forM_ [reader, outsider] $ \token -> do
+            denied <- requestWithHeaders ctx.deployedApplication methodPut path (auth token <> condition) body
+            responseStatus denied `shouldBe` status403
+            (decode (responseBody denied) >>= jsonField "latest") `shouldBe` Nothing
+        _ <- createDeployedSandboxAuthSession ctx.deployedEnv editorId "conditional-session" "conditional-csrf"
+        let cookie = ("Cookie", "hmem_session=conditional-session; hmem_csrf=conditional-csrf")
+            csrf = ("X-CSRF-Token", "conditional-csrf")
+        forM_ [[cookie], [cookie, ("X-CSRF-Token", "incorrect")]] $ \headers -> do
+          rejected <- requestWithHeaders ctx.deployedApplication methodPut path (headers <> conditional) body
+          responseStatus rejected `shouldBe` status403
+        accepted <- requestWithHeaders ctx.deployedApplication methodPut path ([cookie, csrf] <> conditional) body
+        responseStatus accepted `shouldBe` status200
+        let Just latest = decode (responseBody accepted) :: Maybe Observation
+        latest.contentVersion `shouldNotBe` original.contentVersion
+        stale <- requestWithHeaders ctx.deployedApplication methodPut path ([cookie, csrf] <> conditional) body
+        responseStatus stale `shouldBe` status409
+        let Just conflict = decode (responseBody stale) :: Maybe Value
+        jsonField "latest" conflict `shouldBe` Just (toJSON latest)
+
+    it "allows conditional CORS preflight only for configured origins" $ \_ ->
+      withDeployedSandboxCrossOriginAppContext ["https://frontend.example"] $ \ctx -> do
+        let preflight origin = requestWithHeaders ctx.deployedApplication methodOptions
+              "/api/v1/observations/00000000-0000-0000-0000-000000000001"
+              [("Origin", origin), ("Access-Control-Request-Method", "PUT"), ("Access-Control-Request-Headers", "content-type,if-match,x-csrf-token")] ""
+        allowed <- preflight "https://frontend.example"
+        responseStatus allowed `shouldBe` status200
+        lookup "Access-Control-Allow-Origin" allowed.simpleHeaders `shouldBe` Just "https://frontend.example"
+        fmap (T.isInfixOf "if-match" . T.toCaseFold . Text.decodeUtf8) (lookup "Access-Control-Allow-Headers" allowed.simpleHeaders) `shouldBe` Just True
+        disallowed <- preflight "https://unconfigured.example"
+        lookup "Access-Control-Allow-Origin" disallowed.simpleHeaders `shouldBe` Nothing
+
     it "preserves legacy singleton creates and exposes canonical multi-subject observations" $ \(env, app) -> do
       workspace <- createTestWorkspace env "observation-api"
       legacyResponse <- postJson app "/api/v1/observations" (object
@@ -1931,6 +2074,19 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       schema "LinkDependency" `shouldSatisfy` isJust
       schema "DependencyMutationResult" `shouldSatisfy` isJust
       hasSchemaProperty "Observation" "subjects" `shouldBe` True
+      hasSchemaProperty "Observation" "content_version" `shouldBe` True
+      requiredSchemaFields "Observation" `shouldSatisfy` maybe False (elem "content_version")
+      (schema "Observation" >>= jsonField "properties" >>= jsonField "content_version" >>= jsonField "format") `shouldBe` Just (String "uuid")
+      let ifMatchParameter = pathParameter "/api/v1/observations/{observationId}" "put" "If-Match"
+          observationUpdateResponses = jsonPath ["paths", "/api/v1/observations/{observationId}", "put", "responses"] document
+      (ifMatchParameter >>= jsonField "in") `shouldBe` Just (String "header")
+      (ifMatchParameter >>= jsonField "required") `shouldBe` Just (Bool False)
+      (ifMatchParameter >>= jsonField "schema" >>= jsonField "pattern") `shouldBe` Just (String "^[ \\t]*\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\"[ \\t]*$")
+      mapM_ (\status -> (observationUpdateResponses >>= jsonField status) `shouldSatisfy` isJust) ["400", "401", "403", "404", "409"]
+      (observationUpdateResponses >>= jsonField "409" >>= jsonField "content" >>= jsonField "application/json" >>= jsonField "schema" >>= jsonField "$ref") `shouldBe` Just (String "#/components/schemas/ObservationContentConflict")
+      requiredSchemaFields "ObservationContentConflict" `shouldBe` Just ["code", "latest"]
+      (schema "ObservationContentConflict" >>= jsonField "properties" >>= jsonField "code" >>= jsonField "enum") `shouldBe` Just (toJSON (["observation_content_conflict"] :: [T.Text]))
+      (schema "ObservationContentConflict" >>= jsonField "properties" >>= jsonField "latest" >>= jsonField "$ref") `shouldBe` Just (String "#/components/schemas/Observation")
       hasSchemaProperty "Observation" "subject_kind" `shouldBe` True
       hasSchemaProperty "Observation" "subject" `shouldBe` True
       hasSchemaProperty "ObservationSearchHit" "subjects" `shouldBe` True

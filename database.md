@@ -254,6 +254,35 @@ REST and MCP emit canonical `subjects`, for example:
 Clients must read the canonical nonempty `subjects` list. Exact
 `subject_kind` and `subject` filters match any subject in the set.
 
+Canonical Observation reads and successful writes also return the opaque
+`content_version` UUID. To prevent an edit from overwriting a competing content
+write, send that base token as one strong quoted `If-Match` header with a
+content-only update:
+
+```http
+PUT /api/v1/observations/<observation-id>
+Content-Type: application/json
+If-Match: "00000000-0000-0000-0000-000000000001"
+
+{"content":"Corrected repository insight"}
+```
+
+The header accepts one canonical lowercase UUID in quotes, with optional outer
+HTTP spaces/tabs. Weak tags, wildcard `*`, lists, repeated header lines, unquoted
+tokens and malformed UUIDs return 400. A matching version is checked atomically
+and success returns the advanced token. A stale version returns 409 JSON
+`{"code":"observation_content_conflict","latest":<canonical Observation>}`
+without changing content or side effects. Review `latest` and consciously retry
+with its version to rebase. Authorized missing or hard-deleted IDs return 404;
+reader/outsider restrictions and deployed-cookie CSRF requirements still apply.
+`X-Request-Id` correlates a request and never supplies a precondition.
+
+Omitting `If-Match` deliberately retains unconditional HTTP and MCP
+`observation_update` compatibility. These callers can still overwrite competing
+content; use conditional HTTP curation when guarding a known base matters. The
+MCP adapter retains its content-only tool and bounded response shapes. Tokens
+have no timestamp, request-ID, Git provenance, or ordering meaning.
+
 `POST /api/v1/observations/match` (and MCP `observation_match`) accepts 1–256
 concrete, canonical repository-relative `paths`, at most 4096 UTF-8 bytes each
 and 262144 UTF-8 bytes total. It returns each matching

@@ -88,7 +88,22 @@ mkAppWithOidcCodeExchangeAndChangeStream oidcCodeExchange changeStreamConfig log
         $ principalContextMiddleware jwksCache authCfg pool
         $ authMiddleware authCfg
         $ openApiMiddleware
+        $ normalizeObservationIfMatch
          $ serve (Proxy @HMemAPI) (serverWithChangeStream authCfg changeStreamConfig pool tracker wsState pgvec)
+
+-- Servant's Header combinator selects the first physical header line. Join
+-- repeated content preconditions so the authorized handler rejects a tag list,
+-- rather than silently selecting one token before a competing write.
+normalizeObservationIfMatch :: Middleware
+normalizeObservationIfMatch app req respond = case (Wai.requestMethod req, Wai.pathInfo req) of
+  ("PUT", ["api", "v1", "observations", _]) ->
+    case [value | (name, value) <- Wai.requestHeaders req, name == "If-Match"] of
+      values@(_:_:_) -> app req
+        { Wai.requestHeaders = ("If-Match", BS.intercalate "," values)
+            : filter ((/= "If-Match") . fst) (Wai.requestHeaders req)
+        } respond
+      _ -> app req respond
+  _ -> app req respond
 
 -- | Middleware that assigns a unique X-Request-Id to every request.
 -- If the incoming request already has an X-Request-Id header, it is
@@ -711,7 +726,7 @@ corsMiddleware authCfg corsCfg = cors $ \req ->
       | otherwise = False
     policy = simpleCorsResourcePolicy
       { corsMethods        = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-      , corsRequestHeaders = ["Content-Type", "Authorization", fromString (T.unpack authCfg.deployed.csrfHeaderName), "X-CSRF-Token", "X-Request-Id", "X-Request-ID"]
+      , corsRequestHeaders = ["Content-Type", "Authorization", fromString (T.unpack authCfg.deployed.csrfHeaderName), "X-CSRF-Token", "X-Request-Id", "X-Request-ID", "If-Match"]
       , corsExposedHeaders = Just ["X-Request-Id"]
       }
 

@@ -144,7 +144,9 @@ type ObservationAPI =
          :> Post '[JSON] (PaginatedResult ObservationMatch)
   :<|> "similar" :> ReqBody '[JSON] SimilarObservationQuery :> Post '[JSON] [SimilarObservation]
   :<|> Capture "observationId" UUID :> Get '[JSON] Observation
-  :<|> Capture "observationId" UUID :> ReqBody '[JSON] UpdateObservation :> Put '[JSON] Observation
+  :<|> Capture "observationId" UUID :> Header "If-Match" Text
+         :> Description "Replaces content only. Optional If-Match accepts one strong quoted canonical UUID from content_version; weak tags, lists, wildcard and malformed tokens return 400. A stale token returns 409 with code observation_content_conflict and latest canonical Observation without mutation; missing/deleted records return 404. Success returns the advanced content_version. Omitting If-Match deliberately retains unconditional legacy REST/MCP behavior and can overwrite competing content. X-Request-Id is correlation only."
+         :> ReqBody '[JSON] UpdateObservation :> Put '[JSON] Observation
   :<|> Capture "observationId" UUID :> Delete '[JSON] NoContent
   :<|> Capture "observationId" UUID :> "embedding" :> ReqBody '[JSON] ObservationEmbedding :> Put '[JSON] NoContent
 
@@ -718,12 +720,22 @@ observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> simi
     workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleRead
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
     handleDBErrors (Observation.getObservation pool workspaceId observationId) >>= maybe (throwError err404) pure
-  updateH observationId input = do
+  updateH observationId ifMatch input = do
     workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleEdit
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
     reject (validateUpdateObservationInput input)
-    updated <- handleDBErrors (Observation.updateObservation pool workspaceId observationId input) >>= maybe (throwError err404) pure
-    pure updated
+    expectedVersion <- traverse (maybe (throwError invalidIfMatch) pure . parseObservationIfMatch) ifMatch
+    case expectedVersion of
+      Nothing -> handleDBErrors (Observation.updateObservation pool workspaceId observationId input) >>= maybe (throwError err404) pure
+      Just version -> do
+        result <- handleDBErrors (Observation.updateObservationConditional pool workspaceId observationId version input)
+        case result of
+          ObservationUpdated updated -> pure updated
+          ObservationNotFound -> throwError err404
+          ObservationVersionMismatch latest -> throwError err409
+            { errBody = Aeson.encode (object ["code" .= ("observation_content_conflict" :: Text), "latest" .= latest])
+            , errHeaders = [("Content-Type", "application/json")]
+            }
   deleteH observationId = do
     workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleEdit
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
@@ -736,6 +748,19 @@ observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> simi
     _ <- handleDBErrors (Observation.getObservation pool workspaceId observationId) >>= maybe (throwError err404) pure
     handleDBErrors $ Embedding.setObservationEmbeddingInSpace pool workspaceId observationId (fromMaybe legacyManualEmbeddingSpace suppliedSpace) vector
     pure NoContent
+
+-- Only the canonical opaque UUID token is supported, with HTTP outer OWS.
+-- No tag-list, wildcard, weak-tag or timestamp/request-ID interpretation.
+parseObservationIfMatch :: Text -> Maybe UUID
+parseObservationIfMatch supplied = do
+  token <- Text.stripPrefix "\"" trimmed >>= Text.stripSuffix "\""
+  version <- UUID.fromText token
+  if UUID.toText version == token then Just version else Nothing
+  where
+    trimmed = Text.dropAround (\c -> c == ' ' || c == '\t') supplied
+
+invalidIfMatch :: ServerError
+invalidIfMatch = badRequest "invalid_if_match" "If-Match must contain one strong quoted canonical content_version UUID"
 
 projects :: Pool Hasql.Connection -> Server ProjectAPI
 projects pool = listH :<|> createH :<|> createSpecH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> nextH where

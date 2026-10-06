@@ -24,6 +24,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & info . version .~ "0.2.0.0"
   & info . description ?~ "Repository-scoped observation API with immutable provenance. Task placement mutations can return structured lifecycle conflicts when project, hierarchy, or dependency invariants reject the requested state."
   & components . schemas . at "LifecycleConflictError" ?~ lifecycleConflictSchema
+  & components . schemas . at "ObservationContentConflict" ?~ observationContentConflictSchema
   & tags .~ InsOrdSet.fromList
       [ Tag "Observations" (Just "Repository-scoped, provenance-bound observations.") Nothing
       , Tag "Workspace Groups" (Just "Global-superadmin workspace group management.") Nothing
@@ -42,7 +43,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/observations/match" . _Just . post %~ fmap tagObservation
   & paths . at "/api/v1/observations/similar" . _Just . post %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}" . _Just . get %~ fmap tagObservation
-  & paths . at "/api/v1/observations/{observationId}" . _Just . put %~ fmap tagObservation
+  & paths . at "/api/v1/observations/{observationId}" . _Just . put %~ fmap (documentObservationUpdate . tagObservation)
   & paths . at "/api/v1/observations/{observationId}" . _Just . delete %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}/embedding" . _Just . put %~ fmap tagObservation
   & paths . at "/api/v1/search" . _Just . post %~ fmap documentUnifiedSearch
@@ -57,6 +58,23 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}" . _Just . delete %~ fmap documentDependencyRemove
   where
     tagObservation operation = operation & tags .~ InsOrdSet.singleton "Observations"
+    documentObservationUpdate operation = operation
+      & parameters . traversed %~ documentIfMatch
+      & responses %~ (<> observationUpdateErrors)
+    documentIfMatch parameterRef = case parameterRef of
+      Inline parameter | parameter ^. name == "If-Match" -> Inline $ parameter
+        & description ?~ "One strong quoted canonical UUID from content_version, for example \"00000000-0000-0000-0000-000000000001\". Omission is an unconditional compatibility write; weak tags, lists, repeated header lines, wildcard and malformed forms are rejected."
+        & schema ?~ Inline (mempty & type_ ?~ OpenApiString & pattern ?~ "^[ \\t]*\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\"[ \\t]*$")
+      _ -> parameterRef
+    observationUpdateErrors = Responses Nothing $ InsOrdMap.fromList
+      [ (400, Inline (mempty & description .~ "Invalid content-only JSON or unsupported If-Match token form."))
+      , (401, Inline (mempty & description .~ "Authentication is required."))
+      , (403, Inline (mempty & description .~ "Edit authorization or deployed cookie CSRF verification failed."))
+      , (404, Inline (mempty & description .~ "The authorized Observation is missing or permanently deleted."))
+      , (409, Inline (mempty
+          & description .~ "The expected content version is stale. No mutation occurred; latest is the canonical Observation for a conscious rebase."
+          & content . at "application/json" ?~ (mempty & schema ?~ Ref (Reference "ObservationContentConflict"))))
+      ]
     documentUnifiedSearch operation = operation
       & description ?~ "Searches requested observations, projects, and tasks with independent page boundaries. Results retain all three arrays. has_more contains a boolean for each requested plural type; next_offset contains only types with more results. The default limit is 10 per type (allowed 1..200), and the offset defaults to 0 (allowed 0..2147483647). Continue one type by repeating the request with entity_types set to that type and offset set to its next_offset, keeping workspace_id, query, and applicable filters unchanged. If another page would need an offset beyond the supported range, the server returns a structured continuation_limit error instead of an unusable cursor. Offset pagination assumes an unchanged result set between requests."
     tagWorkspaceGroups operation = operation & tags .~ InsOrdSet.singleton "Workspace Groups"
@@ -166,7 +184,9 @@ instance ToSchema ObservationSubject where
 instance ToSchema Observation where
   declareNamedSchema _ = do
     NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @Observation)
-    pure $ NamedSchema name (withLegacySubjectProperties schema)
+    pure $ NamedSchema name (withLegacySubjectProperties schema
+      & properties . at "content_version" ?~ Inline (uuidSchema
+          & description ?~ "Opaque content precondition advanced by every accepted content write. Not ordered; embedding-only writes do not advance it. Send as a strong quoted If-Match token for conditional curation."))
 instance ToSchema ObservationSubjectFacet where
   declareNamedSchema _ = do
     NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ObservationSubjectFacet)
@@ -352,6 +372,13 @@ instance ToSchema TaskDependencyPage where
 
 uuidSchema :: Schema
 uuidSchema = mempty & type_ ?~ OpenApiString & format ?~ "uuid"
+
+observationContentConflictSchema :: Schema
+observationContentConflictSchema = mempty
+  & type_ ?~ OpenApiObject
+  & properties . at "code" ?~ Inline (mempty & type_ ?~ OpenApiString & enum_ ?~ ["observation_content_conflict"])
+  & properties . at "latest" ?~ Ref (Reference "Observation")
+  & required .~ ["code", "latest"]
 
 uuidArrayLike :: Referenced Schema -> Int -> Schema
 uuidArrayLike item maximum = mempty

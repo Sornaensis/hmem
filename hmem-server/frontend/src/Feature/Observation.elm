@@ -4,6 +4,7 @@ module Feature.Observation exposing
     , applyCanonicalObservation
     , applyAuthoritativeObservation
     , canLoadMore
+    , canLoadMoreFacets
     , clearSelection
     , deleteDialogFocusTarget
     , detailResponseMatches
@@ -13,6 +14,7 @@ module Feature.Observation exposing
     , groupPathMatches
     , init
     , hasProtectedEdit
+    , hasUnappliedFilters
     , isLoadedOrSelected
     , markResultsStale
     , listQuery
@@ -72,6 +74,7 @@ init =
     , selectedFacet = Nothing
     , gitSha = ""
     , requestMode = ObservationFlatMode
+    , appliedQuery = Nothing
     , matchPathsInput = ""
     , matchAppliedPaths = []
     , matchValidationError = Nothing
@@ -189,6 +192,12 @@ update msg model =
 
         ApplyObservationFilters ->
             applyObservationFilters model
+
+        RevertObservationFilters ->
+            ( updateObservation revertFilters model, Cmd.none )
+
+        RefreshObservationResults ->
+            refreshActiveResults model
 
         SetObservationBrowseMode mode ->
             switchBrowseMode mode model
@@ -912,7 +921,11 @@ startReloadForSession sessionEpoch workspaceId state =
 
 
 startResultReload : ObservationRequestMode -> Int -> String -> ObservationModel -> ObservationModel
-startResultReload mode sessionEpoch workspaceId state =
+startResultReload mode sessionEpoch workspaceId draftState =
+    let
+        state =
+            commitAppliedQuery { draftState | requestMode = mode }
+    in
     { state
         | items = Dict.empty
         , orderedIds = []
@@ -1058,6 +1071,8 @@ restoreBrowseAfterMatch model =
                         , subjectKind = model.observations.subjectKind
                         , subject = model.observations.subject
                         , selectedFacet = model.observations.selectedFacet
+                        , query = model.observations.query
+                        , gitSha = model.observations.gitSha
                         }
 
             prepared =
@@ -1068,6 +1083,8 @@ restoreBrowseAfterMatch model =
                             , subjectKind = restored.subjectKind
                             , subject = restored.subject
                             , selectedFacet = restored.selectedFacet
+                            , query = restored.query
+                            , gitSha = restored.gitSha
                             , matchPathsInput = ""
                             , matchAppliedPaths = []
                             , matchValidationError = Nothing
@@ -1196,7 +1213,11 @@ startMatchRefresh sessionEpoch workspaceId state =
 
 
 startFacetReload : Int -> String -> ObservationModel -> ObservationModel
-startFacetReload sessionEpoch workspaceId state =
+startFacetReload sessionEpoch workspaceId draftState =
+    let
+        state =
+            commitAppliedQuery { draftState | requestMode = ObservationFacetMode }
+    in
     { state
         | requestMode = ObservationFacetMode
         , facets = Dict.empty
@@ -1272,15 +1293,8 @@ loadMoreFacets : Model -> ( Model, Cmd Msg )
 loadMoreFacets model =
     case repositoryWorkspaceId model of
         Just workspaceId ->
-            let
-                state =
-                    model.observations
-
-                currentFingerprint =
-                    facetFingerprintFor state.facetRequestSessionEpoch (facetQuery workspaceId 0 state)
-            in
-            if state.requestMode == ObservationFacetMode && not state.facetLoading && state.facetHasMore && state.facetExpectedOffset == Nothing && currentFingerprint == state.facetFingerprint then
-                fetchFacetPage state.facetNextOffset model
+            if canLoadMoreFacets workspaceId model.observations then
+                fetchFacetPage model.observations.facetNextOffset model
 
             else
                 ( model, Cmd.none )
@@ -1367,7 +1381,11 @@ repositoryWorkspaceId model =
 
 
 listQuery : String -> Int -> ObservationModel -> Api.ObservationListQuery
-listQuery workspaceId offset state =
+listQuery workspaceId offset inputState =
+    let
+        state =
+            appliedState inputState
+    in
     { workspaceId = workspaceId
     , subjectKind =
         case ( state.requestMode, state.selectedFacet ) of
@@ -1394,7 +1412,11 @@ listQuery workspaceId offset state =
 
 
 facetQuery : String -> Int -> ObservationModel -> Api.ObservationSubjectFacetQuery
-facetQuery workspaceId offset state =
+facetQuery workspaceId offset inputState =
+    let
+        state =
+            appliedState inputState
+    in
     { workspaceId = workspaceId
     , subjectKind = state.subjectKind
     , gitSha = nonEmpty state.gitSha
@@ -1405,9 +1427,16 @@ facetQuery workspaceId offset state =
 
 
 matchQuery : String -> List String -> Int -> ObservationModel -> Api.ObservationMatchQuery
-matchQuery workspaceId paths offset state =
+matchQuery workspaceId paths offset inputState =
+    let
+        state =
+            appliedState inputState
+    in
     { workspaceId = workspaceId
-    , paths = paths
+    , paths =
+        inputState.appliedQuery
+            |> Maybe.map .matchAppliedPaths
+            |> Maybe.withDefault paths
     , subjectKind = state.subjectKind
     , gitSha = nonEmpty state.gitSha
     , query = nonEmpty state.query
@@ -1417,18 +1446,26 @@ matchQuery workspaceId paths offset state =
 
 
 startMatchReload : Int -> String -> List String -> ObservationModel -> ObservationModel
-startMatchReload sessionEpoch workspaceId paths state =
+startMatchReload sessionEpoch workspaceId paths draftState =
     let
+        previous =
+            appliedState draftState
+
+        state =
+            commitAppliedQuery { draftState | requestMode = ObservationMatchMode, matchAppliedPaths = paths }
+
         browseReturn =
-            if state.requestMode == ObservationMatchMode then
+            if draftState.requestMode == ObservationMatchMode then
                 state.browseReturn
 
             else
                 Just
-                    { requestMode = state.requestMode
-                    , subjectKind = state.subjectKind
-                    , subject = state.subject
-                    , selectedFacet = state.selectedFacet
+                    { requestMode = previous.requestMode
+                    , subjectKind = previous.subjectKind
+                    , subject = previous.subject
+                    , selectedFacet = previous.selectedFacet
+                    , query = previous.query
+                    , gitSha = previous.gitSha
                     }
     in
     { state
@@ -1486,7 +1523,11 @@ facetFingerprintFor sessionEpoch query =
 
 
 matchFingerprint : Int -> String -> ObservationModel -> String
-matchFingerprint sessionEpoch workspaceId state =
+matchFingerprint sessionEpoch workspaceId inputState =
+    let
+        state =
+            appliedState inputState
+    in
     String.join "\u{001F}"
         [ "match"
         , String.fromInt sessionEpoch
@@ -1504,11 +1545,87 @@ matchFingerprint sessionEpoch workspaceId state =
 canLoadMore : String -> ObservationModel -> Bool
 canLoadMore workspaceId state =
     not state.loading
+        && not (hasUnappliedFilters state)
         && state.hasMore
         && state.expectedOffset
         == Nothing
         && activeFingerprint workspaceId state
         == state.queryFingerprint
+
+
+canLoadMoreFacets : String -> ObservationModel -> Bool
+canLoadMoreFacets workspaceId state =
+    state.requestMode == ObservationFacetMode
+        && not state.facetLoading
+        && not (hasUnappliedFilters state)
+        && state.facetHasMore
+        && state.facetExpectedOffset == Nothing
+        && facetFingerprintFor state.facetRequestSessionEpoch (facetQuery workspaceId 0 state) == state.facetFingerprint
+
+
+commitAppliedQuery : ObservationModel -> ObservationModel
+commitAppliedQuery state =
+    { state
+        | appliedQuery =
+            Just
+                { requestMode = state.requestMode
+                , query = state.query
+                , subjectKind = state.subjectKind
+                , subject = state.subject
+                , selectedFacet = state.selectedFacet
+                , gitSha = state.gitSha
+                , matchAppliedPaths = state.matchAppliedPaths
+                }
+    }
+
+
+appliedState : ObservationModel -> ObservationModel
+appliedState state =
+    case state.appliedQuery of
+        Just applied ->
+            { state
+                | requestMode = applied.requestMode
+                , query = applied.query
+                , subjectKind = applied.subjectKind
+                , subject = applied.subject
+                , selectedFacet = applied.selectedFacet
+                , gitSha = applied.gitSha
+                , matchAppliedPaths = applied.matchAppliedPaths
+            }
+
+        Nothing ->
+            state
+
+
+hasUnappliedFilters : ObservationModel -> Bool
+hasUnappliedFilters state =
+    case state.appliedQuery of
+        Just _ ->
+            let
+                fingerprint current =
+                    case current.requestMode of
+                        ObservationFacetMode ->
+                            facetFingerprintFor 0 (facetQuery "" 0 current)
+
+                        ObservationMatchMode ->
+                            matchFingerprint 0 "" current
+
+                        mode ->
+                            resultFingerprint mode 0 "" current
+            in
+            fingerprint { state | appliedQuery = Nothing } /= fingerprint (appliedState state)
+
+        Nothing ->
+            False
+
+
+revertFilters : ObservationModel -> ObservationModel
+revertFilters state =
+    let
+        applied =
+            appliedState state
+    in
+    { state | query = applied.query, subjectKind = applied.subjectKind, subject = applied.subject, gitSha = applied.gitSha }
 
 
 activeFingerprint : String -> ObservationModel -> String
@@ -2609,7 +2726,7 @@ viewObservationsStateWithPermission canEdit workspace state =
                         , ( "observation-layout-with-detail", state.selectedId /= Nothing )
                         ]
                     ]
-                    [ viewList state
+                    [ viewList workspace.id state
                     , viewDetail canEdit state
                     ]
                 ]
@@ -2639,6 +2756,11 @@ viewRetainedDraft model =
 
 viewFilters : ObservationModel -> Html Msg
 viewFilters state =
+    div [] [ viewAppliedFilters state, viewFilterInputs state ]
+
+
+viewFilterInputs : ObservationModel -> Html Msg
+viewFilterInputs state =
     div [ class "filter-bar observation-filters" ]
         [ div [ class "filter-group observation-filter-group" ]
             [ label [ class "filter-label", for "observation-query" ] [ text "Search" ]
@@ -2741,6 +2863,55 @@ viewFilters state =
         ]
 
 
+viewAppliedFilters : ObservationModel -> Html Msg
+viewAppliedFilters state =
+    let
+        applied =
+            appliedState state
+
+        query =
+            listQuery "" 0 state
+
+        labels =
+            [ "Mode: " ++ modeName applied.requestMode
+            , "Search: " ++ Maybe.withDefault "all" query.query
+            , "Kind: " ++ (query.subjectKind |> Maybe.map subjectKindLabel |> Maybe.withDefault "all")
+            , "Subject: " ++ Maybe.withDefault "all" query.subject
+            , "Git SHA: " ++ Maybe.withDefault "all" query.gitSha
+            ]
+                ++ (if applied.requestMode == ObservationMatchMode then
+                        [ "Files: " ++ String.join ", " applied.matchAppliedPaths ]
+
+                    else
+                        []
+                   )
+    in
+    div [ class "observation-applied-filters" ]
+        [ p []
+            [ text
+                (if state.appliedQuery == Nothing then
+                    "No query has been applied yet."
+
+                 else
+                    "Applied filters: " ++ String.join "; " labels
+                )
+            ]
+        , if hasUnappliedFilters state then
+            div [ class "form-help", attribute "role" "status" ]
+                [ text "Filters have unapplied changes. Apply filters or revert them before loading more results."
+                , button [ class "btn btn-secondary", type_ "button", onClick RevertObservationFilters ] [ text "Revert filters" ]
+                ]
+
+          else
+            text ""
+        , if state.requestMode == ObservationMatchMode && normalizeMatchPaths state.matchPathsInput /= Ok state.matchAppliedPaths then
+            p [ class "form-help", attribute "role" "status" ] [ text "File path changes are not applied. Select Match files to apply them." ]
+
+          else
+            text ""
+        ]
+
+
 viewModeNavigation : ObservationModel -> Html Msg
 viewModeNavigation state =
     let
@@ -2800,24 +2971,24 @@ viewModeNavigation state =
         ]
 
 
-viewList : ObservationModel -> Html Msg
-viewList state =
+viewList : String -> ObservationModel -> Html Msg
+viewList workspaceId state =
     case state.requestMode of
         ObservationFacetMode ->
-            viewFacetCatalogue state
+            viewFacetCatalogue workspaceId state
 
         ObservationMatchMode ->
-            viewMatchResults state
+            viewMatchResults workspaceId state
 
         ObservationExactSubjectMode ->
-            viewObservationResults "Exact subject observations" "No observations share this exact subject" state
+            viewObservationResults workspaceId "Exact subject observations" "No observations share this exact subject" state
 
         ObservationFlatMode ->
-            viewObservationResults "Observations" "No observations found" state
+            viewObservationResults workspaceId "Observations" "No observations found" state
 
 
-viewObservationResults : String -> String -> ObservationModel -> Html Msg
-viewObservationResults ariaLabel emptyHeading state =
+viewObservationResults : String -> String -> String -> ObservationModel -> Html Msg
+viewObservationResults workspaceId ariaLabel emptyHeading state =
     let
         observations =
             state.orderedIds |> List.filterMap (\observationId -> Dict.get observationId state.items)
@@ -2859,7 +3030,7 @@ viewObservationResults ariaLabel emptyHeading state =
                         (List.map (viewObservationRow state.selectedId context) observations)
         , if state.hasMore then
             div [ class "observation-pagination" ]
-                [ button [ class "btn btn-secondary observation-load-more", type_ "button", onClick LoadMoreObservations, disabled state.loading ]
+                [ button [ class "btn btn-secondary observation-load-more", type_ "button", onClick LoadMoreObservations, disabled (not (canLoadMore workspaceId state)) ]
                     [ text
                         (if state.loading then
                             "Loading..."
@@ -2880,15 +3051,15 @@ viewStaleResultsNotice state =
     if state.resultsStale then
         div [ class "observation-state observation-state-stale", attribute "role" "status" ]
             [ text "Results may have changed."
-            , button [ class "btn btn-secondary", type_ "button", onClick ApplyObservationFilters, disabled (state.loading || state.facetLoading) ] [ text "Refresh results" ]
+            , button [ class "btn btn-secondary", type_ "button", onClick RefreshObservationResults, disabled (state.loading || state.facetLoading) ] [ text "Refresh results" ]
             ]
 
     else
         text ""
 
 
-viewFacetCatalogue : ObservationModel -> Html Msg
-viewFacetCatalogue state =
+viewFacetCatalogue : String -> ObservationModel -> Html Msg
+viewFacetCatalogue workspaceId state =
     let
         facets =
             state.facetKeys |> List.filterMap (\key -> Dict.get key state.facets)
@@ -2919,7 +3090,7 @@ viewFacetCatalogue state =
                         (List.map viewFacet facets)
         , if state.facetHasMore then
             div [ class "observation-pagination" ]
-                [ button [ class "btn btn-secondary observation-facet-load-more", type_ "button", onClick LoadMoreObservationFacets, disabled state.facetLoading ]
+                [ button [ class "btn btn-secondary observation-facet-load-more", type_ "button", onClick LoadMoreObservationFacets, disabled (not (canLoadMoreFacets workspaceId state)) ]
                     [ text
                         (if state.facetLoading then
                             "Loading..."
@@ -2956,8 +3127,8 @@ viewFacet facet =
         ]
 
 
-viewMatchResults : ObservationModel -> Html Msg
-viewMatchResults state =
+viewMatchResults : String -> ObservationModel -> Html Msg
+viewMatchResults workspaceId state =
     let
         paths =
             state.matchAppliedPaths
@@ -3003,7 +3174,7 @@ viewMatchResults state =
             text ""
         , if state.hasMore then
             div [ class "observation-pagination" ]
-                [ button [ class "btn btn-secondary observation-load-more", type_ "button", onClick LoadMoreObservations, disabled state.loading ]
+                [ button [ class "btn btn-secondary observation-load-more", type_ "button", onClick LoadMoreObservations, disabled (not (canLoadMore workspaceId state)) ]
                     [ text
                         (if state.loading then
                             "Loading..."

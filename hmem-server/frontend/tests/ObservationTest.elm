@@ -639,7 +639,7 @@ suite =
                             , matchPathsInput = "src/Draft.elm"
                             , matchAppliedPaths = [ "src/A.elm" ]
                             , matchEvidence = Dict.fromList [ ( retained.id, evidence retained ), ( deleted.id, evidence deleted ) ]
-                            , browseReturn = Just { requestMode = ObservationExactSubjectMode, subjectKind = Just Api.SubjectFile, subject = "manual/flat.elm", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } }
+                            , browseReturn = Just { requestMode = ObservationExactSubjectMode, subjectKind = Just Api.SubjectFile, subject = "manual/flat.elm", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, query = "needle", gitSha = fullSha }
                             , requestGeneration = 11
                             , requestSessionEpoch = 3
                             , queryFingerprint = "pre-snapshot-results"
@@ -1406,10 +1406,16 @@ suite =
                         }
 
                     loaded =
-                        { empty
+                        let
+                            requested =
+                                Feature.Observation.startReload repository.id empty
+                        in
+                        { requested
                             | items = Dict.singleton "glob" glob
                             , orderedIds = [ "glob" ]
                             , hasMore = True
+                            , loading = False
+                            , expectedOffset = Nothing
                             , selectedId = Just "glob"
                             , selectedDetail = Just (fixtureObservation "glob" "2026-01-02T00:00:00Z")
                         }
@@ -1641,7 +1647,11 @@ suite =
                         Feature.Observation.init
 
                     base =
-                        { initial | requestMode = ObservationMatchMode, matchPathsInput = "src/Main.elm", matchAppliedPaths = [ "src/Main.elm" ] }
+                        let
+                            requested =
+                                Feature.Observation.update ApplyObservationMatch (editableModel { initial | matchPathsInput = "src/Main.elm" }) |> Tuple.first |> .observations
+                        in
+                        { requested | loading = False, expectedOffset = Nothing }
 
                     baseObservation =
                         fixtureObservation "page" "2026-01-01T00:00:00Z"
@@ -2376,6 +2386,164 @@ suite =
                 , matched.observations.selectedId == Nothing
                 ]
                     |> Expect.equal [ True, True, True, True, True, True, True, True, True ]
+        , test "save delete snapshot and preserving refresh reuse every applied query despite edited filter inputs" <|
+            \_ ->
+                let
+                    check mode =
+                        let
+                            applied =
+                                appliedModeModel mode
+
+                            drafted =
+                                draftQueryInputs applied
+
+                            refreshing =
+                                Feature.Observation.update RefreshObservationResults drafted |> Tuple.first
+
+                            snapshot =
+                                Feature.WebSocket.update (WsMessageReceived (observationSnapshotWire (fixtureObservation "curated" "2026-01-01T00:00:00Z"))) drafted |> Tuple.first
+
+                            saving =
+                                drafted
+                                    |> Feature.Observation.update StartObservationEdit |> Tuple.first
+                                    |> Feature.Observation.update (SetObservationDraft "saved applied content") |> Tuple.first
+                                    |> Feature.Observation.update SaveObservationEdit |> Tuple.first
+
+                            saved =
+                                saving.observations.edit |> Maybe.andThen .activeRequest
+                                    |> Maybe.map (\request -> Feature.Observation.update (ObservationUpdated request (Ok { observation | content = "saved applied content", updatedAt = "2026-01-02T00:00:00Z" })) saving |> Tuple.first)
+
+                            observation =
+                                fixtureObservation "curated" "2026-01-01T00:00:00Z"
+
+                            deleting =
+                                drafted
+                                    |> Feature.Observation.update OpenObservationDelete |> Tuple.first
+                                    |> Feature.Observation.update ConfirmObservationDelete |> Tuple.first
+
+                            deleted =
+                                deleting.observations.deleteConfirmation |> Maybe.andThen .activeRequest
+                                    |> Maybe.map (\request -> Feature.Observation.update (ObservationDeleted request (Ok ())) deleting |> Tuple.first)
+
+                            preserved candidate =
+                                candidate.observations.appliedQuery == applied.observations.appliedQuery
+                                    && candidate.observations.query == "draft search"
+                                    && Feature.Observation.listQuery "workspace-1" 50 candidate.observations == Feature.Observation.listQuery "workspace-1" 50 applied.observations
+                                    && Feature.Observation.facetQuery "workspace-1" 50 candidate.observations == Feature.Observation.facetQuery "workspace-1" 50 applied.observations
+                                    && Feature.Observation.matchQuery "workspace-1" [ "wrong/draft.elm" ] 50 candidate.observations == Feature.Observation.matchQuery "workspace-1" [ "wrong/draft.elm" ] 50 applied.observations
+                                    && (if mode == ObservationFacetMode then
+                                            candidate.observations.facetRequestGeneration > applied.observations.facetRequestGeneration
+                                                && candidate.observations.facetFingerprint == applied.observations.facetFingerprint
+                                                && candidate.observations.facetExpectedOffset == Just 0
+                                        else
+                                            candidate.observations.requestGeneration > applied.observations.requestGeneration
+                                                && candidate.observations.queryFingerprint == applied.observations.queryFingerprint
+                                                && candidate.observations.expectedOffset == Just 0
+                                       )
+                        in
+                        List.all preserved [ refreshing, snapshot ]
+                            && Maybe.map preserved saved == Just True
+                            && Maybe.map preserved deleted == Just True
+                in
+                observationModes |> List.map check |> Expect.equal [ True, True, True, True ]
+        , describe "dirty filters and paging controls"
+            (List.map
+                (\mode -> test (Debug.toString mode) <| \_ ->
+                let
+                    loaded =
+                        appliedModeModel mode
+
+                    drafted =
+                        draftQueryInputs loaded
+
+                    reverted =
+                        Feature.Observation.update RevertObservationFilters drafted |> Tuple.first
+
+                    more model =
+                        if mode == ObservationFacetMode then
+                            Feature.Observation.canLoadMoreFacets "workspace-1" model.observations
+                        else
+                            Feature.Observation.canLoadMore "workspace-1" model.observations
+
+                    loadMessage =
+                        if mode == ObservationFacetMode then LoadMoreObservationFacets else LoadMoreObservations
+
+                    refused =
+                        Feature.Observation.update loadMessage drafted |> Tuple.first
+
+                    view model =
+                        Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) model.observations |> Query.fromHtml
+
+                    pagingClass =
+                        if mode == ObservationFacetMode then "observation-facet-load-more" else "observation-load-more"
+                in
+                Expect.all
+                    [ \_ -> [ more loaded, more drafted, more reverted, refused.observations == drafted.observations, reverted.observations.matchPathsInput == "src/Draft.elm" ] |> Expect.equal [ True, False, True, True, True ]
+                    , \_ -> view drafted |> Query.find [ Selector.class pagingClass ] |> Query.has [ Selector.disabled True ]
+                    , \_ -> view drafted |> Query.has [ Selector.text "Filters have unapplied changes. Apply filters or revert them before loading more results." ]
+                    , \_ -> view drafted |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Revert filters" ] ] |> Event.simulate Event.click |> Event.expect RevertObservationFilters
+                    , \_ -> view reverted |> Query.find [ Selector.class pagingClass ] |> Query.hasNot [ Selector.disabled True ]
+                    ] ()
+                ) observationModes)
+        , test "explicit Apply commits draft filters and rejects pre-Apply callbacks in every mode" <|
+            \_ ->
+                let
+                    check mode =
+                        let
+                            before =
+                                appliedModeModel mode
+
+                            applied =
+                                draftQueryInputs before |> Feature.Observation.update ApplyObservationFilters |> Tuple.first
+
+                            state =
+                                before.observations
+
+                            lateObservation =
+                                fixtureObservation "late-query" "2026-01-01T00:00:00Z"
+
+                            lateMessage =
+                                case mode of
+                                    ObservationFacetMode ->
+                                        GotObservationSubjectFacets "workspace-1" 3 state.facetRequestGeneration state.facetFingerprint 0 (Ok { items = [ facetFixture Api.SubjectFile "late-query" 1 "2026-01-01T00:00:00Z" ], hasMore = False })
+                                    ObservationMatchMode ->
+                                        GotObservationMatches "workspace-1" 3 state.requestGeneration state.queryFingerprint 0 (Ok { items = [ matchFixture lateObservation [ { path = "src/Main.elm", matchedSubjects = lateObservation.subjects } ] ], hasMore = False })
+                                    _ ->
+                                        GotObservations "workspace-1" Nothing state.requestGeneration state.queryFingerprint 0 (Ok { items = [ lateObservation ], hasMore = False })
+
+                            afterLate =
+                                if mode == ObservationFacetMode || mode == ObservationMatchMode then
+                                    Feature.Observation.update lateMessage applied |> Tuple.first
+                                else
+                                    Feature.DataLoading.update lateMessage applied |> Tuple.first
+
+                            query =
+                                Feature.Observation.listQuery "workspace-1" 0 applied.observations
+                        in
+                        query.query == Just "draft search"
+                            && query.gitSha == Just (String.repeat 40 "a")
+                            && query.subjectKind == Just Api.SubjectGlob
+                            && query.subject == (if mode == ObservationFlatMode then Just "draft/**/*.elm" else if mode == ObservationExactSubjectMode then Just "src/**/*.elm" else Nothing)
+                            && applied.observations.matchAppliedPaths == before.observations.matchAppliedPaths
+                            && applied.observations.matchPathsInput == "src/Draft.elm"
+                            && not (Feature.Observation.hasUnappliedFilters applied.observations)
+                            && afterLate.observations == applied.observations
+                in
+                observationModes |> List.map check |> Expect.equal [ True, True, True, True ]
+        , test "match browse return restores the prior applied search SHA and exact tuple" <|
+            \_ ->
+                let
+                    original =
+                        appliedModeModel ObservationExactSubjectMode
+
+                    matching =
+                        draftQueryInputs original |> Feature.Observation.update ApplyObservationMatch |> Tuple.first
+
+                    restored =
+                        Feature.Observation.update ClearObservationMatch matching |> Tuple.first
+                in
+                Feature.Observation.listQuery "workspace-1" 0 restored.observations
+                    |> Expect.equal (Feature.Observation.listQuery "workspace-1" 0 original.observations)
         , test "facet catalogue and match disclosures expose accessible modes while bounding repeated card DOM" <|
             \_ ->
                 let
@@ -2456,6 +2624,64 @@ suite =
                     ]
                     ()
         ]
+
+
+observationModes : List ObservationRequestMode
+observationModes =
+    [ ObservationFlatMode, ObservationFacetMode, ObservationExactSubjectMode, ObservationMatchMode ]
+
+
+appliedModeModel : ObservationRequestMode -> Model
+appliedModeModel mode =
+    let
+        original =
+            selectedObservationState (fixtureObservation "curated" "2026-01-01T00:00:00Z")
+
+        initial =
+            editableModel { original | query = "applied search", subjectKind = Just Api.SubjectFile, subject = "src/Main.elm", gitSha = fullSha, matchPathsInput = "src/Main.elm" }
+
+        requested =
+            Feature.Observation.update
+                (case mode of
+                    ObservationExactSubjectMode -> SelectObservationFacet Api.SubjectGlob "src/**/*.elm"
+                    ObservationMatchMode -> ApplyObservationMatch
+                    _ -> SetObservationBrowseMode mode
+                ) initial |> Tuple.first
+
+        state =
+            requested.observations
+
+        observation =
+            fixtureObservation "curated" "2026-01-01T00:00:00Z"
+
+        facet =
+            facetFixture Api.SubjectGlob "src/**/*.elm" 9 "2026-01-01T00:00:00Z"
+
+        key =
+            Feature.Observation.facetKey facet.subjectKind facet.subject
+    in
+    { requested
+        | observations =
+            { state
+                | loading = False
+                , expectedOffset = Nothing
+                , hasMore = True
+                , facetLoading = False
+                , facetExpectedOffset = Nothing
+                , facetHasMore = True
+                , facets = Dict.singleton key facet
+                , facetKeys = [ key ]
+                , items = original.items
+                , orderedIds = original.orderedIds
+                , matchEvidence = Dict.singleton observation.id (matchFixture observation [ { path = "src/Main.elm", matchedSubjects = observation.subjects } ])
+            }
+    }
+
+
+draftQueryInputs : Model -> Model
+draftQueryInputs model =
+    [ SetObservationQuery "draft search", SetObservationSubjectKind "glob", SetObservationSubject "draft/**/*.elm", SetObservationGitSha (String.repeat 40 "a"), SetObservationMatchPaths "src/Draft.elm" ]
+        |> List.foldl (\message current -> Feature.Observation.update message current |> Tuple.first) model
 
 
 observationWorkspace : Api.WorkspaceType -> Api.Workspace

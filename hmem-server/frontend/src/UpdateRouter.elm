@@ -311,6 +311,12 @@ route msg model =
         ApplyObservationFilters ->
             Ok (Feature.Observation.update msg model)
 
+        RevertObservationFilters ->
+            Ok (Feature.Observation.update msg model)
+
+        RefreshObservationResults ->
+            Ok (Feature.Observation.update msg model)
+
         SetObservationBrowseMode _ ->
             Ok (Feature.Observation.update msg model)
 

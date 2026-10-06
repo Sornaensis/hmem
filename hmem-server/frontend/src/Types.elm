@@ -329,6 +329,7 @@ type alias ObservationModel =
     , selectedFacet : Maybe Api.ObservationSubject
     , gitSha : String
     , requestMode : ObservationRequestMode
+    , appliedQuery : Maybe ObservationAppliedQuery
     , matchPathsInput : String
     , matchAppliedPaths : List String
     , matchValidationError : Maybe String
@@ -368,6 +369,19 @@ type alias ObservationBrowseReturn =
     , subjectKind : Maybe Api.SubjectKind
     , subject : String
     , selectedFacet : Maybe Api.ObservationSubject
+    , query : String
+    , gitSha : String
+    }
+
+
+type alias ObservationAppliedQuery =
+    { requestMode : ObservationRequestMode
+    , query : String
+    , subjectKind : Maybe Api.SubjectKind
+    , subject : String
+    , selectedFacet : Maybe Api.ObservationSubject
+    , gitSha : String
+    , matchAppliedPaths : List String
     }
 
 
@@ -912,6 +926,8 @@ type Msg
     | SetObservationSubject String
     | SetObservationGitSha String
     | ApplyObservationFilters
+    | RevertObservationFilters
+    | RefreshObservationResults
     | SetObservationBrowseMode ObservationRequestMode
     | SelectObservationFacet Api.SubjectKind String
     | SetObservationMatchPaths String

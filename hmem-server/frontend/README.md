@@ -22,6 +22,15 @@ it; discard cannot interrupt an in-flight save. Permission/session revocation
 and authoritative deletion retire unavailable editing. This bounded in-session
 retention does not persist through a full reload or closing the tab.
 
+## Observation queries
+
+Observation requests keep a complete applied query separate from filter inputs.
+Apply filters commits the filter drafts; Match files commits concrete path input.
+Save, delete, live resynchronization, and Refresh results reuse the applied query.
+Unapplied filter changes pause paging until Apply filters or Revert filters;
+unapplied path input leaves the previously matched files active. The displayed
+applied filters describe the query behind the current results.
+
 ## Expanded hierarchy loading
 
 Navigation transports 50 summaries per kind per request. Expanded nodes whose

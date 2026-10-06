@@ -31,6 +31,18 @@ Leaving the Observation tab retires its card origin; a subsequently reopened
 detail returns to results. The compact workspace header scrolls with Observation
 content so keyboard targets remain visible.
 
+Observation results use one scrolling viewport across cards, subject facets,
+and expanded file-match groups. It mounts at most 25 ordinary logical rows and
+two distinct focus/return owners; complete loaded membership, ordered evidence,
+group counts, and pagination stay cached. Native Tab mounts the next logical
+control before focusing it. Detail and a retained editor remain outside row
+eviction. One original layout can restore unchanged card scroll geometry after
+opening detail; query, content, disclosure, font, or viewport changes retire its
+geometry. A valid originating card still mounts and reveals when that geometry
+cannot be reused.
+`npm run test:observation-viewport` checks production scroll reachability and
+native focus; the other Observation browser families remain separate npm gates.
+
 Each content save sends the opaque version captured when editing began. A
 competing write produces a conflict and preserves the draft, even before its
 live notification arrives. Keep my draft explicitly adopts the latest version
@@ -181,6 +193,18 @@ performance compatibility is validated by the following integration task;
 these local layout and bridge tests do not replace those gates.
 
 ## Large-workspace performance qualification
+
+Observation rendering qualification selects the review base with
+`HMEM_EVIDENCE_BASE_COMMIT=ed3aca53afe346f928dc00f2e2a7b0a8e07aaecb`, then runs
+`npm run perf:self-check`, `npm run perf:record-after`, and `npm run perf:check`
+in order. Its `observation-rendering.v1` profile writes five
+`final-working-tree.*.observation-rendering.v1` artifacts in the temporary
+`hmem-observation-rendering-cbb38fd2-fc89-449c-a308-168374f23f82` directory.
+The frontend owner retains them through project closure plus 30 days and removes
+the temporary trace before qualification. Historical Observation scaling
+artifacts remain separate. Physical scroll checks prove complete cached
+membership outside the unchanged timed interaction intervals; mounted DOM and
+card limits still apply to physical rendered elements.
 
 The versioned harness in `perf/` runs production `Main` in locked Chromium
 with intercepted HTTP and canonical WebSocket transport. It requires no backend

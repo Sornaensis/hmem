@@ -6,6 +6,8 @@ import Browser.Navigation as Nav
 import Dict exposing (Dict)
 import Feature.ChangeStream
 import HierarchyViewport
+import Array exposing (Array)
+import ObservationViewport
 import Http
 import Json.Encode as Encode
 import Set exposing (Set)
@@ -322,6 +324,8 @@ type alias ObservationDeleteState =
 
 type alias ObservationModel =
     { items : Dict String Api.Observation
+    , resultRows : Array ObservationResultRow
+    , viewport : ObservationViewport.State
     , orderedIds : List String
     , hasMore : Bool
     , loading : Bool
@@ -370,10 +374,33 @@ type alias ObservationModel =
     , detailNavigationEpoch : Int
     , detailNavigationToken : Int
     , detailReturnTarget : Maybe String
+    , pendingReturnNavigation : Maybe ObservationReturnIntent
     , edit : Maybe ObservationEditState
     , deleteConfirmation : Maybe ObservationDeleteState
     , nextCurationContextToken : Int
     , nextMutationRequestToken : Int
+    }
+
+
+type ObservationResultRow
+    = ObservationCardRow String Api.Observation
+    | ObservationFacetRow Api.ObservationSubjectFacet
+    | ObservationPathRow String Bool
+    | ObservationSubjectRow String String Api.SubjectKind String Int Bool
+
+
+type alias ObservationReturnIntent =
+    { intent : String
+    , selectedId : Maybe String
+    , workspaceId : String
+    , sessionEpoch : Int
+    , queryGeneration : String
+    , navigationToken : Int
+    , previousToken : Int
+    , previousSelection : Maybe String
+    , originKey : String
+    , readyRevision : Maybe Int
+    , fallback : Bool
     }
 
 
@@ -877,6 +904,7 @@ type Route
 
 type Msg
     = UrlRequested Browser.UrlRequest
+    | ObservationViewportChanged Encode.Value
     | UrlChanged Url.Url
       -- WebSocket
     | WsConnectedMsg

@@ -26,6 +26,7 @@
     "perf:freeze-v3": "node perf/freeze-v3.mjs",
     "preview": "vite preview",
     "test:observation-url": "npm run build && node --test tests-js/observation-url.browser.test.js",
+    "test:observation-viewport": "npm run build && node --test tests-js/observation-viewport.test.js tests-js/observation-viewport.browser.test.js",
     "test:observation-populated": "npm run build && node --test tests-js/observation-populated.browser.test.js tests-js/observation-recovery.browser.test.js"
   },
   "devDependencies": {

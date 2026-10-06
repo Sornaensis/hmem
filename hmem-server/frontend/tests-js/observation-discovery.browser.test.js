@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
+import { scanObservationRows, revealObservationRow } from './observation-viewport-fixture.mjs'
 
 const applied = h => h.page.locator('.observation-applied-filters > p').textContent()
 async function activate(page, button, key = 'Enter') {
@@ -53,8 +54,12 @@ test('production discovery disclosures are presentation only; explicit Match sen
     assert.equal(await h.page.locator('.observation-subject-group-toggle').count(), 4)
     assert.equal(await h.page.locator('.observation-mode-announcement').textContent(), '2 matching observations loaded')
     const matchedSummary = await applied(h)
+    const closeContext = JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context'))
+    assert.ok(closeContext.sessionEpoch > 0, 'Close transfer uses the current authenticated session, including before any card activation')
     await h.page.getByRole('button', { name: 'Close file composer', exact: true }).click()
     await h.page.waitForFunction(() => document.activeElement?.id === 'observation-for-files')
+    assert.deepEqual(JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')), closeContext)
+    console.log(JSON.stringify({ fixture: 'Observation standalone Close focus', context: closeContext, focus: await h.page.evaluate(() => document.activeElement?.id) }))
     assert.equal(await applied(h), matchedSummary); assert.equal(h.receipts.length, before + 1)
   } finally { await h.close() }
 })
@@ -63,11 +68,12 @@ test('production By subject paginates populated facets and locks exact provenanc
   const h = await openDiscovery()
   try {
     await h.start(); await h.page.getByRole('button', { name: 'By subject', exact: true }).click(); await h.idle()
-    assert.equal(await h.page.locator('.observation-facet-card').count(), 50)
+    assert.equal((await scanObservationRows(h.page)).facets.size, 50)
     await h.page.getByRole('button', { name: 'Load more subjects', exact: true }).click(); await h.idle()
-    assert.ok(await h.page.locator('.observation-facet-card').count() > 50)
+    assert.ok((await scanObservationRows(h.page)).facets.size > 50)
     assert.equal(h.receipts.filter(value => value.endpoint.endsWith('/subject-facets')).at(-1).params.offset, '50')
-    await h.page.locator('.observation-facet-card').filter({ hasText: 'src/**/*.elm' }).click(); await h.idle()
+    const facet = h.page.locator('.observation-facet-card').filter({ hasText: 'src/**/*.elm' })
+    await revealObservationRow(h.page, facet); await facet.click(); await h.idle()
     await h.page.locator('#observation-advanced-toggle').click()
     assert.match(await h.page.locator('.observation-selected-facet-value').textContent(), /Glob: src\/\*\*\/\*\.elm/)
     assert.equal(await h.page.locator('#observation-subject').count(), 0)
@@ -126,11 +132,22 @@ test('production 320 CSS-pixel discovery controls remain reachable with enlarged
     await assertReachable(h.page, h.page.locator('#observation-match-paths'))
     await assertReachable(h.page, h.page.getByRole('button', { name: 'Match files', exact: true }))
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
+    await h.page.evaluate(() => {
+      const records = []; window.observationToolbarEvents = records
+      for (const type of ['focusin', 'keydown', 'click']) document.addEventListener(type, event => {
+        if (records.length < 24 && event.target?.id?.startsWith('observation-')) records.push({ type, id: event.target.id, key: event.key || null, context: document.getElementById('observation-panel')?.dataset.observationContext })
+      }, true)
+    })
     await h.page.getByRole('button', { name: 'Close file composer', exact: true }).click()
     await activate(h.page, h.page.locator('#observation-advanced-toggle'), 'Space')
     assert.equal(await h.page.locator('#observation-git-sha').isVisible(), true)
     await assertReachable(h.page, h.page.locator('#observation-git-sha'))
     const layout = await h.page.evaluate(() => ({ width: innerWidth, text: getComputedStyle(document.documentElement).fontSize, overflow: document.documentElement.scrollWidth - innerWidth, main: document.getElementById('main-content-scroll').clientHeight }))
     assert.equal(layout.width, 320); assert.equal(layout.text, '32px'); assert.ok(layout.main > 0); assert.ok(layout.overflow <= 1, JSON.stringify(layout))
+    const receipt = await h.page.evaluate(() => ({ events: window.observationToolbarEvents, focus: document.activeElement?.id, expanded: document.getElementById('observation-advanced-toggle')?.getAttribute('aria-expanded') }))
+    assert.ok(receipt.events.some(event => event.type === 'focusin' && event.id === 'observation-advanced-toggle'))
+    assert.ok(receipt.events.some(event => event.type === 'keydown' && event.id === 'observation-advanced-toggle' && event.key === ' '))
+    assert.equal(receipt.focus, 'observation-advanced-toggle'); assert.equal(receipt.expanded, 'true')
+    console.log(JSON.stringify({ fixture: 'Observation toolbar native supersession', ...receipt }))
   } finally { await h.close() }
 })

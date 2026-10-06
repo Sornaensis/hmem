@@ -47,19 +47,27 @@ module Feature.Observation exposing
     , viewObservationsState
     , viewObservationsStateWithPermission
     , viewRetainedDraft
+    , refreshViewport
+    , updateViewport
+    , projectResultRows
     )
 
 import Api
+import Array
 import Char
 import Dict
 import Helpers exposing (beginTrackedMutation, focusElement, formatDate, formatObservationTimestamp, plainTextExcerpt, replaceFragment)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (custom, onClick, onInput, onSubmit, stopPropagationOn)
+import Html.Keyed as Keyed
+import Html.Lazy as Lazy
+import HierarchyViewport
 import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
+import ObservationViewport
 import Ports exposing (copyToClipboard)
 import Toast exposing (addToast)
 import Types exposing (..)
@@ -68,6 +76,8 @@ import Types exposing (..)
 init : ObservationModel
 init =
     { items = Dict.empty
+    , resultRows = Array.empty
+    , viewport = ObservationViewport.init
     , orderedIds = []
     , hasMore = False
     , loading = False
@@ -116,6 +126,7 @@ init =
     , detailNavigationEpoch = 0
     , detailNavigationToken = 0
     , detailReturnTarget = Nothing
+    , pendingReturnNavigation = Nothing
     , edit = Nothing
     , deleteConfirmation = Nothing
     , nextCurationContextToken = 1
@@ -141,6 +152,7 @@ retireSessionState previous =
 
 clearSelection : ObservationModel -> ObservationModel
 clearSelection state =
+    let viewport = state.viewport in
     { state
         | selectedId = Nothing
         , selectedDetail = Nothing
@@ -149,6 +161,8 @@ clearSelection state =
         , activeDetailRequest = Nothing
         , detailNavigationToken = state.detailNavigationToken + 1
         , detailReturnTarget = Nothing
+        , pendingReturnNavigation = Nothing
+        , viewport = { viewport | origin = Nothing, restoring = False, returnPin = Nothing, focus = Nothing }
         , edit = retainedEdit state.edit
         , deleteConfirmation = Nothing
     }
@@ -287,7 +301,14 @@ updateRaw msg model =
             ( updateObservation (\state -> { state | fileComposerOpen = True }) model, focusElement "observation-match-paths" )
 
         CloseObservationFileComposer ->
-            ( updateObservation (\state -> { state | fileComposerOpen = False }) model, focusElement "observation-for-files" )
+            let toolbarState = model.observations in
+            ( updateObservation (\state -> { state | fileComposerOpen = False }) model
+            , Ports.focusObservationToolbar (Encode.object
+                [ ( "targetId", Encode.string "observation-for-files" )
+                , ( "originId", Encode.string "observation-close-file-composer" )
+                , ( "context", navigationStamp (Maybe.withDefault "" model.selectedWorkspaceId) { toolbarState | detailNavigationEpoch = model.sessionRequestEpoch } )
+                , ( "viewport", ObservationViewport.stampValue model.observations.viewport.stamp )
+                ]) )
 
         ToggleObservationAdvancedFilters ->
             ( updateObservation (\state -> { state | advancedFiltersOpen = not state.advancedFiltersOpen }) model, Cmd.none )
@@ -2099,14 +2120,13 @@ normalizeMatchPaths =
 
 utf8Bytes : String -> Int
 utf8Bytes value =
-    String.toList value
-        |> List.map
-            (\character ->
+    String.foldl
+            (\character total ->
                 let
                     code =
                         Char.toCode character
                 in
-                if code <= 0x7F then
+                total + (if code <= 0x7F then
                     1
 
                 else if code <= 0x07FF then
@@ -2116,9 +2136,9 @@ utf8Bytes value =
                     3
 
                 else
-                    4
+                    4)
             )
-        |> List.sum
+            0 value
 
 
 {-| Select by id rather than list membership: unified-search hits may not occur
@@ -2155,10 +2175,17 @@ activateObservation observationId origin model =
 
                 updated =
                     updateObservation
-                        (\state -> { state | detailNavigationEpoch = model.sessionRequestEpoch, detailNavigationToken = state.detailNavigationToken + 1, detailReturnTarget = origin })
+                        (\current -> { current | detailNavigationEpoch = model.sessionRequestEpoch, detailNavigationToken = current.detailNavigationToken + 1, detailReturnTarget = origin, pendingReturnNavigation = Nothing
+                            , viewport = if origin == Nothing then current.viewport else ObservationViewport.captureOrigin current.viewport })
                         selected
+                state = updated.observations
+                intent =
+                    { intent = "detail", selectedId = state.selectedId, workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch
+                    , queryGeneration = (viewportLifetime updated).generation, navigationToken = state.detailNavigationToken
+                    , previousToken = priorState.detailNavigationToken, previousSelection = priorState.selectedId
+                    , originKey = Maybe.withDefault "" origin, readyRevision = Nothing, fallback = False }
             in
-            ( updated, Cmd.batch [ selectionCmd, navigateDetail "detail" workspaceId origin { priorState | detailNavigationEpoch = model.sessionRequestEpoch } updated.observations ] )
+            ( { updated | observations = { state | pendingReturnNavigation = Just intent } }, selectionCmd )
 
 
 returnToResults : Model -> ( Model, Cmd Msg )
@@ -2174,10 +2201,17 @@ returnToResults model =
 
                 updated =
                     updateObservation
-                        (clearSelection >> (\state -> { state | detailNavigationEpoch = model.sessionRequestEpoch }))
+                        (clearSelection >> (\cleared ->
+                            { cleared | detailNavigationEpoch = model.sessionRequestEpoch, viewport = ObservationViewport.returnToOrigin previous.detailReturnTarget previous.viewport }))
                         model
+                state = updated.observations
+                intent = Just
+                    { intent = "return", selectedId = Nothing, workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, queryGeneration = state.viewport.stamp.generation
+                    , navigationToken = state.detailNavigationToken, previousToken = previous.detailNavigationToken, previousSelection = previous.selectedId
+                    , originKey = Maybe.withDefault "" previous.detailReturnTarget, readyRevision = Nothing, fallback = previous.detailReturnTarget == Nothing }
+                returned = { updated | observations = { state | pendingReturnNavigation = intent } }
             in
-            ( updated, Cmd.batch [ navigateDetail "return" workspaceId previous.detailReturnTarget previous updated.observations ] )
+            ( returned, Cmd.none )
 
         _ ->
             ( model, Cmd.none )
@@ -2201,6 +2235,7 @@ navigateDetail intent workspaceId origin previous destination =
             , ( "originId", origin |> Maybe.map Encode.string |> Maybe.withDefault Encode.null )
             , ( "previous", navigationStamp workspaceId previous )
             , ( "destination", navigationStamp workspaceId destination )
+            , ( "viewport", ObservationViewport.stampValue destination.viewport.stamp )
             ]
         )
 
@@ -3091,6 +3126,155 @@ domToken value =
            )
 
 
+resultRowKey : ObservationResultRow -> String
+resultRowKey row =
+    case row of
+        ObservationCardRow context observation -> observationCardDomId context observation.id
+        ObservationFacetRow facet -> "observation-facet-" ++ domToken (facetKey facet.subjectKind facet.subject)
+        ObservationPathRow path _ -> "observation-path-" ++ domToken path
+        ObservationSubjectRow _ key _ _ _ _ -> "observation-group-" ++ domToken key
+
+
+projectResultRows : ObservationModel -> Array.Array ObservationResultRow
+projectResultRows state =
+    let
+        cards context ids = ids |> List.filterMap (\key -> Dict.get key state.items |> Maybe.map (ObservationCardRow context))
+        subject path group =
+            let expanded = Dict.get group.key state.expandedMatchGroups |> Maybe.withDefault False in
+            ObservationSubjectRow path group.key group.subjectKind group.subject (List.length group.observationIds) expanded
+                :: (if expanded then cards group.key group.observationIds else [])
+        pathRows group = ObservationPathRow group.path (List.isEmpty group.subjectGroups)
+            :: List.concatMap (subject group.path) group.subjectGroups
+        exact = state.selectedFacet |> Maybe.map (\facet -> "exact:" ++ facetKey facet.subjectKind facet.subject) |> Maybe.withDefault "exact:missing"
+    in
+    Array.fromList (case state.requestMode of
+        ObservationFacetMode -> state.facetKeys |> List.filterMap (\key -> Dict.get key state.facets |> Maybe.map ObservationFacetRow)
+        ObservationMatchMode -> groupPathMatches state.matchAppliedPaths state.orderedIds state.matchEvidence |> List.concatMap pathRows
+        ObservationExactSubjectMode -> cards exact state.orderedIds
+        ObservationFlatMode -> cards "flat" state.orderedIds)
+
+
+viewportLifetime : Model -> ObservationViewport.Stamp
+viewportLifetime model =
+    let state = model.observations in
+    { workspace = if model.activeTab == ObservationsTab then repositoryWorkspaceId model |> Maybe.withDefault "" else ""
+    , epoch = model.sessionRequestEpoch
+    , generation = String.join ":" [ modeName state.requestMode, String.fromInt state.requestGeneration, String.fromInt state.facetRequestGeneration, state.queryFingerprint, state.facetFingerprint ]
+    , revision = state.viewport.stamp.revision }
+
+
+{-| Build membership projection only after a structural/canonical change, never
+for a draft keystroke. Transport caches and their counts remain untouched.
+-}
+refreshViewport : Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+refreshViewport previous ( model, command ) =
+    let
+        old = previous.observations
+        state = model.observations
+        lifetime = viewportLifetime model
+        changed = old.items /= state.items || old.orderedIds /= state.orderedIds || old.requestMode /= state.requestMode
+            || old.selectedFacet /= state.selectedFacet || old.facets /= state.facets || old.facetKeys /= state.facetKeys
+            || old.matchAppliedPaths /= state.matchAppliedPaths || old.matchEvidence /= state.matchEvidence
+            || old.expandedMatchGroups /= state.expandedMatchGroups
+            || lifetime.workspace /= state.viewport.stamp.workspace || lifetime.epoch /= state.viewport.stamp.epoch
+            || lifetime.generation /= state.viewport.stamp.generation
+        rows = if changed then (if lifetime.workspace == "" then Array.empty else projectResultRows state) else state.resultRows
+        projectedViewport = if changed then
+            let rebuilt = ObservationViewport.rebuild lifetime (Array.toList rows |> List.map resultRowKey) state.viewport in
+            if old.items /= state.items || old.expandedMatchGroups /= state.expandedMatchGroups then { rebuilt | origin = Nothing } else rebuilt
+            else state.viewport
+        oldStamp = projectedViewport.stamp
+        navigationChanged = projectedViewport.navigationToken /= state.detailNavigationToken
+        viewport = if navigationChanged then { projectedViewport | navigationToken = state.detailNavigationToken, stamp = { oldStamp | revision = oldStamp.revision + 1 } } else projectedViewport
+        invalidatedReturn = changed && (old.items /= state.items || old.expandedMatchGroups /= state.expandedMatchGroups || old.orderedIds /= state.orderedIds)
+        ownedPending = state.pendingReturnNavigation |> Maybe.andThen (\intent ->
+            if intent.workspaceId == lifetime.workspace && intent.sessionEpoch == lifetime.epoch && intent.queryGeneration == lifetime.generation && intent.navigationToken == state.detailNavigationToken then Just intent else Nothing)
+        pending = if invalidatedReturn then ownedPending |> Maybe.map (\intent -> { intent | fallback = intent.intent == "return" && not (Dict.member intent.originKey viewport.index.positions), readyRevision = Nothing }) else ownedPending
+        updated = { state | resultRows = rows, viewport = viewport, pendingReturnNavigation = pending }
+        synchronize = changed || navigationChanged || old.detailReturnTarget /= state.detailReturnTarget || old.viewport.focus /= viewport.focus || old.viewport.returnPin /= viewport.returnPin || old.viewport.stamp /= viewport.stamp
+    in
+    ( { model | observations = updated }
+    , Cmd.batch [ command, if synchronize then Ports.syncObservationViewport (ObservationViewport.sync changed 0 Nothing viewport) else Cmd.none ] )
+
+
+updateViewport : Encode.Value -> Model -> ( Model, Cmd Msg )
+updateViewport payload model =
+    if model.activeTab /= ObservationsTab || viewportLifetime model /= model.observations.viewport.stamp
+        || Decode.decodeValue (Decode.field "navigationToken" Decode.int) payload /= Ok model.observations.detailNavigationToken then
+        ( model, Cmd.none )
+    else
+        case ObservationViewport.update model.observations.detailReturnTarget payload model.observations.viewport of
+            Nothing -> ( model, Cmd.none )
+            Just ( viewport, target, adjustment ) ->
+                let
+                    state = model.observations
+                    valid intent = intent.workspaceId == viewport.stamp.workspace && intent.sessionEpoch == model.sessionRequestEpoch
+                        && intent.queryGeneration == viewport.stamp.generation && intent.navigationToken == state.detailNavigationToken && state.selectedId == intent.selectedId
+                    retained = state.pendingReturnNavigation |> Maybe.andThen (\intent ->
+                        if not (valid intent) || target /= Nothing || Decode.decodeValue (Decode.field "focus" (Decode.nullable Decode.string)) payload == Ok (Just "@outside") then Nothing
+                        else Just { intent | fallback = intent.fallback || (intent.intent == "return" && not (Dict.member intent.originKey viewport.index.positions)) })
+                    ready = retained |> Maybe.andThen (\intent ->
+                        if intent.readyRevision == Just state.viewport.stamp.revision && viewport.stamp == state.viewport.stamp && viewport.index.heights == state.viewport.index.heights
+                            && not viewport.restoring && abs adjustment < 0.01
+                            && (intent.intent /= "detail" || Decode.decodeValue (Decode.field "detailMounted" Decode.bool) payload == Ok True) then Just intent else Nothing)
+                    pending = if ready /= Nothing then Nothing else retained |> Maybe.map (\intent -> { intent | readyRevision = if viewport.restoring then Nothing else Just viewport.stamp.revision })
+                    previous intent = { state | detailNavigationEpoch = intent.sessionEpoch, detailNavigationToken = intent.previousToken, selectedId = intent.previousSelection }
+                    destination = { state | viewport = viewport }
+                    navigation = ready |> Maybe.map (\intent -> navigateDetail intent.intent intent.workspaceId (if intent.fallback || intent.originKey == "" then Nothing else Just intent.originKey) (previous intent) destination) |> Maybe.withDefault Cmd.none
+                    settled = viewport.stamp == state.viewport.stamp && viewport.index.heights == state.viewport.index.heights
+                        && not viewport.restoring && abs adjustment < 0.01 && target == Nothing
+                        && (pending == Nothing || Maybe.map .readyRevision pending == Maybe.map .readyRevision state.pendingReturnNavigation)
+                in
+                ( { model | observations = { state | viewport = viewport, pendingReturnNavigation = pending } }
+                , Cmd.batch [ Ports.syncObservationViewport (ObservationViewport.syncReceipt settled adjustment target viewport), navigation ] )
+
+
+viewResultRows : ObservationModel -> Html Msg
+viewResultRows state =
+    let
+        -- Pure view callers (fixtures/tests) may not have passed through routing.
+        uninitialized = state.viewport.stamp.workspace == "" && Array.isEmpty state.resultRows
+        rows = if uninitialized then projectResultRows state else state.resultRows
+        viewport = if uninitialized then ObservationViewport.rebuild state.viewport.stamp (Array.toList rows |> List.map resultRowKey) state.viewport else state.viewport
+        piece item =
+            case item of
+                HierarchyViewport.Gap at height ->
+                    ( "gap:" ++ String.fromInt at, div [ class "observation-viewport-spacer", style "height" (String.fromFloat height ++ "px"), attribute "aria-hidden" "true" ] [] )
+                HierarchyViewport.Row at key _ ->
+                    ( key, Array.get at rows |> Maybe.map (\row ->
+                        div [ class "observation-viewport-row", attribute "data-observation-key" key, attribute "data-observation-position" (String.fromInt at) ]
+                            [ Lazy.lazy2 viewResultRow state.selectedId row ]) |> Maybe.withDefault (text "") )
+    in
+    Keyed.node "div"
+        [ id "observation-viewport", class "observation-list-rows observation-viewport"
+        , attribute "data-observation-viewport-context" (Encode.encode 0 (ObservationViewport.stampValue viewport.stamp))
+        , attribute "data-observation-layout-ready" (if viewport.restoring then "false" else "true")
+        , attribute "data-observation-focus-key" (Maybe.withDefault "" viewport.focus)
+        , attribute "data-observation-logical-count" (String.fromInt (Array.length rows))
+        , attribute "data-observation-loaded-count" (String.fromInt (List.length state.orderedIds)) ]
+        (ObservationViewport.pieces state.detailReturnTarget viewport |> List.map piece)
+
+
+viewResultRow : Maybe String -> ObservationResultRow -> Html Msg
+viewResultRow selected row =
+    case row of
+        ObservationCardRow context observation -> viewObservationRow selected context observation
+        ObservationFacetRow facet -> viewFacet facet
+        ObservationPathRow path empty ->
+            section [ class "observation-path-group" ]
+                [ h3 [ id ("observation-path-" ++ domToken path), class "observation-path-heading" ] [ text path ]
+                , if empty then p [ class "observation-path-empty" ] [ text "No loaded matches for this path." ] else text "" ]
+        ObservationSubjectRow path key kind subject count expanded ->
+            section [ class "observation-subject-group", attribute "data-observation-group" key, attribute "aria-label" ("Subject " ++ subject ++ " for " ++ path) ]
+                [ div [ class "observation-subject-group-header" ]
+                    [ button [ class "observation-subject-group-toggle", type_ "button", onClick (ToggleObservationMatchGroup key)
+                        , attribute "aria-expanded" (if expanded then "true" else "false"), attribute "aria-controls" "observation-viewport" ]
+                        [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel kind) ]
+                        , span [ class "observation-subject" ] [ text subject ]
+                        , span [ class "observation-loaded-count" ] [ text (String.fromInt count ++ " loaded") ] ]
+                    , button [ class "observation-subject-copy", type_ "button", onClick (CopyObservationSubject subject), attribute "aria-label" ("Copy matching subject " ++ subject) ] [ text "Copy subject" ] ] ]
+
+
 viewObservations : Api.Workspace -> Model -> Html Msg
 viewObservations workspace model =
     let
@@ -3310,7 +3494,7 @@ viewFileComposer state =
 
           else
             text ""
-        , button [ class "btn btn-secondary", type_ "button", onClick CloseObservationFileComposer ] [ text "Close file composer" ]
+        , button [ id "observation-close-file-composer", class "btn btn-secondary", type_ "button", onClick CloseObservationFileComposer ] [ text "Close file composer" ]
         ]
 
 
@@ -3490,8 +3674,7 @@ viewObservationResults workspaceId ariaLabel emptyHeading state =
 
                 else
                     text ""
-        , div [ class "observation-list-rows", attribute "aria-label" ariaLabel ]
-            (List.map (viewObservationRow state.selectedId context) observations)
+        , Lazy.lazy viewResultRows state
         , if state.loading && not (List.isEmpty observations) then
             viewPageLoading state.expectedOffset "observations"
           else
@@ -3583,7 +3766,7 @@ viewFacetCatalogue workspaceId state =
 
                 else
                     text ""
-        , div [ class "observation-facet-rows", attribute "aria-label" "By subject" ] (List.map viewFacet facets)
+        , Lazy.lazy viewResultRows state
         , if state.facetLoading && not (List.isEmpty facets) then
             viewPageLoading state.facetExpectedOffset "shared subjects"
           else
@@ -3633,11 +3816,8 @@ viewMatchResults workspaceId state =
         paths =
             state.matchAppliedPaths
 
-        pathGroups =
-            groupPathMatches paths state.orderedIds state.matchEvidence
-
         hasAnyGroups =
-            List.any (not << List.isEmpty << .subjectGroups) pathGroups
+            not (List.isEmpty state.orderedIds)
     in
     div [ id "observation-results", class "entity-list observation-list observation-match-results", tabindex -1 ]
         [ viewStaleResultsNotice state
@@ -3664,7 +3844,7 @@ viewMatchResults workspaceId state =
                      )
                     )
         , if state.error == Nothing || not (List.isEmpty state.orderedIds) then
-            div [] (List.map (viewPathGroup state) pathGroups)
+            Lazy.lazy viewResultRows state
           else
             text ""
         , if state.loading && not (List.isEmpty state.orderedIds) then
@@ -3757,7 +3937,7 @@ viewObservationRow selectedId context observation =
         isSelected =
             selectedId == Just observation.id
     in
-    div [ class "observation-result" ]
+    div [ class "observation-result", attribute "data-observation-id" observation.id, attribute "data-observation-context-key" context ]
         [ button
             [ id (observationCardDomId context observation.id)
             , classList

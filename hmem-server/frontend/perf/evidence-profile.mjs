@@ -5,20 +5,25 @@ import { atomicEvidenceWrite } from './contracts.mjs'
 export const OBSERVATION_SCALING_BASE = 'c5230077a643d06e7ca5a4ff6b5616cfb90862ec'
 export const OBSERVATION_SCALING_TASK = 'b9f1de65-f016-4178-89a0-ac13a5d7fff8'
 export const OBSERVATION_SCALING_REVISION = 'observation-scaling.v1'
+export const OBSERVATION_RENDERING_BASE = 'ed3aca53afe346f928dc00f2e2a7b0a8e07aaecb'
+export const OBSERVATION_RENDERING_TASK = 'cbb38fd2-fc89-449c-a308-168374f23f82'
+export const OBSERVATION_RENDERING_REVISION = 'observation-rendering.v1'
 const legacyBase = '818cc3cc634bfa8c0ebe14c13fc70b4c2d059e83'
 const historicalTasks = new Map([
   ['04fd7ba26b1a63b5f1c601939b046ef2fe5f51d6', { revision: 'v2', taskId: '2503e08f-ff82-4f2c-adff-24e14fec8299' }],
   ['1bdbe3d071d1fbbb994bc515841103adedff77ec', { revision: 'v3', taskId: '755a7286-6da5-494e-9b9b-fa1edd43d0b0' }],
   ['d9ff753763f086fa4faef078b451f2e48ca1a7a4', { revision: 'expanded-hierarchy.v1', taskId: '555ebf6e-8442-43f4-a75d-c33fcffc76f4', parentTaskId: '6a3f31c2-be12-4aa8-a460-8ec3274332a3' }],
-  [OBSERVATION_SCALING_BASE, { revision: OBSERVATION_SCALING_REVISION, taskId: OBSERVATION_SCALING_TASK }]
+  [OBSERVATION_SCALING_BASE, { revision: OBSERVATION_SCALING_REVISION, taskId: OBSERVATION_SCALING_TASK }],
+  [OBSERVATION_RENDERING_BASE, { revision: OBSERVATION_RENDERING_REVISION, taskId: OBSERVATION_RENDERING_TASK }]
 ])
 
 export function evidenceProfile(baseCommit, frontendRoot, temporaryRoot) {
   if (baseCommit !== legacyBase && !historicalTasks.has(baseCommit)) throw new Error('Unmapped evidence base: ' + baseCommit)
   const task = historicalTasks.get(baseCommit) || null
   const revision = task?.revision || 'v1'
-  const scaling = revision === OBSERVATION_SCALING_REVISION
-  const root = scaling ? path.resolve(temporaryRoot, 'hmem-observation-scaling-' + OBSERVATION_SCALING_TASK) : path.join(frontendRoot, 'perf')
+  const rendering = revision === OBSERVATION_RENDERING_REVISION
+  const scaling = revision === OBSERVATION_SCALING_REVISION || rendering
+  const root = scaling ? path.resolve(temporaryRoot, (rendering ? 'hmem-observation-rendering-' : 'hmem-observation-scaling-') + task.taskId) : path.join(frontendRoot, 'perf')
   const repositoryRoot = path.resolve(frontendRoot, '../..')
   const fromRepository = path.relative(repositoryRoot, root)
   if (scaling && !fromRepository.startsWith('..' + path.sep) && !path.isAbsolute(fromRepository)) throw new Error('Scaling evidence must be outside the repository')
@@ -29,7 +34,7 @@ export function evidenceProfile(baseCommit, frontendRoot, temporaryRoot) {
     manifest: path.join(root, `final-working-tree.evidence-manifest.${revision}.json`),
     diff: path.join(root, scaling || revision === 'expanded-hierarchy.v1' ? `final-working-tree.complete.${revision}.diff` : 'final-working-tree.complete.diff')
   }
-  return { baseCommit, task, revision, scaling, root, files,
+  return { baseCommit, task, revision, scaling, rendering, root, files,
     qualifiedRetirement: scaling || revision === 'expanded-hierarchy.v1',
     trace: scaling ? path.join(root, 'temporary', 'large-observation-trace.zip') : null,
     retention: scaling ? 'Frontend owner; retain the five task artifacts until project closure plus 30 days; remove temporary trace before success' : null }

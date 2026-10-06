@@ -1,14 +1,61 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
+import fs from 'node:fs'
+import { createHash } from 'node:crypto'
 import { generateFixture, fixtureHash, validateFixture, OBSERVATION_MEASURED_QUERY } from './fixtures.mjs'
 import { OBSERVATION_SCALING_CONTRACT, generateObservationScalingFixture, queryObservationScalingMatches, observationScalingFrames, aggregateObservationScaling, observationScalingMetrics, observationTraceCaptureOptions, traceAdmissionReceipt } from './observation-scaling.mjs'
-import { OBSERVATION_SCALING_BASE, OBSERVATION_SCALING_TASK, evidenceProfile, scalingRecordOutputs, assertEvidenceIdentity, assertScalingEvidenceWrite, prepareScalingScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
+import { OBSERVATION_SCALING_BASE, OBSERVATION_SCALING_TASK, OBSERVATION_RENDERING_BASE, OBSERVATION_RENDERING_TASK, evidenceProfile, scalingRecordOutputs, assertEvidenceIdentity, assertScalingEvidenceWrite, prepareScalingScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
 import { persistEvidenceAttempt, hashJson } from './contracts.mjs'
-import { finalWorkingTreeEvidence } from './harness.mjs'
+import { finalWorkingTreeEvidence, inputQualification, assertQualifiedInputs } from './harness.mjs'
 
 const frontend = path.resolve('fixture-root/hmem-server/frontend')
 const temporary = path.resolve('outside-temporary')
+
+test('actual rendering qualification rejects viewport helper drift after recording and during measurement', () => {
+  const plan = evidenceProfile(OBSERVATION_RENDERING_BASE, frontend, temporary)
+  const helperPath = path.resolve('tests-js/observation-viewport-fixture.mjs')
+  const recorded = inputQualification({ plan })
+  const helper = recorded.source.find(value => value.path === 'hmem-server/frontend/tests-js/observation-viewport-fixture.mjs')
+  assert.ok(helper, 'the executable scan/reveal helper is in the actual producer source closure')
+  assert.equal(helper.sha256, createHash('sha256').update(fs.readFileSync(helperPath)).digest('hex'))
+  const changed = inputQualification({ plan, io: { ...fs, readFileSync(file, ...args) {
+    return path.resolve(file) === helperPath ? Buffer.concat([fs.readFileSync(file), Buffer.from('\n// changed scan behavior\n')]) : fs.readFileSync(file, ...args)
+  } } })
+  assert.deepEqual(changed.productionAssets, recorded.productionAssets)
+  assert.deepEqual(changed.source.filter(value => value.path !== helper.path), recorded.source.filter(value => value.path !== helper.path))
+  const normalRecord = JSON.parse(JSON.stringify({ inputQualification: recorded }))
+  assert.doesNotThrow(() => assertQualifiedInputs(normalRecord.inputQualification, inputQualification({ plan }), 'recorded source/production asset fingerprints differ from current inputs'))
+  for (const message of ['recorded source/production asset fingerprints differ from current inputs', 'trace input fingerprints differ from current inputs', 'qualification inputs changed during measurement', 'qualification inputs changed before finalization']) {
+    assert.throws(() => assertQualifiedInputs(normalRecord.inputQualification, changed, message), error => error.message === message)
+  }
+  for (const base of [OBSERVATION_SCALING_BASE, '818cc3cc634bfa8c0ebe14c13fc70b4c2d059e83']) {
+    assert.equal(inputQualification({ plan: evidenceProfile(base, frontend, temporary) }).source.some(value => value.path === helper.path), false, 'prior profile source closure stays unchanged')
+  }
+})
+
+test('rendering evidence is a new strict five-file lifetime and cannot overwrite the retained failed scaling set', () => {
+  const before = evidenceProfile(OBSERVATION_SCALING_BASE, frontend, temporary)
+  const current = evidenceProfile(OBSERVATION_RENDERING_BASE, frontend, temporary)
+  assert.equal(current.rendering, true)
+  assert.equal(current.scaling, true)
+  assert.equal(current.task.taskId, OBSERVATION_RENDERING_TASK)
+  assert.equal(path.basename(current.root), 'hmem-observation-rendering-' + OBSERVATION_RENDERING_TASK)
+  assert.equal(current.revision, 'observation-rendering.v1')
+  assert.equal(new Set(Object.values(current.files)).size, 5)
+  assert.notEqual(current.root, before.root)
+  for (const name of Object.keys(before.files)) {
+    assert.notEqual(current.files[name], before.files[name])
+    assert.ok(path.basename(current.files[name]).includes('.observation-rendering.v1.'))
+    assert.throws(() => assertScalingEvidenceWrite(current, before.files[name], 'foreign'), /Unowned/)
+  }
+  const identity = { taskId: current.task.taskId, evidenceBaseCommit: current.baseCommit, measurementRevision: current.revision }
+  assert.doesNotThrow(() => assertEvidenceIdentity(current, identity))
+  assert.throws(() => assertEvidenceIdentity(current, { ...identity, taskId: before.task.taskId }), /identity mismatch/)
+  assert.throws(() => assertEvidenceIdentity(current, { ...identity, evidenceBaseCommit: before.baseCommit }), /identity mismatch/)
+  assert.equal(path.basename(current.trace), 'large-observation-trace.zip')
+  assert.equal(path.basename(path.dirname(current.trace)), 'temporary')
+})
 
 test('scaling evidence binds every output to the fresh task and rejects identity/path fallback', () => {
   const profile = evidenceProfile(OBSERVATION_SCALING_BASE, frontend, temporary)

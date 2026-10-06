@@ -1,6 +1,7 @@
 module ObservationTest exposing (suite)
 
 import Api
+import Array
 import AppShell
 import Browser
 import Dict
@@ -12,6 +13,7 @@ import Feature.WebSocket
 import Helpers
 import Html.Attributes exposing (attribute, hidden, tabindex)
 import Http
+import ObservationViewport
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Route
@@ -19,7 +21,7 @@ import Test exposing (..)
 import Test.Html.Query as Query
 import Test.Html.Event as Event
 import Test.Html.Selector as Selector
-import Types exposing (AuthStatus(..), Flags, Model, Msg(..), ObservationModel, ObservationRequestMode(..), Page(..), WorkspaceTab(..))
+import Types exposing (AuthStatus(..), Flags, Model, Msg(..), ObservationModel, ObservationRequestMode(..), ObservationResultRow(..), Page(..), WorkspaceTab(..))
 import Url
 
 
@@ -27,6 +29,8 @@ suite : Test
 suite =
     describe "observation API boundary"
         [ describe "URL reauthorization, search intent and bootstrap ownership" observationUrlReviewTests
+        , describe "cached complete viewport projection" observationProjectionTests
+        , describe "receipt-owned Return lifecycle" observationReturnReceiptTests
         , describe "bounded applied URL context" observationUrlTests
         , test "decodes server-shaped file and glob observations" <|
             \_ ->
@@ -4115,3 +4119,223 @@ observationUrlReviewTests =
 urlReviewQuery : ObservationRequestMode -> Types.ObservationAppliedQuery
 urlReviewQuery mode =
     { requestMode = mode, query = "Cache", subjectKind = Just Api.SubjectGlob, subject = "manual", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm", "src/View.elm" ] else [] }
+
+
+returnReceipt : ObservationViewport.State -> Float -> String -> Maybe String -> Encode.Value
+returnReceipt viewport width layout focus =
+    measuredReturnReceipt viewport width layout focus []
+
+
+measuredReturnReceipt : ObservationViewport.State -> Float -> String -> Maybe String -> List ( String, Float ) -> Encode.Value
+measuredReturnReceipt viewport width layout focus measurements =
+    Encode.object
+        [ ( "stamp", ObservationViewport.stampValue viewport.stamp )
+        , ( "navigationToken", Encode.int viewport.navigationToken ), ( "detailMounted", Encode.bool True )
+        , ( "top", Encode.float viewport.top ), ( "height", Encode.float viewport.height ), ( "width", Encode.float width )
+        , ( "layout", Encode.string layout ), ( "measurements", Encode.list (\( key, height ) -> Encode.object [ ( "key", Encode.string key ), ( "height", Encode.float height ) ]) measurements )
+        , ( "focus", focus |> Maybe.map Encode.string |> Maybe.withDefault Encode.null ), ( "target", Encode.null ) ]
+
+
+pendingReturnModel : Model
+pendingReturnModel =
+    let
+        value = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+        initial = Feature.Observation.init
+        before = editableModel initial
+        loaded = editableModel { initial | items = Dict.singleton value.id value, orderedIds = [ value.id ] }
+        projected = Feature.Observation.refreshViewport before ( loaded, Cmd.none ) |> Tuple.first
+        state = projected.observations
+        viewport = state.viewport
+        painted = { projected | observations = { state | viewport = { viewport | width = 800, layout = "font16" } } }
+        selected = Feature.Observation.update (SelectObservationFrom value.id (Feature.Observation.observationCardDomId "flat" value.id)) painted |> Tuple.first
+        started = Feature.Observation.update StartObservationEdit selected |> Tuple.first
+        dirty = Feature.Observation.update (SetObservationDraft "Protected return draft") started |> Tuple.first
+        selectedState = dirty.observations
+        narrow = selectedState.viewport
+        detail = { dirty | observations = { selectedState | viewport = { narrow | width = 400 } } }
+    in
+    Feature.Observation.update ReturnObservationResults detail |> Feature.Observation.refreshViewport detail |> Tuple.first
+
+
+observationReturnReceiptTests : List Test
+observationReturnReceiptTests =
+    [ test "restoration requires a subsequent painted receipt of its new revision and consumes Return once" <| \_ ->
+        let
+            returned = pendingReturnModel
+            oldReceipt = returnReceipt returned.observations.viewport 800 "font16" Nothing
+            restored = Feature.Observation.updateViewport oldReceipt returned |> Tuple.first
+            stale = Feature.Observation.updateViewport oldReceipt restored |> Tuple.first
+            settledReceipt = returnReceipt restored.observations.viewport 800 "font16" Nothing
+            dispatched = Feature.Observation.updateViewport settledReceipt restored |> Tuple.first
+            repeated = Feature.Observation.updateViewport settledReceipt dispatched |> Tuple.first
+            focused = Feature.Observation.updateViewport (returnReceipt dispatched.observations.viewport 800 "font16" dispatched.observations.viewport.returnPin) dispatched |> Tuple.first
+        in
+        Expect.all
+            [ \_ -> Expect.equal True returned.observations.viewport.restoring
+            , \_ -> Expect.equal True (restored.observations.viewport.stamp.revision > returned.observations.viewport.stamp.revision)
+            , \_ -> Expect.equal True (restored.observations.pendingReturnNavigation /= Nothing)
+            , \_ -> Expect.equal restored.observations stale.observations
+            , \_ -> Expect.equal Nothing dispatched.observations.pendingReturnNavigation
+            , \_ -> Expect.equal dispatched.observations repeated.observations
+            , \_ -> Expect.equal returned.observations.viewport.returnPin dispatched.observations.viewport.returnPin
+            , \_ -> Expect.equal Nothing focused.observations.viewport.returnPin
+            , \_ -> Expect.equal returned.observations.edit dispatched.observations.edit
+            ] ()
+    , test "clear activation tab session and query replacement retire pending Return without losing its draft" <| \_ ->
+        let
+            returned = pendingReturnModel
+            cleared = { returned | observations = Feature.Observation.clearSelection returned.observations }
+            activated = Feature.Observation.update (SelectObservationFrom "curated" "new-origin") returned |> Tuple.first
+            queryState = returned.observations
+            query = { returned | observations = { queryState | requestGeneration = queryState.requestGeneration + 1 } }
+            replacements = [ cleared, activated
+                , Feature.Observation.refreshViewport returned ( { returned | activeTab = ProjectsTab }, Cmd.none ) |> Tuple.first
+                , Feature.Observation.refreshViewport returned ( { returned | sessionRequestEpoch = returned.sessionRequestEpoch + 1 }, Cmd.none ) |> Tuple.first
+                , Feature.Observation.refreshViewport returned ( query, Cmd.none ) |> Tuple.first ]
+            replay candidate = Feature.Observation.updateViewport (returnReceipt returned.observations.viewport 800 "font16" Nothing) candidate |> Tuple.first
+        in
+        Expect.all
+            [ \_ -> Expect.equal [ Nothing, Just "detail", Nothing, Nothing, Nothing ] (List.map (.observations >> .pendingReturnNavigation >> Maybe.map .intent) replacements)
+            , \_ -> Expect.equal (List.map (.observations >> .pendingReturnNavigation) replacements) (List.map (replay >> .observations >> .pendingReturnNavigation) replacements)
+            , \_ -> Expect.equal (List.repeat 5 returned.observations.edit) (List.map (.observations >> .edit) replacements)
+            , \_ -> Expect.equal Nothing cleared.observations.viewport.origin
+            ] ()
+    , test "font resize keeps an authorized exact card while actual target loss uses fresh settled results fallback" <| \_ ->
+        let
+            returned = pendingReturnModel
+            changedLayout = Feature.Observation.updateViewport (returnReceipt returned.observations.viewport 320 "font32" Nothing) returned |> Tuple.first
+            settled = Feature.Observation.updateViewport (returnReceipt changedLayout.observations.viewport 320 "font32" Nothing) changedLayout |> Tuple.first
+            state = returned.observations
+            removed = { returned | observations = { state | orderedIds = [], items = Dict.empty } }
+                |> (\model -> Feature.Observation.refreshViewport returned ( model, Cmd.none ) |> Tuple.first)
+            returnedWidth = Feature.Observation.updateViewport (returnReceipt removed.observations.viewport 800 "font16" Nothing) removed |> Tuple.first
+            fallback = Feature.Observation.updateViewport (returnReceipt returnedWidth.observations.viewport 800 "font16" Nothing) returnedWidth |> Tuple.first
+        in
+        Expect.all
+            [ \_ -> Expect.equal (Just False) (Maybe.map .fallback changedLayout.observations.pendingReturnNavigation)
+            , \_ -> Expect.equal Nothing settled.observations.pendingReturnNavigation
+            , \_ -> Expect.equal (Just True) (Maybe.map .fallback removed.observations.pendingReturnNavigation)
+            , \_ -> Expect.equal Nothing fallback.observations.pendingReturnNavigation
+            , \_ -> Expect.equal returned.observations.edit fallback.observations.edit
+            ] ()
+    , test "same-ID narrow activation keeps its exact card when returned grid width cannot reuse the captured heights" <| \_ ->
+        let
+            returned = pendingReturnModel
+            state = returned.observations
+            viewport = state.viewport
+            narrowOrigin = { returned | observations = { state | viewport = { viewport | origin = Maybe.map (\origin -> { origin | width = 400 }) viewport.origin } } }
+            widened = Feature.Observation.updateViewport (returnReceipt narrowOrigin.observations.viewport 800 "font16" Nothing) narrowOrigin |> Tuple.first
+            settled = Feature.Observation.updateViewport (returnReceipt widened.observations.viewport 800 "font16" Nothing) widened |> Tuple.first
+        in
+        Expect.all
+            [ \_ -> Expect.equal (Just False) (Maybe.map .fallback widened.observations.pendingReturnNavigation)
+            , \_ -> Expect.equal Nothing widened.observations.viewport.origin
+            , \_ -> Expect.equal Nothing settled.observations.pendingReturnNavigation
+            , \_ -> Expect.equal returned.observations.viewport.returnPin settled.observations.viewport.returnPin
+            , \_ -> Expect.equal returned.observations.edit settled.observations.edit
+            ] ()
+    , test "newly mounted measurements cannot consume Return before a fresh unchanged-geometry receipt" <| \_ ->
+        let
+            returned = pendingReturnModel
+            restored = Feature.Observation.updateViewport (returnReceipt returned.observations.viewport 800 "font16" Nothing) returned |> Tuple.first
+            key = Feature.Observation.observationCardDomId "flat" "curated"
+            measuring = Feature.Observation.updateViewport (measuredReturnReceipt restored.observations.viewport 800 "font16" Nothing [ ( key, 300 ) ]) restored |> Tuple.first
+            settled = Feature.Observation.updateViewport (measuredReturnReceipt measuring.observations.viewport 800 "font16" Nothing [ ( key, 300 ) ]) measuring |> Tuple.first
+        in
+        Expect.all
+            [ \_ -> Expect.equal True (measuring.observations.pendingReturnNavigation /= Nothing)
+            , \_ -> Expect.equal Nothing settled.observations.pendingReturnNavigation
+            , \_ -> Expect.equal measuring.observations.viewport.stamp settled.observations.viewport.stamp
+            , \_ -> Expect.equal returned.observations.edit settled.observations.edit
+            ] ()
+    , test "detail entry waits for current heading mount and geometry while preceding navigation reads stay inert" <| \_ ->
+        let
+            before = pendingReturnModel
+            activated = Feature.Observation.update (SelectObservationFrom "curated" (Feature.Observation.observationCardDomId "flat" "curated")) before
+                |> Feature.Observation.refreshViewport before |> Tuple.first
+            payload current headingMounted =
+                measuredReturnReceipt current.observations.viewport 400 "font16" Nothing []
+                    |> Decode.decodeValue (Decode.keyValuePairs Decode.value)
+                    |> Result.withDefault []
+                    |> List.filter (\( key, _ ) -> key /= "detailMounted")
+                    |> (\fields -> Encode.object (( "detailMounted", Encode.bool headingMounted ) :: fields))
+            measuring = Feature.Observation.updateViewport (payload activated False) activated |> Tuple.first
+            mounted = Feature.Observation.updateViewport (payload measuring False) measuring |> Tuple.first
+            stale = Feature.Observation.updateViewport (returnReceipt before.observations.viewport 800 "font16" (Just "@outside")) mounted |> Tuple.first
+            settled = Feature.Observation.updateViewport (payload mounted True) mounted |> Tuple.first
+            outside = Feature.Observation.updateViewport (returnReceipt mounted.observations.viewport 400 "font16" (Just "@outside")) mounted |> Tuple.first
+            replayed = Feature.Observation.updateViewport (payload outside True) outside |> Tuple.first
+        in
+        Expect.all
+            [ \_ -> Expect.equal (Just "detail") (Maybe.map .intent activated.observations.pendingReturnNavigation)
+            , \_ -> Expect.equal True (mounted.observations.pendingReturnNavigation /= Nothing)
+            , \_ -> Expect.equal mounted.observations.pendingReturnNavigation stale.observations.pendingReturnNavigation
+            , \_ -> Expect.equal Nothing settled.observations.pendingReturnNavigation
+            , \_ -> Expect.equal Nothing replayed.observations.pendingReturnNavigation
+            , \_ -> Expect.equal before.observations.edit settled.observations.edit
+            ] ()
+    , test "passive selection cannot create intentional detail navigation ownership" <| \_ ->
+        let before = pendingReturnModel |> (\model -> { model | observations = Feature.Observation.clearSelection model.observations })
+            selected = Feature.Observation.selectObservation "curated" before |> Tuple.first
+        in
+        Expect.equal Nothing selected.observations.pendingReturnNavigation
+    ]
+
+
+observationProjectionTests : List Test
+observationProjectionTests =
+    [ test "flat and exact projections retain the complete ordered150 members independently of mounted windows" <| \_ ->
+        let
+            observations = List.range 0 149 |> List.map (\number -> fixtureObservation (String.fromInt number) "2026-01-01T00:00:00Z")
+            ids = List.map .id observations
+            initial = Feature.Observation.init
+            loaded = { initial | items = observations |> List.map (\value -> ( value.id, value )) |> Dict.fromList, orderedIds = ids }
+            cardIds state = Feature.Observation.projectResultRows state |> Array.toList |> List.filterMap (\row -> case row of
+                ObservationCardRow _ value -> Just value.id
+                _ -> Nothing)
+        in
+        Expect.equal [ ids, ids ] [ cardIds loaded, cardIds { loaded | requestMode = ObservationExactSubjectMode } ]
+    , test "ordered match paths and overlapping subject groups preserve every canonical contextual duplicate through collapse" <| \_ ->
+        let
+            initial = Feature.Observation.init
+            value = fixtureObservation "repeated" "2026-01-01T00:00:00Z"
+            subjects = [ { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, { subjectKind = Api.SubjectFile, subject = "src/Shared.elm" } ]
+            paths = [ "src/Main.elm", "src/View.elm" ]
+            evidence = { observation = value, matchedPaths = paths, matchedSubjects = subjects, pathMatches = List.map (\path -> { path = path, matchedSubjects = subjects }) paths }
+            loaded = { initial | requestMode = ObservationMatchMode, items = Dict.singleton value.id value, orderedIds = [ value.id ], matchAppliedPaths = paths, matchEvidence = Dict.singleton value.id evidence }
+            groupKeys = List.concatMap (\path -> List.map (\subject -> Feature.Observation.matchGroupKey path subject.subjectKind subject.subject) subjects) paths
+            expanded = { loaded | expandedMatchGroups = List.map (\key -> ( key, True )) groupKeys |> Dict.fromList }
+            projection = Feature.Observation.projectResultRows expanded |> Array.toList
+            contexts = projection |> List.filterMap (\row -> case row of
+                ObservationCardRow context observation -> Just ( context, observation.id )
+                _ -> Nothing)
+            headings = projection |> List.filterMap (\row -> case row of
+                ObservationPathRow path _ -> Just path
+                _ -> Nothing)
+            collapsed = Feature.Observation.projectResultRows loaded |> Array.toList
+        in
+        Expect.equal ( paths, List.map (\key -> ( key, value.id )) groupKeys, 6 ) ( headings, contexts, List.length collapsed )
+    , test "draft input reuses projection and layout revision while canonical content changes retire origin geometry" <| \_ ->
+        let
+            value = fixtureObservation "selected-observation" "2026-01-01T00:00:00Z"
+            initial = Feature.Observation.init
+            loaded = { initial | items = Dict.singleton value.id value, orderedIds = [ value.id ], selectedId = Just value.id, selectedDetail = Just value }
+            before = editableModel initial
+            projected = Feature.Observation.refreshViewport before ( editableModel loaded, Cmd.none ) |> Tuple.first
+            activeViewport = projected.observations.viewport
+            withOrigin = { activeViewport | width = 800, layout = "font16" } |> ObservationViewport.captureOrigin
+            state = projected.observations
+            owned = { projected | observations = { state | viewport = withOrigin } }
+            started = Feature.Observation.update StartObservationEdit owned |> Feature.Observation.refreshViewport owned |> Tuple.first
+            drafted = Feature.Observation.update (SetObservationDraft "Protected keystroke") started |> Feature.Observation.refreshViewport started |> Tuple.first
+            next = { value | content = "Changed canonical row height", updatedAt = "2026-01-02T00:00:00Z", contentVersion = "20000000-0000-4000-8000-000000000001" }
+            canonical = { drafted | observations = Feature.Observation.applyCanonicalObservation next drafted.observations }
+            refreshed = Feature.Observation.refreshViewport drafted ( canonical, Cmd.none ) |> Tuple.first
+        in
+        Expect.all
+            [ \_ -> Expect.equal started.observations.resultRows drafted.observations.resultRows
+            , \_ -> Expect.equal started.observations.viewport.stamp drafted.observations.viewport.stamp
+            , \_ -> Expect.equal Nothing refreshed.observations.viewport.origin
+            , \_ -> Expect.equal (Just "Protected keystroke") (Maybe.map .draft refreshed.observations.edit)
+            ] ()
+    ]

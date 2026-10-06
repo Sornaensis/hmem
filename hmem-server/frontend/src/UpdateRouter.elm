@@ -31,16 +31,22 @@ type MainOwnedMsg
 update : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 update msg model =
     case msg of
+        ObservationViewportChanged payload ->
+            Ok (Feature.Observation.updateViewport payload model)
+
         HierarchyViewportChanged payload ->
             Ok (Feature.Cards.updateViewport payload model)
 
         _ ->
-            route msg model |> Result.map (Feature.Cards.refreshViewportFor msg model)
+            route msg model |> Result.map (Feature.Cards.refreshViewportFor msg model >> Feature.Observation.refreshViewport model)
 
 
 route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 route msg model =
     case msg of
+        ObservationViewportChanged payload ->
+            Ok (Feature.Observation.updateViewport payload model)
+
         HierarchyViewportChanged payload ->
             Ok (Feature.Cards.updateViewport payload model)
 

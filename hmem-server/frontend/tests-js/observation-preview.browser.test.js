@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
+import { revealObservationRow } from './observation-viewport-fixture.mjs'
 
 const fullBoundary = '😀 '.repeat(104857) + 'END'
 assert.equal(Buffer.byteLength(fullBoundary), 524288)
@@ -73,7 +74,8 @@ for (const width of [1440, 320]) test('production ' + width + ' CSS-pixel previe
     assert.match(await detail.locator('.observation-detail-meta').textContent(), /Content updated2026-10-06 12:35:56\.123 UTC/)
     await h.page.getByRole('button', { name: 'Back to results', exact: true }).click()
     await h.page.waitForFunction(id => document.activeElement?.id === id, cardId, { timeout: 5000 })
-    await cards.nth(1).click(); await h.idle()
+    const multiline = h.page.locator('.observation-result[data-observation-id="multiline"] .observation-card')
+    await revealObservationRow(h.page, multiline); await multiline.click(); await h.idle()
     assert.equal(await h.page.locator('.observation-detail-content').textContent(), longMultiline)
     assert.equal(await h.page.locator('.observation-detail-content script').count(), 0)
     const overflow = await h.page.evaluate(() => document.documentElement.scrollWidth - innerWidth)

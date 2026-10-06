@@ -10,6 +10,11 @@ export function installObservationNavigation(app, options = {}) {
   const Observer = options.MutationObserver || win.MutationObserver
   let frame = null
   let origin = null
+  let toolbar = null, toolbarFrame = null
+  let toolbarActivation = null, nativeIntent = 0
+  const toolbarPort = app.ports.focusObservationToolbar
+  const viewport = options.viewport
+  const cancelToolbar = () => { if (toolbarFrame !== null) cancel(toolbarFrame); toolbarFrame = null; toolbar = null }
 
   const validStamp = value => value && typeof value.workspaceId === 'string'
     && Number.isInteger(value.sessionEpoch) && Number.isInteger(value.token)
@@ -27,12 +32,15 @@ export function installObservationNavigation(app, options = {}) {
   }
 
   const observer = Observer && new Observer(records => {
+    if (toolbarActivation && records.some(record => [...record.removedNodes].some(node => node === toolbarActivation.panel || node.contains?.(toolbarActivation.panel)))) toolbarActivation = null
+    if (toolbar && records.some(record => [...record.removedNodes].some(node => node === toolbar.panel || node.contains?.(toolbar.panel)))) cancelToolbar()
     if (origin && records.some(record => [...record.removedNodes].some(node =>
       node === origin.panel || node.contains?.(origin.panel)
       || node === origin.scroller || node.contains?.(origin.scroller)))) {
       origin = null
       if (frame !== null) cancel(frame)
       frame = null
+      viewport?.cancelNavigation()
     }
   })
 
@@ -48,6 +56,8 @@ export function installObservationNavigation(app, options = {}) {
   // Elm may paint before delivering its port. Native click capture, including
   // keyboard-generated clicks, observes the activation's old DOM lifetime.
   function captureActivation(event) {
+    const target = event.target?.closest?.('#observation-close-file-composer')
+    if (target) toolbarActivation = { id: target.id, panel: panel(), context: currentStamp(panel()), nativeIntent }
     const card = event.target?.closest('.observation-card')
     if (!card) return
     const root = panel()
@@ -55,6 +65,7 @@ export function installObservationNavigation(app, options = {}) {
   }
 
   function navigate(command) {
+    cancelToolbar(); toolbarActivation = null; viewport?.cancelNavigation()
     if (frame !== null) cancel(frame)
     frame = null
     if (!validStamp(command?.previous) || !validStamp(command?.destination)
@@ -82,12 +93,16 @@ export function installObservationNavigation(app, options = {}) {
         || origin?.panel !== before || origin?.scroller !== scroll) {
       origin = null
     }
-    frame = raf(() => {
+    const finish = owned => {
       frame = null
       const root = panel()
       const scroller = doc.getElementById('main-content-scroll')
       if (!scroller || root !== before || scroller !== scroll || !sameStamp(currentStamp(root), command.destination)) {
         origin = null
+        return
+      }
+      if (viewport && !viewport.claimNavigation(owned)) {
+        viewport.awaitNavigation(owned, scheduleNavigation)
         return
       }
       if (command.intent === 'detail') {
@@ -117,19 +132,83 @@ export function installObservationNavigation(app, options = {}) {
         }
         origin = null
       }
-    })
+    }
+    const scheduleNavigation = owned => { frame = raf(() => {
+      frame = null
+      if (panel() !== before || doc.getElementById('main-content-scroll') !== scroll
+          || !sameStamp(currentStamp(before), command.destination)) { origin = null; return }
+      // One bounded receipt/paint turn lets returned-width geometry restore
+      // under its new stamp before the exact physical origin is focused.
+      if ((command.intent === 'return' || owned.viewport) && doc.getElementById('observation-viewport')) {
+        const viewport = doc.getElementById('observation-viewport')
+        const lifetime = viewport.dataset.observationViewportContext
+        frame = raf(() => {
+          const current = doc.getElementById('observation-viewport')
+          let oldStamp, newStamp
+          try { oldStamp = JSON.parse(lifetime); newStamp = JSON.parse(current?.dataset.observationViewportContext || 'null') } catch {}
+          if (current !== viewport || !oldStamp || !newStamp
+              || !['workspace', 'epoch', 'generation'].every(key => oldStamp[key] === newStamp[key])
+              || current.dataset.observationLayoutReady !== 'true') { origin = null }
+          finish(owned)
+        })
+      } else finish(owned)
+    }) }
+    if (viewport && command.viewport) viewport.awaitNavigation(command, scheduleNavigation)
+    else scheduleNavigation(command)
+  }
+  function focusToolbar(command) {
+    cancelToolbar()
+    const root = panel(), context = currentStamp(root)
+    const current = doc.activeElement
+    const activation = toolbarActivation
+    toolbarActivation = null
+    if (!validStamp(command?.context) || !sameStamp(context, command.context)
+        || typeof command.targetId !== 'string' || typeof command.originId !== 'string'
+        || !activation || activation.id !== command.originId || activation.panel !== root
+        || !sameStamp(activation.context, command.context) || activation.nativeIntent !== nativeIntent
+        || (current && current !== doc.body && current.id !== command.originId && current.id !== command.targetId)) return
+    const intent = { ...command, panel: root }
+    toolbar = intent
+    const finish = () => {
+      toolbarFrame = null
+      if (toolbar !== intent) return
+      const actualViewport = doc.getElementById('observation-viewport')
+      let actual
+      try { actual = JSON.parse(actualViewport?.dataset.observationViewportContext || 'null') } catch {}
+      const active = doc.activeElement, target = doc.getElementById(intent.targetId)
+      if (panel() !== root || !sameStamp(currentStamp(root), intent.context)
+          || !actual || !['workspace', 'epoch', 'generation'].every(key => actual[key] === intent.viewport?.[key])
+          || (active && active !== doc.body && active.id !== intent.originId && active.id !== intent.targetId)
+          || !visible(target, root)) { cancelToolbar(); return }
+      toolbar = null
+      target.focus({ preventScroll: true }); target.scrollIntoView({ block: 'nearest', behavior: 'instant' })
+    }
+    toolbarFrame = raf(() => { toolbarFrame = raf(finish) })
+  }
+  function newerToolbarIntent(event) {
+    nativeIntent++
+    if (toolbarActivation && event.target?.id !== toolbarActivation.id) toolbarActivation = null
+    if (toolbar && event.target?.id !== toolbar.originId && event.target?.id !== toolbar.targetId) cancelToolbar()
   }
   doc.addEventListener('click', captureActivation, true)
   observer?.observe(doc.documentElement, { childList: true, subtree: true })
   port.subscribe(navigate)
+  if (toolbarPort) {
+    toolbarPort.subscribe(focusToolbar)
+    for (const name of ['focusin', 'keydown', 'pointerdown']) doc.addEventListener(name, newerToolbarIntent, true)
+  }
   return {
     dispose() {
       if (frame !== null) cancel(frame)
       frame = null
       origin = null
+      cancelToolbar(); viewport?.cancelNavigation()
+      toolbarActivation = null
       doc.removeEventListener('click', captureActivation, true)
       observer?.disconnect()
       port.unsubscribe?.(navigate)
+      toolbarPort?.unsubscribe?.(focusToolbar)
+      if (toolbarPort) for (const name of ['focusin', 'keydown', 'pointerdown']) doc.removeEventListener(name, newerToolbarIntent, true)
     }
   }
 }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
+import { scanObservationRows } from './observation-viewport-fixture.mjs'
 
 test('production cached incremental failure retries the exact applied offset and changed-query Apply replaces page zero', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
@@ -16,14 +17,14 @@ test('production cached incremental failure retries the exact applied offset and
       } else await route.fallback()
     })
     await h.start()
-    assert.equal(await h.page.locator('.observation-card').count(), 50)
+    assert.equal((await scanObservationRows(h.page)).cards.size, 50)
     await h.page.getByRole('button', { name: 'Load more', exact: true }).click()
     await h.page.getByRole('button', { name: 'Retry results', exact: true }).waitFor({ timeout: 5000 })
-    assert.equal(await h.page.locator('.observation-card').count(), 50)
+    assert.equal((await scanObservationRows(h.page)).cards.size, 50)
     assert.match(await h.page.locator('.observation-state-error').innerText(), /loaded results|cached|Retry results/i)
     await h.page.locator('#observation-query').fill('unapplied private control')
     await h.page.getByRole('button', { name: 'Retry results', exact: true }).click(); await h.idle()
-    assert.equal(await h.page.locator('.observation-card').count(), 64)
+    assert.equal((await scanObservationRows(h.page)).cards.size, 64)
     assert.deepEqual(observed.filter(value => value.offset === '50').map(value => ({ query: value.query || '', offset: value.offset, limit: value.limit })), [
       { query: '', offset: '50', limit: '50' }, { query: '', offset: '50', limit: '50' }
     ])

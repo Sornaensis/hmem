@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
+import { scanObservationRows, revealObservationRow } from '../tests-js/observation-viewport-fixture.mjs'
 import { evidenceProfile, scalingRecordOutputs, assertEvidenceIdentity, prepareScalingScratch, createEvidenceOperations, checkQualification, startupEvidenceDisposition, persistOrRetainFailureDiagnostics } from './evidence-profile.mjs'
 import { OBSERVATION_SCALING_CONTRACT, generateObservationScalingFixture, queryObservationScalingMatches, observationScalingFrames, aggregateObservationScaling, observationScalingMetrics, observationTraceCaptureOptions, traceAdmissionReceipt } from './observation-scaling.mjs'
 import { createColdDiagnostics, createEvidenceCapture, persistEvidenceAttempt, createUsablePaintReadiness, createNavigationCompletionIndex, assertNavigationCapacity, retireOwnedResources, assertCompleteNavigationStream, createHierarchyObserverLedger, assertFiveSamples, BASE_COMMIT, HARNESS_CONFIGURATION, hashJson, liveSettleReady, liveTimingSummary, liveWholeWorkspaceReload, median, nearestRankP95, perfApiRouteKey, renderBudgetEvaluation, renderMaximum, representativeReadiness, transportContractReady } from './contracts.mjs'
@@ -107,17 +108,22 @@ function sourceProvenance(capture = createEvidenceCapture({ cwd: path.resolve(fr
   return { reviewBaseCommit: baseCommit, headCommit, orderedCommits, workingTreeQualification: 'exact source and production-asset SHA-256 list; complete diff from review base retained separately' }
 }
 
-function inputQualification() {
-  const collect = directory => fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+export function inputQualification({ plan = evidencePlan, io = fs } = {}) {
+  const collect = directory => io.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
     const file = path.join(directory, entry.name)
     return entry.isDirectory() ? collect(file) : [file]
   }).sort()
   const source = [...collect(path.join(frontendRoot, 'src')),
-    ...fs.readdirSync(here).filter(name => name.endsWith('.mjs')).sort().map(name => path.join(here, name)),
+    ...io.readdirSync(here).filter(name => name.endsWith('.mjs')).sort().map(name => path.join(here, name)),
+    ...(plan.rendering ? [path.join(frontendRoot, 'tests-js/observation-viewport-fixture.mjs')] : []),
     ...['package.json', 'package-lock.json', 'README.md'].map(name => path.join(frontendRoot, name))]
-    .map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file) }))
-  const productionAssets = collect(staticRoot).map(file => ({ path: normalizedRepositoryPath(file), sha256: sha256File(file) }))
-  return { evidenceBaseCommit, source, productionAssets }
+    .map(file => ({ path: normalizedRepositoryPath(file), sha256: createHash('sha256').update(io.readFileSync(file)).digest('hex') }))
+  const productionAssets = collect(staticRoot).map(file => ({ path: normalizedRepositoryPath(file), sha256: createHash('sha256').update(io.readFileSync(file)).digest('hex') }))
+  return { evidenceBaseCommit: plan.baseCommit, source, productionAssets }
+}
+
+export function assertQualifiedInputs(expected, actual, message) {
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(message)
 }
 
 export function finalWorkingTreeEvidence({ plan = evidencePlan, io = fs, write = writeEvidence,
@@ -1081,11 +1087,17 @@ async function measureObservationScaling(page, tracker, fixture, cdp, blankHeap,
     pages.push({ loaded: count, ms: performance.now() - started, ...requestDelta(tracker, before) })
     dom.push({ tab: 'match-loaded-' + count, ...(await domMetrics(page)) })
   }
-  const controls = await page.locator('.observation-subject-group-toggle').evaluateAll(elements => elements.map(element => element.getAttribute('aria-controls')))
+  const controls = evidencePlan.rendering
+    ? [...(await scanObservationRows(page)).groups.keys()]
+    : await page.locator('.observation-subject-group-toggle').evaluateAll(elements => elements.map(element => element.getAttribute('aria-controls')))
   if (controls.length < 4 || new Set(controls).size !== controls.length) throw new Error('Expected distinct overlapping subject groups across both ordered paths')
   for (const [index, id] of controls.entries()) {
+    const selector = evidencePlan.rendering
+      ? '[data-observation-group=' + JSON.stringify(id) + '] .observation-subject-group-toggle'
+      : '.observation-subject-group-toggle[aria-controls="' + id + '"]'
+    if (evidencePlan.rendering) await revealObservationRow(page, page.locator(selector))
     const before = requestSnapshot(tracker)
-    const ms = await requiredDoubleFrame(page, '.observation-subject-group-toggle[aria-controls="' + id + '"]')
+    const ms = await requiredDoubleFrame(page, selector)
     const delta = requestDelta(tracker, before)
     if (delta.count !== 0) throw new Error('Subject disclosure unexpectedly requested HTTP')
     interactions['observationGroup' + index + 'Ms'] = { ms, ...delta }
@@ -1093,6 +1105,15 @@ async function measureObservationScaling(page, tracker, fixture, cdp, blankHeap,
   }
   const boundary = fixture.observations.find(value => value.id === contract.boundaryId)
   const card = page.locator('.observation-card').filter({ hasText: boundary.content.slice(0, 17) }).first()
+  let logicalReachability = null
+  if (evidencePlan.rendering) {
+    const scanned = await scanObservationRows(page)
+    const expected = queryObservationScalingMatches(fixture, { paths: contract.paths, offset: 0, limit: contract.largeLoaded }).items
+    const contextual = expected.reduce((count, item) => count + item.path_matches.reduce((total, match) => total + match.matched_subjects.length, 0), 0)
+    if (scanned.cards.size !== contextual || new Set([...scanned.cards.values()].map(row => row.id)).size !== expected.length) throw new Error('Expanded Observation logical membership was not completely scroll-reachable')
+    logicalReachability = { canonicalMembers: expected.length, contextualCards: scanned.cards.size, groups: scanned.groups.size, maximumMountedRows: scanned.maxMounted }
+    await revealObservationRow(page, card)
+  }
   await card.click()
   await page.locator('#observation-content-reader').waitFor()
   await waitForTransportQuiescence(page, tracker, '512 KiB Observation detail')
@@ -1131,11 +1152,18 @@ async function measureObservationScaling(page, tracker, fixture, cdp, blankHeap,
   dom.push({ tab: 'boundary-editor-post-live', ...(await domMetrics(page)) })
   await requiredDoubleFrameByText(page, '.observation-edit-actions button', 'Cancel')
   await requiredDoubleFrameByText(page, '#observation-panel button', 'All observations')
-  await page.waitForFunction(() => document.querySelectorAll('.observation-card').length === 50)
+  await waitObservationMembers(page, 50)
   await waitForTransportQuiescence(page, tracker, 'flat Observation restore after scaling research')
   return { contract: OBSERVATION_SCALING_CONTRACT, loaded: Math.min(contract.largeLoaded, fixture.observations.length), expandedGroups: controls.length,
-    pages, activeEditorHeapBytes, live,
+    pages, activeEditorHeapBytes, live, ...(logicalReachability ? { logicalReachability } : {}),
     researchTriggers: { activeEditorHeap: activeEditorHeapBytes > contract.researchTriggers.activeEditorHeapBytes, observationLiveFollowUps: live.count > contract.researchTriggers.observationLiveFollowUps } }
+}
+
+async function waitObservationMembers(page, count) {
+  await page.waitForFunction(({ expected, logical }) => logical
+    ? document.getElementById('observation-viewport')?.dataset.observationLoadedCount === String(expected)
+    : document.querySelectorAll('.observation-card').length === expected,
+  { expected: count, logical: evidencePlan.rendering }, { timeout: 30000 })
 }
 
 async function measureRun(browser, origin, fixture, measured, trace, diagnosticRuns) {
@@ -1201,19 +1229,21 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const observationsTabBefore = requestSnapshot(tracker)
   const obsTabMs = await requiredDoubleFrame(page, '.tabs button:nth-child(2)')
   await page.waitForSelector('#observation-results')
-  await page.waitForFunction(expected => document.querySelectorAll('.observation-card').length === expected, Math.min(50, fixture.observations.length), { timeout: 30000 })
+  await waitObservationMembers(page, Math.min(50, fixture.observations.length))
   await waitForTransportQuiescence(page, tracker, 'Observations initial page')
   interactions.observationsTabMs = { ms: obsTabMs, ...requestDelta(tracker, observationsTabBefore) }
   tabSwitches.observations = interactions.observationsTabMs
   dom.push({ tab: 'observations', ...(await domMetrics(page)) })
+  if (evidencePlan.rendering && (await scanObservationRows(page)).cards.size !== Math.min(50, fixture.observations.length)) throw new Error('Initial flat Observation membership was not scroll-reachable')
   const loadBefore = requestSnapshot(tracker)
   const loadStart = performance.now()
   const loadButton = page.locator('.observation-load-more')
   if (await loadButton.count() !== 1) throw new Error(`required Observation load-more target count was ${await loadButton.count()}`)
   await loadButton.click()
-  await page.waitForFunction(expected => document.querySelectorAll('.observation-card').length === expected, Math.min(100, fixture.observations.length), { timeout: 30000 })
+  await waitObservationMembers(page, Math.min(100, fixture.observations.length))
   await waitForTransportQuiescence(page, tracker, 'Observation load more')
   const observationLoadMore = { ms: performance.now() - loadStart, ...requestDelta(tracker, loadBefore) }
+  if (evidencePlan.rendering && (await scanObservationRows(page)).cards.size !== Math.min(100, fixture.observations.length)) throw new Error('Paged flat Observation membership was not scroll-reachable')
   const filterInput = page.locator('#observation-query')
   if (await filterInput.count() !== 1) throw new Error(`required Observation query target count was ${await filterInput.count()}`)
   const filterBefore = requestSnapshot(tracker)
@@ -1229,7 +1259,7 @@ async function measureRun(browser, origin, fixture, measured, trace, diagnosticR
   const observationFilterResetBefore = requestSnapshot(tracker)
   await filterInput.fill('')
   const observationFilterResetMs = await requiredDoubleFrame(page, '.observation-filter-apply')
-  await page.waitForFunction(expected => document.querySelectorAll('.observation-card').length === expected, Math.min(50, fixture.observations.length), { timeout: 30000 })
+  await waitObservationMembers(page, Math.min(50, fixture.observations.length))
   await waitForTransportQuiescence(page, tracker, 'Observation filter reset')
   interactions.observationFilterResetMs = { ms: observationFilterResetMs, ...requestDelta(tracker, observationFilterResetBefore) }
   filters.observationReset = interactions.observationFilterResetMs
@@ -1414,7 +1444,7 @@ function evaluate(result, comparableEnvironment = true) {
 
 function persistQualification(result, prerequisite, qualifiedInputs, command, retirement) {
   if (!retirement.passed) throw new Error('Cannot finalize qualification before every owned resource retires')
-  if (JSON.stringify(inputQualification()) !== JSON.stringify(qualifiedInputs)) throw new Error('qualification inputs changed before finalization')
+  assertQualifiedInputs(qualifiedInputs, inputQualification(), 'qualification inputs changed before finalization')
   if (mode === 'record') {
     const traceManifest = { schemaVersion: 1, baseCommit: BASE_COMMIT, taskId: evidenceTask?.taskId || null, evidenceBaseCommit, measurementRevision: evidenceRevision, inputQualification: qualifiedInputs, sourceProvenance: result.sourceProvenance, contracts: result.contracts, trace: result.trace, retirement }
     writeEvidence(recordOutputPath, JSON.stringify(result, null, 2) + '\n')
@@ -1487,6 +1517,7 @@ async function main() {
     configurationHash: hashJson(HARNESS_CONFIGURATION),
     directFocusContractHash: hashJson(DIRECT_FOCUS_CONTRACT),
     ...(evidencePlan.scaling ? { observationScalingContractHash: hashJson(OBSERVATION_SCALING_CONTRACT) } : {}),
+    ...(evidencePlan.rendering ? { observationReachabilityContractHash: hashJson({ revision: 'logical-scroll.v1', flat: [50, 100], match: [50, 100, 150], completeOrderedContextualCards: true, physicalBudgetSelectorsUnchanged: true, scansOutsideMeasuredActionIntervals: true }) } : {}),
     fixtures: { small: fixtureHash(fixtures.small), large: fixtureHash(fixtures.large) },
     snapshots: { small: snapshotHash(fixtures.small), large: snapshotHash(fixtures.large) }
   }
@@ -1505,8 +1536,8 @@ async function main() {
     recordedTraceManifest = JSON.parse(fs.readFileSync(afterTraceArtifactPath, 'utf8'))
     assertEvidenceIdentity(evidencePlan, recordedBaseline)
     assertEvidenceIdentity(evidencePlan, recordedTraceManifest)
-    if (JSON.stringify(recordedBaseline.inputQualification) !== JSON.stringify(qualifiedInputs)) throw new Error('recorded source/production asset fingerprints differ from current inputs')
-    if (JSON.stringify(recordedTraceManifest.inputQualification) !== JSON.stringify(qualifiedInputs)) throw new Error('trace input fingerprints differ from current inputs')
+    assertQualifiedInputs(recordedBaseline.inputQualification, qualifiedInputs, 'recorded source/production asset fingerprints differ from current inputs')
+    assertQualifiedInputs(recordedTraceManifest.inputQualification, qualifiedInputs, 'trace input fingerprints differ from current inputs')
     if (recordedBaseline.baseCommit !== BASE_COMMIT) throw new Error(`after-artifact base commit mismatch: expected ${BASE_COMMIT}, observed ${recordedBaseline.baseCommit}`)
     if (JSON.stringify(recordedBaseline.contracts) !== JSON.stringify(contracts)) throw new Error(`baseline fixture/configuration/budget contracts do not match current inputs`)
     if (JSON.stringify(recordedTraceManifest.contracts) !== JSON.stringify(contracts)) throw new Error(`after trace manifest fixture/configuration/budget contracts do not match current inputs`)
@@ -1607,7 +1638,7 @@ async function main() {
     if (mode === 'check') comparable = recordedBaseline.environment.fingerprint === environment.fingerprint
     result.evaluation = evaluate(result, comparable)
     attemptState.phase = 'budget evaluation and input verification'
-    if (JSON.stringify(inputQualification()) !== JSON.stringify(qualifiedInputs)) throw new Error('qualification inputs changed during measurement')
+    assertQualifiedInputs(qualifiedInputs, inputQualification(), 'qualification inputs changed during measurement')
     measuredResult = result
     for (const metric of result.evaluation.metrics) console.log((metric.pass ? 'PASS' : 'FAIL') + ' ' + metric.name + ': ' + metric.actual + ' (budget ' + metric.expected + (metric.category === 'informational' ? ', informational environment' : '') + ')')
   } catch (error) {

@@ -10,6 +10,7 @@ import { resolve, join, relative, basename, sep, delimiter } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { chromium, request as playwrightRequest } from '@playwright/test'
+import { paint, scanObservationRows, revealObservationRow } from './observation-viewport-fixture.mjs'
 
 // One fixture-owned native PostgreSQL sandbox, with a ten-minute lifetime.
 // Credentials stay in memory; stdout consumes only public sandbox coordinates.
@@ -246,12 +247,16 @@ test('production startup profiles carry real multipage versioned snapshots throu
     await until(async () => (await page.locator('.observation-card').count()) === 2, 'Real exact facet results')
     await applyRoute(['match', '', null, '', sha, null, null, paths])
     await until(async () => (await page.locator('.observation-path-group').count()) === 2 && (await page.locator('.observation-subject-group-toggle').count()) === 4, 'Real ordered path groups')
-    for (const toggle of await page.locator('.observation-subject-group-toggle').all()) await toggle.click()
-    await page.waitForFunction(() => document.querySelectorAll('.observation-path-group .observation-card').length === 10, null, { timeout: 5000 })
-    assert.equal(await page.locator('.observation-path-group .observation-card').count(), 10)
-    assert.deepEqual(await page.locator('.observation-path-heading').allTextContents(), paths)
-    assert.equal(await page.locator('.observation-card').filter({ hasText: representatives[2].content }).count(), 4)
-    assert.deepEqual((await page.locator('.observation-subject-group-toggle .observation-loaded-count').allTextContents()).sort(), ['2 loaded', '2 loaded', '3 loaded', '3 loaded'])
+    const groupKeys = await page.locator('[data-observation-group]').evaluateAll(elements => elements.map(element => element.dataset.observationGroup))
+    for (const key of groupKeys) {
+      const toggle = page.locator('[data-observation-group=' + JSON.stringify(key) + '] .observation-subject-group-toggle')
+      await revealObservationRow(page, toggle); await toggle.click(); await paint(page)
+    }
+    const reached = await scanObservationRows(page)
+    assert.equal(reached.cards.size, 10)
+    assert.deepEqual([...reached.paths.values()], paths)
+    assert.equal([...reached.cards.values()].filter(row => row.id === representatives[2].id).length, 4)
+    assert.deepEqual([...reached.groups.values()].map(group => group.label.match(/\d+ loaded/)[0]).sort(), ['2 loaded', '2 loaded', '3 loaded', '3 loaded'])
     const oldStartKey = fullPages[0].request.start_idempotency_key
     const oldSnapshotCount = fullClient.receipts.length
     await page.reload()

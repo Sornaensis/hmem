@@ -5,6 +5,7 @@ import AppShell
 import Browser
 import Browser.Navigation as Nav
 import Feature.Cards as Cards
+import Feature.Observation
 import Helpers exposing (parseFragment)
 import Json.Decode as Decode
 import Route exposing (handleUrlChange, handleUrlRequest, urlToPage)
@@ -121,7 +122,7 @@ update msg model =
             result
 
         Err mainOwnedMsg ->
-            case mainOwnedMsg of
+            (case mainOwnedMsg of
                 UpdateRouter.HandleUrlRequest urlRequest ->
                     handleUrlRequest urlRequest model
 
@@ -130,6 +131,7 @@ update msg model =
 
                 UpdateRouter.HandleInAppShell ownedMsg ->
                     AppShell.handleOwned ownedMsg model
+            ) |> Feature.Observation.refreshViewport model
 
 
 

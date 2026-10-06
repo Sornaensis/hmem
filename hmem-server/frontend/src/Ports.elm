@@ -89,3 +89,12 @@ port scrollHierarchyTarget : String -> Cmd msg
 
 
 port navigateObservationDetail : Encode.Value -> Cmd msg
+
+
+port focusObservationToolbar : Encode.Value -> Cmd msg
+
+
+port onObservationViewport : (Encode.Value -> msg) -> Sub msg
+
+
+port syncObservationViewport : Encode.Value -> Cmd msg

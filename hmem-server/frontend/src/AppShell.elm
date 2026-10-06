@@ -931,6 +931,7 @@ subscriptions =
         , Browser.Events.onKeyDown (Decode.map GlobalKeyDown (Decode.field "keyCode" Decode.int))
         , localStorageReceived LocalStorageLoaded
         , Ports.onHierarchyViewport HierarchyViewportChanged
+        , Ports.onObservationViewport ObservationViewportChanged
         , onMainContentScroll MainContentScrolled
         ]
 

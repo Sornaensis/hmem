@@ -226,18 +226,9 @@ test('production startup profiles carry real multipage versioned snapshots throu
     assert.notEqual(changed.body.content_version, original.content_version)
     assert.deepEqual(changed.body.subjects, original.subjects)
     await until(async () => (await page.locator('.observation-detail-content').innerText()).includes(changed.body.content), 'Canonical real update reaches production Elm')
-    let uiPut
-    page.on('response', async response => {
-      if (response.request().method() === 'PUT' && new URL(response.url()).pathname === target) uiPut = { header: response.request().headers()['if-match'], status: response.status(), body: await response.json() }
-    })
-    await page.locator('#observation-edit').click()
-    await page.locator('#observation-edit-content').fill('Real full-profile client token proof')
-    await page.getByRole('button', { name: 'Save content', exact: true }).click()
-    await until(() => uiPut?.body, 'Full-profile UI conditional save')
-    assert.equal(uiPut.header, '"' + changed.body.content_version + '"')
-    assert.equal(uiPut.status, 200)
-    assert.deepEqual(uiPut.body.subjects, original.subjects)
-    await page.locator('#observation-edit-content').waitFor({ state: 'detached' })
+    assert.equal(await page.locator('#observation-edit, #observation-edit-content').count(), 0)
+    await page.locator('.observation-detail-content').click()
+    assert.equal(await page.locator('[contenteditable=true], #observation-edit-content').count(), 0)
     const applyRoute = async tuple => {
       await page.evaluate(fragment => { location.hash = fragment }, 'tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(tuple)))
     }
@@ -267,7 +258,7 @@ test('production startup profiles carry real multipage versioned snapshots throu
     await until(() => fullClient.receipts.slice(oldSnapshotCount).some(value => value.complete && value.path.endsWith('/resync') && value.request.scope.workspace_id === workspace.id && value.body.has_more === false), 'Reload terminal full snapshot')
     assert.deepEqual(fullClient.errors, [])
     for (const client of contexts) if (client !== context) await bounded(client.close(), 5000, 'Prior client cleanup')
-    console.log(JSON.stringify({ phase: 'real-populated-full-profile', harnessHash, chromium: browser.version(), assetHashes, observations: snapshotObservations.length, snapshotItems: snapshotItems.length, pages: fullPages.length, orderedSubjects: true, validVersions: true, terminalTicketLineage: true, selectedFromFullReducerBeforeRest: true, realConditionalStatus: uiPut.status, realMatchedObservations: realMatch.body.items.length, orderedPaths: paths, reloadFreshStart: true, globalProfile: globalStart.request.snapshot_profile }))
+    console.log(JSON.stringify({ phase: 'real-populated-full-profile', harnessHash, chromium: browser.version(), assetHashes, observations: snapshotObservations.length, snapshotItems: snapshotItems.length, pages: fullPages.length, orderedSubjects: true, validVersions: true, terminalTicketLineage: true, selectedFromFullReducerBeforeRest: true, realCanonicalWriterStatus: changed.status, readOnlyBody: true, realMatchedObservations: realMatch.body.items.length, orderedPaths: paths, reloadFreshStart: true, globalProfile: globalStart.request.snapshot_profile }))
   } catch (error) {
     primaryFailure = error
     throw error

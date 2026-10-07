@@ -18,7 +18,8 @@ export function installObservationViewport(app, options = {}) {
   const mounted = () => root ? [...root.querySelectorAll('[data-observation-key]')] : []
   const controls = row => [...row.querySelectorAll('button,a[href],input,textarea,select,summary,[tabindex]')].filter(el =>
     !el.disabled && el.tabIndex >= 0 && !el.closest('[hidden],[inert]') && el.getClientRects().length)
-  const focusControls = row => [...controls(row), ...row.querySelectorAll('#observation-detail-heading')]
+  const focusControls = controls
+  const detailAnchor = () => doc.querySelector('[data-observation-detail-anchor]')
   const controlIdentity = control => JSON.stringify([control.tagName, control.id, control.type, control.className, control.getAttribute?.('role')])
   const rowFor = key => mounted().find(row => row.dataset.observationKey === key)
   const navigation = () => root?.closest('#observation-panel')?.dataset.observationContext || null
@@ -40,7 +41,7 @@ export function installObservationViewport(app, options = {}) {
     const rows = mounted(), focusRow = doc.activeElement?.closest('[data-observation-key]')
     const style = win.getComputedStyle?.(root)
     const layout = JSON.stringify([win.innerWidth, win.innerHeight, style?.fontSize, style?.lineHeight, style?.fontFamily, style?.letterSpacing, layoutEpoch])
-    return { stamp, navigationToken: navigationContext()?.token, detailMounted: !!doc.getElementById('observation-detail-heading'), layout, top: Math.max(0, scroller.scrollTop - origin()), height: scroller.clientHeight, width: root.clientWidth
+    return { stamp, navigationToken: navigationContext()?.token, detailMounted: !!detailAnchor(), layout, top: Math.max(0, scroller.scrollTop - origin()), height: scroller.clientHeight, width: root.clientWidth
       , measurements: rows.map(row => ({ key: row.dataset.observationKey, height: row.getBoundingClientRect().height }))
       , focus: root.contains(focusRow) ? focusRow.dataset.observationKey : (doc.activeElement?.id === 'observation-results' && root.closest('#observation-results') === doc.activeElement ? '@results' : (focusChange ? '@outside' : null)), target }
   }
@@ -125,8 +126,11 @@ export function installObservationViewport(app, options = {}) {
           || !same(settledStamp, stamp) || !same(stamp, readStamp(root)) || root.dataset.observationFocusKey !== owner.key
           || pending || anchorTop !== null || adjustment) return
       const current = rowFor(owner.key), target = current && focusControls(current)[owner.control]
-      nativeOwner = null
-      if (target !== owner.node || controlIdentity(target) !== owner.identity) return
+      if (target !== owner.node || controlIdentity(target) !== owner.identity) { nativeOwner = null; return }
+      if (doc.activeElement && doc.activeElement !== doc.body && doc.activeElement !== target) { nativeOwner = null; return }
+      // Recovery keeps this exact active control owned. A later accepted keyed
+      // movement can blur it again without emitting a new user focus event.
+      owner.afterSettlement = settlement
       if (!doc.activeElement || doc.activeElement === doc.body) {
         restoringNative = true
         try { target.focus({ preventScroll: true }) } finally { restoringNative = false }
@@ -160,7 +164,7 @@ export function installObservationViewport(app, options = {}) {
     schedule()
   }
   function keyboard(event) {
-    userIntent()
+    userIntent(event)
     if (event.key !== 'Tab' || event.ctrlKey || event.altKey || event.metaKey || !root || !same(stamp, readStamp(root))) return
     const row = event.target?.closest('[data-observation-key]')
     if (!root.contains(row)) return
@@ -176,7 +180,7 @@ export function installObservationViewport(app, options = {}) {
     // Capture the currently painted focused row before a queued measurement
     // can evict it. The receipt retains the exact DOM/model stamp guard.
     if (restoringNative) { send(null, true); schedule(); return }
-    if (pendingNavigation && doc.activeElement?.id !== (pendingNavigation.command.intent === 'detail' ? 'observation-detail-heading' : pendingNavigation.command.originId)) pendingNavigation = null
+    if (pendingNavigation && doc.activeElement?.id !== (pendingNavigation.command.intent === 'detail' ? detailAnchor()?.id : pendingNavigation.command.originId)) pendingNavigation = null
     if (revealOwner && doc.activeElement?.id !== revealOwner.targetId) revealOwner = null
     cancelNativePaint()
     const row = doc.activeElement?.closest('[data-observation-key]')
@@ -187,7 +191,13 @@ export function installObservationViewport(app, options = {}) {
   }
   const mutation = MO ? new MO(() => schedule()) : null
   const invalidateLayout = () => { layoutEpoch++; schedule() }
-  function userIntent() { revealOwner = null; pendingNavigation = null; anchorTop = null; adjustment = 0 }
+  function userIntent(event) {
+    revealOwner = null; pendingNavigation = null; anchorTop = null; adjustment = 0
+    if (nativeOwner && ['pointerdown', 'touchstart', 'keydown'].includes(event?.type)
+        && event.target !== nativeOwner.node && !nativeOwner.node.contains?.(event.target)) {
+      nativeOwner = null; cancelNativePaint()
+    }
+  }
   for (const event of ['wheel', 'touchstart', 'pointerdown']) doc.addEventListener(event, userIntent, true)
   mutation?.observe(doc.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-observation-viewport-context', 'data-observation-focus-key', 'data-observation-context'] })
   doc.addEventListener('keydown', keyboard, true); doc.addEventListener('focusin', nativeFocus, true)
@@ -199,12 +209,17 @@ export function installObservationViewport(app, options = {}) {
       schedule()
     },
     cancelNavigation() { pendingNavigation = null },
+    retainNavigationFocus(target) {
+      // Expanding the already focused arrow does not emit a second focusin.
+      // Capture its current rendered identity only after an owned reveal.
+      if (currentReveal() && doc.activeElement === target && target?.id === revealOwner.targetId) nativeFocus()
+    },
     claimNavigation(command) {
       const current = navigationContext(), expected = command?.destination
       if (!current || !expected || !['workspaceId', 'sessionEpoch', 'token', 'selectedId'].every(key => current[key] === expected[key])
           || !same(stamp, command.viewport) || !same(stamp, readStamp(root)) || !same(settledStamp, stamp)) return false
       anchorTop = null; adjustment = 0; pending = null; nativeOwner = null; cancelNativePaint()
-      revealOwner = { root, stamp, navigation: navigation(), targetId: command.intent === 'detail' ? 'observation-detail-heading' : (command.originId || 'observation-results') }
+      revealOwner = { root, stamp, navigation: navigation(), targetId: command.intent === 'detail' ? detailAnchor()?.id : (command.originId || 'observation-results') }
       return true
     },
     dispose() {

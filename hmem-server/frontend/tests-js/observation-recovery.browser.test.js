@@ -36,7 +36,7 @@ test('production cached incremental failure retries the exact applied offset and
   } finally { await h.close() }
 })
 
-test('production failed off-page detail and retained return offer reachable recovery without losing the draft', { timeout: 60000 }, async () => {
+test('production failed off-page read-only detail offers reachable recovery across tab return', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
     let failures = 1, detailRequests = 0
@@ -53,17 +53,15 @@ test('production failed off-page detail and retained return offer reachable reco
     assert.equal(await h.page.locator('.observation-detail-content').count(), 0)
     await h.page.getByRole('button', { name: 'Retry detail', exact: true }).click(); await h.idle()
     assert.equal(detailRequests, 2)
-    await h.page.locator('#observation-edit').click()
-    await h.page.locator('#observation-edit-content').fill('Retained recovery draft')
+    assert.equal(await h.page.locator('.observation-detail-content').textContent(), 'Cache evidence for Main')
+    assert.equal(await h.page.locator('#observation-edit, #observation-edit-content').count(), 0)
     await h.page.getByRole('button', { name: 'Projects', exact: true }).click(); await h.idle()
     failures = 1
-    await h.page.getByRole('button', { name: 'Return to draft', exact: true }).click()
+    await h.page.evaluate(() => { history.back() })
     await h.page.getByRole('button', { name: 'Retry detail', exact: true }).waitFor({ timeout: 5000 })
-    assert.equal(await h.page.locator('#observation-edit-content').inputValue(), 'Retained recovery draft')
-    assert.equal(await h.page.getByRole('button', { name: 'Save content', exact: true }).isEnabled(), true)
-    assert.equal(await h.page.getByRole('button', { name: 'Cancel', exact: true }).isEnabled(), true)
+    assert.equal(await h.page.locator('#observation-edit, #observation-edit-content').count(), 0)
     await h.page.getByRole('button', { name: 'Retry detail', exact: true }).click(); await h.idle()
-    assert.equal(await h.page.locator('#observation-edit-content').inputValue(), 'Retained recovery draft')
+    assert.equal(await h.page.locator('.observation-detail-content').textContent(), 'Cache evidence for Main')
     assert.equal(detailRequests, 4)
   } finally { await h.close() }
 })
@@ -79,12 +77,11 @@ test('production live read revocation retires private curation controls and auth
     })
     await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=observations&observation=cache-main')
     await h.idle()
-    await h.page.locator('#observation-edit').click()
-    await h.page.locator('#observation-edit-content').fill('Retired permission draft')
+    assert.equal(await h.page.locator('#observation-edit, #observation-edit-content').count(), 0)
     const publicUrl = h.page.url()
     canRead = false
     await h.page.evaluate(workspace => window.pushHierarchyFrames([{ schema_version: 1, type: 'access_revoked', workspace_id: workspace }]), h.fixture.workspace.id)
-    await h.page.waitForFunction(() => !document.getElementById('observation-edit-content'), null, { timeout: 5000 })
+    await h.page.waitForFunction(() => !document.getElementById('observation-panel'), null, { timeout: 5000 })
     assert.equal(await h.page.locator('.observation-retained-draft').count(), 0)
     assert.equal(await h.page.locator('#observation-delete').count(), 0)
     assert.equal(h.page.url(), publicUrl)
@@ -92,9 +89,8 @@ test('production live read revocation retires private curation controls and auth
     // The revoked workspace socket is disconnected. This ordinary user has
     // no global stream; a fresh document obtains the new grant from session HTTP.
     await h.page.reload()
-    await h.page.locator('#observation-edit').waitFor({ timeout: 5000 }); await h.idle()
+    await h.page.locator('#observation-delete').waitFor({ timeout: 5000 }); await h.idle()
     assert.equal(await h.page.locator('#observation-edit-content').count(), 0)
-    await h.page.locator('#observation-edit').click()
-    assert.equal(await h.page.locator('#observation-edit-content').inputValue(), 'Cache evidence for Main')
+    assert.equal(await h.page.locator('.observation-detail-content').textContent(), 'Cache evidence for Main')
   } finally { await h.close() }
 })

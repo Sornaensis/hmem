@@ -2225,14 +2225,12 @@ button.observation-facet-card:hover {
 button.observation-card {
   appearance: none;
   -webkit-appearance: none;
-  display: block;
-  width: 100%;
+  display: inline-flex;
+  width: auto;
+  flex: 0 0 auto;
   min-width: 0;
   margin: 0;
   color: var(--text);
-  font: inherit;
-  line-height: inherit;
-  text-align: left;
   cursor: pointer;
   box-shadow: none;
   transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
@@ -2245,7 +2243,6 @@ button.observation-card:hover {
 button.observation-card.observation-card-selected {
   background: rgba(99, 102, 241, 0.14);
   border-color: var(--accent-hover);
-  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .observation-card-header {
@@ -2281,7 +2278,7 @@ button.observation-card.observation-card-selected {
   white-space: pre-wrap;
 }
 
-.observation-card .observation-summary {
+.observation-folded-content .observation-summary {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
@@ -2437,11 +2434,6 @@ textarea.observation-edit-content {
   min-width: 0;
 }
 
-.observation-detail-heading {
-  margin: 0 0 0.5rem;
-  color: var(--text);
-  font-size: 1rem;
-}
 
 .observation-detail-card {
   min-width: 0;
@@ -2518,30 +2510,13 @@ textarea.observation-edit-content {
   padding: 1rem;
 }
 
-.observation-detail-navigation {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
-}
 
-.observation-detail-navigation .observation-detail-heading {
-  margin: 0;
-  flex: 1 1 10rem;
-}
 
-.observation-detail-heading:focus-visible,
-.observation-return:focus-visible,
 #observation-results:focus-visible {
   outline: 2px solid var(--accent-hover);
   outline-offset: 2px;
 }
 
-.observation-return {
-  min-width: 0;
-  white-space: normal;
-}
 
 /* Detail navigation targets must remain unobscured by the compact header. */
 .app:has(#observation-panel) .sticky-workspace-bar {
@@ -2576,10 +2551,6 @@ textarea.observation-edit-content {
 }
 
 @media (max-width: 480px) {
-  .observation-card-header {
-    align-items: flex-start;
-    flex-direction: column;
-  }
 
   .observation-detail-meta-row {
     grid-template-columns: minmax(0, 1fr);
@@ -4271,8 +4242,13 @@ textarea.observation-edit-content {
 .copyable-value:hover { color: var(--accent-hover); }
 .copyable-value:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 2px; border-radius: 2px; }
 .observation-result { min-width: 0; }
-.observation-result > .observation-card { border: 0; padding: 0.5rem 0; background: transparent; }
 .observation-result > .card-header { padding: 0; }
+.observation-card-header { display: flex; }
+.observation-folded-content .observation-summary { margin: 0.75rem 0; }
+.observation-card-footer { border-top: 1px solid var(--border); margin-top: 0.75rem; padding-top: 0.75rem; }
+.observation-card-footer .observation-detail-meta { border: 0; margin: 0; padding-top: 0; }
+.observation-card-footer .observation-detail-actions { margin-top: 0.75rem; }
+.observation-retained-editor { border-top: 1px solid var(--border); margin-top: 0.75rem; padding-top: 0.75rem; }
 .observation-result:has(.observation-card-selected) { border-color: var(--accent-hover); }
 .observation-result .observation-detail { margin-top: 0.75rem; }
 .observation-detail-card { border: 0; padding: 0; background: transparent; }

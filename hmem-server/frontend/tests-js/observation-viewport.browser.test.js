@@ -75,21 +75,34 @@ test('production native Tab mounts offscreen logical targets and retained detail
     assert.equal(initial, '50')
     const last = h.page.locator('.observation-viewport-row').last()
     const originKey = await last.getAttribute('data-observation-key')
-    const summary = last.locator('summary').last()
-    await summary.focus(); await paint(h.page); await h.page.keyboard.press('Tab')
-    try { await h.page.waitForFunction(key => document.activeElement?.closest('[data-observation-key]')?.dataset.observationKey !== key && document.activeElement?.classList.contains('copyable-value'), originKey, { timeout: 5000 }) } catch (error) { console.log('Bounded native focus diagnostic', await h.page.evaluate(() => ({ active: document.activeElement?.outerHTML?.slice(0, 350), stamp: document.querySelector('#observation-viewport')?.dataset.observationViewportContext, keys: [...document.querySelectorAll('[data-observation-key]')].map(row => row.dataset.observationPosition), top: document.querySelector('#main-content-scroll')?.scrollTop }))); throw error }
-    const card = h.page.locator('.copyable-value:focus').locator('..').locator('..').locator('.observation-card'), origin = await card.getAttribute('id')
+    const copy = last.locator('.observation-sha .copyable-value').last()
+    await copy.focus(); await paint(h.page); await h.page.keyboard.press('Tab')
+    try { await h.page.waitForFunction(key => document.activeElement?.closest('[data-observation-key]')?.dataset.observationKey !== key && document.activeElement?.classList.contains('observation-card'), originKey, { timeout: 5000 }) } catch (error) { console.log('Bounded native focus diagnostic', await h.page.evaluate(() => ({ active: document.activeElement?.outerHTML?.slice(0, 350), stamp: document.querySelector('#observation-viewport')?.dataset.observationViewportContext, keys: [...document.querySelectorAll('[data-observation-key]')].map(row => row.dataset.observationPosition), top: document.querySelector('#main-content-scroll')?.scrollTop }))); throw error }
+    const card = h.page.locator('.observation-card:focus'), origin = await card.getAttribute('id')
     await card.focus()
-    await h.page.keyboard.press('Enter'); await h.page.waitForFunction(() => document.activeElement?.id === 'observation-detail-heading', null, { timeout: 5000 })
-    await h.page.locator('#observation-edit').click()
-    await h.page.locator('#observation-edit-content').fill('Protected draft while virtual results move')
+    // The same arrow is already active: its changed attribute is not proof
+    // that the stamped bridge has claimed and focused the selected owner.
+    await h.page.evaluate(() => {
+      window.arrowBridgeFocus = 0
+      const focus = HTMLElement.prototype.focus
+      HTMLElement.prototype.focus = function (...args) {
+        const result = focus.apply(this, args)
+        if (this.matches('[data-observation-detail-anchor]')) window.arrowBridgeFocus++
+        return result
+      }
+      const arrow = document.activeElement, scroll = document.getElementById('main-content-scroll')
+      window.tabOrigin = { rect: arrow.getBoundingClientRect().toJSON(), scroll: scroll.getBoundingClientRect().toJSON(), top: scroll.scrollTop }
+    })
+    await h.page.keyboard.press('Enter'); await h.page.waitForFunction(() => window.arrowBridgeFocus > 0 && document.activeElement?.matches('[data-observation-detail-anchor]'), null, { timeout: 5000 })
+    const content = await h.page.locator('.observation-detail-content').textContent()
+    assert.equal(await h.page.locator('#observation-edit, #observation-edit-content').count(), 0)
     await h.page.locator('#main-content-scroll').evaluate(scroll => { scroll.scrollTop = scroll.scrollHeight }); await paint(h.page)
-    assert.equal(await h.page.locator('#observation-edit-content').inputValue(), 'Protected draft while virtual results move')
-    assert.ok(await h.page.locator('[data-observation-key]').count() <= 27)
-    await h.page.getByRole('button', { name: 'Back to results', exact: true }).click()
-    try { await h.page.waitForFunction(id => document.activeElement?.id === id, origin, { timeout: 5000 }) } catch (error) { console.log('Bounded return diagnostic', await h.page.evaluate(id => ({ originMounted: !!document.getElementById(id), active: document.activeElement?.id, positions: [...document.querySelectorAll('[data-observation-key]')].map(row => row.dataset.observationPosition), top: document.querySelector('#main-content-scroll')?.scrollTop }), origin)); throw error }
-    await h.page.getByRole('button', { name: 'Return to draft', exact: true }).click()
-    assert.equal(await h.page.locator('#observation-edit-content').inputValue(), 'Protected draft while virtual results move')
+    assert.equal(await h.page.locator('.observation-detail-content').textContent(), content)
+    assert.ok(await h.page.locator('[data-observation-key]').count() <= 28)
+    await h.page.locator('[data-observation-detail-anchor]').click()
+    await h.page.waitForFunction(() => !document.getElementById('observation-detail'), null, { timeout: 5000 })
+    try { await h.page.waitForFunction(id => document.activeElement?.id === id, origin, { timeout: 5000 }) } catch (error) { console.log('Bounded return diagnostic', await h.page.evaluate(id => ({ originMounted: !!document.getElementById(id), active: document.activeElement?.id, positions: [...document.querySelectorAll('[data-observation-key]')].map(row => row.dataset.observationPosition), top: document.querySelector('#main-content-scroll')?.scrollTop, initial: window.tabOrigin, stamp: document.querySelector('#observation-viewport')?.dataset.observationViewportContext }), origin)); throw error }
+    assert.equal(await h.page.locator('#observation-detail').count(), 0)
     await h.page.addStyleTag({ content: 'html { font-size: 200%; }' }); await paint(h.page)
     assert.ok(await h.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
   } finally { await h.close() }

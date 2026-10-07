@@ -13,11 +13,11 @@ function harness({ toolbarEnabled = false, viewportBridge } = {}) {
   const element = (id, card = false) => ({ id, inPanel: true, hidden: false, classList: { contains: name => card && name === 'observation-card' },
     closest: () => null, getClientRects() { return this.hidden ? [] : [{}] }, getBoundingClientRect: () => ({ top: 100, bottom: 200 }),
     focus(options) { effects.push({ id, options }); doc.activeElement = this }, scrollIntoView() { effects.push({ scroll: id }); scroll.scrollTop = 900 } })
-  const heading = element('observation-detail-heading'), results = element('observation-results')
+  const heading = element('selected-arrow'), results = element('observation-results')
   elements.set(heading.id, heading); elements.set(results.id, results)
   elements.set('first', element('first', true)); elements.set('duplicate', element('duplicate', true))
   elements.set('main-content-scroll', scroll); elements.set('observation-panel', root)
-  const doc = { documentElement: {}, body: {}, activeElement: null, getElementById(id) { return elements.get(id) }, addEventListener(name, fn, capture) { assert.equal(capture, true); if (name === 'click') captureClick = fn; else events.set(name, fn) }, removeEventListener(name, fn) { if (name === 'click') { assert.equal(fn, captureClick); captureClick = null } else events.delete(name) } }
+  const doc = { documentElement: {}, body: {}, activeElement: null, getElementById(id) { return elements.get(id) }, querySelector() { return elements.get('selected-arrow') }, addEventListener(name, fn, capture) { assert.equal(capture, true); if (name === 'click') captureClick = fn; else events.set(name, fn) }, removeEventListener(name, fn) { if (name === 'click') { assert.equal(fn, captureClick); captureClick = null } else events.delete(name) } }
   const bridge = installObservationNavigation({ ports: { navigateObservationDetail: { subscribe(fn) { subscribed = fn }, unsubscribe(fn) { assert.equal(fn, subscribed); subscribed = null } },
     ...(toolbarEnabled ? { focusObservationToolbar: { subscribe(fn) { toolbarSubscribed = fn }, unsubscribe(fn) { assert.equal(fn, toolbarSubscribed); toolbarSubscribed = null } } } : {}) } }, {
     document: doc, viewport: viewportBridge, window: { getComputedStyle() { return { display: 'block', visibility: 'visible' } } },
@@ -26,7 +26,7 @@ function harness({ toolbarEnabled = false, viewportBridge } = {}) {
   })
   return { scroll, effects, elements, frames, bridge, doc, events, element,
     click(id) { captureClick({ target: { closest: () => elements.get(id) } }) },
-    command(intent, originId, selectedId, overrides = {}, painted = false) { const previous = current, next = { ...current, token: current.token + 1, selectedId, ...overrides }; if (painted) root.dataset.observationContext = JSON.stringify(next); subscribed({ intent, originId, previous, destination: next }); current = next; root.dataset.observationContext = JSON.stringify(current) },
+    command(intent, originId, selectedId, overrides = {}, painted = false, viewport = null) { const previous = current, next = { ...current, token: current.token + 1, selectedId, ...overrides }; if (painted) root.dataset.observationContext = JSON.stringify(next); subscribed({ intent, originId, previous, destination: next, ...(viewport ? { viewport } : {}) }); current = next; root.dataset.observationContext = JSON.stringify(current) },
     stamp(change) { root.dataset.observationContext = JSON.stringify({ ...current, ...change }) },
     select(id) { current = { ...current, selectedId: id }; root.dataset.observationContext = JSON.stringify(current) },
     remount() { elements.delete('observation-panel'); root = { ...root, dataset: { ...root.dataset } }; elements.set('observation-panel', root) },
@@ -40,7 +40,7 @@ function harness({ toolbarEnabled = false, viewportBridge } = {}) {
 test('detail and return restore one exact repeated-card origin with preventScroll', () => {
   const h = harness()
   h.command('detail', 'duplicate', 'A'); h.flush()
-  assert.equal(h.effects[0].id, 'observation-detail-heading')
+  assert.equal(h.effects[0].id, 'selected-arrow')
   h.command('return', 'duplicate', null); h.flush()
   assert.equal(h.effects.at(-1).id, 'duplicate')
   assert.deepEqual(h.effects.at(-1).options, { preventScroll: true })
@@ -69,7 +69,7 @@ test('native old-DOM capture survives port delivery after destination paint', ()
   const h = harness()
   h.click('duplicate'); h.scroll.scrollTop = 777
   h.command('detail', 'duplicate', 'A', {}, true); h.flush()
-  assert.equal(h.effects[0].id, 'observation-detail-heading')
+  assert.equal(h.effects[0].id, 'selected-arrow')
   h.command('return', 'duplicate', null, {}, true); h.flush()
   assert.equal(h.effects.at(-1).id, 'duplicate'); assert.equal(h.scroll.scrollTop, 123)
   h.bridge.dispose()
@@ -78,7 +78,7 @@ test('native old-DOM capture survives port delivery after destination paint', ()
 test('destination paint without old activation proof focuses detail but returns to results', () => {
   const h = harness()
   h.command('detail', 'first', 'A', {}, true); h.flush()
-  assert.equal(h.effects[0].id, 'observation-detail-heading')
+  assert.equal(h.effects[0].id, 'selected-arrow')
   h.command('return', 'first', null, {}, true); h.flush()
   assert.equal(h.effects.at(-1).scroll, 'observation-results')
   h.bridge.dispose()
@@ -143,7 +143,7 @@ test('a newer activation cancels pending focus and owns the return origin', () =
   h.scroll.scrollTop = 456
   h.command('detail', 'duplicate', 'A')
   assert.equal(h.frames.size, 1); h.flush()
-  assert.equal(h.effects.filter(value => value.id === 'observation-detail-heading').length, 1)
+  assert.equal(h.effects.filter(value => value.id === 'selected-arrow').length, 1)
   h.command('return', 'duplicate', null); h.flush()
   assert.equal(h.effects.at(-1).id, 'duplicate'); assert.equal(h.scroll.scrollTop, 456)
   h.bridge.dispose()
@@ -218,5 +218,35 @@ test('unmount retires the Close activation proof before its deferred port arrive
   const h = toolbarHarness()
   h.retirePanel(); h.remount(); h.toolbar(); h.flush(); h.flush()
   assert.deepEqual(h.effects, [])
+  h.bridge.dispose()
+})
+
+for (const kind of ['copy', 'reader']) for (const phase of ['before-port', 'before-frame', 'between-frames']) test(`detail ${kind} intent ${phase} rejects focus and viewport ownership claim`, () => {
+  let claims = 0
+  const h = harness({ viewportBridge: { cancelNavigation() {}, awaitNavigation(command, ready) { ready(command) }, retainNavigationFocus() {}, claimNavigation() { claims++; return true } } })
+  const selected = h.elements.get('selected-arrow')
+  h.elements.set('observation-viewport', { dataset: { observationViewportContext: JSON.stringify({ workspace: 'workspace', epoch: 3, generation: 'query', revision: 1 }), observationLayoutReady: 'true' } })
+  const user = h.element(kind); user.tagName = kind === 'reader' ? 'TEXTAREA' : 'BUTTON'
+  const supersede = () => { h.doc.activeElement = user; h.events.get('focusin')({ target: user }) }
+  h.click('first')
+  if (phase === 'before-port') supersede()
+  h.command('detail', 'first', 'A', {}, true, { workspace: 'workspace', epoch: 3, generation: 'query', revision: 1 })
+  if (phase === 'between-frames') h.flush()
+  if (phase !== 'before-port') supersede()
+  h.flush(); h.flush()
+  assert.equal(h.doc.activeElement, user)
+  assert.equal(claims, 0, 'rejected detail intent does not retire the newer native owner')
+  assert.equal(h.effects.some(value => value.id === selected.id), false)
+  h.bridge.dispose()
+})
+
+test('collapsing the active native arrow preserves the original folded scroll capture', () => {
+  const h = harness()
+  h.click('first'); h.command('detail', 'first', 'A', {}, true); h.flush()
+  h.scroll.scrollTop = 700
+  h.elements.get('first').getAttribute = name => name === 'aria-expanded' ? 'true' : null
+  h.click('first'); h.command('return', 'first', null, {}, true); h.flush()
+  assert.equal(h.scroll.scrollTop, 123)
+  assert.equal(h.doc.activeElement.id, 'first')
   h.bridge.dispose()
 })

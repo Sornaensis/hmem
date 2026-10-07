@@ -95,7 +95,7 @@ test('production By subject paginates populated facets and locks exact provenanc
   } finally { await h.close() }
 })
 
-test('production native search submission and discovery controls preserve a selected dirty editor', { timeout: 60000 }, async () => {
+test('production native search submission and discovery controls preserve selected read-only content', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
     await h.start()
@@ -105,7 +105,8 @@ test('production native search submission and discovery controls preserve a sele
     assert.equal(h.receipts.at(-1).params.query, 'Cache evidence')
     assert.equal(await h.page.locator('.observation-card').count(), 2)
     await h.page.locator('.observation-card').first().click(); await h.idle()
-    await h.page.locator('#observation-edit').click(); await h.page.locator('#observation-edit-content').fill('Protected discovery draft')
+    assert.equal(await h.page.locator('#observation-edit, #observation-edit-content').count(), 0)
+    const selectedContent = await h.page.locator('.observation-detail-content').textContent()
     const stamp = await h.page.locator('#observation-panel').getAttribute('data-observation-context'), summary = await applied(h), count = h.receipts.length
     await composer(h); await h.page.locator('#observation-match-paths').fill('src/Main.elm')
     await activate(h.page, h.page.locator('#observation-advanced-toggle'), 'Space')
@@ -115,7 +116,7 @@ test('production native search submission and discovery controls preserve a sele
     await h.page.waitForFunction(() => document.activeElement?.id === 'observation-for-files' && document.getElementById('observation-file-composer').hidden, null, { timeout: 5000 })
     await composer(h)
     assert.equal(await h.page.locator('#observation-match-paths').inputValue(), 'src/Main.elm')
-    assert.equal(await h.page.locator('#observation-edit-content').inputValue(), 'Protected discovery draft')
+    assert.equal(await h.page.locator('.observation-detail-content').textContent(), selectedContent)
     assert.equal(await h.page.locator('#observation-panel').getAttribute('data-observation-context'), stamp)
     assert.equal(await applied(h), summary); assert.equal(h.receipts.length, count)
   } finally { await h.close() }

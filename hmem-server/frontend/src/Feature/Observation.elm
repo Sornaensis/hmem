@@ -3319,6 +3319,12 @@ viewObservationsStateWithPermission canEdit workspace state =
                     [ if state.selectedId /= Nothing && selectedOwner state == Nothing then
                         div [ class "card observation-result observation-detached", attribute "data-observation-detached" "true" ]
                             [ p [ class "form-help", attribute "role" "status" ] [ text "Selected observation is outside the displayed result rows. Loaded counts and file-match evidence are unchanged." ]
+                            , case state.selectedDetail of
+                                Just observation -> viewObservationHeader True "observation-detached-toggle" observation
+                                Nothing -> div [ class "card-header observation-card-header" ]
+                                    [ observationToggle True "observation-detached-toggle" "Selected observation" ReturnObservationResults
+                                    , span [ class "observation-subject" ] [ text "Selected observation" ]
+                                    ]
                             , viewDetail canEdit state
                             ]
                       else text ""
@@ -3844,33 +3850,49 @@ viewObservationRow canEdit owner state context observation =
         expanded = owner == Just cardId
     in
     div [ class "card observation-result", attribute "data-observation-id" observation.id, attribute "data-observation-context-key" context ]
-        [ div [ class "card-header observation-card-header" ]
-            [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel observation.subjectKind) ]
-            , Helpers.copyableValue "observation-subject" "repository subject" observation.subject (plainTextExcerpt 96 observation.subject)
-            , if List.length observation.subjects > 1 then
-                span [ class "card-meta observation-subject-count" ] [ text ("+" ++ String.fromInt (List.length observation.subjects - 1)) ]
-              else text ""
-            ]
-        , button
-            [ id cardId, classList [ ( "card", True ), ( "observation-card", True ), ( "observation-card-selected", expanded ) ]
-            , type_ "button"
-            , attribute "aria-label" (plainTextExcerpt 180 ((if expanded then "Collapse " else "Open ") ++ subjectKindLabel observation.subjectKind ++ " observation: " ++ plainTextExcerpt 96 observation.subject ++ ". " ++ plainTextExcerpt 60 observation.content))
-            , attribute "aria-expanded" (if expanded then "true" else "false")
-            , attribute "aria-current" (if expanded then "true" else "false")
-            , onClick (if expanded then ReturnObservationResults else SelectObservationFrom observation.id cardId)
-            ]
-            [ if expanded then span [ class "observation-collapse-label" ] [ text "Collapse observation" ] else div [ class "card-body observation-summary" ] [ text (plainTextExcerpt 240 observation.content) ] ]
-        , div [ class "card-meta-group observation-card-meta" ]
-            [ div [ class "card-meta-row" ]
-                [ span [ class "card-meta observation-sha" ] [ text "Provenance revision: ", Helpers.copyableValue "" "provenance revision" observation.gitSha (String.left 12 observation.gitSha ++ "…") ]
-                , span [ class "card-meta observation-updated" ] [ text ("Content updated: " ++ formatObservationTimestamp observation.updatedAt) ]
-                ] ]
-        , if expanded then viewDetail canEdit state else
-            details [ class "observation-card-provenance" ]
-                [ summary [] [ text ("Provenance and " ++ String.fromInt (List.length observation.subjects) ++ " subjects") ]
-                , dl [ class "observation-detail-meta" ] [ viewProvenanceRevision observation.gitSha, viewSubjects observation.subjects ]
+        [ viewObservationHeader expanded cardId observation
+        , if expanded then
+            viewDetail canEdit state
+          else
+            div [ id (cardId ++ "-body"), class "observation-folded-content" ]
+                [ div [ class "card-body observation-summary" ] [ text (plainTextExcerpt 240 observation.content) ]
+                , div [ class "card-meta-group observation-card-meta observation-card-footer" ]
+                    [ div [ class "card-meta-row" ]
+                        [ span [ class "card-meta observation-sha" ] [ text "Provenance revision: ", Helpers.copyableValue "" "provenance revision" observation.gitSha (String.left 12 observation.gitSha ++ "…") ]
+                        , span [ class "card-meta observation-updated" ] [ text ("Content updated: " ++ formatObservationTimestamp observation.updatedAt) ]
+                        ]
+                    ]
                 ]
         ]
+
+
+viewObservationHeader : Bool -> String -> Api.Observation -> Html Msg
+viewObservationHeader expanded cardId observation =
+    div [ class "card-header observation-card-header tree-toggle-row" ]
+        [ observationToggle expanded cardId
+            (subjectKindLabel observation.subjectKind ++ " observation: " ++ plainTextExcerpt 96 observation.subject)
+            (if expanded then ReturnObservationResults else SelectObservationFrom observation.id cardId)
+        , span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel observation.subjectKind) ]
+        , Helpers.copyableValue "observation-subject" "repository subject" observation.subject (plainTextExcerpt 96 observation.subject)
+        , if List.length observation.subjects > 1 then
+            span [ class "card-meta observation-subject-count" ] [ text ("+" ++ String.fromInt (List.length observation.subjects - 1)) ]
+          else text ""
+        ]
+
+
+observationToggle : Bool -> String -> String -> Msg -> Html Msg
+observationToggle expanded cardId name message =
+    button
+        ([ id cardId
+         , classList [ ( "tree-toggle", True ), ( "observation-card", cardId /= "observation-detached-toggle" ), ( "observation-card-selected", expanded ) ]
+         , type_ "button"
+         , attribute "aria-label" (plainTextExcerpt 180 ((if expanded then "Collapse " else "Open ") ++ name))
+         , attribute "aria-expanded" (if expanded then "true" else "false")
+         , attribute "aria-current" (if expanded then "true" else "false")
+         , attribute "aria-controls" (if expanded then "observation-detail" else cardId ++ "-body")
+         , onClick message
+         ] ++ (if expanded then [ attribute "data-observation-detail-anchor" "true" ] else []))
+        [ text (if expanded then "▼" else "▶") ]
 
 
 {-| Only one exact repeated occurrence owns detail. Linked selection chooses the
@@ -3908,12 +3930,8 @@ viewDetail canEdit state =
             text ""
 
         Just _ ->
-            section [ id "observation-detail", class "observation-detail", attribute "aria-labelledby" "observation-detail-heading" ]
-                [ div [ class "observation-detail-navigation" ]
-                    [ h3 [ id "observation-detail-heading", class "observation-detail-heading", tabindex -1 ] [ text "Observation detail" ]
-                    , button [ class "btn btn-secondary observation-return", type_ "button", onClick ReturnObservationResults ] [ text "Back to results" ]
-                    ]
-                , if state.detailLoading then
+            section [ id "observation-detail", class "observation-detail" ]
+                [ if state.detailLoading then
                     div [ class "loading-indicator observation-state observation-detail-state", attribute "role" "status", attribute "aria-live" "polite" ] [ text "Loading detail..." ]
 
                   else
@@ -3930,27 +3948,26 @@ viewDetail canEdit state =
                 , case state.selectedDetail of
                     Just observation ->
                         article [ class "card observation-detail-card" ]
-                            [ viewDetailContent canEdit observation state.edit
-                            , dl [ class "observation-detail-meta" ]
-                                [ viewDetailMeta "Workspace ID" observation.workspaceId "observation-detail-workspace"
-                                , viewSubjects observation.subjects
-                                , viewProvenanceRevision observation.gitSha
-                                , viewDetailMeta "Created" (formatObservationTimestamp observation.createdAt) ""
-                                , viewDetailMeta "Content updated" (formatObservationTimestamp observation.updatedAt) ""
-                                ]
-                            , p [ class "form-help observation-provenance-help" ] [ text "Provenance revision identifies where this evidence was recorded. Content updated is the last content update time; the revision is unchanged by editing and does not indicate automatic staleness." ]
-                            , if canEdit && Maybe.map .observationId state.edit /= Just observation.id then
-                                div [ class "observation-detail-actions" ]
-                                    [ button [ id "observation-edit", class "btn btn-secondary", type_ "button", onClick StartObservationEdit ] [ text "Edit content" ]
-                                    , if state.edit == Nothing then
-                                        button [ id "observation-delete", class "btn btn-danger", type_ "button", onClick OpenObservationDelete ] [ text "Delete observation" ]
-
-                                      else
-                                        text ""
+                            [ viewFullObservationContent observation
+                            , if canEdit && Maybe.map .observationId state.edit == Just observation.id then
+                                section [ class "observation-retained-editor", attribute "aria-label" "Retained observation draft" ]
+                                    [ h4 [] [ text "Retained draft" ]
+                                    , viewDetailContent canEdit observation state.edit
                                     ]
-
-                              else
-                                text ""
+                              else text ""
+                            , div [ class "observation-card-footer" ]
+                                [ dl [ class "observation-detail-meta" ]
+                                    [ viewDetailMeta "Workspace ID" observation.workspaceId "observation-detail-workspace"
+                                    , viewSubjects observation.subjects
+                                    , viewProvenanceRevision observation.gitSha
+                                    , viewDetailMeta "Created" (formatObservationTimestamp observation.createdAt) ""
+                                    , viewDetailMeta "Content updated" (formatObservationTimestamp observation.updatedAt) ""
+                                    ]
+                                , if canEdit && state.edit == Nothing then
+                                    div [ class "observation-detail-actions" ]
+                                        [ button [ id "observation-delete", class "btn btn-danger", type_ "button", onClick OpenObservationDelete ] [ text "Delete" ] ]
+                                  else text ""
+                                ]
                             ]
 
                     Nothing ->

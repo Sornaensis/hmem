@@ -22,9 +22,9 @@ it; discard cannot interrupt an in-flight save. Permission/session revocation
 and authoritative deletion retire unavailable editing. This bounded in-session
 retention does not persist through a full reload or closing the tab.
 
-Activating an Observation card by keyboard or pointer focuses and reveals the
-detail heading. Back to results restores the exact originating card and scroll
-position, including cards repeated in file-match groups; if a save has moved the
+Activating an Observation arrow by keyboard or pointer focuses and reveals the
+expanded card's real arrow. Collapsing it restores the exact originating card and
+scroll position, including cards repeated in file-match groups; if a save has moved the
 card, it reveals that same card at its new position. Direct links or removed
 cards return focus to results. This navigation keeps the retained draft available.
 Leaving the Observation tab retires its card origin; a subsequently reopened
@@ -35,8 +35,8 @@ Observation results use one scrolling viewport across cards, subject facets,
 and expanded file-match groups. It mounts at most 25 ordinary logical rows and
 three distinct selected/native-focus/return owners; complete loaded membership, ordered evidence,
 group counts, and pagination stay cached. Native Tab mounts the next logical
-control before focusing it. The selected occurrence owns its inline detail/editor and stays pinned against row
-eviction. Other occurrences remain compact; links without a displayed occurrence
+control before focusing it. The selected occurrence owns its full read-only detail and any separately labelled
+retained draft, and stays pinned against row eviction. Other occurrences remain compact; links without a displayed occurrence
 use one detached inline card outside loaded counts and match evidence. Collapsing
 a selected card or its match group retains a dirty/saving draft with Return to draft. One original layout can restore unchanged card scroll geometry after
 opening detail; query, content, disclosure, font, or viewport changes retire its
@@ -137,13 +137,20 @@ selection cleanup, and permission admission in controlled browser fixtures.
 Cards show whitespace-collapsed plain-text previews of at most 240 Unicode
 codepoints and three lines. The primary subject uses at most 96 codepoints and
 two lines; selection button names use at most 180 codepoints. Full content stays
-inside the expanded card. Compact cards' provenance disclosures expose the full revision
-and ordered subjects, including copy actions, outside the selection button.
+inside the expanded card as read-only content. A native right/down arrow beside
+the primary subject opens or collapses the card; the subject independently copies
+its complete value. Expansion reveals and focuses the real arrow under current
+navigation and layout stamps. There is no body-click or Edit content entry.
+One footer follows the body: folded cards show revision and update time;
+expanded cards show the full revision, ordered subjects, workspace and timestamps,
+with canonical value copying and a permission-checked Delete action.
 The compact revision uses 12 SHA characters. Content update metadata includes
 time and timezone; the immutable provenance revision does not imply automatic
 staleness or change when content is edited.
 Content above 16 KiB uses a labelled native read-only detail reader with its
 exact full value available for scrolling, selection, and copying.
+Any already retained content draft remains separately labelled and reachable with
+its save/discard/conflict/version safeguards until ordinary lifecycle retirement.
 Native text fields normalize line endings for display; Copy full content copies
 the canonical stored text, preserving its line endings.
 

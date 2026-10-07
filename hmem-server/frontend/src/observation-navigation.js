@@ -12,6 +12,7 @@ export function installObservationNavigation(app, options = {}) {
   let origin = null
   let toolbar = null, toolbarFrame = null
   let toolbarActivation = null, nativeIntent = 0
+  let detailActivation = null
   const toolbarPort = app.ports.focusObservationToolbar
   const viewport = options.viewport
   const cancelToolbar = () => { if (toolbarFrame !== null) cancel(toolbarFrame); toolbarFrame = null; toolbar = null }
@@ -59,8 +60,9 @@ export function installObservationNavigation(app, options = {}) {
     const target = event.target?.closest?.('#observation-close-file-composer')
     if (target) toolbarActivation = { id: target.id, panel: panel(), context: currentStamp(panel()), nativeIntent }
     const card = event.target?.closest('.observation-card')
-    if (!card) return
+    if (!card || card.getAttribute?.('aria-expanded') === 'true') return
     const root = panel()
+    detailActivation = { id: card.id, panel: root, context: currentStamp(root), nativeIntent }
     origin = capture(card, root, doc.getElementById('main-content-scroll'), currentStamp(root))
   }
 
@@ -78,6 +80,15 @@ export function installObservationNavigation(app, options = {}) {
     const before = panel()
     const scroll = doc.getElementById('main-content-scroll')
     const observed = currentStamp(before)
+    const activation = detailActivation
+    detailActivation = null
+    const detailIntent = command.intent === 'detail' && activation?.id === command.originId
+      && activation.panel === before && sameStamp(activation.context, command.previous)
+      ? activation.nativeIntent : nativeIntent
+    const detailFocusAllowed = () => {
+      const active = doc.activeElement, anchor = doc.querySelector('[data-observation-detail-anchor]')
+      return nativeIntent === detailIntent && (!active || active === doc.body || active === anchor || active.id === command.originId)
+    }
     if (!scroll || !(sameStamp(observed, command.previous) || sameStamp(observed, command.destination))) {
       origin = null
       return
@@ -101,32 +112,36 @@ export function installObservationNavigation(app, options = {}) {
         origin = null
         return
       }
+      if (command.intent === 'detail' && !detailFocusAllowed()) return
       if (viewport && !viewport.claimNavigation(owned)) {
         viewport.awaitNavigation(owned, scheduleNavigation)
         return
       }
       if (command.intent === 'detail') {
-        const heading = doc.getElementById('observation-detail-heading')
-        if (visible(heading, root)) {
-          heading.focus({ preventScroll: true })
-          heading.scrollIntoView({ block: 'start', behavior: 'instant' })
+        const anchor = doc.querySelector('[data-observation-detail-anchor]')
+        if (detailFocusAllowed() && visible(anchor, root)) {
+          anchor.focus({ preventScroll: true })
+          viewport?.retainNavigationFocus(anchor)
+          anchor.scrollIntoView({ block: 'start', behavior: 'instant' })
         }
       } else {
         const card = origin && doc.getElementById(origin.id)
         if (visible(card, root) && card.classList.contains('observation-card')) {
           card.focus({ preventScroll: true })
+          viewport?.retainNavigationFocus(card)
           scroller.scrollTop = origin.top
           const rect = card.getBoundingClientRect()
-          const viewport = scroller.getBoundingClientRect()
+          const scrollBounds = scroller.getBoundingClientRect()
           // A canonical save may reorder the row. Preserve the physical origin
           // where possible, then reveal the same card if its layout has moved.
-          if (rect.bottom <= viewport.top || rect.top >= viewport.bottom) {
+          if (rect.bottom <= scrollBounds.top || rect.top >= scrollBounds.bottom) {
             card.scrollIntoView({ block: 'nearest', behavior: 'instant' })
           }
         } else {
           const results = doc.getElementById('observation-results')
           if (visible(results, root)) {
             results.focus({ preventScroll: true })
+            viewport?.retainNavigationFocus(results)
             results.scrollIntoView({ block: 'start', behavior: 'instant' })
           }
         }
@@ -137,6 +152,7 @@ export function installObservationNavigation(app, options = {}) {
       frame = null
       if (panel() !== before || doc.getElementById('main-content-scroll') !== scroll
           || !sameStamp(currentStamp(before), command.destination)) { origin = null; return }
+      if (command.intent === 'detail' && !detailFocusAllowed()) return
       // One bounded receipt/paint turn lets returned-width geometry restore
       // under its new stamp before the exact physical origin is focused.
       if ((command.intent === 'return' || owned.viewport) && doc.getElementById('observation-viewport')) {
@@ -193,9 +209,9 @@ export function installObservationNavigation(app, options = {}) {
   doc.addEventListener('click', captureActivation, true)
   observer?.observe(doc.documentElement, { childList: true, subtree: true })
   port.subscribe(navigate)
+  for (const name of ['focusin', 'keydown', 'pointerdown']) doc.addEventListener(name, newerToolbarIntent, true)
   if (toolbarPort) {
     toolbarPort.subscribe(focusToolbar)
-    for (const name of ['focusin', 'keydown', 'pointerdown']) doc.addEventListener(name, newerToolbarIntent, true)
   }
   return {
     dispose() {
@@ -204,11 +220,12 @@ export function installObservationNavigation(app, options = {}) {
       origin = null
       cancelToolbar(); viewport?.cancelNavigation()
       toolbarActivation = null
+      detailActivation = null
       doc.removeEventListener('click', captureActivation, true)
       observer?.disconnect()
       port.unsubscribe?.(navigate)
       toolbarPort?.unsubscribe?.(focusToolbar)
-      if (toolbarPort) for (const name of ['focusin', 'keydown', 'pointerdown']) doc.removeEventListener(name, newerToolbarIntent, true)
+      for (const name of ['focusin', 'keydown', 'pointerdown']) doc.removeEventListener(name, newerToolbarIntent, true)
     }
   }
 }

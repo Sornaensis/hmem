@@ -37,7 +37,7 @@ async function freePort() {
 async function exists(path) { try { await access(path); return true } catch { return false } }
 function pidAlive(pid) { try { process.kill(pid, 0); return true } catch (error) { if (error.code === 'ESRCH') return false; throw error } }
 
-test('production Elm rejects a real delayed-notification competing write and explicitly rebases without overwrite', { timeout: 600000 }, async () => {
+test('production read-only Elm converges after real conditional writers and delayed canonical notifications', { timeout: 600000 }, async () => {
   let harness, harnessClosed, buildProcess, buildClosed, browser, browserServer, context, writer, root, postgresPid, lifetime
   let primaryFailure
   const coordinates = {}, received = [], held = [], errors = [], pagePuts = []
@@ -143,8 +143,8 @@ test('production Elm rejects a real delayed-notification competing write and exp
       }
     })
     await page.goto(origin + '/workspace/' + workspace.id + '#tab=observations&observation=' + original.id)
-    await page.locator('#observation-edit').click()
-    await page.locator('#observation-edit-content').fill('Retained real client draft')
+    await page.locator('.observation-detail-content').waitFor()
+    assert.equal(await page.locator('#observation-edit, #observation-edit-content').count(), 0)
     await until(() => received.includes('checkpoint'), 'Real WebSocket initial checkpoint')
     holding = true
     const competing = await api(target, 'PUT', { content: 'Independent writer canonical' }, { 'If-Match': '"' + original.content_version + '"', 'X-Request-Id': 'conditional-browser-competing' })
@@ -152,27 +152,17 @@ test('production Elm rejects a real delayed-notification competing write and exp
     assert.notEqual(competing.body.content_version, original.content_version)
     assert.deepEqual(provenance(competing.body), provenance(original))
     await until(() => held.some(value => value.message.toString().includes(original.id)), 'Held genuine competing-write delivery')
-    await page.getByRole('button', { name: 'Save content', exact: true }).click()
-    await until(() => pagePuts.length === 1, 'Actual stale UI PUT409')
-    assert.equal(pagePuts[0].status, 409)
-    assert.equal(pagePuts[0].headers['if-match'], '"' + original.content_version + '"')
-    assert.ok(pagePuts[0].headers['x-request-id'])
-    assert.deepEqual(pagePuts[0].data, { content: 'Retained real client draft' })
-    assert.equal(pagePuts[0].body.code, 'observation_content_conflict')
-    assert.equal(pagePuts[0].body.latest.content_version, competing.body.content_version)
-    await page.getByRole('button', { name: 'Keep my draft', exact: true }).waitFor()
-    assert.equal(await page.locator('#observation-edit-content').inputValue(), 'Retained real client draft')
+    const stale = await api(target, 'PUT', { content: 'Explicit conditional writer draft' }, { 'If-Match': '"' + original.content_version + '"', 'X-Request-Id': 'conditional-browser-stale' })
+    assert.equal(stale.status, 409)
+    assert.equal(stale.body.code, 'observation_content_conflict')
+    assert.equal(stale.body.latest.content_version, competing.body.content_version)
     assert.equal((await api(target)).body.content, 'Independent writer canonical')
-    await page.getByRole('button', { name: 'Keep my draft', exact: true }).click()
-    await page.getByRole('button', { name: 'Save content', exact: true }).click()
-    await until(() => pagePuts.length === 2, 'Explicit rebase UI PUT200')
-    assert.equal(pagePuts[1].status, 200)
-    assert.equal(pagePuts[1].headers['if-match'], '"' + competing.body.content_version + '"')
-    assert.deepEqual(pagePuts[1].data, { content: 'Retained real client draft' })
-    const accepted = pagePuts[1].body
+    const rebased = await api(target, 'PUT', { content: 'Explicit conditional writer draft' }, { 'If-Match': '"' + competing.body.content_version + '"', 'X-Request-Id': 'conditional-browser-rebased' })
+    assert.equal(rebased.status, 200)
+    const accepted = rebased.body
     assert.notEqual(accepted.content_version, competing.body.content_version)
     assert.deepEqual(provenance(accepted), provenance(original))
-    await page.locator('#observation-edit-content').waitFor({ state: 'detached' })
+    assert.equal(pagePuts.length, 0, 'Read-only body never sends a UI content PUT')
     const actualHeld = held.splice(0), heldDigest = digest(actualHeld.map(value => value.hash).join('\n'))
     const deliveryStart = await page.evaluate(() => globalThis.__conditionalDeliveredFrames.length)
     holding = false
@@ -182,24 +172,15 @@ test('production Elm rejects a real delayed-notification competing write and exp
       return actualHeld.every(value => delivered.filter(hash => hash === value.hash).length >= actualHeld.filter(other => other.hash === value.hash).length)
     }, 'Every genuine held frame reaches the browser')
     await page.waitForFunction(() => !document.querySelector('.loading-indicator'))
-    await until(async () => (await page.locator('.observation-detail-content').innerText()).includes('Retained real client draft'), 'Released genuine frames preserve accepted canonical')
+    await until(async () => (await page.locator('.observation-detail-content').innerText()).includes('Explicit conditional writer draft'), 'Released genuine frames preserve accepted canonical')
     const final = await api(target)
     assert.equal(final.body.content_version, accepted.content_version)
     assert.equal(final.body.content, accepted.content)
     assert.deepEqual(provenance(final.body), provenance(original))
-    // A subsequent real save proves that the client also retained V2 after all
-    // delayed frames arrived; an unchanged server GET alone cannot prove this.
-    await page.locator('#observation-edit').click()
-    await page.locator('#observation-edit-content').fill('Retained real client draft after released frames')
-    await page.getByRole('button', { name: 'Save content', exact: true }).click()
-    await until(() => pagePuts.length === 3, 'Post-release UI token proof')
-    assert.equal(pagePuts[2].headers['if-match'], '"' + accepted.content_version + '"')
-    assert.equal(pagePuts[2].status, 200)
-    assert.notEqual(pagePuts[2].body.content_version, accepted.content_version)
-    assert.deepEqual(provenance(pagePuts[2].body), provenance(original))
-    await page.locator('#observation-edit-content').waitFor({ state: 'detached' })
+    assert.equal(await page.locator('#observation-edit, #observation-edit-content').count(), 0)
+    assert.equal(pagePuts.length, 0)
     assert.deepEqual(errors, [])
-    console.log(JSON.stringify({ phase: 'real-conditional-client', harnessHash, chromium: browser.version(), assetHashes, statuses: pagePuts.map(value => value.status), versionAdvance: true, provenanceSHA256: digest(JSON.stringify(provenance(final.body))), heldFrames: actualHeld.length, heldBytes, heldDigest, releasedBaseMatches: true, rollback: false }))
+    console.log(JSON.stringify({ phase: 'real-conditional-writers-readonly-client', harnessHash, chromium: browser.version(), assetHashes, statuses: [competing.status, stale.status, rebased.status], versionAdvance: true, provenanceSHA256: digest(JSON.stringify(provenance(final.body))), heldFrames: actualHeld.length, heldBytes, heldDigest, canonicalReadConverged: true, rollback: false }))
   } catch (error) {
     primaryFailure = error
     throw error

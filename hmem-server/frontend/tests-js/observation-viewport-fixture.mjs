@@ -4,7 +4,19 @@ export async function paint(page) {
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
 }
 
+async function retireSelectedReveal(page) {
+  const selected = await page.locator('#observation-panel').evaluate(panel => JSON.parse(panel.dataset.observationContext).selectedId)
+  if (selected !== null) {
+    // A real user's wheel supersedes the selected arrow's owned reveal. Plain
+    // scrollTop writes alone legitimately compete with that reveal authority.
+    await page.locator('#main-content-scroll').hover()
+    await page.mouse.wheel(0, 1)
+    await paint(page)
+  }
+}
+
 export async function scanObservationRows(page) {
+  await retireSelectedReveal(page)
   const keys = new Set(), positions = new Map(), cards = new Map(), groups = new Map(), facets = new Map(), paths = new Map()
   await page.locator('#main-content-scroll').evaluate(scroll => { const list = document.getElementById('observation-viewport'); scroll.scrollTop += list.getBoundingClientRect().top - scroll.getBoundingClientRect().top })
   const deadline = Date.now() + 15000
@@ -19,7 +31,7 @@ export async function scanObservationRows(page) {
       paths: [...root.querySelectorAll('.observation-path-heading')].map(row => ({ key: row.id, position: Number(row.closest('[data-observation-key]').dataset.observationPosition), path: row.textContent }))
     }))
     maxMounted = Math.max(maxMounted, receipt.keys.length)
-    assert.ok(receipt.keys.length <= 27, 'global logical rows plus two pins')
+    assert.ok(receipt.keys.length <= 28, '25 ordinary logical rows plus three deduplicated owners')
     receipt.keys.forEach(row => { keys.add(row.key); positions.set(row.key, row.position) }); receipt.cards.forEach(row => cards.set(row.key, row)); receipt.groups.forEach(row => groups.set(row.key, row))
     receipt.facets.forEach(row => facets.set(row.key, row))
     receipt.paths.forEach(row => paths.set(row.key, row.path))
@@ -45,6 +57,7 @@ export async function scanObservationRows(page) {
 }
 
 export async function revealObservationRow(page, predicate) {
+  await retireSelectedReveal(page)
   await page.locator('#main-content-scroll').evaluate(scroll => { const list = document.getElementById('observation-viewport'); scroll.scrollTop += list.getBoundingClientRect().top - scroll.getBoundingClientRect().top })
   const deadline = Date.now() + 15000
   let end = false

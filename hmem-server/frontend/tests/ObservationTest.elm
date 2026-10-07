@@ -579,8 +579,9 @@ suite =
                 in
                 Expect.all
                     [ \_ -> readOnly |> Query.hasNot [ Selector.text "Edit content" ]
-                    , \_ -> readOnly |> Query.hasNot [ Selector.text "Delete observation" ]
-                    , \_ -> editor |> Query.has [ Selector.text "Edit content", Selector.text "Delete observation", Selector.text "Workspace ID", Selector.text "Subjects", Selector.text "Git SHA" ]
+                    , \_ -> readOnly |> Query.hasNot [ Selector.id "observation-delete" ]
+                    , \_ -> editor |> Query.hasNot [ Selector.id "observation-edit" ]
+                    , \_ -> editor |> Query.has [ Selector.text "Delete", Selector.text "Workspace ID", Selector.text "Subjects", Selector.text "Git SHA" ]
                     , \_ -> editor |> Query.findAll [ Selector.tag "textarea" ] |> Query.count (Expect.equal 1)
                     , \_ -> editor |> Query.findAll [ Selector.tag "input" ] |> Query.count (Expect.equal 3)
                     ]
@@ -609,6 +610,27 @@ suite =
                     , \_ -> Feature.Observation.observationContentError (String.repeat 174763 "€") |> Expect.equal (Just "Observation content must not exceed 512 KiB of UTF-8 text.")
                     ]
                     ()
+        , test "retained dirty saving and conflicted editors stay separate from the read-only canonical body" <|
+            \_ ->
+                let
+                    original = savingEditModel "Protected retained draft"
+                    check ( saving, conflict ) =
+                        let
+                            state = original.observations
+                            retained = { state | edit = Maybe.map (\edit -> { edit | saving = saving, conflict = conflict }) state.edit }
+                            view = Feature.Observation.viewObservationsStateWithPermission True (observationWorkspace Api.Repository) retained |> Query.fromHtml
+                            canonical = Maybe.map .content retained.selectedDetail |> Maybe.withDefault ""
+                        in
+                        Expect.all
+                            [ \_ -> view |> Query.find [ Selector.class "observation-detail-content" ] |> Query.has [ Selector.text canonical ]
+                            , \_ -> view |> Query.find [ Selector.class "observation-retained-editor" ] |> Query.has [ Selector.attribute (attribute "aria-label" "Retained observation draft"), Selector.text "Retained draft" ]
+                            , \_ -> view |> Query.find [ Selector.id "observation-edit-content" ] |> Query.has [ Selector.attribute (Html.Attributes.value "Protected retained draft"), Selector.attribute (Html.Attributes.disabled saving) ]
+                            , \_ -> view |> Query.find [ Selector.class "observation-edit-actions" ] |> Query.find [ Selector.tag "button", Selector.class "btn-primary" ] |> Query.has [ Selector.attribute (Html.Attributes.disabled (saving || conflict)) ]
+                            , \_ -> view |> Query.hasNot [ Selector.id "observation-edit" ]
+                            , \_ -> view |> Query.hasNot [ Selector.id "observation-delete" ]
+                            ] ()
+                in
+                Expect.all (List.map (\variant _ -> check variant) [ ( False, False ), ( True, False ), ( False, True ) ]) ()
         , test "canonical edits refresh clean drafts but preserve dirty drafts as explicit conflicts" <|
             \_ ->
                 let
@@ -1867,7 +1889,7 @@ suite =
                     , \_ -> Feature.Observation.viewObservationsState repository { empty | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Loading observations..." ]
                     , \_ -> Feature.Observation.viewObservationsState repository empty |> Query.fromHtml |> Query.has [ Selector.text "No observations found" ]
                     , \_ -> Feature.Observation.viewObservationsState repository { empty | error = Just "Failed to load observations." } |> Query.fromHtml |> Query.has [ Selector.text "Unable to load observations", Selector.text "Failed to load observations." ]
-                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Provenance revision (Git SHA)", Selector.text fullSha, Selector.text "Observation detail", Selector.text "Subject kind", Selector.text "File", Selector.text "Subject", Selector.text "src/Main.elm" ]
+                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Provenance revision (Git SHA)", Selector.text fullSha, Selector.text "Subject kind", Selector.text "File", Selector.text "Subject", Selector.text "src/Main.elm" ]
                     , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Load more" ] ] |> Query.hasNot [ Selector.disabled True ]
                     , \_ -> Feature.Observation.viewObservationsState repository paginating |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Loading..." ] ] |> Query.has [ Selector.disabled True ]
                     , \_ -> Feature.Observation.viewObservationsState repository detailLoading |> Query.fromHtml |> Query.has [ Selector.text "Loading detail..." ]
@@ -1901,7 +1923,7 @@ suite =
                     , \_ -> view |> Query.findAll [ Selector.class "observation-filter-input" ] |> Query.count (Expect.equal 4)
                     , \_ -> view |> Query.find [ Selector.class "observation-filter-select" ] |> Query.has [ Selector.tag "select", Selector.class "filter-select" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-filter-apply" ] |> Query.has [ Selector.tag "button", Selector.class "btn", Selector.class "btn-primary", Selector.text "Apply filters" ]
-                    , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" "selected") ] |> Query.has [ Selector.tag "button", Selector.class "card", Selector.class "observation-card", Selector.class "observation-card-selected" ]
+                    , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" "selected") ] |> Query.has [ Selector.tag "button", Selector.class "tree-toggle", Selector.class "observation-card", Selector.class "observation-card-selected" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-list-rows" ] |> Query.has [ Selector.class "observation-card" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.tag "article", Selector.class "card", Selector.class "observation-detail-content", Selector.class "observation-detail-meta", Selector.text fullSha ]
                     ]
@@ -1981,7 +2003,7 @@ suite =
                     [ \_ -> Helpers.plainTextExcerpt 3 "😀 😀 😀" |> Expect.equal "😀 …"
                     , \_ -> Helpers.plainTextExcerpt 240 content |> String.toList |> List.length |> Expect.equal 240
                     , \_ -> view |> Query.find [ Selector.class "observation-card" ] |> Query.hasNot [ Selector.tag "details", Selector.tag "script", Selector.class "observation-sha-copy" ]
-                    , \_ -> view |> Query.has [ Selector.class "observation-collapse-label", Selector.text "Collapse observation" ]
+                    , \_ -> view |> Query.has [ Selector.class "tree-toggle", Selector.text "▼" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-content" ] |> Query.has [ Selector.text content ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "src/**/*.elm", Selector.text "src/Second.elm", Selector.text fullSha ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "Provenance revision (Git SHA)", Selector.text "Content updated", Selector.class "copyable-value" ]
@@ -3299,7 +3321,7 @@ suite =
                     , \_ -> returned.observations.detailNavigationToken |> Expect.equal (activated.observations.detailNavigationToken + 1)
                     , \_ -> returned.observations.detailReturnTarget |> Expect.equal Nothing
                     ] ()
-        , test "originating repeated card uses its exact DOM ID and detail exposes native return with focusable heading" <|
+        , test "originating repeated card uses its exact native arrow and removes redundant detail chrome" <|
             \_ ->
                 let
                     model =
@@ -3313,8 +3335,10 @@ suite =
                 in
                 Expect.all
                     [ \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Event.simulate Event.click |> Event.expect ReturnObservationResults
-                    , \_ -> view |> Query.find [ Selector.id "observation-detail-heading" ] |> Query.has [ Selector.attribute (tabindex -1) ]
-                    , \_ -> view |> Query.find [ Selector.class "observation-return" ] |> Event.simulate Event.click |> Event.expect ReturnObservationResults
+                    , \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Query.has [ Selector.tag "button", Selector.text "▼", Selector.attribute (attribute "aria-expanded" "true"), Selector.attribute (attribute "aria-controls" "observation-detail"), Selector.attribute (attribute "data-observation-detail-anchor" "true") ]
+                    , \_ -> view |> Query.hasNot [ Selector.id "observation-detail-heading" ]
+                    , \_ -> view |> Query.hasNot [ Selector.class "observation-return" ]
+                    , \_ -> view |> Query.hasNot [ Selector.id "observation-edit" ]
                     ] ()
         , test "direct user selection chooses results fallback instead of inheriting an earlier card origin" <|
             \_ ->

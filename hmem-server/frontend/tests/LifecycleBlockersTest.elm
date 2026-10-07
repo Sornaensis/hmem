@@ -63,13 +63,20 @@ suite =
                     |> Query.find [ Selector.id "entity-parent" ]
                     |> Query.find [ Selector.tag "button", Selector.attribute (Attributes.title "Reopen this task before adding open subtasks.") ]
                     |> Query.has [ Selector.attribute (Attributes.disabled True), Selector.attribute (Attributes.title "Reopen this task before adding open subtasks.") ]
-        , test "task status controls explain cancellation cascades and done-subtask preservation" <|
+        , test "project task and subtask status controls omit adjacent lifecycle explanations" <|
             \_ ->
-                Feature.Cards.viewProjectsTree "workspace-a" lifecycleModel
-                    |> Query.fromHtml
-                    |> Query.find [ Selector.id "entity-drag" ]
-                    |> Query.find [ Selector.class "lifecycle-gate-note" ]
-                    |> Query.has [ Selector.text "Cancel includes subtasks", Selector.attribute (Attributes.title "Cancelling this task cancels unfinished subtasks; done subtasks are preserved.") ]
+                let
+                    tree = Feature.Cards.viewProjectsTree "workspace-a" lifecycleModel |> Query.fromHtml
+                    option id status = tree |> Query.find [ Selector.id id ] |> Query.find [ Selector.tag "option", Selector.attribute (Attributes.value status) ]
+                in
+                Expect.all
+                    [ \_ -> tree |> Query.hasNot [ Selector.class "lifecycle-gate-note" ]
+                    , \_ -> tree |> Query.hasNot [ Selector.class "completion-gate-note" ]
+                    , \_ -> option "entity-drag" "cancelled" |> Query.hasNot [ Selector.attribute (Attributes.disabled True) ]
+                    , \_ -> option "entity-child" "cancelled" |> Query.hasNot [ Selector.attribute (Attributes.disabled True) ]
+                    , \_ -> option "entity-child" "todo" |> Query.has [ Selector.attribute (Attributes.disabled True), Selector.attribute (Attributes.title "Reopen the cancelled parent task before reopening this subtask.") ]
+                    ]
+                    ()
         , test "cancelled parent prevents reopening children but still permits historical completion and cancellation" <|
             \_ ->
                 List.map (Feature.Cards.taskStatusOptionDisabledReason Nothing True (Just Api.Cancelled)) [ Api.Todo, Api.Blocked, Api.InProgress, Api.Done, Api.Cancelled ]
@@ -80,6 +87,71 @@ suite =
                         , Nothing
                         , Nothing
                         ]
+        , test "hierarchy feedback rows retain pending and independent errors but omit quiet completion" <|
+            \_ ->
+                let
+                    loading = lifecycleModel.dataLoading
+                    complete =
+                        { workspaceId = "workspace-a", sessionEpoch = 0, generation = 0, filterFingerprint = ""
+                        , projectOffset = 0, taskOffset = 0, inFlight = False, succeeded = True
+                        , projectHasMore = False, taskHasMore = False, projectCardCount = 0, taskCardCount = 0
+                        , projectRequestPending = False, taskRequestPending = False
+                        }
+                    pass = { refreshing = False, rootDemand = Nothing, projects = Dict.empty, tasks = Dict.empty, projectError = Nothing, taskError = Nothing }
+                    model state queue errors =
+                        { lifecycleModel | dataLoading = { loading | loadedNavigationBranches = Dict.singleton "project:project-a" state, navigationQueue = queue, navigationPasses = Dict.singleton "project:project-a" errors } }
+                    statusKeys value = Feature.Cards.logicalRows (Feature.Cards.cardTreeProjection "workspace-a" value) value
+                        |> List.filter (\row -> row.kind == "status") |> List.map .key
+                    cases =
+                        [ model complete [] pass
+                        , model complete [ "project:project-a" ] pass
+                        , model { complete | inFlight = True } [] pass
+                        , model { complete | projectHasMore = True } [] pass
+                        , model { complete | taskHasMore = True } [] pass
+                        , model complete [] { pass | projectError = Just "Project stream failed" }
+                        , model complete [] { pass | taskError = Just "Task stream failed" }
+                        ]
+                in
+                Expect.all
+                    [ \_ -> List.map statusKeys cases |> Expect.equal ([] :: List.repeat 6 [ "status:project:project-a" ])
+                    , \_ ->
+                        let
+                            ready value = Feature.Cards.refreshViewport value ( value, Cmd.none ) |> Tuple.first
+                            cachedStatus value = Dict.member "status:project:project-a" value.cards.viewport.rows
+                            cleared = model complete [] pass
+                            transitions pending =
+                                let
+                                    quiet = ready cleared
+                                    active = Feature.Cards.refreshViewport quiet ( { quiet | dataLoading = pending.dataLoading }, Cmd.none ) |> Tuple.first
+                                    finished = Feature.Cards.refreshViewport active ( { active | dataLoading = cleared.dataLoading }, Cmd.none ) |> Tuple.first
+                                in
+                                ( cachedStatus active, cachedStatus finished, Dict.member "status:project:project-a" finished.cards.viewport.index.positions )
+                        in
+                        List.map transitions (List.drop 1 cases) |> Expect.equal (List.repeat 6 ( True, False, False ))
+                    ]
+                    ()
+        , test "empty root completion removes cached feedback rows and their geometry without membership changes" <|
+            \_ ->
+                let
+                    loading = lifecycleModel.dataLoading
+                    request =
+                        { workspaceId = "workspace-a", sessionEpoch = 0, generation = 0, filterFingerprint = ""
+                        , projectOffset = 0, taskOffset = 0, inFlight = True, succeeded = False
+                        , projectHasMore = True, taskHasMore = True, projectCardCount = 0, taskCardCount = 0
+                        , projectRequestPending = False, taskRequestPending = False
+                        }
+                    empty = { lifecycleModel | projects = Dict.empty, tasks = Dict.empty, dataLoading = { loading | rootNavigationRequest = Just request } }
+                    waiting = Feature.Cards.refreshViewport empty ( empty, Cmd.none ) |> Tuple.first
+                    completedLoading = waiting.dataLoading
+                    completed = { waiting | dataLoading = { completedLoading | rootNavigationRequest = Just { request | inFlight = False, succeeded = True, projectHasMore = False, taskHasMore = False } } }
+                    finished = Feature.Cards.refreshViewport waiting ( completed, Cmd.none ) |> Tuple.first
+                in
+                Expect.equal [ True, True, True, True ]
+                    [ Dict.member "root-status:project" waiting.cards.viewport.rows
+                    , Dict.member "root-status:task" waiting.cards.viewport.rows
+                    , Dict.isEmpty finished.cards.viewport.rows
+                    , Dict.isEmpty finished.cards.viewport.index.positions
+                    ]
         , test "subtask modal denies unfinished moves to cancelled parents and actual execution stays inert" <|
             \_ ->
                 let

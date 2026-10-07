@@ -39,8 +39,9 @@ test('production expanded hierarchy drains independent pages and keeps every end
     const membership = await h.logicalKeys()
     for (const project of h.fixture.projects) assert.ok(membership.has('project:' + project.id), 'Missing scroll-reachable project ' + project.id)
     for (const task of h.fixture.tasks) assert.ok(membership.has('task:' + task.id), 'Missing scroll-reachable task ' + task.id)
-    await h.page.locator('#main-content-scroll').evaluate(element => { element.scrollTop = element.scrollHeight })
-    await h.page.getByText('All children loaded', { exact: true }).last().waitFor()
+    assert.equal([...membership].some(key => key.startsWith('status:') || key.startsWith('root-status:')), false, 'Completed hierarchy must not reserve feedback rows')
+    assert.equal(await h.page.getByText('All children loaded', { exact: true }).count(), 0)
+    assert.equal(await h.page.locator('.lifecycle-gate-note,.completion-gate-note').count(), 0)
     assert.ok((await h.page.evaluate(() => window.hierarchyMaximum)) <= 31)
     assert.ok((await h.page.evaluate(() => window.hierarchyObserverMaximum)) <= 31)
     assert.ok(h.caps().maxBranches <= 4); assert.ok(h.caps().maxDetails <= 6)
@@ -87,8 +88,13 @@ test('failed independent continuation pauses with truthful error and explicit Re
     try { await h.scrollTo('task:task-120') } catch (error) { throw new Error(error.message + '\n' + JSON.stringify({ navigation: h.requests.filter(r => r.path.endsWith('/navigation')), keys: [...await h.logicalKeys()], text: (await h.page.locator('body').innerText()).slice(-2000) })) }
     const remaining = await h.scrollTo('status:project:root-project')
     await remaining.getByRole('button', { name: /Retry/ }).click(); await h.idle()
-    const complete = await h.scrollTo('status:project:root-project')
-    assert.equal(await complete.getByText('All children loaded', { exact: true }).count(), 1)
+    const branch = h.requests.filter(r => r.parent === 'root-project' && r.path.endsWith('/navigation') && r.status === 200)
+    assert.equal(branch.at(-1).projectHasMore, false); assert.equal(branch.at(-1).taskHasMore, false)
+    assert.ok(branch.every(r => r.done), 'Retried transport must settle')
+    const membership = await h.logicalKeys()
+    for (const project of h.fixture.projects) assert.ok(membership.has('project:' + project.id), project.id)
+    for (const task of h.fixture.tasks) assert.ok(membership.has('task:' + task.id), task.id)
+    assert.equal(membership.has('status:project:root-project'), false, 'Retry completion removes its feedback row and spacing')
   } finally { await h.close() }
 })
 

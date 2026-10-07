@@ -1049,17 +1049,6 @@ sentenceCase value =
             value
 
 
-viewCompletionGateNote : Maybe String -> Html Msg
-viewCompletionGateNote reason =
-    case reason of
-        Just message ->
-            span [ class "completion-gate-note", title message ] [ text "completion gated" ]
-
-        Nothing ->
-            text ""
-
-
-
 -- VIEW
 
 
@@ -1693,7 +1682,6 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                 ]
             , div [ class "card-actions" ]
                 [ Feature.Editing.viewStatusSelectWithDisabled model "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString projectStatusDisabled ChangeProjectStatus
-                , span [ class "lifecycle-gate-note", title "Archiving archives all descendant projects and cancels unfinished tasks; done tasks are preserved." ] [ text "Archive includes descendants" ]
                 , Feature.Editing.viewPrioritySelect model "project" project.id project.priority ChangeProjectPriority
                 , if Permissions.canEditCurrentWorkspace model then
                         button [ class "btn-icon btn-danger", onClick (ConfirmDelete "project" project.id), title "Delete" ] [ text "✕" ]
@@ -2294,8 +2282,6 @@ viewTaskCardBody descendants projection showProject model task =
                 ]
             , div [ class "card-actions" ]
                 [ Feature.Editing.viewStatusSelectWithDisabled model "task" task.id (Api.taskStatusToString task.status) taskStatusOptions Api.taskStatusToString taskStatusDisabled ChangeTaskStatus
-                , span [ class "lifecycle-gate-note", title "Cancelling this task cancels unfinished subtasks; done subtasks are preserved." ] [ text "Cancel includes subtasks" ]
-                , viewCompletionGateNote completionBlockerReason
                 , Feature.Editing.viewPrioritySelect model "task" task.id task.priority ChangeTaskPriority
                 , if Permissions.canEditCurrentWorkspace model then
                     button [ class "btn-icon btn-danger", onClick (ConfirmDelete "task" task.id), title "Delete" ] [ text "✕" ]
@@ -3233,6 +3219,8 @@ logicalRows projection model =
             { key = kind ++ ":" ++ id, kind = kind, entityId = id, depth = depth, parentKind = parentKind, parentId = parentId, zone = Nothing }
         status kind id depth =
             row "status" (kind ++ ":" ++ id) depth kind (Just id)
+        branchStatus kind id depth tail =
+            if branchStatusVisible model kind id then status kind id depth :: tail else tail
         boundary key depth zone =
             { key = "drop:" ++ key, kind = "drop", entityId = "", depth = depth, parentKind = zone.parentType, parentId = zone.parentId, zone = Just zone }
         zones kind parent projectId depth values identify priority render tail =
@@ -3256,7 +3244,7 @@ logicalRows projection model =
                 in
                 row "task" value.id depth "task" value.parentId
                     :: (if isCollapsed model ("task-" ++ value.id) then tail else
-                            tasks (depth + 1) value.projectId (Just value.id) seen children (status "task" value.id (depth + 1) :: tail))
+                            tasks (depth + 1) value.projectId (Just value.id) seen children (branchStatus "task" value.id (depth + 1) tail))
         projects depth parent visited values tail =
             zones "project" parent Nothing depth values .id .priority (project depth visited) tail
         project depth visited value tail =
@@ -3269,20 +3257,21 @@ logicalRows projection model =
                 row "project" value.id depth "project" value.parentId
                     :: (if isCollapsed model ("proj-" ++ value.id) then tail else
                             projects (depth + 1) (Just value.id) seen children
-                                (if model.search.filterShowOnly == ShowProjectsOnly then status "project" value.id (depth + 1) :: tail
-                                 else tasks (depth + 1) (Just value.id) Nothing seen childrenTasks (status "project" value.id (depth + 1) :: tail)))
+                                (if model.search.filterShowOnly == ShowProjectsOnly then branchStatus "project" value.id (depth + 1) tail
+                                 else tasks (depth + 1) (Just value.id) Nothing seen childrenTasks (branchStatus "project" value.id (depth + 1) tail)))
         roots = projection.projects |> List.filter (\p -> p.parentId == Nothing && projectVisible p)
         rootTasks = projection.tasks |> List.filter (\t -> t.parentId == Nothing && taskVisible t && (model.search.filterShowOnly == ShowTasksOnly || t.projectId == Nothing))
-        rootStatus kind = row "root-status" kind 0 "workspace_root" Nothing
+        rootStatus kind tail =
+            if rootStatusVisible model kind then row "root-status" kind 0 "workspace_root" Nothing :: tail else tail
     in
     case model.focus.focusedEntity of
         Just ( "project", id ) -> Dict.get id model.projects |> Maybe.map (\value -> project 0 Set.empty value []) |> Maybe.withDefault []
         Just ( "task", id ) -> Dict.get id model.tasks |> Maybe.map (\value -> task 0 Set.empty value []) |> Maybe.withDefault []
         _ ->
             let
-                taskRoots = if model.search.filterShowOnly == ShowProjectsOnly then [] else tasks 0 Nothing Nothing Set.empty rootTasks [ rootStatus "task" ]
+                taskRoots = if model.search.filterShowOnly == ShowProjectsOnly then [] else tasks 0 Nothing Nothing Set.empty rootTasks (rootStatus "task" [])
             in
-            if model.search.filterShowOnly == ShowTasksOnly then taskRoots else projects 0 Nothing Set.empty roots (rootStatus "project" :: taskRoots)
+            if model.search.filterShowOnly == ShowTasksOnly then taskRoots else projects 0 Nothing Set.empty roots (rootStatus "project" taskRoots)
 
 
 
@@ -3384,6 +3373,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( model, command ) 
                 || previous.search.filterTaskStatuses /= model.search.filterTaskStatuses
                 || (previous.dragDrop.dragging == Nothing) /= (model.dragDrop.dragging == Nothing)
                 || (not model.dataLoading.navigationVisibilityActive && (previous.projects /= model.projects || previous.tasks /= model.tasks))
+                || feedbackRowsChanged previous model
         sameContext = old.workspaceId == model.selectedWorkspaceId && old.sessionEpoch == model.sessionRequestEpoch
         active = model.auth.status == AuthReady && model.activeTab == ProjectsTab
     in
@@ -3591,10 +3581,54 @@ viewHierarchyViewport ws incoming =
         ]
 
 
+feedbackRowsChanged : Model -> Model -> Bool
+feedbackRowsChanged previous model =
+    let
+        branchKeys value =
+            Set.fromList
+                (value.dataLoading.navigationQueue
+                    ++ (Dict.toList value.dataLoading.loadedNavigationBranches
+                        |> List.filter (\( _, state ) -> state.inFlight || state.projectHasMore || state.taskHasMore)
+                        |> List.map Tuple.first)
+                    ++ (Dict.toList value.dataLoading.navigationPasses
+                        |> List.filter (\( _, pass ) -> pass.projectError /= Nothing || pass.taskError /= Nothing)
+                        |> List.map Tuple.first)
+                )
+        branchesChanged =
+            previous.dataLoading.navigationQueue /= model.dataLoading.navigationQueue
+                || previous.dataLoading.loadedNavigationBranches /= model.dataLoading.loadedNavigationBranches
+                || previous.dataLoading.navigationPasses /= model.dataLoading.navigationPasses
+    in
+    rootStatusVisible previous "project" /= rootStatusVisible model "project"
+        || rootStatusVisible previous "task" /= rootStatusVisible model "task"
+        || (branchesChanged && branchKeys previous /= branchKeys model)
+
+
+rootStatusVisible : Model -> String -> Bool
+rootStatusVisible model kind =
+    model.dataLoading.rootNavigationRequest
+        |> Maybe.map (\request -> request.inFlight || not request.succeeded || (if kind == "project" then request.projectHasMore else request.taskHasMore))
+        |> Maybe.withDefault False
+
+
+branchStatusVisible : Model -> String -> String -> Bool
+branchStatusVisible model kind id =
+    let
+        key = kind ++ ":" ++ id
+        hasError = Dict.get key model.dataLoading.navigationPasses
+            |> Maybe.map (\pass -> pass.projectError /= Nothing || pass.taskError /= Nothing)
+            |> Maybe.withDefault False
+        pending = Dict.get key model.dataLoading.loadedNavigationBranches
+            |> Maybe.map (\state -> state.inFlight || state.projectHasMore || state.taskHasMore)
+            |> Maybe.withDefault False
+    in
+    pending || hasError || List.member key model.dataLoading.navigationQueue
+
+
 viewViewportRootStatus : Model -> String -> Html Msg
 viewViewportRootStatus model kind =
-    case model.dataLoading.rootNavigationRequest of
-        Just request ->
+    case ( rootStatusVisible model kind, model.dataLoading.rootNavigationRequest ) of
+        ( True, Just request ) ->
             let
                 more = if kind == "project" then request.projectHasMore else request.taskHasMore
             in
@@ -3602,7 +3636,7 @@ viewViewportRootStatus model kind =
             else if more || not request.succeeded then
                 button [ class "navigation-load-more", onClick (LoadRootNavigationPage kind) ] [ text (if request.succeeded then "Load more " ++ kind ++ "s" else "Retry loading " ++ kind ++ "s") ]
             else text ""
-        Nothing -> text ""
+        _ -> text ""
 
 
 viewViewportBranchStatus : Model -> String -> String -> Html Msg
@@ -3613,11 +3647,22 @@ viewViewportBranchStatus model kind id =
         error stream = pass |> Maybe.andThen (if stream == "project" then .projectError else .taskError)
         viewError stream = error stream |> Maybe.map (\message -> div [ class "card-description-error", attribute "role" "status" ]
             [ text message, button [ class "btn-small btn-ghost", onClick (LoadNavigationBranchPage kind id stream) ] [ text "Retry" ] ]) |> Maybe.withDefault (text "")
+        loading = List.member key model.dataLoading.navigationQueue
+            || (Dict.get key model.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight |> Maybe.withDefault False)
+        viewMore stream =
+            let
+                more = Dict.get key model.dataLoading.loadedNavigationBranches
+                    |> Maybe.map (if stream == "project" then .projectHasMore else .taskHasMore)
+                    |> Maybe.withDefault False
+            in
+            if more && not loading && error stream == Nothing then
+                button [ class "navigation-load-more", onClick (LoadNavigationBranchPage kind id stream) ] [ text ("Load more " ++ stream ++ "s") ]
+            else text ""
     in
-    case Dict.get key model.dataLoading.loadedNavigationBranches of
-        Nothing -> text ""
-        Just state -> div [ class "hierarchy-branch-status" ]
-            [ if state.inFlight || List.member key model.dataLoading.navigationQueue then span [ attribute "role" "status" ] [ text "Loading more…" ] else text ""
+    if branchStatusVisible model kind id then
+        div [ class "hierarchy-branch-status" ]
+            [ if loading then span [ attribute "role" "status" ] [ text "Loading more…" ] else text ""
             , viewError "project", viewError "task"
-            , if not state.inFlight && not state.projectHasMore && not state.taskHasMore then span [ class "hierarchy-end" ] [ text "All children loaded" ] else text ""
+            , viewMore "project", viewMore "task"
             ]
+    else text ""

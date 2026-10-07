@@ -664,7 +664,7 @@ async function scrollExpandedHierarchy(page, expectedKeys) {
   if (!end) throw new Error('Finite expanded hierarchy scroll did not reach its end')
   const missing = expectedKeys.filter(key => !keys.has(key))
   if (missing.length) throw new Error('Expanded members were not scroll-reachable: ' + missing.slice(0, 5).join(', '))
-  if (!await page.getByText('All children loaded', {exact:true}).count()) throw new Error('Terminal hierarchy status was not scroll-reachable')
+  if (await page.locator('[data-hierarchy-key^="status:"], [data-hierarchy-key^="root-status:"]').count()) throw new Error('Settled expanded hierarchy still reserves a feedback row')
   await page.locator('#main-content-scroll').evaluate(element => { element.scrollTop = 0 })
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
   return { reachedEnd: true, distinctMountedKeys: keys.size }

@@ -168,8 +168,8 @@ offsets advance by transport size while cached counts deduplicate IDs.
 The hierarchy is one continuous logical preorder over all cached root and
 expanded child summaries. Loading another page adds reachable siblings; root
 **Load more** requests the next 50-item transport page directly. Branches
-continue automatically, and their end rows expose loading, completion or an
-incomplete/error state with Retry.
+continue automatically. Branch feedback rows expose loading, continuation or
+an incomplete/error state with Retry; completed branches reserve no status row.
 
 Rendering mounts at most 25 ordinary rows across the entire viewport, plus a
 bounded set of active focus, editor, inline-create, drag and native DOM-focus

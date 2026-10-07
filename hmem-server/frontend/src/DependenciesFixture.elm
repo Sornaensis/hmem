@@ -80,7 +80,7 @@ fixtureModel =
                 , unifiedResults = Just { observations = [], projects = [], tasks = [] }
                 , isSearching = True
                 , activeRequestQuery = Just "selected query"
-                , activeRequest = Just { workspaceId = workspaceId, token = 5, query = "selected query" }
+                , activeRequest = Just { workspaceId = workspaceId, sessionEpoch = base.sessionRequestEpoch, token = 5, query = "selected query" }
                 , nextRequestToken = 6
             }
         , tasks =

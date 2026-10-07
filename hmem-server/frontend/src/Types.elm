@@ -366,6 +366,7 @@ type alias ObservationModel =
     , facetExpectedOffset : Maybe Int
     , facetNextOffset : Int
     , selectedId : Maybe String
+    , inlineOwner : Maybe String
     , selectedDetail : Maybe Api.Observation
     , detailLoading : Bool
     , detailError : Maybe String
@@ -1114,6 +1115,7 @@ type Msg
     | CascadeDeleteDone DeleteConfirmation (Result Api.ApiError Api.CascadeResult)
     | CancelDelete
     | CopyId String
+    | ClipboardResult Bool
       -- Local storage
     | LocalStorageLoaded Encode.Value
       -- Focus mode

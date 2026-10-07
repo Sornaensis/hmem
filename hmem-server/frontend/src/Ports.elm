@@ -59,6 +59,9 @@ port loginAuth : String -> Cmd msg
 port copyToClipboard : String -> Cmd msg
 
 
+port clipboardResult : (Bool -> msg) -> Sub msg
+
+
 
 -- PORTS: Local storage
 

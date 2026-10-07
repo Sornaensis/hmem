@@ -23,7 +23,7 @@ for (const width of [1440, 320]) test('production ' + width + ' CSS-pixel previe
     const cards = h.page.locator('.observation-card')
     assert.equal(await cards.count(), 3)
     const geometry = await cards.evaluateAll(elements => elements.map(element => {
-      const preview = element.querySelector('.observation-summary'), subject = element.querySelector('.observation-subject')
+      const preview = element.querySelector('.observation-summary'), subject = element.closest('.observation-result').querySelector('.observation-subject')
       return { nameLength: [...element.getAttribute('aria-label')].length, previewLength: [...preview.textContent].length,
         previewHeight: preview.getBoundingClientRect().height, previewLine: parseFloat(getComputedStyle(preview).lineHeight),
         subjectHeight: subject.getBoundingClientRect().height, subjectLine: parseFloat(getComputedStyle(subject).lineHeight),
@@ -45,8 +45,8 @@ for (const width of [1440, 320]) test('production ' + width + ' CSS-pixel previe
     await disclosure.locator('summary').focus(); await h.page.keyboard.press('Enter')
     assert.equal(await disclosure.getAttribute('open'), '')
     assert.deepEqual(await disclosure.locator('.observation-subject-row .observation-subject-copy').allTextContents(), [longSubject, 'src/**/*.elm', 'src/Extra.elm'])
-    assert.equal(await disclosure.locator('.observation-detail-sha code').textContent(), h.sha)
-    await disclosure.getByRole('button', { name: 'Copy full revision', exact: true }).click()
+    assert.equal(await disclosure.locator('.observation-detail-sha .copyable-value').textContent(), h.sha)
+    await disclosure.getByRole('button', { name: 'Copy provenance revision: ' + h.sha, exact: true }).click()
     await h.page.waitForFunction(() => window.previewCopies.length === 1, null, { timeout: 5000 })
     assert.deepEqual(await h.page.evaluate(() => window.previewCopies), [h.sha])
     assert.equal(h.receipts.length, before)
@@ -70,7 +70,7 @@ for (const width of [1440, 320]) test('production ' + width + ' CSS-pixel previe
     await h.page.waitForFunction(() => window.previewCopies.length === 2, null, { timeout: 5000 })
     assert.equal(digest(await h.page.evaluate(() => window.previewCopies[1])), digest(fullBoundary))
     assert.deepEqual(await detail.locator('.observation-subject-row .observation-subject-copy').allTextContents(), [longSubject, 'src/**/*.elm', 'src/Extra.elm'])
-    assert.equal(await detail.locator('.observation-detail-sha code').textContent(), h.sha)
+    assert.equal(await detail.locator('.observation-detail-sha .copyable-value').textContent(), h.sha)
     assert.match(await detail.locator('.observation-detail-meta').textContent(), /Content updated2026-10-06 12:35:56\.123 UTC/)
     await h.page.getByRole('button', { name: 'Back to results', exact: true }).click()
     await h.page.waitForFunction(id => document.activeElement?.id === id, cardId, { timeout: 5000 })

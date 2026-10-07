@@ -1038,7 +1038,7 @@ auditDisplayField field value =
     else
         case Decode.decodeValue (Decode.dict Decode.value) value of
             Ok dict ->
-                Dict.get field dict |> Maybe.map auditDisplayValue
+                Dict.get field dict |> Maybe.map (auditTypedDisplayValue field)
 
             Err _ ->
                 Nothing
@@ -1050,7 +1050,7 @@ auditSnapshotDetailItemsFromValue value =
         Ok dict ->
             orderedAuditFields dict
                 |> List.filter (not << auditFieldHidden)
-                |> List.filterMap (\field -> Dict.get field dict |> Maybe.map (\fieldValue -> ( auditFieldLabel field, auditDisplayValue fieldValue )))
+                |> List.filterMap (\field -> Dict.get field dict |> Maybe.map (\fieldValue -> ( auditFieldLabel field, auditTypedDisplayValue field fieldValue )))
                 |> List.take 8
 
         Err _ ->
@@ -1117,8 +1117,8 @@ auditChangeFromValues field mOld mNew =
         Just
             { field = field
             , label = auditFieldLabel field
-            , oldValue = Maybe.map auditDisplayValue mOld
-            , newValue = Maybe.map auditDisplayValue mNew
+            , oldValue = Maybe.map (auditTypedDisplayValue field) mOld
+            , newValue = Maybe.map (auditTypedDisplayValue field) mNew
             }
 
 
@@ -1377,18 +1377,20 @@ viewAuditLogEntry model entry =
             , span [ class ("audit-action-badge " ++ actionClass) ] [ text actionLabel ]
             , span [ class "audit-entity-type" ] [ text entry.entityType ]
             , span summaryAttrs
-                [ text entitySummary ]
+                [ viewAuditSummary model entry
+                , if navigable then button [ class "btn-small", stopPropagationOn "click" (Decode.succeed ( NavigateToAuditEntity entry, True )) ] [ text "Open" ] else text ""
+                ]
             , span [ class "audit-timestamp" ] [ text (formatDate entry.changedAt) ]
             ]
         , if expanded then
             div [ class "audit-entry-detail" ]
-                [ viewAuditDetailSection "Audit context" (auditContextDetailItemsForView model entry)
+                [ viewAuditContext model entry
                 , viewAuditDetailSection "Action details" (auditActionDetailItems entry)
                 , viewAuditEntryChangeDetails entry
                 , div [ class "audit-entry-meta" ]
-                    [ span [ class "audit-entry-id" ] [ text ("Entry: " ++ String.left 8 entry.id) ]
-                    , span [ class "audit-entity-id" ] [ text ("Entity: " ++ String.left 8 entry.entityId) ]
-                    , span [ class "audit-actor" ] [ text ("Actor: " ++ auditActorSummary entry) ]
+                    [ span [ class "audit-entry-id" ] [ text "Entry: ", Helpers.copyableValue "" "audit entry ID" entry.id (String.left 8 entry.id) ]
+                    , span [ class "audit-entity-id" ] [ text "Entity: ", Helpers.copyableValue "" "entity ID" entry.entityId (String.left 8 entry.entityId) ]
+                    , span [ class "audit-actor" ] [ text "Actor: ", if entry.actorLabel == Nothing then entry.actorId |> Maybe.map (\value -> Helpers.copyableValue "" "actor ID" value (String.left 12 value)) |> Maybe.withDefault (text "unknown") else text (auditActorSummary entry) ]
                     , if isRevertableEntityType entry.entityType && Permissions.canViewGlobalAudit model && model.page == AuditLogPage then
                         button [ class "btn-revert", onClick (ConfirmRevert entry), title "Revert this change" ] [ text "↩ Revert" ]
 
@@ -1431,7 +1433,7 @@ viewAuditDetailSection titleText rows =
 viewAuditDetailItem : ( String, String ) -> List (Html Msg)
 viewAuditDetailItem ( labelText, valueText ) =
     [ dt [ class "audit-detail-label" ] [ text labelText ]
-    , dd [ class "audit-detail-value" ] [ text valueText ]
+    , dd [ class "audit-detail-value" ] [ viewAuditValue labelText valueText ]
     ]
 
 
@@ -1441,7 +1443,7 @@ auditContextDetailItemsForView model entry =
         |> List.map
             (\( label, valueText ) ->
                 if label == "Target entity" then
-                    ( label, valueText ++ " · " ++ auditEntitySummary model entry )
+                    ( label, valueText )
 
                 else
                     ( label, valueText )
@@ -1583,16 +1585,16 @@ viewChangedField change =
         , case ( change.oldValue, change.newValue ) of
             ( Just oldValue, Just newValue ) ->
                 span []
-                    [ span [ class "history-diff-old" ] [ text oldValue ]
+                    [ span [ class "history-diff-old" ] [ viewAuditValue change.label oldValue ]
                     , text " → "
-                    , span [ class "history-diff-new" ] [ text newValue ]
+                    , span [ class "history-diff-new" ] [ viewAuditValue change.label newValue ]
                     ]
 
             ( Nothing, Just newValue ) ->
-                span [ class "history-diff-new" ] [ text newValue ]
+                span [ class "history-diff-new" ] [ viewAuditValue change.label newValue ]
 
             ( Just oldValue, Nothing ) ->
-                span [ class "history-diff-old" ] [ text oldValue ]
+                span [ class "history-diff-old" ] [ viewAuditValue change.label oldValue ]
 
             ( Nothing, Nothing ) ->
                 text ""
@@ -1725,3 +1727,87 @@ updateAuditLogModel fn model =
 updateFocusModel : (FocusModel -> FocusModel) -> Model -> Model
 updateFocusModel fn model =
     { model | focus = fn model.focus }
+
+
+isTypedAuditField : String -> Bool
+isTypedAuditField field =
+    let normalized = field |> String.toLower |> String.replace " " "_" in
+    String.endsWith "_id" normalized || normalized == "id" || List.member normalized [ "git_sha", "subject", "path", "file_path", "glob", "content_version" ]
+
+
+auditTypedDisplayValue : String -> Decode.Value -> String
+auditTypedDisplayValue field value =
+    if field == "subjects" then Encode.encode 0 value
+    else if isTypedAuditField field then Decode.decodeValue flexibleStringDecoder value |> Result.withDefault (auditDisplayValue value)
+    else auditDisplayValue value
+
+
+viewAuditValue : String -> String -> Html Msg
+viewAuditValue labelText value =
+    if labelText == "subjects" then
+        case Decode.decodeString (Decode.list (Decode.map2 Tuple.pair (Decode.field "subject_kind" Decode.string) (Decode.field "subject" Decode.string))) value of
+            Ok subjects ->
+                div [] (List.map (\( kind, subject ) ->
+                    if List.member kind [ "file", "glob" ] then div [] [ text (kind ++ ": "), Helpers.copyableValue "" (kind ++ " subject") subject subject ]
+                    else text "Unsupported subject kind") subjects)
+            Err _ -> text (truncateAuditValue 160 value)
+    else if isTypedAuditField labelText && value /= "(unset)" && value /= "null" && value /= "(empty)" then Helpers.copyableValue "" labelText value value
+    else text value
+
+
+viewAuditContext : Model -> Api.AuditLogEntry -> Html Msg
+viewAuditContext model entry =
+    div [ class "audit-detail-section" ]
+        [ h4 [ class "audit-detail-heading" ] [ text "Audit context" ]
+        , dl [ class "audit-detail-grid" ]
+            (List.concatMap (\( labelText, valueText ) ->
+                if labelText == "Actor" && entry.actorLabel == Nothing && entry.actorId /= Nothing then
+                    [ dt [ class "audit-detail-label" ] [ text labelText ]
+                    , dd [ class "audit-detail-value" ] [ Helpers.copyableValue "" "actor ID" (Maybe.withDefault "" entry.actorId) valueText ] ]
+                else if labelText == "Target entity" then
+                    [ dt [ class "audit-detail-label" ] [ text labelText ]
+                    , dd [ class "audit-detail-value" ] [ text (valueText ++ " · "), viewAuditSummary model entry ] ]
+                else viewAuditDetailItem ( labelText, valueText )) (auditContextDetailItemsForView model entry))
+        ]
+
+
+{-| Only raw typed fields supply identifier payloads. User names and content do
+not become identifiers when they happen to look like an abbreviated fallback.
+-}
+viewAuditSummary : Model -> Api.AuditLogEntry -> Html Msg
+viewAuditSummary model entry =
+    let
+        field name =
+            let decode = Decode.decodeValue (Decode.field name flexibleStringDecoder) >> Result.toMaybe in
+            case Maybe.andThen decode entry.newValues of
+                Just value -> Just value
+                Nothing -> Maybe.andThen decode entry.oldValues
+        named kind name =
+            case field name of
+                Nothing -> text "?"
+                Just value ->
+                    let label = case kind of
+                            "task" -> Dict.get value model.tasks |> Maybe.map .title
+                            "project" -> Dict.get value model.projects |> Maybe.map .name
+                            "memory" -> Dict.get value model.memories |> Maybe.map (.content >> String.left 40)
+                            _ -> Nothing
+                    in case label of
+                        Just known -> text known
+                        Nothing -> Helpers.copyableValue "" (kind ++ " ID") value (String.left 8 value)
+        ordinary =
+            case field "name" of
+                Just value -> text value
+                Nothing -> case field "title" of
+                    Just value -> text value
+                    Nothing -> case field "content" of
+                        Just value -> text (String.left 60 value)
+                        Nothing -> Helpers.copyableValue "" "entity ID" entry.entityId (String.left 8 entry.entityId)
+    in
+    span [] (case entry.entityType of
+        "memory_link" -> [ named "memory" "source_id", text " → ", named "memory" "target_id", text (" (" ++ Maybe.withDefault "link" (field "relation_type") ++ ")") ]
+        "memory_tag" -> [ text ("Tag \"" ++ Maybe.withDefault "?" (field "tag") ++ "\" on "), named "memory" "memory_id" ]
+        "memory_category_link" -> [ named "memory" "memory_id", text " ↔ Category ", named "category" "category_id" ]
+        "task_dependency" -> [ named "task" "task_id", text " → depends on ", named "task" "depends_on_id" ]
+        "project_memory_link" -> [ named "project" "project_id", text " ↔ ", named "memory" "memory_id" ]
+        "task_memory_link" -> [ named "task" "task_id", text " ↔ ", named "memory" "memory_id" ]
+        _ -> [ ordinary ])

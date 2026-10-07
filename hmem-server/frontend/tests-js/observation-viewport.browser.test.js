@@ -77,8 +77,9 @@ test('production native Tab mounts offscreen logical targets and retained detail
     const originKey = await last.getAttribute('data-observation-key')
     const summary = last.locator('summary').last()
     await summary.focus(); await paint(h.page); await h.page.keyboard.press('Tab')
-    try { await h.page.waitForFunction(key => document.activeElement?.closest('[data-observation-key]')?.dataset.observationKey !== key && document.activeElement?.classList.contains('observation-card'), originKey, { timeout: 5000 }) } catch (error) { console.log('Bounded native focus diagnostic', await h.page.evaluate(() => ({ active: document.activeElement?.outerHTML?.slice(0, 350), stamp: document.querySelector('#observation-viewport')?.dataset.observationViewportContext, keys: [...document.querySelectorAll('[data-observation-key]')].map(row => row.dataset.observationPosition), top: document.querySelector('#main-content-scroll')?.scrollTop }))); throw error }
-    const card = h.page.locator('.observation-card:focus'), origin = await card.getAttribute('id')
+    try { await h.page.waitForFunction(key => document.activeElement?.closest('[data-observation-key]')?.dataset.observationKey !== key && document.activeElement?.classList.contains('copyable-value'), originKey, { timeout: 5000 }) } catch (error) { console.log('Bounded native focus diagnostic', await h.page.evaluate(() => ({ active: document.activeElement?.outerHTML?.slice(0, 350), stamp: document.querySelector('#observation-viewport')?.dataset.observationViewportContext, keys: [...document.querySelectorAll('[data-observation-key]')].map(row => row.dataset.observationPosition), top: document.querySelector('#main-content-scroll')?.scrollTop }))); throw error }
+    const card = h.page.locator('.copyable-value:focus').locator('..').locator('..').locator('.observation-card'), origin = await card.getAttribute('id')
+    await card.focus()
     await h.page.keyboard.press('Enter'); await h.page.waitForFunction(() => document.activeElement?.id === 'observation-detail-heading', null, { timeout: 5000 })
     await h.page.locator('#observation-edit').click()
     await h.page.locator('#observation-edit-content').fill('Protected draft while virtual results move')

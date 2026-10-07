@@ -3,7 +3,7 @@ import test from 'node:test'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
 import { scanObservationRows, revealObservationRow } from './observation-viewport-fixture.mjs'
 
-const applied = h => h.page.locator('.observation-applied-filters > p').textContent()
+const applied = h => h.page.locator('.observation-applied-filters .observation-applied-summary').textContent()
 async function activate(page, button, key = 'Enter') {
   const expanded = await button.getAttribute('aria-expanded'), id = await button.getAttribute('id')
   await button.focus(); await page.keyboard.press(key)
@@ -72,7 +72,7 @@ test('production By subject paginates populated facets and locks exact provenanc
     await h.page.getByRole('button', { name: 'Load more subjects', exact: true }).click(); await h.idle()
     assert.ok((await scanObservationRows(h.page)).facets.size > 50)
     assert.equal(h.receipts.filter(value => value.endpoint.endsWith('/subject-facets')).at(-1).params.offset, '50')
-    const facet = h.page.locator('.observation-facet-card').filter({ hasText: 'src/**/*.elm' })
+    const facet = h.page.locator('.observation-facet').filter({ hasText: 'src/**/*.elm' }).locator('.observation-facet-card')
     await revealObservationRow(h.page, facet); await facet.click(); await h.idle()
     await h.page.locator('#observation-advanced-toggle').click()
     assert.match(await h.page.locator('.observation-selected-facet-value').textContent(), /Glob: src\/\*\*\/\*\.elm/)

@@ -1969,12 +1969,7 @@ a:hover {
   outline-offset: 2px;
 }
 
-.observation-filters {
-  align-items: flex-end;
-  padding: 0.75rem;
-  background: var(--bg-surface);
-  border-radius: 0.5rem;
-}
+.observation-filters { align-items: flex-end; min-width: 0; }
 
 .observation-discovery-controls {
   display: grid;
@@ -2105,10 +2100,7 @@ textarea.observation-filter-input {
 }
 
 .observation-layout-with-detail {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(18rem, 2fr);
-  align-items: start;
-  gap: 1rem;
+  display: block;
 }
 
 .observation-list-rows {
@@ -4267,3 +4259,30 @@ textarea.observation-edit-content {
 .hierarchy-row > .card, .hierarchy-row .tree-card { margin-bottom: 0; }
 .hierarchy-spacer { pointer-events: none; }
 .hierarchy-branch-status { min-height: 24px; font-size: 0.8rem; color: var(--text-muted); }
+
+
+/* Structured values share one accessible copy affordance across app surfaces. */
+.copyable-value {
+  appearance: none; border: 0; padding: 0; background: transparent;
+  color: inherit; font: inherit; text-align: left; min-width: 0; max-width: 100%;
+  white-space: normal; overflow-wrap: anywhere; cursor: pointer;
+  text-decoration: underline dotted; text-underline-offset: 0.2em;
+}
+.copyable-value:hover { color: var(--accent-hover); }
+.copyable-value:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 2px; border-radius: 2px; }
+.observation-result { min-width: 0; }
+.observation-result > .observation-card { border: 0; padding: 0.5rem 0; background: transparent; }
+.observation-result > .card-header { padding: 0; }
+.observation-result:has(.observation-card-selected) { border-color: var(--accent-hover); }
+.observation-result .observation-detail { margin-top: 0.75rem; }
+.observation-detail-card { border: 0; padding: 0; background: transparent; }
+.observation-detached { margin-bottom: 0.75rem; }
+.observation-facet-card { border: 0; padding: 0; background: transparent; }
+.observation-facet-card strong, .observation-facet-card .card-meta { display: block; }
+.observation-applied-summary { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; font-size: 0.75rem; color: var(--text-muted); }
+.observation-applied-value { min-width: 0; overflow-wrap: anywhere; }
+.observation-discovery-controls .filter-bar { margin-bottom: 0; }
+.observation-subject-group-header { display: flex; min-width: 0; flex-wrap: wrap; }
+.observation-subject-group-header > .copyable-value { flex: 1 1 12rem; }
+.observation-subject-group-toggle { flex: 0 1 auto; }
+.membership-user, .audit-detail-value, .search-result-main { min-width: 0; overflow-wrap: anywhere; }

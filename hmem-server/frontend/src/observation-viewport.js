@@ -18,6 +18,7 @@ export function installObservationViewport(app, options = {}) {
   const mounted = () => root ? [...root.querySelectorAll('[data-observation-key]')] : []
   const controls = row => [...row.querySelectorAll('button,a[href],input,textarea,select,summary,[tabindex]')].filter(el =>
     !el.disabled && el.tabIndex >= 0 && !el.closest('[hidden],[inert]') && el.getClientRects().length)
+  const focusControls = row => [...controls(row), ...row.querySelectorAll('#observation-detail-heading')]
   const controlIdentity = control => JSON.stringify([control.tagName, control.id, control.type, control.className, control.getAttribute?.('role')])
   const rowFor = key => mounted().find(row => row.dataset.observationKey === key)
   const navigation = () => root?.closest('#observation-panel')?.dataset.observationContext || null
@@ -84,6 +85,13 @@ export function installObservationViewport(app, options = {}) {
       }
     }
     send(); settleNativeOwner(); completeNavigation()
+    // Inline detail shares the measured list. Preserve an owned reveal through
+    // accepted reflow only while its original target still owns native focus.
+    if (currentReveal() && same(settledStamp, stamp) && doc.activeElement?.id === revealOwner.targetId) {
+      const target = doc.getElementById(revealOwner.targetId)
+      const bounds = target?.getBoundingClientRect?.(), host = scroller.getBoundingClientRect()
+      if (bounds && (bounds.top < host.top || bounds.bottom > host.bottom)) target.scrollIntoView?.({ block: 'nearest', behavior: 'instant' })
+    }
   }
   function completeNavigation() {
     const waiting = pendingNavigation, current = navigationContext()
@@ -104,7 +112,7 @@ export function installObservationViewport(app, options = {}) {
     }
     if (!same(settledStamp, stamp) || settlement <= owner.afterSettlement || !same(stamp, readStamp(root))
         || root.dataset.observationFocusKey !== owner.key || pending || anchorTop !== null || adjustment) return
-    const row = rowFor(owner.key), control = row && controls(row)[owner.control]
+    const row = rowFor(owner.key), control = row && focusControls(row)[owner.control]
     if (!row) return
     if (control !== owner.node || controlIdentity(control) !== owner.identity) { nativeOwner = null; cancelNativePaint(); return }
     // Only the model's acknowledged successor layout may transfer this native
@@ -116,7 +124,7 @@ export function installObservationViewport(app, options = {}) {
       if (nativeOwner !== owner || owner.root !== root || owner.navigation !== navigation() || !same(owner.stamp, stamp)
           || !same(settledStamp, stamp) || !same(stamp, readStamp(root)) || root.dataset.observationFocusKey !== owner.key
           || pending || anchorTop !== null || adjustment) return
-      const current = rowFor(owner.key), target = current && controls(current)[owner.control]
+      const current = rowFor(owner.key), target = current && focusControls(current)[owner.control]
       nativeOwner = null
       if (target !== owner.node || controlIdentity(target) !== owner.identity) return
       if (!doc.activeElement || doc.activeElement === doc.body) {
@@ -129,7 +137,7 @@ export function installObservationViewport(app, options = {}) {
     const next = command?.stamp
     if (!next || typeof next.workspace !== 'string' || !Number.isInteger(next.epoch)
       || typeof next.generation !== 'string' || !Number.isInteger(next.revision) || !Number.isInteger(command.navigationToken)) return
-    if (sameLifetime(stamp, next) && navigationToken !== null && command.navigationToken < navigationToken) return
+    if (sameLifetime(stamp, next) && (next.revision < stamp.revision || (navigationToken !== null && command.navigationToken < navigationToken))) return
     if (!same(stamp, next)) {
       last = ''; pending = null; adjustment = 0; anchorTop = null; cancelNativePaint()
       if (nativeOwner && (!sameLifetime(nativeOwner.stamp, next) || next.revision < nativeOwner.stamp.revision)) nativeOwner = null
@@ -160,8 +168,6 @@ export function installObservationViewport(app, options = {}) {
     if (event.target !== (backwards ? tabbable[0] : tabbable.at(-1))) return
     const position = keys.indexOf(row.dataset.observationKey)
     let nextPosition = position + (backwards ? -1 : 1)
-    // Path labels have no native controls; Tab proceeds to the next disclosure/card.
-    while (keys[nextPosition]?.startsWith('observation-path-')) nextPosition += backwards ? -1 : 1
     const next = keys[nextPosition]
     if (position < 0 || !next || rowFor(next)) return
     event.preventDefault(); send({ key: next, edge: backwards ? 'last' : 'first' })
@@ -174,7 +180,7 @@ export function installObservationViewport(app, options = {}) {
     if (revealOwner && doc.activeElement?.id !== revealOwner.targetId) revealOwner = null
     cancelNativePaint()
     const row = doc.activeElement?.closest('[data-observation-key]')
-    const control = root?.contains(row) ? controls(row).indexOf(doc.activeElement) : -1
+    const control = root?.contains(row) ? focusControls(row).indexOf(doc.activeElement) : -1
     nativeOwner = control >= 0 && same(stamp, readStamp(root)) ? { root, stamp, navigation: navigation(), afterSettlement: settlement,
       key: row.dataset.observationKey, control, node: doc.activeElement, identity: controlIdentity(doc.activeElement) } : null
     send(null, true); schedule()

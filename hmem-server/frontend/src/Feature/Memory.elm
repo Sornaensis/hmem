@@ -487,7 +487,7 @@ viewMemoryCard model memory =
             [ div [ class "card-meta-row" ]
                 [ span [ class "card-meta" ] [ text ("Created: " ++ formatDate memory.createdAt) ]
                 , span [ class "card-meta" ] [ text ("Updated: " ++ formatDate memory.updatedAt) ]
-                , span [ class "card-meta card-id card-id-copy", onClick (CopyId memory.id) ] [ text memory.id ]
+                , Helpers.copyableValue "card-meta card-id card-id-copy" "memory ID" memory.id memory.id
                 ]
             ]
         ]

@@ -49,6 +49,33 @@ tests = describe "Observation global logical viewport"
     , test "a repeated focus and return owner adds one pin and leaves all omitted geometry" <| \_ ->
         let active = { state | top = 50000, height = 100000, focus = Just "2" } in
         Expect.equal 26 (Viewport.pieces (Just "2") active |> rows |> List.length)
+    , test "selected native and return owners are three deduplicated pins with truthful geometry" <| \_ ->
+        let
+            active = { state | top = 50000, height = 100000, focus = Just "900" }
+            pieces = Viewport.piecesWithOwner (Just "700") (Just "2") active
+            total piece = case piece of
+                Row _ _ _ -> active.index.estimate
+                Gap _ height -> height
+        in
+        Expect.all
+            [ \_ -> Expect.equal 28 (List.length (rows pieces))
+            , \_ -> Expect.equal True (List.all (\key -> List.member key (rows pieces)) [ "700", "900", "2" ])
+            , \_ -> Expect.equal 26 (Viewport.piecesWithOwner (Just "900") (Just "900") active |> rows |> List.length)
+            , \_ -> Expect.equal 180000 (List.sum (List.map total pieces))
+            , \_ -> Expect.equal keys (Array.toList active.index.keys)
+            ] ()
+    , test "selected offscreen owner measurement is admitted only under current workspace session query and layout" <| \_ ->
+        let
+            active = { state | top = 50000, focus = Just "900" }
+            stamp = active.stamp
+            retired = [ { stamp | workspace = "other" }, { stamp | epoch = 2 }, { stamp | generation = "old" }, { stamp | revision = stamp.revision - 1 } ]
+        in
+        case Viewport.updateWithOwner (Just "700") (Just "2") (receipt active active.top 800 [ ( "700", 450 ), ( "999", 3 ) ] Nothing Nothing) active of
+            Nothing -> Expect.fail "selected receipt rejected"
+            Just ( updated, _, _ ) -> Expect.all
+                [ \_ -> Expect.equal ( Just 450, Nothing ) ( Dict.get "700" updated.index.heights, Dict.get "999" updated.index.heights )
+                , \_ -> Expect.equal (List.repeat 4 Nothing) (List.map (\old -> Viewport.updateWithOwner (Just "700") (Just "2") (receipt { active | stamp = old } active.top 800 [ ( "700", 1 ) ] Nothing Nothing) active) retired)
+                ] ()
     , test "structural reorder preserves exact anchor key and intrarow scroll" <| \_ ->
         let
             old = { state | top = 18000 + 17 }

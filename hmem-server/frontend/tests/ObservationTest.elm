@@ -6,6 +6,7 @@ import AppShell
 import Browser
 import Dict
 import Expect
+import Feature.AuditLog
 import Feature.DataLoading
 import Feature.Observation
 import Feature.Search
@@ -28,7 +29,8 @@ import Url
 suite : Test
 suite =
     describe "observation API boundary"
-        [ describe "URL reauthorization, search intent and bootstrap ownership" observationUrlReviewTests
+        [ describe "structured copy origins" structuredCopyTests
+        , describe "URL reauthorization, search intent and bootstrap ownership" observationUrlReviewTests
         , describe "cached complete viewport projection" observationProjectionTests
         , describe "receipt-owned Return lifecycle" observationReturnReceiptTests
         , describe "bounded applied URL context" observationUrlTests
@@ -1979,10 +1981,10 @@ suite =
                     [ \_ -> Helpers.plainTextExcerpt 3 "😀 😀 😀" |> Expect.equal "😀 …"
                     , \_ -> Helpers.plainTextExcerpt 240 content |> String.toList |> List.length |> Expect.equal 240
                     , \_ -> view |> Query.find [ Selector.class "observation-card" ] |> Query.hasNot [ Selector.tag "details", Selector.tag "script", Selector.class "observation-sha-copy" ]
-                    , \_ -> view |> Query.find [ Selector.class "observation-summary" ] |> Query.has [ Selector.text (Helpers.plainTextExcerpt 240 content) ]
+                    , \_ -> view |> Query.has [ Selector.class "observation-collapse-label", Selector.text "Collapse observation" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-content" ] |> Query.has [ Selector.text content ]
-                    , \_ -> view |> Query.find [ Selector.class "observation-card-provenance" ] |> Query.has [ Selector.text "Provenance and 3 subjects", Selector.text "src/**/*.elm", Selector.text "src/Second.elm", Selector.text fullSha ]
-                    , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "Provenance revision (Git SHA)", Selector.text "Content updated", Selector.text "Copy full revision" ]
+                    , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "src/**/*.elm", Selector.text "src/Second.elm", Selector.text fullSha ]
+                    , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "Provenance revision (Git SHA)", Selector.text "Content updated", Selector.class "copyable-value" ]
                     ] ()
         , test "Observation timestamps retain useful UTC update time and explicit non-UTC offsets" <|
             \_ ->
@@ -2147,7 +2149,7 @@ suite =
                         Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) state |> Query.fromHtml
                 in
                 Expect.all
-                    [ \_ -> view |> Query.find [ Selector.class "observation-match-results" ] |> Query.has [ Selector.text "src/Main.elm", Selector.text "src/**/*.elm", Selector.text "1 loaded", Selector.text "Copy subject" ]
+                    [ \_ -> view |> Query.find [ Selector.class "observation-match-results" ] |> Query.has [ Selector.text "src/Main.elm", Selector.text "src/**/*.elm", Selector.text "1 loaded", Selector.class "copyable-value" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-match-results" ] |> Query.findAll [ Selector.class "observation-card" ] |> Query.count (Expect.equal 0)
                     , \_ -> view |> Query.find [ Selector.id "observation-match-paths" ] |> Query.has [ Selector.tag "textarea" ]
                     , \_ -> Feature.Observation.matchResponseMatches 0 4 "match-request" 0 state |> Expect.equal True
@@ -2607,7 +2609,7 @@ suite =
                     , \_ -> exactTuple oppositeKind |> Expect.equal ( Just Api.SubjectGlob, Just "src/**/*.elm" )
                     , \_ -> exactTuple afterApply |> Expect.equal ( Just Api.SubjectGlob, Just "src/**/*.elm" )
                     , \_ -> oppositeKind.observations.subjectKind |> Expect.equal (Just Api.SubjectFile)
-                    , \_ -> view |> Query.has [ Selector.text "Glob: src/**/*.elm", Selector.text "Exact results stay locked to this subject tuple." ]
+                    , \_ -> view |> Query.has [ Selector.text "Glob: ", Selector.text "src/**/*.elm", Selector.text "Exact results stay locked to this subject tuple." ]
                     ]
                     ()
         , test "match draft changes do not reinterpret applied evidence, paging, filters, or refresh" <|
@@ -3310,7 +3312,7 @@ suite =
                         Feature.Observation.viewObservations (observationWorkspace Api.Repository) model |> Query.fromHtml
                 in
                 Expect.all
-                    [ \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Event.simulate Event.click |> Event.expect (SelectObservationFrom observation.id (Feature.Observation.observationCardDomId "flat" observation.id))
+                    [ \_ -> view |> Query.find [ Selector.id (Feature.Observation.observationCardDomId "flat" observation.id) ] |> Event.simulate Event.click |> Event.expect ReturnObservationResults
                     , \_ -> view |> Query.find [ Selector.id "observation-detail-heading" ] |> Query.has [ Selector.attribute (tabindex -1) ]
                     , \_ -> view |> Query.find [ Selector.class "observation-return" ] |> Event.simulate Event.click |> Event.expect ReturnObservationResults
                     ] ()
@@ -3420,7 +3422,7 @@ suite =
                     , \_ -> oneExpanded |> Query.findAll [ Selector.class "observation-card" ] |> Query.count (Expect.equal 1)
                     , \_ -> oneExpanded |> Query.find [ Selector.id fileCardId ] |> Query.has [ Selector.class "observation-card-selected", Selector.attribute (attribute "aria-current" "true") ]
                     , \_ -> bothExpanded |> Query.findAll [ Selector.class "observation-card" ] |> Query.count (Expect.equal 2)
-                    , \_ -> bothExpanded |> Query.find [ Selector.id globCardId ] |> Query.has [ Selector.class "observation-card-selected" ]
+                    , \_ -> bothExpanded |> Query.find [ Selector.id globCardId ] |> Query.hasNot [ Selector.class "observation-card-selected" ]
                     , \_ -> (fileCardId == globCardId) |> Expect.equal False
                     ]
                     ()
@@ -4338,4 +4340,57 @@ observationProjectionTests =
             , \_ -> Expect.equal Nothing refreshed.observations.viewport.origin
             , \_ -> Expect.equal (Just "Protected keystroke") (Maybe.map .draft refreshed.observations.edit)
             ] ()
+    ]
+
+
+structuredCopyTests : List Test
+structuredCopyTests =
+    [ test "search titles equal to fallback text remain user prose while blank names copy canonical IDs" <| \_ ->
+        let
+            project name = { id = "abcd1234-full-project", workspaceId = "workspace-1", parentId = Nothing, name = name, description = Nothing, status = Api.ProjActive, priority = 5, createdAt = "", updatedAt = "" }
+            results = Feature.Search.searchResultPresentations { projects = [ project "Project abcd1234", project "" ], tasks = [], observations = [] }
+        in
+        Expect.equal [ Nothing, Just "abcd1234-full-project" ] (List.map .titleCopyValue results)
+    , test "audit dependency fragments copy each raw UUID and coincident user title stays plain" <| \_ ->
+        let
+            decode = Decode.decodeString Api.auditLogEntryDecoder
+            relationship = """{"id":"audit-rel","workspace_id":"workspace-1","entity_type":"task_dependency","entity_id":"relation","action":"create","old_values":null,"new_values":{"task_id":"abcd1234-full-task","depends_on_id":"efgh5678-full-task"},"changed_at":"2026-01-01T00:00:00Z"}"""
+            ordinary = """{"id":"audit-title","workspace_id":"workspace-1","entity_type":"task","entity_id":"abcd1234-full-task","action":"create","old_values":null,"new_values":{"title":"abcd1234"},"changed_at":"2026-01-01T00:00:00Z"}"""
+        in
+        case ( decode relationship, decode ordinary ) of
+            ( Ok dependency, Ok title ) ->
+                let
+                    base = editableModel Feature.Observation.init
+                    session = editorSession
+                    admin = { session | workspace = Just { workspaceId = "workspace-1", role = Just "admin", canRead = True, canEdit = True, canAdmin = True } }
+                    audit = Feature.AuditLog.init
+                    filters = audit.filters
+                    model = { base | sessionContext = Just admin, auditLog = { audit | entries = [ dependency, title ], filters = { filters | workspaceId = Just "workspace-1" } } }
+                    view = Feature.AuditLog.viewWorkspaceAuditPanel "workspace-1" model |> Query.fromHtml
+                    copy value = view |> Query.find [ Selector.attribute (attribute "aria-label" ("Copy task ID: " ++ value)) ] |> Event.simulate Event.click |> Event.expect (CopyId value)
+                in Expect.all
+                    [ \_ -> copy "abcd1234-full-task"
+                    , \_ -> copy "efgh5678-full-task"
+                    , \_ -> view |> Query.findAll [ Selector.class "audit-entity-summary" ] |> Query.index 1 |> Query.hasNot [ Selector.class "copyable-value" ]
+                    ] ()
+            _ -> Expect.fail "audit fixture did not decode"
+    , test "audit known ordered subjects and version retain long canonical copy values with hidden snapshots excluded" <| \_ ->
+        let
+            second = String.repeat 200 "segment/" ++ "*.elm"
+            version = "12345678-1234-4000-8000-123456789abc"
+            values = Encode.object [ ( "content_version", Encode.string version ), ( "subjects", Encode.list identity [ Encode.object [ ( "subject_kind", Encode.string "file" ), ( "subject", Encode.string "src/Main.elm" ) ], Encode.object [ ( "subject_kind", Encode.string "glob" ), ( "subject", Encode.string second ) ] ] ), ( "client_secret", Encode.string "hidden" ) ]
+            json = Encode.object [ ( "id", Encode.string "audit-obs" ), ( "workspace_id", Encode.string "workspace-1" ), ( "entity_type", Encode.string "observation" ), ( "entity_id", Encode.string "observation-1" ), ( "action", Encode.string "create" ), ( "old_values", Encode.null ), ( "new_values", values ), ( "changed_at", Encode.string "2026-01-01T00:00:00Z" ) ]
+        in case Decode.decodeValue Api.auditLogEntryDecoder json of
+            Err _ -> Expect.fail "observation audit fixture did not decode"
+            Ok entry ->
+                let
+                    base = editableModel Feature.Observation.init
+                    audit = Feature.AuditLog.init
+                    model = { base | auditLog = { audit | entityHistory = Dict.singleton "observation-1" [ entry ], historyExpanded = Dict.singleton "observation-1" True } }
+                    view = Feature.AuditLog.viewEntityHistory model "observation" "observation-1" |> Query.fromHtml
+                in Expect.all
+                    [ \_ -> view |> Query.find [ Selector.attribute (attribute "aria-label" ("Copy content version: " ++ version)) ] |> Event.simulate Event.click |> Event.expect (CopyId version)
+                    , \_ -> view |> Query.find [ Selector.attribute (attribute "aria-label" ("Copy glob subject: " ++ second)) ] |> Event.simulate Event.click |> Event.expect (CopyId second)
+                    , \_ -> view |> Query.hasNot [ Selector.text "hidden" ]
+                    ] ()
     ]

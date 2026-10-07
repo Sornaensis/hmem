@@ -67,6 +67,7 @@ type alias SearchResultPresentation =
     , entityTypeClass : String
     , entityId : String
     , title : String
+    , titleCopyValue : Maybe String
     , summary : String
     , badges : List SearchResultBadge
     , tags : List String
@@ -853,7 +854,9 @@ viewSearchResultCard result =
         [ div [ class "search-result-main" ]
             [ div [ class "search-result-topline" ]
                 ([ span [ class ("entity-type-label " ++ result.entityTypeClass), title result.entityType ] [ text result.entityTypeLabel ]
-                 , span [ class "search-result-title", title result.title ] [ text result.title ]
+                 , case result.titleCopyValue of
+                    Just value -> Helpers.copyableValue "search-result-title" (if result.entityType == "observation" then "repository subject" else "entity ID") value result.title
+                    Nothing -> span [ class "search-result-title", title result.title ] [ text result.title ]
                  ]
                     ++ List.map viewSearchResultBadge result.badges
                 )
@@ -919,6 +922,7 @@ projectResultPresentation project =
     , entityTypeLabel = "PRJ"
     , entityTypeClass = "entity-type-project"
     , entityId = project.id
+    , titleCopyValue = if String.isEmpty (String.trim project.name) then Just project.id else Nothing
     , title = nonBlankString project.name ("Project " ++ shortId project.id)
     , summary = nonBlankMaybe project.description "No description"
     , badges =
@@ -950,6 +954,7 @@ taskResultPresentation task =
         else
             "entity-type-subtask"
     , entityId = task.id
+    , titleCopyValue = if String.isEmpty (String.trim task.title) then Just task.id else Nothing
     , title = nonBlankString task.title ("Task " ++ shortId task.id)
     , summary = nonBlankMaybe task.description "No description"
     , badges =
@@ -971,6 +976,7 @@ observationResultPresentation observation =
     , entityTypeLabel = "OBS"
     , entityTypeClass = "entity-type-observation"
     , entityId = observation.id
+    , titleCopyValue = Just observation.subject
     , title = observation.subject
     , summary = nonBlankString observation.contentPreview "No observation content"
     , badges =

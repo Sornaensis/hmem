@@ -932,6 +932,7 @@ subscriptions =
         , localStorageReceived LocalStorageLoaded
         , Ports.onHierarchyViewport HierarchyViewportChanged
         , Ports.onObservationViewport ObservationViewportChanged
+        , Ports.clipboardResult ClipboardResult
         , onMainContentScroll MainContentScrolled
         ]
 

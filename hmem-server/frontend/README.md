@@ -33,15 +33,23 @@ content so keyboard targets remain visible.
 
 Observation results use one scrolling viewport across cards, subject facets,
 and expanded file-match groups. It mounts at most 25 ordinary logical rows and
-two distinct focus/return owners; complete loaded membership, ordered evidence,
+three distinct selected/native-focus/return owners; complete loaded membership, ordered evidence,
 group counts, and pagination stay cached. Native Tab mounts the next logical
-control before focusing it. Detail and a retained editor remain outside row
-eviction. One original layout can restore unchanged card scroll geometry after
+control before focusing it. The selected occurrence owns its inline detail/editor and stays pinned against row
+eviction. Other occurrences remain compact; links without a displayed occurrence
+use one detached inline card outside loaded counts and match evidence. Collapsing
+a selected card or its match group retains a dirty/saving draft with Return to draft. One original layout can restore unchanged card scroll geometry after
 opening detail; query, content, disclosure, font, or viewport changes retire its
 geometry. A valid originating card still mounts and reveals when that geometry
 cannot be reused.
 `npm run test:observation-viewport` checks production scroll reachability and
 native focus; the other Observation browser families remain separate npm gates.
+
+Displayed identifier values are native copy buttons across the app. Pointer, Enter,
+and Space copy the complete canonical SHA, path, glob, or UUID even when its
+label is abbreviated. Copying preserves selection and editing; subject drilling
+uses its own control. Clipboard feedback follows browser success or failure.
+Editable identifier inputs keep their normal editing behavior.
 
 Each content save sends the opaque version captured when editing began. A
 competing write produces a conflict and preserves the draft, even before its
@@ -129,7 +137,7 @@ selection cleanup, and permission admission in controlled browser fixtures.
 Cards show whitespace-collapsed plain-text previews of at most 240 Unicode
 codepoints and three lines. The primary subject uses at most 96 codepoints and
 two lines; selection button names use at most 180 codepoints. Full content stays
-in detail. Each card's separate provenance disclosure exposes the full revision
+inside the expanded card. Compact cards' provenance disclosures expose the full revision
 and ordered subjects, including copy actions, outside the selection button.
 The compact revision uses 12 SHA characters. Content update metadata includes
 time and timezone; the immutable provenance revision does not imply automatic
@@ -312,3 +320,11 @@ Retry automation rejects an owner with automatic work queued or physical branch/
 Root completion proof accepts only the project or task kinds admitted by the current root pass. Manual root pages extend that kind’s demand; refresh continuation stops at previously demanded spans. Valid companion payloads cannot clear a paused kind. Initial root loading and its manual pages retain the producer’s whole-request retry mask: a failed bootstrap retries both pending kinds, while a failed single-kind manual page keeps its terminal companion unchanged. Established same-context refreshes and later authoritative snapshots use staged per-kind acceptance. The root Retry helper selects the actual per-kind “Retry loading” control and stamps that request; a selected retry at offset zero preserves independent companion coverage. Session, filter, and accepted authoritative snapshot retirement distinguish genuine fresh root lifetimes from ambiguous unstamped zero-offset retries.
 
 Complete evidence collection accepts binary Git output with explicit limits: 32 MiB per command, 128 MiB across the collection, 30 seconds per command and 60 seconds overall. Required untracked source and failed-record archives remain in the complete diff. A no-index exit code of 1 is accepted only with intact bounded output; overflow, timeout, signals and command errors fail qualification. Evidence files are replaced atomically, and persistence invalidates an earlier success manifest before writing. Partial or failed writes retain an explicit failed receipt, or remove stale success receipts if writing the failure is also unavailable. These writer limits do not change the measured performance budgets or the request-accounting cut.
+
+
+Displayed structured UUIDs, repository subjects/paths and provenance revisions
+are native clickable values. Enter/Space or a click copies the full canonical
+value, including when its display is abbreviated, without activating adjacent
+navigation. Clipboard feedback waits for success/failure from the browser.
+Editable inputs retain their normal behavior; subject drill controls remain
+separate. Observation filters use the shared app filter-bar surface and spacing.

@@ -118,6 +118,7 @@ init =
     , facetExpectedOffset = Nothing
     , facetNextOffset = 0
     , selectedId = Nothing
+    , inlineOwner = Nothing
     , selectedDetail = Nothing
     , detailLoading = False
     , detailError = Nothing
@@ -155,6 +156,7 @@ clearSelection state =
     let viewport = state.viewport in
     { state
         | selectedId = Nothing
+        , inlineOwner = Nothing
         , selectedDetail = Nothing
         , detailLoading = False
         , detailError = Nothing
@@ -350,18 +352,13 @@ updateRaw msg model =
             loadMoreFacets model
 
         ToggleObservationMatchGroup groupKey ->
-            ( updateObservation
-                (\state ->
-                    { state
-                        | expandedMatchGroups =
-                            Dict.update groupKey
-                                (\current -> Just (not (Maybe.withDefault False current)))
-                                state.expandedMatchGroups
-                    }
-                )
-                model
-            , Cmd.none
-            )
+            let
+                state = model.observations
+                ownsSelection = state.selectedId |> Maybe.map (\selected -> state.inlineOwner == Just (observationCardDomId groupKey selected)) |> Maybe.withDefault False
+                ( retained, command ) = if ownsSelection && (Dict.get groupKey state.expandedMatchGroups |> Maybe.withDefault False) then returnToResults model else ( model, Cmd.none )
+            in
+            ( updateObservation (\current -> { current | expandedMatchGroups = Dict.update groupKey (\expanded -> Just (not (Maybe.withDefault False expanded))) current.expandedMatchGroups }) retained
+            , command )
 
         SelectObservation observationId ->
             activateObservation observationId Nothing model
@@ -373,42 +370,25 @@ updateRaw msg model =
             returnToResults model
 
         CopyObservationSubject subject ->
-            let
-                ( updated, toastCmd ) =
-                    addToast Success "Repository subject copied to clipboard" model
-            in
-            ( updated, Cmd.batch [ copyToClipboard subject, toastCmd ] )
+            ( model, copyToClipboard subject )
 
         CopyObservationGitSha gitSha ->
-            let
-                ( updated, toastCmd ) =
-                    addToast Success "Provenance revision copied to clipboard" model
-            in
-            ( updated, Cmd.batch [ copyToClipboard gitSha, toastCmd ] )
+            ( model, copyToClipboard gitSha )
 
         CopyObservationContent observationId ->
             case currentSelectedObservation model.observations of
                 Just observation ->
                     if observation.id == observationId then
-                        let
-                            ( updated, toastCmd ) =
-                                addToast Success "Full observation content copied to clipboard" model
-                        in
-                        ( updated, Cmd.batch [ copyToClipboard observation.content, toastCmd ] )
-
+                        ( model, copyToClipboard observation.content )
                     else
                         ( model, Cmd.none )
-
                 Nothing ->
                     ( model, Cmd.none )
 
         CopyObservationLink ->
             case Helpers.completeObservationUrl model of
                 Ok url ->
-                    let
-                        ( updated, toastCmd ) = addToast Success "Observation link copied to clipboard" model
-                    in
-                    ( updated, Cmd.batch [ copyToClipboard url, toastCmd ] )
+                    ( model, copyToClipboard url )
                 Err message ->
                     addToast Warning message model
 
@@ -3190,8 +3170,9 @@ refreshViewport previous ( model, command ) =
         ownedPending = state.pendingReturnNavigation |> Maybe.andThen (\intent ->
             if intent.workspaceId == lifetime.workspace && intent.sessionEpoch == lifetime.epoch && intent.queryGeneration == lifetime.generation && intent.navigationToken == state.detailNavigationToken then Just intent else Nothing)
         pending = if invalidatedReturn then ownedPending |> Maybe.map (\intent -> { intent | fallback = intent.intent == "return" && not (Dict.member intent.originKey viewport.index.positions), readyRevision = Nothing }) else ownedPending
-        updated = { state | resultRows = rows, viewport = viewport, pendingReturnNavigation = pending }
-        synchronize = changed || navigationChanged || old.detailReturnTarget /= state.detailReturnTarget || old.viewport.focus /= viewport.focus || old.viewport.returnPin /= viewport.returnPin || old.viewport.stamp /= viewport.stamp
+        owner = if changed || old.selectedId /= state.selectedId || old.detailReturnTarget /= state.detailReturnTarget then resolveSelectedOwner rows viewport state else state.inlineOwner
+        updated = { state | resultRows = rows, viewport = viewport, inlineOwner = owner, pendingReturnNavigation = pending }
+        synchronize = changed || navigationChanged || old.selectedId /= state.selectedId || old.detailReturnTarget /= state.detailReturnTarget || old.viewport.focus /= viewport.focus || old.viewport.returnPin /= viewport.returnPin || old.viewport.stamp /= viewport.stamp
     in
     ( { model | observations = updated }
     , Cmd.batch [ command, if synchronize then Ports.syncObservationViewport (ObservationViewport.sync changed 0 Nothing viewport) else Cmd.none ] )
@@ -3203,7 +3184,7 @@ updateViewport payload model =
         || Decode.decodeValue (Decode.field "navigationToken" Decode.int) payload /= Ok model.observations.detailNavigationToken then
         ( model, Cmd.none )
     else
-        case ObservationViewport.update model.observations.detailReturnTarget payload model.observations.viewport of
+        case ObservationViewport.updateWithOwner model.observations.inlineOwner model.observations.detailReturnTarget payload model.observations.viewport of
             Nothing -> ( model, Cmd.none )
             Just ( viewport, target, adjustment ) ->
                 let
@@ -3229,13 +3210,14 @@ updateViewport payload model =
                 , Cmd.batch [ Ports.syncObservationViewport (ObservationViewport.syncReceipt settled adjustment target viewport), navigation ] )
 
 
-viewResultRows : ObservationModel -> Html Msg
-viewResultRows state =
+viewResultRows : Bool -> ObservationModel -> Html Msg
+viewResultRows canEdit state =
     let
         -- Pure view callers (fixtures/tests) may not have passed through routing.
         uninitialized = state.viewport.stamp.workspace == "" && Array.isEmpty state.resultRows
         rows = if uninitialized then projectResultRows state else state.resultRows
         viewport = if uninitialized then ObservationViewport.rebuild state.viewport.stamp (Array.toList rows |> List.map resultRowKey) state.viewport else state.viewport
+        owner = selectedOwner state
         piece item =
             case item of
                 HierarchyViewport.Gap at height ->
@@ -3243,7 +3225,7 @@ viewResultRows state =
                 HierarchyViewport.Row at key _ ->
                     ( key, Array.get at rows |> Maybe.map (\row ->
                         div [ class "observation-viewport-row", attribute "data-observation-key" key, attribute "data-observation-position" (String.fromInt at) ]
-                            [ Lazy.lazy2 viewResultRow state.selectedId row ]) |> Maybe.withDefault (text "") )
+                            [ Lazy.lazy4 viewResultRow canEdit owner state row ]) |> Maybe.withDefault (text "") )
     in
     Keyed.node "div"
         [ id "observation-viewport", class "observation-list-rows observation-viewport"
@@ -3252,27 +3234,28 @@ viewResultRows state =
         , attribute "data-observation-focus-key" (Maybe.withDefault "" viewport.focus)
         , attribute "data-observation-logical-count" (String.fromInt (Array.length rows))
         , attribute "data-observation-loaded-count" (String.fromInt (List.length state.orderedIds)) ]
-        (ObservationViewport.pieces state.detailReturnTarget viewport |> List.map piece)
+        (ObservationViewport.piecesWithOwner owner state.detailReturnTarget viewport |> List.map piece)
 
 
-viewResultRow : Maybe String -> ObservationResultRow -> Html Msg
-viewResultRow selected row =
+viewResultRow : Bool -> Maybe String -> ObservationModel -> ObservationResultRow -> Html Msg
+viewResultRow canEdit owner state row =
     case row of
-        ObservationCardRow context observation -> viewObservationRow selected context observation
+        ObservationCardRow context observation -> viewObservationRow canEdit owner state context observation
         ObservationFacetRow facet -> viewFacet facet
         ObservationPathRow path empty ->
             section [ class "observation-path-group" ]
-                [ h3 [ id ("observation-path-" ++ domToken path), class "observation-path-heading" ] [ text path ]
+                [ h3 [ id ("observation-path-" ++ domToken path), class "observation-path-heading" ] [ Helpers.copyableValue "" "file path" path path ]
                 , if empty then p [ class "observation-path-empty" ] [ text "No loaded matches for this path." ] else text "" ]
         ObservationSubjectRow path key kind subject count expanded ->
             section [ class "observation-subject-group", attribute "data-observation-group" key, attribute "aria-label" ("Subject " ++ subject ++ " for " ++ path) ]
                 [ div [ class "observation-subject-group-header" ]
                     [ button [ class "observation-subject-group-toggle", type_ "button", onClick (ToggleObservationMatchGroup key)
-                        , attribute "aria-expanded" (if expanded then "true" else "false"), attribute "aria-controls" "observation-viewport" ]
+                        , attribute "aria-expanded" (if expanded then "true" else "false"), attribute "aria-controls" "observation-viewport"
+                        , attribute "aria-label" ((if expanded then "Collapse " else "Expand ") ++ subject ++ " for " ++ path) ]
                         [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel kind) ]
-                        , span [ class "observation-subject" ] [ text subject ]
                         , span [ class "observation-loaded-count" ] [ text (String.fromInt count ++ " loaded") ] ]
-                    , button [ class "observation-subject-copy", type_ "button", onClick (CopyObservationSubject subject), attribute "aria-label" ("Copy matching subject " ++ subject) ] [ text "Copy subject" ] ] ]
+                    , Helpers.copyableValue "observation-subject observation-subject-copy" "matching subject" subject subject
+                    ] ]
 
 
 viewObservations : Api.Workspace -> Model -> Html Msg
@@ -3333,8 +3316,13 @@ viewObservationsStateWithPermission canEdit workspace state =
                         , ( "observation-layout-with-detail", state.selectedId /= Nothing )
                         ]
                     ]
-                    [ viewList workspace.id state
-                    , viewDetail canEdit state
+                    [ if state.selectedId /= Nothing && selectedOwner state == Nothing then
+                        div [ class "card observation-result observation-detached", attribute "data-observation-detached" "true" ]
+                            [ p [ class "form-help", attribute "role" "status" ] [ text "Selected observation is outside the displayed result rows. Loaded counts and file-match evidence are unchanged." ]
+                            , viewDetail canEdit state
+                            ]
+                      else text ""
+                    , viewList canEdit workspace.id state
                     ]
                 ]
             , viewDeleteConfirmation canEdit state
@@ -3437,7 +3425,7 @@ viewAdvancedFilters state =
                         div [ class "filter-group observation-filter-group observation-selected-facet" ]
                             [ span [ class "filter-label" ] [ text "Selected shared subject" ]
                             , strong [ class "observation-selected-facet-value" ]
-                                [ text (subjectKindLabel selectedFacet.subjectKind ++ ": " ++ selectedFacet.subject) ]
+                                [ text (subjectKindLabel selectedFacet.subjectKind ++ ": "), Helpers.copyableValue "" "repository subject" selectedFacet.subject selectedFacet.subject ]
                             , p [ class "form-help" ] [ text "Exact results stay locked to this subject tuple. Browse/match kind changes do not alter it." ]
                             ]
 
@@ -3507,30 +3495,16 @@ viewAppliedFilters state =
         query =
             listQuery "" 0 state
 
-        labels =
-            [ "Mode: " ++ modeName applied.requestMode
-            , "Search: " ++ Maybe.withDefault "all" query.query
-            , "Kind: " ++ (query.subjectKind |> Maybe.map subjectKindLabel |> Maybe.withDefault "all")
-            , "Subject: " ++ Maybe.withDefault "all" query.subject
-            , "Git SHA: " ++ Maybe.withDefault "all" query.gitSha
-            ]
-                ++ (if applied.requestMode == ObservationMatchMode then
-                        [ "Files: " ++ String.join ", " applied.matchAppliedPaths ]
-
-                    else
-                        []
-                   )
+        typed labelText value =
+            span [ class "observation-applied-value" ] [ text (labelText ++ ": "), Helpers.copyableValue "" labelText value value ]
     in
     div [ class "observation-applied-filters" ]
-        [ p []
-            [ text
-                (if state.appliedQuery == Nothing then
-                    "No query has been applied yet."
-
-                 else
-                    "Applied filters: " ++ String.join "; " labels
-                )
-            ]
+        [ if state.appliedQuery == Nothing then p [] [ text "No query has been applied yet." ] else
+            div [ class "observation-applied-summary" ]
+                ([ span [] [ text ("Applied filters: Mode: " ++ modeName applied.requestMode ++ "; Search: " ++ Maybe.withDefault "all" query.query ++ "; Kind: " ++ (query.subjectKind |> Maybe.map subjectKindLabel |> Maybe.withDefault "all")) ]
+                 , query.subject |> Maybe.map (typed "Subject") |> Maybe.withDefault (span [] [ text "Subject: all" ])
+                 , query.gitSha |> Maybe.map (typed "Git SHA") |> Maybe.withDefault (span [] [ text "Git SHA: all" ])
+                 ] ++ (if applied.requestMode == ObservationMatchMode then List.map (typed "File") applied.matchAppliedPaths else []))
         , if hasUnappliedFilters state then
             div [ class "form-help", attribute "role" "status" ]
                 [ text "Filters have unapplied changes. Apply filters or revert them before loading more results."
@@ -3621,24 +3595,24 @@ viewModeNavigation state =
         ]
 
 
-viewList : String -> ObservationModel -> Html Msg
-viewList workspaceId state =
+viewList : Bool -> String -> ObservationModel -> Html Msg
+viewList canEdit workspaceId state =
     case state.requestMode of
         ObservationFacetMode ->
-            viewFacetCatalogue workspaceId state
+            viewFacetCatalogue canEdit workspaceId state
 
         ObservationMatchMode ->
-            viewMatchResults workspaceId state
+            viewMatchResults canEdit workspaceId state
 
         ObservationExactSubjectMode ->
-            viewObservationResults workspaceId "Exact subject observations" "No observations share this exact subject" state
+            viewObservationResults canEdit workspaceId "Exact subject observations" "No observations share this exact subject" state
 
         ObservationFlatMode ->
-            viewObservationResults workspaceId "Observations" "No observations found" state
+            viewObservationResults canEdit workspaceId "Observations" "No observations found" state
 
 
-viewObservationResults : String -> String -> String -> ObservationModel -> Html Msg
-viewObservationResults workspaceId ariaLabel emptyHeading state =
+viewObservationResults : Bool -> String -> String -> String -> ObservationModel -> Html Msg
+viewObservationResults canEdit workspaceId ariaLabel emptyHeading state =
     let
         observations =
             state.orderedIds |> List.filterMap (\observationId -> Dict.get observationId state.items)
@@ -3674,7 +3648,7 @@ viewObservationResults workspaceId ariaLabel emptyHeading state =
 
                 else
                     text ""
-        , Lazy.lazy viewResultRows state
+        , Lazy.lazy2 viewResultRows canEdit state
         , if state.loading && not (List.isEmpty observations) then
             viewPageLoading state.expectedOffset "observations"
           else
@@ -3740,8 +3714,8 @@ viewPageLoading offset labelText =
         ]
 
 
-viewFacetCatalogue : String -> ObservationModel -> Html Msg
-viewFacetCatalogue workspaceId state =
+viewFacetCatalogue : Bool -> String -> ObservationModel -> Html Msg
+viewFacetCatalogue canEdit workspaceId state =
     let
         facets =
             state.facetKeys |> List.filterMap (\key -> Dict.get key state.facets)
@@ -3766,7 +3740,7 @@ viewFacetCatalogue workspaceId state =
 
                 else
                     text ""
-        , Lazy.lazy viewResultRows state
+        , Lazy.lazy2 viewResultRows canEdit state
         , if state.facetLoading && not (List.isEmpty facets) then
             viewPageLoading state.facetExpectedOffset "shared subjects"
           else
@@ -3791,27 +3765,19 @@ viewFacetCatalogue workspaceId state =
 
 viewFacet : Api.ObservationSubjectFacet -> Html Msg
 viewFacet facet =
-    button
-        [ id ("observation-facet-" ++ domToken (facetKey facet.subjectKind facet.subject))
-        , class "card observation-facet-card"
-        , type_ "button"
-        , onClick (SelectObservationFacet facet.subjectKind facet.subject)
-        , attribute "aria-label"
-            ("Open " ++ subjectKindLabel facet.subjectKind ++ " subject " ++ facet.subject ++ " with " ++ String.fromInt facet.observationCount ++ " observations")
-        ]
+    div [ class "card observation-facet" ]
         [ div [ class "card-header observation-card-header" ]
             [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel facet.subjectKind) ]
-            , span [ class "observation-subject" ] [ text facet.subject ]
-            ]
-        , div [ class "observation-facet-meta" ]
+            , Helpers.copyableValue "observation-subject" "repository subject" facet.subject facet.subject ]
+        , button [ id ("observation-facet-" ++ domToken (facetKey facet.subjectKind facet.subject)), class "observation-facet-card", type_ "button"
+            , onClick (SelectObservationFacet facet.subjectKind facet.subject)
+            , attribute "aria-label" ("Open " ++ subjectKindLabel facet.subjectKind ++ " subject " ++ facet.subject ++ " with " ++ String.fromInt facet.observationCount ++ " observations") ]
             [ strong [] [ text (String.fromInt facet.observationCount ++ " observations") ]
-            , span [ class "card-meta" ] [ text ("Latest update: " ++ formatDate facet.latestUpdatedAt) ]
-            ]
-        ]
+            , span [ class "card-meta" ] [ text ("Latest update: " ++ formatDate facet.latestUpdatedAt) ] ] ]
 
 
-viewMatchResults : String -> ObservationModel -> Html Msg
-viewMatchResults workspaceId state =
+viewMatchResults : Bool -> String -> ObservationModel -> Html Msg
+viewMatchResults canEdit workspaceId state =
     let
         paths =
             state.matchAppliedPaths
@@ -3844,7 +3810,7 @@ viewMatchResults workspaceId state =
                      )
                     )
         , if state.error == Nothing || not (List.isEmpty state.orderedIds) then
-            Lazy.lazy viewResultRows state
+            Lazy.lazy2 viewResultRows canEdit state
           else
             text ""
         , if state.loading && not (List.isEmpty state.orderedIds) then
@@ -3871,117 +3837,68 @@ viewMatchResults workspaceId state =
         ]
 
 
-viewPathGroup : ObservationModel -> ObservationPathGroup -> Html Msg
-viewPathGroup state pathGroup =
-    section [ class "observation-path-group", attribute "aria-labelledby" ("observation-path-" ++ domToken pathGroup.path) ]
-        [ h3 [ id ("observation-path-" ++ domToken pathGroup.path), class "observation-path-heading" ] [ text pathGroup.path ]
-        , if List.isEmpty pathGroup.subjectGroups then
-            p [ class "observation-path-empty" ] [ text "No loaded matches for this path." ]
-
-          else
-            div [ class "observation-subject-groups" ] (List.map (viewSubjectGroup state pathGroup.path) pathGroup.subjectGroups)
-        ]
-
-
-viewSubjectGroup : ObservationModel -> String -> ObservationSubjectGroup -> Html Msg
-viewSubjectGroup state path group =
+viewObservationRow : Bool -> Maybe String -> ObservationModel -> String -> Api.Observation -> Html Msg
+viewObservationRow canEdit owner state context observation =
     let
-        expanded =
-            Dict.get group.key state.expandedMatchGroups |> Maybe.withDefault False
-
-        panelId =
-            "observation-group-panel-" ++ domToken group.key
-
-        observations =
-            group.observationIds |> List.filterMap (\observationId -> Dict.get observationId state.items)
+        cardId = observationCardDomId context observation.id
+        expanded = owner == Just cardId
     in
-    section [ class "observation-subject-group" ]
-        [ div [ class "observation-subject-group-header" ]
-            [ button
-                [ class "observation-subject-group-toggle"
-                , type_ "button"
-                , onClick (ToggleObservationMatchGroup group.key)
-                , attribute "aria-expanded"
-                    (if expanded then
-                        "true"
-
-                     else
-                        "false"
-                    )
-                , attribute "aria-controls" panelId
-                ]
-                [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel group.subjectKind) ]
-                , span [ class "observation-subject" ] [ text group.subject ]
-                , span [ class "observation-loaded-count" ] [ text (String.fromInt (List.length group.observationIds) ++ " loaded") ]
-                ]
-            , button
-                [ class "observation-subject-copy"
-                , type_ "button"
-                , onClick (CopyObservationSubject group.subject)
-                , attribute "aria-label" ("Copy matching subject " ++ group.subject)
-                ]
-                [ text "Copy subject" ]
+    div [ class "card observation-result", attribute "data-observation-id" observation.id, attribute "data-observation-context-key" context ]
+        [ div [ class "card-header observation-card-header" ]
+            [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel observation.subjectKind) ]
+            , Helpers.copyableValue "observation-subject" "repository subject" observation.subject (plainTextExcerpt 96 observation.subject)
+            , if List.length observation.subjects > 1 then
+                span [ class "card-meta observation-subject-count" ] [ text ("+" ++ String.fromInt (List.length observation.subjects - 1)) ]
+              else text ""
             ]
-        , if expanded then
-            div [ id panelId, class "observation-subject-group-cards", attribute "aria-label" ("Loaded observations for " ++ group.subject) ]
-                (List.map (viewObservationRow state.selectedId group.key) observations)
-
-          else
-            text ""
-        ]
-
-
-viewObservationRow : Maybe String -> String -> Api.Observation -> Html Msg
-viewObservationRow selectedId context observation =
-    let
-        isSelected =
-            selectedId == Just observation.id
-    in
-    div [ class "observation-result", attribute "data-observation-id" observation.id, attribute "data-observation-context-key" context ]
-        [ button
-            [ id (observationCardDomId context observation.id)
-            , classList
-                [ ( "card", True )
-                , ( "observation-card", True )
-                , ( "observation-card-selected", isSelected )
-                ]
+        , button
+            [ id cardId, classList [ ( "card", True ), ( "observation-card", True ), ( "observation-card-selected", expanded ) ]
             , type_ "button"
-            , attribute "aria-label"
-                (plainTextExcerpt 180 ("Open " ++ subjectKindLabel observation.subjectKind ++ " observation: " ++ plainTextExcerpt 96 observation.subject ++ ". " ++ plainTextExcerpt 60 observation.content))
-            , attribute "aria-current"
-                (if isSelected then
-                    "true"
-
-                 else
-                    "false"
-                )
-            , onClick (SelectObservationFrom observation.id (observationCardDomId context observation.id))
+            , attribute "aria-label" (plainTextExcerpt 180 ((if expanded then "Collapse " else "Open ") ++ subjectKindLabel observation.subjectKind ++ " observation: " ++ plainTextExcerpt 96 observation.subject ++ ". " ++ plainTextExcerpt 60 observation.content))
+            , attribute "aria-expanded" (if expanded then "true" else "false")
+            , attribute "aria-current" (if expanded then "true" else "false")
+            , onClick (if expanded then ReturnObservationResults else SelectObservationFrom observation.id cardId)
             ]
-            [ div [ class "card-header observation-card-header" ]
-                [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel observation.subjectKind) ]
-                , span [ class "observation-subject" ] [ text (plainTextExcerpt 96 observation.subject) ]
-                , if List.length observation.subjects > 1 then
-                    span [ class "card-meta observation-subject-count", attribute "aria-label" (String.fromInt (List.length observation.subjects - 1) ++ " additional subjects") ] [ text ("+" ++ String.fromInt (List.length observation.subjects - 1)) ]
-
-                  else
-                    text ""
+            [ if expanded then span [ class "observation-collapse-label" ] [ text "Collapse observation" ] else div [ class "card-body observation-summary" ] [ text (plainTextExcerpt 240 observation.content) ] ]
+        , div [ class "card-meta-group observation-card-meta" ]
+            [ div [ class "card-meta-row" ]
+                [ span [ class "card-meta observation-sha" ] [ text "Provenance revision: ", Helpers.copyableValue "" "provenance revision" observation.gitSha (String.left 12 observation.gitSha ++ "…") ]
+                , span [ class "card-meta observation-updated" ] [ text ("Content updated: " ++ formatObservationTimestamp observation.updatedAt) ]
+                ] ]
+        , if expanded then viewDetail canEdit state else
+            details [ class "observation-card-provenance" ]
+                [ summary [] [ text ("Provenance and " ++ String.fromInt (List.length observation.subjects) ++ " subjects") ]
+                , dl [ class "observation-detail-meta" ] [ viewProvenanceRevision observation.gitSha, viewSubjects observation.subjects ]
                 ]
-            , div [ class "card-body observation-summary" ] [ text (plainTextExcerpt 240 observation.content) ]
-            , div [ class "card-meta-group observation-card-meta" ]
-                [ div [ class "card-meta-row" ]
-                    [ span [ class "card-meta observation-sha" ] [ text ("Provenance revision: " ++ String.left 12 observation.gitSha ++ "…") ]
-                    , span [ class "card-meta observation-updated" ] [ text ("Content updated: " ++ formatObservationTimestamp observation.updatedAt) ]
-                    ]
-                ]
-            ]
-        , details [ class "observation-card-provenance" ]
-            [ summary [] [ text ("Provenance and " ++ String.fromInt (List.length observation.subjects) ++ " subjects") ]
-            , dl [ class "observation-detail-meta" ]
-                [ viewProvenanceRevision observation.gitSha
-                , viewSubjects observation.subjects
-                ]
-            ]
         ]
+
+
+{-| Only one exact repeated occurrence owns detail. Linked selection chooses the
+first known occurrence; absent/collapsed membership gets a detached inline card.
+-}
+selectedOwner : ObservationModel -> Maybe String
+selectedOwner state =
+    if state.viewport.stamp.workspace == "" && Array.isEmpty state.resultRows then
+        let rows = projectResultRows state in
+        resolveSelectedOwner rows (ObservationViewport.rebuild state.viewport.stamp (Array.toList rows |> List.map resultRowKey) state.viewport) state
+    else state.inlineOwner
+
+
+resolveSelectedOwner : Array.Array ObservationResultRow -> ObservationViewport.State -> ObservationModel -> Maybe String
+resolveSelectedOwner rows viewport state =
+    case state.selectedId of
+        Nothing -> Nothing
+        Just selected ->
+            case state.detailReturnTarget of
+                Just origin ->
+                    Dict.get origin viewport.index.positions |> Maybe.andThen (\position ->
+                        Array.get position rows |> Maybe.andThen (\row -> case row of
+                            ObservationCardRow _ observation -> if observation.id == selected then Just origin else Nothing
+                            _ -> Nothing))
+                Nothing ->
+                    Array.toList rows |> List.filterMap (\row -> case row of
+                        ObservationCardRow context observation -> if observation.id == selected then Just (observationCardDomId context observation.id) else Nothing
+                        _ -> Nothing) |> List.head
 
 
 viewDetail : Bool -> ObservationModel -> Html Msg
@@ -4252,7 +4169,7 @@ viewDetailMeta : String -> String -> String -> Html Msg
 viewDetailMeta labelText valueText valueClass =
     div [ class "observation-detail-meta-row" ]
         [ dt [ class "observation-detail-meta-label" ] [ text labelText ]
-        , dd [ classList [ ( "observation-detail-meta-value", True ), ( valueClass, not (String.isEmpty valueClass) ) ] ] [ text valueText ]
+        , dd [ classList [ ( "observation-detail-meta-value", True ), ( valueClass, not (String.isEmpty valueClass) ) ] ] [ if valueClass == "observation-detail-workspace" then Helpers.copyableValue "" "workspace ID" valueText valueText else text valueText ]
         ]
 
 
@@ -4261,9 +4178,7 @@ viewProvenanceRevision gitSha =
     div [ class "observation-detail-meta-row" ]
         [ dt [ class "observation-detail-meta-label" ] [ text "Provenance revision (Git SHA)" ]
         , dd [ class "observation-detail-meta-value observation-detail-sha" ]
-            [ code [] [ text gitSha ]
-            , button [ class "btn btn-secondary observation-sha-copy", type_ "button", onClick (CopyObservationGitSha gitSha) ] [ text "Copy full revision" ]
-            ]
+            [ Helpers.copyableValue "" "provenance revision" gitSha gitSha ]
         ]
 
 
@@ -4280,13 +4195,7 @@ viewSubject : Api.ObservationSubject -> Html Msg
 viewSubject subject =
     div [ class "observation-subject-row" ]
         [ span [ class "entity-type-label observation-kind" ] [ text (subjectKindLabel subject.subjectKind) ]
-        , button
-            [ class "observation-subject-copy"
-            , type_ "button"
-            , onClick (CopyObservationSubject subject.subject)
-            , attribute "aria-label" ("Copy repository subject " ++ plainTextExcerpt 96 subject.subject)
-            ]
-            [ text subject.subject ]
+        , Helpers.copyableValue "observation-subject-copy" "repository subject" subject.subject subject.subject
         ]
 
 

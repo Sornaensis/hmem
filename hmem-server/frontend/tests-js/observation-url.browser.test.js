@@ -46,7 +46,7 @@ test('production subject and locked exact links reload the correct mode and Back
     const facetUrl = h.page.url()
     await h.page.reload(); await ready(h)
     assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations/subject-facets')
-    await h.page.locator('.observation-facet-card').filter({ hasText: 'src/**/*.elm' }).click(); await ready(h)
+    await h.page.locator('.observation-facet').filter({ hasText: 'src/**/*.elm' }).locator('.observation-facet-card').click(); await ready(h)
     await h.page.locator('#observation-query').fill('Cache evidence'); await h.page.locator('#observation-query').press('Enter'); await ready(h)
     const exactUrl = h.page.url(), before = h.receipts.length
     await h.page.reload(); await ready(h)
@@ -71,7 +71,7 @@ test('production ordered file context restores Match and A-to-B-to-Back retains 
     await navigate(h, tuple('match', 'Cache evidence', null, '', h.sha, null, null, [' src/Main.elm ', 'src/View.elm', 'src/Main.elm']))
     assert.deepEqual(h.receipts.at(-1).payload.paths, ['src/Main.elm', 'src/View.elm'])
     assert.deepEqual(await h.page.locator('.observation-path-heading').allTextContents(), ['src/Main.elm', 'src/View.elm'])
-    await h.page.locator('.observation-subject-group-toggle').filter({ hasText: 'src/**/*.elm' }).first().click()
+    await h.page.locator('.observation-subject-group').filter({ hasText: 'src/**/*.elm' }).locator('.observation-subject-group-toggle').first().click()
     await h.page.locator('.observation-card').filter({ hasText: 'Cache evidence for Main' }).first().click(); await ready(h)
     await h.page.locator('#observation-edit').click(); await h.page.locator('#observation-edit-content').fill('Protected history draft')
     const aUrl = h.page.url(), appliedSummary = await applied(h.page)

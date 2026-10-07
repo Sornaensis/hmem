@@ -348,7 +348,7 @@ viewMembershipManager ws model =
 viewMembershipRow : String -> Api.WorkspaceMembership -> Html Msg
 viewMembershipRow wsId membership =
     div [ class "membership-row" ]
-        [ span [ class "membership-user" ] [ text membership.userId ]
+        [ Helpers.copyableValue "membership-user" "user ID" membership.userId membership.userId
         , span [ class ("badge badge-" ++ membership.role) ] [ text membership.role ]
         , span [ class "membership-updated" ] [ text ("Updated " ++ formatDate membership.updatedAt) ]
         , button [ class "btn-small btn-danger-subtle", onClick (RemoveWorkspaceMembership wsId membership.userId) ] [ text "Remove" ]
@@ -366,7 +366,7 @@ viewPurgeConfirmModal model =
                 [ div [ class "modal", stopPropagationOn "click" (Decode.succeed ( NoOp, True )) ]
                     [ h3 [ class "modal-title" ] [ text "Permanently purge workspace?" ]
                     , p [] [ text "This will delete the workspace and then permanently purge it. This cannot be undone." ]
-                    , p [ class "card-id" ] [ text wsId ]
+                    , p [ class "card-id" ] [ Helpers.copyableValue "" "workspace ID" wsId wsId ]
                     , div [ class "modal-actions" ]
                         [ button [ class "btn btn-secondary", onClick CancelWorkspacePurge ] [ text "Cancel" ]
                         , button [ class "btn btn-danger", onClick PerformWorkspacePurge ] [ text "Purge" ]

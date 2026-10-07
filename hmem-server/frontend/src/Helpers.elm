@@ -5,6 +5,9 @@ import Browser.Dom
 import Browser.Navigation as Nav
 import Char
 import Dict exposing (Dict)
+import Html exposing (Html, button, text)
+import Html.Attributes exposing (attribute, class, title, type_)
+import Html.Events exposing (stopPropagationOn)
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Ports exposing (saveToLocalStorage)
@@ -14,6 +17,23 @@ import String
 import Task as ElmTask
 import Types exposing (..)
 import Url
+
+
+{-| A displayed identifier is its own copy control; the payload may be longer
+than its abbreviated presentation. Native buttons provide Enter/Space support.
+-}
+copyableValue : String -> String -> String -> String -> Html Msg
+copyableValue classes label value display =
+    button
+        [ class ("copyable-value " ++ classes)
+        , type_ "button"
+        , title ("Copy " ++ label ++ ": " ++ value)
+        , attribute "aria-label" ("Copy " ++ label ++ ": " ++ value)
+        , stopPropagationOn "click" (Decode.succeed ( CopyId value, True ))
+        , stopPropagationOn "keydown" (Decode.map (\key -> ( NoOp, key == "Enter" || key == " " )) (Decode.field "key" Decode.string))
+        , stopPropagationOn "keyup" (Decode.map (\key -> ( NoOp, key == "Enter" || key == " " )) (Decode.field "key" Decode.string))
+        ]
+        [ text display ]
 
 
 presentationWindowSize : Int

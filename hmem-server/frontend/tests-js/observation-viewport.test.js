@@ -16,7 +16,10 @@ function harness({ fallback = false } = {}) {
     const value = { dataset: { observationKey: key }, getBoundingClientRect: () => ({ height: 180 }), scrollIntoView: () => effects.push('scroll:' + key) }
     value.controls = [{ tagName: 'BUTTON', type: 'button', className: 'primary', disabled: false, tabIndex: 0, closest: selector => selector === '[data-observation-key]' ? value : null,
       getClientRects: () => [{}], focus: () => { doc.activeElement = value.controls[0]; effects.push('focus:' + key) } }]
-    value.querySelectorAll = () => value.controls
+    value.heading = { tagName: 'H3', id: 'observation-detail-heading', tabIndex: -1, className: 'observation-detail-heading',
+      closest: selector => selector === '[data-observation-key]' ? value : null,
+      getClientRects: () => [{}], focus: () => { doc.activeElement = value.heading; effects.push('heading:' + key) } }
+    value.querySelectorAll = selector => selector === '#observation-detail-heading' ? [value.heading] : [...value.controls, value.heading]
     return value
   }
   let rows = [row('0'), row('1')]
@@ -82,10 +85,10 @@ test('mounted fallback measurement and native anchor adjustment work without Res
   h.bridge.dispose()
 })
 
-test('native Tab skips noninteractive path labels while retaining exact next card ownership', () => {
+test('native Tab mounts the next directly copyable path label', () => {
   const h = harness(); h.sync({ keys: ['0', '1', 'observation-path-label', '2'] }); h.flush()
   assert.equal(h.keyboard(), true)
-  assert.deepEqual(h.sent.at(-1).target, { key: '2', edge: 'first' })
+  assert.deepEqual(h.sent.at(-1).target, { key: 'observation-path-label', edge: 'first' })
   h.bridge.dispose()
 })
 
@@ -197,5 +200,58 @@ test('arming asks for one fresh receipt and unchanged acknowledged geometry does
   assert.equal(h.sent.length, 2); assert.equal(h.frames.size, 0)
   h.sync({ navigationToken: -1, settled: false }); h.flush()
   assert.equal(h.sent.length, 2, 'retired navigation cannot request another read')
+  h.bridge.dispose()
+})
+
+
+test('negative tabindex inline heading is retained through accepted successor geometry without becoming a Tab control', () => {
+  const h = harness(); h.sync(); h.flush()
+  const owner = h.root.querySelectorAll()[0]
+  h.doc.activeElement = owner.heading; h.events.get('focusin')()
+  assert.equal(h.sent.at(-1).focus, '0')
+  h.move('0'); h.doc.activeElement = h.doc.body; h.root.dataset.observationFocusKey = '0'
+  const next = { ...h.stamp, revision: 2 }; h.root.dataset.observationViewportContext = JSON.stringify(next)
+  h.sync({ stamp: next, settled: false }); h.flush()
+  h.sync({ stamp: next }); h.flush(); h.flush()
+  assert.deepEqual(h.effects, ['heading:0'])
+  h.doc.activeElement = owner.controls[0]
+  assert.equal(h.keyboard(), false, 'next mounted row uses normal browser Tab')
+  h.bridge.dispose()
+})
+
+for (const retirement of ['copy', 'editor', 'outside', 'workspace', 'session', 'query', 'navigation', 'node-retirement']) test('inline heading cannot restore after ' + retirement + ' under acknowledged successor geometry', () => {
+  const h = harness(); h.sync(); h.flush()
+  const owner = h.root.querySelectorAll()[0]
+  h.doc.activeElement = owner.heading; h.events.get('focusin')()
+  h.move('0'); h.doc.activeElement = h.doc.body; h.root.dataset.observationFocusKey = '0'
+  const next = { ...h.stamp, revision: 2 }
+  if (retirement === 'copy' || retirement === 'editor') {
+    const replacement = { ...owner.controls[0], tagName: retirement === 'editor' ? 'TEXTAREA' : 'BUTTON', className: retirement === 'editor' ? 'editor' : 'copyable-value' }
+    owner.controls.push(replacement); h.doc.activeElement = replacement; h.events.get('focusin')()
+  }
+  if (retirement === 'outside') { h.doc.activeElement = { closest: () => null }; h.events.get('focusin')() }
+  if (retirement === 'workspace') next.workspace = 'other'
+  if (retirement === 'session') next.epoch++
+  if (retirement === 'query') next.generation = 'replacement'
+  if (retirement === 'navigation') h.panel.dataset.observationContext = JSON.stringify({ workspaceId: 'repo', sessionEpoch: 2, token: 1, selectedId: 'other' })
+  if (retirement === 'node-retirement') h.replace('0')
+  h.root.dataset.observationViewportContext = JSON.stringify(next)
+  h.sync({ stamp: next, settled: false }); h.flush(); h.sync({ stamp: next }); h.flush(); h.flush()
+  assert.equal(h.effects.includes('heading:0'), false)
+  if (retirement === 'copy' || retirement === 'editor') assert.equal(h.doc.activeElement.tagName, retirement === 'editor' ? 'TEXTAREA' : 'BUTTON')
+  h.bridge.dispose()
+})
+
+
+test('a delayed older same-lifetime command cannot strand current painted rows without scroll receipts', () => {
+  const h = harness(); h.sync(); h.flush()
+  const next = { ...h.stamp, revision: 2 }
+  h.root.dataset.observationViewportContext = JSON.stringify(next)
+  h.sync({ stamp: next }); h.flush()
+  h.sync({ stamp: h.stamp, settled: false, top: 0, adjustment: 70 }); h.flush()
+  h.scroll.scrollTop = 500; h.events.get('scroll:scroll')(); h.flush()
+  assert.equal(h.sent.at(-1).stamp.revision, 2)
+  assert.equal(h.sent.at(-1).top, 400)
+  assert.equal(h.scroll.scrollTop, 500)
   h.bridge.dispose()
 })

@@ -1,4 +1,4 @@
-module ObservationViewport exposing (State, Stamp, init, rebuild, pieces, update, stampValue, sync, syncReceipt, captureOrigin, returnToOrigin)
+module ObservationViewport exposing (State, Stamp, init, rebuild, pieces, piecesWithOwner, update, updateWithOwner, stampValue, sync, syncReceipt, captureOrigin, returnToOrigin)
 
 import Array
 import Dict exposing (Dict)
@@ -84,7 +84,12 @@ pins returned state =
 
 pieces : Maybe String -> State -> List HierarchyViewport.Piece
 pieces returned state =
-    HierarchyViewport.window state.top state.height 360 25 (pins returned state) state.index
+    piecesWithOwner Nothing returned state
+
+
+piecesWithOwner : Maybe String -> Maybe String -> State -> List HierarchyViewport.Piece
+piecesWithOwner selected returned state =
+    HierarchyViewport.window state.top state.height 360 25 (Set.union (Set.fromList (List.filterMap identity [ selected ])) (pins returned state)) state.index
 
 
 stampValue : Stamp -> Encode.Value
@@ -139,6 +144,11 @@ Unseen keys and offscreen measurements cannot alter geometry.
 -}
 update : Maybe String -> Encode.Value -> State -> Maybe ( State, Maybe ( String, String ), Float )
 update returned value state =
+    updateWithOwner Nothing returned value state
+
+
+updateWithOwner : Maybe String -> Maybe String -> Encode.Value -> State -> Maybe ( State, Maybe ( String, String ), Float )
+updateWithOwner selected returned value state =
     case Decode.decodeValue decoder value of
         Err _ -> Nothing
         Ok receipt ->
@@ -146,7 +156,7 @@ update returned value state =
                 Nothing
             else
                 let
-                    mounted = pieces returned state |> List.filterMap (\piece -> case piece of
+                    mounted = piecesWithOwner selected returned state |> List.filterMap (\piece -> case piece of
                         HierarchyViewport.Row _ key _ -> Just key
                         _ -> Nothing) |> Set.fromList
                     validKey key = Dict.member key state.index.positions

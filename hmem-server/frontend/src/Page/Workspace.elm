@@ -68,7 +68,7 @@ viewReadableWorkspacePage wsId model ws =
             , div [ class "workspace-details" ]
                 [ div [ class "workspace-detail" ]
                     [ span [ class "workspace-detail-label" ] [ text "ID" ]
-                    , span [ class "workspace-detail-value card-id card-id-copy", onClick (CopyId ws.id) ] [ text ws.id ]
+                    , Helpers.copyableValue "workspace-detail-value card-id card-id-copy" "workspace ID" ws.id ws.id
                     ]
                 , case ws.ghOwner of
                     Just owner ->

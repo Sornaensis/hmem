@@ -17,6 +17,7 @@ import Feature.Timeline
 import Feature.WebSocket
 import Feature.WorkspaceAdmin
 import Helpers
+import Ports
 import Toast
 import Types exposing (..)
 import Url
@@ -526,8 +527,11 @@ route msg model =
         CancelDelete ->
             Ok (Feature.Cards.update msg model)
 
-        CopyId _ ->
-            Ok (Feature.Cards.update msg model)
+        CopyId value ->
+            Ok ( model, Ports.copyToClipboard value )
+
+        ClipboardResult succeeded ->
+            Ok (Toast.addToast (if succeeded then Success else Error) (if succeeded then "Copied to clipboard" else "Unable to copy to clipboard") model)
 
         ExpandAndEdit _ _ _ _ _ ->
             Ok (Feature.Editing.update msg model)

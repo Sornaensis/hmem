@@ -107,7 +107,7 @@ test('production repeated match cards and same-ID activation retain editor owner
     await returnToResults(h.page)
     await h.page.waitForFunction(id => document.activeElement?.id === id, origin)
     const returned = await second.boundingBox()
-    assert.ok(returned.width > narrowWidth, 'Closing detail widens the repeated result cards')
+    assert.ok(Math.abs(returned.width - narrowWidth) <= 1, 'Inline detail preserves full-width result cards')
     const main = await h.page.locator('#main-content-scroll').boundingBox()
     assert.ok(returned.y + returned.height > main.y && returned.y < main.y + main.height)
     await assertUnobscured(h.page, second)

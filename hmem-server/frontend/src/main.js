@@ -572,7 +572,8 @@ if (app.ports.clearChangeStreamScope) {
 
 // Clipboard
 app.ports.copyToClipboard.subscribe(function (text) {
-  navigator.clipboard.writeText(text)
+  Promise.resolve().then(() => navigator.clipboard.writeText(text))
+    .then(() => app.ports.clipboardResult.send(true), () => app.ports.clipboardResult.send(false))
 })
 
 // ---------------------------------------------------------------------------

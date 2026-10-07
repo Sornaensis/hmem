@@ -580,11 +580,7 @@ update msg model =
             ( { model | cards = updatedCards }, Cmd.none )
 
         CopyId idStr ->
-            let
-                ( m2, toastCmd ) =
-                    addToast Success "ID copied to clipboard" model
-            in
-            ( m2, Cmd.batch [ copyToClipboard idStr, toastCmd ] )
+            ( model, copyToClipboard idStr )
 
         ScrollToEntity entityId ->
             ( updateCardsModel
@@ -1799,7 +1795,7 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
                 [ div [ class "card-meta-row" ]
                     [ span [ class "card-meta" ] [ text ("Created: " ++ formatDate project.createdAt) ]
                     , span [ class "card-meta" ] [ text ("Updated: " ++ formatDate project.updatedAt) ]
-                    , span [ class "card-meta card-id card-id-copy", onClick (CopyId project.id) ] [ text project.id ]
+                    , Helpers.copyableValue "card-meta card-id card-id-copy" "project ID" project.id project.id
                     ]
                 ]
             ]
@@ -2404,7 +2400,7 @@ viewTaskCardBody descendants projection showProject model task =
             [ div [ class "card-meta-row" ]
                 [ span [ class "card-meta" ] [ text ("Created: " ++ formatDate task.createdAt) ]
                 , span [ class "card-meta" ] [ text ("Updated: " ++ formatDate task.updatedAt) ]
-                , span [ class "card-meta card-id card-id-copy", onClick (CopyId task.id) ] [ text task.id ]
+                , Helpers.copyableValue "card-meta card-id card-id-copy" "task ID" task.id task.id
                 ]
             , div [ class "card-meta-row" ]
                 [ case task.dueAt of

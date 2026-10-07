@@ -6,7 +6,7 @@ export async function paint(page) {
 
 export async function scanObservationRows(page) {
   const keys = new Set(), positions = new Map(), cards = new Map(), groups = new Map(), facets = new Map(), paths = new Map()
-  await page.locator('#main-content-scroll').evaluate(scroll => { scroll.scrollTop = 0 })
+  await page.locator('#main-content-scroll').evaluate(scroll => { const list = document.getElementById('observation-viewport'); scroll.scrollTop += list.getBoundingClientRect().top - scroll.getBoundingClientRect().top })
   const deadline = Date.now() + 15000
   let end = false, maxMounted = 0
   while (Date.now() < deadline) {
@@ -15,7 +15,7 @@ export async function scanObservationRows(page) {
       logicalCount: Number(root.dataset.observationLogicalCount), keys: [...root.querySelectorAll('[data-observation-key]')].map(row => ({ key: row.dataset.observationKey, position: Number(row.dataset.observationPosition) })),
       cards: [...root.querySelectorAll('.observation-result')].map(row => ({ key: row.closest('[data-observation-key]').dataset.observationKey, position: Number(row.closest('[data-observation-key]').dataset.observationPosition), id: row.dataset.observationId, context: row.dataset.observationContextKey })),
       groups: [...root.querySelectorAll('[data-observation-group]')].map(row => ({ key: row.dataset.observationGroup, position: Number(row.closest('[data-observation-key]').dataset.observationPosition), label: row.querySelector('.observation-subject-group-toggle').textContent, expanded: row.querySelector('.observation-subject-group-toggle').getAttribute('aria-expanded') })),
-      facets: [...root.querySelectorAll('.observation-facet-card')].map(row => ({ key: row.closest('[data-observation-key]').dataset.observationKey, position: Number(row.closest('[data-observation-key]').dataset.observationPosition), label: row.textContent })),
+      facets: [...root.querySelectorAll('.observation-facet-card')].map(row => ({ key: row.closest('[data-observation-key]').dataset.observationKey, position: Number(row.closest('[data-observation-key]').dataset.observationPosition), label: row.closest('.observation-facet').textContent })),
       paths: [...root.querySelectorAll('.observation-path-heading')].map(row => ({ key: row.id, position: Number(row.closest('[data-observation-key]').dataset.observationPosition), path: row.textContent }))
     }))
     maxMounted = Math.max(maxMounted, receipt.keys.length)
@@ -32,20 +32,20 @@ export async function scanObservationRows(page) {
       // Newly measured heights can extend the physical end or anchor a paint
       // past an unseen row. Revisit actual scroll geometry within the same
       // deadline; success requires every current logical key to be observed.
-      await page.locator('#main-content-scroll').evaluate(scroll => { scroll.scrollTop = 0 })
+      await page.locator('#main-content-scroll').evaluate(scroll => { const list = document.getElementById('observation-viewport'); scroll.scrollTop += list.getBoundingClientRect().top - scroll.getBoundingClientRect().top })
       end = false
       continue
     }
     end = await page.locator('#main-content-scroll').evaluate(scroll => { const before = scroll.scrollTop; scroll.scrollTop += Math.max(120, scroll.clientHeight / 2); return before === scroll.scrollTop })
   }
   const geometry = await page.locator('#observation-viewport').evaluate(root => ({ logicalCount: root.dataset.observationLogicalCount,
-    top: document.getElementById('main-content-scroll').scrollTop, height: document.getElementById('main-content-scroll').scrollHeight,
+    top: document.getElementById('main-content-scroll').scrollTop, height: document.getElementById('main-content-scroll').scrollHeight, clientHeight: document.getElementById('main-content-scroll').clientHeight, rootRect: root.getBoundingClientRect().toJSON(), scrollRect: document.getElementById('main-content-scroll').getBoundingClientRect().toJSON(),
     mountedPositions: [...root.querySelectorAll('[data-observation-key]')].map(row => row.dataset.observationPosition) }))
   throw new Error('Observation logical scan exceeded its finite 15-second deadline: ' + JSON.stringify({ observed: keys.size, positions: [...positions.values()].sort((a, b) => a - b), ...geometry }))
 }
 
 export async function revealObservationRow(page, predicate) {
-  await page.locator('#main-content-scroll').evaluate(scroll => { scroll.scrollTop = 0 })
+  await page.locator('#main-content-scroll').evaluate(scroll => { const list = document.getElementById('observation-viewport'); scroll.scrollTop += list.getBoundingClientRect().top - scroll.getBoundingClientRect().top })
   const deadline = Date.now() + 15000
   let end = false
   while (Date.now() < deadline) {
@@ -56,11 +56,17 @@ export async function revealObservationRow(page, predicate) {
       // automatic actionability scrolling can change the mounted window.
       const key = await row.first().getAttribute('data-observation-key')
       await predicate.first().evaluate(control => control.focus({ preventScroll: true }))
-      await page.waitForFunction(key => {
+      try { await page.waitForFunction(key => {
         const root = document.getElementById('observation-viewport')
         return root?.dataset.observationFocusKey === key && root.contains(document.activeElement)
           && document.activeElement.closest('[data-observation-key]')?.dataset.observationKey === key
-      }, key, { timeout: 5000 })
+      }, key, { timeout: 5000 }) } catch (error) {
+        throw new Error(error.message + ' ' + JSON.stringify(await page.evaluate(key => ({ key,
+          focus: document.activeElement?.outerHTML?.slice(0, 300), claimed: document.getElementById('observation-viewport')?.dataset.observationFocusKey,
+          stamp: document.getElementById('observation-viewport')?.dataset.observationViewportContext,
+          mounted: [...document.querySelectorAll('[data-observation-key]')].map(row => row.dataset.observationPosition), scroll: document.getElementById('main-content-scroll')?.getBoundingClientRect().toJSON(), top: document.getElementById('main-content-scroll')?.scrollTop,
+          navigation: document.getElementById('observation-panel')?.dataset.observationContext }), key)))
+      }
       await row.first().scrollIntoViewIfNeeded(); await paint(page); return row.first()
     }
     if (end) break

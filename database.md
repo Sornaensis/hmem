@@ -12,6 +12,7 @@ workspaces ──< observations
      └───────────────< tasks
 
 tasks ──< task_dependencies >── tasks
+observations ──< observation_revision_events
 ```
 
 A repository workspace supplies the scope for an Observation. Projects and
@@ -29,7 +30,7 @@ content. Its immutable ordered repository subjects are stored in
 | --- | --- | --- |
 | `id` | `UUID` | Primary key; defaults to `gen_random_uuid()` |
 | `workspace_id` | `UUID` | Required foreign key to `workspaces(id)`; deleting the workspace cascades |
-| `git_sha` | `TEXT` | Required lowercase 40-character Git SHA |
+| `git_sha` | `TEXT` | Immutable original creation SHA, lowercase 40-character Git SHA |
 | `content` | `TEXT` | Required Observation content |
 | `content_version` | `UUID` | Opaque content precondition; defaults to a fresh UUID and advances on every accepted content write |
 | `search_vector` | `TSVECTOR` | Required internal full-text index value; defaults to an empty vector |
@@ -51,25 +52,82 @@ paths, control characters, and non-canonical forms are rejected. `content` is
 1–524288 bytes. `git_sha` must match
 `^[0-9a-f]{40}$`.
 
-The provenance tuple—`workspace_id`, the complete ordered subject set, and
-`git_sha`—is immutable after creation. The normal Observation update may replace
-only `content`. A content change clears any stored embedding in the same
-mutation, so a vector made from old content is never reused silently. The
-optional embedding is written through a separate pgvector operation. Changing
-the repository, subject, kind, or revision requires a new Observation. Deleting
-an Observation is a hard delete, not a soft-delete lifecycle state.
+The creation provenance tuple—`workspace_id`, the complete ordered subject set,
+and `git_sha`—is immutable. Correcting repository identity or subjects requires a
+new Observation. Corrected content can be reviewed at another revision by
+appending a compact assertion; this never replaces the original `git_sha`.
+Every accepted content update or re-audit clears the stored embedding and its
+space fingerprint and fences leased work atomically, including identical-text
+writes. Optional embedding writes are separate operations. Observation deletion
+is a hard delete, not a soft-delete lifecycle state.
 
 Core reads return `content_version`. Conditional updates compare the expected
 UUID with the workspace and Observation ID atomically. They return the applied
 canonical Observation, a version mismatch with the latest canonical Observation,
 or an absent record. A mismatch produces no content, embedding, job, audit, or
 outbox mutation. A caller can consciously rebase against the returned version.
-The existing content-only core update remains deliberately unconditional for
-compatible callers. Every accepted content write, including identical bytes and
-unconditional updates, advances the token. Embedding-only writes leave it intact;
+The canonical core update requires a reviewed SHA and an expected version; the
+unconditional content-only updater is removed at the coordinated cutover.
+Every accepted content write or re-audit, including identical bytes and SHA,
+advances the token and appends one event. Embedding-only writes leave it intact;
 direct token replacement is rejected. Versions carry no ordering, clock, Git
 revision, or request-ID meaning. V030 backfills existing records and registers
-the schema migration within its transaction.
+the schema migration within its transaction. The revision-history migration is
+a separate forward migration with its own atomic schema and ledger transaction.
+
+## `observation_revision_events`
+
+This approved contract is implemented through a coordinated core/API/MCP/Elm
+release. See [the API contract](api.md) for request and compatibility details.
+The table contains compact assertions, never past content or diffs:
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `observation_id` | `UUID` | FK to Observation, cascades on deletion |
+| `sequence` | `BIGINT` | Positive per-Observation server sequence; composite primary key with ID |
+| `event_kind` | `TEXT` | `creation`, `update`, or `legacy_creation` |
+| `reviewed_git_sha` | `TEXT` | Required lowercase full SHA; a legacy event labels only the original creation claim |
+| `content_version` | `UUID` | Resulting version; null only for `legacy_creation` |
+| `content_digest` | `TEXT` | SHA-256 of exact accepted UTF-8 bytes, 64 lowercase hex characters; null only for `legacy_creation` |
+| `recorded_at` | `TIMESTAMPTZ` | Server time for new assertions; preserved historical creation time for legacy claim |
+| `actor_type` | `TEXT`, nullable | Trusted Principal type (`user` or `bot`); null only for unknown legacy/absent context |
+| `actor_id` | `TEXT`, nullable | Trusted Principal ID, including synthetic local IDs and deployed bot token IDs |
+| `actor_label` | `TEXT`, nullable | Optional trusted Principal display label |
+
+New creation appends sequence 1 with its accepted content bound to `git_sha`.
+Each accepted update/re-audit appends the next sequence under the Observation
+lock. Digesting never trims, normalizes Unicode, converts newlines, or inserts a
+BOM. Version, digest, event, content, vector/job invalidation, audit, and outbox
+effects commit together. A failed precondition or validation appends nothing.
+Direct event replacement or deletion is rejected except FK deletion cascades;
+the server owns sequence, time, actor, and digest. Sequences order this history;
+opaque UUID versions remain only conditional-write tokens. Public sequence values
+must stay in the exact JSON integer range (1–9007199254740991); exhausted sequence
+allocation fails without mutation.
+
+Actor fields mirror the existing server Principal/audit context, including known
+local user/bot identities. A deployed bot's `actor_id` is its token ID, not the
+separate grant-user ID that authorizes it. Do not replace known actors with null
+or infer a user UUID from arbitrary text. Null type/ID is reserved for genuinely
+absent context or unknown legacy attribution; clients cannot supply these fields.
+
+Canonical reads include `latest_sequence` and nullable `current_provenance`.
+The latter is the latest bound event with these same fields except
+`observation_id`. It is an assertion made by the authorized caller, not a server
+Git verification. The server does not inspect a checkout. History is separately
+paged in descending sequence and never embedded unboundedly in normal reads.
+
+Migration preserves every existing creation SHA claim as sequence 1
+`legacy_creation`, with null version/digest/actor and the original `created_at`.
+All migrated Observations expose null `current_provenance`: current legacy
+content may have been corrected without a reviewed SHA. Timestamps, existing
+versions, audit text, and embeddings do not establish historical bindings.
+Migration invents no update events or SHAs and does not change content, version,
+identity, subjects, or vectors. The first accepted post-cutover re-audit binds
+current content and establishes current provenance. Permanent Observation or
+workspace deletion cascades event rows with subjects and jobs. Existing audit
+and outbox retention/authorization remains unchanged; no Observation restore is
+introduced.
 
 `search_vector` is maintained from every subject and content. pgvector is optional:
 without the extension, the `embedding` column and vector index are absent and
@@ -142,6 +200,16 @@ compare-and-set rules. If a different provider space is enabled, reconciliation
 may replace a different-space manual vector; do not treat manual vectors as
 immutable or relabel old/unknown vectors. New Observations start with a null
 embedding; editing `content` clears the vector and fences stale work.
+
+Revision assertions retain the existing embedding input fingerprint encoding:
+immutable creation SHA, ordered subjects, and exact content. Reviewed SHA,
+history sequence, digest, and content version are excluded. The core and manual
+NDJSON fingerprint implementations/export projections must remain equivalent.
+Every accepted assertion resets a leased job's state and owner even if that
+fingerprint is unchanged; its old attempt cannot complete or renew. Unchanged
+manual export input remains reusable after a SHA-only or same-text re-audit.
+Changed-content imports are stale. This distinguishes input compatibility from
+automatic job ownership and preserves NDJSON versions 1/2 and optional pgvector.
 
 Use the same model revision, input formatting, and space for stored and query
 vectors. Different spaces are not comparable. The qualified GPU space is
@@ -257,14 +325,14 @@ Clients must read the canonical nonempty `subjects` list. Exact
 Canonical Observation reads and successful writes also return the opaque
 `content_version` UUID. To prevent an edit from overwriting a competing content
 write, send that base token as one strong quoted `If-Match` header with a
-content-only update:
+reviewed revision assertion:
 
 ```http
 PUT /api/v1/observations/<observation-id>
 Content-Type: application/json
 If-Match: "00000000-0000-0000-0000-000000000001"
 
-{"content":"Corrected repository insight"}
+{"content":"Corrected repository insight","reviewed_git_sha":"0123456789abcdef0123456789abcdef01234567"}
 ```
 
 The header accepts one canonical lowercase UUID in quotes, with optional outer
@@ -277,11 +345,31 @@ with its version to rebase. Authorized missing or hard-deleted IDs return 404;
 reader/outsider restrictions and deployed-cookie CSRF requirements still apply.
 `X-Request-Id` correlates a request and never supplies a precondition.
 
-Omitting `If-Match` deliberately retains unconditional HTTP and MCP
-`observation_update` compatibility. These callers can still overwrite competing
-content; use conditional HTTP curation when guarding a known base matters. The
-MCP adapter retains its content-only tool and bounded response shapes. Tokens
-have no timestamp, request-ID, Git provenance, or ordering meaning.
+`If-Match` is required: omission returns 428
+`observation_content_precondition_required`. Missing/null/malformed reviewed SHA
+returns 400. MCP `observation_update` requires `reviewed_git_sha` and
+`expected_content_version`; the thin adapter forwards both to canonical REST.
+Content-only clients must upgrade at cutover. No unconditional transition path
+is retained. Tokens have no timestamp, request-ID, Git provenance, or ordering
+meaning. Same-text and same-SHA updates are valid explicit re-audits.
+
+`GET /api/v1/observations/{observationId}/history` and MCP
+`observation_history` return bounded `{items,has_more}` history, default limit 50,
+maximum 200, and nonnegative offset. History fields follow the event table and
+contain no prior content. Ordinary repository read authorization applies.
+`git_sha` retains original-SHA filter meaning. Separate `current_git_sha` and
+`history_git_sha` filters match the bound current assertion and any recorded SHA
+claim respectively, including labeled legacy creation claims in history only.
+Supplied filters combine with AND and never duplicate an Observation. These
+semantics apply to lists, unified Observation search, matching, similarity,
+aggregate counts, and subject facets so their totals remain consistent.
+
+Observation snapshot envelopes use `schema_version: 2` with the mandatory
+nullable `current_provenance` and `latest_sequence` fields. Planning envelope
+kinds retain version 1. Cutover invalidates pre-cutover materialized snapshots
+and replay/resume sessions, requiring authorized resync before using the new
+canonical projection. Live events carry the same committed current fields;
+history loads separately and stale responses must not overwrite current state.
 
 `POST /api/v1/observations/match` (and MCP `observation_match`) accepts 1–256
 concrete, canonical repository-relative `paths`, at most 4096 UTF-8 bytes each

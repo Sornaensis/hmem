@@ -7,6 +7,7 @@ module Feature.Observation exposing
     , canLoadMoreFacets
     , clearSelection
     , deleteDialogFocusTarget
+    , historyResponseMatches
     , detailResponseMatches
     , failResultPage
     , facetKey
@@ -113,6 +114,8 @@ init =
     , subject = ""
     , selectedFacet = Nothing
     , gitSha = ""
+    , currentGitSha = ""
+    , historyGitSha = ""
     , requestMode = ObservationFlatMode
     , fileComposerOpen = False
     , advancedFiltersOpen = False
@@ -145,6 +148,8 @@ init =
     , selectedId = Nothing
     , inlineOwner = Nothing
     , selectedDetail = Nothing
+    , history = Nothing
+    , nextHistoryRequestToken = 1
     , detailLoading = False
     , detailError = Nothing
     , activeDetailRequest = Nothing
@@ -179,20 +184,20 @@ emptyCounts =
 countQuery : String -> ObservationModel -> Api.ObservationCountQuery
 countQuery workspaceId state =
     let value = listQuery workspaceId 0 state in
-    { workspaceId = workspaceId, subjectKind = value.subjectKind, subject = value.subject, gitSha = value.gitSha, query = value.query
+    { workspaceId = workspaceId, subjectKind = value.subjectKind, subject = value.subject, gitSha = value.gitSha, currentGitSha = value.currentGitSha, historyGitSha = value.historyGitSha, query = value.query
     , paths = if state.requestMode == ObservationMatchMode then Just (appliedState state).matchAppliedPaths else Nothing }
 
 
 countFingerprint : String -> ObservationModel -> String
 countFingerprint workspaceId state =
     let value = countQuery workspaceId state in
-    Encode.encode 0 (Encode.list Encode.string [ workspaceId, Maybe.withDefault "" (Maybe.map Api.subjectKindToString value.subjectKind), Maybe.withDefault "" value.subject, Maybe.withDefault "" value.gitSha, Maybe.withDefault "" value.query, Encode.encode 0 (Encode.list Encode.string (Maybe.withDefault [] value.paths)) ])
+    Encode.encode 0 (Encode.list Encode.string [ workspaceId, Maybe.withDefault "" (Maybe.map Api.subjectKindToString value.subjectKind), Maybe.withDefault "" value.subject, Maybe.withDefault "" value.gitSha, Maybe.withDefault "" value.currentGitSha, Maybe.withDefault "" value.historyGitSha, Maybe.withDefault "" value.query, Encode.encode 0 (Encode.list Encode.string (Maybe.withDefault [] value.paths)) ])
 
 
 hasAppliedCountFilter : ObservationModel -> Bool
 hasAppliedCountFilter state =
     let value = countQuery "" state in
-    value.subjectKind /= Nothing || value.subject /= Nothing || value.gitSha /= Nothing || value.query /= Nothing || not (List.isEmpty (Maybe.withDefault [] value.paths))
+    value.subjectKind /= Nothing || value.subject /= Nothing || value.gitSha /= Nothing || value.currentGitSha /= Nothing || value.historyGitSha /= Nothing || value.query /= Nothing || not (List.isEmpty (Maybe.withDefault [] value.paths))
 
 
 countActor : Model -> String
@@ -265,6 +270,7 @@ retireSessionState previous =
         , nextDetailRequestToken = previous.nextDetailRequestToken
         , nextCurationContextToken = previous.nextCurationContextToken
         , nextMutationRequestToken = previous.nextMutationRequestToken
+        , nextHistoryRequestToken = previous.nextHistoryRequestToken
         , detailNavigationToken = previous.detailNavigationToken + 1
         , nextLinkToken = previous.nextLinkToken + 1
         , nextPreferenceRequest = previous.nextPreferenceRequest + 1
@@ -278,6 +284,7 @@ clearSelection state =
         | selectedId = Nothing
         , inlineOwner = Nothing
         , selectedDetail = Nothing
+        , history = Nothing
         , detailLoading = False
         , detailError = Nothing
         , activeDetailRequest = Nothing
@@ -294,7 +301,7 @@ retainedEdit : Maybe ObservationEditState -> Maybe ObservationEditState
 retainedEdit maybeEdit =
     Maybe.andThen
         (\edit ->
-            if edit.saving || edit.draft /= edit.baseContent then
+            if edit.saving || (edit.draft /= edit.baseContent || edit.reviewedGitShaDraft /= edit.baseReviewedGitSha) then
                 Just edit
 
             else
@@ -402,6 +409,12 @@ updateRaw msg model =
 
         SetObservationGitSha value ->
             ( updateObservation (\state -> { state | gitSha = value }) model, Cmd.none )
+
+        SetObservationCurrentGitSha value ->
+            ( updateObservation (\state -> { state | currentGitSha = value }) model, Cmd.none )
+
+        SetObservationHistoryGitSha value ->
+            ( updateObservation (\state -> { state | historyGitSha = value }) model, Cmd.none )
 
         ApplyObservationFilters ->
             applyObservationFilters model
@@ -555,6 +568,15 @@ updateRaw msg model =
             , Cmd.none
             )
 
+        SetObservationReviewedGitSha value ->
+            ( updateObservation (\state -> { state | edit = Maybe.map (\edit -> if edit.saving then edit else { edit | reviewedGitShaDraft = value, error = Nothing }) state.edit }) model, Cmd.none )
+
+        LoadObservationHistory ->
+            loadHistory model
+
+        GotObservationHistory request result ->
+            receiveHistory request result model
+
         SaveObservationEdit ->
             saveEdit model
 
@@ -564,7 +586,7 @@ updateRaw msg model =
 
             else
                 ( updateObservation (\state -> { state | edit = Nothing }) model
-                , focusElement "observation-edit"
+                , focusElement "observation-review"
                 )
 
         ReloadObservationEdit ->
@@ -692,6 +714,8 @@ startEdit model =
                         , baseContentVersion = observation.contentVersion
                         , baseUpdatedAt = observation.updatedAt
                         , draft = observation.content
+                        , baseReviewedGitSha = reviewedSha observation
+                        , reviewedGitShaDraft = reviewedSha observation
                         , latestCanonical = observation
                         , conflict = False
                         , saving = False
@@ -728,7 +752,7 @@ saveEdit model =
                 ( model, Cmd.none )
 
             else
-                case observationContentError edit.draft of
+                case editValidationError edit of
                     Just message ->
                         ( updateObservation
                             (\state -> { state | edit = Just { edit | error = Just message } })
@@ -765,7 +789,7 @@ saveEdit model =
                         ( tracked
                         , Cmd.batch
                             [ clearCmd
-                            , Api.updateObservation model.flags.apiUrl edit.observationId edit.draft edit.baseContentVersion requestId (ObservationUpdated request)
+                            , Api.updateObservation model.flags.apiUrl edit.observationId edit.draft edit.reviewedGitShaDraft edit.baseContentVersion requestId (ObservationUpdated request)
                             ]
                         )
 
@@ -788,6 +812,8 @@ reloadEdit state =
                             , baseContentVersion = edit.latestCanonical.contentVersion
                             , baseUpdatedAt = edit.latestCanonical.updatedAt
                             , draft = edit.latestCanonical.content
+                            , baseReviewedGitSha = reviewedSha edit.latestCanonical
+                            , reviewedGitShaDraft = reviewedSha edit.latestCanonical
                             , conflict = False
                             , saving = False
                             , error = Nothing
@@ -812,6 +838,7 @@ rebaseEdit state =
                             | baseContent = edit.latestCanonical.content
                             , baseContentVersion = edit.latestCanonical.contentVersion
                             , baseUpdatedAt = edit.latestCanonical.updatedAt
+                            , baseReviewedGitSha = reviewedSha edit.latestCanonical
                             , conflict = False
                             , saving = False
                             , error = Nothing
@@ -1497,6 +1524,8 @@ restoreBrowseAfterMatch model =
                         , selectedFacet = model.observations.selectedFacet
                         , query = model.observations.query
                         , gitSha = model.observations.gitSha
+                        , currentGitSha = model.observations.currentGitSha
+                        , historyGitSha = model.observations.historyGitSha
                         }
 
             prepared =
@@ -1508,7 +1537,7 @@ restoreBrowseAfterMatch model =
                             , subject = restored.subject
                             , selectedFacet = restored.selectedFacet
                             , query = restored.query
-                            , gitSha = restored.gitSha
+                            , gitSha = restored.gitSha, currentGitSha = restored.currentGitSha, historyGitSha = restored.historyGitSha
                             , matchPathsInput = ""
                             , matchAppliedPaths = []
                             , matchValidationError = Nothing
@@ -1677,7 +1706,7 @@ acceptRefreshChunk offset hasMore count merge model =
                         committed = if state.requestMode == ObservationFacetMode then
                             { state | facets = pass.facets, facetKeys = pass.facetKeys, facetHasMore = hasMore, facetNextOffset = next }
                             else { state | items = currentItems, orderedIds = pass.orderedIds, matchEvidence = evidence, hasMore = hasMore, nextOffset = next }
-                        reconciled = List.foldl applyAuthoritativeObservation committed (Dict.values currentItems)
+                        reconciled = List.foldl applyAuthoritativeObservation committed (Dict.values pass.items)
                         finished = { reconciled | refreshPass = Nothing, refreshPending = False, refreshError = Nothing, resultsStale = False, loading = False, facetLoading = False, expectedOffset = Nothing, facetExpectedOffset = Nothing, failedRequest = Nothing }
                     in
                     ( updateObservation (always finished) model, Cmd.none )
@@ -1919,6 +1948,8 @@ listQuery workspaceId offset inputState =
             _ ->
                 Nothing
     , gitSha = nonEmpty state.gitSha
+    , currentGitSha = nonEmpty state.currentGitSha
+    , historyGitSha = nonEmpty state.historyGitSha
     , query = nonEmpty state.query
     , limit = pageSize
     , offset = offset
@@ -1934,6 +1965,8 @@ facetQuery workspaceId offset inputState =
     { workspaceId = workspaceId
     , subjectKind = state.subjectKind
     , gitSha = nonEmpty state.gitSha
+    , currentGitSha = nonEmpty state.currentGitSha
+    , historyGitSha = nonEmpty state.historyGitSha
     , query = nonEmpty state.query
     , limit = pageSize
     , offset = offset
@@ -1953,6 +1986,8 @@ matchQuery workspaceId paths offset inputState =
             |> Maybe.withDefault paths
     , subjectKind = state.subjectKind
     , gitSha = nonEmpty state.gitSha
+    , currentGitSha = nonEmpty state.currentGitSha
+    , historyGitSha = nonEmpty state.historyGitSha
     , query = nonEmpty state.query
     , limit = pageSize
     , offset = offset
@@ -1979,7 +2014,7 @@ startMatchReload sessionEpoch workspaceId paths draftState =
                     , subject = previous.subject
                     , selectedFacet = previous.selectedFacet
                     , query = previous.query
-                    , gitSha = previous.gitSha
+                    , gitSha = previous.gitSha, currentGitSha = previous.currentGitSha, historyGitSha = previous.historyGitSha
                     }
     in
     { state
@@ -2012,6 +2047,8 @@ queryFingerprint query =
         , query.subjectKind |> Maybe.map Api.subjectKindToString |> Maybe.withDefault ""
         , query.subject |> Maybe.withDefault ""
         , query.gitSha |> Maybe.withDefault ""
+        , query.currentGitSha |> Maybe.withDefault ""
+        , query.historyGitSha |> Maybe.withDefault ""
         , query.query |> Maybe.withDefault ""
         , String.fromInt query.limit
         ]
@@ -2034,6 +2071,8 @@ facetFingerprintFor sessionEpoch query =
         , query.workspaceId
         , query.subjectKind |> Maybe.map Api.subjectKindToString |> Maybe.withDefault ""
         , query.gitSha |> Maybe.withDefault ""
+        , query.currentGitSha |> Maybe.withDefault ""
+        , query.historyGitSha |> Maybe.withDefault ""
         , query.query |> Maybe.withDefault ""
         , String.fromInt query.limit
         ]
@@ -2051,6 +2090,8 @@ matchFingerprint sessionEpoch workspaceId inputState =
         , workspaceId
         , state.subjectKind |> Maybe.map Api.subjectKindToString |> Maybe.withDefault ""
         , state.gitSha |> String.trim
+        , state.currentGitSha |> String.trim
+        , state.historyGitSha |> String.trim
         , state.query |> String.trim
         , state.matchAppliedPaths
             |> List.map (\path -> String.fromInt (String.length path) ++ ":" ++ path)
@@ -2084,10 +2125,20 @@ canLoadMoreFacets workspaceId state =
 
 commitAppliedQuery : ObservationModel -> ObservationModel
 commitAppliedQuery state =
-    { state
-        | appliedQuery = Just (querySnapshot { state | appliedQuery = Nothing })
-        , failedRequest = Nothing
-    }
+    let
+        query = querySnapshot { state | appliedQuery = Nothing }
+        clear observation = { observation | provenanceMatch = Nothing }
+        scoped =
+            if state.appliedQuery == Just query then state
+            else
+                { state
+                    | selectedDetail = Maybe.map clear state.selectedDetail
+                    , items = Dict.map (\_ -> clear) state.items
+                    , edit = Maybe.map (\edit -> { edit | latestCanonical = clear edit.latestCanonical }) state.edit
+                    , matchEvidence = Dict.map (\_ evidence -> { evidence | observation = clear evidence.observation }) state.matchEvidence
+                }
+    in
+    { scoped | appliedQuery = Just query, failedRequest = Nothing }
 
 
 querySnapshot : ObservationModel -> ObservationAppliedQuery
@@ -2101,7 +2152,7 @@ querySnapshot input =
     , subjectKind = state.subjectKind
     , subject = state.subject
     , selectedFacet = state.selectedFacet
-    , gitSha = state.gitSha
+    , gitSha = state.gitSha, currentGitSha = state.currentGitSha, historyGitSha = state.historyGitSha
     , matchAppliedPaths = state.matchAppliedPaths
     }
 
@@ -2208,7 +2259,7 @@ appliedState state =
                 , subjectKind = applied.subjectKind
                 , subject = applied.subject
                 , selectedFacet = applied.selectedFacet
-                , gitSha = applied.gitSha
+                , gitSha = applied.gitSha, currentGitSha = applied.currentGitSha, historyGitSha = applied.historyGitSha
                 , matchAppliedPaths = applied.matchAppliedPaths
             }
 
@@ -2244,7 +2295,7 @@ revertFilters state =
         applied =
             appliedState state
     in
-    { state | query = applied.query, subjectKind = applied.subjectKind, subject = applied.subject, gitSha = applied.gitSha }
+    { state | query = applied.query, subjectKind = applied.subjectKind, subject = applied.subject, gitSha = applied.gitSha, currentGitSha = applied.currentGitSha, historyGitSha = applied.historyGitSha }
 
 
 activeFingerprint : String -> ObservationModel -> String
@@ -2451,6 +2502,7 @@ selectDifferentObservation observationId model =
                         (\current ->
                             { current
                                 | selectedId = Just observationId
+                                , history = Nothing
                                 , selectedDetail =
                                     current.edit
                                         |> Maybe.andThen
@@ -2500,23 +2552,23 @@ detailResponseMatches workspaceId observationId sessionEpoch token selectedWorks
 
 preferNewerObservation : Api.Observation -> Api.Observation -> Api.Observation
 preferNewerObservation candidate existing =
+    let
+        refreshed =
+            if candidate.latestSequence == existing.latestSequence && candidate.contentVersion == existing.contentVersion && candidate.content == existing.content && candidate.provenanceMatch == Nothing then
+                { candidate | provenanceMatch = existing.provenanceMatch }
+            else candidate
+    in
     if not (sameObservationProvenance candidate existing) then
         existing
-
+    else if candidate.latestSequence > existing.latestSequence then
+        candidate
+    else if candidate.latestSequence < existing.latestSequence then
+        existing
     else
         case compareTimestamps candidate.updatedAt existing.updatedAt of
-            Just GT ->
-                candidate
-
-            Just EQ ->
-                if candidate.content == existing.content then
-                    candidate
-
-                else
-                    existing
-
-            _ ->
-                existing
+            Just GT -> refreshed
+            Just EQ -> if candidate.content == existing.content then refreshed else existing
+            _ -> existing
 
 
 type alias ParsedTimestamp =
@@ -2821,7 +2873,7 @@ applyCanonicalObservationWithProof conditionalProof candidate state =
                     |> Maybe.withDefault candidate
 
         acceptedCandidate =
-            accepted == candidate
+            { accepted | provenanceMatch = candidate.provenanceMatch } == candidate
 
         selectedDetail =
             if state.selectedId == Just candidate.id then
@@ -2853,6 +2905,7 @@ applyCanonicalObservationWithProof conditionalProof candidate state =
             else
                 state.items
         , selectedDetail = selectedDetail
+        , history = currentHistory selectedDetail state.history
         , edit = edit
         , matchEvidence = matchEvidence
         , resultsStale = resultsStale
@@ -2893,11 +2946,15 @@ applyAuthoritativeObservation candidate state =
                 _ ->
                     Nothing
 
-        accepted =
+        freshest =
             existing
                 |> withRetainedCanonical candidate.id state
                 |> Maybe.map (preferNewerObservation candidate)
                 |> Maybe.withDefault candidate
+
+        -- Membership annotations come exclusively from this authoritative page.
+        accepted =
+            { freshest | provenanceMatch = if freshest.latestSequence == candidate.latestSequence && freshest.contentVersion == candidate.contentVersion && freshest.content == candidate.content && sameObservationProvenance freshest candidate then candidate.provenanceMatch else Nothing }
 
         acceptedCandidate =
             accepted == candidate
@@ -2929,6 +2986,7 @@ applyAuthoritativeObservation candidate state =
             else
                 state.items
         , selectedDetail = selectedDetail
+        , history = currentHistory selectedDetail state.history
         , edit = edit
         , matchEvidence = matchEvidence
     }
@@ -2959,12 +3017,14 @@ reconcileEditWithCanonical observation maybeEdit =
                 else if observation.contentVersion == edit.latestCanonical.contentVersion && timestampsEquivalent observation.updatedAt edit.latestCanonical.updatedAt && observation.content == edit.latestCanonical.content then
                     edit
 
-                else if edit.draft == edit.baseContent && not edit.saving then
+                else if edit.draft == edit.baseContent && edit.reviewedGitShaDraft == edit.baseReviewedGitSha && not edit.saving then
                     { edit
                         | baseContent = observation.content
                         , baseContentVersion = observation.contentVersion
                         , baseUpdatedAt = observation.updatedAt
                         , draft = observation.content
+                        , baseReviewedGitSha = reviewedSha observation
+                        , reviewedGitShaDraft = reviewedSha observation
                         , latestCanonical = observation
                         , conflict = False
                         , error = Nothing
@@ -3685,7 +3745,7 @@ viewRetainedDraft model =
                 div [ class "observation-retained-draft", attribute "role" "status" ]
                     [ p [] [ text "Your Observation draft is retained. Save or discard it before leaving this workspace or editing another observation." ]
                     , button [ class "btn btn-secondary", type_ "button", onClick ReturnToObservationDraft ] [ text "Return to draft" ]
-                    , button [ class "btn btn-primary", type_ "button", onClick SaveObservationEdit, disabled (edit.saving || edit.conflict || observationContentError edit.draft /= Nothing) ]
+                    , button [ class "btn btn-primary", type_ "button", onClick SaveObservationEdit, disabled (edit.saving || edit.conflict || editValidationError edit /= Nothing) ]
                         [ text (if edit.saving then "Saving..." else "Save draft") ]
                     , button [ class "btn btn-secondary", type_ "button", onClick CancelObservationEdit, disabled edit.saving ] [ text "Discard draft" ]
                     ]
@@ -3786,7 +3846,7 @@ viewAdvancedFilters state =
             ObservationMatchMode ->
                 p [ class "form-help observation-filter-mode-help" ] [ text "Concrete path matching uses the shared search, kind, and Git SHA filters and ignores manual exact-subject filtering." ]
         , div [ class "filter-group observation-filter-group" ]
-            [ label [ class "filter-label", for "observation-git-sha" ] [ text "Git SHA" ]
+            [ label [ class "filter-label", for "observation-git-sha" ] [ text "Original Git SHA" ]
             , input
                 [ id "observation-git-sha"
                 , class "form-input observation-filter-input observation-filter-sha"
@@ -3795,6 +3855,14 @@ viewAdvancedFilters state =
                 , onInput SetObservationGitSha
                 ]
                 []
+            ]
+        , div [ class "filter-group observation-filter-group" ]
+            [ label [ class "filter-label", for "observation-current-git-sha" ] [ text "Current reviewed Git SHA" ]
+            , input [ id "observation-current-git-sha", class "form-input observation-filter-sha", value state.currentGitSha, onInput SetObservationCurrentGitSha, placeholder "Full Git SHA" ] []
+            ]
+        , div [ class "filter-group observation-filter-group" ]
+            [ label [ class "filter-label", for "observation-history-git-sha" ] [ text "Recorded history Git SHA" ]
+            , input [ id "observation-history-git-sha", class "form-input observation-filter-sha", value state.historyGitSha, onInput SetObservationHistoryGitSha, placeholder "Full Git SHA" ] []
             ]
         ]
 
@@ -3851,7 +3919,9 @@ viewAppliedFilters state =
             div [ class "observation-applied-summary" ]
                 ([ span [] [ text ("Applied filters: Mode: " ++ modeName applied.requestMode ++ "; Search: " ++ Maybe.withDefault "all" query.query ++ "; Kind: " ++ (query.subjectKind |> Maybe.map subjectKindLabel |> Maybe.withDefault "all")) ]
                  , query.subject |> Maybe.map (typed "Subject") |> Maybe.withDefault (span [] [ text "Subject: all" ])
-                 , query.gitSha |> Maybe.map (typed "Git SHA") |> Maybe.withDefault (span [] [ text "Git SHA: all" ])
+                 , query.gitSha |> Maybe.map (typed "Original Git SHA") |> Maybe.withDefault (span [] [ text "Original Git SHA: all" ])
+                 , query.currentGitSha |> Maybe.map (typed "Current reviewed Git SHA") |> Maybe.withDefault (text "")
+                 , query.historyGitSha |> Maybe.map (typed "Recorded history Git SHA") |> Maybe.withDefault (text "")
                  ] ++ (if applied.requestMode == ObservationMatchMode then List.map (typed "File") applied.matchAppliedPaths else []))
         , if hasUnappliedFilters state then
             div [ class "form-help", attribute "role" "status" ]
@@ -4185,7 +4255,7 @@ viewObservationRow canEdit owner state context observation =
                 , div [ class "card-meta-group observation-card-meta observation-card-footer" ]
                     [ dl [ class "observation-detail-meta" ] [ viewSubjects cardId observation.id state.expandedSubjects observation.subjects ]
                     , div [ class "card-meta-row" ]
-                        [ span [ class "card-meta observation-sha" ] [ text "Provenance revision: ", Helpers.copyableValue "" "provenance revision" observation.gitSha (String.left 12 observation.gitSha ++ "…") ]
+                        [ span [ class "card-meta observation-sha" ] [ text "Current reviewed revision: ", (observation.currentProvenance |> Maybe.map (\provenance -> Helpers.copyableValue "" "current reviewed revision" provenance.reviewedGitSha (String.left 12 provenance.reviewedGitSha ++ "…")) |> Maybe.withDefault (text "Unknown legacy binding")) ]
                         , span [ class "card-meta observation-updated" ] [ text ("Content updated: " ++ formatObservationTimestamp observation.updatedAt) ]
                         ]
                     ]
@@ -4283,16 +4353,20 @@ viewDetail canEdit state =
                                     ]
                               else text ""
                             , div [ class "observation-card-footer" ]
-                                [ dl [ class "observation-detail-meta" ]
+                                [ viewMatchContext observation.provenanceMatch
+                                , viewHistory observation state
+                                , dl [ class "observation-detail-meta" ]
                                     [ viewDetailMeta "Workspace ID" observation.workspaceId "observation-detail-workspace"
                                     , viewSubjects (Maybe.withDefault "observation-detached" (selectedOwner state)) observation.id state.expandedSubjects observation.subjects
+                                    , viewCurrentProvenance observation
                                     , viewProvenanceRevision observation.gitSha
                                     , viewDetailMeta "Created" (formatObservationTimestamp observation.createdAt) ""
                                     , viewDetailMeta "Content updated" (formatObservationTimestamp observation.updatedAt) ""
                                     ]
                                 , if canEdit && state.edit == Nothing then
                                     div [ class "observation-detail-actions" ]
-                                        [ button [ id "observation-delete", class "btn btn-danger", type_ "button", onClick OpenObservationDelete ] [ text "Delete" ] ]
+                                        [ button [ id "observation-review", class "btn btn-secondary", type_ "button", onClick StartObservationEdit ] [ text "Review / re-audit" ]
+                                        , button [ id "observation-delete", class "btn btn-danger", type_ "button", onClick OpenObservationDelete ] [ text "Delete" ] ]
                                   else text ""
                                 ]
                             ]
@@ -4309,7 +4383,7 @@ viewDetailContent canEdit observation maybeEdit =
             if canEdit && edit.observationId == observation.id then
                 let
                     validationError =
-                        observationContentError edit.draft
+                        editValidationError edit
                 in
                 div [ class "observation-edit-form" ]
                     [ label [ class "filter-label", for "observation-edit-content" ] [ text "Observation content" ]
@@ -4323,7 +4397,9 @@ viewDetailContent canEdit observation maybeEdit =
                         , attribute "aria-describedby" "observation-edit-help observation-edit-status"
                         ]
                         []
-                    , p [ id "observation-edit-help", class "form-help" ] [ text "Only content can be edited. Workspace, subjects, Git SHA, and subject order are immutable provenance; the server records the content update time." ]
+                    , label [ class "filter-label", for "observation-reviewed-sha" ] [ text "Reviewed Git SHA" ]
+                    , input [ id "observation-reviewed-sha", class "form-input", value edit.reviewedGitShaDraft, onInput SetObservationReviewedGitSha, disabled edit.saving, attribute "aria-describedby" "observation-edit-help observation-edit-status" ] []
+                    , p [ id "observation-edit-help", class "form-help" ] [ text "Assert the full lowercase revision you reviewed. Every accepted review records a new assertion, including unchanged content. Creation revision, workspace and ordered subjects remain immutable." ]
                     , case validationError of
                         Just message ->
                             p [ id "observation-edit-status", class "form-error", attribute "role" "alert" ] [ text message ]
@@ -4367,14 +4443,14 @@ viewDetailContent canEdit observation maybeEdit =
                             [ class "btn btn-primary"
                             , type_ "button"
                             , onClick SaveObservationEdit
-                            , disabled (edit.saving || edit.conflict || validationError /= Nothing || edit.draft == edit.baseContent)
+                            , disabled (edit.saving || edit.conflict || validationError /= Nothing)
                             ]
                             [ text
                                 (if edit.saving then
                                     "Saving..."
 
                                  else
-                                    "Save content"
+                                    (if edit.draft == edit.baseContent then "Record re-audit" else "Save reviewed content")
                                 )
                             ]
                         , button [ class "btn btn-secondary", type_ "button", onClick CancelObservationEdit, disabled edit.saving ] [ text "Cancel" ]
@@ -4520,7 +4596,7 @@ viewDetailMeta labelText valueText valueClass =
 viewProvenanceRevision : String -> Html Msg
 viewProvenanceRevision gitSha =
     div [ class "observation-detail-meta-row" ]
-        [ dt [ class "observation-detail-meta-label" ] [ text "Provenance revision (Git SHA)" ]
+        [ dt [ class "observation-detail-meta-label" ] [ text "Original creation revision (Git SHA)" ]
         , dd [ class "observation-detail-meta-value observation-detail-sha" ]
             [ Helpers.copyableValue "" "provenance revision" gitSha gitSha ]
         ]
@@ -4588,3 +4664,123 @@ resultViewFingerprint : Int -> String -> ObservationModel -> String
 resultViewFingerprint epoch workspaceId state =
     if state.requestMode == ObservationMatchMode then matchFingerprint epoch workspaceId state
     else resultFingerprint state.requestMode epoch workspaceId state
+
+
+reviewedSha : Api.Observation -> String
+reviewedSha observation =
+    observation.currentProvenance |> Maybe.map .reviewedGitSha |> Maybe.withDefault observation.gitSha
+
+
+editValidationError : ObservationEditState -> Maybe String
+editValidationError edit =
+    case observationContentError edit.draft of
+        Just message -> Just message
+        Nothing ->
+            if String.length edit.reviewedGitShaDraft == 40 && String.all (\character -> Char.isDigit character || String.contains (String.fromChar character) "abcdef") edit.reviewedGitShaDraft then Nothing
+            else Just "Reviewed Git SHA must be exactly 40 lowercase hexadecimal characters."
+
+
+currentHistory : Maybe Api.Observation -> Maybe ObservationHistoryState -> Maybe ObservationHistoryState
+currentHistory selected history =
+    Maybe.andThen (\saved -> if Maybe.map (\observation -> observation.id == saved.observationId && observation.workspaceId == saved.workspaceId && observation.latestSequence == saved.head) selected == Just True then Just saved else Nothing) history
+
+
+historyResponseMatches : ObservationHistoryRequest -> Model -> Bool
+historyResponseMatches request model =
+    Permissions.canReadCurrentWorkspace model
+        && repositoryWorkspaceId model == Just request.workspaceId
+        && model.sessionRequestEpoch == request.sessionEpoch
+        && model.observations.selectedId == Just request.observationId
+        && Maybe.map .latestSequence model.observations.selectedDetail == Just request.head
+        && Maybe.andThen .active model.observations.history == Just request
+
+
+loadHistory : Model -> ( Model, Cmd Msg )
+loadHistory model =
+    case currentSelectedObservation model.observations of
+        Nothing -> ( model, Cmd.none )
+        Just observation ->
+            if not (Permissions.canReadCurrentWorkspace model) || repositoryWorkspaceId model /= Just observation.workspaceId then ( model, Cmd.none )
+            else
+                let
+                    previous = currentHistory (Just observation) model.observations.history
+                    saved = Maybe.withDefault { workspaceId = observation.workspaceId, observationId = observation.id, sessionEpoch = model.sessionRequestEpoch, head = observation.latestSequence, items = [], hasMore = True, nextOffset = 0, loading = False, error = Nothing, active = Nothing } previous
+                    request = { workspaceId = observation.workspaceId, observationId = observation.id, sessionEpoch = model.sessionRequestEpoch, head = observation.latestSequence, token = model.observations.nextHistoryRequestToken, offset = saved.nextOffset }
+                in
+                if saved.loading || not saved.hasMore || saved.nextOffset > 10000 then ( model, Cmd.none )
+                else
+                    ( updateObservation (\state -> { state | history = Just { saved | loading = True, error = Nothing, active = Just request }, nextHistoryRequestToken = request.token + 1 }) model
+                    , Api.fetchObservationHistory model.flags.apiUrl observation.id request.offset (GotObservationHistory request)
+                    )
+
+
+receiveHistory : ObservationHistoryRequest -> Result Http.Error (Api.PaginatedResult Api.ObservationRevision) -> Model -> ( Model, Cmd Msg )
+receiveHistory request result model =
+    if not (historyResponseMatches request model) then ( model, Cmd.none )
+    else
+        let
+            finish transform = ( updateObservation (\state -> { state | history = Maybe.map (\saved -> transform { saved | loading = False, active = Nothing }) state.history }) model, Cmd.none )
+            failure message = finish (\saved -> { saved | error = Just message })
+        in
+        case result of
+            Err _ -> failure "Revision history could not be loaded. Retry this page."
+            Ok page ->
+                let
+                    sequences = List.map (.provenance >> .sequence) page.items
+                    expected = List.range (Basics.max 1 (request.head - request.offset - List.length page.items + 1)) (request.head - request.offset) |> List.reverse
+                in
+                if List.length page.items /= Basics.min 25 (Basics.max 0 (request.head - request.offset)) || page.hasMore /= (request.offset + List.length page.items < request.head) || (page.hasMore && List.length page.items /= 25) || sequences /= expected || List.any (\event -> event.observationId /= request.observationId) page.items then
+                    failure "History changed or returned an inconsistent page. Refresh the Observation before retrying."
+                else
+                    finish (\saved -> { saved | items = saved.items ++ page.items, nextOffset = saved.nextOffset + List.length page.items, hasMore = page.hasMore, error = if page.hasMore && saved.nextOffset + List.length page.items > 10000 then Just "History is incomplete at the bounded page limit." else Nothing })
+
+
+viewCurrentProvenance : Api.Observation -> Html Msg
+viewCurrentProvenance observation =
+    div [ class "observation-detail-meta-row observation-current-provenance" ]
+        [ dt [ class "observation-detail-meta-label" ] [ text "Current reviewed revision" ]
+        , dd [ class "observation-detail-meta-value" ]
+            [ observation.currentProvenance
+                |> Maybe.map (\provenance -> span [] [ Helpers.copyableValue "" "current reviewed revision" provenance.reviewedGitSha provenance.reviewedGitSha, text (" · assertion " ++ String.fromInt provenance.sequence ++ " · " ++ formatObservationTimestamp provenance.recordedAt) ])
+                |> Maybe.withDefault (text "Unknown legacy content binding")
+            ]
+        ]
+
+
+viewMatchContext : Maybe Api.ObservationProvenanceMatch -> Html Msg
+viewMatchContext matched =
+    case matched of
+        Nothing -> text ""
+        Just context ->
+            p [ class "form-help observation-provenance-match" ]
+                ([ text "Matched current Observation by: " ]
+                 ++ List.filterMap (\( labelText, sha ) -> Maybe.map (\value -> span [] [ text (labelText ++ " "), Helpers.copyableValue "" labelText value value, text " " ]) sha)
+                    [ ( "original creation claim", context.originalGitSha ), ( "current reviewed assertion", context.currentGitSha ), ( "recorded history claim", context.historyGitSha ) ]
+                 ++ [ text "History may include a migrated unbound creation claim; prior content is not reconstructed." ])
+
+
+viewHistory : Api.Observation -> ObservationModel -> Html Msg
+viewHistory observation state =
+    let
+        saved = currentHistory (Just observation) state.history
+        entry event =
+            li [ class "observation-history-entry" ]
+                [ text ("Assertion " ++ String.fromInt event.provenance.sequence ++ " · ")
+                , Helpers.copyableValue "" "recorded revision" event.provenance.reviewedGitSha event.provenance.reviewedGitSha
+                , text (" · " ++ formatObservationTimestamp event.provenance.recordedAt ++ " · ")
+                , text (if event.provenance.eventKind == "legacy_creation" then "Migrated creation claim; content binding unknown" else "Content-bound " ++ event.provenance.eventKind)
+                , event.provenance.contentVersion |> Maybe.map (\version -> span [] [ text " · version ", Helpers.copyableValue "" "content version" version version ]) |> Maybe.withDefault (text "")
+                , text (" · " ++ Maybe.withDefault "Unknown actor" event.provenance.actorLabel)
+                , event.provenance.actorId |> Maybe.map (\actorId -> span [] [ text " · ", Helpers.copyableValue "" "actor ID" actorId actorId ]) |> Maybe.withDefault (text "")
+                ]
+        buttonLabel =
+            saved |> Maybe.map (\history -> if history.loading then "Loading history..." else if history.error /= Nothing then "Retry history" else "Load more history") |> Maybe.withDefault "Load revision history"
+    in
+    section [ class "observation-history", attribute "aria-label" "Revision history" ]
+        [ p [ class "form-help" ] [ text ("Revision history · head " ++ String.fromInt observation.latestSequence ++ ". Compact assertions contain no prior content.") ]
+        , saved |> Maybe.map (\history -> ol [] (List.map entry history.items)) |> Maybe.withDefault (text "")
+        , saved |> Maybe.andThen .error |> Maybe.map (\message -> p [ class "form-error", attribute "role" "alert" ] [ text message ]) |> Maybe.withDefault (text "")
+        , if saved |> Maybe.map (\history -> history.hasMore && history.nextOffset <= 10000) |> Maybe.withDefault True then
+            button [ id "observation-history-load", type_ "button", class "btn btn-secondary", onClick LoadObservationHistory, disabled (saved |> Maybe.map .loading |> Maybe.withDefault False) ] [ text buttonLabel ]
+          else text ""
+        ]

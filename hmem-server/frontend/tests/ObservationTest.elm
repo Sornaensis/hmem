@@ -29,7 +29,8 @@ import Url
 suite : Test
 suite =
     describe "observation API boundary"
-        [ describe "structured copy origins" structuredCopyTests
+        [ describe "reviewed assertion and history fences" revisionTests
+        , describe "structured copy origins" structuredCopyTests
         , describe "URL reauthorization, search intent and bootstrap ownership" observationUrlReviewTests
         , describe "cached complete viewport projection" observationProjectionTests
         , describe "receipt-owned Return lifecycle" observationReturnReceiptTests
@@ -135,22 +136,24 @@ suite =
                     , subjectKind = Just Api.SubjectGlob
                     , subject = Just "src/**/*.elm"
                     , gitSha = Just fullSha
+                    , currentGitSha = Nothing
+                    , historyGitSha = Nothing
                     , query = Just "render & test"
                     , limit = 50
                     , offset = 100
                     }
                     |> Expect.equal
                         ("https://api.example/api/v1/observations?workspace_id=workspace%2Fa&subject_kind=glob&subject=src%2F**%2F*.elm&git_sha=" ++ fullSha ++ "&query=render%20%26%20test&limit=50&offset=100")
-        , test "encodes Observation updates as content-only JSON" <|
+        , test "encodes reviewed content and SHA without client-owned assertion metadata" <|
             \_ ->
-                Api.observationUpdateBody "revised"
+                Api.observationUpdateBody "revised" fullSha
                     |> Encode.encode 0
-                    |> Expect.equal "{\"content\":\"revised\"}"
+                    |> Expect.equal ("{\"content\":\"revised\",\"reviewed_git_sha\":\"" ++ fullSha ++ "\"}")
         , test "content versions are required opaque UUIDs on canonical observations" <|
             \_ ->
                 [ fileFixture
                 , String.replace "10000000-0000-4000-8000-000000000000" "not-a-uuid" fileFixture
-                , String.replace "\"content_version\":\"10000000-0000-4000-8000-000000000000\"," "" fileFixture
+                , String.replace "\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"latest_sequence\":1,\"current_provenance\":null," "" fileFixture
                 ]
                     |> List.map (Decode.decodeString Api.observationDecoder >> isOk)
                     |> Expect.equal [ True, False, False ]
@@ -585,7 +588,7 @@ suite =
                     , \_ -> editor |> Query.hasNot [ Selector.id "observation-edit" ]
                     , \_ -> editor |> Query.has [ Selector.text "Delete", Selector.text "Workspace ID", Selector.text "Subjects", Selector.text "Git SHA" ]
                     , \_ -> editor |> Query.findAll [ Selector.tag "textarea" ] |> Query.count (Expect.equal 1)
-                    , \_ -> editor |> Query.findAll [ Selector.tag "input" ] |> Query.count (Expect.equal 3)
+                    , \_ -> editor |> Query.findAll [ Selector.tag "input" ] |> Query.count (Expect.equal 5)
                     ]
                     ()
         , test "edit captures canonical base, validates UTF-8 bounds, and renders only a content draft" <|
@@ -605,7 +608,7 @@ suite =
                 Expect.all
                     [ \_ -> started.observations.edit |> Maybe.map (\edit -> ( edit.baseContent, edit.baseUpdatedAt, edit.draft )) |> Expect.equal (Just ( observation.content, observation.updatedAt, observation.content ))
                     , \_ -> view |> Query.find [ Selector.id "observation-edit-content" ] |> Query.has [ Selector.tag "textarea" ]
-                    , \_ -> view |> Query.has [ Selector.text "Only content can be edited", Selector.text "immutable provenance" ]
+                    , \_ -> view |> Query.has [ Selector.text "Reviewed Git SHA", Selector.text "Creation revision, workspace and ordered subjects remain immutable." ]
                     , \_ -> Feature.Observation.observationContentError "   " |> Expect.equal (Just "Observation content must not be blank.")
                     , \_ -> Feature.Observation.observationContentError (String.repeat 524288 "a") |> Expect.equal Nothing
                     , \_ -> Feature.Observation.observationContentError (String.repeat 524289 "a") |> Expect.equal (Just "Observation content must not exceed 512 KiB of UTF-8 text.")
@@ -1041,7 +1044,7 @@ suite =
                     , \_ -> generation |> Expect.equal 1
                     , \_ -> final.observations.selectedDetail |> Maybe.map .content |> Expect.equal (Just "foreign canonical content")
                     , \_ -> final.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.conflict, edit.latestCanonical.content )) |> Expect.equal (Just ( "local unsaved draft", True, "foreign canonical content" ))
-                    , \_ -> finalView |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Save content" ] ] |> Query.has [ Selector.disabled True ]
+                    , \_ -> finalView |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Save reviewed content" ] ] |> Query.has [ Selector.disabled True ]
                     , \_ -> finalView |> Query.has [ Selector.text "Use latest version", Selector.text "Keep my draft" ]
                     ]
                     ()
@@ -1088,7 +1091,7 @@ suite =
                             , matchPathsInput = "src/Draft.elm"
                             , matchAppliedPaths = [ "src/A.elm" ]
                             , matchEvidence = Dict.fromList [ ( retained.id, evidence retained ), ( deleted.id, evidence deleted ) ]
-                            , browseReturn = Just { requestMode = ObservationExactSubjectMode, subjectKind = Just Api.SubjectFile, subject = "manual/flat.elm", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, query = "needle", gitSha = fullSha }
+                            , browseReturn = Just { requestMode = ObservationExactSubjectMode, subjectKind = Just Api.SubjectFile, subject = "manual/flat.elm", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, query = "needle", gitSha = fullSha, currentGitSha = "", historyGitSha = "" }
                             , requestGeneration = 11
                             , requestSessionEpoch = 3
                             , queryFingerprint = "pre-snapshot-results"
@@ -1462,7 +1465,7 @@ suite =
                         in
                         Expect.all
                             [ \_ -> failed.observations.edit |> Expect.equal dirty.observations.edit
-                            , \_ -> view |> Query.has [ Selector.text "Failed to load observation detail.", Selector.text "Save content", Selector.text "Cancel", Selector.text "Keep my draft", Selector.text "Use latest version" ]
+                            , \_ -> view |> Query.has [ Selector.text "Failed to load observation detail.", Selector.text "Save reviewed content", Selector.text "Cancel", Selector.text "Keep my draft", Selector.text "Use latest version" ]
                             , \_ -> view |> Query.find [ Selector.id "observation-edit-content" ] |> Query.has [ Selector.attribute (Html.Attributes.value "editable retained draft") ]
                             , \_ -> Feature.Observation.update CancelObservationEdit failed |> Tuple.first |> .observations |> .edit |> Expect.equal Nothing
                             ]
@@ -1891,7 +1894,7 @@ suite =
                     , \_ -> Feature.Observation.viewObservationsState repository { empty | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Loading observations..." ]
                     , \_ -> Feature.Observation.viewObservationsState repository empty |> Query.fromHtml |> Query.has [ Selector.text "No observations found" ]
                     , \_ -> Feature.Observation.viewObservationsState repository { empty | error = Just "Failed to load observations." } |> Query.fromHtml |> Query.has [ Selector.text "Unable to load observations", Selector.text "Failed to load observations." ]
-                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Provenance revision (Git SHA)", Selector.text fullSha, Selector.text "Subject kind", Selector.text "File", Selector.text "Subject", Selector.text "src/Main.elm" ]
+                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Original creation revision (Git SHA)", Selector.text fullSha, Selector.text "Subject kind", Selector.text "File", Selector.text "Subject", Selector.text "src/Main.elm" ]
                     , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Load more" ] ] |> Query.hasNot [ Selector.disabled True ]
                     , \_ -> Feature.Observation.viewObservationsState repository paginating |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Loading..." ] ] |> Query.has [ Selector.disabled True ]
                     , \_ -> Feature.Observation.viewObservationsState repository detailLoading |> Query.fromHtml |> Query.has [ Selector.text "Loading detail..." ]
@@ -2009,7 +2012,7 @@ suite =
                     , \_ -> view |> Query.has [ Selector.class "tree-toggle", Selector.text "▼" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-content" ] |> Query.has [ Selector.text content ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "src/**/*.elm", Selector.text "src/Second.elm", Selector.text fullSha ]
-                    , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "Provenance revision (Git SHA)", Selector.text "Content updated", Selector.class "copyable-value" ]
+                    , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "Original creation revision (Git SHA)", Selector.text "Content updated", Selector.class "copyable-value" ]
                     ] ()
         , test "Observation timestamps retain useful UTC update time and explicit non-UTC offsets" <|
             \_ ->
@@ -2081,7 +2084,7 @@ suite =
             \_ ->
                 let
                     canonical =
-                        """{"id":"multi","workspace_id":"workspace-1","subjects":[{"subject_kind":"glob","subject":"src/**/*.elm"},{"subject_kind":"file","subject":"src/Main.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Evidence","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"""
+                        """{"id":"multi","workspace_id":"workspace-1","subjects":[{"subject_kind":"glob","subject":"src/**/*.elm"},{"subject_kind":"file","subject":"src/Main.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","latest_sequence":1,"current_provenance":null,"content":"Evidence","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"""
 
                     canonicalSubjects =
                         Decode.decodeString Api.observationDecoder canonical
@@ -2093,12 +2096,12 @@ suite =
                 in
                 [ canonicalSubjects == Ok [ "src/**/*.elm", "src/Main.elm" ]
                 , legacySubjects == Ok [ "src/Main.elm" ]
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[],\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[{\"subject_kind\":\"other\",\"subject\":\"x\"}],\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":\"not-an-array\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[],\"subject_kind\":\"file\",\"subject\":\"src/legacy.elm\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
-                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":\"not-an-array\",\"subject_kind\":\"file\",\"subject\":\"src/legacy.elm\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[],\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"latest_sequence\":1,\"current_provenance\":null,\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[{\"subject_kind\":\"other\",\"subject\":\"x\"}],\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"latest_sequence\":1,\"current_provenance\":null,\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"latest_sequence\":1,\"current_provenance\":null,\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":\"not-an-array\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"latest_sequence\":1,\"current_provenance\":null,\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":[],\"subject_kind\":\"file\",\"subject\":\"src/legacy.elm\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"latest_sequence\":1,\"current_provenance\":null,\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
+                , Decode.decodeString Api.observationDecoder "{\"id\":\"bad\",\"workspace_id\":\"workspace-1\",\"subjects\":\"not-an-array\",\"subject_kind\":\"file\",\"subject\":\"src/legacy.elm\",\"git_sha\":\"x\",\"content_version\":\"10000000-0000-4000-8000-000000000000\",\"latest_sequence\":1,\"current_provenance\":null,\"content\":\"x\",\"created_at\":\"x\",\"updated_at\":\"x\"}" |> isErr
                 ]
                     |> Expect.equal [ True, True, True, True, True, True, True, True ]
         , test "normalizes bounded concrete match paths and encodes the match request" <|
@@ -2110,6 +2113,8 @@ suite =
                             , paths = [ "src/Main.elm", "my/src/proj/Main.java" ]
                             , subjectKind = Just Api.SubjectGlob
                             , gitSha = Just fullSha
+                            , currentGitSha = Nothing
+                            , historyGitSha = Nothing
                             , query = Just "render"
                             , limit = 50
                             , offset = 0
@@ -2185,7 +2190,7 @@ suite =
             \_ ->
                 let
                     response =
-                        """{"items":[{"observation":{"id":"v020","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Legacy.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Legacy","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Legacy.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Legacy.elm"}]},{"observation":{"id":"v021","workspace_id":"workspace-1","subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Canonical","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Main.elm"],"matched_subjects":[{"subject_kind":"glob","subject":"src/**/*.elm"}]}],"has_more":true}"""
+                        """{"items":[{"observation":{"id":"v020","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Legacy.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","latest_sequence":1,"current_provenance":null,"content":"Legacy","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Legacy.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Legacy.elm"}]},{"observation":{"id":"v021","workspace_id":"workspace-1","subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","latest_sequence":1,"current_provenance":null,"content":"Canonical","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Main.elm"],"matched_subjects":[{"subject_kind":"glob","subject":"src/**/*.elm"}]}],"has_more":true}"""
 
                     decoded =
                         Decode.decodeString (Api.paginatedDecoder Api.observationMatchDecoder) response
@@ -2410,6 +2415,8 @@ suite =
                             { workspaceId = "workspace/a"
                             , subjectKind = Just Api.SubjectGlob
                             , gitSha = Just fullSha
+                            , currentGitSha = Nothing
+                            , historyGitSha = Nothing
                             , query = Just "render & test"
                             , limit = 25
                             , offset = 75
@@ -2434,10 +2441,10 @@ suite =
             \_ ->
                 let
                     canonical =
-                        """{"observation":{"id":"canonical","workspace_id":"workspace-1","subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Canonical","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Main.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"path_matches":[{"path":"src/Main.elm","matched_subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}]}]}"""
+                        """{"observation":{"id":"canonical","workspace_id":"workspace-1","subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","latest_sequence":1,"current_provenance":null,"content":"Canonical","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Main.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}],"path_matches":[{"path":"src/Main.elm","matched_subjects":[{"subject_kind":"file","subject":"src/Main.elm"},{"subject_kind":"glob","subject":"src/**/*.elm"}]}]}"""
 
                     legacy =
-                        """{"observation":{"id":"legacy","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Legacy.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Legacy","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Legacy.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Legacy.elm"}]}"""
+                        """{"observation":{"id":"legacy","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Legacy.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","latest_sequence":1,"current_provenance":null,"content":"Legacy","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},"matched_paths":["src/Legacy.elm"],"matched_subjects":[{"subject_kind":"file","subject":"src/Legacy.elm"}]}"""
                 in
                 Expect.all
                     [ \_ ->
@@ -3276,7 +3283,7 @@ suite =
                                 Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) failed.observations |> Query.fromHtml
                         in
                         Expect.all
-                            [ \_ -> Feature.Observation.viewObservations (observationWorkspace Api.Repository) failed |> Query.fromHtml |> Query.has [ Selector.class "observation-edit-form", Selector.text "Save content", Selector.text "Cancel", Selector.text "Retry detail" ]
+                            [ \_ -> Feature.Observation.viewObservations (observationWorkspace Api.Repository) failed |> Query.fromHtml |> Query.has [ Selector.class "observation-edit-form", Selector.text "Save reviewed content", Selector.text "Cancel", Selector.text "Retry detail" ]
                             , \_ -> retried.observations.edit |> Expect.equal dirty.observations.edit
                             , \_ -> retried.observations.activeDetailRequest |> Maybe.map (\fresh -> fresh.token > request.token) |> Expect.equal (Just True)
                             , \_ -> retried.observations.detailError |> Expect.equal Nothing
@@ -3580,7 +3587,7 @@ fullSha =
 
 fileFixture : String
 fileFixture =
-    """{"id":"observation-file","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Main.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"File observation","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}"""
+    """{"id":"observation-file","workspace_id":"workspace-1","subject_kind":"file","subject":"src/Main.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","latest_sequence":1,"current_provenance":null,"content":"File observation","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}"""
 
 
 routeFlags : Flags
@@ -3742,6 +3749,9 @@ fixtureObservation id createdAt =
     , gitSha = fullSha
     , content = "Observation"
     , contentVersion = "10000000-0000-4000-8000-000000000000"
+    , latestSequence = 1
+    , currentProvenance = Nothing
+    , provenanceMatch = Nothing
     , createdAt = createdAt
     , updatedAt = createdAt
     }
@@ -3759,6 +3769,9 @@ observationWithSubjects observationId subjects =
             , gitSha = fullSha
             , content = "Observation " ++ observationId
             , contentVersion = "10000000-0000-4000-8000-000000000000"
+            , latestSequence = 1
+            , currentProvenance = Nothing
+            , provenanceMatch = Nothing
             , createdAt = "2026-01-01T00:00:00Z"
             , updatedAt = "2026-01-01T00:00:00Z"
             }
@@ -3878,7 +3891,7 @@ workspaceScopeValue =
 snapshotItem : String -> Encode.Value -> Encode.Value
 snapshotItem kind data =
     Encode.object
-        [ ( "schema_version", Encode.int 1 )
+        [ ( "schema_version", Encode.int (if kind == "observation" then 2 else 1) )
         , ( "kind", Encode.string kind )
         , ( "data", data )
         ]
@@ -3902,6 +3915,8 @@ observationValue observation =
         , ( "git_sha", Encode.string observation.gitSha )
         , ( "content", Encode.string observation.content )
         , ( "content_version", Encode.string observation.contentVersion )
+        , ( "latest_sequence", Encode.int observation.latestSequence )
+        , ( "current_provenance", Encode.null )
         , ( "created_at", Encode.string observation.createdAt )
         , ( "updated_at", Encode.string observation.updatedAt )
         ]
@@ -3914,7 +3929,7 @@ paginatedFixture hasMore =
 
 globFixture : String
 globFixture =
-    """{"id":"observation-glob","workspace_id":"workspace-1","subject_kind":"glob","subject":"src/**/*.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","content":"Glob observation","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}"""
+    """{"id":"observation-glob","workspace_id":"workspace-1","subject_kind":"glob","subject":"src/**/*.elm","git_sha":"0123456789abcdef0123456789abcdef01234567","content_version":"10000000-0000-4000-8000-000000000000","latest_sequence":1,"current_provenance":null,"content":"Glob observation","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z"}"""
 
 
 isErr : Result error value -> Bool
@@ -3957,7 +3972,7 @@ observationUrlTests =
         |> List.concatMap (\mode ->
             [ test ("complete applied URL round-trips Unicode and reserved values in " ++ Debug.toString mode) <| \_ ->
                 let
-                    query = { requestMode = mode, query = "café & #+%= 🙂", subjectKind = Just Api.SubjectGlob, subject = "manual & value", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, gitSha = fullSha, matchAppliedPaths = if mode == ObservationMatchMode then [ "src/é& #+.elm", "src/View.elm" ] else [] }
+                    query = { requestMode = mode, query = "café & #+%= 🙂", subjectKind = Just Api.SubjectGlob, subject = "manual & value", selectedFacet = Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" }, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/é& #+.elm", "src/View.elm" ] else [] }
                     state = Helpers.restoreObservationQuery query Feature.Observation.init
                     draft = { state | query = "unapplied secret", matchPathsInput = "unapplied path" }
                     model = editableModel draft
@@ -3966,7 +3981,7 @@ observationUrlTests =
                 Expect.equal (Just query) (Maybe.map .query restored)
             , test ("authorized bootstrap preserves mode and closes initial loading accounting in " ++ Debug.toString mode) <| \_ ->
                 let
-                    query = { requestMode = mode, query = "Cache", subjectKind = Nothing, subject = "", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm" ] else [] }
+                    query = { requestMode = mode, query = "Cache", subjectKind = Nothing, subject = "", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm" ] else [] }
                     original = editableModel (Helpers.restoreObservationQuery query Feature.Observation.init)
                     loading = original.dataLoading
                     initial = { original | dataLoading = { loading | activeWorkspaceLoadToken = Just 44 } }
@@ -4013,7 +4028,7 @@ observationUrlTests =
                 Expect.equal ( [ "src/Main.elm", "src/View.elm" ], Just "off&page", Just "off&page" ) (context.query.matchAppliedPaths, context.fragment.observationId, legacy.fragment.observationId)
             , test "oversized own replacement proof is consumed once and does not resurrect on Back or ABA" <| \_ ->
                 let
-                    query = { requestMode = ObservationMatchMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", matchAppliedPaths = [ "src/" ++ String.repeat 1800 "é" ++ ".elm" ] }
+                    query = { requestMode = ObservationMatchMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [ "src/" ++ String.repeat 1800 "é" ++ ".elm" ] }
                     original = editableModel (Helpers.restoreObservationQuery query Feature.Observation.init)
                     issued = Helpers.writeObservationHistory True original |> Tuple.first
                     url = issued.observations.pendingExcludedLink |> Maybe.andThen (.url >> Url.fromString) |> Maybe.withDefault original.url
@@ -4033,7 +4048,7 @@ observationUrlTests =
                     ] ()
             , test "same applied route preserves unapplied controls and unchanged request identity" <| \_ ->
                 let
-                    query = { requestMode = ObservationFlatMode, query = "applied", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", matchAppliedPaths = [] }
+                    query = { requestMode = ObservationFlatMode, query = "applied", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
                     state = Helpers.restoreObservationQuery query Feature.Observation.init
                     model = editableModel { state | query = "unapplied", requestGeneration = 99, selectedId = Nothing }
                     url = Helpers.completeObservationUrl model |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.withDefault model.url
@@ -4046,7 +4061,7 @@ observationUrlTests =
                     selected = fixtureObservation "selected-observation" "2026-01-01T00:00:00Z"
                     original = editableModel ({ initialState | selectedId = Just selected.id, selectedDetail = Just selected, items = Dict.singleton selected.id selected, orderedIds = [ selected.id ] }) |> Feature.Observation.update StartObservationEdit |> Tuple.first |> Feature.Observation.update (SetObservationDraft "protected URL draft") |> Tuple.first
                     old = Feature.Observation.update ApplyObservationFilters original |> Tuple.first
-                    query = { requestMode = ObservationFlatMode, query = "changed", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", matchAppliedPaths = [] }
+                    query = { requestMode = ObservationFlatMode, query = "changed", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
                     target = Helpers.completeObservationUrl { old | observations = Helpers.restoreObservationQuery query old.observations } |> Result.toMaybe |> Maybe.andThen Url.fromString |> Maybe.withDefault old.url
                     after = Route.handleUrlChange target old |> Tuple.first
                     late = Feature.DataLoading.update (GotObservations "workspace-1" Nothing old.observations.requestGeneration old.observations.queryFingerprint 0 (Ok { items = [ fixtureObservation "old-row" "2026-01-01T00:00:00Z" ], hasMore = False })) after |> Tuple.first
@@ -4169,7 +4184,7 @@ observationUrlReviewTests =
 
 urlReviewQuery : ObservationRequestMode -> Types.ObservationAppliedQuery
 urlReviewQuery mode =
-    { requestMode = mode, query = "Cache", subjectKind = Just Api.SubjectGlob, subject = "manual", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm", "src/View.elm" ] else [] }
+    { requestMode = mode, query = "Cache", subjectKind = Just Api.SubjectGlob, subject = "manual", selectedFacet = if mode == ObservationExactSubjectMode then Just { subjectKind = Api.SubjectGlob, subject = "src/**/*.elm" } else Nothing, gitSha = fullSha, currentGitSha = "", historyGitSha = "", matchAppliedPaths = if mode == ObservationMatchMode then [ "src/Main.elm", "src/View.elm" ] else [] }
 
 
 returnReceipt : ObservationViewport.State -> Float -> String -> Maybe String -> Encode.Value
@@ -4444,3 +4459,181 @@ structuredCopyTests =
                     , \_ -> view |> Query.hasNot [ Selector.text "hidden" ]
                     ] ()
     ]
+
+
+revisionTests : List Test
+revisionTests =
+    [ test "SHA-only dirty edit preserves both drafts and original base through live and authoritative reviews" <| \_ ->
+        let
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            started = Feature.Observation.update StartObservationEdit (editableModel (selectedObservationState original)) |> Tuple.first
+            drafted = Feature.Observation.update (SetObservationReviewedGitSha (String.repeat 40 "c")) started |> Tuple.first
+            latest = { original | content = "Other writer content", latestSequence = 2, contentVersion = "20000000-0000-4000-8000-000000000000", currentProvenance = Just (revisionProvenance 2 (String.repeat 40 "b")) }
+            check state = state.edit |> Maybe.map (\edit -> ( ( edit.draft, edit.reviewedGitShaDraft, edit.baseContent ), ( edit.baseContentVersion, edit.baseReviewedGitSha, edit.conflict ) )) |> Expect.equal (Just ( ( original.content, String.repeat 40 "c", original.content ), ( original.contentVersion, fullSha, True ) ))
+            live = Feature.Observation.applyCanonicalObservation latest drafted.observations
+            authoritative = Feature.Observation.applyAuthoritativeObservation latest drafted.observations
+            attempted = Feature.Observation.update SaveObservationEdit { drafted | observations = live } |> Tuple.first
+            rebased = Feature.Observation.update RebaseObservationEdit { drafted | observations = authoritative } |> Tuple.first
+        in Expect.all [ \_ -> check live, \_ -> check authoritative
+            , \_ -> attempted.observations.edit |> Maybe.andThen .activeRequest |> Expect.equal Nothing
+            , \_ -> rebased.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.reviewedGitShaDraft, edit.baseReviewedGitSha )) |> Expect.equal (Just ( original.content, String.repeat 40 "c", String.repeat 40 "b" )) ] ()
+    , test "clean edit advances content and both reviewed SHA fields on canonical and authoritative refresh" <| \_ ->
+        let
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            started = Feature.Observation.update StartObservationEdit (editableModel (selectedObservationState original)) |> Tuple.first
+            latest = { original | content = "Fresh content", latestSequence = 2, contentVersion = "20000000-0000-4000-8000-000000000000", currentProvenance = Just (revisionProvenance 2 (String.repeat 40 "b")) }
+            check state = state.edit |> Maybe.map (\edit -> ( ( edit.draft, edit.baseContent, edit.baseContentVersion ), ( edit.reviewedGitShaDraft, edit.baseReviewedGitSha, edit.conflict ) )) |> Expect.equal (Just ( ( latest.content, latest.content, latest.contentVersion ), ( String.repeat 40 "b", String.repeat 40 "b", False ) ))
+        in Expect.all [ \_ -> check (Feature.Observation.applyCanonicalObservation latest started.observations), \_ -> check (Feature.Observation.applyAuthoritativeObservation latest started.observations) ] ()
+    , test "embedding timestamp refresh keeps identical assertion query proof" <| \_ ->
+        let
+            context = Just { originalGitSha = Nothing, currentGitSha = Nothing, historyGitSha = Just (String.repeat 40 "c") }
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            listed = { original | provenanceMatch = context }
+            embedding = { original | updatedAt = "2026-01-02T00:00:00Z" }
+            refreshed = Feature.Observation.applyCanonicalObservation embedding (selectedObservationState listed)
+        in Expect.all [ \_ -> refreshed.selectedDetail |> Maybe.map .provenanceMatch |> Expect.equal (Just context), \_ -> refreshed.selectedDetail |> Maybe.map .updatedAt |> Expect.equal (Just embedding.updatedAt) ] ()
+    , test "cleared applied filters immediately retire old context and unfiltered membership cannot revive it" <| \_ ->
+        let
+            context = Just { originalGitSha = Nothing, currentGitSha = Nothing, historyGitSha = Just (String.repeat 40 "c") }
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            listed = { original | provenanceMatch = context }
+            selected = selectedObservationState listed
+            filtered = Feature.Observation.startReloadForSession 0 "workspace-1" { selected | historyGitSha = String.repeat 40 "c" } |> Feature.DataLoading.mergeObservationPage 0 { items = [ listed ], hasMore = False }
+            started = Feature.Observation.update StartObservationEdit (editableModel filtered) |> Tuple.first
+            draft = Feature.Observation.update (SetObservationReviewedGitSha (String.repeat 40 "b")) started |> Tuple.first
+            draftState = draft.observations
+            cleared = Feature.Observation.startReloadForSession 0 "workspace-1" { draftState | historyGitSha = "" }
+            restored = Feature.DataLoading.mergeObservationPage 0 { items = [ original ], hasMore = False } cleared
+        in Expect.all [ \_ -> cleared.selectedDetail |> Maybe.map .provenanceMatch |> Expect.equal (Just Nothing)
+            , \_ -> cleared.edit |> Maybe.map (.latestCanonical >> .provenanceMatch) |> Expect.equal (Just Nothing)
+            , \_ -> restored.selectedDetail |> Maybe.map .provenanceMatch |> Expect.equal (Just Nothing)
+            , \_ -> Dict.get original.id restored.items |> Maybe.map .provenanceMatch |> Expect.equal (Just Nothing) ] ()
+    , test "changed applied SHA query replaces prior membership proof on identical canonical content" <| \_ ->
+        let
+            prior = Just { originalGitSha = Nothing, currentGitSha = Nothing, historyGitSha = Just (String.repeat 40 "c") }
+            current = Just { originalGitSha = Just fullSha, currentGitSha = Nothing, historyGitSha = Nothing }
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            listed = { original | provenanceMatch = prior }
+            selected = selectedObservationState listed
+            filtered = Feature.Observation.startReloadForSession 0 "workspace-1" { selected | historyGitSha = String.repeat 40 "c" } |> Feature.DataLoading.mergeObservationPage 0 { items = [ listed ], hasMore = False }
+            changed = Feature.Observation.startReloadForSession 0 "workspace-1" { filtered | historyGitSha = "", gitSha = fullSha }
+            received = Feature.DataLoading.mergeObservationPage 0 { items = [ { original | provenanceMatch = current } ], hasMore = False } changed
+        in Expect.all [ \_ -> changed.selectedDetail |> Maybe.map .provenanceMatch |> Expect.equal (Just Nothing), \_ -> received.selectedDetail |> Maybe.map .provenanceMatch |> Expect.equal (Just current) ] ()
+    , test "identical detail refresh retains truthful query context and advancing head retires it" <| \_ ->
+        let
+            context = Just { originalGitSha = Just fullSha, currentGitSha = Just (String.repeat 40 "b"), historyGitSha = Just (String.repeat 40 "c") }
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            listed = { original | provenanceMatch = context }
+            refreshed = Feature.Observation.preferNewerObservation original listed
+            advanced = Feature.Observation.preferNewerObservation { original | latestSequence = 2, contentVersion = "20000000-0000-4000-8000-000000000000" } refreshed
+        in Expect.all [ \_ -> refreshed.provenanceMatch |> Expect.equal context, \_ -> advanced.provenanceMatch |> Expect.equal Nothing ] ()
+    , test "unchanged content accepts an explicit re-audit with a fresh version and head" <| \_ ->
+        let
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            saving = savingEditModel original.content
+            accepted = { original | latestSequence = 2, contentVersion = "20000000-0000-4000-8000-000000000000", currentProvenance = Just (revisionProvenance 2 fullSha) }
+        in
+        case saving.observations.edit |> Maybe.andThen .activeRequest of
+            Nothing -> Expect.fail "Unchanged content must dispatch a re-audit"
+            Just request ->
+                let completed = Feature.Observation.update (ObservationUpdated request (Ok accepted)) saving |> Tuple.first
+                in Expect.all [ \_ -> completed.observations.selectedDetail |> Expect.equal (Just accepted), \_ -> completed.observations.edit |> Expect.equal Nothing ] ()
+    , test "SHA-only drafts survive collapse and protect navigation while session retirement clears private state" <| \_ ->
+        let
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            started = Feature.Observation.update StartObservationEdit (editableModel (selectedObservationState original)) |> Tuple.first
+            drafted = Feature.Observation.update (SetObservationReviewedGitSha (String.repeat 40 "b")) started |> Tuple.first
+            collapsed = Feature.Observation.clearSelection drafted.observations
+            retired = Feature.Observation.retireSessionState drafted.observations
+        in Expect.all
+            [ \_ -> Feature.Observation.hasProtectedEdit drafted |> Expect.equal True
+            , \_ -> collapsed.edit |> Maybe.map (\edit -> ( edit.draft, edit.reviewedGitShaDraft )) |> Expect.equal (Just ( original.content, String.repeat 40 "b" ))
+            , \_ -> retired.edit |> Expect.equal Nothing
+            , \_ -> retired.history |> Expect.equal Nothing ] ()
+    , test "invalid reviewed SHA never dispatches and preserves both draft fields" <| \_ ->
+        let
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            started = Feature.Observation.update StartObservationEdit (editableModel (selectedObservationState original)) |> Tuple.first
+            invalid = Feature.Observation.update (SetObservationReviewedGitSha (String.repeat 40 "A")) started |> Tuple.first
+            attempted = Feature.Observation.update SaveObservationEdit invalid |> Tuple.first
+        in attempted.observations.edit |> Maybe.map (\edit -> ( edit.activeRequest == Nothing, edit.reviewedGitShaDraft, edit.error /= Nothing )) |> Expect.equal (Just ( True, String.repeat 40 "A", True ))
+    , test "conflict and deliberate rebase preserve content plus reviewed SHA drafts" <| \_ ->
+        let
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            started = Feature.Observation.update StartObservationEdit (editableModel (selectedObservationState original)) |> Tuple.first
+            content = Feature.Observation.update (SetObservationDraft "My draft") started |> Tuple.first
+            draft = Feature.Observation.update (SetObservationReviewedGitSha (String.repeat 40 "c")) content |> Tuple.first
+            saving = Feature.Observation.update SaveObservationEdit draft |> Tuple.first
+            latest = { original | latestSequence = 2, contentVersion = "20000000-0000-4000-8000-000000000000", currentProvenance = Just (revisionProvenance 2 (String.repeat 40 "b")) }
+        in
+        case saving.observations.edit |> Maybe.andThen .activeRequest of
+            Nothing -> Expect.fail "Expected save"
+            Just request ->
+                let
+                    conflicted = Feature.Observation.update (ObservationUpdated request (Err (Api.ObservationContentConflict latest))) saving |> Tuple.first
+                    rebased = Feature.Observation.update RebaseObservationEdit conflicted |> Tuple.first
+                    live = { draft | observations = Feature.Observation.applyCanonicalObservation latest draft.observations }
+                in Expect.all
+                    [ \_ -> conflicted.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.reviewedGitShaDraft, edit.conflict )) |> Expect.equal (Just ( "My draft", String.repeat 40 "c", True ))
+                    , \_ -> rebased.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.reviewedGitShaDraft, edit.baseContentVersion )) |> Expect.equal (Just ( "My draft", String.repeat 40 "c", latest.contentVersion ))
+                    , \_ -> live.observations.edit |> Maybe.map (\edit -> ( edit.draft, edit.reviewedGitShaDraft )) |> Expect.equal (Just ( "My draft", String.repeat 40 "c" )) ] ()
+    , test "history accepts bounded descending pages and fences selection, session, access, head and retry identity" <| \_ ->
+        let
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            selected = { original | latestSequence = 27 }
+            model = editableModel (selectedObservationState selected)
+            loading = Feature.Observation.update LoadObservationHistory model |> Tuple.first
+            page = { items = List.range 3 27 |> List.reverse |> List.map (\sequence -> { observationId = selected.id, provenance = revisionProvenance sequence fullSha }), hasMore = True }
+        in
+        case loading.observations.history |> Maybe.andThen .active of
+            Nothing -> Expect.fail "Expected history request"
+            Just request ->
+                let
+                    completed = Feature.Observation.update (GotObservationHistory request (Ok page)) loading |> Tuple.first
+                    continuing = Feature.Observation.update LoadObservationHistory completed |> Tuple.first
+                    advanced = { selected | latestSequence = 28 }
+                    headChanged = { loading | observations = Feature.Observation.applyCanonicalObservation advanced loading.observations }
+                    denied = { loading | sessionContext = Just { editorSession | workspace = Nothing } }
+                in Expect.all
+                    [ \_ -> completed.observations.history |> Maybe.map (\history -> ( List.length history.items, history.nextOffset, history.hasMore )) |> Expect.equal (Just ( 25, 25, True ))
+                    , \_ -> continuing.observations.history |> Maybe.andThen .active |> Maybe.map .offset |> Expect.equal (Just 25)
+                    , \_ -> Feature.Observation.historyResponseMatches request continuing |> Expect.equal False
+                    , \_ -> Feature.Observation.historyResponseMatches request { loading | sessionRequestEpoch = loading.sessionRequestEpoch + 1 } |> Expect.equal False
+                    , \_ -> Feature.Observation.historyResponseMatches request { loading | observations = Feature.Observation.clearSelection loading.observations } |> Expect.equal False
+                    , \_ -> Feature.Observation.historyResponseMatches request headChanged |> Expect.equal False
+                    , \_ -> Feature.Observation.historyResponseMatches request denied |> Expect.equal False
+                    , \_ -> Feature.Observation.update (GotObservationHistory request (Ok page)) headChanged |> Tuple.first |> .observations |> Expect.equal headChanged.observations ] ()
+    , test "three SHA predicates round-trip independently through links and API requests" <| \_ ->
+        let
+            initial = Feature.Observation.init
+            state = { initial | gitSha = fullSha, currentGitSha = String.repeat 40 "b", historyGitSha = String.repeat 40 "c" }
+            model = editableModel state
+            url = Helpers.observationHistoryUrl model
+            restored = Url.fromString url |> Maybe.map (Helpers.observationUrlContext >> .query)
+            query = Feature.Observation.listQuery "workspace-1" 0 state
+        in Expect.all
+            [ \_ -> restored |> Maybe.map (\value -> ( value.gitSha, value.currentGitSha, value.historyGitSha )) |> Expect.equal (Just ( fullSha, String.repeat 40 "b", String.repeat 40 "c" ))
+            , \_ -> ( query.gitSha, query.currentGitSha, query.historyGitSha ) |> Expect.equal ( Just fullSha, Just (String.repeat 40 "b"), Just (String.repeat 40 "c") ) ] ()
+    , test "schema2 Observation snapshots require current fields while old Observation envelopes force scoped resync" <| \_ ->
+        let
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            valid = observationSnapshotWire original
+            old = String.replace "\"schema_version\":2" "\"schema_version\":1" valid
+            missing = String.replace "\"latest_sequence\":1," "" valid
+            invalidHead = String.replace "\"latest_sequence\":1" "\"latest_sequence\":0" valid
+        in Expect.all
+            [ \_ -> Api.decodeCanonicalFrame valid /= Nothing |> Expect.equal True
+            , \_ -> Api.decodeCanonicalFrame old |> Expect.equal Nothing
+            , \_ -> Api.decodeCanonicalFrame missing |> Expect.equal Nothing
+            , \_ -> Api.decodeCanonicalFrame invalidHead |> Expect.equal Nothing
+            , \_ -> Api.decodeCanonicalTransportScope old |> Expect.equal (Just (Api.WorkspaceScope "workspace-1")) ] ()
+    ]
+
+
+revisionProvenance : Int -> String -> Api.ObservationProvenance
+revisionProvenance sequence sha =
+    { sequence = sequence, eventKind = "update", reviewedGitSha = sha
+    , contentVersion = Just "20000000-0000-4000-8000-000000000000"
+    , contentDigest = Just (String.repeat 64 "a"), recordedAt = "2026-01-01T00:00:00Z"
+    , actorType = Just "user", actorId = Just "reviewer", actorLabel = Just "Reviewer"
+    }

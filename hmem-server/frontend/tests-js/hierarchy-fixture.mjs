@@ -18,7 +18,7 @@ export function allFixtureObservations(fixture, options) {
 
 export function fixtureObservationCounts(fixture, query) {
   const scoped = fixture.observations.filter(value => value.workspace_id === query.workspace_id)
-  let values = allFixtureObservations({ ...fixture, observations: scoped }, { query: query.query, subjectKind: query.subject_kind, subject: query.subject, gitSha: query.git_sha })
+  let values = allFixtureObservations({ ...fixture, observations: scoped }, { query: query.query, subjectKind: query.subject_kind, subject: query.subject, gitSha: query.git_sha, currentGitSha: query.current_git_sha, historyGitSha: query.history_git_sha })
   if (query.paths) values = values.filter(value => value.subjects.some(subject => (!query.subject_kind || subject.subject_kind === query.subject_kind) && query.paths.some(path => {
     if (subject.subject_kind === 'file') return subject.subject === path
     const pattern = subject.subject.split('/').map((part, i, all) => part === '**' ? (i === all.length - 1 ? '.*' : '(?:[^/]+/)*') : part.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + (i === all.length - 1 ? '' : '/')).join('')

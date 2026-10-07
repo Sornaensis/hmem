@@ -186,3 +186,52 @@ test('production 320 CSS-pixel discovery controls remain reachable with enlarged
     console.log(JSON.stringify({ fixture: 'Observation toolbar native supersession', ...receipt }))
   } finally { await h.close() }
 })
+
+
+test('production original, current and historical SHA predicates keep one current row and restore independent URL selectors', { timeout: 60000 }, async () => {
+  const current = 'b'.repeat(40), historical = 'c'.repeat(40)
+  const h = await openDiscovery(undefined, values => values.map(value => value.id === 'cache-main' ? { ...value, latest_sequence: 3,
+    current_provenance: { sequence: 3, event_kind: 'update', reviewed_git_sha: current, content_version: value.content_version, content_digest: 'a'.repeat(64), recorded_at: value.updated_at, actor_type: 'local', actor_id: null, actor_label: 'Fixture reviewer' },
+    revision_history: [{ reviewed_git_sha: value.git_sha }, { reviewed_git_sha: historical }, { reviewed_git_sha: historical }, { reviewed_git_sha: current }] } : value))
+  try {
+    await h.start()
+    await h.page.locator('#observation-advanced-toggle').click()
+    await h.page.locator('#observation-git-sha').fill(h.sha)
+    await h.page.locator('#observation-current-git-sha').fill(current)
+    await h.page.locator('#observation-history-git-sha').fill(historical)
+    await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
+    const receipt = h.receipts.filter(value => value.endpoint === '/api/v1/observations').at(-1)
+    assert.equal(receipt.params.git_sha, h.sha); assert.equal(receipt.params.current_git_sha, current); assert.equal(receipt.params.history_git_sha, historical)
+    assert.deepEqual(receipt.response.items.map(value => value.id), ['cache-main'])
+    const counts = h.receipts.filter(value => value.endpoint.endsWith('/count')).at(-1)
+    assert.equal(counts.payload.current_git_sha, current); assert.equal(counts.payload.history_git_sha, historical)
+    const tuple = JSON.parse(new URLSearchParams(new URL(h.page.url()).hash.slice(1)).get('oq'))
+    assert.equal(tuple[4], h.sha); assert.equal(tuple[8], current); assert.equal(tuple[9], historical)
+    await h.page.locator('.observation-card').click(); await h.idle()
+    assert.match(await h.page.locator('.observation-detail-content').innerText(), /Cache evidence for Main/)
+    assert.match(await h.page.locator('.observation-provenance-match').innerText(), /recorded history claim/)
+    assert.match(await h.page.locator('.observation-current-provenance').innerText(), new RegExp(current))
+    const restoredUrl = h.page.url()
+    await h.page.goto(restoredUrl); await h.page.locator('#observation-panel').waitFor(); await h.idle()
+    const restored = h.receipts.filter(value => value.endpoint === '/api/v1/observations').at(-1)
+    assert.equal(restored.params.current_git_sha, current); assert.equal(restored.params.history_git_sha, historical)
+    assert.deepEqual(restored.response.items.map(value => value.id), ['cache-main'])
+    await composer(h); await h.page.locator('#observation-match-paths').fill('src/Main.elm')
+    await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
+    const match = h.receipts.filter(value => value.endpoint.endsWith('/match')).at(-1)
+    assert.equal(match.payload.current_git_sha, current); assert.equal(match.payload.history_git_sha, historical)
+    assert.equal(match.response.items.length, 1); assert.equal(match.response.items[0].observation.current_provenance.reviewed_git_sha, current)
+    for (const id of ['observation-git-sha', 'observation-current-git-sha', 'observation-history-git-sha']) {
+      if (!(await h.page.locator('#' + id).isVisible())) await h.page.locator('#observation-advanced-toggle').click()
+      await h.page.locator('#' + id).fill('')
+    }
+    await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
+    assert.equal(await h.page.locator('.observation-provenance-match').count(), 0, 'Cleared query must not revive prior history proof')
+    const unfiltered = h.receipts.filter(value => value.endpoint.endsWith('/match')).at(-1)
+    assert.equal('current_git_sha' in unfiltered.payload, false); assert.equal('history_git_sha' in unfiltered.payload, false)
+    await h.page.locator('#observation-git-sha').fill(h.sha)
+    await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()
+    const replacedContext = await h.page.locator('.observation-provenance-match').innerText()
+    assert.match(replacedContext, /original creation claim/); assert.doesNotMatch(replacedContext, /recorded history claim/)
+  } finally { await h.close() }
+})

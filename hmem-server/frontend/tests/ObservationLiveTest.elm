@@ -27,7 +27,7 @@ observationId = "00000000-0000-4000-8000-000000000002"
 
 row identity =
     { id = identity, workspaceId = workspaceId, subjects = [ { subjectKind = Api.SubjectFile, subject = "src/Main.elm" } ], subjectKind = Api.SubjectFile, subject = "src/Main.elm"
-    , gitSha = String.repeat 40 "a", content = "canonical", contentVersion = "00000000-0000-4000-8000-000000000003", createdAt = "2026-01-01T00:00:00Z", updatedAt = "2026-01-01T00:00:00Z" }
+    , gitSha = String.repeat 40 "a", content = "canonical", contentVersion = "00000000-0000-4000-8000-000000000003", latestSequence = 1, currentProvenance = Nothing, provenanceMatch = Nothing, createdAt = "2026-01-01T00:00:00Z", updatedAt = "2026-01-01T00:00:00Z" }
 
 
 model =

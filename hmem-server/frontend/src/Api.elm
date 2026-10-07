@@ -161,6 +161,12 @@ module Api exposing
     , navigationSummariesBody
     , navigationSummariesDecoder
     , observationDecoder
+    , ObservationProvenance
+    , ObservationRevision
+    , ObservationProvenanceMatch
+    , observationProvenanceDecoder
+    , observationRevisionDecoder
+    , fetchObservationHistory
     , ObservationUpdateError(..)
     , decodeObservationUpdateResponse
     , observationListUrl
@@ -425,9 +431,60 @@ type alias Observation =
     , gitSha : String
     , content : String
     , contentVersion : String
+    , latestSequence : Int
+    , currentProvenance : Maybe ObservationProvenance
+    , provenanceMatch : Maybe ObservationProvenanceMatch
     , createdAt : String
     , updatedAt : String
     }
+
+
+type alias ObservationProvenance =
+    { sequence : Int
+    , eventKind : String
+    , reviewedGitSha : String
+    , contentVersion : Maybe String
+    , contentDigest : Maybe String
+    , recordedAt : String
+    , actorType : Maybe String
+    , actorId : Maybe String
+    , actorLabel : Maybe String
+    }
+
+
+type alias ObservationRevision =
+    { observationId : String, provenance : ObservationProvenance }
+
+
+type alias ObservationProvenanceMatch =
+    { originalGitSha : Maybe String, currentGitSha : Maybe String, historyGitSha : Maybe String }
+
+
+observationProvenanceDecoder : Decoder ObservationProvenance
+observationProvenanceDecoder =
+    D.succeed ObservationProvenance
+        |> required "sequence" (D.int |> D.andThen (\n -> if n > 0 then D.succeed n else D.fail "Invalid assertion sequence"))
+        |> required "event_kind" (D.string |> D.andThen (\kind -> if List.member kind [ "creation", "update", "legacy_creation" ] then D.succeed kind else D.fail "Invalid assertion kind"))
+        |> required "reviewed_git_sha" D.string
+        |> required "content_version" (D.nullable observationContentVersionDecoder)
+        |> required "content_digest" (D.nullable D.string)
+        |> required "recorded_at" D.string
+        |> required "actor_type" (D.nullable D.string)
+        |> required "actor_id" (D.nullable D.string)
+        |> required "actor_label" (D.nullable D.string)
+
+
+observationRevisionDecoder : Decoder ObservationRevision
+observationRevisionDecoder =
+    D.map2 ObservationRevision (D.field "observation_id" D.string) observationProvenanceDecoder
+
+
+observationProvenanceMatchDecoder : Decoder ObservationProvenanceMatch
+observationProvenanceMatchDecoder =
+    D.succeed ObservationProvenanceMatch
+        |> optional "original_git_sha" (D.nullable D.string) Nothing
+        |> optional "current_git_sha" (D.nullable D.string) Nothing
+        |> optional "history_git_sha" (D.nullable D.string) Nothing
 
 
 type ObservationUpdateError
@@ -446,6 +503,8 @@ type alias ObservationListQuery =
     , subjectKind : Maybe SubjectKind
     , subject : Maybe String
     , gitSha : Maybe String
+    , currentGitSha : Maybe String
+    , historyGitSha : Maybe String
     , query : Maybe String
     , limit : Int
     , offset : Int
@@ -457,6 +516,8 @@ type alias ObservationMatchQuery =
     , paths : List String
     , subjectKind : Maybe SubjectKind
     , gitSha : Maybe String
+    , currentGitSha : Maybe String
+    , historyGitSha : Maybe String
     , query : Maybe String
     , limit : Int
     , offset : Int
@@ -489,6 +550,8 @@ type alias ObservationSubjectFacetQuery =
     { workspaceId : String
     , subjectKind : Maybe SubjectKind
     , gitSha : Maybe String
+    , currentGitSha : Maybe String
+    , historyGitSha : Maybe String
     , query : Maybe String
     , limit : Int
     , offset : Int
@@ -619,6 +682,10 @@ type alias ObservationSearchHit =
     , gitSha : String
     , contentPreview : String
     , updatedAt : String
+    , contentVersion : String
+    , latestSequence : Int
+    , currentProvenance : Maybe ObservationProvenance
+    , provenanceMatch : Maybe ObservationProvenanceMatch
     }
 
 
@@ -1530,12 +1597,15 @@ observationDecoder =
         |> required "git_sha" D.string
         |> required "content" D.string
         |> required "content_version" observationContentVersionDecoder
+        |> required "latest_sequence" (D.int |> D.andThen (\n -> if n > 0 then D.succeed n else D.fail "Invalid assertion head"))
+        |> required "current_provenance" (D.nullable observationProvenanceDecoder)
+        |> optional "provenance_match" (D.nullable observationProvenanceMatchDecoder) Nothing
         |> required "created_at" D.string
         |> required "updated_at" D.string
 
 
-observationFromFields : String -> String -> List ObservationSubject -> String -> String -> String -> String -> String -> Observation
-observationFromFields id workspaceId subjects gitSha content contentVersion createdAt updatedAt =
+observationFromFields : String -> String -> List ObservationSubject -> String -> String -> String -> Int -> Maybe ObservationProvenance -> Maybe ObservationProvenanceMatch -> String -> String -> Observation
+observationFromFields id workspaceId subjects gitSha content contentVersion latestSequence currentProvenance provenanceMatch createdAt updatedAt =
     case subjects of
         primary :: _ ->
             { id = id
@@ -1546,6 +1616,9 @@ observationFromFields id workspaceId subjects gitSha content contentVersion crea
             , gitSha = gitSha
             , content = content
             , contentVersion = contentVersion
+            , latestSequence = latestSequence
+            , currentProvenance = currentProvenance
+            , provenanceMatch = provenanceMatch
             , createdAt = createdAt
             , updatedAt = updatedAt
             }
@@ -1560,6 +1633,9 @@ observationFromFields id workspaceId subjects gitSha content contentVersion crea
             , gitSha = gitSha
             , content = content
             , contentVersion = contentVersion
+            , latestSequence = latestSequence
+            , currentProvenance = currentProvenance
+            , provenanceMatch = provenanceMatch
             , createdAt = createdAt
             , updatedAt = updatedAt
             }
@@ -1801,6 +1877,10 @@ observationSearchHitDecoder =
         |> required "git_sha" D.string
         |> required "content_preview" D.string
         |> required "updated_at" D.string
+        |> required "content_version" observationContentVersionDecoder
+        |> required "latest_sequence" (D.int |> D.andThen (\n -> if n > 0 then D.succeed n else D.fail "Invalid assertion head"))
+        |> required "current_provenance" (D.nullable observationProvenanceDecoder)
+        |> optional "provenance_match" (D.nullable observationProvenanceMatchDecoder) Nothing
 
 
 unifiedSearchResultsDecoder : Decoder UnifiedSearchResults
@@ -2403,25 +2483,15 @@ decodeCanonicalTransportScope raw =
 
 snapshotItemDecoder : Decoder SnapshotItem
 snapshotItemDecoder =
-    D.field "schema_version" D.int
+    D.map2 Tuple.pair (D.field "schema_version" D.int) (D.field "kind" nonEmptyStringDecoder)
         |> D.andThen
-            (\version ->
-                if version == 1 then
-                    D.map2 SnapshotItem
-                        (D.field "kind" nonEmptyStringDecoder
-                            |> D.andThen
-                                (\kind ->
-                                    if List.member kind [ "workspace", "workspace_group", "project", "task", "task_dependency", "observation" ] then
-                                        D.succeed kind
-
-                                    else
-                                        D.fail "unknown snapshot kind"
-                                )
-                        )
-                        (D.field "data" D.value)
-
+            (\( version, kind ) ->
+                if kind == "observation" && version == 2 then
+                    D.field "data" observationDecoder |> D.map (\_ -> ()) |> D.andThen (\_ -> D.map (SnapshotItem kind) (D.field "data" D.value))
+                else if version == 1 && List.member kind [ "workspace", "workspace_group", "project", "task", "task_dependency" ] then
+                    D.map (SnapshotItem kind) (D.field "data" D.value)
                 else
-                    D.fail "unsupported snapshot schema"
+                    D.fail "unsupported snapshot schema or kind"
             )
 
 
@@ -2851,7 +2921,7 @@ fetchMemory apiUrl memId toMsg =
 
 
 type alias ObservationCountQuery =
-    { workspaceId : String, subjectKind : Maybe SubjectKind, subject : Maybe String, gitSha : Maybe String, query : Maybe String, paths : Maybe (List String) }
+    { workspaceId : String, subjectKind : Maybe SubjectKind, subject : Maybe String, gitSha : Maybe String, currentGitSha : Maybe String, historyGitSha : Maybe String, query : Maybe String, paths : Maybe (List String) }
 
 
 type alias ObservationCounts =
@@ -2875,6 +2945,8 @@ fetchObservationCounts apiUrl value toMsg =
             [ optional "subject_kind" (E.string << subjectKindToString) value.subjectKind
             , optional "subject" E.string value.subject
             , optional "git_sha" E.string value.gitSha
+            , optional "current_git_sha" E.string value.currentGitSha
+            , optional "history_git_sha" E.string value.historyGitSha
             , optional "query" E.string value.query
             , optional "paths" (E.list E.string) value.paths ])
     in
@@ -2892,6 +2964,8 @@ observationListUrl apiUrl listQuery =
             , optional "subject_kind" (Maybe.map subjectKindToString listQuery.subjectKind)
             , optional "subject" listQuery.subject
             , optional "git_sha" listQuery.gitSha
+            , optional "current_git_sha" listQuery.currentGitSha
+            , optional "history_git_sha" listQuery.historyGitSha
             , optional "query" listQuery.query
             , Just ("limit=" ++ String.fromInt listQuery.limit)
             , Just ("offset=" ++ String.fromInt listQuery.offset)
@@ -2911,6 +2985,8 @@ observationSubjectFacetsUrl apiUrl facetQuery =
             [ Just ("workspace_id=" ++ Url.percentEncode facetQuery.workspaceId)
             , optional "subject_kind" (Maybe.map subjectKindToString facetQuery.subjectKind)
             , optional "git_sha" facetQuery.gitSha
+            , optional "current_git_sha" facetQuery.currentGitSha
+            , optional "history_git_sha" facetQuery.historyGitSha
             , optional "query" facetQuery.query
             , Just ("limit=" ++ String.fromInt facetQuery.limit)
             , Just ("offset=" ++ String.fromInt facetQuery.offset)
@@ -2949,18 +3025,18 @@ fetchObservation apiUrl observationId toMsg =
         }
 
 
-observationUpdateBody : String -> E.Value
-observationUpdateBody content =
-    E.object [ ( "content", E.string content ) ]
+observationUpdateBody : String -> String -> E.Value
+observationUpdateBody content reviewedGitSha =
+    E.object [ ( "content", E.string content ), ( "reviewed_git_sha", E.string reviewedGitSha ) ]
 
 
-updateObservation : String -> String -> String -> String -> String -> (Result ObservationUpdateError Observation -> msg) -> Cmd msg
-updateObservation apiUrl observationId content contentVersion requestId toMsg =
+updateObservation : String -> String -> String -> String -> String -> String -> (Result ObservationUpdateError Observation -> msg) -> Cmd msg
+updateObservation apiUrl observationId content reviewedGitSha contentVersion requestId toMsg =
     Http.request
         { method = "PUT"
         , headers = [ Http.header "X-Request-Id" requestId, Http.header "If-Match" ("\"" ++ contentVersion ++ "\"") ]
         , url = apiUrl ++ "/api/v1/observations/" ++ Url.percentEncode observationId
-        , body = Http.jsonBody (observationUpdateBody content)
+        , body = Http.jsonBody (observationUpdateBody content reviewedGitSha)
         , expect = Http.expectStringResponse toMsg decodeObservationUpdateResponse
         , timeout = Nothing
         , tracker = Nothing
@@ -3045,6 +3121,8 @@ observationMatchBody matchQuery =
             ++ List.filterMap identity
                 [ optional "subject_kind" (E.string << subjectKindToString) matchQuery.subjectKind
                 , optional "git_sha" E.string matchQuery.gitSha
+            , optional "current_git_sha" E.string matchQuery.currentGitSha
+            , optional "history_git_sha" E.string matchQuery.historyGitSha
                 , optional "query" E.string matchQuery.query
                 ]
         )
@@ -3811,3 +3889,8 @@ decodeEncodedString encoded =
 
     else
         encoded
+
+
+fetchObservationHistory : String -> String -> Int -> (Result Http.Error (PaginatedResult ObservationRevision) -> msg) -> Cmd msg
+fetchObservationHistory apiUrl observationId offset toMsg =
+    Http.get { url = apiUrl ++ "/api/v1/observations/" ++ Url.percentEncode observationId ++ "/history?limit=25&offset=" ++ String.fromInt offset, expect = Http.expectJson toMsg (paginatedDecoder observationRevisionDecoder) }

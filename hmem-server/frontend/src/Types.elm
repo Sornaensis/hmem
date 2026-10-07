@@ -278,6 +278,17 @@ type alias EditingModel =
     }
 
 
+type alias ObservationHistoryRequest =
+    { workspaceId : String, observationId : String, sessionEpoch : Int, head : Int, token : Int, offset : Int }
+
+
+type alias ObservationHistoryState =
+    { workspaceId : String, observationId : String, sessionEpoch : Int, head : Int
+    , items : List Api.ObservationRevision, hasMore : Bool, nextOffset : Int
+    , loading : Bool, error : Maybe String, active : Maybe ObservationHistoryRequest
+    }
+
+
 type alias ObservationDetailRequest =
     { workspaceId : String
     , observationId : String
@@ -304,6 +315,8 @@ type alias ObservationEditState =
     , baseContentVersion : String
     , baseUpdatedAt : String
     , draft : String
+    , baseReviewedGitSha : String
+    , reviewedGitShaDraft : String
     , latestCanonical : Api.Observation
     , conflict : Bool
     , saving : Bool
@@ -352,6 +365,8 @@ type alias ObservationModel =
     , subject : String
     , selectedFacet : Maybe Api.ObservationSubject
     , gitSha : String
+    , currentGitSha : String
+    , historyGitSha : String
     , requestMode : ObservationRequestMode
     , fileComposerOpen : Bool
     , advancedFiltersOpen : Bool
@@ -384,6 +399,8 @@ type alias ObservationModel =
     , selectedId : Maybe String
     , inlineOwner : Maybe String
     , selectedDetail : Maybe Api.Observation
+    , history : Maybe ObservationHistoryState
+    , nextHistoryRequestToken : Int
     , detailLoading : Bool
     , detailError : Maybe String
     , activeDetailRequest : Maybe ObservationDetailRequest
@@ -458,6 +475,8 @@ type alias ObservationBrowseReturn =
     , selectedFacet : Maybe Api.ObservationSubject
     , query : String
     , gitSha : String
+    , currentGitSha : String
+    , historyGitSha : String
     }
 
 
@@ -468,6 +487,8 @@ type alias ObservationAppliedQuery =
     , subject : String
     , selectedFacet : Maybe Api.ObservationSubject
     , gitSha : String
+    , currentGitSha : String
+    , historyGitSha : String
     , matchAppliedPaths : List String
     }
 
@@ -1062,6 +1083,8 @@ type Msg
     | SetObservationSubjectKind String
     | SetObservationSubject String
     | SetObservationGitSha String
+    | SetObservationCurrentGitSha String
+    | SetObservationHistoryGitSha String
     | ApplyObservationFilters
     | RevertObservationFilters
     | RefreshObservationResults
@@ -1092,6 +1115,9 @@ type Msg
     | StartObservationEdit
     | ReturnToObservationDraft
     | SetObservationDraft String
+    | SetObservationReviewedGitSha String
+    | LoadObservationHistory
+    | GotObservationHistory ObservationHistoryRequest (Result Http.Error (Api.PaginatedResult Api.ObservationRevision))
     | SaveObservationEdit
     | CancelObservationEdit
     | ReloadObservationEdit

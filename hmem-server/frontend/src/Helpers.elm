@@ -236,19 +236,19 @@ replaceFragment model =
 
 defaultObservationQuery : ObservationAppliedQuery
 defaultObservationQuery =
-    { requestMode = ObservationFlatMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", matchAppliedPaths = [] }
+    { requestMode = ObservationFlatMode, query = "", subjectKind = Nothing, subject = "", selectedFacet = Nothing, gitSha = "", currentGitSha = "", historyGitSha = "", matchAppliedPaths = [] }
 
 
 observationAppliedQuery : ObservationModel -> ObservationAppliedQuery
 observationAppliedQuery state =
     Maybe.withDefault
-        { requestMode = state.requestMode, query = state.query, subjectKind = state.subjectKind, subject = state.subject, selectedFacet = state.selectedFacet, gitSha = state.gitSha, matchAppliedPaths = state.matchAppliedPaths }
+        { requestMode = state.requestMode, query = state.query, subjectKind = state.subjectKind, subject = state.subject, selectedFacet = state.selectedFacet, gitSha = state.gitSha, currentGitSha = state.currentGitSha, historyGitSha = state.historyGitSha, matchAppliedPaths = state.matchAppliedPaths }
         state.appliedQuery
 
 
 restoreObservationQuery : ObservationAppliedQuery -> ObservationModel -> ObservationModel
 restoreObservationQuery query state =
-    { state | requestMode = query.requestMode, query = query.query, subjectKind = query.subjectKind, subject = query.subject, selectedFacet = query.selectedFacet, gitSha = query.gitSha, matchAppliedPaths = query.matchAppliedPaths, matchPathsInput = String.join "\n" query.matchAppliedPaths, appliedQuery = Just query, matchValidationError = Nothing, failedRequest = Nothing, pendingExcludedLink = Nothing }
+    { state | requestMode = query.requestMode, query = query.query, subjectKind = query.subjectKind, subject = query.subject, selectedFacet = query.selectedFacet, gitSha = query.gitSha, currentGitSha = query.currentGitSha, historyGitSha = query.historyGitSha, matchAppliedPaths = query.matchAppliedPaths, matchPathsInput = String.join "\n" query.matchAppliedPaths, appliedQuery = Just query, matchValidationError = Nothing, failedRequest = Nothing, pendingExcludedLink = Nothing }
 
 
 type alias ObservationUrlContext =
@@ -350,12 +350,14 @@ observationQueryDecoder =
 
         tuple =
             Decode.map8 (\requestMode query subjectKind subject gitSha facetKind facetSubject paths ->
-                ( { requestMode = requestMode, query = query, subjectKind = subjectKind, subject = subject, gitSha = gitSha, selectedFacet = Maybe.map2 (\k s -> { subjectKind = k, subject = s }) facetKind facetSubject, matchAppliedPaths = paths }, (facetKind == Nothing) == (facetSubject == Nothing) ))
+                ( { requestMode = requestMode, query = query, subjectKind = subjectKind, subject = subject, gitSha = gitSha, currentGitSha = "", historyGitSha = "", selectedFacet = Maybe.map2 (\k s -> { subjectKind = k, subject = s }) facetKind facetSubject, matchAppliedPaths = paths }, (facetKind == Nothing) == (facetSubject == Nothing) ))
                 (Decode.index 0 mode) (Decode.index 1 Decode.string) (Decode.index 2 kind) (Decode.index 3 Decode.string) (Decode.index 4 Decode.string) (Decode.index 5 kind) (Decode.index 6 (Decode.nullable Decode.string)) (Decode.index 7 (Decode.list Decode.string))
     in
     Decode.list Decode.value |> Decode.andThen (\values ->
-        if List.length values /= 8 then Decode.fail "Invalid query tuple" else
-        tuple |> Decode.andThen (\( query, pairedFacet ) ->
+        if not (List.member (List.length values) [ 8, 10 ]) then Decode.fail "Invalid query tuple" else
+        (if List.length values == 8 then tuple else
+            Decode.map3 (\( query, paired ) current history -> ( { query | currentGitSha = current, historyGitSha = history }, paired )) tuple (Decode.index 8 Decode.string) (Decode.index 9 Decode.string))
+        |> Decode.andThen (\( query, pairedFacet ) ->
             if not pairedFacet || (query.requestMode == ObservationExactSubjectMode && query.selectedFacet == Nothing) then Decode.fail "Invalid exact facet" else
             if query.requestMode == ObservationMatchMode then
                 case normalizeObservationPaths (String.join "\n" query.matchAppliedPaths) of
@@ -379,7 +381,7 @@ encodeObservationQuery query =
                 ObservationExactSubjectMode -> "exact"
                 ObservationMatchMode -> "match"
     in
-    Encode.list identity [ Encode.string mode, Encode.string query.query, kind query.subjectKind, Encode.string query.subject, Encode.string query.gitSha, kind (Maybe.map .subjectKind query.selectedFacet), query.selectedFacet |> Maybe.map (.subject >> Encode.string) |> Maybe.withDefault Encode.null, Encode.list Encode.string query.matchAppliedPaths ] |> Encode.encode 0 |> Url.percentEncode
+    Encode.list identity [ Encode.string mode, Encode.string query.query, kind query.subjectKind, Encode.string query.subject, Encode.string query.gitSha, kind (Maybe.map .subjectKind query.selectedFacet), query.selectedFacet |> Maybe.map (.subject >> Encode.string) |> Maybe.withDefault Encode.null, Encode.list Encode.string query.matchAppliedPaths, Encode.string query.currentGitSha, Encode.string query.historyGitSha ] |> Encode.encode 0 |> Url.percentEncode
 
 
 observationUrl : Model -> String -> String
@@ -698,6 +700,8 @@ observationListQuery workspaceId offset observations =
     , subjectKind = observations.subjectKind
     , subject = observationFilterValue observations.subject
     , gitSha = observationFilterValue observations.gitSha
+    , currentGitSha = observationFilterValue observations.currentGitSha
+    , historyGitSha = observationFilterValue observations.historyGitSha
     , query = observationFilterValue observations.query
     , limit = 50
     , offset = offset
@@ -711,6 +715,8 @@ observationQueryFingerprint query =
         , query.subjectKind |> Maybe.map Api.subjectKindToString |> Maybe.withDefault ""
         , query.subject |> Maybe.withDefault ""
         , query.gitSha |> Maybe.withDefault ""
+        , query.currentGitSha |> Maybe.withDefault ""
+        , query.historyGitSha |> Maybe.withDefault ""
         , query.query |> Maybe.withDefault ""
         , String.fromInt query.limit
         ]

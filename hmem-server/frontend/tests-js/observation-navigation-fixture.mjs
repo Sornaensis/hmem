@@ -12,6 +12,7 @@ export async function openObservations(viewport = { width: 1440, height: 900 }) 
     return { id: 'observation-' + index, workspace_id: fixture.workspace.id, subjects,
       subject_kind: subjects[0].subject_kind, subject: path, git_sha: sha,
       content_version: '10000000-0000-4000-8000-' + String(index).padStart(12, '0'),
+    latest_sequence: 1, current_provenance: null,
       content: 'Observation ' + index + '\n' + 'Long readable content '.repeat(30),
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' }
   }
@@ -35,17 +36,17 @@ export async function openObservations(viewport = { width: 1440, height: 900 }) 
         receipt.paths = paths
         body = { items: fixture.observations.filter(value => values.has(value.id)).slice(query.offset, query.offset + query.limit).map(value => ({ observation: values.get(value.id), path_matches: paths.map(path => ({ path, matched_subjects: value.subjects })) })), has_more: false }
       } else if (endpoint.endsWith('/subject-facets')) {
-        body = queryObservationFacets(fixture, { query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), gitSha: url.searchParams.get('git_sha'), offset: receipt.offset, limit: 50 })
+        body = queryObservationFacets(fixture, { query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), gitSha: url.searchParams.get('git_sha'), currentGitSha: url.searchParams.get('current_git_sha'), historyGitSha: url.searchParams.get('history_git_sha'), offset: receipt.offset, limit: 50 })
       } else if (endpoint === '/api/v1/observations') {
-        body = queryObservations({ ...fixture, observations: fixture.observations.filter(value => values.has(value.id)).map(value => values.get(value.id)) }, { query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'), gitSha: url.searchParams.get('git_sha'), offset: receipt.offset, limit: 50 })
+        body = queryObservations({ ...fixture, observations: fixture.observations.filter(value => values.has(value.id)).map(value => values.get(value.id)) }, { query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'), gitSha: url.searchParams.get('git_sha'), currentGitSha: url.searchParams.get('current_git_sha'), historyGitSha: url.searchParams.get('history_git_sha'), offset: receipt.offset, limit: 50 })
       } else {
         const id = decodeURIComponent(endpoint.split('/').at(-1))
         body = values.get(id)
         if (!body) { status = 404; body = { error: 'Missing controlled observation' } }
         else if (request.method() === 'PUT') {
-          const update = request.postDataJSON(); assert.deepEqual(Object.keys(update), ['content'])
+          const update = request.postDataJSON(); assert.deepEqual(Object.keys(update).sort(), ['content', 'reviewed_git_sha'])
           assert.equal(request.headers()['if-match'], '"' + body.content_version + '"')
-          body = { ...body, content: update.content, content_version: '20000000-0000-4000-8000-' + String(nextVersion++).padStart(12, '0'), updated_at: '2026-01-02T00:00:00Z' }; values.set(id, body)
+          body = { ...body, latest_sequence: body.latest_sequence + 1, current_provenance: { sequence: body.latest_sequence + 1, event_kind: 'update', reviewed_git_sha: update.reviewed_git_sha, content_version: null, content_digest: 'a'.repeat(64), recorded_at: '2026-01-02T00:00:00Z', actor_type: 'local', actor_id: null, actor_label: null }, content: update.content, content_version: '20000000-0000-4000-8000-' + String(nextVersion++).padStart(12, '0'), updated_at: '2026-01-02T00:00:00Z' }; body.current_provenance.content_version = body.content_version; values.set(id, body)
         } else if (request.method() === 'DELETE') { values.delete(id); body = {} }
         else assert.equal(request.method(), 'GET')
       }

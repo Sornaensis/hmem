@@ -322,6 +322,12 @@ route msg model =
         SetObservationGitSha _ ->
             Ok (Feature.Observation.update msg model)
 
+        SetObservationCurrentGitSha _ ->
+            Ok (Feature.Observation.update msg model)
+
+        SetObservationHistoryGitSha _ ->
+            Ok (Feature.Observation.update msg model)
+
         ApplyObservationFilters ->
             Ok (Feature.Observation.update msg model)
 
@@ -404,6 +410,15 @@ route msg model =
             Ok (Feature.Observation.update msg model)
 
         SetObservationDraft _ ->
+            Ok (Feature.Observation.update msg model)
+
+        SetObservationReviewedGitSha _ ->
+            Ok (Feature.Observation.update msg model)
+
+        LoadObservationHistory ->
+            Ok (Feature.Observation.update msg model)
+
+        GotObservationHistory _ _ ->
             Ok (Feature.Observation.update msg model)
 
         SaveObservationEdit ->

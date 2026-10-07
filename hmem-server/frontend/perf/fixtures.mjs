@@ -216,6 +216,7 @@ function makeObservations(workspaceId, count) {
       git_sha: createHash('sha1').update(`${FIXTURE_SEED}:observation:${index}`).digest('hex'),
       content: `Observation ${String(index + 1).padStart(5, '0')} records deterministic repository evidence.`,
       content_version: `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      latest_sequence: 1, current_provenance: null,
       subject_kind: subjects[0].subject_kind,
       subject: subjects[0].subject,
       created_at: timestamp(index),
@@ -468,6 +469,8 @@ export function queryObservations(fixture, options = {}) {
     ))
   }
   if (options.gitSha) ranked = ranked.filter(({ observation }) => observation.git_sha === options.gitSha)
+  if (options.currentGitSha) ranked = ranked.filter(({ observation }) => observation.current_provenance?.reviewed_git_sha === options.currentGitSha)
+  if (options.historyGitSha) ranked = ranked.filter(({ observation }) => (observation.revision_history || [{ reviewed_git_sha: observation.git_sha }]).some(event => event.reviewed_git_sha === options.historyGitSha))
   ranked.sort((left, right) =>
     (right.rank - left.rank)
     || compareTimestampDesc(left.observation.updated_at, right.observation.updated_at)
@@ -479,6 +482,8 @@ export function queryObservations(fixture, options = {}) {
 export function queryObservationFacets(fixture, options = {}) {
   let ranked = observationSearch(fixture, options.query)
   if (options.gitSha) ranked = ranked.filter(({ observation }) => observation.git_sha === options.gitSha)
+  if (options.currentGitSha) ranked = ranked.filter(({ observation }) => observation.current_provenance?.reviewed_git_sha === options.currentGitSha)
+  if (options.historyGitSha) ranked = ranked.filter(({ observation }) => (observation.revision_history || [{ reviewed_git_sha: observation.git_sha }]).some(event => event.reviewed_git_sha === options.historyGitSha))
   const groups = new Map()
   for (const { observation } of ranked) {
     for (const subject of observation.subjects) {

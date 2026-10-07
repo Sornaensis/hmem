@@ -4381,3 +4381,10 @@ textarea.observation-edit-content {
 .observation-subject-group-header > .copyable-value { flex: 1 1 12rem; }
 .observation-subject-group-toggle { flex: 0 1 auto; }
 .membership-user, .audit-detail-value, .search-result-main { min-width: 0; overflow-wrap: anywhere; }
+
+.observation-history { margin: 0.75rem 0; }
+.observation-history ol { list-style: none; margin: 0.5rem 0; padding: 0; }
+.observation-history-entry { padding: 0.5rem 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; font-size: 0.85rem; }
+.observation-current-provenance .observation-detail-meta-value { overflow-wrap: anywhere; }
+.observation-provenance-match { overflow-wrap: anywhere; }
+.observation-edit-form #observation-reviewed-sha { width: 100%; box-sizing: border-box; }

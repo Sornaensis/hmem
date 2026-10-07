@@ -25,7 +25,7 @@ suite =
                 , List.map (\item -> { entityType = item.entityType, entityTypeLabel = item.entityTypeLabel, title = item.title, summary = item.summary, actionLabel = item.actionLabel }) presentations
                     == [ { entityType = "project", entityTypeLabel = "PRJ", title = "Project Alpha", summary = "Project description", actionLabel = "Focus project" }
                        , { entityType = "task", entityTypeLabel = "TSK", title = "Task Alpha", summary = "Task description", actionLabel = "Focus task" }
-                       , { entityType = "observation", entityTypeLabel = "OBS", title = "src/Main.elm", summary = "Ranked FTS preview", actionLabel = "Open observation" }
+                       , { entityType = "observation", entityTypeLabel = "OBS", title = "src/Main.elm", summary = "Current binding unknown · Ranked FTS preview", actionLabel = "Open observation" }
                        ]
                 ]
                     |> Expect.equal [ True, True ]
@@ -98,6 +98,10 @@ observation id subject contentPreview =
     , subject = subject
     , gitSha = "0123456789abcdef0123456789abcdef01234567"
     , contentPreview = contentPreview
+    , contentVersion = "10000000-0000-4000-8000-000000000000"
+    , latestSequence = 1
+    , currentProvenance = Nothing
+    , provenanceMatch = Nothing
     , updatedAt = "2026-01-01T00:00:00Z"
     }
 

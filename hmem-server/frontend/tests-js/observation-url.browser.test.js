@@ -3,7 +3,7 @@ import test from 'node:test'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
 
 const resultReceipts = h => h.receipts.filter(value => !value.endpoint.endsWith('/count'))
-const tuple = (mode, query = '', kind = null, subject = '', sha = '', facetKind = null, facet = null, paths = []) => [mode, query, kind, subject, sha, facetKind, facet, paths]
+const tuple = (mode, query = '', kind = null, subject = '', sha = '', facetKind = null, facet = null, paths = []) => [mode, query, kind, subject, sha, facetKind, facet, paths, '', '']
 const fragment = (query, id = null) => '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + (id ? '&observation=' + encodeURIComponent(id) : '')
 const applied = page => page.locator('.observation-applied-filters').innerText()
 async function ready(h) { await h.page.locator('#observation-panel').waitFor(); await h.idle() }
@@ -245,7 +245,7 @@ test('production populated unified-search Observation activation pushes B and Ba
       assert.ok(payload.entity_types.includes('observation'))
       const requested = payload.query
       const observation = h.fixture.observations.find(value => value.id === (requested.includes('Main') ? 'cache-main' : 'cache-view'))
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ projects: [], tasks: [], observations: [{ id: observation.id, workspace_id: observation.workspace_id, subject_kind: observation.subject_kind, subject: observation.subject, git_sha: observation.git_sha, content_preview: observation.content, updated_at: observation.updated_at }] }) })
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ projects: [], tasks: [], observations: [{ id: observation.id, workspace_id: observation.workspace_id, subject_kind: observation.subject_kind, subject: observation.subject, git_sha: observation.git_sha, content_preview: observation.content, updated_at: observation.updated_at, content_version: observation.content_version, latest_sequence: observation.latest_sequence, current_provenance: observation.current_provenance }] }) })
     })
     await navigate(h, tuple('flat', 'Cache evidence'))
     await h.page.locator('.observation-result[data-observation-id="cache-main"] .observation-card').click(); await ready(h)

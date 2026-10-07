@@ -16,6 +16,7 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
     subjects: [{ subject_kind: 'file', subject: file }, { subject_kind: 'glob', subject: glob }],
     subject_kind: 'file', subject: file, git_sha: sha, content,
     content_version: '10000000-0000-4000-8000-' + String(index).padStart(12, '0'),
+    latest_sequence: 1, current_provenance: null,
     created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' })
   fixture.observations = [
     observation('cache-main', 'src/Main.elm', 'src/**/*.elm', 'Cache evidence for Main', 1),
@@ -33,15 +34,15 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
     receipts.push(receipt)
     try {
       let body
-      const options = { query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'), gitSha: url.searchParams.get('git_sha'), offset: Number(url.searchParams.get('offset') || 0), limit: Number(url.searchParams.get('limit') || 50) }
+      const options = { query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'), gitSha: url.searchParams.get('git_sha'), currentGitSha: url.searchParams.get('current_git_sha'), historyGitSha: url.searchParams.get('history_git_sha'), offset: Number(url.searchParams.get('offset') || 0), limit: Number(url.searchParams.get('limit') || 50) }
       if (url.pathname.endsWith('/count')) {
         assert.equal(request.method(), 'POST')
         receipt.payload = request.postDataJSON()
         body = fixtureObservationCounts(fixture, receipt.payload)
       } else if (url.pathname.endsWith('/match')) {
         assert.equal(request.method(), 'POST')
-        const query = request.postDataJSON(); receipt.payload = query
-        const candidates = allFixtureObservations(fixture, { query: query.query, gitSha: query.git_sha })
+        const query = request.postDataJSON(); receipt.payload = query; options.gitSha = query.git_sha; options.currentGitSha = query.current_git_sha; options.historyGitSha = query.history_git_sha
+        const candidates = allFixtureObservations(fixture, { query: query.query, gitSha: query.git_sha, currentGitSha: query.current_git_sha, historyGitSha: query.history_git_sha })
         const matched = candidates.flatMap(observation => {
           const path_matches = query.paths.flatMap(path => {
             const matched_subjects = observation.subjects.filter(subject => (!query.subject_kind || subject.subject_kind === query.subject_kind) && (subject.subject_kind === 'file' ? subject.subject === path : patterns.get(subject.subject)?.test(path)))
@@ -56,6 +57,10 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
         assert.equal(request.method(), 'GET')
         body = fixture.observations.find(value => value.id === decodeURIComponent(url.pathname.split('/').at(-1)))
         assert.ok(body, 'Unknown controlled observation')
+      }
+      if (options.gitSha || options.currentGitSha || options.historyGitSha) {
+        const context = { ...(options.gitSha ? { original_git_sha: options.gitSha } : {}), ...(options.currentGitSha ? { current_git_sha: options.currentGitSha } : {}), ...(options.historyGitSha ? { history_git_sha: options.historyGitSha } : {}) };
+        if (body.items) body.items = body.items.map(value => value.observation ? { ...value, observation: { ...value.observation, provenance_match: context } } : value.content ? { ...value, provenance_match: context } : value);
       }
       receipt.response = body
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })

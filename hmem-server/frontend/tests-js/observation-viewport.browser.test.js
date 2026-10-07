@@ -34,7 +34,7 @@ test('production ordered150 Match members and every repeated group stay scroll-r
       }, { once: true })
     })
     await h.start()
-    await h.page.getByRole('button', { name: 'For files', exact: true }).click()
+    await h.page.getByRole('button', { name: 'Files', exact: true }).click()
     await h.page.locator('#observation-match-paths').fill(OBSERVATION_SCALING_CONTRACT.paths.join('\n'))
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
     for (const loaded of [50, 100, 150]) {

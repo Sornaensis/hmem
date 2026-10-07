@@ -1046,7 +1046,6 @@ type Msg
     | CopyObservationSubject String
     | CopyObservationGitSha String
     | CopyObservationContent String
-    | CopyObservationLink
     | SynchronizeWorkspaceFragment
     | StartObservationEdit
     | ReturnToObservationDraft

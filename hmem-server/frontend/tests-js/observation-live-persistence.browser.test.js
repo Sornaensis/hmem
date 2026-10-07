@@ -121,7 +121,7 @@ test('production automatic refresh stages loaded span, coalesces bursts, keeps d
 test('production ordered match group and subject disclosure stay independent across refresh and applied-query reload', { timeout: 60000 }, async () => {
   const h = await openDiscovery(undefined, transform)
   try {
-    await h.start(); await h.page.getByRole('button', { name: 'For files', exact: true }).click()
+    await h.start(); await h.page.getByRole('button', { name: 'Files', exact: true }).click()
     await h.page.locator('#observation-match-paths').fill('src/Main.elm'); await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
     const group = h.page.locator('.observation-subject-group-toggle').first(); await group.click(); await paint(h.page)
     await h.page.locator('.observation-subject-group-toggle').nth(1).click(); await paint(h.page)

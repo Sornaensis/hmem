@@ -385,9 +385,6 @@ route msg model =
         CopyObservationGitSha _ ->
             Ok (Feature.Observation.update msg model)
 
-        CopyObservationLink ->
-            Ok (Feature.Observation.update msg model)
-
         SynchronizeWorkspaceFragment ->
             Ok (Helpers.writeObservationHistory False model)
 

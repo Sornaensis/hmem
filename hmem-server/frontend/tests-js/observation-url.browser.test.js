@@ -9,19 +9,18 @@ async function ready(h) { await h.page.locator('#observation-panel').waitFor(); 
 async function history(h, direction) { await h.page.evaluate(direction => window.history[direction](), direction); await ready(h) }
 async function navigate(h, query, id) { await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + fragment(query, id)); await ready(h) }
 
-test('production complete applied flat link excludes drafts, copies exact context, and reloads once after admission', { timeout: 60000 }, async () => {
+test('production applied flat URI excludes drafts, has no Copy link, and reloads once after admission', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
-    await h.page.addInitScript(() => { window.copiedLinks = []; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => window.copiedLinks.push(value) } }) })
     await h.start()
     await h.page.locator('#observation-query').fill('Cache evidence')
     await h.page.locator('#observation-query').press('Enter'); await ready(h)
     const appliedUrl = h.page.url(), before = h.receipts.length
     assert.deepEqual(JSON.parse(new URLSearchParams(new URL(appliedUrl).hash.slice(1)).get('oq')), tuple('flat', 'Cache evidence'))
     await h.page.locator('#observation-query').fill('unapplied draft & secret')
-    await h.page.getByRole('button', { name: 'Copy link', exact: true }).click()
-    await h.page.waitForFunction(() => window.copiedLinks.length === 1)
-    assert.equal(await h.page.evaluate(() => window.copiedLinks[0]), appliedUrl)
+    assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
+    assert.equal(await h.page.locator('.observation-share-controls').count(), 0)
+    assert.equal(h.page.url(), appliedUrl)
     assert.equal(h.receipts.length, before)
     const count = h.receipts.length
     await h.page.reload(); await ready(h)
@@ -33,16 +32,15 @@ test('production complete applied flat link excludes drafts, copies exact contex
     await h.page.locator('.observation-card').first().click(); await ready(h)
     await h.page.locator('#observation-delete').click()
     await h.page.getByRole('dialog', { name: 'Delete observation permanently?' }).waitFor()
-    assert.equal(await h.page.locator('.observation-share-controls').getAttribute('inert'), '')
-    assert.equal(await h.page.locator('.observation-share-controls').getAttribute('aria-hidden'), 'true')
+    assert.equal(await h.page.locator('.observation-curation-background').getAttribute('inert'), '')
+    assert.equal(await h.page.locator('.observation-curation-background').getAttribute('aria-hidden'), 'true')
   } finally { await h.close() }
 })
 
 test('production subject and locked exact links reload the correct mode and Back restores the previous applied tuple without echo', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
-    await h.page.addInitScript(() => { Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => {} } }) })
-    await h.start(); await h.page.getByRole('button', { name: 'By subject', exact: true }).click(); await ready(h)
+    await h.start(); await h.page.getByRole('button', { name: 'Subject', exact: true }).click(); await ready(h)
     const facetUrl = h.page.url()
     await h.page.reload(); await ready(h)
     assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations/subject-facets')
@@ -60,7 +58,8 @@ test('production subject and locked exact links reload the correct mode and Back
     await history(h, 'back'); assert.equal(h.receipts.at(-1).params.query, undefined)
     await history(h, 'back'); assert.equal(h.page.url(), facetUrl); assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations/subject-facets')
     const count = h.receipts.length
-    await h.page.getByRole('button', { name: 'Copy link', exact: true }).click(); await ready(h)
+    assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
+    assert.equal(h.page.url(), facetUrl)
     assert.equal(h.receipts.length, count)
   } finally { await h.close() }
 })
@@ -102,7 +101,7 @@ test('production malformed and oversized links restore atomically with an explic
       assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations')
       assert.equal(h.receipts.at(-1).params.query, undefined)
       assert.equal(await h.page.locator('.observation-detail').count(), 0)
-      assert.match(await h.page.locator('.observation-share-controls').innerText(), /No filters or selection were restored/)
+      assert.match(await h.page.locator('.observation-url-notice').innerText(), /No filters or selection were restored/)
       assert.ok(Buffer.byteLength(h.page.url()) <= 4096)
       assert.match(h.page.url(), /ov=1&oq=/)
     }
@@ -113,7 +112,8 @@ test('production valid oversized queries remain active, replace bounded markers,
   const h = await openDiscovery({ width: 320, height: 800 })
   try {
     await h.start()
-    await h.page.getByRole('button', { name: 'For files', exact: true }).click()
+    await h.page.locator('.observation-card').first().click(); await ready(h)
+    await h.page.getByRole('button', { name: 'Files', exact: true }).click()
     const path = 'src/' + 'é'.repeat(1800) + '.elm'
     await h.page.locator('#observation-match-paths').fill(path)
     const initialHistory = await h.page.evaluate(() => history.length), count = h.receipts.length
@@ -121,9 +121,18 @@ test('production valid oversized queries remain active, replace bounded markers,
     const firstMarker = h.page.url()
     assert.equal(h.receipts.length, count + 1); assert.deepEqual(h.receipts.at(-1).payload.paths, [path])
     assert.match(firstMarker, /&ox=/); assert.ok(Buffer.byteLength(firstMarker) <= 4096)
-    assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).isDisabled(), true)
-    assert.match(await h.page.locator('.observation-share-controls').innerText(), /not restored by Back, reload/)
+    assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
+    assert.match(await h.page.locator('.observation-url-notice').innerText(), /not restored by Back, reload/)
     assert.equal(await h.page.evaluate(() => history.length), initialHistory)
+    await h.page.locator('#observation-delete').click()
+    await h.page.getByRole('dialog', { name: 'Delete observation permanently?' }).waitFor()
+    assert.equal(await h.page.locator('.observation-url-notice').getAttribute('inert'), '')
+    assert.equal(await h.page.locator('.observation-url-notice').getAttribute('aria-hidden'), 'true')
+    assert.equal(await h.page.locator('.observation-curation-background').getAttribute('inert'), '')
+    await h.page.locator('#observation-delete-cancel').click()
+    await h.page.getByRole('dialog', { name: 'Delete observation permanently?' }).waitFor({ state: 'hidden' })
+    assert.equal(await h.page.locator('.observation-url-notice').getAttribute('inert'), null)
+    assert.equal(await h.page.locator('.observation-url-notice').getAttribute('aria-hidden'), null)
     await h.page.locator('#observation-match-paths').fill(path + 'x')
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await ready(h)
     assert.notEqual(h.page.url(), firstMarker); assert.equal(await h.page.evaluate(() => history.length), initialHistory)
@@ -133,7 +142,7 @@ test('production valid oversized queries remain active, replace bounded markers,
     assert.equal(await h.page.evaluate(() => history.length), initialHistory + 1)
     await history(h, 'back'); assert.equal(h.page.url(), marker)
     assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations')
-    assert.match(await h.page.locator('.observation-share-controls').innerText(), /not restored by Back, reload/)
+    assert.match(await h.page.locator('.observation-url-notice').innerText(), /not restored by Back, reload/)
     await h.page.reload(); await ready(h)
     assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations')
     assert.equal(await h.page.locator('#observation-query').inputValue(), '')

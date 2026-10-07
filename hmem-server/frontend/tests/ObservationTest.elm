@@ -3343,6 +3343,28 @@ suite =
                     , \_ -> view |> Query.hasNot [ Selector.class "observation-return" ]
                     , \_ -> view |> Query.hasNot [ Selector.id "observation-edit" ]
                     ] ()
+        , test "compact native header represents applied mode independently of composer and has no link-copy control" <|
+            \_ ->
+                let
+                    check ( mode, open, label ) =
+                        let
+                            model = appliedModeModel mode
+                            state = model.observations
+                            view = Feature.Observation.viewObservations (observationWorkspace Api.Repository) { model | observations = { state | fileComposerOpen = open } } |> Query.fromHtml
+                        in
+                        Expect.all
+                            [ \_ -> view |> Query.findAll [ Selector.class "observation-mode-button" ] |> Query.count (Expect.equal 3)
+                            , \_ -> view |> Query.find [ Selector.class "observation-mode-button", Selector.class "filter-pill-active" ] |> Query.has [ Selector.text label, Selector.attribute (attribute "aria-pressed" "true"), Selector.tag "button" ]
+                            , \_ -> view |> Query.find [ Selector.id "observation-for-files" ] |> Query.has [ Selector.attribute (attribute "aria-expanded" (if open then "true" else "false")), Selector.attribute (attribute "aria-controls" "observation-file-composer") ]
+                            , \_ -> view |> Query.find [ Selector.id "observation-mode-heading" ] |> Query.has [ Selector.attribute (tabindex -1) ]
+                            , \_ -> view |> Query.find [ Selector.class "observation-mode-announcement" ] |> Query.has [ Selector.attribute (attribute "aria-live" "polite") ]
+                            , \_ -> view |> Query.hasNot [ Selector.text "Copy link" ]
+                            , \_ -> view |> Query.hasNot [ Selector.class "observation-share-controls" ]
+                            ] ()
+                in
+                Expect.all (List.map (\scenario _ -> check scenario)
+                    [ ( ObservationFlatMode, False, "All" ), ( ObservationFlatMode, True, "All" ), ( ObservationFacetMode, False, "Subject" )
+                    , ( ObservationExactSubjectMode, True, "Subject" ), ( ObservationMatchMode, False, "Files" ), ( ObservationMatchMode, True, "Files" ) ]) ()
         , test "direct user selection chooses results fallback instead of inheriting an earlier card origin" <|
             \_ ->
                 let
@@ -3441,7 +3463,7 @@ suite =
                         Feature.Observation.observationCardDomId globGroup repeated.id
                 in
                 Expect.all
-                    [ \_ -> facetView |> Query.find [ Selector.class "observation-mode-button", Selector.class "btn-primary" ] |> Query.has [ Selector.text "By subject" ]
+                    [ \_ -> facetView |> Query.find [ Selector.class "observation-mode-button", Selector.class "filter-pill-active" ] |> Query.has [ Selector.text "Subject" ]
                     , \_ -> facetView |> Query.has [ Selector.text "123 observations", Selector.text "Latest update: 2026-08-30", Selector.text "Load more subjects", Selector.attribute (attribute "aria-live" "polite") ]
                     , \_ -> facetView |> Query.hasNot [ Selector.id "observation-subject" ]
                     , \_ -> collapsed |> Query.findAll [ Selector.class "observation-card" ] |> Query.count (Expect.equal 0)

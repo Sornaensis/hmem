@@ -418,13 +418,6 @@ updateRaw msg model =
                 Nothing ->
                     ( model, Cmd.none )
 
-        CopyObservationLink ->
-            case Helpers.completeObservationUrl model of
-                Ok url ->
-                    ( model, copyToClipboard url )
-                Err message ->
-                    addToast Warning message model
-
         StartObservationEdit ->
             if hasProtectedEdit model then
                 returnToDraft model
@@ -3498,22 +3491,21 @@ viewObservations workspace model =
     let
         state =
             model.observations
+
+        noticeAttributes =
+            [ class "form-help observation-url-notice", attribute "role" "status" ]
+                ++ (if Permissions.canEditCurrentWorkspace model && state.deleteConfirmation /= Nothing then
+                        [ attribute "inert" "", attribute "aria-hidden" "true" ]
+
+                    else
+                        []
+                   )
     in
     div [ class "observation-workspace-view" ]
         [ if workspace.workspaceType == Api.Repository then
-            div
-                ([ class "observation-share-controls" ]
-                    ++ (if Permissions.canEditCurrentWorkspace model && state.deleteConfirmation /= Nothing then
-                            [ attribute "inert" "", attribute "aria-hidden" "true" ]
-                        else
-                            []
-                       )
-                )
-                [ button [ class "btn btn-secondary observation-link-copy", type_ "button", onClick CopyObservationLink, disabled (Result.toMaybe (Helpers.completeObservationUrl model) == Nothing) ] [ text "Copy link" ]
-                , case state.linkNotice of
-                    Just message -> p [ class "form-help", attribute "role" "status" ] [ text message ]
-                    Nothing -> if Result.toMaybe (Helpers.completeObservationUrl model) == Nothing then p [ class "form-help", attribute "role" "status" ] [ text Helpers.excludedObservationNotice ] else text ""
-                ]
+            case state.linkNotice of
+                Just message -> p noticeAttributes [ text message ]
+                Nothing -> if Result.toMaybe (Helpers.completeObservationUrl model) == Nothing then p noticeAttributes [ text Helpers.excludedObservationNotice ] else text ""
           else text ""
         , viewObservationsStateWithPermission (Permissions.canEditCurrentWorkspace model) workspace { state | detailNavigationEpoch = model.sessionRequestEpoch }
         ]
@@ -3674,7 +3666,7 @@ viewAdvancedFilters state =
                         p [ class "form-error", attribute "role" "alert" ] [ text "No exact shared subject is selected." ]
 
             ObservationFacetMode ->
-                p [ class "form-help observation-filter-mode-help" ] [ text "By subject ignores the manual exact-subject filter and uses the shared search, kind, and Git SHA filters." ]
+                p [ class "form-help observation-filter-mode-help" ] [ text "Subject ignores the manual exact-subject filter and uses the shared search, kind, and Git SHA filters." ]
 
             ObservationMatchMode ->
                 p [ class "form-help observation-filter-mode-help" ] [ text "Concrete path matching uses the shared search, kind, and Git SHA filters and ignores manual exact-subject filtering." ]
@@ -3765,18 +3757,17 @@ viewAppliedFilters state =
 viewModeNavigation : ObservationModel -> Html Msg
 viewModeNavigation state =
     let
-        modeButton mode labelText =
+        modeButton mode active labelText =
             button
                 [ classList
-                    [ ( "btn", True )
-                    , ( "btn-secondary", state.requestMode /= mode )
-                    , ( "btn-primary", state.requestMode == mode )
+                    [ ( "filter-pill", True )
+                    , ( "filter-pill-active", active )
                     , ( "observation-mode-button", True )
                     ]
                 , type_ "button"
                 , onClick (SetObservationBrowseMode mode)
                 , attribute "aria-pressed"
-                    (if state.requestMode == mode then
+                    (if active then
                         "true"
 
                      else
@@ -3800,25 +3791,17 @@ viewModeNavigation state =
                     "File matches"
     in
     section [ class "observation-mode-navigation", attribute "aria-labelledby" "observation-mode-heading" ]
-        [ div [ class "observation-mode-actions", attribute "role" "group", attribute "aria-label" "Observation browse mode" ]
-            [ modeButton ObservationFlatMode "All observations"
-            , modeButton ObservationFacetMode "By subject"
+        [ h2 [ id "observation-mode-heading", class "observation-mode-heading", tabindex -1 ] [ text headingText ]
+        , div [ class "observation-mode-actions", attribute "role" "group", attribute "aria-label" "Observation browse mode" ]
+            [ modeButton ObservationFlatMode (state.requestMode == ObservationFlatMode) "All"
+            , modeButton ObservationFacetMode (state.requestMode == ObservationFacetMode || state.requestMode == ObservationExactSubjectMode) "Subject"
             , button
-                [ id "observation-for-files", class "btn btn-secondary observation-mode-button", type_ "button", onClick OpenObservationFileComposer
+                [ id "observation-for-files", classList [ ( "filter-pill", True ), ( "filter-pill-active", state.requestMode == ObservationMatchMode ), ( "observation-mode-button", True ) ], type_ "button", onClick OpenObservationFileComposer
+                , attribute "aria-pressed" (if state.requestMode == ObservationMatchMode then "true" else "false")
                 , attribute "aria-expanded" (if state.fileComposerOpen then "true" else "false")
                 , attribute "aria-controls" "observation-file-composer"
                 ]
-                [ text "For files" ]
-            ]
-        , h2 [ id "observation-mode-heading", class "observation-mode-heading", tabindex -1 ] [ text headingText ]
-        , p [ class "form-help" ]
-            [ text
-                (case state.requestMode of
-                    ObservationFlatMode -> "Search text across all saved observations."
-                    ObservationFacetMode -> "Browse saved file and glob subjects. Choose one to see its exact observations."
-                    ObservationExactSubjectMode -> "Results stay locked to the selected saved subject."
-                    ObservationMatchMode -> "Results match the applied concrete file paths. Open For files to change them."
-                )
+                [ text "Files" ]
             ]
         , p [ class "observation-mode-announcement", attribute "aria-live" "polite" ]
             [ text

@@ -111,20 +111,22 @@ technology behavior.
 
 Observation requests keep a complete applied query separate from filter inputs.
 Apply filters commits the filter drafts; Match files commits concrete path input.
-Save, delete, live resynchronization, and Refresh results reuse the applied query.
+Save, delete, live resynchronization, and Retry refresh reuse the applied query.
 Unapplied filter changes pause paging until Apply filters or Revert filters;
 unapplied path input leaves the previously matched files active. The displayed
 applied filters describe the query behind the current results.
 
-All observations searches saved text; By subject lists stored file and glob
-subjects with exact provenance results. For files opens a composer without
-changing those results. Match files applies its trimmed, deduplicated concrete
+The compact All control searches saved text; Subject lists stored file and glob
+subjects with exact provenance results. Subject stays active for those exact results.
+Files opens a composer without
+changing those results; its active state reflects applied file matches independently
+of whether the composer is open. Match files applies its trimmed, deduplicated concrete
 paths and filter drafts; wildcard input is rejected. Advanced filters toggles
 the kind, exact subject, and Git SHA controls without resetting their values or
 the applied query. Search also submits with Enter. A selected subject stays
 locked while filtering its exact results.
 
-Copy link shares the complete applied mode, search, kind, manual subject, revision,
+The browser URL retains the complete applied mode, search, kind, manual subject, revision,
 locked facet, ordered matched paths, and selected Observation. Filter/path drafts,
 content drafts, disclosures, and cached pages stay local. Version 1 fragments use
 `ov=1` and a percent-encoded eight-position JSON `oq` tuple:
@@ -140,7 +142,7 @@ Observation hits in unified search use the same intentional history behavior.
 After reauthorization, validated public URL context is restored with fresh requests;
 retired drafts and caches remain cleared. Reload does not persist content drafts.
 Complete encoded URLs are limited to 4096
-UTF-8 bytes. Larger valid queries remain active in the page and disable Copy link.
+UTF-8 bytes. Larger valid queries remain active in the page with an explicit notice.
 They replace the current entry with a bounded, fresh `ox` marker, carrying only
 navigation context. Further oversized transitions replace that entry; a smaller
 complete context pushes a new entry. Back, reload, and shared markers restore

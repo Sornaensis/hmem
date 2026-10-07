@@ -90,7 +90,7 @@ for (const width of [1440, 320]) test(`production ${width} inline owner, keyboar
 test('production repeated match occurrence owns one read-only body and group collapse retires it without moving detail', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
-    await h.start(); await h.page.getByRole('button', { name: 'For files', exact: true }).click()
+    await h.start(); await h.page.getByRole('button', { name: 'Files', exact: true }).click()
     await h.page.locator('#observation-match-paths').fill('src/Main.elm')
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
     const groups = await h.page.locator('[data-observation-group]').evaluateAll(elements => elements.map(el => el.dataset.observationGroup))

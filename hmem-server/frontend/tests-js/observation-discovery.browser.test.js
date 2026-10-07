@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
-import { scanObservationRows, revealObservationRow } from './observation-viewport-fixture.mjs'
+import { paint, scanObservationRows, revealObservationRow } from './observation-viewport-fixture.mjs'
 
 const applied = h => h.page.locator('.observation-applied-filters .observation-applied-summary').textContent()
 async function activate(page, button, key = 'Enter') {
@@ -10,7 +12,7 @@ async function activate(page, button, key = 'Enter') {
   if (expanded !== null) await page.waitForFunction(({ id, expected }) => document.getElementById(id)?.getAttribute('aria-expanded') === expected, { id, expected: id === 'observation-for-files' || expanded !== 'true' ? 'true' : 'false' }, { timeout: 5000 })
 }
 async function composer(h) {
-  await activate(h.page, h.page.getByRole('button', { name: 'For files', exact: true }))
+  await activate(h.page, h.page.getByRole('button', { name: 'Files', exact: true }))
   await h.page.waitForFunction(() => document.activeElement?.id === 'observation-match-paths', null, { timeout: 5000 })
 }
 async function assertReachable(page, target) {
@@ -27,10 +29,31 @@ test('production discovery disclosures are presentation only; explicit Match sen
   const h = await openDiscovery()
   try {
     await h.start()
+    if (process.env.HMEM_HEADER_SCREENSHOT_DIR) {
+      await mkdir(process.env.HMEM_HEADER_SCREENSHOT_DIR, { recursive: true })
+      for (const width of [1440, 320]) {
+        await h.page.setViewportSize({ width, height: 900 }); await paint(h.page)
+        await h.page.locator('#main-content-scroll').hover()
+        await h.page.mouse.wheel(0, -5000); await paint(h.page)
+        await h.page.locator('#observation-mode-heading').scrollIntoViewIfNeeded(); await paint(h.page)
+        const geometry = await h.page.locator('.observation-mode-navigation').evaluate(element => {
+          const header = element.getBoundingClientRect(), scroll = document.getElementById('main-content-scroll').getBoundingClientRect()
+          return { visible: header.top >= scroll.top && header.bottom <= scroll.bottom, overflow: document.documentElement.scrollWidth - innerWidth }
+        })
+        assert.ok(geometry.visible && geometry.overflow <= 1, JSON.stringify(geometry))
+        await h.page.screenshot({ path: join(process.env.HMEM_HEADER_SCREENSHOT_DIR, width === 1440 ? 'observation-header-desktop.png' : 'observation-header-narrow.png') })
+      }
+      await h.page.setViewportSize({ width: 1440, height: 900 }); await paint(h.page)
+    }
+    assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).getAttribute('aria-pressed'), 'true')
+    assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
     assert.equal(await h.page.locator('#observation-match-paths').isVisible(), false)
     assert.equal(await h.page.locator('#observation-subject-kind').isVisible(), false)
     const summary = await applied(h), before = h.receipts.length, genericBefore = h.requests.length
     await composer(h)
+    assert.equal(await h.page.getByRole('button', { name: 'Files', exact: true }).getAttribute('aria-pressed'), 'false')
+    assert.equal(await h.page.getByRole('button', { name: 'Files', exact: true }).getAttribute('aria-expanded'), 'true')
+    assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).getAttribute('aria-pressed'), 'true')
     assert.equal(h.receipts.length, before); assert.equal(await applied(h), summary)
     await activate(h.page, h.page.locator('#observation-advanced-toggle'), 'Space')
     assert.equal(await h.page.locator('#observation-advanced-toggle').getAttribute('aria-expanded'), 'true')
@@ -44,6 +67,7 @@ test('production discovery disclosures are presentation only; explicit Match sen
     await h.page.locator('#observation-match-paths').fill('  src/Main.elm  \nsrc/View.elm\nsrc/Main.elm\n')
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
     const matches = h.receipts.filter(value => value.endpoint.endsWith('/match'))
+    assert.equal(await h.page.getByRole('button', { name: 'Files', exact: true }).getAttribute('aria-pressed'), 'true')
     assert.equal(matches.length, 1)
     assert.deepEqual(matches[0].payload.paths, ['src/Main.elm', 'src/View.elm'])
     assert.equal(matches[0].payload.query, 'Cache evidence'); assert.equal(matches[0].payload.git_sha, h.sha)
@@ -58,6 +82,8 @@ test('production discovery disclosures are presentation only; explicit Match sen
     assert.ok(closeContext.sessionEpoch > 0, 'Close transfer uses the current authenticated session, including before any card activation')
     await h.page.getByRole('button', { name: 'Close file composer', exact: true }).click()
     await h.page.waitForFunction(() => document.activeElement?.id === 'observation-for-files')
+    assert.equal(await h.page.getByRole('button', { name: 'Files', exact: true }).getAttribute('aria-pressed'), 'true')
+    assert.equal(await h.page.getByRole('button', { name: 'Files', exact: true }).getAttribute('aria-expanded'), 'false')
     assert.deepEqual(JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')), closeContext)
     console.log(JSON.stringify({ fixture: 'Observation standalone Close focus', context: closeContext, focus: await h.page.evaluate(() => document.activeElement?.id) }))
     assert.equal(await applied(h), matchedSummary); assert.equal(h.receipts.length, before + 1)
@@ -67,13 +93,15 @@ test('production discovery disclosures are presentation only; explicit Match sen
 test('production By subject paginates populated facets and locks exact provenance; invalid file input preserves results', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
   try {
-    await h.start(); await h.page.getByRole('button', { name: 'By subject', exact: true }).click(); await h.idle()
+    await h.start(); await h.page.getByRole('button', { name: 'Subject', exact: true }).click(); await h.idle()
+    assert.equal(await h.page.getByRole('button', { name: 'Subject', exact: true }).getAttribute('aria-pressed'), 'true')
     assert.equal((await scanObservationRows(h.page)).facets.size, 50)
     await h.page.getByRole('button', { name: 'Load more subjects', exact: true }).click(); await h.idle()
     assert.ok((await scanObservationRows(h.page)).facets.size > 50)
     assert.equal(h.receipts.filter(value => value.endpoint.endsWith('/subject-facets')).at(-1).params.offset, '50')
     const facet = h.page.locator('.observation-facet').filter({ hasText: 'src/**/*.elm' }).locator('.observation-facet-card')
     await revealObservationRow(h.page, facet); await facet.click(); await h.idle()
+    assert.equal(await h.page.getByRole('button', { name: 'Subject', exact: true }).getAttribute('aria-pressed'), 'true')
     await h.page.locator('#observation-advanced-toggle').click()
     assert.match(await h.page.locator('.observation-selected-facet-value').textContent(), /Glob: src\/\*\*\/\*\.elm/)
     assert.equal(await h.page.locator('#observation-subject').count(), 0)
@@ -126,13 +154,18 @@ test('production 320 CSS-pixel discovery controls remain reachable with enlarged
   const h = await openDiscovery({ width: 320, height: 800 })
   try {
     await h.start()
-    for (const label of ['All observations', 'By subject', 'For files']) await assertReachable(h.page, h.page.getByRole('button', { name: label, exact: true }))
+    for (const label of ['All', 'Subject', 'Files']) await assertReachable(h.page, h.page.getByRole('button', { name: label, exact: true }))
     await assertReachable(h.page, h.page.locator('#observation-query'))
     await h.page.addStyleTag({ content: 'html { font-size: 200%; }' })
     await composer(h); await h.page.locator('#observation-match-paths').fill('src/Main.elm')
     await assertReachable(h.page, h.page.locator('#observation-match-paths'))
     await assertReachable(h.page, h.page.getByRole('button', { name: 'Match files', exact: true }))
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
+    await activate(h.page, h.page.getByRole('button', { name: 'All', exact: true }), 'Space'); await h.idle()
+    await h.page.waitForFunction(() => document.activeElement?.id === 'observation-mode-heading', null, { timeout: 5000 })
+    assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations')
+    assert.equal(await h.page.getByRole('button', { name: 'All', exact: true }).getAttribute('aria-pressed'), 'true')
+    await composer(h)
     await h.page.evaluate(() => {
       const records = []; window.observationToolbarEvents = records
       for (const type of ['focusin', 'keydown', 'click']) document.addEventListener(type, event => {

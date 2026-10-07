@@ -1070,7 +1070,7 @@ async function verifyStaleDeepFocusContinuation(browser, origin) {
 
 async function measureObservationScaling(page, tracker, fixture, cdp, blankHeap, dom, interactions) {
   const contract = fixture.observationScaling
-  await requiredDoubleFrameByText(page, '#observation-panel button', 'For files')
+  await requiredDoubleFrameByText(page, '#observation-panel button', 'Files')
   await page.locator('#observation-match-paths').fill(contract.paths.join('\n'))
   await page.locator('.observation-match-apply').click()
   const waitLoaded = async count => {
@@ -1151,7 +1151,7 @@ async function measureObservationScaling(page, tracker, fixture, cdp, blankHeap,
   if (await page.locator('#observation-edit-content').inputValue() !== draft) throw new Error('Observation live batch replaced the protected draft')
   dom.push({ tab: 'boundary-editor-post-live', ...(await domMetrics(page)) })
   await requiredDoubleFrameByText(page, '.observation-edit-actions button', 'Cancel')
-  await requiredDoubleFrameByText(page, '#observation-panel button', 'All observations')
+  await requiredDoubleFrameByText(page, '#observation-panel button', 'All')
   await waitObservationMembers(page, 50)
   await waitForTransportQuiescence(page, tracker, 'flat Observation restore after scaling research')
   return { contract: OBSERVATION_SCALING_CONTRACT, loaded: Math.min(contract.largeLoaded, fixture.observations.length), expandedGroups: controls.length,

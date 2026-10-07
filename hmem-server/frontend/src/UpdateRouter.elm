@@ -733,6 +733,12 @@ route msg model =
         GotWorkspaceMemberships _ _ ->
             Ok (Feature.WorkspaceAdmin.update msg model)
 
+        RetryWorkspaceMemberships _ ->
+            Ok (Feature.WorkspaceAdmin.update msg model)
+
+        RetryMembershipAuthorization ->
+            Err (HandleInAppShell AppShell.RetryMembershipAuthorizationMsg)
+
         CreateWorkspaceGroup _ ->
             Ok (Feature.Groups.update msg model)
 

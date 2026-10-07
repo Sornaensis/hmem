@@ -40,6 +40,7 @@ import Url
 type AppShellOwnedMsg
     = SelectWorkspaceMsg String
     | SwitchTabMsg WorkspaceTab
+    | RetryMembershipAuthorizationMsg
     | SessionContextLoadedMsg Int (Maybe String) (Result Http.Error Api.SessionContext)
     | AuthUnauthorizedMsg
     | AuthTokenChangedMsg Bool
@@ -132,6 +133,19 @@ handleOwned ownedMsg model =
 handleOwnedRaw : AppShellOwnedMsg -> Model -> ( Model, Cmd Msg )
 handleOwnedRaw ownedMsg model =
     case ownedMsg of
+        RetryMembershipAuthorizationMsg ->
+            case ( model.workspaceAdmin.authorizationFailure, model.selectedWorkspaceId, model.page ) of
+                ( Just workspaceId, Just selectedId, WorkspacePage pageId ) ->
+                    if workspaceId == selectedId && workspaceId == pageId && model.auth.status /= AuthBooting && model.sessionContext == Nothing then
+                        let
+                            updated = { model | auth = { status = AuthBooting, mode = model.auth.mode }
+                                , sessionRequestEpoch = model.sessionRequestEpoch + 1
+                                , dataLoading = Feature.DataLoading.prepareForPageLoad model.page model.dataLoading }
+                        in
+                        ( updated, Api.fetchSessionContext model.flags.apiUrl (Just workspaceId) (GotSessionContext updated.sessionRequestEpoch (Just workspaceId)) )
+                    else ( model, Cmd.none )
+                _ -> ( model, Cmd.none )
+
         SelectWorkspaceMsg wsId ->
             if Feature.Observation.hasProtectedEdit model && model.selectedWorkspaceId /= Just wsId then
                 Feature.Observation.refuseContextExit model
@@ -181,19 +195,26 @@ handleOwnedRaw ownedMsg model =
                 ( preferredModel, preferenceCmd ) =
                     Feature.Observation.restorePendingPreferences newModel
 
+                ( adminModel, adminCmd ) =
+                    if tab == AdministrationTab then
+                        case preferredModel.selectedWorkspaceId of
+                            Just workspaceId -> Feature.WorkspaceAdmin.ensureMemberships False workspaceId preferredModel
+                            Nothing -> ( preferredModel, Cmd.none )
+                    else ( preferredModel, Cmd.none )
+
                 finalModel =
                     let
-                        state = preferredModel.observations
+                        state = adminModel.observations
                         pendingEntry = tab == ObservationsTab && model.activeTab /= ObservationsTab && not state.preferenceHydrated
                     in
-                    { preferredModel | auditLog = auditLog, timeline = timeline
+                    { adminModel | auditLog = auditLog, timeline = timeline
                         , observations = if pendingEntry then { state | preferenceEntryHistory = Just (Helpers.observationHistoryUrl preferredModel) } else if tab /= ObservationsTab then { state | preferenceEntryHistory = Nothing } else state }
             in
             let
                 ( linked, linkCmd ) =
                     if tab == model.activeTab then ( finalModel, Cmd.none ) else Helpers.writeObservationHistory True finalModel
             in
-            ( linked, Cmd.batch [ preferenceCmd, linkCmd, auditCmd, timelineCmd ] )
+            ( linked, Cmd.batch [ preferenceCmd, linkCmd, auditCmd, timelineCmd, adminCmd ] )
 
         SessionContextLoadedMsg epoch expectedWorkspace result ->
             if sessionEpochMatches epoch model.sessionRequestEpoch && sessionContextResponseMatches expectedWorkspace model then
@@ -201,7 +222,8 @@ handleOwnedRaw ownedMsg model =
                     Ok sessionContext ->
                         let
                             sessionReadyModel =
-                                { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = nextWorkspaceAdmin, auditLog = nextAuditLog, timeline = nextTimeline }
+                                { model | auth = { status = AuthReady, mode = Just sessionContext.authMode }, sessionContext = Just sessionContext, workspaceAdmin = model.workspaceAdmin, auditLog = nextAuditLog, timeline = nextTimeline }
+                                    |> Feature.WorkspaceAdmin.reconcileSessionAuthority
                                     |> Feature.Observation.reconcileCurationPermission
                                     |> updateLoadingAfterSession model expectedWorkspace sessionContext
                                     |> prepareSessionNavigation model expectedWorkspace sessionContext
@@ -222,41 +244,12 @@ handleOwnedRaw ownedMsg model =
                                     _ ->
                                         ( sessionReadyModel, Cmd.none )
 
-                            mMembershipWorkspaceId =
-                                if Permissions.isImplicitLocalSuperadminSession sessionContext then
-                                    Nothing
-
-                                else
-                                    case sessionContext.workspace of
-                                        Just workspaceContext ->
-                                            if sessionContext.globalPermissions.superadmin || workspaceContext.canAdmin then
-                                                Just workspaceContext.workspaceId
-
-                                            else
-                                                Nothing
-
-                                        Nothing ->
-                                            Nothing
-
-                            fetchMembershipsCmd =
-                                case mMembershipWorkspaceId of
-                                    Just wsId ->
-                                        Api.fetchWorkspaceMemberships model.flags.apiUrl wsId (GotWorkspaceMemberships wsId)
-
-                                    Nothing ->
-                                        Cmd.none
-
-                            nextWorkspaceAdmin =
-                                case mMembershipWorkspaceId of
-                                    Just wsId ->
-                                        let
-                                            admin =
-                                                model.workspaceAdmin
-                                        in
-                                        { admin | loadingMemberships = Dict.insert wsId True admin.loadingMemberships }
-
-                                    Nothing ->
-                                        model.workspaceAdmin
+                            ( membershipModel, fetchMembershipsCmd ) =
+                                if focusedModel.activeTab == AdministrationTab then
+                                    case focusedModel.selectedWorkspaceId of
+                                        Just workspaceId -> Feature.WorkspaceAdmin.ensureMemberships False workspaceId focusedModel
+                                        Nothing -> ( focusedModel, Cmd.none )
+                                else ( focusedModel, Cmd.none )
 
                             ( nextAuditLog, fetchAuditCmd ) =
                                 case ( expectedWorkspace, model.page ) of
@@ -299,17 +292,23 @@ handleOwnedRaw ownedMsg model =
                                     _ ->
                                         ( model.timeline, Cmd.none )
                         in
-                        ( focusedModel
+                        ( membershipModel
                         , Cmd.batch [ retireSessionScopes sessionContext model, sessionBootstrapCmd, focusCmd, fetchMembershipsCmd, fetchAuditCmd, fetchTimelineCmd ]
                         )
 
                     Err _ ->
-                        ( clearSessionScopedState
-                            { model
+                        let
+                            cleared = clearSessionScopedState
+                                { model
                                 | auth = { status = authStatusFromSessionError result, mode = model.auth.mode }
                                 , sessionContext = Nothing
                                 , sessionRequestEpoch = model.sessionRequestEpoch + 1
-                            }
+                                }
+                            admin = cleared.workspaceAdmin
+                            failedWorkspace = model.workspaceAdmin.authorizationPending |> Maybe.map .workspaceId
+                                |> Maybe.map Just |> Maybe.withDefault model.workspaceAdmin.authorizationFailure
+                        in
+                        ( { cleared | workspaceAdmin = { admin | authorizationFailure = failedWorkspace } }
                         , disconnectWebSocket ()
                         )
 
@@ -908,7 +907,7 @@ clearSessionScopedState model =
         , groups = Feature.Groups.init
         , auditLog = Feature.AuditLog.init
         , timeline = Feature.Timeline.init
-        , workspaceAdmin = Feature.WorkspaceAdmin.init
+        , workspaceAdmin = Feature.WorkspaceAdmin.retireSessionState model.workspaceAdmin
         , webSocket = { state = Disconnected, streams = Dict.empty, targetGenerations = Dict.empty }
     }
 
@@ -1106,6 +1105,9 @@ viewAuthFailedPage model message =
     div [ class "page" ]
         [ h2 [] [ text "Session unavailable" ]
         , p [] [ text message ]
+        , if model.workspaceAdmin.authorizationFailure /= Nothing then
+            button [ class "btn btn-primary", onClick RetryMembershipAuthorization ] [ text "Retry session" ]
+          else text ""
         , p [] [ text ("Runtime mode: " ++ Permissions.authModeLabel model) ]
         , if Permissions.isLocalMode model then
             p [ class "help-text" ] [ text "This frontend is configured for local mode, which should resolve to a server-provided local principal. If this persists, verify local bootstrap and token settings on the server." ]

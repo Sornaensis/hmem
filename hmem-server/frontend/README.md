@@ -1,5 +1,7 @@
 # Frontend validation
 
+Workspace **Administration** is a separate tab after Audit for authenticated users with explicit workspace admin access. Implicit local superadmin sessions retain their hidden administration presentation. The tab shows current account/role context and memberships, with labeled User UUID and Role fields to grant, update, or remove access. Member UUID values copy their complete identifier. Failed reads offer Retry; failed writes retain the form and list. Controls stay unavailable through an owned write and its authorization recheck. A failed recheck retires unverified access and offers Retry session.
+
 Use Node.js 20 LTS.
 
 For a clean browser-test installation, run:

@@ -9,6 +9,7 @@ import Feature.Dependencies
 import Feature.Editing
 import Feature.Observation
 import Feature.Timeline
+import Feature.WorkspaceAdmin
 import Helpers exposing (localStorageKey, parseFragment, pushUrl, replaceFragment)
 import Permissions
 import Ports exposing (disconnectWebSocket, requestLocalStorage)
@@ -254,8 +255,14 @@ handleUrlChangeWithoutProtectedExit url model =
                     ( auditModel, auditCmd ) =
                         prepareWorkspaceAuditFromRoute wsId frag.tab observationModel
 
-                    ( finalModel, timelineCmd ) =
+                    ( timelineModel, timelineCmd ) =
                         prepareWorkspaceTimelineFromRoute wsId frag.tab auditModel
+
+                    ( finalModel, adminCmd ) =
+                        if frag.tab == AdministrationTab then
+                            Feature.WorkspaceAdmin.ensureMemberships False wsId timelineModel
+                        else
+                            ( timelineModel, Cmd.none )
 
                     ( focusedModel, focusCmd ) =
                         case frag.focus of
@@ -269,9 +276,9 @@ handleUrlChangeWithoutProtectedExit url model =
                     let
                         ( repaired, repairCmd ) = Helpers.writeObservationHistory False focusedModel
                     in
-                    ( repaired, Cmd.batch [ repairCmd, queryCmd, observationCmd, auditCmd, timelineCmd, focusCmd ] )
+                    ( repaired, Cmd.batch [ repairCmd, queryCmd, observationCmd, auditCmd, timelineCmd, adminCmd, focusCmd ] )
                 else
-                    ( focusedModel, Cmd.batch [ queryCmd, observationCmd, auditCmd, timelineCmd, focusCmd ] )
+                    ( focusedModel, Cmd.batch [ queryCmd, observationCmd, auditCmd, timelineCmd, adminCmd, focusCmd ] )
 
             else
                 let

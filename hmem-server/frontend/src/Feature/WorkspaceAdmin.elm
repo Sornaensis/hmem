@@ -1,6 +1,11 @@
 module Feature.WorkspaceAdmin exposing
     ( handleEscape
     , init
+    , ensureMemberships
+    , reconcileAuthority
+    , reconcileSessionAuthority
+    , retireSessionState
+    , acceptCanonicalMemberships
     , update
     , viewPermissionSummary
     , viewPurgeConfirmModal
@@ -14,6 +19,7 @@ import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Json.Decode as Decode
+import Json.Encode as Encode
 import Permissions
 import Toast exposing (addToast)
 import Types exposing (..)
@@ -25,8 +31,115 @@ init =
     , loadingMemberships = Dict.empty
     , membershipUserId = ""
     , membershipRole = "read"
+    , owner = Nothing
+    , nextRequestToken = 0
+    , activeListRequest = Nothing
+    , activeMutation = Nothing
+    , authorizationPending = Nothing
+    , authorizationFailure = Nothing
+    , membershipErrors = Dict.empty
+    , mutationError = Nothing
     , purgeConfirmation = Nothing
     }
+
+
+sessionKey : Model -> String
+sessionKey model =
+    model.sessionContext
+        |> Maybe.map (\session -> Encode.encode 0 (Encode.list Encode.string
+            [ session.authMode, session.principal.actorType, session.principal.actorId, session.principal.authority
+            , Maybe.withDefault "" session.principal.grantUserId
+            , Permissions.currentWorkspaceRoleLabel model
+            ]))
+        |> Maybe.withDefault ""
+
+canManageTarget : String -> Model -> Bool
+canManageTarget workspaceId model =
+    Permissions.canViewWorkspaceAdministration model
+        && model.selectedWorkspaceId == Just workspaceId
+        && model.page == WorkspacePage workspaceId
+
+reconcileAuthority : Model -> Model
+reconcileAuthority model =
+    let
+        admin = model.workspaceAdmin
+        owner =
+            if Permissions.canViewWorkspaceAdministration model then
+                model.selectedWorkspaceId |> Maybe.map (\workspaceId -> { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, sessionKey = sessionKey model })
+            else Nothing
+        samePrincipal =
+            case ( admin.owner, owner ) of
+                ( Just previous, Just current ) -> previous.workspaceId == current.workspaceId && previous.sessionKey == current.sessionKey
+                _ -> False
+    in
+    if admin.owner == owner then model
+    else
+        { model | workspaceAdmin =
+            { admin | owner = owner
+                , memberships = if samePrincipal then admin.memberships else Dict.empty
+                , loadingMemberships = Dict.empty, membershipErrors = Dict.empty
+                , activeListRequest = Nothing, activeMutation = Nothing, authorizationPending = Nothing, authorizationFailure = Nothing, mutationError = Nothing
+                , membershipUserId = "", membershipRole = "read"
+            }
+        }
+
+retireSessionState : WorkspaceAdminModel -> WorkspaceAdminModel
+retireSessionState admin =
+    { init | nextRequestToken = admin.nextRequestToken }
+
+reconcileSessionAuthority : Model -> Model
+reconcileSessionAuthority model =
+    reconcileAuthority model
+        |> updateWorkspaceAdmin (\admin -> { admin | authorizationPending = Nothing, authorizationFailure = Nothing })
+
+membershipBusy : WorkspaceAdminModel -> Bool
+membershipBusy admin =
+    admin.activeMutation /= Nothing || admin.authorizationPending /= Nothing
+
+newGuard : String -> Model -> MembershipRequestGuard
+newGuard workspaceId model =
+    { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, sessionKey = sessionKey model, token = model.workspaceAdmin.nextRequestToken + 1 }
+
+guardIsCurrent : MembershipRequestGuard -> Model -> Bool
+guardIsCurrent guard model =
+    canManageTarget guard.workspaceId model
+        && guard.sessionEpoch == model.sessionRequestEpoch
+        && guard.sessionKey == sessionKey model
+
+ensureMemberships : Bool -> String -> Model -> ( Model, Cmd Msg )
+ensureMemberships force workspaceId original =
+    let
+        model = reconcileAuthority original
+        admin = model.workspaceAdmin
+        guard = newGuard workspaceId model
+    in
+    if not (canManageTarget workspaceId model) || admin.activeListRequest /= Nothing || membershipBusy admin then
+        ( model, Cmd.none )
+    else if not force && Dict.member workspaceId admin.memberships then
+        ( model, Cmd.none )
+    else
+        ( { model | workspaceAdmin = { admin | nextRequestToken = guard.token, activeListRequest = Just guard
+            , loadingMemberships = Dict.insert workspaceId True admin.loadingMemberships
+            , membershipErrors = Dict.remove workspaceId admin.membershipErrors } }
+        , Api.fetchWorkspaceMemberships model.flags.apiUrl workspaceId (GotWorkspaceMemberships guard)
+        )
+
+acceptCanonicalMemberships : String -> List Api.WorkspaceMembership -> Model -> Model
+acceptCanonicalMemberships workspaceId memberships model =
+    if canManageTarget workspaceId model then
+        updateWorkspaceAdmin (\admin -> { admin | memberships = Dict.insert workspaceId memberships admin.memberships
+            , activeListRequest = Nothing
+            , loadingMemberships = Dict.insert workspaceId False admin.loadingMemberships
+            , membershipErrors = Dict.remove workspaceId admin.membershipErrors }) model
+    else model
+
+finishMembershipMutation : Model -> ( Model, Cmd Msg )
+finishMembershipMutation model =
+    let
+        admitted = reconcileAuthority { model | sessionRequestEpoch = model.sessionRequestEpoch + 1 }
+        updated = updateWorkspaceAdmin (\admin -> { admin | authorizationPending = admin.owner }) admitted
+    in
+    ( updated, Api.fetchSessionContext model.flags.apiUrl model.selectedWorkspaceId (GotSessionContext updated.sessionRequestEpoch model.selectedWorkspaceId) )
 
 
 handleEscape : Model -> Maybe Model
@@ -41,118 +154,107 @@ handleEscape model =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        GotWorkspaceMemberships wsId result ->
-            case result of
-                Ok paginated ->
-                    ( updateWorkspaceAdmin
-                        (\admin ->
-                            { admin
-                                | memberships = Dict.insert wsId paginated.items admin.memberships
-                                , loadingMemberships = Dict.insert wsId False admin.loadingMemberships
-                            }
-                        )
-                        model
-                    , Cmd.none
-                    )
 
-                Err _ ->
-                    addToast Error "Failed to load workspace memberships"
-                        (updateWorkspaceAdmin (\admin -> { admin | loadingMemberships = Dict.insert wsId False admin.loadingMemberships }) model)
+        GotWorkspaceMemberships guard result ->
+            if guardIsCurrent guard model && model.workspaceAdmin.activeListRequest == Just guard then
+                case result of
+                    Ok paginated ->
+                        ( updateWorkspaceAdmin (\admin -> { admin | memberships = Dict.insert guard.workspaceId paginated.items admin.memberships
+                            , loadingMemberships = Dict.insert guard.workspaceId False admin.loadingMemberships
+                            , membershipErrors = Dict.remove guard.workspaceId admin.membershipErrors, activeListRequest = Nothing }) model
+                        , Cmd.none )
+                    Err _ ->
+                        ( updateWorkspaceAdmin (\admin -> { admin | loadingMemberships = Dict.insert guard.workspaceId False admin.loadingMemberships
+                            , membershipErrors = Dict.insert guard.workspaceId "Could not load memberships. Retry to refresh this list." admin.membershipErrors
+                            , activeListRequest = Nothing }) model
+                        , Cmd.none )
+            else ( model, Cmd.none )
+
+        RetryWorkspaceMemberships workspaceId ->
+            ensureMemberships True workspaceId model
 
         UpdateMembershipUserId value ->
-            ( updateWorkspaceAdmin (\admin -> { admin | membershipUserId = value }) model, Cmd.none )
+            if Permissions.canViewWorkspaceAdministration model && not (membershipBusy model.workspaceAdmin) then
+                ( updateWorkspaceAdmin (\admin -> { admin | membershipUserId = value, mutationError = Nothing }) model, Cmd.none )
+            else ( model, Cmd.none )
 
         UpdateMembershipRole role ->
-            ( updateWorkspaceAdmin (\admin -> { admin | membershipRole = role }) model, Cmd.none )
+            if Permissions.canViewWorkspaceAdministration model && not (membershipBusy model.workspaceAdmin) && List.member role [ "read", "edit", "admin" ] then
+                ( updateWorkspaceAdmin (\admin -> { admin | membershipRole = role, mutationError = Nothing }) model, Cmd.none )
+            else ( model, Cmd.none )
 
-        SubmitWorkspaceMembership wsId ->
-            if not (Permissions.canAdminCurrentWorkspace model) then
-                addToast Warning "Workspace admin permission is required to manage memberships" model
-
+        SubmitWorkspaceMembership workspaceId ->
+            let
+                userId = String.trim model.workspaceAdmin.membershipUserId
+            in
+            if not (canManageTarget workspaceId model) || membershipBusy model.workspaceAdmin then
+                ( model, Cmd.none )
+            else if String.isEmpty userId then
+                ( updateWorkspaceAdmin (\admin -> { admin | mutationError = Just "Enter a user UUID before granting a role." }) model, Cmd.none )
+            else if not (List.member model.workspaceAdmin.membershipRole [ "read", "edit", "admin" ]) then
+                ( updateWorkspaceAdmin (\admin -> { admin | mutationError = Just "Choose a valid role." }) model, Cmd.none )
             else
                 let
-                    userId =
-                        String.trim model.workspaceAdmin.membershipUserId
+                    guard = newGuard workspaceId model
+                    ( trackedModel, requestId, clearCmd ) = beginTrackedMutation [ workspaceId, userId ] model
+                    updated = updateWorkspaceAdmin (\admin -> { admin | nextRequestToken = guard.token
+                        , activeMutation = Just { guard = guard, userId = userId, removing = False }, mutationError = Nothing
+                        , activeListRequest = Nothing, loadingMemberships = Dict.insert workspaceId False admin.loadingMemberships }) trackedModel
                 in
-                if String.isEmpty userId then
-                    addToast Warning "Enter a user ID before granting a role" model
+                ( updated, Cmd.batch [ clearCmd, Api.upsertWorkspaceMembership model.flags.apiUrl workspaceId userId model.workspaceAdmin.membershipRole requestId (WorkspaceMembershipSaved guard) ] )
 
-                else
-                    let
-                        ( trackedModel, requestId, clearCmd ) =
-                            beginTrackedMutation [ wsId, userId ] model
-                    in
-                    ( trackedModel
-                    , Cmd.batch
-                        [ clearCmd
-                        , Api.upsertWorkspaceMembership model.flags.apiUrl wsId userId model.workspaceAdmin.membershipRole requestId (WorkspaceMembershipSaved wsId)
-                        ]
-                    )
+        WorkspaceMembershipSaved guard result ->
+            case model.workspaceAdmin.activeMutation of
+                Just mutation ->
+                    if guardIsCurrent guard model && mutation.guard == guard && not mutation.removing then
+                        case result of
+                            Ok membership ->
+                                if membership.workspaceId == guard.workspaceId && membership.userId == mutation.userId then
+                                    let
+                                        existing = Dict.get guard.workspaceId model.workspaceAdmin.memberships |> Maybe.withDefault []
+                                        updated = updateWorkspaceAdmin (\admin -> { admin | memberships = Dict.insert guard.workspaceId (membership :: List.filter (\item -> item.userId /= membership.userId) existing) admin.memberships
+                                            , activeMutation = Nothing, membershipUserId = "", mutationError = Nothing }) model
+                                        ( trackedModel, trackCmd ) = trackLocalMutation membership.userId updated
+                                        ( toastedModel, toastCmd ) = addToast Success "Workspace membership saved" trackedModel
+                                        ( finalModel, sessionCmd ) = finishMembershipMutation toastedModel
+                                    in ( finalModel, Cmd.batch [ trackCmd, toastCmd, sessionCmd ] )
+                                else
+                                    ( updateWorkspaceAdmin (\admin -> { admin | activeMutation = Nothing, mutationError = Just "The membership response did not match this request. Retry the action." }) model, Cmd.none )
+                            Err _ ->
+                                ( updateWorkspaceAdmin (\admin -> { admin | activeMutation = Nothing, mutationError = Just "Could not save membership. Your form is retained; retry the action." }) model, Cmd.none )
+                    else ( model, Cmd.none )
+                Nothing -> ( model, Cmd.none )
 
-        WorkspaceMembershipSaved wsId result ->
-            case result of
-                Ok membership ->
-                    let
-                        existing =
-                            Dict.get wsId model.workspaceAdmin.memberships |> Maybe.withDefault []
-
-                        withoutUser =
-                            List.filter (\m -> m.userId /= membership.userId) existing
-
-                        updatedAdmin admin =
-                            { admin
-                                | memberships = Dict.insert wsId (membership :: withoutUser) admin.memberships
-                                , membershipUserId = ""
-                            }
-
-                        ( trackedModel, trackCmd ) =
-                            trackLocalMutation membership.userId (updateWorkspaceAdmin updatedAdmin model)
-
-                        ( toastedModel, toastCmd ) =
-                            addToast Success "Workspace membership saved" trackedModel
-                    in
-                    ( { toastedModel | sessionRequestEpoch = toastedModel.sessionRequestEpoch + 1 }
-                    , Cmd.batch [ trackCmd, toastCmd, Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (toastedModel.sessionRequestEpoch + 1) (Just wsId)) ]
-                    )
-
-                Err _ ->
-                    addToast Error "Failed to save workspace membership" model
-
-        RemoveWorkspaceMembership wsId userId ->
-            if not (Permissions.canAdminCurrentWorkspace model) then
-                addToast Warning "Workspace admin permission is required to manage memberships" model
-
+        RemoveWorkspaceMembership workspaceId userId ->
+            if not (canManageTarget workspaceId model) || membershipBusy model.workspaceAdmin then
+                ( model, Cmd.none )
             else
                 let
-                    ( trackedModel, requestId, clearCmd ) =
-                        beginTrackedMutation [ wsId, userId ] model
+                    guard = newGuard workspaceId model
+                    ( trackedModel, requestId, clearCmd ) = beginTrackedMutation [ workspaceId, userId ] model
+                    updated = updateWorkspaceAdmin (\admin -> { admin | nextRequestToken = guard.token
+                        , activeMutation = Just { guard = guard, userId = userId, removing = True }, mutationError = Nothing
+                        , activeListRequest = Nothing, loadingMemberships = Dict.insert workspaceId False admin.loadingMemberships }) trackedModel
                 in
-                ( trackedModel
-                , Cmd.batch
-                    [ clearCmd
-                    , Api.deleteWorkspaceMembership model.flags.apiUrl wsId userId requestId (WorkspaceMembershipDeleted wsId userId)
-                    ]
-                )
+                ( updated, Cmd.batch [ clearCmd, Api.deleteWorkspaceMembership model.flags.apiUrl workspaceId userId requestId (WorkspaceMembershipDeleted guard userId) ] )
 
-        WorkspaceMembershipDeleted wsId userId result ->
-            case result of
-                Ok () ->
-                    let
-                        existing =
-                            Dict.get wsId model.workspaceAdmin.memberships |> Maybe.withDefault []
-
-                        updatedAdmin admin =
-                            { admin | memberships = Dict.insert wsId (List.filter (\m -> m.userId /= userId) existing) admin.memberships }
-
-                        ( toastedModel, toastCmd ) =
-                            addToast Success "Workspace membership removed" (updateWorkspaceAdmin updatedAdmin model)
-                    in
-                    ( { toastedModel | sessionRequestEpoch = toastedModel.sessionRequestEpoch + 1 }
-                    , Cmd.batch [ toastCmd, Api.fetchSessionContext model.flags.apiUrl (Just wsId) (GotSessionContext (toastedModel.sessionRequestEpoch + 1) (Just wsId)) ]
-                    )
-
-                Err _ ->
-                    addToast Error "Failed to remove workspace membership" model
+        WorkspaceMembershipDeleted guard userId result ->
+            case model.workspaceAdmin.activeMutation of
+                Just mutation ->
+                    if guardIsCurrent guard model && mutation.guard == guard && mutation.removing && mutation.userId == userId then
+                        case result of
+                            Ok () ->
+                                let
+                                    existing = Dict.get guard.workspaceId model.workspaceAdmin.memberships |> Maybe.withDefault []
+                                    updated = updateWorkspaceAdmin (\admin -> { admin | memberships = Dict.insert guard.workspaceId (List.filter (\item -> item.userId /= userId) existing) admin.memberships
+                                        , activeMutation = Nothing, mutationError = Nothing }) model
+                                    ( toastedModel, toastCmd ) = addToast Success "Workspace membership removed" updated
+                                    ( finalModel, sessionCmd ) = finishMembershipMutation toastedModel
+                                in ( finalModel, Cmd.batch [ toastCmd, sessionCmd ] )
+                            Err _ ->
+                                ( updateWorkspaceAdmin (\admin -> { admin | activeMutation = Nothing, mutationError = Just "Could not remove membership. Retry the action." }) model, Cmd.none )
+                    else ( model, Cmd.none )
+                Nothing -> ( model, Cmd.none )
 
         ConfirmWorkspacePurge wsId ->
             if Permissions.canAdminCurrentWorkspace model then
@@ -243,115 +345,100 @@ update msg model =
 
 viewPermissionSummary : Model -> Html Msg
 viewPermissionSummary model =
-    if not (Permissions.shouldShowPermissionSummary model) then
-        text ""
+    case model.sessionContext of
+        Nothing ->
+            p [ class "form-help", attribute "role" "status" ] [ text "Loading permissions..." ]
 
-    else
-        case model.sessionContext of
-            Nothing ->
-                div [ class "permission-summary permission-summary-loading" ]
-                    [ text "Loading permissions..." ]
-
-            Just session ->
-                div [ class "permission-summary" ]
-                    [ span [] [ text ("Signed in as " ++ session.principal.actorLabel) ]
-                    , span [] [ text ("Role: " ++ Permissions.currentWorkspaceRoleLabel model) ]
-                    , if session.globalPermissions.createWorkspace then
-                        span [ class "permission-pill" ] [ text "create workspace" ]
-
-                      else
-                        text ""
-                    , if session.globalPermissions.superadmin then
-                        span [ class "permission-pill permission-pill-superadmin" ] [ text "superadmin" ]
-
-                      else
-                        text ""
+        Just session ->
+            div [ class "card workspace-admin-context" ]
+                [ div [ class "workspace-admin-context-main" ]
+                    [ span [ class "workspace-admin-label" ] [ text "Signed in as" ]
+                    , strong [] [ text session.principal.actorLabel ]
+                    , span [ class "badge workspace-admin-role" ] [ text (Permissions.currentWorkspaceRoleLabel model) ]
                     ]
-
+                , if session.globalPermissions.createWorkspace then
+                    span [ class "permission-pill" ] [ text "Can create workspaces" ]
+                  else text ""
+                , if session.globalPermissions.superadmin then
+                    span [ class "permission-pill permission-pill-superadmin" ] [ text "Superadmin" ]
+                  else text ""
+                ]
 
 viewWorkspaceAdminPanel : Api.Workspace -> Model -> Html Msg
 viewWorkspaceAdminPanel ws model =
-    let
-        membershipLoaded =
-            Dict.member ws.id model.workspaceAdmin.memberships
-
-        workspaceSessionMatches =
-            model.sessionContext
-                |> Maybe.andThen .workspace
-                |> Maybe.map (\workspaceContext -> workspaceContext.workspaceId == ws.id)
-                |> Maybe.withDefault False
-    in
-    if Permissions.hasImplicitLocalSuperadmin model && Permissions.canAdminCurrentWorkspace model then
-        text ""
-
-    else if Permissions.canAdminCurrentWorkspace model && (workspaceSessionMatches || membershipLoaded) then
-        div [ class "workspace-admin-panel" ]
-            [ h3 [] [ text "Workspace administration" ]
-            , p [ class "help-text" ] [ text "Client affordances reflect server-provided permissions; the server remains authoritative for every action." ]
-            , viewMembershipManager ws model
-            ]
-
-    else if model.sessionContext == Nothing || (Permissions.isSuperadmin model && not workspaceSessionMatches && not membershipLoaded) then
-        div [ class "workspace-admin-panel empty-state" ]
-            [ text "Loading workspace permissions..." ]
-
-    else
-        div [ class "workspace-admin-panel empty-state" ]
-            [ text "Workspace admin controls are hidden because your current role is "
-            , strong [] [ text (Permissions.currentWorkspaceRoleLabel model) ]
-            , text "."
-            ]
-
+    section [ class "workspace-administration", attribute "aria-labelledby" "workspace-administration-heading" ]
+        [ h2 [ id "workspace-administration-heading" ] [ text "Administration" ]
+        , if model.auth.status /= AuthReady || model.sessionContext == Nothing then
+            p [ class "form-help", attribute "role" "status" ] [ text "Loading workspace permissions..." ]
+          else if not (canManageTarget ws.id model) then
+            div [ class "card empty-state", attribute "role" "status" ]
+                [ text "Administration is unavailable for your current workspace access." ]
+          else
+            div [ class "workspace-admin-content" ]
+                [ viewPermissionSummary model
+                , viewMembershipManager ws model
+                ]
+        ]
 
 viewMembershipManager : Api.Workspace -> Model -> Html Msg
 viewMembershipManager ws model =
-    if not (Permissions.shouldShowMembershipAdmin model) then
-        text ""
-
-    else
-        let
-            memberships =
-                Dict.get ws.id model.workspaceAdmin.memberships |> Maybe.withDefault []
-
-            loading =
-                Dict.get ws.id model.workspaceAdmin.loadingMemberships |> Maybe.withDefault False
-        in
-        div [ class "workspace-memberships" ]
-            [ h4 [] [ text "Memberships" ]
-            , if loading && List.isEmpty memberships then
-                div [ class "loading-indicator" ] [ text "Loading memberships..." ]
-
-              else if List.isEmpty memberships then
-                div [ class "empty-state" ] [ text "No explicit memberships found. Superadmins may still have access." ]
-
-              else
-                div [ class "membership-list" ] (List.map (viewMembershipRow ws.id) memberships)
-            , div [ class "membership-form" ]
-                [ input
-                    [ class "form-input"
-                    , placeholder "User UUID"
-                    , value model.workspaceAdmin.membershipUserId
-                    , onInput UpdateMembershipUserId
+    let
+        admin = model.workspaceAdmin
+        memberships = Dict.get ws.id admin.memberships |> Maybe.withDefault []
+        loading = Dict.get ws.id admin.loadingMemberships |> Maybe.withDefault False
+        busy = membershipBusy admin
+        removing = admin.activeMutation |> Maybe.map .removing |> Maybe.withDefault False
+    in
+    div [ class "card workspace-memberships" ]
+        [ h3 [] [ text "Memberships" ]
+        , p [ class "form-help" ] [ text "Grant a user read, edit, or admin access to this workspace." ]
+        , if loading then
+            p [ class "form-help", attribute "role" "status" ] [ text "Loading memberships..." ]
+          else text ""
+        , case Dict.get ws.id admin.membershipErrors of
+            Just message ->
+                div [ class "workspace-admin-feedback", attribute "role" "alert" ]
+                    [ p [] [ text message ]
+                    , button [ class "btn btn-secondary", type_ "button", onClick (RetryWorkspaceMemberships ws.id), disabled (loading || busy) ] [ text "Retry memberships" ]
                     ]
-                    []
-                , select [ class "form-input", value model.workspaceAdmin.membershipRole, onInput UpdateMembershipRole ]
-                    [ option [ value "read" ] [ text "read" ]
-                    , option [ value "edit" ] [ text "edit" ]
-                    , option [ value "admin" ] [ text "admin" ]
-                    ]
-                , button [ class "btn btn-primary", onClick (SubmitWorkspaceMembership ws.id) ]
-                    [ text "Grant / update" ]
+            Nothing -> text ""
+        , if List.isEmpty memberships then
+            if Dict.member ws.id admin.memberships then
+                p [ class "form-help", attribute "role" "status" ] [ text "No explicit memberships. Superadmins may still have access." ]
+            else text ""
+          else
+            div [ class "membership-list" ] (List.map (viewMembershipRow ws.id busy) memberships)
+        , Html.form [ class "membership-form", onSubmit (SubmitWorkspaceMembership ws.id) ]
+            [ div [ class "filter-group membership-user-field" ]
+                [ label [ class "filter-label", for "workspace-membership-user" ] [ text "User UUID" ]
+                , input [ id "workspace-membership-user", class "form-input", placeholder "Enter user UUID"
+                    , value admin.membershipUserId, onInput UpdateMembershipUserId, disabled busy ] []
                 ]
+            , div [ class "filter-group" ]
+                [ label [ class "filter-label", for "workspace-membership-role" ] [ text "Role" ]
+                , select [ id "workspace-membership-role", class "form-input", value admin.membershipRole, onInput UpdateMembershipRole, disabled busy ]
+                    [ option [ value "read" ] [ text "Read" ]
+                    , option [ value "edit" ] [ text "Edit" ]
+                    , option [ value "admin" ] [ text "Admin" ]
+                    ]
+                ]
+            , button [ id "workspace-membership-submit", class "btn btn-primary", type_ "submit", disabled busy ]
+                [ text (if admin.authorizationPending /= Nothing then "Checking access..." else if busy && not removing then "Saving..." else "Grant / update") ]
             ]
+        , if removing then p [ class "form-help", attribute "role" "status" ] [ text "Removing membership..." ] else text ""
+        , if admin.authorizationPending /= Nothing then p [ class "form-help", attribute "role" "status" ] [ text "Checking current workspace access..." ] else text ""
+        , case admin.mutationError of
+            Just message -> p [ class "form-error", attribute "role" "alert" ] [ text message ]
+            Nothing -> text ""
+        ]
 
-
-viewMembershipRow : String -> Api.WorkspaceMembership -> Html Msg
-viewMembershipRow wsId membership =
-    div [ class "membership-row" ]
+viewMembershipRow : String -> Bool -> Api.WorkspaceMembership -> Html Msg
+viewMembershipRow wsId busy membership =
+    div [ class "membership-row", attribute "data-member-user" membership.userId ]
         [ Helpers.copyableValue "membership-user" "user ID" membership.userId membership.userId
         , span [ class ("badge badge-" ++ membership.role) ] [ text membership.role ]
         , span [ class "membership-updated" ] [ text ("Updated " ++ formatDate membership.updatedAt) ]
-        , button [ class "btn-small btn-danger-subtle", onClick (RemoveWorkspaceMembership wsId membership.userId) ] [ text "Remove" ]
+        , button [ class "btn-small btn-danger-subtle", type_ "button", disabled busy, onClick (RemoveWorkspaceMembership wsId membership.userId) ] [ text "Remove" ]
         ]
 
 

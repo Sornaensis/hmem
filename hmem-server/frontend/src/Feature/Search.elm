@@ -499,6 +499,9 @@ viewSearchBar model =
 
                 AuditTab ->
                     text ""
+
+                AdministrationTab ->
+                    text ""
         ]
 
 

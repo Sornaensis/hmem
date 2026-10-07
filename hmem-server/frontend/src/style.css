@@ -543,6 +543,97 @@ a:hover {
   margin-bottom: 1.5rem;
 }
 
+.workspace-tabs {
+  flex-wrap: wrap;
+}
+
+.workspace-tabs .tab {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.workspace-administration,
+.workspace-admin-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.page .workspace-administration h2,
+.workspace-memberships h3 {
+  margin: 0;
+}
+
+.workspace-admin-context,
+.workspace-admin-context-main,
+.membership-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  min-width: 0;
+}
+
+.workspace-admin-label,
+.membership-updated {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
+.workspace-admin-role {
+  color: var(--accent-hover);
+  background: rgba(99, 102, 241, 0.15);
+}
+
+.workspace-memberships > .form-help {
+  margin: 0.5rem 0 1rem;
+}
+
+.membership-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0.75rem 0 1rem;
+}
+
+.membership-row {
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.membership-row .membership-user {
+  flex: 1 1 16rem;
+}
+
+.membership-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.membership-form .filter-group {
+  min-width: 0;
+  flex: 1 1 7rem;
+}
+
+.membership-form .membership-user-field {
+  flex: 3 1 18rem;
+}
+
+.membership-form .form-input {
+  width: 100%;
+}
+
+.workspace-admin-feedback {
+  margin: 0.75rem 0;
+}
+
+@media (max-width: 480px) {
+  .workspace-tabs .tab { padding: 0.625rem 0.75rem; }
+  .membership-form > .btn { width: 100%; }
+}
+
 .tab {
   padding: 0.625rem 1.25rem;
   background: none;

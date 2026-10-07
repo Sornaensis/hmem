@@ -13,6 +13,7 @@ import Feature.Dependencies as Dependencies
 import Feature.Observation as Observation
 import Feature.Search
 import Feature.Timeline as Timeline
+import Feature.WorkspaceAdmin
 import Helpers exposing (applyDependencyMutationResult, applyTaskDependencyLinkMutation, beginWorkspaceDataReload, replaceFragment)
 import Http
 import Json.Decode as Decode
@@ -444,11 +445,7 @@ update msg model =
             if canonicalGuardIsCurrent guard model then
                 case result of
                     Ok paginated ->
-                        let
-                            admin =
-                                model.workspaceAdmin
-                        in
-                        ( { model | workspaceAdmin = { admin | memberships = Dict.insert workspaceId paginated.items admin.memberships, loadingMemberships = Dict.insert workspaceId False admin.loadingMemberships } }, Cmd.none )
+                        ( Feature.WorkspaceAdmin.acceptCanonicalMemberships workspaceId paginated.items model, Cmd.none )
 
                     Err error ->
                         canonicalHttpFailure guard error model

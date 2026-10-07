@@ -100,20 +100,21 @@ viewReadableWorkspacePage wsId model ws =
                     ]
                 ]
             ]
-        , Feature.WorkspaceAdmin.viewPermissionSummary model
         , if not (Permissions.canReadCurrentWorkspace model) then
             viewUnauthorizedWorkspace model
 
           else
             div []
-                [ Feature.WorkspaceAdmin.viewWorkspaceAdminPanel ws model
-                , if model.activeTab == AuditTab || model.activeTab == TimelineTab then
+                [ if model.activeTab == AuditTab || model.activeTab == TimelineTab || model.activeTab == AdministrationTab then
                     text ""
 
                   else
                     Feature.Search.viewSearchBar model
                 , viewTabs model
-                , if model.dataLoading.loadingWorkspaceData then
+                , if model.activeTab == AdministrationTab then
+                    viewTabContent wsId model
+
+                  else if model.dataLoading.loadingWorkspaceData then
                     div [ class "loading-indicator" ] [ text "Loading..." ]
 
                   else if model.activeTab == AuditTab || model.activeTab == TimelineTab then
@@ -234,13 +235,18 @@ viewCreateButton _ =
 
 viewTabs : Model -> Html Msg
 viewTabs model =
-    div [ class "tabs" ]
+    div [ class "tabs workspace-tabs", attribute "aria-label" "Workspace sections" ]
         (List.filterMap identity
             [ Just (viewTab ProjectsTab model.activeTab (workspaceTabLabel ProjectsTab))
             , Just (viewTab ObservationsTab model.activeTab (workspaceTabLabel ObservationsTab))
             , Just (viewTab TimelineTab model.activeTab (workspaceTabLabel TimelineTab))
             , if Permissions.canViewCurrentWorkspaceAudit model then
                 Just (viewTab AuditTab model.activeTab (workspaceTabLabel AuditTab))
+
+              else
+                Nothing
+            , if Permissions.canViewWorkspaceAdministration model then
+                Just (viewTab AdministrationTab model.activeTab (workspaceTabLabel AdministrationTab))
 
               else
                 Nothing
@@ -263,6 +269,9 @@ workspaceTabLabel tab =
         AuditTab ->
             "Audit"
 
+        AdministrationTab ->
+            "Administration"
+
 
 viewTab : WorkspaceTab -> WorkspaceTab -> String -> Html Msg
 viewTab tab activeTab label =
@@ -275,6 +284,8 @@ viewTab tab activeTab label =
                 "tab"
             )
         , onClick (SwitchTab tab)
+        , type_ "button"
+        , attribute "aria-current" (if tab == activeTab then "page" else "false")
         ]
         [ text label ]
 
@@ -298,3 +309,11 @@ viewTabContent wsId model =
 
         AuditTab ->
             Feature.AuditLog.viewWorkspaceAuditPanel wsId model
+
+        AdministrationTab ->
+            case Dict.get wsId model.workspaces of
+                Just workspace ->
+                    Feature.WorkspaceAdmin.viewWorkspaceAdminPanel workspace model
+
+                Nothing ->
+                    div [ class "loading-indicator" ] [ text "Loading workspace administration..." ]

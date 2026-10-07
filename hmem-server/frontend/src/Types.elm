@@ -777,8 +777,28 @@ type alias WorkspaceAdminModel =
     , loadingMemberships : Dict String Bool
     , membershipUserId : String
     , membershipRole : String
+    , owner : Maybe MembershipOwner
+    , nextRequestToken : Int
+    , activeListRequest : Maybe MembershipRequestGuard
+    , activeMutation : Maybe MembershipMutation
+    , authorizationPending : Maybe MembershipOwner
+    , authorizationFailure : Maybe String
+    , membershipErrors : Dict String String
+    , mutationError : Maybe String
     , purgeConfirmation : Maybe String
     }
+
+
+type alias MembershipOwner =
+    { workspaceId : String, sessionEpoch : Int, sessionKey : String }
+
+
+type alias MembershipRequestGuard =
+    { workspaceId : String, sessionEpoch : Int, sessionKey : String, token : Int }
+
+
+type alias MembershipMutation =
+    { guard : MembershipRequestGuard, userId : String, removing : Bool }
 
 
 type alias AuditLogFilters =
@@ -852,6 +872,7 @@ type WorkspaceTab
     | ObservationsTab
     | TimelineTab
     | AuditTab
+    | AdministrationTab
 
 
 
@@ -1159,7 +1180,9 @@ type Msg
       -- Workspace groups
     | GotWorkspaceGroups (Result Http.Error (Api.PaginatedResult Api.WorkspaceGroup))
     | GotGroupMembers String (Result Http.Error (List String))
-    | GotWorkspaceMemberships String (Result Http.Error (Api.PaginatedResult Api.WorkspaceMembership))
+    | GotWorkspaceMemberships MembershipRequestGuard (Result Http.Error (Api.PaginatedResult Api.WorkspaceMembership))
+    | RetryWorkspaceMemberships String
+    | RetryMembershipAuthorization
     | CreateWorkspaceGroup String
     | WorkspaceGroupCreated (Result Http.Error Api.WorkspaceGroup)
     | DeleteWorkspaceGroup String
@@ -1171,9 +1194,9 @@ type Msg
     | UpdateMembershipUserId String
     | UpdateMembershipRole String
     | SubmitWorkspaceMembership String
-    | WorkspaceMembershipSaved String (Result Http.Error Api.WorkspaceMembership)
+    | WorkspaceMembershipSaved MembershipRequestGuard (Result Http.Error Api.WorkspaceMembership)
     | RemoveWorkspaceMembership String String
-    | WorkspaceMembershipDeleted String String (Result Http.Error ())
+    | WorkspaceMembershipDeleted MembershipRequestGuard String (Result Http.Error ())
     | ConfirmWorkspacePurge String
     | PerformWorkspacePurge
     | CancelWorkspacePurge

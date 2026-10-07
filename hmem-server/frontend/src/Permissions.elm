@@ -1,6 +1,7 @@
 module Permissions exposing
     ( authModeLabel
     , canAdminCurrentWorkspace
+    , canViewWorkspaceAdministration
     , canCreateWorkspace
     , canEditCurrentWorkspace
     , canReadCurrentWorkspace
@@ -20,7 +21,7 @@ module Permissions exposing
     )
 
 import Api
-import Types exposing (Model)
+import Types exposing (AuthStatus(..), Model)
 
 
 localAuthMode : String
@@ -116,6 +117,14 @@ canEditCurrentWorkspace model =
 canAdminCurrentWorkspace : Model -> Bool
 canAdminCurrentWorkspace model =
     currentWorkspacePermission .canAdmin model
+
+
+canViewWorkspaceAdministration : Model -> Bool
+canViewWorkspaceAdministration model =
+    model.auth.status == AuthReady
+        && canReadCurrentWorkspace model
+        && canAdminCurrentWorkspace model
+        && shouldShowMembershipAdmin model
 
 
 canViewGlobalAudit : Model -> Bool

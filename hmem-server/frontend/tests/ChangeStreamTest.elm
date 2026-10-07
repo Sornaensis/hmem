@@ -470,7 +470,7 @@ suite =
                           , ChangeStream.RefreshTaskDependencies "t" "d" True (Just "remote-request")
                           ]
                         ]
-        , test "observation invalidations stay targeted and never reload the active page" <|
+        , test "observation invalidations target canonical detail and automatically refresh the applied collection" <|
             \_ ->
                 let
                     event action eventId =
@@ -496,8 +496,8 @@ suite =
                 , actions [ event "updated" "u", event "deleted" "d" ]
                 ]
                     |> Expect.equal
-                        [ [ ChangeStream.RefetchEntity "observation" "o" ]
-                        , [ ChangeStream.RemoveEntity "observation" "o", ChangeStream.RefreshTimeline ]
+                        [ [ ChangeStream.RefetchEntity "observation" "o", ChangeStream.RefreshObservations ]
+                        , [ ChangeStream.RemoveEntity "observation" "o", ChangeStream.RefreshObservations, ChangeStream.RefreshTimeline ]
                         ]
         , test "dedupe history is bounded and evicts the oldest accepted event" <|
             \_ ->

@@ -369,7 +369,7 @@ invalidationActions envelope invalidation =
         ( Api.WorkspaceScope expected, "collection", [ collection, workspaceId ] ) ->
             if workspaceId == expected && List.member collection [ "projects", "tasks", "observations", "task_dependencies" ] then
                 if collection == "observations" then
-                    []
+                    [ RefreshObservations ]
 
                 else if List.member collection [ "projects", "tasks" ] then
                     [ RefreshNavigation ]

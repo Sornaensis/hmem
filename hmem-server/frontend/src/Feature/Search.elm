@@ -9,6 +9,7 @@ module Feature.Search exposing
     , unifiedSearchResponseMatches
     , unifiedSearchResultCount
     , update
+    , refreshAcceptedSearch
     , viewSearchBar
     , viewUnifiedSearchError
     , viewUnifiedSearchLoading
@@ -19,6 +20,7 @@ import Api
 import Feature.DataLoading
 import Feature.Observation
 import Dict
+import Permissions
 import Helpers exposing (replaceFragment, saveFiltersCmd, scrollToElement, taskStatusBadgeClass, taskStatusDisplayText, taskStatusTitle)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -29,6 +31,8 @@ import Types exposing (..)
 init : SearchModel
 init =
     { query = ""
+    , submittedQuery = Nothing
+    , refreshPending = False
     , unifiedResults = Nothing
     , isSearching = False
     , searchError = Nothing
@@ -93,15 +97,7 @@ update msg model =
                 searchModel =
                     model.search
 
-                updatedSearch =
-                    { searchModel
-                        | query = query
-                        , unifiedResults = Nothing
-                        , isSearching = False
-                        , searchError = Nothing
-                        , activeRequestQuery = Nothing
-                        , activeRequest = Nothing
-                    }
+                updatedSearch = { searchModel | query = query }
 
                 newModel =
                     { model | search = updatedSearch }
@@ -144,7 +140,7 @@ update msg model =
                                 searchModel.nextRequestToken
 
                             request =
-                                { workspaceId = workspaceId, token = token, query = trimmed }
+                                { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, token = token, query = trimmed }
                         in
                         ( { model
                             | search =
@@ -154,13 +150,15 @@ update msg model =
                                     , searchError = Nothing
                                     , activeRequestQuery = Just trimmed
                                     , activeRequest = Just request
+                                    , submittedQuery = Just trimmed
+                                    , refreshPending = False
                                     , nextRequestToken = token + 1
                                 }
                           }
-                        , Api.unifiedSearch model.flags.apiUrl trimmed workspaceId entityTypes (GotUnifiedSearchResults workspaceId token trimmed)
+                        , Api.unifiedSearch model.flags.apiUrl trimmed workspaceId entityTypes (GotUnifiedSearchResults workspaceId model.sessionRequestEpoch token trimmed)
                         )
 
-        GotUnifiedSearchResults workspaceId token requestedQuery result ->
+        GotUnifiedSearchResults workspaceId sessionEpoch token requestedQuery result ->
             let
                 searchModel =
                     model.search
@@ -168,10 +166,14 @@ update msg model =
                 currentQuery =
                     String.trim searchModel.query
             in
-            if not (unifiedSearchResponseMatches workspaceId token requestedQuery model.selectedWorkspaceId searchModel) || currentQuery /= requestedQuery then
+            if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || sessionEpoch /= model.sessionRequestEpoch || Maybe.map .sessionEpoch searchModel.activeRequest /= Just sessionEpoch
+                || not (unifiedSearchResponseMatches workspaceId token requestedQuery model.selectedWorkspaceId searchModel) || searchModel.submittedQuery /= Just requestedQuery then
                 ( model, Cmd.none )
 
             else
+                if searchModel.refreshPending then
+                    refreshAcceptedSearch { model | search = { searchModel | activeRequest = Nothing, activeRequestQuery = Nothing, refreshPending = False } }
+                else
                 case result of
                     Ok results ->
                         ( { model
@@ -191,9 +193,9 @@ update msg model =
                         ( { model
                             | search =
                                 { searchModel
-                                    | unifiedResults = Nothing
+                                    | unifiedResults = searchModel.unifiedResults
                                     , isSearching = False
-                                    , searchError = Just "Search failed. Please try again."
+                                    , searchError = Just "Search refresh failed. Submit the search again to retry."
                                     , activeRequestQuery = Nothing
                                     , activeRequest = Nothing
                                 }
@@ -329,7 +331,7 @@ update msg model =
 unifiedSearchResponseMatches : String -> Int -> String -> Maybe String -> SearchModel -> Bool
 unifiedSearchResponseMatches workspaceId token query selectedWorkspaceId searchModel =
     selectedWorkspaceId == Just workspaceId
-        && searchModel.activeRequest == Just { workspaceId = workspaceId, token = token, query = query }
+        && (searchModel.activeRequest |> Maybe.map (\request -> request.workspaceId == workspaceId && request.token == token && request.query == query) |> Maybe.withDefault False)
 
 
 workspaceEntityTypes : String -> Model -> List String
@@ -357,6 +359,8 @@ clearTransientSearchState searchModel =
         , searchError = Nothing
         , activeRequestQuery = Nothing
         , activeRequest = Nothing
+        , submittedQuery = Nothing
+        , refreshPending = False
     }
 
 
@@ -1079,3 +1083,20 @@ capitalizeWord word =
 
         Just ( first, rest ) ->
             String.fromChar first |> String.toUpper |> (\head -> head ++ rest)
+
+
+refreshAcceptedSearch : Model -> ( Model, Cmd Msg )
+refreshAcceptedSearch model =
+    let state = model.search in
+    case ( model.selectedWorkspaceId, state.submittedQuery ) of
+        ( Just workspaceId, Just query ) ->
+            if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then ( model, Cmd.none )
+            else if state.activeRequest /= Nothing then ( { model | search = { state | refreshPending = True } }, Cmd.none )
+            else
+                let
+                    token = state.nextRequestToken
+                    request = { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, token = token, query = query }
+                in
+                ( { model | search = { state | activeRequest = Just request, activeRequestQuery = Just query, isSearching = True, searchError = Nothing, nextRequestToken = token + 1 } }
+                , Api.unifiedSearch model.flags.apiUrl query workspaceId (workspaceEntityTypes workspaceId model) (GotUnifiedSearchResults workspaceId model.sessionRequestEpoch token query) )
+        _ -> ( model, Cmd.none )

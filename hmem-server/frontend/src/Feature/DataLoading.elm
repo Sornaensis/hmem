@@ -3222,9 +3222,14 @@ updateResponse msg model =
             if model.selectedWorkspaceId /= Just wsId || model.observations.requestSessionEpoch /= model.sessionRequestEpoch || not (acceptWorkspaceLoad maybeToken model.dataLoading) || not (listObservationResponseMatches generation fingerprint offset model.observations) then
                 ( settleInitialObservationResponse wsId maybeToken generation fingerprint offset model, Cmd.none )
 
+            else if model.observations.refreshPending && model.observations.refreshPass == Nothing then
+                Feature.Observation.completeSupersededRead { model | dataLoading = completeObservationWorkspaceLoad wsId maybeToken generation fingerprint offset model }
             else
                 case result of
                     Ok paginated ->
+                        if model.observations.refreshPass /= Nothing then
+                            Feature.Observation.acceptResultRefresh offset paginated model
+                        else
                         let
                             currentObservations =
                                 model.observations

@@ -75,6 +75,12 @@ port requestLocalStorage : String -> Cmd msg
 port localStorageReceived : (Encode.Value -> msg) -> Sub msg
 
 
+port observationPreferenceCommand : Encode.Value -> Cmd msg
+
+
+port observationPreferencesReceived : (Encode.Value -> msg) -> Sub msg
+
+
 
 -- PORTS: Scroll
 

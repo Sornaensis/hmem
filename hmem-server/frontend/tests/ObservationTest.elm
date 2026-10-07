@@ -67,7 +67,7 @@ suite =
                     [ \_ -> Feature.Observation.isLoadedOrSelected "loaded" stale |> Expect.equal True
                     , \_ -> Feature.Observation.isLoadedOrSelected "foreign" stale |> Expect.equal False
                     , \_ -> ( stale.resultsStale, stale.orderedIds ) |> Expect.equal ( True, [ "loaded" ] )
-                    , \_ -> view |> Query.has [ Selector.text "Results may have changed.", Selector.text "Refresh results" ]
+                    , \_ -> view |> Query.hasNot [ Selector.text "Results may have changed.", Selector.text "Refresh results" ]
                     ]
                     ()
         , test "canonical selected detail never admits an unproven row to flat, facet, exact, or match membership" <|
@@ -329,7 +329,9 @@ suite =
                         Expect.all
                             [ \_ -> (generation > 0) |> Expect.equal True
                             , \_ -> Dict.get target completed.webSocket.targetGenerations |> Expect.equal (Just (generation + 1))
-                            , \_ -> [ lateCanonical.observations, lateDetail.observations, latePage.observations ] |> Expect.equal (List.repeat 3 completed.observations)
+                            , \_ -> [ lateCanonical.observations, lateDetail.observations ] |> Expect.equal (List.repeat 2 completed.observations)
+                            , \_ -> ( latePage.observations.selectedDetail, latePage.observations.items, latePage.observations.edit ) |> Expect.equal ( completed.observations.selectedDetail, completed.observations.items, completed.observations.edit )
+                            , \_ -> latePage.observations.requestGeneration |> Expect.equal (completed.observations.requestGeneration + 1)
                             , \_ -> [ Http.BadStatus 404, Http.Timeout ] |> List.map (\error -> Feature.WebSocket.update (CanonicalObservationFetched guard "workspace-1" original.id (Err error)) completed |> Tuple.first |> .observations) |> Expect.equal (List.repeat 2 completed.observations)
                             , \_ -> completed.observations.selectedDetail |> Expect.equal (Just accepted)
                             , \_ -> Dict.get original.id completed.observations.items |> Expect.equal (Just accepted)
@@ -515,12 +517,12 @@ suite =
 
                                     generationRetired =
                                         if mode == ObservationFacetMode then
-                                            completed.observations.facetRequestGeneration == prepared.observations.facetRequestGeneration + 1
+                                            completed.observations.facetRequestGeneration == prepared.observations.facetRequestGeneration && stale.observations.facetRequestGeneration == completed.observations.facetRequestGeneration + 1
                                         else
-                                            completed.observations.requestGeneration == prepared.observations.requestGeneration + 1
+                                            completed.observations.requestGeneration == prepared.observations.requestGeneration && stale.observations.requestGeneration == completed.observations.requestGeneration + 1
                                 in
                                 generationRetired
-                                    && stale.observations == completed.observations
+                                    && ( stale.observations.selectedDetail, stale.observations.orderedIds, stale.observations.edit ) == ( completed.observations.selectedDetail, completed.observations.orderedIds, completed.observations.edit )
                                     && completed.observations.orderedIds == prepared.observations.orderedIds
                                     && completed.observations.selectedDetail == Just latest
                                     && completed.observations.appliedQuery == prepared.observations.appliedQuery
@@ -1966,7 +1968,7 @@ suite =
                                     && { openedState | fileComposerOpen = False, advancedFiltersOpen = False } == protected.observations
                         in
                         edited.observations.edit /= Nothing
-                            && edited.observations.failedRequest /= Nothing
+                            && edited.observations.refreshError /= Nothing
                             && (saving.observations.edit |> Maybe.map .saving) == Just True
                             && List.all preserved [ edited, saving ]
                 in
@@ -1997,7 +1999,8 @@ suite =
                         , { subjectKind = Api.SubjectFile, subject = "src/Second.elm" }
                         ]
                     observation = { original | content = content }
-                    view = Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) (selectedObservationState observation) |> Query.fromHtml
+                    selected = selectedObservationState observation
+                    view = Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) { selected | expandedSubjects = Dict.singleton observation.id True } |> Query.fromHtml
                 in
                 Expect.all
                     [ \_ -> Helpers.plainTextExcerpt 3 "😀 😀 😀" |> Expect.equal "😀 …"
@@ -2250,7 +2253,7 @@ suite =
                     , \_ -> Feature.Observation.viewObservationsState repository { base | error = Just "Failed to match repository files." } |> Query.fromHtml |> Query.has [ Selector.text "Failed to match repository files." ]
                     , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.hasNot [ Selector.id "observation-subject" ]
                     , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.class "observation-subject-copy", Selector.text "1 loaded", Selector.text "src/Main.elm", Selector.text "src/**/*.elm" ]
-                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.findAll [ Selector.class "observation-subject-copy", Selector.tag "button" ] |> Query.count (Expect.equal 3)
+                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.findAll [ Selector.class "observation-subject-copy", Selector.tag "button" ] |> Query.count (Expect.equal 1)
                     , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.find [ Selector.class "observation-load-more" ] |> Query.hasNot [ Selector.disabled True ]
                     ]
                     ()
@@ -2881,8 +2884,8 @@ suite =
                 in
                 [ firstPage.observations.nextOffset == 2
                 , Dict.member observation.id firstPage.observations.items
-                , refreshed.observations.requestGeneration > 4
-                , refreshed.observations.expectedOffset == Just 0
+                , stale.observations.requestGeneration > 4
+                , stale.observations.expectedOffset == Just 0
                 , Dict.member observation.id stale.observations.items
                 , Dict.member observation.id stale.observations.matchEvidence
                 ]
@@ -3155,10 +3158,10 @@ suite =
                         in
                         Expect.all
                             [ \_ -> view |> Query.findAll [ Selector.class cachedSelector ] |> Query.count (Expect.equal 1)
-                            , \_ -> view |> Query.has [ Selector.text "Previously loaded results remain available; the last request failed." ]
+                            , \_ -> view |> Query.has [ Selector.text (if offset == 0 then "Automatic refresh failed." else "Previously loaded results remain available; the last request failed.") ]
                             , \_ -> view |> Query.find [ Selector.class "observation-retry" ] |> Event.simulate Event.click |> Event.expect RetryObservationResults
-                            , \_ -> failed.observations.failedRequest |> Maybe.map .offset |> Expect.equal (Just offset)
-                            , \_ -> failed.observations.resultsStale |> Expect.equal (offset == 0)
+                            , \_ -> failed.observations.failedRequest |> Maybe.map .offset |> Expect.equal (if offset == 0 then Nothing else Just offset)
+                            , \_ -> failed.observations.resultsStale |> Expect.equal False
                             , \_ -> newGeneration > oldGeneration |> Expect.equal True
                             , \_ -> (if mode == ObservationFacetMode then retried.observations.facetExpectedOffset else retried.observations.expectedOffset) |> Expect.equal (Just offset)
                             , \_ -> Feature.Observation.listQuery "workspace-1" offset retried.observations |> Expect.equal (Feature.Observation.listQuery "workspace-1" offset loaded.observations)
@@ -3189,7 +3192,7 @@ suite =
                                 { model | observations = { state | items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty, facets = Dict.empty, facetKeys = [], selectedId = Nothing, selectedDetail = Nothing } }
 
                             requested =
-                                Feature.Observation.update RefreshObservationResults empty |> Tuple.first
+                                Feature.Observation.update ApplyObservationFilters empty |> Tuple.first
 
                             failed =
                                 applyObservationPage (observationPageMessage 0 (Err Http.Timeout) requested) requested
@@ -3764,7 +3767,7 @@ sameWorkspaceRepositoryModel : Int -> ObservationModel -> Model
 sameWorkspaceRepositoryModel sessionEpoch observations =
     let
         shell =
-            sameWorkspaceModel observations
+            editableModel observations
 
         workspace =
             observationWorkspace Api.Repository
@@ -4213,7 +4216,8 @@ observationReturnReceiptTests =
             cleared = { returned | observations = Feature.Observation.clearSelection returned.observations }
             activated = Feature.Observation.update (SelectObservationFrom "curated" "new-origin") returned |> Tuple.first
             queryState = returned.observations
-            query = { returned | observations = { queryState | requestGeneration = queryState.requestGeneration + 1 } }
+            applied = Helpers.observationAppliedQuery queryState
+            query = { returned | observations = Helpers.restoreObservationQuery { applied | query = "different applied query" } queryState }
             replacements = [ cleared, activated
                 , Feature.Observation.refreshViewport returned ( { returned | activeTab = ProjectsTab }, Cmd.none ) |> Tuple.first
                 , Feature.Observation.refreshViewport returned ( { returned | sessionRequestEpoch = returned.sessionRequestEpoch + 1 }, Cmd.none ) |> Tuple.first

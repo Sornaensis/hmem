@@ -11,6 +11,7 @@ import Feature.ChangeStream as ChangeStream
 import Feature.DataLoading
 import Feature.Dependencies as Dependencies
 import Feature.Observation as Observation
+import Feature.Search
 import Feature.Timeline as Timeline
 import Helpers exposing (applyDependencyMutationResult, applyTaskDependencyLinkMutation, beginWorkspaceDataReload, replaceFragment)
 import Http
@@ -1064,10 +1065,9 @@ applyAction scope action ( model, accumulated ) =
         ChangeStream.RefreshSearch _ ->
             if scopeMatchesSelectedWorkspace scope model then
                 let
-                    search =
-                        model.search
+                    ( refreshed, command ) = Feature.Search.refreshAcceptedSearch model
                 in
-                append Cmd.none { model | search = { search | unifiedResults = Nothing, activeRequest = Nothing } }
+                append command refreshed
 
             else
                 ( model, accumulated )

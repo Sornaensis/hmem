@@ -178,14 +178,22 @@ handleOwnedRaw ownedMsg model =
                         _ ->
                             ( newModel.timeline, Cmd.none )
 
+                ( preferredModel, preferenceCmd ) =
+                    Feature.Observation.restorePendingPreferences newModel
+
                 finalModel =
-                    { newModel | auditLog = auditLog, timeline = timeline }
+                    let
+                        state = preferredModel.observations
+                        pendingEntry = tab == ObservationsTab && model.activeTab /= ObservationsTab && not state.preferenceHydrated
+                    in
+                    { preferredModel | auditLog = auditLog, timeline = timeline
+                        , observations = if pendingEntry then { state | preferenceEntryHistory = Just (Helpers.observationHistoryUrl preferredModel) } else if tab /= ObservationsTab then { state | preferenceEntryHistory = Nothing } else state }
             in
             let
                 ( linked, linkCmd ) =
                     if tab == model.activeTab then ( finalModel, Cmd.none ) else Helpers.writeObservationHistory True finalModel
             in
-            ( linked, Cmd.batch [ linkCmd, auditCmd, timelineCmd ] )
+            ( linked, Cmd.batch [ preferenceCmd, linkCmd, auditCmd, timelineCmd ] )
 
         SessionContextLoadedMsg epoch expectedWorkspace result ->
             if sessionEpochMatches epoch model.sessionRequestEpoch && sessionContextResponseMatches expectedWorkspace model then
@@ -932,6 +940,7 @@ subscriptions =
         , localStorageReceived LocalStorageLoaded
         , Ports.onHierarchyViewport HierarchyViewportChanged
         , Ports.onObservationViewport ObservationViewportChanged
+        , Ports.observationPreferencesReceived ObservationPreferencesReceived
         , Ports.clipboardResult ClipboardResult
         , onMainContentScroll MainContentScrolled
         ]

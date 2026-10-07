@@ -33,7 +33,11 @@ module Feature.Observation exposing
     , reconcileCurationPermission
     , reconcileDeletedObservation
     , refreshActiveResults
+    , acceptResultRefresh
+    , continueAutomaticRefresh
+    , completeSupersededRead
     , restoreRouteResults
+    , restorePendingPreferences
     , bootstrapObservation
     , refuseContextExit
     , reload
@@ -68,9 +72,12 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
 import ObservationViewport
+import ObservationPreferences as Preferences
 import Ports exposing (copyToClipboard)
+import Set
 import Toast exposing (addToast)
 import Types exposing (..)
+import Url
 
 
 init : ObservationModel
@@ -82,6 +89,17 @@ init =
     , hasMore = False
     , loading = False
     , resultsStale = False
+    , refreshPass = Nothing
+    , refreshPending = False
+    , refreshError = Nothing
+    , expandedSubjects = Dict.empty
+    , preferenceOwner = Nothing
+    , preferenceValue = Preferences.empty
+    , preferenceHydrated = False
+    , preferencePendingDetail = False
+    , preferenceEntryHistory = Nothing
+    , preferenceTouch = 0
+    , nextPreferenceRequest = 1
     , error = Nothing
     , query = ""
     , subjectKind = Nothing
@@ -148,6 +166,7 @@ retireSessionState previous =
         , nextMutationRequestToken = previous.nextMutationRequestToken
         , detailNavigationToken = previous.detailNavigationToken + 1
         , nextLinkToken = previous.nextLinkToken + 1
+        , nextPreferenceRequest = previous.nextPreferenceRequest + 1
     }
 
 
@@ -226,8 +245,11 @@ selectionForTab tab state =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     let
-        ( updated, command ) =
+        ( rawUpdated, command ) =
             updateRaw msg model
+        queryUpdated = if querySnapshot rawUpdated.observations /= querySnapshot model.observations then
+            updateObservation (\state -> { state | refreshPass = Nothing, refreshPending = False, refreshError = Nothing }) rawUpdated
+            else rawUpdated
 
         intentional =
             case msg of
@@ -241,6 +263,11 @@ update msg model =
                 ReturnObservationResults -> True
                 ReturnToObservationDraft -> True
                 _ -> False
+        touched = intentional || (case msg of
+            ToggleObservationSubjects _ -> True
+            ToggleObservationMatchGroup _ -> True
+            _ -> False)
+        updated = if touched then rememberPreferences queryUpdated else queryUpdated
     in
     if intentional && (Helpers.observationAppliedQuery updated.observations /= Helpers.observationAppliedQuery model.observations || updated.observations.selectedId /= model.observations.selectedId || updated.activeTab /= model.activeTab) then
         let
@@ -254,6 +281,9 @@ update msg model =
 updateRaw : Msg -> Model -> ( Model, Cmd Msg )
 updateRaw msg model =
     case msg of
+        ObservationPreferencesReceived payload ->
+            hydratePreferences payload model
+
         SetObservationQuery value ->
             ( updateObservation (\state -> { state | query = value }) model, Cmd.none )
 
@@ -350,6 +380,9 @@ updateRaw msg model =
 
         LoadMoreObservationFacets ->
             loadMoreFacets model
+
+        ToggleObservationSubjects observationId ->
+            ( updateObservation (\state -> { state | expandedSubjects = Dict.update observationId (\open -> Just (not (Maybe.withDefault False open))) state.expandedSubjects }) model, Cmd.none )
 
         ToggleObservationMatchGroup groupKey ->
             let
@@ -500,10 +533,15 @@ updateRaw msg model =
             if model.selectedWorkspaceId /= Just workspaceId || model.sessionRequestEpoch /= sessionEpoch || not (matchResponseMatches sessionEpoch generation fingerprint offset model.observations) then
                 ( model, Cmd.none )
 
+            else if model.observations.refreshPending && model.observations.refreshPass == Nothing then
+                completeSupersededRead model
             else
                 case result of
                     Ok paginated ->
-                        ( updateObservation (mergeMatchPage offset paginated) model, Cmd.none )
+                        if model.observations.refreshPass /= Nothing then
+                            acceptRefreshChunk offset paginated.hasMore (List.length paginated.items)
+                                (\pass -> { pass | items = List.foldl (\match -> Dict.insert match.observation.id match.observation) pass.items paginated.items, orderedIds = appendUnique pass.orderedIds (List.map (.observation >> .id) paginated.items), matchEvidence = List.foldl (\match -> Dict.insert match.observation.id match) pass.matchEvidence paginated.items }) model
+                        else ( updateObservation (mergeMatchPage offset paginated) model, Cmd.none )
 
                     Err _ ->
                         ( updateObservation (failResultPage workspaceId offset "Failed to match repository files.") model, Cmd.none )
@@ -512,10 +550,15 @@ updateRaw msg model =
             if model.selectedWorkspaceId /= Just workspaceId || model.sessionRequestEpoch /= sessionEpoch || not (facetResponseMatches sessionEpoch generation fingerprint offset model.observations) then
                 ( model, Cmd.none )
 
+            else if model.observations.refreshPending && model.observations.refreshPass == Nothing then
+                completeSupersededRead model
             else
                 case result of
                     Ok paginated ->
-                        ( updateObservation (mergeFacetPage offset paginated) model, Cmd.none )
+                        if model.observations.refreshPass /= Nothing then
+                            acceptRefreshChunk offset paginated.hasMore (List.length paginated.items)
+                                (\pass -> { pass | facets = List.foldl (\facet -> Dict.insert (facetKey facet.subjectKind facet.subject) facet) pass.facets paginated.items, facetKeys = appendUnique pass.facetKeys (List.map (\facet -> facetKey facet.subjectKind facet.subject) paginated.items) }) model
+                        else ( updateObservation (mergeFacetPage offset paginated) model, Cmd.none )
 
                     Err _ ->
                         ( updateObservation (failResultPage workspaceId offset "Failed to load shared subjects.") model, Cmd.none )
@@ -1202,6 +1245,9 @@ startResultReload mode sessionEpoch workspaceId draftState =
     in
     { state
         | items = Dict.empty
+        , refreshPass = Nothing
+        , refreshPending = False
+        , refreshError = Nothing
         , orderedIds = []
         , hasMore = False
         , loading = True
@@ -1442,46 +1488,95 @@ refreshActiveResults model =
 
 refreshActiveResultsRaw : Model -> ( Model, Cmd Msg )
 refreshActiveResultsRaw model =
-    case repositoryWorkspaceId model of
-        Just workspaceId ->
-            case model.observations.requestMode of
-                ObservationFacetMode ->
+    let
+        state = model.observations
+    in
+    if state.refreshPass /= Nothing then
+        ( updateObservation (\current -> { current | refreshPass = Maybe.map (\pass -> { pass | invalidated = True }) current.refreshPass, refreshPending = True }) model, Cmd.none )
+    else if state.loading || state.facetLoading then
+        ( updateObservation (\current -> { current | refreshPending = True }) model, Cmd.none )
+    else
+        case repositoryWorkspaceId model of
+            Just workspaceId ->
+                if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then ( model, Cmd.none )
+                else
                     let
-                        state =
-                            startFacetRefresh model.sessionRequestEpoch workspaceId model.observations
-
-                        updated =
-                            updateObservation (always state) model
+                        facets = state.requestMode == ObservationFacetMode
+                        pass = { query = querySnapshot state, targetOffset = Basics.max 50 (if facets then state.facetNextOffset else state.nextOffset), items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty, facets = Dict.empty, facetKeys = [], invalidated = False }
+                        started = if facets then startFacetRefresh model.sessionRequestEpoch workspaceId state
+                            else if state.requestMode == ObservationMatchMode then startMatchRefresh model.sessionRequestEpoch workspaceId state
+                            else startResultRefresh state.requestMode model.sessionRequestEpoch workspaceId state
+                        prepared = updateObservation (always { started | refreshPass = Just pass, refreshPending = False, refreshError = Nothing }) model
                     in
-                    fetchFacetPage 0 updated
+                    fetchRefreshPage 0 prepared
+            Nothing -> ( model, Cmd.none )
 
-                ObservationMatchMode ->
-                    case model.observations.matchAppliedPaths of
-                        (_ :: _) as paths ->
-                            let
-                                state =
-                                    startMatchRefresh model.sessionRequestEpoch workspaceId model.observations
 
-                                updated =
-                                    updateObservation (always state) model
-                            in
-                            fetchMatchPage 0 paths updated
+fetchRefreshPage : Int -> Model -> ( Model, Cmd Msg )
+fetchRefreshPage offset model =
+    case model.observations.requestMode of
+        ObservationFacetMode -> fetchFacetPage offset model
+        ObservationMatchMode -> fetchMatchPage offset model.observations.matchAppliedPaths model
+        _ -> fetchPage offset model
 
-                        [] ->
-                            ( model, Cmd.none )
 
-                mode ->
+continueAutomaticRefresh : Model -> ( Model, Cmd Msg )
+continueAutomaticRefresh model =
+    if model.observations.refreshPending && model.observations.refreshPass == Nothing && not model.observations.loading && not model.observations.facetLoading && model.observations.refreshError == Nothing then
+        refreshActiveResultsRaw model
+    else ( model, Cmd.none )
+
+
+completeSupersededRead : Model -> ( Model, Cmd Msg )
+completeSupersededRead model =
+    continueAutomaticRefresh (updateObservation (\state -> { state | loading = False, facetLoading = False, expectedOffset = Nothing, facetExpectedOffset = Nothing }) model)
+
+
+acceptResultRefresh : Int -> Api.PaginatedResult Api.Observation -> Model -> ( Model, Cmd Msg )
+acceptResultRefresh offset page model =
+    acceptRefreshChunk offset page.hasMore (List.length page.items)
+        (\pass -> { pass | items = List.foldl (\item -> Dict.insert item.id item) pass.items page.items, orderedIds = appendUnique pass.orderedIds (List.map .id page.items) }) model
+
+
+appendUnique : List String -> List String -> List String
+appendUnique prior added =
+    let
+        ( reversed, _ ) = List.foldl (\key ( keys, seen ) -> if Set.member key seen then ( keys, seen ) else ( key :: keys, Set.insert key seen )) ( [], Set.fromList prior ) added
+    in prior ++ List.reverse reversed
+
+
+acceptRefreshChunk : Int -> Bool -> Int -> (ObservationRefreshPass -> ObservationRefreshPass) -> Model -> ( Model, Cmd Msg )
+acceptRefreshChunk offset hasMore count merge model =
+    let state = model.observations in
+    case state.refreshPass of
+        Nothing -> ( model, Cmd.none )
+        Just old ->
+            if old.query /= querySnapshot state then ( model, Cmd.none )
+            else if old.invalidated then
+                refreshActiveResultsRaw (updateObservation (\current -> { current | refreshPass = Nothing, loading = False, facetLoading = False, expectedOffset = Nothing, facetExpectedOffset = Nothing, refreshPending = False }) model)
+            else
+                let
+                    pass = merge old
+                    before = if state.requestMode == ObservationFacetMode then List.length old.facetKeys else List.length old.orderedIds
+                    after = if state.requestMode == ObservationFacetMode then List.length pass.facetKeys else List.length pass.orderedIds
+                    next = offset + count
+                    fail message = ( updateObservation (\current -> { current | refreshPass = Nothing, refreshPending = False, refreshError = Just message, loading = False, facetLoading = False, expectedOffset = Nothing, facetExpectedOffset = Nothing }) model, Cmd.none )
+                in
+                if count > 50 || (hasMore && (count /= 50 || after <= before)) then fail "Automatic refresh is incomplete: the page made no valid progress."
+                else if hasMore && next >= 10000 && next < old.targetOffset then fail "Automatic refresh is incomplete: the bounded offset limit was reached."
+                else if hasMore && next < old.targetOffset then
+                    fetchRefreshPage next (updateObservation (\current -> { current | refreshPass = Just pass }) model)
+                else
                     let
-                        state =
-                            startResultRefresh mode model.sessionRequestEpoch workspaceId model.observations
-
-                        updated =
-                            updateObservation (always state) model
+                        currentItems = Dict.map (\identity item -> Dict.get identity state.items |> Maybe.map (preferNewerObservation item) |> Maybe.withDefault item) pass.items
+                        evidence = Dict.map (\identity match -> { match | observation = Dict.get identity currentItems |> Maybe.withDefault match.observation }) pass.matchEvidence
+                        committed = if state.requestMode == ObservationFacetMode then
+                            { state | facets = pass.facets, facetKeys = pass.facetKeys, facetHasMore = hasMore, facetNextOffset = next }
+                            else { state | items = currentItems, orderedIds = pass.orderedIds, matchEvidence = evidence, hasMore = hasMore, nextOffset = next }
+                        reconciled = List.foldl applyAuthoritativeObservation committed (Dict.values currentItems)
+                        finished = { reconciled | refreshPass = Nothing, refreshPending = False, refreshError = Nothing, resultsStale = False, loading = False, facetLoading = False, expectedOffset = Nothing, facetExpectedOffset = Nothing, failedRequest = Nothing }
                     in
-                    fetchPage 0 updated
-
-        Nothing ->
-            ( model, Cmd.none )
+                    ( updateObservation (always finished) model, Cmd.none )
 
 
 startResultRefresh : ObservationRequestMode -> Int -> String -> ObservationModel -> ObservationModel
@@ -1499,7 +1594,6 @@ startResultRefresh mode sessionEpoch workspaceId input =
         , requestSessionEpoch = sessionEpoch
         , queryFingerprint = resultFingerprint mode sessionEpoch workspaceId state
         , expectedOffset = Just 0
-        , nextOffset = 0
     }
 
 
@@ -1518,7 +1612,6 @@ startMatchRefresh sessionEpoch workspaceId input =
         , requestSessionEpoch = sessionEpoch
         , queryFingerprint = matchFingerprint sessionEpoch workspaceId state
         , expectedOffset = Just 0
-        , nextOffset = 0
     }
 
 
@@ -1530,6 +1623,9 @@ startFacetReload sessionEpoch workspaceId draftState =
     in
     { state
         | requestMode = ObservationFacetMode
+        , refreshPass = Nothing
+        , refreshPending = False
+        , refreshError = Nothing
         , facets = Dict.empty
         , facetKeys = []
         , facetHasMore = False
@@ -1558,7 +1654,6 @@ startFacetRefresh sessionEpoch workspaceId input =
         , facetRequestSessionEpoch = sessionEpoch
         , facetFingerprint = facetFingerprintFor sessionEpoch (facetQuery workspaceId 0 state)
         , facetExpectedOffset = Just 0
-        , facetNextOffset = 0
     }
 
 
@@ -1785,6 +1880,9 @@ startMatchReload sessionEpoch workspaceId paths draftState =
     in
     { state
         | items = Dict.empty
+        , refreshPass = Nothing
+        , refreshPending = False
+        , refreshError = Nothing
         , orderedIds = []
         , hasMore = False
         , loading = True
@@ -1917,6 +2015,10 @@ have accepted it. Keep the failed request independent of edited filter inputs.
 -}
 failResultPage : String -> Int -> String -> ObservationModel -> ObservationModel
 failResultPage workspaceId offset message state =
+    if state.refreshPass /= Nothing then
+        let invalidated = state.refreshPass |> Maybe.map .invalidated |> Maybe.withDefault False in
+        { state | refreshPass = Nothing, refreshPending = invalidated, refreshError = if invalidated then Nothing else Just ("Automatic refresh failed. " ++ message), loading = False, facetLoading = False, expectedOffset = Nothing, facetExpectedOffset = Nothing }
+    else
     let
         facets =
             state.requestMode == ObservationFacetMode
@@ -1947,6 +2049,8 @@ failResultPage workspaceId offset message state =
 
 retryResults : Model -> ( Model, Cmd Msg )
 retryResults model =
+    if model.observations.refreshError /= Nothing then refreshActiveResultsRaw model
+    else
     case ( repositoryWorkspaceId model, model.observations.failedRequest ) of
         ( Just workspaceId, Just failed ) ->
             let
@@ -2634,13 +2738,8 @@ applyCanonicalObservationWithProof conditionalProof candidate state =
                 (Maybe.map (\evidence -> { evidence | observation = accepted }))
                 state.matchEvidence
 
-        resultsStale =
-            -- A canonical entity response does not carry the active flat,
-            -- facet, exact-subject, or match membership proof.  Keep any row
-            -- the active page already owns, preserve selected detail, and ask
-            -- for an explicit bounded refresh instead of silently admitting a
-            -- selected/detail-only row to the current result set.
-            True
+        resultsStale = state.resultsStale || (existing /= Just accepted)
+
     in
     { state
         | items =
@@ -2653,6 +2752,8 @@ applyCanonicalObservationWithProof conditionalProof candidate state =
         , edit = edit
         , matchEvidence = matchEvidence
         , resultsStale = resultsStale
+        , refreshPending = state.refreshPending || (existing /= Just accepted)
+        , refreshPass = if existing /= Just accepted then Maybe.map (\pass -> { pass | invalidated = True }) state.refreshPass else state.refreshPass
     }
 
 
@@ -2738,7 +2839,7 @@ isLoadedOrSelected observationId state =
 
 markResultsStale : ObservationModel -> ObservationModel
 markResultsStale state =
-    { state | resultsStale = True }
+    { state | resultsStale = True, refreshPending = True, refreshPass = Maybe.map (\pass -> { pass | invalidated = True }) state.refreshPass }
 
 
 reconcileEditWithCanonical : Api.Observation -> Maybe ObservationEditState -> Maybe ObservationEditState
@@ -2786,6 +2887,8 @@ removeObservation observationId state =
     in
     { state
         | items = Dict.remove observationId state.items
+        , expandedSubjects = Dict.remove observationId state.expandedSubjects
+        , preferenceValue = let prefs = state.preferenceValue in { prefs | detail = if Maybe.map .id prefs.detail == Just observationId then Nothing else prefs.detail, subjects = List.filter ((/=) observationId) prefs.subjects }
         , orderedIds = List.filter ((/=) observationId) state.orderedIds
         , matchEvidence = Dict.remove observationId state.matchEvidence
         , selectedId =
@@ -2819,6 +2922,8 @@ removeObservation observationId state =
             else
                 state.activeDetailRequest
         , resultsStale = state.resultsStale || state.requestMode == ObservationFacetMode
+        , refreshPending = state.refreshPending || isLoadedOrSelected observationId state
+        , refreshPass = if isLoadedOrSelected observationId state then Maybe.map (\pass -> { pass | invalidated = True }) state.refreshPass else state.refreshPass
         , edit =
             state.edit
                 |> Maybe.andThen
@@ -3139,7 +3244,7 @@ viewportLifetime model =
     let state = model.observations in
     { workspace = if model.activeTab == ObservationsTab then repositoryWorkspaceId model |> Maybe.withDefault "" else ""
     , epoch = model.sessionRequestEpoch
-    , generation = String.join ":" [ modeName state.requestMode, String.fromInt state.requestGeneration, String.fromInt state.facetRequestGeneration, state.queryFingerprint, state.facetFingerprint ]
+    , generation = if state.requestMode == ObservationFacetMode then facetFingerprintFor model.sessionRequestEpoch (facetQuery (Maybe.withDefault "" model.selectedWorkspaceId) 0 state) else resultViewFingerprint model.sessionRequestEpoch (Maybe.withDefault "" model.selectedWorkspaceId) state
     , revision = state.viewport.stamp.revision }
 
 
@@ -3147,8 +3252,9 @@ viewportLifetime model =
 for a draft keystroke. Transport caches and their counts remain untouched.
 -}
 refreshViewport : Model -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
-refreshViewport previous ( model, command ) =
+refreshViewport previous ( incoming, command ) =
     let
+        ( model, preferenceCmd ) = syncPreferences previous incoming
         old = previous.observations
         state = model.observations
         lifetime = viewportLifetime model
@@ -3174,8 +3280,137 @@ refreshViewport previous ( model, command ) =
         updated = { state | resultRows = rows, viewport = viewport, inlineOwner = owner, pendingReturnNavigation = pending }
         synchronize = changed || navigationChanged || old.selectedId /= state.selectedId || old.detailReturnTarget /= state.detailReturnTarget || old.viewport.focus /= viewport.focus || old.viewport.returnPin /= viewport.returnPin || old.viewport.stamp /= viewport.stamp
     in
-    ( { model | observations = updated }
-    , Cmd.batch [ command, if synchronize then Ports.syncObservationViewport (ObservationViewport.sync changed 0 Nothing viewport) else Cmd.none ] )
+    let
+        ( automatic, automaticCmd ) = continueAutomaticRefresh { model | observations = updated }
+    in
+    ( automatic, Cmd.batch [ command, preferenceCmd, automaticCmd, if synchronize then Ports.syncObservationViewport (ObservationViewport.sync changed 0 Nothing viewport) else Cmd.none ] )
+
+
+preferenceMode : ObservationRequestMode -> String
+preferenceMode mode =
+    case mode of
+        ObservationFlatMode -> "flat"
+        ObservationExactSubjectMode -> "exact"
+        ObservationMatchMode -> "match"
+        ObservationFacetMode -> "facets"
+
+
+rememberPreferences : Model -> Model
+rememberPreferences model =
+    updateObservation (\state ->
+        { state | preferenceTouch = state.preferenceTouch + 1
+        , preferencePendingDetail = False
+        , preferenceEntryHistory = Nothing
+        , preferenceValue = Preferences.normalize
+            { detail = state.selectedId |> Maybe.map (\observationId -> { id = observationId, occurrence = state.detailReturnTarget, mode = preferenceMode state.requestMode })
+            , subjects = Dict.toList state.expandedSubjects |> List.filter Tuple.second |> List.map Tuple.first
+            , groups = Dict.toList state.expandedMatchGroups |> List.filter Tuple.second |> List.map Tuple.first }
+        }) model
+
+
+authorizedPreferenceOwner : Model -> Maybe Preferences.Owner
+authorizedPreferenceOwner model =
+    if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) then Nothing else
+    Maybe.map2 (\workspace context ->
+        { workspaceId = workspace, actorId = context.principal.actorId, authority = context.principal.authority
+        , runtimeId = model.flags.sessionId, epoch = model.sessionRequestEpoch, requestId = model.observations.nextPreferenceRequest, touch = model.observations.preferenceTouch })
+        (repositoryWorkspaceId model) model.sessionContext
+
+
+samePreferenceScope : Preferences.Owner -> Preferences.Owner -> Bool
+samePreferenceScope a b =
+    a.workspaceId == b.workspaceId && a.actorId == b.actorId && a.authority == b.authority && a.runtimeId == b.runtimeId && a.epoch == b.epoch
+
+
+preferenceCommand : String -> Preferences.Owner -> Encode.Value -> Cmd Msg
+preferenceCommand operation owner value =
+    Ports.observationPreferenceCommand (Encode.object [ ( "operation", Encode.string operation ), ( "owner", Preferences.ownerValue owner ), ( "value", value ) ])
+
+
+syncPreferences : Model -> Model -> ( Model, Cmd Msg )
+syncPreferences previous model =
+    let
+        state = model.observations
+        retire = Ports.observationPreferenceCommand (Encode.object [ ( "operation", Encode.string "retire" ) ])
+    in
+    case authorizedPreferenceOwner model of
+        Nothing ->
+            if state.preferenceOwner == Nothing && previous.observations.preferenceOwner == Nothing then ( model, Cmd.none ) else
+            ( updateObservation (\current -> { current | preferenceOwner = Nothing, preferenceValue = Preferences.empty, preferenceHydrated = False, preferencePendingDetail = False, preferenceEntryHistory = Nothing
+                , expandedSubjects = Dict.empty, expandedMatchGroups = Dict.empty, nextPreferenceRequest = current.nextPreferenceRequest + 1 }) model, retire )
+        Just authorized ->
+            case state.preferenceOwner of
+                Just owner ->
+                    if samePreferenceScope owner authorized then
+                        if state.preferenceHydrated && state.preferencePendingDetail && model.activeTab == ObservationsTab then
+                            restorePendingPreferences model
+                        else if state.preferenceHydrated && (state.preferenceValue /= previous.observations.preferenceValue || state.preferenceTouch /= previous.observations.preferenceTouch || not previous.observations.preferenceHydrated) then
+                            ( model, preferenceCommand "write" owner (Preferences.encode owner state.preferenceValue) )
+                        else ( model, Cmd.none )
+                    else
+                        let clean = { state | preferenceOwner = Nothing, preferenceValue = Preferences.empty, preferenceHydrated = False, preferencePendingDetail = False, preferenceEntryHistory = Nothing, expandedSubjects = Dict.empty, expandedMatchGroups = Dict.empty } in
+                        syncPreferences previous { model | observations = clean }
+                Nothing ->
+                    ( { model | observations = { state | preferenceOwner = Just authorized, preferenceHydrated = False, nextPreferenceRequest = state.nextPreferenceRequest + 1 } }
+                    , preferenceCommand "read" authorized Encode.null )
+
+
+hydratePreferences : Encode.Value -> Model -> ( Model, Cmd Msg )
+hydratePreferences payload model =
+    let state = model.observations in
+    case ( state.preferenceOwner, Decode.decodeValue (Decode.field "owner" Preferences.ownerDecoder) payload, authorizedPreferenceOwner model ) of
+        ( Just owner, Ok received, Just authorized ) ->
+            if owner /= received || not (samePreferenceScope owner authorized) || state.preferenceHydrated then ( model, Cmd.none ) else
+            let
+                accepted = { state | preferenceHydrated = True }
+                value = Decode.decodeValue (Decode.field "value" (Preferences.decoder owner)) payload
+            in
+            if state.preferenceTouch /= owner.touch then ( { model | observations = { accepted | preferenceEntryHistory = Nothing } }, Cmd.none ) else
+            case value of
+                Err _ -> ( { model | observations = { accepted | preferenceEntryHistory = Nothing } }, Cmd.none )
+                Ok prefs ->
+                    let
+                        hydrated = { accepted | preferenceValue = prefs, preferencePendingDetail = prefs.detail /= Nothing, preferenceEntryHistory = if prefs.detail == Nothing then Nothing else accepted.preferenceEntryHistory, expandedSubjects = Dict.fromList (List.map (\key -> ( key, True )) prefs.subjects)
+                            , expandedMatchGroups = Dict.fromList (List.map (\key -> ( key, True )) prefs.groups) }
+                        ready = { model | observations = hydrated }
+                    in
+                    restorePendingPreferences ready
+        _ -> ( model, Cmd.none )
+
+
+restorePendingPreferences : Model -> ( Model, Cmd Msg )
+restorePendingPreferences model =
+    let
+        state = model.observations
+        currentOwner = Maybe.map2 samePreferenceScope state.preferenceOwner (authorizedPreferenceOwner model) |> Maybe.withDefault False
+        urlContext = Helpers.observationUrlContext model.url
+        urlKeys = model.url.fragment |> Maybe.withDefault "" |> String.split "&" |> List.filterMap (String.split "=" >> List.head >> Maybe.andThen Url.percentDecode)
+        ownedEntryHistory = state.preferenceEntryHistory == Just (Url.toString model.url)
+        urlWins = not ownedEntryHistory && urlContext.fragment.tab == ObservationsTab && (urlContext.fragment.observationId /= Nothing || urlContext.notice /= Nothing || List.any (\key -> List.member key [ "observation", "ov", "oq", "ox" ]) urlKeys)
+        consumed = { model | observations = { state | preferencePendingDetail = False, preferenceEntryHistory = Nothing } }
+    in
+    if not currentOwner || not state.preferenceHydrated || not state.preferencePendingDetail || model.activeTab /= ObservationsTab then
+        ( model, Cmd.none )
+    else if state.preferenceEntryHistory /= Nothing && urlContext.fragment.tab /= ObservationsTab then
+        -- The early tab entry's history command has not reached UrlChanged yet.
+        ( model, Cmd.none )
+    else
+        case state.preferenceValue.detail of
+            Just detail ->
+                if urlContext.notice == Nothing && urlContext.fragment.observationId == Just detail.id && state.selectedId == Just detail.id && detail.mode == preferenceMode state.requestMode then
+                    ( { consumed | observations = { state | preferencePendingDetail = False, preferenceEntryHistory = Nothing, detailReturnTarget = detail.occurrence } }, Cmd.none )
+                else if urlWins || state.selectedId /= Nothing then
+                    ( consumed, Cmd.none )
+                else
+                    let
+                        ( selected, command ) = selectObservation detail.id consumed
+                        selectedState = selected.observations
+                        occurrence = if detail.mode == preferenceMode selectedState.requestMode then detail.occurrence else Nothing
+                        restored = { selected | observations = { selectedState | detailReturnTarget = occurrence } }
+                        ( linked, linkCmd ) = if ownedEntryHistory then Helpers.writeObservationHistory False restored else ( restored, Cmd.none )
+                    in
+                    ( linked, Cmd.batch [ command, linkCmd ] )
+            Nothing -> ( consumed, Cmd.none )
 
 
 updateViewport : Encode.Value -> Model -> ( Model, Cmd Msg )
@@ -3646,7 +3881,7 @@ viewObservationResults canEdit workspaceId ariaLabel emptyHeading state =
                 viewRequestError "Unable to load observations" message (not (List.isEmpty observations)) state
 
             Nothing ->
-                if not state.loading && List.isEmpty observations then
+                if not state.loading && state.refreshError == Nothing && List.isEmpty observations then
                     div [ class "empty-state observation-state observation-state-empty" ]
                         [ h3 [] [ text emptyHeading ]
                         , p [] [ text "Try clearing or changing the active provenance filters." ]
@@ -3679,14 +3914,11 @@ viewObservationResults canEdit workspaceId ariaLabel emptyHeading state =
 
 viewStaleResultsNotice : ObservationModel -> Html Msg
 viewStaleResultsNotice state =
-    if state.resultsStale then
-        div [ class "observation-state observation-state-stale", attribute "role" "status" ]
-            [ text "Results may have changed."
-            , button [ class "btn btn-secondary", type_ "button", onClick RefreshObservationResults, disabled (state.loading || state.facetLoading) ] [ text "Refresh results" ]
-            ]
-
-    else
-        text ""
+    case state.refreshError of
+        Just message ->
+            div [ class "observation-state observation-state-error", attribute "role" "status" ]
+                [ text message, button [ class "btn btn-secondary observation-retry", type_ "button", onClick RetryObservationResults, disabled (state.loading || state.facetLoading) ] [ text "Retry refresh" ] ]
+        Nothing -> text ""
 
 
 viewRequestError : String -> String -> Bool -> ObservationModel -> Html Msg
@@ -3738,7 +3970,7 @@ viewFacetCatalogue canEdit workspaceId state =
                 viewRequestError "Unable to load shared subjects" message (not (List.isEmpty facets)) state
 
             Nothing ->
-                if not state.facetLoading && List.isEmpty facets then
+                if not state.facetLoading && state.refreshError == Nothing && List.isEmpty facets then
                     div [ class "empty-state observation-state observation-state-empty" ]
                         [ h3 [] [ text "No subjects found" ]
                         , p [] [ text "Try clearing or changing the shared search, kind, or Git SHA filters." ]
@@ -3857,7 +4089,8 @@ viewObservationRow canEdit owner state context observation =
             div [ id (cardId ++ "-body"), class "observation-folded-content" ]
                 [ div [ class "card-body observation-summary" ] [ text (plainTextExcerpt 240 observation.content) ]
                 , div [ class "card-meta-group observation-card-meta observation-card-footer" ]
-                    [ div [ class "card-meta-row" ]
+                    [ dl [ class "observation-detail-meta" ] [ viewSubjects cardId observation.id state.expandedSubjects observation.subjects ]
+                    , div [ class "card-meta-row" ]
                         [ span [ class "card-meta observation-sha" ] [ text "Provenance revision: ", Helpers.copyableValue "" "provenance revision" observation.gitSha (String.left 12 observation.gitSha ++ "…") ]
                         , span [ class "card-meta observation-updated" ] [ text ("Content updated: " ++ formatObservationTimestamp observation.updatedAt) ]
                         ]
@@ -3958,7 +4191,7 @@ viewDetail canEdit state =
                             , div [ class "observation-card-footer" ]
                                 [ dl [ class "observation-detail-meta" ]
                                     [ viewDetailMeta "Workspace ID" observation.workspaceId "observation-detail-workspace"
-                                    , viewSubjects observation.subjects
+                                    , viewSubjects (Maybe.withDefault "observation-detached" (selectedOwner state)) observation.id state.expandedSubjects observation.subjects
                                     , viewProvenanceRevision observation.gitSha
                                     , viewDetailMeta "Created" (formatObservationTimestamp observation.createdAt) ""
                                     , viewDetailMeta "Content updated" (formatObservationTimestamp observation.updatedAt) ""
@@ -4199,12 +4432,20 @@ viewProvenanceRevision gitSha =
         ]
 
 
-viewSubjects : List Api.ObservationSubject -> Html Msg
-viewSubjects subjects =
+viewSubjects : String -> String -> Dict.Dict String Bool -> List Api.ObservationSubject -> Html Msg
+viewSubjects occurrence observationId expanded subjects =
+    let
+        open = Dict.get observationId expanded |> Maybe.withDefault False
+        bodyId = "observation-subjects-" ++ occurrence ++ "-" ++ domToken observationId
+    in
     div [ class "observation-detail-meta-row observation-detail-subjects" ]
-        [ dt [ class "observation-detail-meta-label" ] [ text "Subjects" ]
-        , dd [ class "observation-detail-meta-value observation-detail-subject" ]
-            (List.map viewSubject subjects)
+        [ dt [ class "observation-detail-meta-label" ]
+            [ button [ type_ "button", class "tree-toggle observation-subjects-toggle", onClick (ToggleObservationSubjects observationId)
+                , attribute "aria-expanded" (if open then "true" else "false"), attribute "aria-controls" bodyId
+                , attribute "aria-label" ((if open then "Hide" else "Show") ++ " ordered subjects") ] [ text (if open then "▼" else "▶") ]
+            , text ("Subjects (" ++ String.fromInt (List.length subjects) ++ ")") ]
+        , dd [ id bodyId, class "observation-detail-meta-value observation-detail-subject", hidden (not open) ]
+            (if open then List.map viewSubject subjects else [])
         ]
 
 
@@ -4247,3 +4488,9 @@ bootstrapObservation token model =
                     in
                     ( { model | observations = state }, Api.fetchObservations model.flags.apiUrl (listQuery workspaceId 0 state) (GotObservations workspaceId (Just token) state.requestGeneration state.queryFingerprint 0) )
         Nothing -> ( model, Cmd.none )
+
+
+resultViewFingerprint : Int -> String -> ObservationModel -> String
+resultViewFingerprint epoch workspaceId state =
+    if state.requestMode == ObservationMatchMode then matchFingerprint epoch workspaceId state
+    else resultFingerprint state.requestMode epoch workspaceId state

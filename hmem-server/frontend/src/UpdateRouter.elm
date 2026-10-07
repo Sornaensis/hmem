@@ -271,7 +271,7 @@ route msg model =
         SubmitSearch ->
             Ok (Feature.Search.update msg model)
 
-        GotUnifiedSearchResults _ _ _ _ ->
+        GotUnifiedSearchResults _ _ _ _ _ ->
             Ok (Feature.Search.update msg model)
 
         NavigateToSearchResult _ _ ->
@@ -359,6 +359,12 @@ route msg model =
             Ok (Feature.Observation.update msg model)
 
         LoadMoreObservationFacets ->
+            Ok (Feature.Observation.update msg model)
+
+        ToggleObservationSubjects _ ->
+            Ok (Feature.Observation.update msg model)
+
+        ObservationPreferencesReceived _ ->
             Ok (Feature.Observation.update msg model)
 
         ToggleObservationMatchGroup _ ->

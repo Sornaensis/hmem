@@ -72,12 +72,19 @@ for (const width of [1440, 320]) test('production ' + width + ' CSS-pixel previe
     await detail.getByRole('button', { name: 'Copy full content', exact: true }).click()
     await h.page.waitForFunction(() => window.previewCopies.length === 2, null, { timeout: 5000 })
     assert.equal(digest(await h.page.evaluate(() => window.previewCopies[1])), digest(fullBoundary))
+    await detail.locator('.observation-subjects-toggle').click()
+    await detail.locator('.observation-subject-row .observation-subject-copy').first().waitFor({ timeout: 5000 })
     assert.deepEqual(await detail.locator('.observation-subject-row .observation-subject-copy').allTextContents(), [longSubject, 'src/**/*.elm', 'src/Extra.elm'])
     assert.equal(await detail.locator('.observation-detail-sha .copyable-value').textContent(), h.sha)
     assert.match(await detail.locator('.observation-detail-meta').textContent(), /Content updated2026-10-06 12:35:56\.123 UTC/)
     const returnCalls = await h.page.evaluate(() => window.previewReturnFocus)
     await h.page.locator('[data-observation-detail-anchor]').click()
     await h.page.waitForFunction(({ id, count }) => !document.getElementById('observation-detail') && window.previewReturnFocus > count && document.activeElement?.id === id, { id: cardId, count: returnCalls }, { timeout: 5000 })
+    assert.deepEqual(await h.page.locator('.observation-result[data-observation-id="boundary"] .observation-subject-row .observation-subject-copy').allTextContents(), [longSubject, 'src/**/*.elm', 'src/Extra.elm'], 'Subject disclosure remains open independently of detail collapse')
+    // Deliberate user scrolling supersedes the completed return's focused-arrow
+    // reveal authority before scanning beyond this tall, open subject list.
+    await h.page.locator('#main-content-scroll').hover()
+    await h.page.mouse.wheel(0, 1)
     const multiline = h.page.locator('.observation-result[data-observation-id="multiline"] .observation-card')
     await revealObservationRow(h.page, multiline); await multiline.click(); await h.idle()
     assert.equal(await h.page.locator('.observation-detail-content').textContent(), longMultiline)
@@ -88,7 +95,11 @@ for (const width of [1440, 320]) test('production ' + width + ' CSS-pixel previe
   } catch (error) {
     const state = await h.page.evaluate(() => ({ focus: document.activeElement?.id, stamp: document.getElementById('observation-panel')?.dataset.observationContext,
       loading: [...document.querySelectorAll('.loading-indicator')].map(element => element.textContent), detail: !!document.getElementById('observation-detail'),
-      detailLength: document.querySelector('.observation-detail-content')?.textContent.length }))
+      detailLength: document.querySelector('.observation-detail-content')?.textContent.length,
+      viewport: { ...document.getElementById('observation-viewport')?.dataset },
+      scroll: (() => { const host = document.getElementById('main-content-scroll'); return { top: host?.scrollTop, height: host?.scrollHeight, clientHeight: host?.clientHeight, rect: host?.getBoundingClientRect().toJSON(), list: document.getElementById('observation-viewport')?.getBoundingClientRect().toJSON() } })(),
+      rows: [...document.querySelectorAll('[data-observation-key]')].map(row => ({ key: row.dataset.observationKey, position: row.dataset.observationPosition, rect: row.getBoundingClientRect().toJSON(), observation: row.querySelector('.observation-result')?.dataset.observationId })),
+      active: document.activeElement?.outerHTML?.slice(0, 400) }))
     throw new Error(error.message + ' ' + JSON.stringify({ state, errors: h.errors, requests: h.receipts.map(({ endpoint, method, done }) => ({ endpoint, method, done })) }))
   } finally { await h.close() }
 })

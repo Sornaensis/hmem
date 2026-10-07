@@ -48,7 +48,7 @@ suite =
 
                     pending =
                         { base
-                            | activeRequest = Just { workspaceId = "workspace-b", token = 2, query = "same query" }
+                            | activeRequest = Just { workspaceId = "workspace-b", sessionEpoch = 0, token = 2, query = "same query" }
                             , activeRequestQuery = Just "same query"
                             , nextRequestToken = 3
                         }

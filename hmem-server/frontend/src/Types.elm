@@ -8,6 +8,7 @@ import Feature.ChangeStream
 import HierarchyViewport
 import Array exposing (Array)
 import ObservationViewport
+import ObservationPreferences
 import Http
 import Json.Encode as Encode
 import Set exposing (Set)
@@ -242,6 +243,7 @@ type alias NavigationFocusRequest =
 
 type alias SearchRequest =
     { workspaceId : String
+    , sessionEpoch : Int
     , token : Int
     , query : String
     }
@@ -249,6 +251,8 @@ type alias SearchRequest =
 
 type alias SearchModel =
     { query : String
+    , submittedQuery : Maybe String
+    , refreshPending : Bool
     , unifiedResults : Maybe Api.UnifiedSearchResults
     , isSearching : Bool
     , searchError : Maybe String
@@ -330,6 +334,17 @@ type alias ObservationModel =
     , hasMore : Bool
     , loading : Bool
     , resultsStale : Bool
+    , refreshPass : Maybe ObservationRefreshPass
+    , refreshPending : Bool
+    , refreshError : Maybe String
+    , expandedSubjects : Dict String Bool
+    , preferenceOwner : Maybe ObservationPreferences.Owner
+    , preferenceValue : ObservationPreferences.Preferences
+    , preferenceHydrated : Bool
+    , preferencePendingDetail : Bool
+    , preferenceEntryHistory : Maybe String
+    , preferenceTouch : Int
+    , nextPreferenceRequest : Int
     , error : Maybe String
     , query : String
     , subjectKind : Maybe Api.SubjectKind
@@ -380,6 +395,18 @@ type alias ObservationModel =
     , deleteConfirmation : Maybe ObservationDeleteState
     , nextCurationContextToken : Int
     , nextMutationRequestToken : Int
+    }
+
+
+type alias ObservationRefreshPass =
+    { query : ObservationAppliedQuery
+    , targetOffset : Int
+    , items : Dict String Api.Observation
+    , orderedIds : List String
+    , matchEvidence : Dict String Api.ObservationMatch
+    , facets : Dict String Api.ObservationSubjectFacet
+    , facetKeys : List String
+    , invalidated : Bool
     }
 
 
@@ -980,7 +1007,7 @@ type Msg
     | AutoDismissToast Int
     | SearchInput String
     | SubmitSearch
-    | GotUnifiedSearchResults String Int String (Result Http.Error Api.UnifiedSearchResults)
+    | GotUnifiedSearchResults String Int Int String (Result Http.Error Api.UnifiedSearchResults)
     | NavigateToSearchResult String String
     | SetFilterShowOnly FilterShowOnly
     | SetFilterPriority FilterPriority
@@ -1011,6 +1038,8 @@ type Msg
     | LoadMoreObservations
     | LoadMoreObservationFacets
     | ToggleObservationMatchGroup String
+    | ToggleObservationSubjects String
+    | ObservationPreferencesReceived Encode.Value
     | SelectObservation String
     | SelectObservationFrom String String
     | ReturnObservationResults

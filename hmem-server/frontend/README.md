@@ -51,6 +51,23 @@ label is abbreviated. Copying preserves selection and editing; subject drilling
 uses its own control. Clipboard feedback follows browser success or failure.
 Editable identifier inputs keep their normal editing behavior.
 
+Live Observation changes automatically refresh the applied discovery query, including
+the previously loaded pages. Requests coalesce into one active pass; old results stay
+visible until a complete guarded pass replaces membership. Equal results preserve the
+viewport and selection. A failed or incomplete refresh keeps the cache and offers
+Retry refresh. Draft filters are not submitted by background refresh. Unified search
+similarly retains its accepted results and refreshes its submitted search text.
+
+Ordered subjects have their own arrow, independent of the full read-only card and
+file-match groups. Card, subject and group preferences survive reloads in a versioned
+workspace/actor/authority storage namespace. Storage contains bounded UI hints only,
+not content, results or drafts. Tagged session and read-request ownership reject late
+hydration; explicit URL context and local preference actions take priority. A saved
+card hydrated on another tab is restored on the first authorized Observation entry,
+unless intervening URL or local preference intent supersedes it. Storage
+failure leaves the page usable. Offset pagination remains a bounded query, not a
+snapshot of concurrent mutations.
+
 Each content save sends the opaque version captured when editing began. A
 competing write produces a conflict and preserves the draft, even before its
 live notification arrives. Keep my draft explicitly adopts the latest version

@@ -14,6 +14,12 @@ module Feature.Observation exposing
     , facetResponseMatches
     , groupPathMatches
     , init
+    , pageSize
+    , countQuery
+    , hasAppliedCountFilter
+    , syncCounts
+    , invalidateCounts
+    , validPage
     , retireSessionState
     , hasProtectedEdit
     , hasUnappliedFilters
@@ -83,6 +89,7 @@ import Url
 init : ObservationModel
 init =
     { items = Dict.empty
+    , counts = emptyCounts
     , resultRows = Array.empty
     , viewport = ObservationViewport.init
     , orderedIds = []
@@ -153,13 +160,107 @@ init =
     }
 
 
+pageSize : Int
+pageSize =
+    200
+
+
+validPage : Int -> Bool -> List String -> List String -> Bool
+validPage offset hasMore received existing =
+    List.length received <= pageSize
+        && (not hasMore || (List.length received == pageSize && List.any (\key -> offset == 0 || not (List.member key existing)) received))
+
+
+emptyCounts : ObservationCountState
+emptyCounts =
+    { owner = Nothing, active = Nothing, nextToken = 1, generation = 0, pending = False, current = False, value = Nothing, valueFingerprint = "", settledFingerprint = "", error = Nothing }
+
+
+countQuery : String -> ObservationModel -> Api.ObservationCountQuery
+countQuery workspaceId state =
+    let value = listQuery workspaceId 0 state in
+    { workspaceId = workspaceId, subjectKind = value.subjectKind, subject = value.subject, gitSha = value.gitSha, query = value.query
+    , paths = if state.requestMode == ObservationMatchMode then Just (appliedState state).matchAppliedPaths else Nothing }
+
+
+countFingerprint : String -> ObservationModel -> String
+countFingerprint workspaceId state =
+    let value = countQuery workspaceId state in
+    Encode.encode 0 (Encode.list Encode.string [ workspaceId, Maybe.withDefault "" (Maybe.map Api.subjectKindToString value.subjectKind), Maybe.withDefault "" value.subject, Maybe.withDefault "" value.gitSha, Maybe.withDefault "" value.query, Encode.encode 0 (Encode.list Encode.string (Maybe.withDefault [] value.paths)) ])
+
+
+hasAppliedCountFilter : ObservationModel -> Bool
+hasAppliedCountFilter state =
+    let value = countQuery "" state in
+    value.subjectKind /= Nothing || value.subject /= Nothing || value.gitSha /= Nothing || value.query /= Nothing || not (List.isEmpty (Maybe.withDefault [] value.paths))
+
+
+countActor : Model -> String
+countActor model =
+    model.sessionContext |> Maybe.map (\session -> Encode.encode 0 (Encode.list Encode.string [ session.authMode, session.principal.actorType, session.principal.actorId, session.principal.authority, Maybe.withDefault "" session.principal.grantUserId, Permissions.currentWorkspaceRoleLabel model ])) |> Maybe.withDefault ""
+
+
+invalidateCounts : ObservationModel -> ObservationModel
+invalidateCounts state =
+    let counts = state.counts in
+    { state | counts = { counts | generation = counts.generation + 1, pending = True, current = False, error = Nothing } }
+
+
+syncCounts : Model -> ( Model, Cmd Msg )
+syncCounts model =
+    let counts = model.observations.counts in
+    if model.auth.status /= AuthReady || model.sessionContext == Nothing || not (Permissions.canReadCurrentWorkspace model) then
+        ( updateObservation (\state -> { state | counts = { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 } }) model, Cmd.none )
+    else
+        case repositoryWorkspaceId model of
+            Nothing -> ( updateObservation (\state -> { state | counts = { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 } }) model, Cmd.none )
+            Just workspaceId ->
+                let
+                    fingerprint = countFingerprint workspaceId model.observations
+                    owner = { workspaceId = workspaceId, sessionEpoch = model.sessionRequestEpoch, actor = countActor model, token = 0, generation = 0, fingerprint = "" }
+                    previousOwner = counts.owner
+                    changedOwner = previousOwner /= Just owner
+                    owned = if changedOwner then { emptyCounts | owner = Just owner, nextToken = counts.nextToken, generation = counts.generation + 1, pending = True } else counts
+                    requestedFingerprint = Maybe.map .fingerprint owned.active |> Maybe.withDefault owned.settledFingerprint
+                    changedFilter = requestedFingerprint /= fingerprint
+                    queued = { owned | pending = owned.pending || changedFilter, error = if changedFilter then Nothing else owned.error }
+                in
+                if queued.active == Nothing && queued.pending && queued.error == Nothing then
+                    let
+                        guard = { owner | token = queued.nextToken, generation = queued.generation, fingerprint = fingerprint }
+                        started = { queued | active = Just guard, nextToken = queued.nextToken + 1, pending = False }
+                    in
+                    ( updateObservation (\state -> { state | counts = started }) model, Api.fetchObservationCounts model.flags.apiUrl (countQuery workspaceId model.observations) (GotObservationCounts guard) )
+                else
+                    ( updateObservation (\state -> { state | counts = queued }) model, Cmd.none )
+
+
+acceptCounts : ObservationCountGuard -> Result Http.Error Api.ObservationCounts -> Model -> ( Model, Cmd Msg )
+acceptCounts guard result model =
+    let counts = model.observations.counts in
+    if counts.active /= Just guard then ( model, Cmd.none )
+    else
+        let
+            owned = guard.workspaceId == Maybe.withDefault "" (repositoryWorkspaceId model) && guard.sessionEpoch == model.sessionRequestEpoch && guard.actor == countActor model && model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model
+            current = owned && guard.generation == counts.generation && guard.fingerprint == countFingerprint guard.workspaceId model.observations && not counts.pending
+            completed = { counts | active = Nothing, settledFingerprint = guard.fingerprint }
+            settled = if not current then { completed | pending = owned, error = Nothing }
+                else case result of
+                    Ok value -> if value.workspaceId == guard.workspaceId then { completed | value = Just value, valueFingerprint = guard.fingerprint, current = True, error = Nothing }
+                        else { completed | current = False, error = Just "Observation counts returned the wrong workspace." }
+                    Err _ -> { completed | current = False, error = Just "Unable to load Observation counts." }
+        in
+        syncCounts (updateObservation (\state -> { state | counts = settled }) model)
+
+
 {-| Read permission may be revoked and regranted within the same session epoch.
 Retire private state while keeping request/navigation identities monotonic.
 -}
 retireSessionState : ObservationModel -> ObservationModel
 retireSessionState previous =
     { init
-        | requestGeneration = previous.requestGeneration + 1
+        | counts = let counts = previous.counts in { emptyCounts | nextToken = counts.nextToken, generation = counts.generation + 1 }
+        , requestGeneration = previous.requestGeneration + 1
         , facetRequestGeneration = previous.facetRequestGeneration + 1
         , nextDetailRequestToken = previous.nextDetailRequestToken
         , nextCurationContextToken = previous.nextCurationContextToken
@@ -281,6 +382,12 @@ update msg model =
 updateRaw : Msg -> Model -> ( Model, Cmd Msg )
 updateRaw msg model =
     case msg of
+        GotObservationCounts guard result ->
+            acceptCounts guard result model
+
+        RetryObservationCounts ->
+            syncCounts (updateObservation (\state -> let counts = state.counts in { state | counts = { counts | error = Nothing, pending = True } }) model)
+
         ObservationPreferencesReceived payload ->
             hydratePreferences payload model
 
@@ -534,7 +641,9 @@ updateRaw msg model =
                         if model.observations.refreshPass /= Nothing then
                             acceptRefreshChunk offset paginated.hasMore (List.length paginated.items)
                                 (\pass -> { pass | items = List.foldl (\match -> Dict.insert match.observation.id match.observation) pass.items paginated.items, orderedIds = appendUnique pass.orderedIds (List.map (.observation >> .id) paginated.items), matchEvidence = List.foldl (\match -> Dict.insert match.observation.id match) pass.matchEvidence paginated.items }) model
-                        else ( updateObservation (mergeMatchPage offset paginated) model, Cmd.none )
+                        else if validPage offset paginated.hasMore (List.map (\item -> item.observation.id) paginated.items) model.observations.orderedIds then
+                            ( updateObservation (mergeMatchPage offset paginated) model, Cmd.none )
+                        else ( updateObservation (failResultPage workspaceId offset "File matches are incomplete: the page made no valid progress.") model, Cmd.none )
 
                     Err _ ->
                         ( updateObservation (failResultPage workspaceId offset "Failed to match repository files.") model, Cmd.none )
@@ -551,7 +660,9 @@ updateRaw msg model =
                         if model.observations.refreshPass /= Nothing then
                             acceptRefreshChunk offset paginated.hasMore (List.length paginated.items)
                                 (\pass -> { pass | facets = List.foldl (\facet -> Dict.insert (facetKey facet.subjectKind facet.subject) facet) pass.facets paginated.items, facetKeys = appendUnique pass.facetKeys (List.map (\facet -> facetKey facet.subjectKind facet.subject) paginated.items) }) model
-                        else ( updateObservation (mergeFacetPage offset paginated) model, Cmd.none )
+                        else if validPage offset paginated.hasMore (List.map (\item -> facetKey item.subjectKind item.subject) paginated.items) model.observations.facetKeys then
+                            ( updateObservation (mergeFacetPage offset paginated) model, Cmd.none )
+                        else ( updateObservation (failResultPage workspaceId offset "Shared subjects are incomplete: the page made no valid progress.") model, Cmd.none )
 
                     Err _ ->
                         ( updateObservation (failResultPage workspaceId offset "Failed to load shared subjects.") model, Cmd.none )
@@ -1457,7 +1568,7 @@ refreshActiveResults : Model -> ( Model, Cmd Msg )
 refreshActiveResults model =
     let
         ( refreshed, resultsCmd ) =
-            refreshActiveResultsRaw model
+            refreshActiveResultsRaw (updateObservation invalidateCounts model)
 
         state =
             refreshed.observations
@@ -1495,7 +1606,7 @@ refreshActiveResultsRaw model =
                 else
                     let
                         facets = state.requestMode == ObservationFacetMode
-                        pass = { query = querySnapshot state, targetOffset = Basics.max 50 (if facets then state.facetNextOffset else state.nextOffset), items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty, facets = Dict.empty, facetKeys = [], invalidated = False }
+                        pass = { query = querySnapshot state, targetOffset = Basics.max pageSize (if facets then state.facetNextOffset else state.nextOffset), items = Dict.empty, orderedIds = [], matchEvidence = Dict.empty, facets = Dict.empty, facetKeys = [], invalidated = False }
                         started = if facets then startFacetRefresh model.sessionRequestEpoch workspaceId state
                             else if state.requestMode == ObservationMatchMode then startMatchRefresh model.sessionRequestEpoch workspaceId state
                             else startResultRefresh state.requestMode model.sessionRequestEpoch workspaceId state
@@ -1555,7 +1666,7 @@ acceptRefreshChunk offset hasMore count merge model =
                     next = offset + count
                     fail message = ( updateObservation (\current -> { current | refreshPass = Nothing, refreshPending = False, refreshError = Just message, loading = False, facetLoading = False, expectedOffset = Nothing, facetExpectedOffset = Nothing }) model, Cmd.none )
                 in
-                if count > 50 || (hasMore && (count /= 50 || after <= before)) then fail "Automatic refresh is incomplete: the page made no valid progress."
+                if count > pageSize || (hasMore && (count /= pageSize || after <= before)) then fail "Automatic refresh is incomplete: the page made no valid progress."
                 else if hasMore && next >= 10000 && next < old.targetOffset then fail "Automatic refresh is incomplete: the bounded offset limit was reached."
                 else if hasMore && next < old.targetOffset then
                     fetchRefreshPage next (updateObservation (\current -> { current | refreshPass = Just pass }) model)
@@ -1809,7 +1920,7 @@ listQuery workspaceId offset inputState =
                 Nothing
     , gitSha = nonEmpty state.gitSha
     , query = nonEmpty state.query
-    , limit = 50
+    , limit = pageSize
     , offset = offset
     }
 
@@ -1824,7 +1935,7 @@ facetQuery workspaceId offset inputState =
     , subjectKind = state.subjectKind
     , gitSha = nonEmpty state.gitSha
     , query = nonEmpty state.query
-    , limit = 50
+    , limit = pageSize
     , offset = offset
     }
 
@@ -1843,7 +1954,7 @@ matchQuery workspaceId paths offset inputState =
     , subjectKind = state.subjectKind
     , gitSha = nonEmpty state.gitSha
     , query = nonEmpty state.query
-    , limit = 50
+    , limit = pageSize
     , offset = offset
     }
 
@@ -1944,7 +2055,7 @@ matchFingerprint sessionEpoch workspaceId inputState =
         , state.matchAppliedPaths
             |> List.map (\path -> String.fromInt (String.length path) ++ ":" ++ path)
             |> String.join ""
-        , "50"
+        , String.fromInt pageSize
         ]
 
 
@@ -2745,6 +2856,7 @@ applyCanonicalObservationWithProof conditionalProof candidate state =
         , edit = edit
         , matchEvidence = matchEvidence
         , resultsStale = resultsStale
+        , counts = (if existing /= Just accepted then invalidateCounts state else state).counts
         , refreshPending = state.refreshPending || (existing /= Just accepted)
         , refreshPass = if existing /= Just accepted then Maybe.map (\pass -> { pass | invalidated = True }) state.refreshPass else state.refreshPass
     }
@@ -2832,7 +2944,8 @@ isLoadedOrSelected observationId state =
 
 markResultsStale : ObservationModel -> ObservationModel
 markResultsStale state =
-    { state | resultsStale = True, refreshPending = True, refreshPass = Maybe.map (\pass -> { pass | invalidated = True }) state.refreshPass }
+    let invalidated = invalidateCounts state in
+    { invalidated | resultsStale = True, refreshPending = True, refreshPass = Maybe.map (\pass -> { pass | invalidated = True }) state.refreshPass }
 
 
 reconcileEditWithCanonical : Api.Observation -> Maybe ObservationEditState -> Maybe ObservationEditState
@@ -2879,7 +2992,8 @@ removeObservation observationId state =
             confirmation.observationId == observationId
     in
     { state
-        | items = Dict.remove observationId state.items
+        | counts = (if isLoadedOrSelected observationId state then invalidateCounts state else state).counts
+        , items = Dict.remove observationId state.items
         , expandedSubjects = Dict.remove observationId state.expandedSubjects
         , preferenceValue = let prefs = state.preferenceValue in { prefs | detail = if Maybe.map .id prefs.detail == Just observationId then Nothing else prefs.detail, subjects = List.filter ((/=) observationId) prefs.subjects }
         , orderedIds = List.filter ((/=) observationId) state.orderedIds
@@ -2947,7 +3061,7 @@ reconcileDeletedObservation observationId model =
             model.observations.selectedId == Just observationId
 
         updated =
-            updateObservation (removeObservation observationId) model
+            updateObservation (removeObservation observationId >> invalidateCounts) model
     in
     ( updated
     , if wasSelected then
@@ -3275,8 +3389,9 @@ refreshViewport previous ( incoming, command ) =
     in
     let
         ( automatic, automaticCmd ) = continueAutomaticRefresh { model | observations = updated }
+        ( counted, countsCmd ) = syncCounts automatic
     in
-    ( automatic, Cmd.batch [ command, preferenceCmd, automaticCmd, if synchronize then Ports.syncObservationViewport (ObservationViewport.sync changed 0 Nothing viewport) else Cmd.none ] )
+    ( counted, Cmd.batch [ command, preferenceCmd, automaticCmd, countsCmd, if synchronize then Ports.syncObservationViewport (ObservationViewport.sync changed 0 Nothing viewport) else Cmd.none ] )
 
 
 preferenceMode : ObservationRequestMode -> String
@@ -3803,19 +3918,15 @@ viewModeNavigation state =
                 ]
                 [ text "Files" ]
             ]
-        , p [ class "observation-mode-announcement", attribute "aria-live" "polite" ]
-            [ text
-                (case state.requestMode of
-                    ObservationFacetMode ->
-                        String.fromInt (List.length state.facetKeys) ++ " shared subjects loaded"
-
-                    ObservationMatchMode ->
-                        String.fromInt (List.length state.orderedIds) ++ " matching observations loaded"
-
-                    _ ->
-                        String.fromInt (List.length state.orderedIds) ++ " observations loaded"
-                )
-            ]
+        , if hasAppliedCountFilter state then
+            let counts = state.counts in
+            p [ class "observation-mode-announcement", attribute "aria-live" "polite" ]
+                [ text (if counts.current && counts.valueFingerprint == countFingerprint (Maybe.map .workspaceId counts.owner |> Maybe.withDefault "") state then
+                    counts.value |> Maybe.map (\value -> String.fromInt value.matchCount ++ (if value.matchCount == 1 then " Observation matches" else " Observations match")) |> Maybe.withDefault "Observation match count unavailable"
+                    else if counts.error /= Nothing then "Observation match count unavailable"
+                    else "Counting matching Observations…")
+                , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryObservationCounts ] [ text "Retry counts" ] else text "" ]
+          else text ""
         ]
 
 

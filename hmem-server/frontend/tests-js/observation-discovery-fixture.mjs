@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { hierarchyFixture, openHierarchy } from './hierarchy-fixture.mjs'
+import { hierarchyFixture, openHierarchy, fixtureObservationCounts, allFixtureObservations } from './hierarchy-fixture.mjs'
 import { queryObservations, queryObservationFacets } from '../perf/fixtures.mjs'
 
 // Controlled concrete examples, not a replacement for the server glob matcher.
@@ -34,10 +34,14 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
     try {
       let body
       const options = { query: url.searchParams.get('query'), subjectKind: url.searchParams.get('subject_kind'), subject: url.searchParams.get('subject'), gitSha: url.searchParams.get('git_sha'), offset: Number(url.searchParams.get('offset') || 0), limit: Number(url.searchParams.get('limit') || 50) }
-      if (url.pathname.endsWith('/match')) {
+      if (url.pathname.endsWith('/count')) {
+        assert.equal(request.method(), 'POST')
+        receipt.payload = request.postDataJSON()
+        body = fixtureObservationCounts(fixture, receipt.payload)
+      } else if (url.pathname.endsWith('/match')) {
         assert.equal(request.method(), 'POST')
         const query = request.postDataJSON(); receipt.payload = query
-        const candidates = queryObservations(fixture, { query: query.query, gitSha: query.git_sha, limit: 200 }).items
+        const candidates = allFixtureObservations(fixture, { query: query.query, gitSha: query.git_sha })
         const matched = candidates.flatMap(observation => {
           const path_matches = query.paths.flatMap(path => {
             const matched_subjects = observation.subjects.filter(subject => (!query.subject_kind || subject.subject_kind === query.subject_kind) && (subject.subject_kind === 'file' ? subject.subject === path : patterns.get(subject.subject)?.test(path)))

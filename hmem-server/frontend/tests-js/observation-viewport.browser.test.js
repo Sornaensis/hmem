@@ -6,10 +6,10 @@ import { paint, scanObservationRows, revealObservationRow } from './observation-
 
 const populate = values => {
   const source = generateObservationScalingFixture('large').observations
-  return [...source.slice(0, 149), source.at(-1)].map(value => ({ ...value, workspace_id: values[0].workspace_id }))
+  return [...source.slice(0, 349), source.at(-1)].map(value => ({ ...value, workspace_id: values[0].workspace_id }))
 }
 
-test('production ordered150 Match members and every repeated group stay scroll-reachable under a global row cap', { timeout: 60000 }, async () => {
+test('production ordered350 Match members and every repeated group stay scroll-reachable under a global row cap', { timeout: 60000 }, async () => {
   const h = await openDiscovery({ width: 1440, height: 900 }, populate)
   try {
     await h.page.addInitScript(() => {
@@ -37,11 +37,11 @@ test('production ordered150 Match members and every repeated group stay scroll-r
     await h.page.getByRole('button', { name: 'Files', exact: true }).click()
     await h.page.locator('#observation-match-paths').fill(OBSERVATION_SCALING_CONTRACT.paths.join('\n'))
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await h.idle()
-    for (const loaded of [50, 100, 150]) {
+    for (const loaded of [200, 350]) {
       assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), String(loaded))
       const response = h.receipts.filter(value => value.endpoint.endsWith('/match')).at(-1)
       assert.deepEqual(response.payload.paths, OBSERVATION_SCALING_CONTRACT.paths)
-      if (loaded < 150) { await h.page.locator('.observation-load-more').click(); await h.idle() }
+      if (loaded < 350) { await h.page.locator('.observation-load-more').click(); await h.idle() }
     }
     const closed = await scanObservationRows(h.page)
     assert.equal(closed.groups.size, 4)
@@ -52,9 +52,12 @@ test('production ordered150 Match members and every repeated group stay scroll-r
       await toggle.click(); await paint(h.page)
     }
     const expanded = await scanObservationRows(h.page)
-    assert.equal(expanded.cards.size, 455, 'all ordered repeated evidence remains reachable, not deduplicated')
-    assert.equal(new Set([...expanded.cards.values()].map(row => row.id)).size, 150)
-    assert.equal(expanded.keys.size, 461, 'two path labels plus four headers plus455 repeated cards')
+    const accepted = h.receipts.filter(value => value.endpoint.endsWith('/match')).flatMap(value => value.response.items)
+    const expectedRepeated = accepted.reduce((count, item) => count + item.path_matches.reduce((sum, match) => sum + match.matched_subjects.length, 0), 0)
+    assert.equal(expectedRepeated, 1061)
+    assert.equal(expanded.cards.size, expectedRepeated, 'all ordered repeated evidence remains reachable, not deduplicated')
+    assert.equal(new Set([...expanded.cards.values()].map(row => row.id)).size, 350)
+    assert.equal(expanded.keys.size, expectedRepeated + 6, 'two path labels plus four headers plus1061 repeated cards')
     for (const key of closed.groups.keys()) assert.equal(expanded.groups.get(key).expanded, 'true')
     const nativeMove = await h.page.evaluate(() => window.observationNativeMove)
     assert.deepEqual(nativeMove, { phase: 'keyed-window-pin-paint', sameControl: true, sameRow: true, sameViewport: true, sameParent: true, sameStamp: true, nativeFocusFellToBody: true })
@@ -72,7 +75,7 @@ test('production native Tab mounts offscreen logical targets and retained detail
   try {
     await h.start()
     const initial = await h.page.locator('#observation-viewport').getAttribute('data-observation-logical-count')
-    assert.equal(initial, '50')
+    assert.equal(initial, '200')
     const last = h.page.locator('.observation-viewport-row').last()
     const originKey = await last.getAttribute('data-observation-key')
     const copy = last.locator('.observation-sha .copyable-value').last()

@@ -2857,7 +2857,7 @@ suite =
 
                     firstPage =
                         Feature.Observation.update
-                            (GotObservationMatches "workspace-1" 7 4 "match-fingerprint" 0 (Ok { items = [ matchItem, { matchItem | observation = { observation | id = "other" } } ], hasMore = True }))
+                            (GotObservationMatches "workspace-1" 7 4 "match-fingerprint" 0 (Ok { items = matchItem :: (List.range 1 199 |> List.map (\i -> { matchItem | observation = { observation | id = "other-" ++ String.fromInt i } })), hasMore = True }))
                             shell
                             |> Tuple.first
 
@@ -2865,7 +2865,7 @@ suite =
                         firstPage.observations
 
                     loadingMoreState =
-                        { firstObservations | expectedOffset = Just 2 }
+                        { firstObservations | expectedOffset = Just 200 }
 
                     loadingMore =
                         { firstPage | observations = loadingMoreState }
@@ -2878,11 +2878,11 @@ suite =
 
                     stale =
                         Feature.Observation.update
-                            (GotObservationMatches "workspace-1" 7 4 "match-fingerprint" 2 (Ok { items = [ matchItem ], hasMore = False }))
+                            (GotObservationMatches "workspace-1" 7 4 "match-fingerprint" 200 (Ok { items = [ matchItem ], hasMore = False }))
                             refreshed
                             |> Tuple.first
                 in
-                [ firstPage.observations.nextOffset == 2
+                [ firstPage.observations.nextOffset == 200
                 , Dict.member observation.id firstPage.observations.items
                 , stale.observations.requestGeneration > 4
                 , stale.observations.expectedOffset == Just 0
@@ -3464,7 +3464,7 @@ suite =
                 in
                 Expect.all
                     [ \_ -> facetView |> Query.find [ Selector.class "observation-mode-button", Selector.class "filter-pill-active" ] |> Query.has [ Selector.text "Subject" ]
-                    , \_ -> facetView |> Query.has [ Selector.text "123 observations", Selector.text "Latest update: 2026-08-30", Selector.text "Load more subjects", Selector.attribute (attribute "aria-live" "polite") ]
+                    , \_ -> facetView |> Query.has [ Selector.text "123 observations", Selector.text "Latest update: 2026-08-30", Selector.text "Load more subjects" ]
                     , \_ -> facetView |> Query.hasNot [ Selector.id "observation-subject" ]
                     , \_ -> collapsed |> Query.findAll [ Selector.class "observation-card" ] |> Query.count (Expect.equal 0)
                     , \_ -> collapsed |> Query.findAll [ Selector.class "observation-subject-group-toggle", Selector.attribute (attribute "aria-expanded" "false") ] |> Query.count (Expect.equal 2)

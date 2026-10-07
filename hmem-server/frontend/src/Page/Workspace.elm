@@ -60,11 +60,17 @@ viewReadableWorkspacePage wsId model ws =
                     ]
                 , viewCreateButton model.activeTab
                 ]
-            , if not (List.isEmpty summaryParts) then
-                div [ class "workspace-summary" ] [ text (String.join " · " summaryParts) ]
-
-              else
-                text ""
+            , div [ class "workspace-summary" ]
+                [ text (String.join " · " summaryParts)
+                , if ws.workspaceType == Api.Repository then
+                    let counts = model.observations.counts in
+                    span [ class "workspace-observation-total", attribute "aria-live" "polite" ]
+                        [ text ((if List.isEmpty summaryParts then "" else " · ") ++
+                            (if counts.current then counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " Observations total") |> Maybe.withDefault "Observation total unavailable"
+                             else if counts.error /= Nothing then "Observation total unavailable"
+                             else if counts.value /= Nothing then "Updating Observation total…" else "Loading Observation total…"))
+                        , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryObservationCounts ] [ text "Retry counts" ] else text "" ]
+                  else text "" ]
             , div [ class "workspace-details" ]
                 [ div [ class "workspace-detail" ]
                     [ span [ class "workspace-detail-label" ] [ text "ID" ]
@@ -175,11 +181,6 @@ workspaceSummaryParts workspaceDataLoadActive wsId projects tasks observations o
 
               else
                 Nothing
-            , if observationCount > 0 && not observationsHaveMore then
-                Just (String.fromInt observationCount ++ " observation" ++ (if observationCount > 1 then "s" else ""))
-
-              else
-                Nothing
             ]
 
 
@@ -219,11 +220,17 @@ viewStickyWorkspaceBar model ws summaryParts =
             [ span [ class ("badge badge-" ++ Api.workspaceTypeToString ws.workspaceType) ]
                 [ text (Api.workspaceTypeToString ws.workspaceType) ]
             , span [ class "sticky-workspace-name" ] [ text ws.name ]
-            , if not (List.isEmpty summaryParts) then
-                span [ class "sticky-workspace-summary" ] [ text (String.join " · " summaryParts) ]
-
-              else
-                text ""
+            , span [ class "sticky-workspace-summary" ]
+                [ text (String.join " · " summaryParts)
+                , if ws.workspaceType == Api.Repository then
+                    let counts = model.observations.counts in
+                    span [ class "workspace-observation-total" ]
+                        [ text ((if List.isEmpty summaryParts then "" else " · ") ++
+                            (if counts.current then counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " Observations total") |> Maybe.withDefault "Observation total unavailable"
+                             else if counts.error /= Nothing then "Observation total unavailable"
+                             else if counts.value /= Nothing then "Updating Observation total…" else "Loading Observation total…"))
+                        , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryObservationCounts ] [ text "Retry counts" ] else text "" ]
+                  else text "" ]
             ]
         ]
 

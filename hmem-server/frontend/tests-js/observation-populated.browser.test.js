@@ -46,7 +46,7 @@ test('production startup profiles carry real multipage versioned snapshots throu
     const { stdout } = await promisify(execFile)('stack', ['path', '--local-install-root'], { cwd: repo, windowsHide: true, timeout: 30000 })
     const executable = join(stdout.trim(), 'bin', process.platform === 'win32' ? 'hmem-test-harness.exe' : 'hmem-test-harness')
     const harnessHash = digest(await readFile(executable))
-    assert.equal(harnessHash, '0879eaa4197b74d3f528c719831925f89b18e1acfe6f17d1f9599e8e8ec67123', 'Use the installed harness relinked after Snapshot/V031')
+    assert.equal(harnessHash, 'c37f5c8f51e258d2af7dc44801f7e340b3926504c1e53174413831462ebb20a1', 'Use the installed harness relinked with the Observation count API')
     const port = await freePort(), origin = 'http://127.0.0.1:' + port
     harness = spawn(executable, ['deployed', '--interactive', '--port', String(port)], { cwd: repo, env: process.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     harnessClosed = once(harness, 'close')
@@ -194,6 +194,7 @@ test('production startup profiles carry real multipage versioned snapshots throu
     } finally { releaseRest(); await page.unroute('**/api/v1/observations**', holdRest) }
     await until(() => fullClient.receipts.some(value => value.complete && value.path.endsWith('/ticket') && value.request.scope.workspace_id === workspace.id), 'Real ticket handoff')
     await until(() => frames.some(value => value.page === page && value.type === 'checkpoint'), 'Real WebSocket checkpoint')
+    await until(async () => (await page.locator('.workspace-header .workspace-observation-total').textContent()) === '112 Observations total', 'Real authorized aggregate reaches production workspace information')
     const fullPages = fullClient.receipts.filter(value => value.path.endsWith('/resync') && value.request.scope.workspace_id === workspace.id)
     assert.equal(fullPages.length, 2)
     assert.equal(fullPages[0].request.snapshot_profile, 'full_v1')

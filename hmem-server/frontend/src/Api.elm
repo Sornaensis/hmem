@@ -23,6 +23,10 @@ module Api exposing
     , MemoryType(..)
     , NextTaskCandidate
     , Observation
+    , ObservationCounts
+    , ObservationCountQuery
+    , observationCountsDecoder
+    , fetchObservationCounts
     , ObservationListQuery
     , ObservationMatch
     , ObservationMatchQuery
@@ -2844,6 +2848,37 @@ fetchMemory apiUrl memId toMsg =
         { url = apiUrl ++ "/api/v1/memories/" ++ memId
         , expect = Http.expectJson toMsg memoryDecoder
         }
+
+
+type alias ObservationCountQuery =
+    { workspaceId : String, subjectKind : Maybe SubjectKind, subject : Maybe String, gitSha : Maybe String, query : Maybe String, paths : Maybe (List String) }
+
+
+type alias ObservationCounts =
+    { workspaceId : String, totalCount : Int, matchCount : Int }
+
+
+observationCountsDecoder : Decoder ObservationCounts
+observationCountsDecoder =
+    let
+        count = D.int |> D.andThen (\value -> if value >= 0 && toFloat value <= 9007199254740991 then D.succeed value else D.fail "Invalid Observation count")
+    in
+    D.map3 ObservationCounts (D.field "workspace_id" D.string) (D.field "total_count" count) (D.field "match_count" count)
+        |> D.andThen (\value -> if value.matchCount <= value.totalCount then D.succeed value else D.fail "Match count exceeds total")
+
+
+fetchObservationCounts : String -> ObservationCountQuery -> (Result Http.Error ObservationCounts -> msg) -> Cmd msg
+fetchObservationCounts apiUrl value toMsg =
+    let
+        optional name encoder item = item |> Maybe.map (\v -> ( name, encoder v ))
+        body = E.object (( "workspace_id", E.string value.workspaceId ) :: List.filterMap identity
+            [ optional "subject_kind" (E.string << subjectKindToString) value.subjectKind
+            , optional "subject" E.string value.subject
+            , optional "git_sha" E.string value.gitSha
+            , optional "query" E.string value.query
+            , optional "paths" (E.list E.string) value.paths ])
+    in
+    Http.post { url = apiUrl ++ "/api/v1/observations/count", body = Http.jsonBody body, expect = Http.expectJson toMsg observationCountsDecoder }
 
 
 observationListUrl : String -> ObservationListQuery -> String

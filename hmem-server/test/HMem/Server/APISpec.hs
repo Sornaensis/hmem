@@ -1667,6 +1667,44 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       length observed `shouldBe` 1
       jsonPath ["payload"] (head observed).outboxEnvelope `shouldBe` Nothing
 
+    it "returns authorized full Observation aggregate counts and validates count predicates" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "observation-count-api"
+      other <- createTestWorkspace env "observation-count-api-other"
+      let sha = T.replicate 40 "a"
+          create w = object ["workspace_id" .= w, "subjects" .= [ObservationSubject SubjectFile "src/Main.hs", ObservationSubject SubjectGlob "src/**/*.hs"], "git_sha" .= sha, "content" .= ("needle" :: T.Text)]
+          input fields = object (["workspace_id" .= workspace.id] <> fields)
+          call fields = postJson app "/api/v1/observations/count" (input fields)
+      _ <- postJson app "/api/v1/observations" (create workspace.id)
+      _ <- postJson app "/api/v1/observations" (create workspace.id)
+      _ <- postJson app "/api/v1/observations" (create other.id)
+      response <- call ["paths" .= (["src/Main.hs", "src/Main.hs", "src/Other.hs"] :: [T.Text]), "subject_kind" .= ("glob" :: T.Text), "query" .= ("needle" :: T.Text)]
+      responseStatus response `shouldBe` status200
+      (decode (responseBody response) :: Maybe ObservationCounts) `shouldBe` Just (ObservationCounts workspace.id 2 2)
+      mismatch <- call ["subject_kind" .= ("glob" :: T.Text), "subject" .= ("src/Main.hs" :: T.Text)]
+      (decode (responseBody mismatch) :: Maybe ObservationCounts) `shouldBe` Just (ObservationCounts workspace.id 2 0)
+      forM_ [["paths" .= ([] :: [T.Text])], ["paths" .= (["../bad"] :: [T.Text])], ["paths" .= (["src/Main.hs"] :: [T.Text]), "subject" .= ("src/Main.hs" :: T.Text)], ["git_sha" .= ("invalid" :: T.Text)]] $ \fields -> call fields >>= expectValidationError
+
+    it "guards Observation aggregate reads and deployed-cookie CSRF" $ \_ ->
+      withDeployedSandboxAppContext $ \ctx -> do
+        workspace <- createTestWorkspace ctx.deployedEnv "observation-count-authority"
+        readerId <- createDeployedSandboxUser ctx.deployedEnv False False
+        outsiderId <- createDeployedSandboxUser ctx.deployedEnv False False
+        _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership readerId Auth.WorkspaceRoleRead) Nothing
+        reader <- issueDeployedSandboxPAT ctx.deployedEnv readerId "Count reader"
+        outsider <- issueDeployedSandboxPAT ctx.deployedEnv outsiderId "Count outsider"
+        let body = encode (object ["workspace_id" .= workspace.id])
+            auth token = [("Authorization", "Bearer " <> Text.encodeUtf8 token.rawToken)]
+            call headers = requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations/count" headers body
+        call [] >>= (\response -> responseStatus response `shouldBe` status401)
+        call (auth outsider) >>= (\response -> responseStatus response `shouldBe` status403)
+        accepted <- call (auth reader)
+        responseStatus accepted `shouldBe` status200
+        (decode (responseBody accepted) :: Maybe ObservationCounts) `shouldBe` Just (ObservationCounts workspace.id 0 0)
+        _ <- createDeployedSandboxAuthSession ctx.deployedEnv readerId "count-session" "count-csrf"
+        let cookie = ("Cookie", "hmem_session=count-session; hmem_csrf=count-csrf")
+        call [cookie] >>= (\response -> responseStatus response `shouldBe` status403)
+        call [cookie, ("X-CSRF-Token", "count-csrf")] >>= (\response -> responseStatus response `shouldBe` status200)
+
     it "lists deterministic workspace-isolated subject facets with full filtered counts" $ \(env, app) -> do
       workspace <- createTestWorkspace env "observation-facets-api"
       otherWorkspace <- createTestWorkspace env "observation-facets-api-other"
@@ -1956,6 +1994,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       request app methodGet ("/api/v1/observations?workspace_id=" <> planningId) "" >>= rejected
       request app methodGet ("/api/v1/observations/subject-facets?workspace_id=" <> planningId) "" >>= rejected
       postJson app "/api/v1/observations/match" (object ["workspace_id" .= planning.id, "paths" .= (["src/Scope.hs"] :: [T.Text])]) >>= rejected
+      postJson app "/api/v1/observations/count" (object ["workspace_id" .= planning.id]) >>= rejected
       postJson app "/api/v1/observations/similar" (object ["workspace_id" .= planning.id, "embedding" .= ([] :: [Double])]) >>= rejected
       postJson app "/api/v1/search" (object ["workspace_id" .= planning.id, "entity_types" .= ["observation" :: T.Text]]) >>= rejected
       request app methodGet ("/api/v1/audit?workspace_id=" <> planningId <> "&entity_type=observation") "" >>= rejected
@@ -1971,6 +2010,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       request app methodGet ("/api/v1/observations/subject-facets?workspace_id=" <> repositoryId) "" >>= rejected
       postJson app "/api/v1/observations" (observationInput repository.id) >>= rejected
       postJson app "/api/v1/observations/match" (object ["workspace_id" .= repository.id, "paths" .= (["src/Scope.hs"] :: [T.Text])]) >>= rejected
+      postJson app "/api/v1/observations/count" (object ["workspace_id" .= repository.id]) >>= rejected
       postJson app "/api/v1/observations/similar" (object ["workspace_id" .= repository.id, "embedding" .= ([] :: [Double])]) >>= rejected
       request app methodGet observationPath "" >>= rejected
       request app methodPut observationPath (encode (object ["content" .= ("rejected" :: T.Text)])) >>= rejected
@@ -2100,6 +2140,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         , "/api/v1/observations"
         , "/api/v1/observations/subject-facets"
         , "/api/v1/observations/match"
+        , "/api/v1/observations/count"
         , "/api/v1/observations/similar"
         , "/api/v1/observations/{observationId}"
          , "/api/v1/observations/{observationId}/embedding"
@@ -2107,6 +2148,11 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
          , "/api/v1/tasks/{taskId}/dependencies/{dependsOnId}"
          , "/api/v1/workspaces/{workspaceId}/timeline"
         , "/api/v1/workspaces/{workspaceId}/timeline/buckets" ]
+      mapM_ (\field -> do
+        let property = schema "ObservationCounts" >>= jsonField "properties" >>= jsonField field
+        (property >>= jsonField "type") `shouldBe` Just (String "integer")
+        (property >>= jsonField "minimum") `shouldBe` Just (Number 0)
+        (property >>= jsonField "maximum") `shouldBe` Just (Number 9007199254740991)) ["total_count", "match_count"]
       let hasWorkspaceGroupTag path method = jsonStrings (operationTags path method) == Just ["Workspace Groups"]
       mapM_ (\(path, method) -> hasWorkspaceGroupTag path method `shouldBe` True)
         [ ("/api/v1/groups", "get"), ("/api/v1/groups", "post")

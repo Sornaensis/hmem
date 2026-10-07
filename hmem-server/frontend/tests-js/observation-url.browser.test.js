@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { openDiscovery } from './observation-discovery-fixture.mjs'
 
+const resultReceipts = h => h.receipts.filter(value => !value.endpoint.endsWith('/count'))
 const tuple = (mode, query = '', kind = null, subject = '', sha = '', facetKind = null, facet = null, paths = []) => [mode, query, kind, subject, sha, facetKind, facet, paths]
 const fragment = (query, id = null) => '#tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(query)) + (id ? '&observation=' + encodeURIComponent(id) : '')
 const applied = page => page.locator('.observation-applied-filters').innerText()
@@ -15,19 +16,19 @@ test('production applied flat URI excludes drafts, has no Copy link, and reloads
     await h.start()
     await h.page.locator('#observation-query').fill('Cache evidence')
     await h.page.locator('#observation-query').press('Enter'); await ready(h)
-    const appliedUrl = h.page.url(), before = h.receipts.length
+    const appliedUrl = h.page.url(), before = resultReceipts(h).length
     assert.deepEqual(JSON.parse(new URLSearchParams(new URL(appliedUrl).hash.slice(1)).get('oq')), tuple('flat', 'Cache evidence'))
     await h.page.locator('#observation-query').fill('unapplied draft & secret')
     assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
     assert.equal(await h.page.locator('.observation-share-controls').count(), 0)
     assert.equal(h.page.url(), appliedUrl)
-    assert.equal(h.receipts.length, before)
-    const count = h.receipts.length
+    assert.equal(resultReceipts(h).length, before)
+    const count = resultReceipts(h).length
     await h.page.reload(); await ready(h)
     assert.equal(await h.page.locator('#observation-query').inputValue(), 'Cache evidence')
-    assert.equal(h.receipts.length, count + 1)
-    assert.equal(h.receipts.at(-1).params.query, 'Cache evidence')
-    assert.deepEqual(h.receipts.at(-1).response.items.map(row => row.id).sort(), ['cache-main', 'cache-view'])
+    assert.equal(resultReceipts(h).length, count + 1)
+    assert.equal(resultReceipts(h).at(-1).params.query, 'Cache evidence')
+    assert.deepEqual(resultReceipts(h).at(-1).response.items.map(row => row.id).sort(), ['cache-main', 'cache-view'])
     assert.equal(h.page.url(), appliedUrl)
     await h.page.locator('.observation-card').first().click(); await ready(h)
     await h.page.locator('#observation-delete').click()
@@ -43,24 +44,24 @@ test('production subject and locked exact links reload the correct mode and Back
     await h.start(); await h.page.getByRole('button', { name: 'Subject', exact: true }).click(); await ready(h)
     const facetUrl = h.page.url()
     await h.page.reload(); await ready(h)
-    assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations/subject-facets')
+    assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations/subject-facets')
     await h.page.locator('.observation-facet').filter({ hasText: 'src/**/*.elm' }).locator('.observation-facet-card').click(); await ready(h)
     await h.page.locator('#observation-query').fill('Cache evidence'); await h.page.locator('#observation-query').press('Enter'); await ready(h)
-    const exactUrl = h.page.url(), before = h.receipts.length
+    const exactUrl = h.page.url(), before = resultReceipts(h).length
     await h.page.reload(); await ready(h)
-    assert.equal(h.receipts.length, before + 1)
-    assert.equal(h.receipts.at(-1).params.subject_kind, 'glob'); assert.equal(h.receipts.at(-1).params.subject, 'src/**/*.elm')
-    assert.equal(h.receipts.at(-1).params.query, 'Cache evidence')
+    assert.equal(resultReceipts(h).length, before + 1)
+    assert.equal(resultReceipts(h).at(-1).params.subject_kind, 'glob'); assert.equal(resultReceipts(h).at(-1).params.subject, 'src/**/*.elm')
+    assert.equal(resultReceipts(h).at(-1).params.query, 'Cache evidence')
     await h.page.locator('#observation-advanced-toggle').click()
     assert.match(await h.page.locator('.observation-selected-facet-value').innerText(), /Glob: src\/\*\*\/\*\.elm/)
     assert.equal(await h.page.locator('#observation-subject').count(), 0)
     assert.equal(h.page.url(), exactUrl)
-    await history(h, 'back'); assert.equal(h.receipts.at(-1).params.query, undefined)
-    await history(h, 'back'); assert.equal(h.page.url(), facetUrl); assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations/subject-facets')
-    const count = h.receipts.length
+    await history(h, 'back'); assert.equal(resultReceipts(h).at(-1).params.query, undefined)
+    await history(h, 'back'); assert.equal(h.page.url(), facetUrl); assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations/subject-facets')
+    const count = resultReceipts(h).length
     assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
     assert.equal(h.page.url(), facetUrl)
-    assert.equal(h.receipts.length, count)
+    assert.equal(resultReceipts(h).length, count)
   } finally { await h.close() }
 })
 
@@ -68,7 +69,7 @@ test('production ordered file context restores Match and A-to-B-to-Back restores
   const h = await openDiscovery()
   try {
     await navigate(h, tuple('match', 'Cache evidence', null, '', h.sha, null, null, [' src/Main.elm ', 'src/View.elm', 'src/Main.elm']))
-    assert.deepEqual(h.receipts.at(-1).payload.paths, ['src/Main.elm', 'src/View.elm'])
+    assert.deepEqual(resultReceipts(h).at(-1).payload.paths, ['src/Main.elm', 'src/View.elm'])
     assert.deepEqual(await h.page.locator('.observation-path-heading').allTextContents(), ['src/Main.elm', 'src/View.elm'])
     await h.page.locator('.observation-subject-group').filter({ hasText: 'src/**/*.elm' }).locator('.observation-subject-group-toggle').first().click()
     await h.page.locator('.observation-result[data-observation-id="cache-main"] .observation-card').first().click(); await ready(h)
@@ -95,11 +96,11 @@ test('production malformed and oversized links restore atomically with an explic
     const bad = ['#tab=observations&observation=cache-main&ov=2&oq=[]', '#tab=observations&ov=1&oq=%ZZ', fragment(tuple('flat')) + '&ov=1', fragment(tuple('flat')) + '&unknown=1', fragment(tuple('match', '', null, '', '', null, null, ['../bad'])), '#tab=observations&ov=1&oq=' + 'a'.repeat(4097)]
     for (const suffix of bad) {
       await h.page.goto(h.origin + '/'); await h.idle()
-      const count = h.receipts.length
+      const count = resultReceipts(h).length
       await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + suffix); await ready(h)
-      assert.equal(h.receipts.length, count + 1)
-      assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations')
-      assert.equal(h.receipts.at(-1).params.query, undefined)
+      assert.equal(resultReceipts(h).length, count + 1)
+      assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations')
+      assert.equal(resultReceipts(h).at(-1).params.query, undefined)
       assert.equal(await h.page.locator('.observation-detail').count(), 0)
       assert.match(await h.page.locator('.observation-url-notice').innerText(), /No filters or selection were restored/)
       assert.ok(Buffer.byteLength(h.page.url()) <= 4096)
@@ -116,10 +117,10 @@ test('production valid oversized queries remain active, replace bounded markers,
     await h.page.getByRole('button', { name: 'Files', exact: true }).click()
     const path = 'src/' + 'é'.repeat(1800) + '.elm'
     await h.page.locator('#observation-match-paths').fill(path)
-    const initialHistory = await h.page.evaluate(() => history.length), count = h.receipts.length
+    const initialHistory = await h.page.evaluate(() => history.length), count = resultReceipts(h).length
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await ready(h)
     const firstMarker = h.page.url()
-    assert.equal(h.receipts.length, count + 1); assert.deepEqual(h.receipts.at(-1).payload.paths, [path])
+    assert.equal(resultReceipts(h).length, count + 1); assert.deepEqual(resultReceipts(h).at(-1).payload.paths, [path])
     assert.match(firstMarker, /&ox=/); assert.ok(Buffer.byteLength(firstMarker) <= 4096)
     assert.equal(await h.page.getByRole('button', { name: 'Copy link', exact: true }).count(), 0)
     assert.match(await h.page.locator('.observation-url-notice').innerText(), /not restored by Back, reload/)
@@ -141,10 +142,10 @@ test('production valid oversized queries remain active, replace bounded markers,
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await ready(h)
     assert.equal(await h.page.evaluate(() => history.length), initialHistory + 1)
     await history(h, 'back'); assert.equal(h.page.url(), marker)
-    assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations')
+    assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations')
     assert.match(await h.page.locator('.observation-url-notice').innerText(), /not restored by Back, reload/)
     await h.page.reload(); await ready(h)
-    assert.equal(h.receipts.at(-1).endpoint, '/api/v1/observations')
+    assert.equal(resultReceipts(h).at(-1).endpoint, '/api/v1/observations')
     assert.equal(await h.page.locator('#observation-query').inputValue(), '')
     const overflow = await h.page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
     assert.ok(overflow <= 1, String(overflow))
@@ -176,11 +177,11 @@ test('production percent-encoded reserved Unicode context survives copy-sized re
   const completion = new Promise(resolve => { completed = resolve })
   try {
     await navigate(h, tuple('flat', search, 'file', 'src/Main.elm', h.sha))
-    assert.equal(h.receipts.at(-1).params.query, search)
-    assert.equal(h.receipts.at(-1).params.subject, 'src/Main.elm')
-    assert.deepEqual(h.receipts.at(-1).response.items.map(value => value.id), ['cache-main'])
+    assert.equal(resultReceipts(h).at(-1).params.query, search)
+    assert.equal(resultReceipts(h).at(-1).params.subject, 'src/Main.elm')
+    assert.deepEqual(resultReceipts(h).at(-1).response.items.map(value => value.id), ['cache-main'])
     await h.page.reload(); await ready(h)
-    assert.equal(h.receipts.at(-1).params.query, search)
+    assert.equal(resultReceipts(h).at(-1).params.query, search)
     let arrived
     const arrival = new Promise(resolve => { arrived = resolve }), held = new Promise(resolve => { release = resolve })
     await h.page.route('**/api/v1/observations?**', async route => {
@@ -225,7 +226,7 @@ for (const mode of ['exact', 'match']) test(`production ${mode} public URL conte
     assert.equal(h.page.url(), publicUrl)
     assert.equal(JSON.parse(await h.page.locator('#observation-panel').getAttribute('data-observation-context')).selectedId, 'cache-main')
     assert.equal(await h.page.locator('#observation-edit-content').count(), 0)
-    const result = h.receipts.filter(receipt => receipt.endpoint === (mode === 'match' ? '/api/v1/observations/match' : '/api/v1/observations')).at(-1)
+    const result = resultReceipts(h).filter(receipt => receipt.endpoint === (mode === 'match' ? '/api/v1/observations/match' : '/api/v1/observations')).at(-1)
     if (mode === 'match') assert.deepEqual(result.payload.paths, query[7])
     else { assert.equal(result.params.subject_kind, 'glob'); assert.equal(result.params.subject, 'src/**/*.elm') }
     assert.equal(mode === 'match' ? result.payload.query : result.params.query, 'Cache evidence')

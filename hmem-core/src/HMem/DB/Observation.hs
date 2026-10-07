@@ -5,6 +5,7 @@ module HMem.DB.Observation
   , updateObservationConditional
   , deleteObservation
   , listObservations
+  , countObservations
   , listObservationsOverfetch
   , listObservationsSearchOverfetch
   , listObservationSubjectFacets
@@ -21,7 +22,7 @@ import Data.Aeson (eitherDecodeStrict')
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
 import Data.Functor.Contravariant (contramap)
-import Data.Int (Int32)
+import Data.Int (Int32, Int64)
 import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
 import Data.Text (Text)
@@ -266,19 +267,63 @@ matchObservationsOverfetch pool queryValue = do
   validateOrThrow $ validateObservationMatchQuery queryValue
   matchObservationsUnchecked pool queryValue { limit = Just (fromMaybe 50 queryValue.limit + 1) }
 
+-- The aggregate and row query share exact same-row provenance and FTS filters.
+observationFilterSql :: [String]
+observationFilterSql =
+  [ "WHERE o.workspace_id = $1"
+  , "  AND (($2::text IS NULL AND $3::text IS NULL) OR EXISTS (SELECT 1 FROM observation_subjects f WHERE f.observation_id = o.id AND ($2::text IS NULL OR f.subject_kind::text = $2) AND ($3::text IS NULL OR f.subject = $3)))"
+  , "  AND ($4::text IS NULL OR o.git_sha = $4)"
+  , "  AND ($5::text IS NULL OR o.search_vector @@ plainto_tsquery('simple', $5))"
+  ]
+
+filePathPredicate :: String -> String
+filePathPredicate path = "s.subject_kind = 'file' AND s.subject = " <> path
+
+globPathPredicate :: String -> String
+globPathPredicate path = "s.subject_kind = 'glob' AND hmem_observation_subject_matches(s.subject_kind, s.subject, " <> path <> ")"
+
+-- One statement provides total and distinct matches from the same snapshot;
+-- neither count projects content nor aggregates subject payloads.
+countObservations :: Pool Hasql.Connection -> ObservationCountQuery -> IO ObservationCounts
+countObservations pool value = do
+  validateOrThrow $ validateObservationCountQuery value
+  (total, matched) <- runSession pool $ Session.statement
+    (value.workspaceId, subjectKindToText <$> value.subjectKind, value.subject, value.gitSha, value.query,
+     subjectsJson . map (ObservationSubject SubjectFile) . normalizePaths <$> value.paths) countObservationsStatement
+  validateOrThrow ["Observation count exceeds the supported exact integer range" | total > 9007199254740991 || matched > 9007199254740991]
+  pure $ ObservationCounts value.workspaceId total matched
+
+countObservationsStatement :: Statement.Statement
+  (UUID, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Maybe Text) (Int64, Int64)
+countObservationsStatement = Statement.Statement sql encoder decoder True
+  where
+    sql = BS8.pack $ unlines $
+      [ "SELECT (SELECT COUNT(*) FROM observations WHERE workspace_id = $1), COUNT(*)"
+      , "FROM observations o"
+      ] <> observationFilterSql <>
+      [ "AND ($6::jsonb IS NULL OR EXISTS (SELECT 1 FROM observation_subjects s"
+      , "  JOIN jsonb_array_elements($6::jsonb) rp ON (" <> filePathPredicate "(rp.value ->> 'subject')" <> " OR " <> globPathPredicate "(rp.value ->> 'subject')" <> ")"
+      , "  WHERE s.observation_id = o.id AND ($2::text IS NULL OR s.subject_kind::text = $2)))"
+      ]
+    encoder =
+         contramap (\(a,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,b,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,c,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,d,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,e,_) -> e) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,f) -> f) (Enc.param (Enc.nullable Enc.text))
+    decoder = Dec.singleRow $ (,) <$> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.int8)
+
 listObservationsStatement :: Statement.Statement
   (UUID, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Int32, Int32) [Observation]
 listObservationsStatement = Statement.Statement sql encoder (Dec.rowList observationDecoder) True
   where
-    sql = BS8.pack $ unlines
+    sql = BS8.pack $ unlines $
       [ "SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version,"
       , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text"
       , "FROM observations o JOIN observation_subjects s ON s.observation_id = o.id"
-      , "WHERE o.workspace_id = $1"
-      , "  AND (($2::text IS NULL AND $3::text IS NULL) OR EXISTS (SELECT 1 FROM observation_subjects f WHERE f.observation_id = o.id AND ($2::text IS NULL OR f.subject_kind::text = $2) AND ($3::text IS NULL OR f.subject = $3)))"
-      , "  AND ($4::text IS NULL OR o.git_sha = $4)"
-      , "  AND ($5::text IS NULL OR o.search_vector @@ plainto_tsquery('simple', $5))"
-      , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.search_vector"
+      ] <> observationFilterSql <>
+      [ "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.search_vector"
       , "ORDER BY"
       , "  CASE WHEN $5::text IS NULL THEN 0 ELSE ts_rank(search_vector, plainto_tsquery('simple', $5)) END DESC,"
       , "  o.updated_at DESC, o.id DESC"
@@ -333,12 +378,12 @@ matchObservationsStatement = Statement.Statement sql encoder (Dec.rowList matchO
       , "), matching_subjects AS ("
       , "  SELECT s.observation_id, s.ordinal, s.subject_kind, s.subject, rp.path, rp.path_ordinal"
       , "  FROM scoped_candidates c JOIN observation_subjects s ON s.observation_id = c.id"
-      , "  JOIN requested_paths rp ON s.subject_kind = 'file' AND s.subject = rp.path"
+      , "  JOIN requested_paths rp ON " <> filePathPredicate "rp.path"
       , "  WHERE $3::text IS NULL OR s.subject_kind::text = $3"
       , "  UNION ALL"
       , "  SELECT s.observation_id, s.ordinal, s.subject_kind, s.subject, rp.path, rp.path_ordinal"
       , "  FROM scoped_candidates c JOIN observation_subjects s ON s.observation_id = c.id"
-      , "  JOIN requested_paths rp ON s.subject_kind = 'glob' AND hmem_observation_subject_matches(s.subject_kind, s.subject, rp.path)"
+      , "  JOIN requested_paths rp ON " <> globPathPredicate "rp.path"
       , "  WHERE $3::text IS NULL OR s.subject_kind::text = $3"
       , "), candidate_ids AS ("
       , "  SELECT DISTINCT observation_id AS id FROM matching_subjects"

@@ -5,6 +5,7 @@ module HMem.Types
   , ObservationSubject(..), Observation(..), CreateObservation(..), UpdateObservation(..), ObservationQuery(..), ObservationSubjectFacetQuery(..), ObservationSubjectFacet(..), SimilarObservationQuery(..), SimilarObservation(..), ObservationMatchQuery(..), ObservationPathMatch(..), ObservationMatch(..)
   , maxObservationSubjectBytes, maxObservationSubjects, maxObservationSubjectBytesTotal, maxObservationContentBytes, observationEmbeddingDimensions
   , ObservationEmbedding(..), EmbeddingSpaceFingerprint, embeddingSpaceFingerprintText, legacyManualEmbeddingSpace, parseEmbeddingSpaceFingerprint
+  , ObservationCountQuery(..), ObservationCounts(..), validateObservationCountQuery
   , validateCreateObservationInput, validateUpdateObservationInput, validateObservationQuery, validateObservationSubjectFacetQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
   , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
   , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
@@ -37,7 +38,7 @@ import Data.Char (isAlpha, isHexDigit, isLower, isSpace, isUpper, toLower)
 import Data.Int (Int32, Int64)
 import Data.List (nub)
 import Data.Map.Strict (Map)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -462,6 +463,34 @@ instance FromJSON ObservationQuery where
 
 -- | Lists exact stored subjects with counts calculated over the complete
 -- filtered Observation set before subject pagination is applied.
+data ObservationCountQuery = ObservationCountQuery
+  { workspaceId :: UUID
+  , subjectKind :: Maybe SubjectKind
+  , subject :: Maybe Text
+  , gitSha :: Maybe Text
+  , query :: Maybe Text
+  , paths :: Maybe [Text]
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationCountQuery where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationCountQuery where parseJSON = genericParseJSON jsonOptions
+
+data ObservationCounts = ObservationCounts
+  { workspaceId :: UUID
+  , totalCount :: Int64
+  , matchCount :: Int64
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationCounts where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationCounts where parseJSON = genericParseJSON jsonOptions
+
+validateObservationCountQuery :: ObservationCountQuery -> [Text]
+validateObservationCountQuery value =
+  maybe [] validateObservationSubject value.subject
+  <> maybe [] validateGitSha value.gitSha
+  <> maybe [] validateConcretePaths value.paths
+  <> ["subject and paths are mutually exclusive" | isJust value.subject && isJust value.paths]
+
 data ObservationSubjectFacetQuery = ObservationSubjectFacetQuery
   { workspaceId :: UUID
   , subjectKind :: Maybe SubjectKind

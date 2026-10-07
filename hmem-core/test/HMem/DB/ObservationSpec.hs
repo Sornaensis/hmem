@@ -16,6 +16,40 @@ import HMem.Types
 
 spec :: Spec
 spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
+  describe "Observation aggregate counts" $ do
+    it "counts full distinct sets using list and concrete-path predicates" $ \env -> do
+      workspace <- createTestWorkspace env "counts"
+      other <- createTestWorkspace env "counts-other"
+      first <- createObservation env.pool (CreateObservation workspace.id
+        [ObservationSubject SubjectFile "src/Main.hs", ObservationSubject SubjectGlob "src/**/*.hs"] canonicalSha "needle")
+      _ <- createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/Other.hs"] alternateSha "needle")
+      _ <- createObservation env.pool (newObservation other.id SubjectFile "src/Main.hs" "needle")
+      let input = ObservationCountQuery workspace.id Nothing Nothing Nothing Nothing Nothing
+      countObservations env.pool input `shouldReturn` ObservationCounts workspace.id 2 2
+      countObservations env.pool input { subjectKind = Just SubjectGlob, subject = Just "src/Main.hs" } `shouldReturn` ObservationCounts workspace.id 2 0
+      let exact :: ObservationCountQuery
+          exact = input { subjectKind = Just SubjectFile, subject = Just "src/Main.hs", gitSha = Just canonicalSha, query = Just "needle" }
+      listed <- listObservations env.pool (ObservationQuery workspace.id exact.subjectKind exact.subject exact.gitSha exact.query (Just 200) Nothing)
+      counted <- countObservations env.pool exact
+      counted.matchCount `shouldBe` fromIntegral (length listed)
+      map (.id) listed `shouldBe` [first.id]
+      let matched :: ObservationCountQuery
+          matched = input { subjectKind = Just SubjectGlob, paths = Just ["src/Main.hs", "src/Main.hs", "src/Other.hs"], query = Just "needle" }
+      matches <- matchObservations env.pool (ObservationMatchQuery workspace.id ["src/Main.hs", "src/Main.hs", "src/Other.hs"] matched.subjectKind Nothing matched.query (Just 200) Nothing)
+      result <- countObservations env.pool matched
+      result.matchCount `shouldBe` fromIntegral (length matches)
+      result.matchCount `shouldBe` 1
+      _ <- deleteObservation env.pool workspace.id first.id
+      countObservations env.pool input `shouldReturn` ObservationCounts workspace.id 1 1
+
+    it "returns honest zero and validates path/exact exclusivity" $ \env -> do
+      workspace <- createTestWorkspace env "counts-zero"
+      let input = ObservationCountQuery workspace.id Nothing Nothing Nothing Nothing Nothing
+      countObservations env.pool input `shouldReturn` ObservationCounts workspace.id 0 0
+      validateObservationCountQuery input { paths = Just [] } `shouldSatisfy` (not . null)
+      validateObservationCountQuery input { paths = Just ["../bad"] } `shouldSatisfy` (not . null)
+      validateObservationCountQuery input { paths = Just ["src/Main.hs"], subject = Just "src/Main.hs" } `shouldSatisfy` (not . null)
+
   describe "Observation CRUD" $ do
     it "round-trips file and glob observations and permits duplicate provenance" $ \env -> do
       workspace <- createTestWorkspace env "observation-crud"

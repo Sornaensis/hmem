@@ -11,6 +11,7 @@ module HMem.Server.API
   , ObservationEmbedding(..)
   , CreateObservationRequest(..)
   , ObservationMatchRequest(..)
+  , ObservationCountRequest(..)
   , LinkDependencyRequest(..)
   , UpdateWorkspaceRequest(..)
   , server
@@ -143,6 +144,9 @@ type ObservationAPI =
          :> Description "Requires repository read authorization for the requested active repository workspace. Matches concrete canonical repository-relative paths against stored file and glob subjects. The optional full-text query searches Observation content and all stored subject text. Canonical path_matches correlates each caller path with its ordered matched stored subjects."
          :> Post '[JSON] (PaginatedResult ObservationMatch)
   :<|> "similar" :> ReqBody '[JSON] SimilarObservationQuery :> Post '[JSON] [SimilarObservation]
+  :<|> "count" :> ReqBody '[JSON] ObservationCountRequest
+         :> Description "Requires active repository workspace read authorization. Returns full workspace total_count and distinct match_count from one database statement snapshot. Filters share list same-subject provenance, SHA and simple full-text predicates; optional concrete paths use canonical file/glob OR matching. subject and paths are mutually exclusive. Counts ignore pagination and are nonnegative exact integers at most 9007199254740991. Deployed cookie requests require CSRF."
+         :> Post '[JSON] ObservationCounts
   :<|> Capture "observationId" UUID :> Get '[JSON] Observation
   :<|> Capture "observationId" UUID :> Header "If-Match" Text
          :> Description "Replaces content only. Optional If-Match accepts one strong quoted canonical UUID from content_version; weak tags, lists, wildcard and malformed tokens return 400. A stale token returns 409 with code observation_content_conflict and latest canonical Observation without mutation; missing/deleted records return 404. Success returns the advanced content_version. Omitting If-Match deliberately retains unconditional legacy REST/MCP behavior and can overwrite competing content. X-Request-Id is correlation only."
@@ -241,6 +245,7 @@ decodeLifecycleDetail detail = fromMaybe (Aeson.String detail) $
 
 newtype CreateObservationRequest = CreateObservationRequest (Either Text CreateObservation)
 newtype ObservationMatchRequest = ObservationMatchRequest (Either Text ObservationMatchQuery)
+newtype ObservationCountRequest = ObservationCountRequest (Either Text ObservationCountQuery)
 newtype LinkDependencyRequest = LinkDependencyRequest (Either Text LinkDependency)
 newtype UpdateWorkspaceRequest = UpdateWorkspaceRequest (Either Text UpdateWorkspace)
 
@@ -274,6 +279,11 @@ instance FromJSON CreateObservationRequest where
 
 instance FromJSON ObservationMatchRequest where
   parseJSON value = pure $ ObservationMatchRequest $ case Aeson.fromJSON value of
+    Aeson.Error message -> Left (Text.pack message)
+    Aeson.Success parsed -> Right parsed
+
+instance FromJSON ObservationCountRequest where
+  parseJSON value = pure $ ObservationCountRequest $ case Aeson.fromJSON value of
     Aeson.Error message -> Left (Text.pack message)
     Aeson.Success parsed -> Right parsed
 
@@ -677,7 +687,12 @@ groups pool = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembersH :<|> a
     pure NoContent
 
 observations :: Pool Hasql.Connection -> Server ObservationAPI
-observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> similarH :<|> getH :<|> updateH :<|> deleteH :<|> embeddingH where
+observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> similarH :<|> countH :<|> getH :<|> updateH :<|> deleteH :<|> embeddingH where
+  countH (ObservationCountRequest requestBody) = do
+    value <- decodeRequest requestBody
+    requireObservationWorkspace pool value.workspaceId Auth.WorkspaceRoleRead
+    reject (validateObservationCountQuery value)
+    handleDBErrors $ Observation.countObservations pool value
   listH workspaceId kind subjectValue sha queryValue limit offset = do
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
     -- Validate client-supplied values before pagination defaults/caps are

@@ -158,6 +158,12 @@ route msg model =
         GotObservations _ _ _ _ _ _ ->
             Ok (Feature.DataLoading.update msg model)
 
+        GotObservationCounts _ _ ->
+            Ok (Feature.Observation.update msg model)
+
+        RetryObservationCounts ->
+            Ok (Feature.Observation.update msg model)
+
         GotObservationMatches _ _ _ _ _ _ ->
             Ok (Feature.Observation.update msg model)
 

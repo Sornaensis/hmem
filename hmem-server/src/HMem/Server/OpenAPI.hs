@@ -15,7 +15,7 @@ import Data.Proxy (Proxy(..))
 import Data.Text (Text)
 import Servant.OpenApi (toOpenApi)
 
-import HMem.Server.API (HMemAPI, CreateObservationRequest, ObservationMatchRequest, LinkDependencyRequest, UpdateWorkspaceRequest)
+import HMem.Server.API (HMemAPI, CreateObservationRequest, ObservationMatchRequest, ObservationCountRequest, LinkDependencyRequest, UpdateWorkspaceRequest)
 import HMem.Types
 
 openApiSpec :: OpenApi
@@ -226,6 +226,14 @@ instance ToSchema ObservationMatch where
           & deprecated ?~ True
           & description ?~ "Deprecated compatibility projection of the union of matched stored subjects, in Observation ordinal order.")
 instance ToSchema ObservationMatchRequest where declareNamedSchema _ = declareNamedSchema (Proxy @ObservationMatchQuery)
+instance ToSchema ObservationCountRequest where declareNamedSchema _ = declareNamedSchema (Proxy @ObservationCountQuery)
+instance ToSchema ObservationCountQuery where
+  declareNamedSchema _ = genericDeclareNamedSchema opts (Proxy @ObservationCountQuery)
+instance ToSchema ObservationCounts where
+  declareNamedSchema _ = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ObservationCounts)
+    let countSchema = mempty & type_ ?~ OpenApiInteger & minimum_ ?~ 0 & maximum_ ?~ 9007199254740991
+    pure $ NamedSchema name (schema & properties . at "total_count" ?~ Inline countSchema & properties . at "match_count" ?~ Inline countSchema)
 instance ToSchema WorkspaceTimelineEvent where declareNamedSchema = genericDeclareNamedSchema opts
 instance ToSchema TimelineActor where declareNamedSchema = genericDeclareNamedSchema timelineActorOpts
 instance ToSchema TimelineProjectContext where declareNamedSchema = genericDeclareNamedSchema timelineProjectContextOpts

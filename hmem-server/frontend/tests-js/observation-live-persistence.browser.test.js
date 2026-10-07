@@ -82,7 +82,7 @@ test('production card and independently ordered subjects survive live refresh an
 })
 
 test('production automatic refresh stages loaded span, coalesces bursts, keeps drafts and cache, and explicit Retry is fresh', { timeout: 60000 }, async () => {
-  const h = await openDiscovery(undefined, transform)
+  const h = await openDiscovery(undefined, values => transform([...values, ...Array.from({ length: 201 }, (_, i) => ({ ...values[3], id: 'live-extra-' + i, subjects: [{ subject_kind: 'file', subject: `docs/Extra-${i}.md` }] }))]))
   let release
   try {
     await h.start()
@@ -94,7 +94,7 @@ test('production automatic refresh stages loaded span, coalesces bursts, keeps d
     const before = await owner(h.page); const requests = []; let hold = true, fail = false
     await h.page.route('**/api/v1/observations?**', async route => {
       const params = Object.fromEntries(new URL(route.request().url()).searchParams); requests.push(params)
-      const body = queryObservations(h.fixture, { offset: Number(params.offset || 0), limit: 50, query: params.query, subjectKind: params.subject_kind, subject: params.subject, gitSha: params.git_sha })
+      const body = queryObservations(h.fixture, { offset: Number(params.offset || 0), limit: Number(params.limit), query: params.query, subjectKind: params.subject_kind, subject: params.subject, gitSha: params.git_sha })
       if (hold) { hold = false; await new Promise(resolve => { release = resolve }) }
       if (fail) { fail = false; await route.fulfill({ status: 503, body: '{}' }); return }
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
@@ -105,16 +105,16 @@ test('production automatic refresh stages loaded span, coalesces bursts, keeps d
     assert.equal(await owner(h.page), before); assert.equal(await card.locator('#observation-detail').count(), 1)
     await push(h, 4); await paint(h.page); assert.equal(requests.length, 1)
     release(); release = null; await h.idle(); await paint(h.page)
-    assert.deepEqual(requests.map(value => value.offset), ['0', '0', '50'])
+    assert.deepEqual(requests.map(value => value.offset), ['0', '0', '200'])
     assert.ok(requests.every(value => !value.query)); assert.equal(await h.page.locator('#observation-query').inputValue(), 'unapplied draft')
-    assert.equal(await owner(h.page), before); assert.equal(await h.page.locator('[data-observation-loaded-count]').getAttribute('data-observation-loaded-count'), '64')
+    assert.equal(await owner(h.page), before); assert.equal(await h.page.locator('[data-observation-loaded-count]').getAttribute('data-observation-loaded-count'), '265')
     assert.equal(await h.page.evaluate(() => document.activeElement.closest('.observation-detail-sha') !== null), true)
     assert.equal(await h.page.getByText('Results may have changed.', { exact: true }).count(), 0)
     fail = true; await push(h); await h.page.getByText('Automatic refresh failed.', { exact: false }).waitFor(); await h.idle()
     const afterFailure = requests.length; await paint(h.page); assert.equal(requests.length, afterFailure)
     assert.equal(await card.locator('#observation-detail').count(), 1)
     await h.page.getByRole('button', { name: 'Retry refresh', exact: true }).click(); await h.idle()
-    assert.deepEqual(requests.slice(afterFailure).map(value => value.offset), ['0', '50'])
+    assert.deepEqual(requests.slice(afterFailure).map(value => value.offset), ['0', '200'])
   } finally { release?.(); await h.close() }
 })
 

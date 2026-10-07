@@ -899,6 +899,33 @@ a:hover {
   .sticky-workspace-bar {
     margin: -1rem -1rem 0;
   }
+
+  .workspace-header-top,
+  .workspace-header-title {
+    flex-wrap: wrap;
+  }
+
+  .workspace-header-title .editable-text,
+  .workspace-header-title .inline-edit-input,
+  .workspace-detail,
+  .sticky-workspace-summary {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  .sticky-workspace-summary {
+    white-space: normal;
+  }
+
+  .page:has(.workspace-header) .search-input {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .app:has(.workspace-header) .sidebar {
+    max-height: min(16rem, 40dvh);
+  }
 }
 
 /* Buttons */

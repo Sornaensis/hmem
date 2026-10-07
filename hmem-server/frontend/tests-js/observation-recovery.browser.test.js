@@ -4,29 +4,38 @@ import { openDiscovery } from './observation-discovery-fixture.mjs'
 import { scanObservationRows } from './observation-viewport-fixture.mjs'
 
 test('production cached incremental failure retries the exact applied offset and changed-query Apply replaces page zero', { timeout: 60000 }, async () => {
-  const h = await openDiscovery()
+  const h = await openDiscovery(undefined, values => [...values, ...Array.from({ length: 200 }, (_, i) => ({ ...values[3], id: 'recovery-extra-' + i, subjects: [{ subject_kind: 'file', subject: `docs/Extra-${i}.md` }] }))])
   try {
     const observed = []
     let failNext = true
     await h.page.route('**/api/v1/observations?**', async route => {
       const params = Object.fromEntries(new URL(route.request().url()).searchParams)
       observed.push(params)
-      if (params.offset === '50' && failNext) {
+      if (params.offset === '200' && failNext) {
         failNext = false
         await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Controlled incremental failure' }) })
       } else await route.fallback()
     })
     await h.start()
-    assert.equal((await scanObservationRows(h.page)).cards.size, 50)
+    try { assert.equal((await scanObservationRows(h.page)).cards.size, 200) } catch (error) {
+      console.log('Bounded initial recovery scan receipt', await h.page.evaluate(() => ({
+        context: document.getElementById('observation-panel')?.dataset.observationContext,
+        viewport: { ...document.getElementById('observation-viewport')?.dataset },
+        active: document.activeElement?.outerHTML?.slice(0, 180),
+        scrollTop: document.getElementById('main-content-scroll')?.scrollTop,
+        rows: [...document.querySelectorAll('[data-observation-key]')].map(row => ({ key: row.dataset.observationKey, position: row.dataset.observationPosition }))
+      })))
+      throw error
+    }
     await h.page.getByRole('button', { name: 'Load more', exact: true }).click()
     await h.page.getByRole('button', { name: 'Retry results', exact: true }).waitFor({ timeout: 5000 })
-    assert.equal((await scanObservationRows(h.page)).cards.size, 50)
+    assert.equal((await scanObservationRows(h.page)).cards.size, 200)
     assert.match(await h.page.locator('.observation-state-error').innerText(), /loaded results|cached|Retry results/i)
     await h.page.locator('#observation-query').fill('unapplied private control')
     await h.page.getByRole('button', { name: 'Retry results', exact: true }).click(); await h.idle()
-    assert.equal((await scanObservationRows(h.page)).cards.size, 64)
-    assert.deepEqual(observed.filter(value => value.offset === '50').map(value => ({ query: value.query || '', offset: value.offset, limit: value.limit })), [
-      { query: '', offset: '50', limit: '50' }, { query: '', offset: '50', limit: '50' }
+    assert.equal((await scanObservationRows(h.page)).cards.size, 264)
+    assert.deepEqual(observed.filter(value => value.offset === '200').map(value => ({ query: value.query || '', offset: value.offset, limit: value.limit })), [
+      { query: '', offset: '200', limit: '200' }, { query: '', offset: '200', limit: '200' }
     ])
     await h.page.locator('#observation-query').fill('Cache evidence')
     await h.page.getByRole('button', { name: 'Apply filters', exact: true }).click(); await h.idle()

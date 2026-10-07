@@ -328,6 +328,7 @@ type alias ObservationDeleteState =
 
 type alias ObservationModel =
     { items : Dict String Api.Observation
+    , counts : ObservationCountState
     , resultRows : Array ObservationResultRow
     , viewport : ObservationViewport.State
     , orderedIds : List String
@@ -395,6 +396,24 @@ type alias ObservationModel =
     , deleteConfirmation : Maybe ObservationDeleteState
     , nextCurationContextToken : Int
     , nextMutationRequestToken : Int
+    }
+
+
+type alias ObservationCountGuard =
+    { workspaceId : String, sessionEpoch : Int, actor : String, token : Int, generation : Int, fingerprint : String }
+
+
+type alias ObservationCountState =
+    { owner : Maybe ObservationCountGuard
+    , active : Maybe ObservationCountGuard
+    , nextToken : Int
+    , generation : Int
+    , pending : Bool
+    , current : Bool
+    , value : Maybe Api.ObservationCounts
+    , valueFingerprint : String
+    , settledFingerprint : String
+    , error : Maybe String
     }
 
 
@@ -1046,6 +1065,8 @@ type Msg
     | ApplyObservationFilters
     | RevertObservationFilters
     | RefreshObservationResults
+    | GotObservationCounts ObservationCountGuard (Result Http.Error Api.ObservationCounts)
+    | RetryObservationCounts
     | RetryObservationResults
     | RetryObservationDetail
     | SetObservationBrowseMode ObservationRequestMode

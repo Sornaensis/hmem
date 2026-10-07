@@ -3,7 +3,29 @@ import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { resolve, sep } from 'node:path'
 import { chromium } from '@playwright/test'
-import { generateFixture, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, projectOverviewResponse, taskOverviewResponse, workspaceShellSnapshotItems } from '../perf/fixtures.mjs'
+import { generateFixture, queryObservations, navigationBranchResponse, navigationFocusResponse, navigationSummariesResponse, projectOverviewResponse, taskOverviewResponse, workspaceShellSnapshotItems } from '../perf/fixtures.mjs'
+
+// Controlled HTTP-fixture equivalent; backend predicate equivalence is tested
+// separately against PostgreSQL. Never count a paginated fixture prefix.
+export function allFixtureObservations(fixture, options) {
+  const values = []
+  for (let offset = 0; ; offset += 200) {
+    const page = queryObservations(fixture, { ...options, offset, limit: 200 })
+    values.push(...page.items)
+    if (!page.has_more) return values
+  }
+}
+
+export function fixtureObservationCounts(fixture, query) {
+  const scoped = fixture.observations.filter(value => value.workspace_id === query.workspace_id)
+  let values = allFixtureObservations({ ...fixture, observations: scoped }, { query: query.query, subjectKind: query.subject_kind, subject: query.subject, gitSha: query.git_sha })
+  if (query.paths) values = values.filter(value => value.subjects.some(subject => (!query.subject_kind || subject.subject_kind === query.subject_kind) && query.paths.some(path => {
+    if (subject.subject_kind === 'file') return subject.subject === path
+    const pattern = subject.subject.split('/').map((part, i, all) => part === '**' ? (i === all.length - 1 ? '.*' : '(?:[^/]+/)*') : part.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + (i === all.length - 1 ? '' : '/')).join('')
+    return new RegExp('^' + pattern + '$').test(path)
+  })))
+  return { workspace_id: query.workspace_id, total_count: scoped.length, match_count: values.length }
+}
 
 export function hierarchyFixture() {
   const base = generateFixture('small')
@@ -115,6 +137,7 @@ export async function openHierarchy(fixture = hierarchyFixture(), additionalFixt
           value = (path.includes('/projects/') ? fixture.projects : fixture.tasks).find(item => item.id === path.split('/')[4])
           if (request.method() === 'PUT') { const update = request.postDataJSON(); assert.deepEqual(Object.keys(update).sort(), ['request_id','title']); assert.equal(typeof update.request_id,'string'); value.title=update.title; receipt.update = update }
         }
+        else if (path === '/api/v1/observations/count') value = fixtureObservationCounts(fixture, request.postDataJSON())
         else if (path === '/api/v1/observations' || path.endsWith('/subject-facets')) value = { items: [], has_more: false }
         else { unhandled.push(request.method() + ' ' + path); status = 501; value = { error: 'Unhandled controlled route' } }
         const control = controls.find(candidate => !candidate.used && candidate.match(receipt))

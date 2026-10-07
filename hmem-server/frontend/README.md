@@ -60,6 +60,19 @@ viewport and selection. A failed or incomplete refresh keeps the cache and offer
 Retry refresh. Draft filters are not submitted by background refresh. Unified search
 similarly retains its accepted results and refreshes its submitted search text.
 
+Observation list, exact subject, subject-facet and concrete-file requests use
+200-item transport pages. Load more remains explicit; automatic refresh stages
+the previously demanded span before replacing results. Hierarchy pages remain
+50 items, and the viewport still mounts at most 25 ordinary rows plus three owners.
+The workspace information bar shows an authorized full-workspace Observation
+total, including zero, independently of loaded pages or the active tab. Effective
+applied Observation filters show the full distinct match count; draft controls
+do not change it. Counts come from a read-authorized, cookie-CSRF-protected POST
+`/api/v1/observations/count` aggregate over the same list or concrete-path predicates.
+Loading, stale totals and failures are labelled honestly; Retry counts requests
+a fresh guarded aggregate. Count replies cannot change card or subject disclosure,
+focus, scroll, or cached result membership.
+
 Ordered subjects have their own arrow, independent of the full read-only card and
 file-match groups. Card, subject and group preferences survive reloads in a versioned
 workspace/actor/authority storage namespace. Storage contains bounded UI hints only,

@@ -3229,6 +3229,8 @@ updateResponse msg model =
                     Ok paginated ->
                         if model.observations.refreshPass /= Nothing then
                             Feature.Observation.acceptResultRefresh offset paginated model
+                        else if not (Feature.Observation.validPage offset paginated.hasMore (List.map .id paginated.items) model.observations.orderedIds) then
+                            ( { model | observations = Feature.Observation.failResultPage wsId offset "Observations are incomplete: the page made no valid progress." model.observations, dataLoading = completeObservationWorkspaceLoad wsId maybeToken generation fingerprint offset model }, Cmd.none )
                         else
                         let
                             currentObservations =

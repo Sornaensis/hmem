@@ -295,7 +295,7 @@ suite =
                 [ Page.Workspace.workspaceSummaryParts True "workspace-a" [ activeProject ] [ openTask ] [ workspaceObservation ] False
                 , Page.Workspace.workspaceSummaryParts False "workspace-a" [ activeProject, closedProject ] [ openTask, blockedTask, doneTask, otherWorkspaceTask ] [ workspaceObservation, otherWorkspaceObservation ] False
                 ]
-                    |> Expect.equal [ [], [ "1 open project", "2 open tasks", "1 observation" ] ]
+                    |> Expect.equal [ [], [ "1 open project", "2 open tasks" ] ]
         , test "timeline tab fragment round-trips and exposes a workspace tab label" <|
             \_ ->
                 [ (Helpers.parseFragment (Just "tab=timeline")).tab == TimelineTab

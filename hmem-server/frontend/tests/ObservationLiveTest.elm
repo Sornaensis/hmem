@@ -13,11 +13,15 @@ import Json.Decode as D
 import Json.Encode as E
 import ObservationPreferences as P
 import Test exposing (..)
+import Test.Html.Query as Query
+import Test.Html.Selector as Selector
 import Types exposing (..)
 import Url
 
 
 workspaceId = "00000000-0000-4000-8000-000000000001"
+workspaceFixture = { id = workspaceId, name = "Repository", workspaceType = Api.Repository, ghOwner = Nothing, ghRepo = Nothing, createdAt = "2026-01-01T00:00:00Z", updatedAt = "2026-01-01T00:00:00Z" }
+emptyCountGuard = { workspaceId = "", sessionEpoch = -1, actor = "", token = -1, generation = -1, fingerprint = "" }
 observationId = "00000000-0000-4000-8000-000000000002"
 
 
@@ -37,7 +41,7 @@ model =
         state = O.startReloadForSession 3 workspaceId O.init
     in
     { base | auth = { status = AuthReady, mode = Just "local" }, sessionContext = Just session, sessionRequestEpoch = 3, selectedWorkspaceId = Just workspaceId, activeTab = ObservationsTab, workspaces = Dict.singleton workspaceId workspace
-        , observations = { state | loading = False, expectedOffset = Nothing, items = Dict.singleton observationId (row observationId), orderedIds = [ observationId ], nextOffset = 64 } }
+        , observations = { state | loading = False, expectedOffset = Nothing, items = Dict.singleton observationId (row observationId), orderedIds = [ observationId ], nextOffset = 264 } }
 
 
 page offset values more current =
@@ -50,17 +54,87 @@ project previous current = O.refreshViewport previous ( current, Cmd.none ) |> T
 
 suite : Test
 suite = describe "automatic observation refresh and scoped preferences"
-    [ test "stages demanded pages without replacing cache and commits membership once" <| \_ ->
+    [ test "Observation pages share 200 while full aggregate query ignores offsets" <| \_ ->
+        Expect.equal ( [ 200, 200, 200 ], [ False, False, False ] )
+            ( [ (O.listQuery workspaceId 0 model.observations).limit, (O.facetQuery workspaceId 200 model.observations).limit, (O.matchQuery workspaceId [ "src/Main.elm" ] 400 model.observations).limit ]
+            , [ O.validPage 0 True [ "one" ] [], O.validPage 200 True (List.repeat 200 "one") [ "one" ], O.hasAppliedCountFilter model.observations ] )
+    , test "count decoder rejects negative fractional overflow and inconsistent totals" <| \_ ->
+        let value total matched = "{\"workspace_id\":\"" ++ workspaceId ++ "\",\"total_count\":" ++ total ++ ",\"match_count\":" ++ matched ++ "}" in
+        Expect.equal [ True, False, False, False, False ] (List.map (\json -> D.decodeString Api.observationCountsDecoder json |> Result.toMaybe |> (/=) Nothing)
+            [ value "0" "0", value "-1" "0", value "2.5" "1", value "9007199254740992" "0", value "1" "2" ])
+    , test "draft filters do not request counts and applied filters preserve total while held" <| \_ ->
+        let
+            started = O.syncCounts model |> Tuple.first
+            guard = started.observations.counts.active |> Maybe.withDefault emptyCountGuard
+            admitted = O.update (GotObservationCounts guard (Ok { workspaceId = workspaceId, totalCount = 300, matchCount = 300 })) started |> Tuple.first
+            draft = O.update (SetObservationQuery "needle") admitted |> Tuple.first |> O.syncCounts |> Tuple.first
+            applied = O.update ApplyObservationFilters draft |> Tuple.first |> O.syncCounts |> Tuple.first
+        in
+        Expect.all
+            [ \_ -> Expect.equal Nothing draft.observations.counts.active
+            , \_ -> Expect.equal ( True, Just 300 ) ( applied.observations.counts.current, Maybe.map .totalCount applied.observations.counts.value )
+            , \_ -> O.viewObservationsState workspaceFixture applied.observations |> Query.fromHtml |> Query.has [ Selector.text "Counting matching Observations…" ]
+            ] ()
+    , test "stale B cannot relabel A when C then B is applied while a successor is held" <| \_ ->
+        let
+            started = O.syncCounts model |> Tuple.first
+            aGuard = started.observations.counts.active |> Maybe.withDefault emptyCountGuard
+            a = O.update (GotObservationCounts aGuard (Ok { workspaceId = workspaceId, totalCount = 300, matchCount = 9 })) started |> Tuple.first
+            apply term current = let draft = O.update (SetObservationQuery term) current |> Tuple.first in O.update ApplyObservationFilters draft |> Tuple.first |> O.syncCounts |> Tuple.first
+            b = apply "B" a
+            bGuard = b.observations.counts.active |> Maybe.withDefault emptyCountGuard
+            c = apply "C" b
+            staleB = O.update (GotObservationCounts bGuard (Ok { workspaceId = workspaceId, totalCount = 300, matchCount = 2 })) c |> Tuple.first
+            bAgain = apply "B" staleB
+        in
+        Expect.all
+            [ \_ -> Expect.equal a.observations.counts.valueFingerprint bAgain.observations.counts.valueFingerprint
+            , \_ -> O.viewObservationsState workspaceFixture bAgain.observations |> Query.fromHtml |> Query.has [ Selector.text "Counting matching Observations…" ]
+            ] ()
+    , test "inactive-tab invalidations coalesce and stale success dispatches one current successor" <| \_ ->
+        let
+            initial = O.syncCounts { model | activeTab = ProjectsTab } |> Tuple.first
+            guard = initial.observations.counts.active |> Maybe.withDefault emptyCountGuard
+            invalidated = { initial | observations = O.invalidateCounts (O.invalidateCounts initial.observations) } |> O.syncCounts |> Tuple.first
+            successor = O.update (GotObservationCounts guard (Ok { workspaceId = workspaceId, totalCount = 99, matchCount = 99 })) invalidated |> Tuple.first
+            finalGuard = successor.observations.counts.active |> Maybe.withDefault emptyCountGuard
+            accepted = O.update (GotObservationCounts finalGuard (Ok { workspaceId = workspaceId, totalCount = 0, matchCount = 0 })) successor |> Tuple.first
+        in
+        Expect.equal ( ( False, Nothing, guard.token + 1 ), ( True, Just 0, Nothing ) )
+            ( ( invalidated.observations.counts.current, successor.observations.counts.value, finalGuard.token ), ( accepted.observations.counts.current, Maybe.map .totalCount accepted.observations.counts.value, accepted.observations.counts.active ) )
+    , test "count failure pauses and explicit retry receives a fresh token" <| \_ ->
+        let
+            started = O.syncCounts model |> Tuple.first
+            guard = started.observations.counts.active |> Maybe.withDefault emptyCountGuard
+            failed = O.update (GotObservationCounts guard (Err Http.NetworkError)) started |> Tuple.first |> O.syncCounts |> Tuple.first
+            retry = O.update RetryObservationCounts failed |> Tuple.first
+        in
+        Expect.equal ( ( Nothing, False ), ( True, Just (guard.token + 1) ) ) ( ( failed.observations.counts.active, failed.observations.counts.current ), ( failed.observations.counts.error /= Nothing, Maybe.map .token retry.observations.counts.active ) )
+    , test "count replies cannot cross actor epoch workspace or read revocation" <| \_ ->
+        let
+            started = O.syncCounts model |> Tuple.first
+            guard = started.observations.counts.active |> Maybe.withDefault emptyCountGuard
+            reply current = O.update (GotObservationCounts guard (Ok { workspaceId = workspaceId, totalCount = 100, matchCount = 100 })) current |> Tuple.first
+            foreign = { started | selectedWorkspaceId = Just "foreign" } |> reply
+            epoch = { started | sessionRequestEpoch = 4 } |> reply
+            revoked = { started | auth = { status = AuthBooting, mode = Just "local" } } |> reply
+            session = started.sessionContext |> Maybe.withDefault { authMode = "local", principal = { actorType = "user", actorId = "actor", actorLabel = "Actor", authority = "local", grantUserId = Nothing }, globalPermissions = { createWorkspace = False, superadmin = False }, workspace = Nothing }
+            principal = session.principal
+            actor = { started | sessionContext = Just { session | principal = { principal | actorId = "other-actor" } } } |> reply
+            readRevoked = { started | sessionContext = Just { session | workspace = Just { workspaceId = workspaceId, role = Just "read", canRead = False, canEdit = False, canAdmin = False } } } |> reply
+        in
+        Expect.equal [ Nothing, Nothing, Nothing, Nothing, Nothing ] (List.map (\current -> current.observations.counts.value) [ foreign, epoch, revoked, actor, readRevoked ])
+    , test "stages demanded pages without replacing cache and commits membership once" <| \_ ->
         let
             initial = project model model
             started = O.refreshActiveResults initial |> Tuple.first
-            first = page 0 (List.range 1 50 |> List.map (String.fromInt >> row)) True started
-            final = page 50 [ row "51", row observationId ] False first |> project first
+            first = page 0 (List.range 1 200 |> List.map (String.fromInt >> row)) True started
+            final = page 200 [ row "201", row observationId ] False first |> project first
         in Expect.all
             [ \_ -> first.observations.orderedIds |> Expect.equal [ observationId ]
-            , \_ -> first.observations.expectedOffset |> Expect.equal (Just 50)
+            , \_ -> first.observations.expectedOffset |> Expect.equal (Just 200)
             , \_ -> first.observations.viewport.stamp |> Expect.equal initial.observations.viewport.stamp
-            , \_ -> final.observations.orderedIds |> List.length |> Expect.equal 52
+            , \_ -> final.observations.orderedIds |> List.length |> Expect.equal 202
             , \_ -> final.observations.refreshPass |> Expect.equal Nothing ] ()
     , test "burst retires incomplete staging and starts only one fresh pass at completion, retaining demanded depth" <| \_ ->
         let
@@ -71,7 +145,7 @@ suite = describe "automatic observation refresh and scoped preferences"
             [ \_ -> burst.observations.requestGeneration |> Expect.equal started.observations.requestGeneration
             , \_ -> completed.observations.requestGeneration |> Expect.equal (started.observations.requestGeneration + 1)
             , \_ -> completed.observations.orderedIds |> Expect.equal [ observationId ]
-            , \_ -> Maybe.map .targetOffset completed.observations.refreshPass |> Expect.equal (Just 64) ] ()
+            , \_ -> Maybe.map .targetOffset completed.observations.refreshPass |> Expect.equal (Just 264) ] ()
     , test "equal background results preserve semantic viewport stamp, selection, owner and disclosure" <| \_ ->
         let
             state = model.observations
@@ -96,7 +170,7 @@ suite = describe "automatic observation refresh and scoped preferences"
             , \_ -> incomplete.observations.refreshError /= Nothing |> Expect.equal True
             , \_ -> quiet.observations.refreshPass |> Expect.equal Nothing
             , \_ -> retry.observations.expectedOffset |> Expect.equal (Just 0)
-            , \_ -> Maybe.map .targetOffset retry.observations.refreshPass |> Expect.equal (Just 64) ] ()
+            , \_ -> Maybe.map .targetOffset retry.observations.refreshPass |> Expect.equal (Just 264) ] ()
     , test "canonical newer proof cannot be replaced by an older staged page" <| \_ ->
         let
             started = O.refreshActiveResults model |> Tuple.first
@@ -214,7 +288,7 @@ suite = describe "automatic observation refresh and scoped preferences"
     , test "facet demanded span survives pass invalidation and failure then fresh Retry" <| \_ ->
         let
             state = model.observations
-            base = { model | observations = { state | requestMode = ObservationFacetMode, appliedQuery = Nothing, facetNextOffset = 150 } }
+            base = { model | observations = { state | requestMode = ObservationFacetMode, appliedQuery = Nothing, facetNextOffset = 450 } }
             started = O.refreshActiveResults base |> Tuple.first
             invalidated = O.refreshActiveResults started |> Tuple.first
             request = invalidated.observations
@@ -222,8 +296,8 @@ suite = describe "automatic observation refresh and scoped preferences"
             failure = O.failResultPage workspaceId 0 "Failed" restarted.observations
             retry = O.update RetryObservationResults { restarted | observations = failure } |> Tuple.first
         in Expect.all
-            [ \_ -> Maybe.map .targetOffset restarted.observations.refreshPass |> Expect.equal (Just 150)
-            , \_ -> Maybe.map .targetOffset retry.observations.refreshPass |> Expect.equal (Just 150)
+            [ \_ -> Maybe.map .targetOffset restarted.observations.refreshPass |> Expect.equal (Just 450)
+            , \_ -> Maybe.map .targetOffset retry.observations.refreshPass |> Expect.equal (Just 450)
             , \_ -> retry.observations.facetExpectedOffset |> Expect.equal (Just 0) ] ()
     , test "actual canonical, deletion and unloaded invalidation retire active staging without a collection event; equal canonical is no-op" <| \_ ->
         let

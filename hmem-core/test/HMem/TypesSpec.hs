@@ -79,9 +79,20 @@ spec = do
           eitherDecode (encode (Object (KM.delete "content_version" fields))) `shouldSatisfy` (isLeft :: Either String Observation -> Bool)
           eitherDecode (encode (Object (KM.insert "content_version" (toJSON ("not-a-uuid" :: String)) fields))) `shouldSatisfy` (isLeft :: Either String Observation -> Bool)
         _ -> expectationFailure "Observation must encode an object"
-    it "retains content-only unconditional update JSON and rejects token mutation" $ do
-      eitherDecode "{\"content\":\"compatible replacement\"}" `shouldBe` Right (UpdateObservation "compatible replacement")
-      eitherDecode "{\"content\":\"replacement\",\"content_version\":\"00000000-0000-0000-0000-000000000001\"}" `shouldSatisfy` (isLeft :: Either String UpdateObservation -> Bool)
+    it "requires explicit reviewed SHA and rejects server-owned field mutation" $ do
+      eitherDecode "{\"content\":\"replacement\"}" `shouldSatisfy` (isLeft :: Either String ReviewedObservationUpdate -> Bool)
+      eitherDecode (encode (ReviewedObservationUpdate "replacement" canonicalSha)) `shouldBe` Right (ReviewedObservationUpdate "replacement" canonicalSha)
+      eitherDecode "{\"content\":\"replacement\",\"content_version\":\"00000000-0000-0000-0000-000000000001\"}" `shouldSatisfy` (isLeft :: Either String ReviewedObservationUpdate -> Bool)
+      validateReviewedObservationUpdate (ReviewedObservationUpdate "text" "BAD") `shouldSatisfy` (not . null)
+    it "hashes exact UTF-8 bytes without Unicode/newline normalization" $ do
+      observationContentDigest "abc" `shouldBe` "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      observationContentDigest "é\r\n" `shouldNotBe` observationContentDigest "e\x301\n"
+    it "requires nullable canonical provenance fields to be present" $ do
+      case toJSON observationValue of
+        Object fields -> do
+          eitherDecode (encode (Object (KM.delete "current_provenance" fields))) `shouldSatisfy` (isLeft :: Either String Observation -> Bool)
+          eitherDecode (encode (Object (KM.delete "latest_sequence" fields))) `shouldSatisfy` (isLeft :: Either String Observation -> Bool)
+        _ -> expectationFailure "Observation must encode an object"
   where
     workspace = read "00000000-0000-0000-0000-000000000001" :: UUID
     observationSearch = UnifiedSearchQuery
@@ -90,7 +101,7 @@ spec = do
       , projectStatus = Nothing, taskStatus = Nothing, taskPriority = Nothing, projectId = Nothing }
     savedView = CreateSavedView workspace "view" Nothing "activity" Null
     observedAt = read "2026-01-02 03:04:05 UTC" :: UTCTime
-    observationValue = Observation workspace workspace create.subjects canonicalSha "body" observedAt observedAt workspace
+    observationValue = Observation workspace workspace create.subjects canonicalSha "body" observedAt observedAt workspace 1 Nothing
     matchValue = ObservationMatch
       { observation = observationValue
       , pathMatches =

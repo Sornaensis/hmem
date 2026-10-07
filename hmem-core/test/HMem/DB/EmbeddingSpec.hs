@@ -4,7 +4,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently, race, wait, waitCatch, withAsync)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Exception (bracket, finally, throwIO, try)
-import Control.Monad (unless, void)
+import Control.Monad (forM_, unless, void, when)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as B8
 import Data.Char (toLower)
@@ -30,6 +30,7 @@ import System.Timeout (timeout)
 import HMem.Config qualified as Config
 import HMem.DB.Embedding
 import HMem.DB.Observation
+import HMem.DB.ObservationFixture (reviewed, writeObservation)
 import HMem.DB.Pool (DBException(..), checkPgvector, createPool, runSession)
 import HMem.DB.TestHarness
 import HMem.Types
@@ -99,8 +100,67 @@ spec = around withTestEnv $ do
           expected = observationContentFingerprint observation.gitSha observation.subjects observation.content
       compareAndSetObservationEmbedding env.pool workspace.id observation.id expected managedSpace unitX `shouldReturn` EmbeddingApplied
       compareAndSetObservationEmbedding env.pool workspace.id observation.id expected managedSpace unitX `shouldReturn` EmbeddingAlreadySatisfied
-      _ <- updateObservation env.pool workspace.id observation.id (UpdateObservation "after")
+      _ <- writeObservation env.pool workspace.id observation.id (reviewed "after")
       compareAndSetObservationEmbedding env.pool workspace.id observation.id expected managedSpace unitX `shouldReturn` EmbeddingStale
+
+    it "fences same-input assertions with active or disabled targets while retaining reusable manual input" $ \env -> do
+      requirePgvector env
+      workspace <- createTestWorkspace env "embedding-same-input-fence"
+      let managedSpace = testSpace "hmem:managed-gte-qwen2:same-input-fence"
+      forM_ [False, True] $ \disabled -> do
+        enableEmbeddingTarget env.pool managedSpace
+        observation <- create env workspace "unchanged input"
+        let fingerprint = observationContentFingerprint observation.gitSha observation.subjects observation.content
+        [oldAttempt] <- claimEmbeddingJobs env.pool "same-input-old" 1
+        when disabled $ disableEmbeddingTarget env.pool
+        Just asserted <- writeObservation env.pool workspace.id observation.id (reviewed observation.content)
+        asserted.contentVersion `shouldNotBe` observation.contentVersion
+        observationContentFingerprint asserted.gitSha asserted.subjects asserted.content `shouldBe` fingerprint
+        runSession env.pool (Session.statement observation.id jobStateStatement) `shouldReturn` "pending"
+        enableEmbeddingTarget env.pool managedSpace
+        renewEmbeddingJob env.pool oldAttempt `shouldReturn` False
+        releaseEmbeddingJob env.pool oldAttempt "provider_cancelled" True `shouldReturn` False
+        completeClaimedEmbeddingJob env.pool oldAttempt unitX `shouldReturn` EmbeddingStale
+        [replacement] <- claimEmbeddingJobs env.pool "same-input-new" 1
+        replacement.contentFingerprint `shouldBe` oldAttempt.contentFingerprint
+        replacement.attempts `shouldBe` oldAttempt.attempts
+        replacement.leaseOwner `shouldNotBe` oldAttempt.leaseOwner
+        renewEmbeddingJob env.pool oldAttempt `shouldReturn` False
+        releaseEmbeddingJob env.pool oldAttempt "provider_cancelled" True `shouldReturn` False
+        completeClaimedEmbeddingJob env.pool oldAttempt unitX `shouldReturn` EmbeddingStale
+        renewEmbeddingJob env.pool replacement `shouldReturn` True
+        -- Manual exports describe embedding input, not an assertion/lease.
+        compareAndSetObservationEmbedding env.pool workspace.id observation.id fingerprint managedSpace unitX
+          `shouldReturn` EmbeddingApplied
+        claimEmbeddingJobs env.pool "after-manual-input" 1 `shouldReturn` []
+
+    it "restarts exhausted retry budgets on changed and equal-input assertions with active or disabled targets" $ \env -> do
+      requirePgvector env
+      workspace <- createTestWorkspace env "embedding-exhausted-assertion"
+      let managedSpace = testSpace "hmem:managed-gte-qwen2:exhausted-assertion"
+      forM_ [(False,False),(False,True),(True,False),(True,True)] $ \(disabled,equalInput) -> do
+        enableEmbeddingTarget env.pool managedSpace
+        observation <- create env workspace "old exhausted input"
+        [firstClaim] <- claimEmbeddingJobs env.pool "exhausted-owner" 1
+        -- Capture a genuine final attempt, then let the assertion replace it.
+        runSession env.pool $ Session.statement observation.id finalAttemptStatement
+        let exhausted = firstClaim { attempts = 16 }
+            body = if equalInput then observation.content else "new reviewed input"
+        when disabled $ disableEmbeddingTarget env.pool
+        Just asserted <- writeObservation env.pool workspace.id observation.id (reviewed body)
+        runSession env.pool (Session.statement observation.id jobStateStatement) `shouldReturn` "pending"
+        asserted.contentVersion `shouldNotBe` observation.contentVersion
+        enableEmbeddingTarget env.pool managedSpace
+        [replacement] <- claimEmbeddingJobs env.pool "exhausted-replacement" 1
+        replacement.attempts `shouldBe` 1
+        replacement.leaseOwner `shouldNotBe` exhausted.leaseOwner
+        replacement.content `shouldBe` body
+        replacement.contentFingerprint `shouldBe` observationContentFingerprint observation.gitSha observation.subjects body
+        renewEmbeddingJob env.pool exhausted `shouldReturn` False
+        releaseEmbeddingJob env.pool exhausted "provider_cancelled" True `shouldReturn` False
+        completeClaimedEmbeddingJob env.pool exhausted unitX `shouldReturn` EmbeddingStale
+        renewEmbeddingJob env.pool replacement `shouldReturn` True
+        completeClaimedEmbeddingJob env.pool replacement unitX `shouldReturn` EmbeddingApplied
 
     it "returns not-found when a compare-and-set target is deleted" $ \env -> do
       requirePgvector env
@@ -125,7 +185,7 @@ spec = around withTestEnv $ do
       oldJob <- create env workspace "before"
       [claimed] <- claimEmbeddingJobs env.pool "worker-one" 1
       claimed.observationId `shouldBe` oldJob.id
-      _ <- updateObservation env.pool workspace.id oldJob.id (UpdateObservation "after")
+      _ <- writeObservation env.pool workspace.id oldJob.id (reviewed "after")
       completeClaimedEmbeddingJob env.pool claimed unitX
         `shouldReturn` EmbeddingStale
       [replacement] <- claimEmbeddingJobs env.pool "worker-two" 1
@@ -139,7 +199,7 @@ spec = around withTestEnv $ do
       enableEmbeddingTarget env.pool managedSpace
       observation <- create env workspace "same"
       setObservationEmbeddingInSpace env.pool workspace.id observation.id managedSpace unitX
-      _ <- updateObservation env.pool workspace.id observation.id (UpdateObservation "same")
+      _ <- writeObservation env.pool workspace.id observation.id (reviewed "same")
       [requeued] <- claimEmbeddingJobs env.pool "after-update" 1
       requeued.observationId `shouldBe` observation.id
       -- Model an interrupted/manual vector clear with an old job hash.  The
@@ -159,9 +219,10 @@ spec = around withTestEnv $ do
       observation <- create env workspace "same"
       setObservationEmbeddingInSpace env.pool workspace.id observation.id managedSpace unitX
       disableEmbeddingTarget env.pool
-      _ <- updateObservation env.pool workspace.id observation.id (UpdateObservation "same")
+      _ <- writeObservation env.pool workspace.id observation.id (reviewed "same")
+      runSession env.pool (Session.statement observation.id jobStateStatement) `shouldReturn` "pending"
       enableEmbeddingTarget env.pool managedSpace
-      reconcileEmbeddingJobs env.pool 1 `shouldReturn` 1
+      reconcileEmbeddingJobs env.pool 1 `shouldReturn` 0
       [requeued] <- claimEmbeddingJobs env.pool "disabled-content" 1
       requeued.observationId `shouldBe` observation.id
 
@@ -413,7 +474,7 @@ spec = around withTestEnv $ do
       enableEmbeddingTarget env.pool managedSpace
       observation <- create env workspace "before mutation"
       [oldAttempt] <- claimEmbeddingJobs env.pool "content-old" 1
-      _ <- updateObservation env.pool workspace.id observation.id (UpdateObservation "after mutation")
+      _ <- writeObservation env.pool workspace.id observation.id (reviewed "after mutation")
       renewEmbeddingJob env.pool oldAttempt `shouldReturn` False
       releaseEmbeddingJob env.pool oldAttempt "provider_cancelled" True `shouldReturn` False
       completeClaimedEmbeddingJob env.pool oldAttempt unitX `shouldReturn` EmbeddingStale
@@ -703,6 +764,11 @@ expireLeaseStatement = Statement.Statement
 exhaustLeaseStatement :: Statement.Statement UUID ()
 exhaustLeaseStatement = Statement.Statement
   "UPDATE public.embedding_jobs SET attempts = 16, lease_expires_at = now() - interval '1 second' WHERE observation_id = $1"
+  (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
+
+finalAttemptStatement :: Statement.Statement UUID ()
+finalAttemptStatement = Statement.Statement
+  "UPDATE public.embedding_jobs SET attempts = 16 WHERE observation_id = $1"
   (Enc.param (Enc.nonNullable Enc.uuid)) Dec.noResult True
 
 jobStateStatement :: Statement.Statement UUID Text

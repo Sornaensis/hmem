@@ -355,15 +355,25 @@ enqueueActiveJobStatement = Statement.Statement
 -- bytes are identical.  Its matching completed job must therefore be made
 -- pending again rather than being mistaken for evidence of a current vector.
 enqueueObservationForContentChange :: Observation -> Session.Session ()
-enqueueObservationForContentChange observation = Session.statement
-  ( observation.id
-  , observation.workspaceId
-  , observationContentFingerprint observation.gitSha observation.subjects observation.content
-  ) enqueueContentChangeJobStatement
+enqueueObservationForContentChange observation = do
+  let inputs = (observation.id, observation.workspaceId,
+        observationContentFingerprint observation.gitSha observation.subjects observation.content)
+  -- Fence old attempts even while automatic generation is disabled. A later
+  -- re-enable must never revive an owner claimed before this assertion. Each
+  -- accepted assertion starts a fresh retry budget, including identical input.
+  Session.statement inputs fenceContentChangeJobStatement
+  Session.statement inputs enqueueContentChangeJobStatement
+
+fenceContentChangeJobStatement :: Statement.Statement (UUID, UUID, Text) ()
+fenceContentChangeJobStatement = Statement.Statement
+  "UPDATE public.embedding_jobs SET content_fingerprint = $3, state = 'pending', attempts = 0, lease_owner = NULL, lease_expires_at = NULL, failure_code = NULL, next_attempt_at = now(), updated_at = now() WHERE observation_id = $1 AND workspace_id = $2"
+  (contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+  <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid))
+  <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.text))) Dec.noResult True
 
 enqueueContentChangeJobStatement :: Statement.Statement (UUID, UUID, Text) ()
 enqueueContentChangeJobStatement = Statement.Statement
-  "INSERT INTO public.embedding_jobs(observation_id, workspace_id, content_fingerprint, space_fingerprint, state) SELECT $1, $2, $3, t.space_fingerprint, 'pending' FROM public.embedding_target_state t WHERE t.singleton AND t.enabled ON CONFLICT (observation_id) DO UPDATE SET workspace_id = EXCLUDED.workspace_id, content_fingerprint = EXCLUDED.content_fingerprint, space_fingerprint = EXCLUDED.space_fingerprint, state = 'pending', lease_owner = NULL, lease_expires_at = NULL, failure_code = NULL, next_attempt_at = now(), updated_at = now()"
+  "INSERT INTO public.embedding_jobs(observation_id, workspace_id, content_fingerprint, space_fingerprint, state) SELECT $1, $2, $3, t.space_fingerprint, 'pending' FROM public.embedding_target_state t WHERE t.singleton AND t.enabled ON CONFLICT (observation_id) DO UPDATE SET workspace_id = EXCLUDED.workspace_id, content_fingerprint = EXCLUDED.content_fingerprint, space_fingerprint = EXCLUDED.space_fingerprint, state = 'pending', attempts = 0, lease_owner = NULL, lease_expires_at = NULL, failure_code = NULL, next_attempt_at = now(), updated_at = now()"
   (contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
   <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid))
   <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.text))) Dec.noResult True

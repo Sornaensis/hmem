@@ -49,6 +49,7 @@ data-files:
     migrations/V029__cascade_archive_and_cancel.sql
     migrations/V030__observation_content_versions.sql
     migrations/V031__retire_unversioned_observation_snapshots.sql
+    migrations/V032__observation_revision_events.sql
 
 library
   exposed-modules:

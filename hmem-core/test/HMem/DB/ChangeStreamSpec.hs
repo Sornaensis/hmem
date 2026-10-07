@@ -656,8 +656,8 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
           assertCoreTransactionMetadata record
           pure record.outboxCursor
         _ -> expectationFailure "expected exactly one embedding-only observation outbox record" >> fail "unreachable"
-      _ <- Observation.updateObservation env.pool workspace.id observation.id
-        (UpdateObservation "embedding-invalidating content update")
+      _ <- Observation.updateObservationReviewed env.pool workspace.id observation.id observation.contentVersion
+        (ReviewedObservationUpdate "embedding-invalidating content update" observation.gitSha)
       invalidationRecords <- listOutboxAfter env.pool (WorkspaceScope workspace.id) embeddingCursor 10
       case invalidationRecords of
         [record] -> do

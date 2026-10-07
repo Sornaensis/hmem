@@ -1,6 +1,7 @@
 module HMem.Types
   ( jsonOptions, camelToSnake
   , ObservationUpdateResult(..)
+  , ObservationProvenance(..), ObservationRevisionEvent(..), ReviewedObservationUpdate(..), validateReviewedObservationUpdate, observationContentDigest
   , SubjectKind(..), subjectKindToText, subjectKindFromText
   , ObservationSubject(..), Observation(..), CreateObservation(..), UpdateObservation(..), ObservationQuery(..), ObservationSubjectFacetQuery(..), ObservationSubjectFacet(..), SimilarObservationQuery(..), SimilarObservation(..), ObservationMatchQuery(..), ObservationPathMatch(..), ObservationMatch(..)
   , maxObservationSubjectBytes, maxObservationSubjects, maxObservationSubjectBytesTotal, maxObservationContentBytes, observationEmbeddingDimensions
@@ -31,6 +32,7 @@ import Data.Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types (Parser, Pair)
+import Crypto.Hash (Digest, SHA256, hash)
 import Control.Applicative ((<|>))
 import Control.Monad (unless)
 import Data.ByteString qualified as BS
@@ -392,6 +394,8 @@ data Observation = Observation
   , createdAt   :: UTCTime
   , updatedAt   :: UTCTime
   , contentVersion :: UUID
+  , latestSequence :: Int64
+  , currentProvenance :: Maybe ObservationProvenance
   } deriving (Show, Eq, Generic)
 
 instance ToJSON Observation where
@@ -401,11 +405,79 @@ instance ToJSON Observation where
     , "content" .= observation.content, "created_at" .= observation.createdAt
     , "updated_at" .= observation.updatedAt
     , "content_version" .= observation.contentVersion
+    , "latest_sequence" .= observation.latestSequence
+    , "current_provenance" .= observation.currentProvenance
     ] <> legacySubjectPairs observation.subjects
 instance FromJSON Observation where
   parseJSON = withObject "Observation" $ \o -> Observation
     <$> o .: "id" <*> o .: "workspace_id" <*> parseSubjects o <*> o .: "git_sha"
     <*> o .: "content" <*> o .: "created_at" <*> o .: "updated_at" <*> o .: "content_version"
+    <*> o .: "latest_sequence" <*> o .: "current_provenance"
+
+-- | Compact assertions preserve creation identity without retaining old text.
+-- Nullable fields are required in JSON so legacy unknowns remain explicit.
+data ObservationProvenance = ObservationProvenance
+  { sequence :: Int64
+  , eventKind :: Text
+  , reviewedGitSha :: Text
+  , contentVersion :: Maybe UUID
+  , contentDigest :: Maybe Text
+  , recordedAt :: UTCTime
+  , actorType :: Maybe Text
+  , actorId :: Maybe Text
+  , actorLabel :: Maybe Text
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationProvenance where
+  toJSON = genericToJSON jsonOptions { omitNothingFields = False }
+instance FromJSON ObservationProvenance where
+  parseJSON = withObject "ObservationProvenance" $ \o -> do
+    p <- ObservationProvenance <$> o .: "sequence" <*> o .: "event_kind"
+      <*> o .: "reviewed_git_sha" <*> o .: "content_version" <*> o .: "content_digest"
+      <*> o .: "recorded_at" <*> o .: "actor_type" <*> o .: "actor_id" <*> o .: "actor_label"
+    let legacy = p.eventKind == "legacy_creation"
+        bound = isJust p.contentVersion && maybe False (\d -> T.length d == 64 && T.all (\c -> c `elem` ['0'..'9'] <> ['a'..'f']) d) p.contentDigest
+    unless (p.sequence >= 1 && p.sequence <= 9007199254740991
+      && null (validateGitSha p.reviewedGitSha)
+      && p.eventKind `elem` ["creation", "update", "legacy_creation"]
+      && (if legacy then p.contentVersion == Nothing && p.contentDigest == Nothing
+             && p.actorType == Nothing && p.actorId == Nothing && p.actorLabel == Nothing else bound)
+      && (case (p.actorType, p.actorId) of
+            (Nothing, Nothing) -> p.actorLabel == Nothing
+            (Just kind, Just actor) -> kind `elem` ["user", "bot"] && not (T.null actor)
+            _ -> False)) $ fail "Invalid Observation provenance assertion"
+    pure p
+
+data ObservationRevisionEvent = ObservationRevisionEvent
+  { observationId :: UUID
+  , provenance :: ObservationProvenance
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON ObservationRevisionEvent where
+  toJSON e = case toJSON e.provenance of
+    Object fields -> Object (KM.insert "observation_id" (toJSON e.observationId) fields)
+    value -> value
+instance FromJSON ObservationRevisionEvent where
+  parseJSON value = withObject "ObservationRevisionEvent" (\o ->
+    ObservationRevisionEvent <$> o .: "observation_id" <*> parseJSON value) value
+
+data ReviewedObservationUpdate = ReviewedObservationUpdate
+  { content :: Text
+  , reviewedGitSha :: Text
+  } deriving (Show, Eq, Generic)
+instance ToJSON ReviewedObservationUpdate where toJSON = genericToJSON jsonOptions
+instance FromJSON ReviewedObservationUpdate where
+  parseJSON = withObject "ReviewedObservationUpdate" $ \o -> do
+    unless (all (`elem` ["content", "reviewed_git_sha"]) (map Key.toText (KM.keys o))) $
+      fail "Reviewed Observation updates accept only content and reviewed_git_sha"
+    ReviewedObservationUpdate <$> o .: "content" <*> o .: "reviewed_git_sha"
+
+validateReviewedObservationUpdate :: ReviewedObservationUpdate -> [Text]
+validateReviewedObservationUpdate p = validateUpdateObservationInput (UpdateObservation p.content)
+  <> validateGitSha p.reviewedGitSha
+
+observationContentDigest :: Text -> Text
+observationContentDigest body = T.pack (show (hash (TE.encodeUtf8 body) :: Digest SHA256))
 
 -- | Conditional content writes distinguish a stale base from an absent row.
 -- The token is opaque: it has no ordering or timestamp semantics.

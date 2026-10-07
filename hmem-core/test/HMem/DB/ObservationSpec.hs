@@ -10,6 +10,7 @@ import Test.Hspec
 import Hasql.Session qualified as Session
 
 import HMem.DB.Observation
+import HMem.DB.ObservationFixture (reviewed, writeObservation)
 import HMem.DB.Pool (DBException(..), checkPgvector, runSession)
 import HMem.DB.TestHarness
 import HMem.Types
@@ -67,7 +68,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       created <- createObservation env.pool (newObservation owner.id SubjectFile "src/Main.hs" "owned")
       outsiderOwned <- createObservation env.pool (newObservation outsider.id SubjectFile "src/Outsider.hs" "outsider")
       getObservation env.pool outsider.id created.id `shouldReturn` Nothing
-      updateObservation env.pool outsider.id created.id (UpdateObservation "stolen") `shouldReturn` Nothing
+      writeObservation env.pool outsider.id created.id (reviewed "stolen") `shouldReturn` Nothing
       deleteObservation env.pool outsider.id created.id `shouldReturn` False
       getObservation env.pool owner.id created.id >>= (`shouldSatisfy` isJust)
       outsiderRows <- listObservations env.pool (observationQuery outsider.id Nothing Nothing Nothing)
@@ -76,7 +77,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
     it "updates content and hard-deletes only within the owning workspace" $ \env -> do
       workspace <- createTestWorkspace env "observation-update"
       created <- createObservation env.pool (newObservation workspace.id SubjectFile "src/Main.hs" "before")
-      updated <- updateObservation env.pool workspace.id created.id (UpdateObservation "after")
+      updated <- writeObservation env.pool workspace.id created.id (reviewed "after")
       fmap (.content) updated `shouldBe` Just "after"
       deleteObservation env.pool workspace.id created.id `shouldReturn` True
       getObservation env.pool workspace.id created.id >>= (`shouldSatisfy` isNothing)
@@ -215,7 +216,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       facetsBefore <- listObservationSubjectFacets env.pool
         (facetQuery workspace.id Nothing Nothing (Just "needle") Nothing Nothing)
       map (.subject) facetsBefore `shouldBe` ["aaa-stable.hs"]
-      Just updated <- updateObservation env.pool workspace.id moving.id (UpdateObservation "needle revised")
+      Just updated <- writeObservation env.pool workspace.id moving.id (reviewed "needle revised")
       updated.updatedAt `shouldSatisfy` (> backdatedStable.updatedAt)
       facetsAfter <- listObservationSubjectFacets env.pool
         (facetQuery workspace.id Nothing Nothing (Just "needle") Nothing Nothing)
@@ -307,7 +308,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       setResult `shouldSatisfy` isCapabilityUnavailable
       searchResult <- try @DBException $ similarObservations env.pool (similarQuery workspace.id Nothing Nothing Nothing unitX Nothing Nothing Nothing)
       searchResult `shouldSatisfy` isCapabilityUnavailable
-      updated <- updateObservation env.pool workspace.id created.id (UpdateObservation "updated without pgvector")
+      updated <- writeObservation env.pool workspace.id created.id (reviewed "updated without pgvector")
       fmap (.content) updated `shouldBe` Just "updated without pgvector"
 
     it "isolates embedding mutation and vector search, and applies exact filters, thresholds, ties, and pagination when pgvector is present" $ \env -> do
@@ -348,7 +349,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
           tieIds `shouldBe` equalSimilarity
           tiePage <- similarIds env (similarQuery owner.id (Just SubjectFile) Nothing Nothing unitY (Just 1) (Just 1) (Just 1))
           tiePage `shouldBe` [equalSimilarity !! 1]
-          updatedTarget <- updateObservation env.pool owner.id target.id (UpdateObservation "target content changed")
+          updatedTarget <- writeObservation env.pool owner.id target.id (reviewed "target content changed")
           fmap (.content) updatedTarget `shouldBe` Just "target content changed"
           similarIds env (similarQuery owner.id (Just SubjectFile) (Just "src/Main.hs") (Just canonicalSha) unitX Nothing Nothing Nothing)
             `shouldReturn` []

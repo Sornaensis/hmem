@@ -3,6 +3,9 @@ module HMem.DB.Observation
   , getObservation
   , updateObservation
   , updateObservationConditional
+  , updateObservationReviewed
+  , listObservationHistory
+  , listObservationHistoryOverfetch
   , deleteObservation
   , listObservations
   , countObservations
@@ -80,7 +83,7 @@ createObservationStatement = Statement.Statement sql encoder (Dec.rowList observ
       , "), inserted AS ("
       , "  INSERT INTO observations (workspace_id, git_sha, content, subject_set_open)"
       , "  SELECT id, $3, $4, TRUE FROM repository_workspace"
-      , "  RETURNING id, workspace_id, git_sha, content, created_at, updated_at, content_version"
+      , "  RETURNING id, workspace_id, git_sha, content, created_at, updated_at, content_version, latest_sequence, current_provenance"
       , "), inserted_subjects AS ("
       , "  INSERT INTO observation_subjects (observation_id, ordinal, subject_kind, subject)"
       , "  SELECT inserted.id, entry.ordinality - 1, (entry.value ->> 'subject_kind')::observation_subject_kind, entry.value ->> 'subject'"
@@ -88,9 +91,9 @@ createObservationStatement = Statement.Statement sql encoder (Dec.rowList observ
       , "  RETURNING observation_id, ordinal, subject_kind, subject"
       , ")"
       , "SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version,"
-      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text"
+      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text, o.latest_sequence, o.current_provenance"
       , "FROM inserted o JOIN inserted_subjects s ON s.observation_id = o.id"
-      , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version"
+      , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.latest_sequence, o.current_provenance"
       ]
     encoder =
          contramap (\(a,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
@@ -106,30 +109,29 @@ getObservation pool workspace observationId = do
     [] -> Nothing
 
 updateObservation :: Pool Hasql.Connection -> UUID -> UUID -> UpdateObservation -> IO (Maybe Observation)
-updateObservation pool workspace observationId update = do
-  result <- updateObservationWithVersion pool workspace observationId Nothing update
-  pure $ case result of
-    ObservationUpdated observation -> Just observation
-    _ -> Nothing
+updateObservation _ _ _ _ = throwIO $ DBCheckViolation "Observation updates require reviewed_git_sha and expected content_version"
 
 -- | Compare the opaque base token in the same UPDATE that replaces content.
 -- PostgreSQL rechecks the predicate after a competing row writer commits.
 updateObservationConditional :: Pool Hasql.Connection -> UUID -> UUID -> UUID -> UpdateObservation -> IO ObservationUpdateResult
-updateObservationConditional pool workspace observationId expectedVersion =
-  updateObservationWithVersion pool workspace observationId (Just expectedVersion)
+updateObservationConditional _ _ _ _ _ = throwIO $ DBCheckViolation "Observation updates require reviewed_git_sha and expected content_version"
 
-updateObservationWithVersion :: Pool Hasql.Connection -> UUID -> UUID -> Maybe UUID -> UpdateObservation -> IO ObservationUpdateResult
-updateObservationWithVersion pool workspace observationId expectedVersion update = do
-  validateOrThrow $ validateUpdateObservationInput update
+-- Temporary legacy signatures above fail before any DB/session. The dependent
+-- API cutover removes them; no unknown-SHA content-write bypass is retained.
+updateObservationReviewed :: Pool Hasql.Connection -> UUID -> UUID -> UUID -> ReviewedObservationUpdate -> IO ObservationUpdateResult
+updateObservationReviewed pool workspace observationId expectedVersion update = do
+  validateOrThrow $ validateReviewedObservationUpdate update
   runTransaction pool $ do
     -- Keep the optional-column probe and update under one table lock. This
     -- makes clearing an existing embedding part of the same logical mutation
     -- while still allowing databases without pgvector to update normally.
     Session.sql "LOCK TABLE public.observations IN ROW EXCLUSIVE MODE"
     hasEmbedding <- Session.statement () observationEmbeddingColumnStatement
+    Session.statement update.reviewedGitSha setReviewedShaStatement
     applied <- Session.statement (workspace, observationId, update.content, expectedVersion) $
       if hasEmbedding then updateObservationAndClearEmbeddingStatement
                       else updateObservationContentStatement
+    Session.statement "" setReviewedShaStatement
     rows <- Session.statement (workspace, observationId) getObservationStatement
     case rows of
       (observation:_)
@@ -145,23 +147,50 @@ observationEmbeddingColumnStatement = Statement.Statement
   (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool)))
   True
 
-updateObservationContentStatement :: Statement.Statement (UUID, UUID, Text, Maybe UUID) Bool
+setReviewedShaStatement :: Statement.Statement Text ()
+setReviewedShaStatement = Statement.Statement "SELECT set_config('hmem.reviewed_git_sha', $1, true)"
+  (Enc.param (Enc.nonNullable Enc.text)) Dec.noResult True
+
+updateObservationContentStatement :: Statement.Statement (UUID, UUID, Text, UUID) Bool
 updateObservationContentStatement = updateObservationStatement
-  "WITH updated AS (UPDATE observations SET content = $3, embedding_space_fingerprint = NULL WHERE workspace_id = $1 AND id = $2 AND ($4::uuid IS NULL OR content_version = $4) RETURNING 1) SELECT EXISTS (SELECT 1 FROM updated)"
+  "WITH updated AS (UPDATE observations SET content = $3, embedding_space_fingerprint = NULL WHERE workspace_id = $1 AND id = $2 AND content_version = $4 RETURNING 1) SELECT EXISTS (SELECT 1 FROM updated)"
 
-updateObservationAndClearEmbeddingStatement :: Statement.Statement (UUID, UUID, Text, Maybe UUID) Bool
+updateObservationAndClearEmbeddingStatement :: Statement.Statement (UUID, UUID, Text, UUID) Bool
 updateObservationAndClearEmbeddingStatement = updateObservationStatement
-  "WITH updated AS (UPDATE observations SET content = $3, embedding = NULL, embedding_space_fingerprint = NULL WHERE workspace_id = $1 AND id = $2 AND ($4::uuid IS NULL OR content_version = $4) RETURNING 1) SELECT EXISTS (SELECT 1 FROM updated)"
+  "WITH updated AS (UPDATE observations SET content = $3, embedding = NULL, embedding_space_fingerprint = NULL WHERE workspace_id = $1 AND id = $2 AND content_version = $4 RETURNING 1) SELECT EXISTS (SELECT 1 FROM updated)"
 
-updateObservationStatement :: BS8.ByteString -> Statement.Statement (UUID, UUID, Text, Maybe UUID) Bool
+updateObservationStatement :: BS8.ByteString -> Statement.Statement (UUID, UUID, Text, UUID) Bool
 updateObservationStatement sql = Statement.Statement
   sql
   ( contramap (\(a,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
  <> contramap (\(_,b,_,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid))
  <> contramap (\(_,_,c,_) -> c) (Enc.param (Enc.nonNullable Enc.text))
- <> contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nullable Enc.uuid)))
+ <> contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nonNullable Enc.uuid)))
   (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool)))
   True
+
+listObservationHistory :: Pool Hasql.Connection -> UUID -> UUID -> Maybe Int -> Maybe Int -> IO [ObservationRevisionEvent]
+listObservationHistory pool workspace observationId pageLimit pageOffset = do
+  validateOrThrow $ validateObservationQuery (ObservationQuery workspace Nothing Nothing Nothing Nothing pageLimit pageOffset)
+  observationHistoryUnchecked pool workspace observationId (fromMaybe 50 pageLimit) (fromMaybe 0 pageOffset)
+
+listObservationHistoryOverfetch :: Pool Hasql.Connection -> UUID -> UUID -> Maybe Int -> Maybe Int -> IO [ObservationRevisionEvent]
+listObservationHistoryOverfetch pool workspace observationId pageLimit pageOffset = do
+  validateOrThrow $ validateObservationQuery (ObservationQuery workspace Nothing Nothing Nothing Nothing pageLimit pageOffset)
+  observationHistoryUnchecked pool workspace observationId (fromMaybe 50 pageLimit + 1) (fromMaybe 0 pageOffset)
+
+observationHistoryUnchecked :: Pool Hasql.Connection -> UUID -> UUID -> Int -> Int -> IO [ObservationRevisionEvent]
+observationHistoryUnchecked pool workspace observationId pageLimit pageOffset =
+  runSession pool $ Session.statement (workspace, observationId, fromIntegral pageLimit :: Int32, fromIntegral pageOffset :: Int32) $
+    Statement.Statement
+      "SELECT to_jsonb(e) FROM observation_revision_events e JOIN observations o ON o.id = e.observation_id WHERE o.workspace_id = $1 AND o.id = $2 ORDER BY e.sequence DESC LIMIT $3 OFFSET $4"
+      ( contramap (\(a,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,b,_,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,_,c,_) -> c) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nonNullable Enc.int4)))
+      (Dec.rowList (Dec.column (Dec.nonNullable Dec.jsonb) >>= \value -> case Aeson.fromJSON value of
+        Aeson.Success event -> pure event
+        Aeson.Error message -> fail message)) True
 
 -- | Observations are permanently deleted; there is no soft-delete state.
 deleteObservation :: Pool Hasql.Connection -> UUID -> UUID -> IO Bool
@@ -320,10 +349,10 @@ listObservationsStatement = Statement.Statement sql encoder (Dec.rowList observa
   where
     sql = BS8.pack $ unlines $
       [ "SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version,"
-      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text"
+      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text, o.latest_sequence, o.current_provenance"
       , "FROM observations o JOIN observation_subjects s ON s.observation_id = o.id"
       ] <> observationFilterSql <>
-      [ "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.search_vector"
+      [ "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.search_vector, o.latest_sequence, o.current_provenance"
       , "ORDER BY"
       , "  CASE WHEN $5::text IS NULL THEN 0 ELSE ts_rank(search_vector, plainto_tsquery('simple', $5)) END DESC,"
       , "  o.updated_at DESC, o.id DESC"
@@ -388,16 +417,16 @@ matchObservationsStatement = Statement.Statement sql encoder (Dec.rowList matchO
       , "), candidate_ids AS ("
       , "  SELECT DISTINCT observation_id AS id FROM matching_subjects"
       , "), candidates AS ("
-      , "  SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.search_vector,"
+      , "  SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.search_vector, o.latest_sequence, o.current_provenance,"
       , "         jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text AS subjects_json"
       , "  FROM candidate_ids ids JOIN observations o ON o.id = ids.id"
       , "  JOIN observation_subjects s ON s.observation_id = o.id"
-      , "  GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.search_vector"
+      , "  GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.search_vector, o.latest_sequence, o.current_provenance"
       , "), matched_pairs AS ("
       , "  SELECT DISTINCT c.*, ms.path, ms.path_ordinal, ms.ordinal, ms.subject_kind, ms.subject"
       , "  FROM candidates c JOIN matching_subjects ms ON ms.observation_id = c.id"
       , "), matched AS ("
-      , "  SELECT DISTINCT p.id, p.workspace_id, p.git_sha, p.content, p.created_at, p.updated_at, p.content_version, p.search_vector, p.subjects_json,"
+      , "  SELECT DISTINCT p.id, p.workspace_id, p.git_sha, p.content, p.created_at, p.updated_at, p.content_version, p.search_vector, p.subjects_json, p.latest_sequence, p.current_provenance,"
       , "    (SELECT jsonb_agg(path ORDER BY path_ordinal) FROM (SELECT DISTINCT path, path_ordinal FROM matched_pairs q WHERE q.id = p.id) paths) AS paths_json,"
       , "    (SELECT jsonb_agg(jsonb_build_object('subject_kind', subject_kind::text, 'subject', subject) ORDER BY ordinal) FROM (SELECT DISTINCT ordinal, subject_kind, subject FROM matched_pairs q WHERE q.id = p.id) subjects) AS matched_subjects_json,"
       , "    (SELECT jsonb_agg(jsonb_build_object('path', path_group.path, 'matched_subjects', path_group.matched_subjects) ORDER BY path_group.path_ordinal)"
@@ -407,7 +436,7 @@ matchObservationsStatement = Statement.Statement sql encoder (Dec.rowList matchO
       , "             GROUP BY path_subjects.path, path_subjects.path_ordinal) path_group) AS path_matches_json"
       , "  FROM matched_pairs p"
       , ")"
-      , "SELECT id, workspace_id, git_sha, content, created_at, updated_at, content_version, subjects_json, paths_json::text, matched_subjects_json::text, path_matches_json::text"
+      , "SELECT id, workspace_id, git_sha, content, created_at, updated_at, content_version, subjects_json, latest_sequence, current_provenance, paths_json::text, matched_subjects_json::text, path_matches_json::text"
       , "FROM matched"
       , "ORDER BY CASE WHEN $5::text IS NULL THEN 0 ELSE ts_rank(search_vector, plainto_tsquery('simple', $5)) END DESC, updated_at DESC, id DESC"
       , "LIMIT $6 OFFSET $7"
@@ -467,7 +496,7 @@ similarObservationsStatement = Statement.Statement sql encoder (Dec.rowList simi
   where
     sql = BS8.pack $ unlines
       [ "SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version,"
-      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text,"
+      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text, o.latest_sequence, o.current_provenance,"
       , "       1 - (o.embedding <=> $1::vector) AS similarity"
       , "FROM observations o JOIN observation_subjects s ON s.observation_id = o.id"
       , "WHERE o.embedding IS NOT NULL"
@@ -476,7 +505,7 @@ similarObservationsStatement = Statement.Statement sql encoder (Dec.rowList simi
       , "  AND ($5::text IS NULL OR o.git_sha = $5)"
       , "  AND 1 - (o.embedding <=> $1::vector) >= $6"
       , "  AND o.embedding_space_fingerprint = $7"
-      , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.embedding"
+      , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.embedding, o.latest_sequence, o.current_provenance"
       , "ORDER BY o.embedding <=> $1::vector ASC, o.updated_at DESC, o.id DESC"
       , "LIMIT $8 OFFSET $9"
       ]
@@ -502,10 +531,16 @@ observationDecoder = do
   version <- Dec.column (Dec.nonNullable Dec.uuid)
   subjectsJson <- Dec.column (Dec.nonNullable Dec.text)
   subjectsValue <- either (fail . show) pure (eitherDecodeStrict' (TE.encodeUtf8 subjectsJson))
+  historyHead <- Dec.column (Dec.nonNullable Dec.int8)
+  provenanceJson <- Dec.column (Dec.nullable Dec.jsonb)
+  provenanceValue <- traverse (\value -> case Aeson.fromJSON value of
+    Aeson.Success p -> pure p
+    Aeson.Error message -> fail message) provenanceJson
   pure Observation
     { id = observationId, workspaceId = workspace, subjects = subjectsValue
     , gitSha = sha, content = observationContent
     , createdAt = created, updatedAt = updated, contentVersion = version
+    , latestSequence = historyHead, currentProvenance = provenanceValue
     }
 
 similarObservationDecoder :: Dec.Row SimilarObservation
@@ -550,10 +585,10 @@ getObservationStatement = Statement.Statement sql encoder (Dec.rowList observati
   where
     sql = BS8.pack $ unlines
       [ "SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version,"
-      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text"
+      , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text, o.latest_sequence, o.current_provenance"
       , "FROM observations o JOIN observation_subjects s ON s.observation_id = o.id"
       , "WHERE o.workspace_id = $1 AND o.id = $2"
-      , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version"
+      , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.latest_sequence, o.current_provenance"
       ]
     encoder = contramap fst (Enc.param (Enc.nonNullable Enc.uuid))
            <> contramap snd (Enc.param (Enc.nonNullable Enc.uuid))

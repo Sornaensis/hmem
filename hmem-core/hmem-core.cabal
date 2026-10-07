@@ -90,6 +90,8 @@ test-suite hmem-core-test
       HMem.DB.AuthSpec
       HMem.DB.ChangeStreamSpec
       HMem.DB.EmbeddingSpec
+      HMem.DB.ObservationFixture
+      HMem.DB.ObservationRevisionSpec
       HMem.DB.ObservationSpec
       HMem.DB.ObservationVersionSpec
       HMem.DB.OverviewSpec

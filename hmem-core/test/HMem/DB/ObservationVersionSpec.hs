@@ -20,6 +20,7 @@ import HMem.DB.ChangeStream (ChangeScope(..), listOutboxAfter)
 import HMem.DB.Embedding (enableEmbeddingTarget)
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Observation
+import HMem.DB.ObservationFixture (reviewed, writeObservation)
 import HMem.DB.Pool (DBException, checkPgvector, createPool, runSession, withConn)
 import HMem.DB.TestHarness
 import HMem.Types
@@ -31,7 +32,7 @@ spec = around withTestEnv $ describe "Observation content versions" $ do
   it "allows exactly one competing writer, then a conscious rebase" $ \env -> do
     workspace <- createTestWorkspace env "observation-content-race"
     original <- create env workspace.id "original"
-    let write pool body = updateObservationConditional pool workspace.id original.id original.contentVersion (UpdateObservation body)
+    let write pool body = updateObservationReviewed pool workspace.id original.id original.contentVersion (reviewed body)
         -- Pool stripes can serialize checkouts on one capability. Separate
         -- pools guarantee three distinct sessions while observing contention.
         withWriterPool = bracket (createPool env.testDb.testDbConnStr 1 60 10000) destroyAllResources
@@ -57,11 +58,17 @@ spec = around withTestEnv $ describe "Observation content versions" $ do
     winner.contentVersion `shouldNotBe` original.contentVersion
     winner.subjects `shouldBe` original.subjects
     winner.gitSha `shouldBe` original.gitSha
-    rebased <- updateObservationConditional env.pool workspace.id original.id winner.contentVersion (UpdateObservation "conscious rebase")
+    winner.latestSequence `shouldBe` 2
+    fmap (.contentVersion) winner.currentProvenance `shouldBe` Just (Just winner.contentVersion)
+    historyAfterRace <- listObservationHistory env.pool workspace.id original.id Nothing Nothing
+    map (.provenance.sequence) historyAfterRace `shouldBe` [2,1]
+    map (.provenance.contentVersion) historyAfterRace `shouldBe` [Just winner.contentVersion, Just original.contentVersion]
+    rebased <- updateObservationReviewed env.pool workspace.id original.id winner.contentVersion (reviewed "conscious rebase")
     case rebased of
       ObservationUpdated row -> do
         row.content `shouldBe` "conscious rebase"
         row.contentVersion `shouldNotBe` winner.contentVersion
+        row.latestSequence `shouldBe` 3
       _ -> expectationFailure (show rebased)
     audit <- getAuditLogRows env.pool "observation" (T.pack (show original.id))
     map (.action) audit `shouldBe` ["create", "update", "update"]
@@ -78,19 +85,20 @@ spec = around withTestEnv $ describe "Observation content versions" $ do
         checkConflictEffects transactionEnv
       ) env { pool = pool }
 
-  it "advances equal-content conditional, unconditional and SQL writes but rejects token replacement" $ \env -> do
+  it "advances equal-content reviewed assertions but rejects unbound SQL and token replacement" $ \env -> do
     workspace <- createTestWorkspace env "observation-version-all-writers"
     original <- create env workspace.id "same content"
-    Just unconditional <- updateObservation env.pool workspace.id original.id (UpdateObservation original.content)
+    Just unconditional <- writeObservation env.pool workspace.id original.id (reviewed original.content)
     unconditional.contentVersion `shouldNotBe` original.contentVersion
-    conditional <- updateObservationConditional env.pool workspace.id original.id unconditional.contentVersion (UpdateObservation original.content)
+    conditional <- updateObservationReviewed env.pool workspace.id original.id unconditional.contentVersion (reviewed original.content)
     latest <- case conditional of
       ObservationUpdated row -> pure row
       _ -> expectationFailure (show conditional) >> fail "unreachable"
     latest.contentVersion `shouldNotBe` unconditional.contentVersion
-    runSession env.pool $ Session.sql "UPDATE observations SET content = content"
+    unbound <- try @DBException $ runSession env.pool $ Session.sql "UPDATE observations SET content = content"
+    unbound `shouldSatisfy` either (const True) (const False)
     Just sqlWrite <- getObservation env.pool workspace.id original.id
-    sqlWrite.contentVersion `shouldNotBe` latest.contentVersion
+    sqlWrite.contentVersion `shouldBe` latest.contentVersion
     replacement <- try @DBException $ runSession env.pool $ Session.sql "UPDATE observations SET content_version = gen_random_uuid()"
     replacement `shouldSatisfy` either (const True) (const False)
     getObservation env.pool workspace.id original.id `shouldReturn` Just sqlWrite
@@ -99,10 +107,10 @@ spec = around withTestEnv $ describe "Observation content versions" $ do
     workspace <- createTestWorkspace env "observation-version-owner"
     foreignWorkspace <- createTestWorkspace env "observation-version-foreign"
     original <- create env workspace.id "private content"
-    updateObservationConditional env.pool foreignWorkspace.id original.id original.contentVersion (UpdateObservation "foreign") `shouldReturn` ObservationNotFound
-    updateObservationConditional env.pool workspace.id foreignWorkspace.id original.contentVersion (UpdateObservation "missing") `shouldReturn` ObservationNotFound
+    updateObservationReviewed env.pool foreignWorkspace.id original.id original.contentVersion (reviewed "foreign") `shouldReturn` ObservationNotFound
+    updateObservationReviewed env.pool workspace.id foreignWorkspace.id original.contentVersion (reviewed "missing") `shouldReturn` ObservationNotFound
     deleteObservation env.pool workspace.id original.id `shouldReturn` True
-    updateObservationConditional env.pool workspace.id original.id original.contentVersion (UpdateObservation "deleted") `shouldReturn` ObservationNotFound
+    updateObservationReviewed env.pool workspace.id original.id original.contentVersion (reviewed "deleted") `shouldReturn` ObservationNotFound
 
   it "backfills populated V029 rows without data effects and records V030 atomically" $ \env -> do
     workspace <- createTestWorkspace env "observation-version-migration"
@@ -111,10 +119,10 @@ spec = around withTestEnv $ describe "Observation content versions" $ do
     auditBefore <- getAuditLogRows env.pool "observation" (T.pack (show first.id))
     outboxBefore <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
     -- Recreate the exact pre-V030 table shape in this contained test database.
-    runSession env.pool $ Session.sql "DROP TRIGGER trg_observations_content_version ON observations; ALTER TABLE observations DROP COLUMN content_version CASCADE; DROP FUNCTION hmem_advance_observation_content_version(); DROP FUNCTION hmem_guard_observation_content_version(); DELETE FROM schema_migrations WHERE version = 30"
+    runSession env.pool $ Session.sql "DROP TRIGGER trg_observations_revision_prepare ON observations; DROP TRIGGER trg_observations_revision_append ON observations; DROP TRIGGER trg_observations_00_guard_provenance ON observations; DROP TABLE observation_revision_events; DROP FUNCTION hmem_observation_provenance(bigint,text,text,uuid,text); DROP FUNCTION hmem_guard_observation_provenance(); DROP FUNCTION hmem_prepare_observation_provenance(); DROP FUNCTION hmem_guard_observation_revision_event(); DROP FUNCTION hmem_append_observation_revision_event(); ALTER TABLE observations DROP COLUMN latest_sequence, DROP COLUMN current_provenance; DELETE FROM schema_migrations WHERE version = 32; DROP TRIGGER trg_observations_content_version ON observations; ALTER TABLE observations DROP COLUMN content_version CASCADE; DROP FUNCTION hmem_advance_observation_content_version(); DROP FUNCTION hmem_guard_observation_content_version(); DELETE FROM schema_migrations WHERE version = 30"
     upgraded <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
     upgraded.failed `shouldBe` Nothing
-    upgraded.applied `shouldBe` ["V030__observation_content_versions.sql"]
+    upgraded.applied `shouldBe` ["V030__observation_content_versions.sql", "V032__observation_revision_events.sql"]
     Just migratedFirst <- getObservation env.pool workspace.id first.id
     Just migratedSecond <- getObservation env.pool workspace.id second.id
     map (.content) [migratedFirst, migratedSecond] `shouldBe` [first.content, second.content]
@@ -134,21 +142,23 @@ checkConflictEffects env = do
   when vectorAvailable $
     enableEmbeddingTarget env.pool (maybe (error "invalid test embedding space") id (parseEmbeddingSpaceFingerprint "hmem:version-test:v1"))
   original <- create env workspace.id "original"
-  Just latest <- updateObservation env.pool workspace.id original.id (UpdateObservation "latest searchable")
+  Just latest <- writeObservation env.pool workspace.id original.id (reviewed "latest searchable")
   when vectorAvailable $
     setObservationEmbedding env.pool workspace.id original.id (replicate observationEmbeddingDimensions 0.25)
   Just canonical <- getObservation env.pool workspace.id original.id
   canonical.contentVersion `shouldBe` latest.contentVersion
   before <- effects env original.id
+  historyBefore <- listObservationHistory env.pool workspace.id original.id Nothing Nothing
   auditBefore <- getAuditLogRows env.pool "observation" (T.pack (show original.id))
   outboxBefore <- listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100
-  updateObservationConditional env.pool workspace.id original.id original.contentVersion (UpdateObservation "rejected content")
+  updateObservationReviewed env.pool workspace.id original.id original.contentVersion (reviewed "rejected content")
     `shouldReturn` ObservationVersionMismatch canonical
   effects env original.id `shouldReturn` before
+  listObservationHistory env.pool workspace.id original.id Nothing Nothing `shouldReturn` historyBefore
   getAuditLogRows env.pool "observation" (T.pack (show original.id)) `shouldReturn` auditBefore
   listOutboxAfter env.pool (WorkspaceScope workspace.id) 0 100 `shouldReturn` outboxBefore
   getObservation env.pool workspace.id original.id `shouldReturn` Just canonical
-  applied <- updateObservationConditional env.pool workspace.id original.id canonical.contentVersion (UpdateObservation "replacement searchable")
+  applied <- updateObservationReviewed env.pool workspace.id original.id canonical.contentVersion (reviewed "replacement searchable")
   case applied of
     ObservationUpdated row -> do
       row.contentVersion `shouldNotBe` canonical.contentVersion

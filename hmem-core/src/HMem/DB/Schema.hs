@@ -43,7 +43,7 @@ module HMem.DB.Schema
 
 import Data.Aeson (Value)
 import Data.ByteString (ByteString)
-import Data.Int (Int16)
+import Data.Int (Int16, Int64)
 import Data.Text (Text)
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
@@ -138,6 +138,9 @@ data ObservationT f = ObservationT
   , obsSearchVector :: Column f PgTSVector
   , obsCreatedAt   :: Column f UTCTime
   , obsUpdatedAt   :: Column f UTCTime
+  , obsContentVersion :: Column f UUID
+  , obsLatestSequence :: Column f Int64
+  , obsCurrentProvenance :: Column f (Maybe Value)
   } deriving stock Generic
     deriving anyclass Rel8able
 
@@ -152,6 +155,9 @@ observationSchema = TableSchema
       , obsSearchVector = "search_vector"
       , obsCreatedAt    = "created_at"
       , obsUpdatedAt    = "updated_at"
+      , obsContentVersion = "content_version"
+      , obsLatestSequence = "latest_sequence"
+      , obsCurrentProvenance = "current_provenance"
       }
   }
 

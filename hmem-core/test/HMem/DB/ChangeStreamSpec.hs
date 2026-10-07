@@ -108,6 +108,93 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     repeated.failed `shouldBe` Nothing
     repeated.applied `shouldBe` []
 
+  it "retires every pre-cutover workspace snapshot and resume lineage in V033 without changing global catalogue state" $ \env -> do
+    workspace <- createTestWorkspace env "snapshot-revision-upgrade"
+    original <- Observation.createObservation env.pool CreateObservation
+      { workspaceId = workspace.id, subjects = [ObservationSubject SubjectFile "src/Upgrade.hs"]
+      , gitSha = T.replicate 40 "a", content = "historical snapshot content" }
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "snapshot-revision-upgrade"
+        item kind value = object ["schema_version" .= (1 :: Int), "kind" .= (kind :: T.Text), "data" .= value]
+        canonical = object ["schema_version" .= (2 :: Int), "kind" .= ("observation" :: T.Text), "data" .= original]
+        legacy = item "observation" (case toJSON original of Object fields -> Object (KeyMap.delete "current_provenance" fields); value -> value)
+        root = item "workspace" (toJSON workspace)
+        unwrap = either (fail . show) pure
+        begin key profile values = beginResyncWithStartKeyAndProfile env.pool 60 scope audience key 1 profile (pure values) >>= unwrap
+        page token = readSnapshotPageWithStoredTtls env.pool 60 600 scope audience token >>= unwrap
+        resume value = maybe (fail "terminal snapshot omitted resume bearer") pure value.snapshotResumeToken
+    incompatible <- begin "revision-upgrade-incompatible-start" FullV1 [root, legacy]
+    first <- page incompatible.snapshotToken
+    next <- maybe (fail "expected continuation page") pure first.snapshotNextToken
+    terminal <- page next
+    oldResume <- resume terminal
+    rotated <- replayAndRotateResumeToken env.pool 600 scope audience oldResume 100 >>= unwrap
+    successor <- replayAndRotateResumeToken env.pool 600 scope audience rotated.replayPageResumeToken 100 >>= unwrap
+    retired <- mapM (\(key, profile, values) -> do
+      started <- begin key profile values
+      saved <- page started.snapshotToken
+      pure (started, saved))
+      [ ("revision-upgrade-valid-start", FullV1, [canonical])
+      , ("revision-upgrade-shell-start", WorkspaceShellV1, [root])
+      , ("revision-upgrade-unrelated-start", FullV1, [root])
+      , ("revision-upgrade-empty-start", FullV1, [])
+      , ("revision-upgrade-detached-start", WorkspaceShellV1, [root]) ]
+    retiredResumes <- mapM (resume . snd) retired
+    detached <- case reverse retiredResumes of token : _ -> pure token; [] -> fail "missing detached fixture"
+    runSession env.pool $ Session.statement (tokenHashForTest detached.unResumeToken) detachResumeForTestStatement
+    -- Append an old-format Observation event AFTER every snapshot watermark.
+    -- Both shell and initially empty full snapshots can replay it, despite
+    -- neither having any incompatible materialized Observation item.
+    runSession env.pool (Session.statement (workspace.id, T.pack (show original.id)) recordLegacyObservationForTestStatement) `shouldReturn` 1
+    let legacyData = case toJSON original of
+          Object fields -> Object (KeyMap.delete "latest_sequence" (KeyMap.delete "current_provenance" fields))
+          value -> value
+    runSession env.pool $ Session.statement (workspace.id, legacyData) legacyObservationPayloadForTestStatement
+    pending <- listOutboxAfter env.pool scope incompatible.snapshotHighWatermark 100
+    pending `shouldSatisfy` \case [record] -> envelopeEntityField "data" record == Just legacyData; _ -> False
+    descendants <- mapM (\token -> do
+      replayed <- replayUnacknowledgedResumeToken env.pool scope audience token 100 >>= unwrap
+      replayed.replayPageRecords `shouldBe` pending
+      replacement <- replayAndRotateResumeToken env.pool 600 scope audience token 100 >>= unwrap
+      replacement.replayPageRecords `shouldBe` pending
+      pure replacement.replayPageResumeToken) retiredResumes
+    global <- beginResyncWithStartKeyAndProfile env.pool 60 GlobalScope audience "revision-upgrade-global-start" 1 FullV1 (pure [root]) >>= unwrap
+    globalPage <- readSnapshotPageWithStoredTtls env.pool 60 600 GlobalScope audience global.snapshotToken >>= unwrap
+    auditBefore <- getAuditLogRows env.pool "observation" (T.pack (show original.id))
+    outboxBefore <- listOutboxAfter env.pool scope 0 100
+    -- Model a populated pre-V033 database without changing historical items.
+    runSession env.pool $ Session.sql "DELETE FROM schema_migrations WHERE version = 33"
+    upgraded <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
+    upgraded.failed `shouldBe` Nothing
+    upgraded.applied `shouldBe` ["V033__retire_pre_revision_observation_sessions.sql"]
+    mapM_ (\token -> readSnapshotPageWithStoredTtls env.pool 60 600 scope audience token `shouldReturn` Left SnapshotNotFound)
+      ([incompatible.snapshotToken, next] <> map (\(started, _) -> started.snapshotToken) retired)
+    mapM_ (\token -> replayUnacknowledgedResumeToken env.pool scope audience token 100 `shouldReturn` Left ResumeNotFound)
+      ([oldResume, rotated.replayPageResumeToken, successor.replayPageResumeToken] <> retiredResumes <> descendants)
+    runSession env.pool (Session.statement workspace.id countSnapshotSessionsStatement) `shouldReturn` 0
+    runSession env.pool (Session.statement workspace.id countSnapshotPageTokensStatement) `shouldReturn` 0
+    readSnapshotPageWithStoredTtls env.pool 60 600 GlobalScope audience global.snapshotToken `shouldReturn` Right globalPage
+    globalResume <- resume globalPage
+    globalReplay <- replayUnacknowledgedResumeToken env.pool GlobalScope audience globalResume 100 >>= unwrap
+    globalReplay.replayPageRecords `shouldBe` []
+    Observation.getObservation env.pool workspace.id original.id `shouldReturn` Just original
+    getAuditLogRows env.pool "observation" (T.pack (show original.id)) `shouldReturn` auditBefore
+    listOutboxAfter env.pool scope 0 100 `shouldReturn` outboxBefore
+    freshUser <- UUIDV4.nextRandom
+    runSession env.pool $ Session.statement freshUser insertTestUserStatement
+    _ <- Auth.upsertWorkspaceMembership env.pool workspace.id (Auth.UpsertWorkspaceMembership freshUser Auth.WorkspaceRoleRead) Nothing
+    let authorized = AuthenticatedAudience "revision-upgrade-authorized" freshUser
+    fresh <- beginResyncWithStartKeyAndProfile env.pool 60 scope authorized "revision-upgrade-incompatible-start" 1 FullV1 (pure [canonical]) >>= unwrap
+    fresh.snapshotToken `shouldNotBe` incompatible.snapshotToken
+    freshPage <- readSnapshotPageWithStoredTtls env.pool 60 600 scope authorized fresh.snapshotToken >>= unwrap
+    freshPage.snapshotPageItems `shouldBe` [canonical]
+    freshResume <- resume freshPage
+    freshResume `shouldNotBe` oldResume
+    replayUnacknowledgedResumeToken env.pool scope authorized freshResume 100 >>= (`shouldSatisfy` isRight)
+    repeated <- Migration.runMigrations env.pool env.testSandbox.sandboxMigrationsDir
+    repeated.failed `shouldBe` Nothing
+    repeated.applied `shouldBe` []
+
   it "cascade status intent rejects historical unfinished child moves without silently cancelling them" $ \env -> do
     workspace <- createTestWorkspace env "cascade-legacy-move-intent"
     source <- createProject env.pool (CreateProject workspace.id Nothing "source" Nothing Nothing Nothing)
@@ -1091,6 +1178,22 @@ countSnapshotSessionsStatement = Statement.Statement
   "SELECT count(*)::bigint FROM change_stream_snapshot_sessions WHERE scope = 'workspace' AND workspace_id = $1"
   (Enc.param (Enc.nonNullable Enc.uuid))
   (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int8))) True
+
+detachResumeForTestStatement :: Statement.Statement ByteString ()
+detachResumeForTestStatement = Statement.Statement
+  "UPDATE change_stream_resume_tokens SET session_hash = NULL WHERE token_hash = $1"
+  (Enc.param (Enc.nonNullable Enc.bytea)) Dec.noResult True
+
+recordLegacyObservationForTestStatement :: Statement.Statement (UUID.UUID, T.Text) Int64
+recordLegacyObservationForTestStatement = Statement.Statement
+  "WITH recorded AS MATERIALIZED (SELECT hmem_change_stream_record('workspace', $1, 'observation', $2, 'updated', '[]'::jsonb)) SELECT count(*)::bigint FROM recorded"
+  ((contramap fst $ Enc.param $ Enc.nonNullable Enc.uuid) <> (contramap snd $ Enc.param $ Enc.nonNullable Enc.text))
+  (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int8))) True
+
+legacyObservationPayloadForTestStatement :: Statement.Statement (UUID.UUID, Value) ()
+legacyObservationPayloadForTestStatement = Statement.Statement
+  "UPDATE change_stream_outbox SET envelope = jsonb_set(envelope, '{entity,data}', $2) WHERE scope = 'workspace' AND workspace_id = $1 AND cursor = (SELECT max(cursor) FROM change_stream_outbox WHERE scope = 'workspace' AND workspace_id = $1)"
+  ((contramap fst $ Enc.param $ Enc.nonNullable Enc.uuid) <> (contramap snd $ Enc.param $ Enc.nonNullable Enc.jsonb)) Dec.noResult True
 
 countSnapshotPageTokensStatement :: Statement.Statement UUID.UUID Int64
 countSnapshotPageTokensStatement = Statement.Statement

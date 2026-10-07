@@ -940,7 +940,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         _ -> fail "snapshot omitted items"
       let path = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show original.id))
       updated <- requestWithHeaders app methodPut path [("If-Match", quotedContentVersion original.contentVersion)]
-        (encode (object ["content" .= ("snapshot successor" :: T.Text)]))
+        (encode (object ["content" .= ("snapshot successor" :: T.Text), "reviewed_git_sha" .= T.replicate 40 "b"]))
       responseStatus updated `shouldBe` status200
       latest <- maybe (fail "expected successor Observation") pure (decode (responseBody updated) :: Maybe Observation)
       latest.contentVersion `shouldNotBe` original.contentVersion
@@ -1402,10 +1402,59 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         requestWithHeaders ctx.deployedApplication methodGet bucketPath (authHeader superadminToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
 
   describe "Observation HTTP contract" $ do
-    it "transports opaque versions, rejects stale writes without effects, and accepts conscious rebase or deliberate unconditional compatibility" $ \(env, app) -> do
+    it "returns bounded revision history and truthful deduplicated current projections for historical SHA queries" $ \(env, app) -> do
+      original <- createVersionObservation env app "observation-history-http"
+      let path = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show original.id))
+          reviewedSha = T.replicate 40 "b"
+          put row = requestWithHeaders app methodPut path [("If-Match", quotedContentVersion row.contentVersion)]
+            (encode (object ["content" .= original.content, "reviewed_git_sha" .= reviewedSha]))
+      accepted <- put original
+      responseStatus accepted `shouldBe` status200
+      let Just second = decode (responseBody accepted) :: Maybe Observation
+      again <- put second
+      responseStatus again `shouldBe` status200
+      let Just third = decode (responseBody again) :: Maybe Observation
+      third.latestSequence `shouldBe` 3
+      third.contentVersion `shouldNotBe` second.contentVersion
+      let Just current = third.currentProvenance
+      current.contentVersion `shouldBe` Just third.contentVersion
+      current.reviewedGitSha `shouldBe` reviewedSha
+      first <- request app methodGet (path <> "/history?limit=1") ""
+      responseStatus first `shouldBe` status200
+      let Just firstPage = decode (responseBody first) :: Maybe (PaginatedResult ObservationRevisionEvent)
+      firstPage.hasMore `shouldBe` True
+      map (.provenance.sequence) firstPage.items `shouldBe` [3]
+      next <- request app methodGet (path <> "/history?limit=1&offset=1") ""
+      let Just nextPage = decode (responseBody next) :: Maybe (PaginatedResult ObservationRevisionEvent)
+      map (.provenance.sequence) nextPage.items `shouldBe` [2]
+      forM_ ["?limit=0", "?limit=201", "?offset=-1", "?offset=100001"] $ \query ->
+        request app methodGet (path <> "/history" <> query) "" >>= (\r -> responseStatus r `shouldBe` status400)
+      let base = "/api/v1/observations?workspace_id=" <> Text.encodeUtf8 (T.pack (show original.workspaceId))
+          selector = "&git_sha=" <> Text.encodeUtf8 original.gitSha <> "&current_git_sha=" <> Text.encodeUtf8 reviewedSha <> "&history_git_sha=" <> Text.encodeUtf8 reviewedSha
+      listed <- request app methodGet (base <> selector <> "&limit=1") ""
+      let Just page = decode (responseBody listed) :: Maybe (PaginatedResult Observation)
+      page.hasMore `shouldBe` False
+      map (.id) page.items `shouldBe` [third.id]
+      map (.content) page.items `shouldBe` [third.content]
+      map (.provenanceMatch) page.items `shouldBe` [Just (ObservationProvenanceMatch (Just original.gitSha) (Just reviewedSha) (Just reviewedSha))]
+      -- A single explicit current selector must match the latest assertion.
+      absent <- request app methodGet (base <> "&current_git_sha=" <> Text.encodeUtf8 original.gitSha) ""
+      let Just absentPage = decode (responseBody absent) :: Maybe (PaginatedResult Observation)
+      absentPage.items `shouldBe` []
+      forM_ [object ["content" .= ("unbound" :: T.Text)], object ["content" .= ("unbound" :: T.Text), "reviewed_git_sha" .= ("BAD" :: T.Text)], object ["content" .= ("unbound" :: T.Text), "reviewed_git_sha" .= reviewedSha, "actor_id" .= ("spoof" :: T.Text)]] $ \body -> do
+        rejected <- requestWithHeaders app methodPut path [("If-Match", quotedContentVersion third.contentVersion)] (encode body)
+        responseStatus rejected `shouldBe` status400
+        let Just errorBody = decode (responseBody rejected) :: Maybe Value
+        jsonField "error" errorBody `shouldBe` Just (String "validation_error")
+      readBack <- request app methodGet path ""
+      decode (responseBody readBack) `shouldBe` Just third
+      request app methodDelete path "" >>= (\r -> responseStatus r `shouldBe` status200)
+      request app methodGet (path <> "/history") "" >>= (\r -> responseStatus r `shouldBe` status404)
+
+    it "transports opaque versions, rejects stale writes without effects, and accepts conscious rebase while rejecting missing preconditions" $ \(env, app) -> do
       original <- createVersionObservation env app "observation-version-http"
       let path = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show original.id))
-          body content = encode (object ["content" .= (content :: T.Text)])
+          body content = encode (object ["content" .= (content :: T.Text), "reviewed_git_sha" .= T.replicate 40 "b"])
           put version content = requestWithHeaders app methodPut path
             [("If-Match", quotedContentVersion version), ("X-Request-Id", "shared-correlation")] (body content)
       readResponse <- request app methodGet path ""
@@ -1439,22 +1488,21 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       responseStatus rebased `shouldBe` status200
       let Just rebase = decode (responseBody rebased) :: Maybe Observation
       rebase.contentVersion `shouldNotBe` latest.contentVersion
-      unconditional <- requestWithHeaders app methodPut path [("X-Request-Id", quotedContentVersion original.contentVersion)] (body "legacy overwrite")
-      responseStatus unconditional `shouldBe` status200
-      let Just legacy = decode (responseBody unconditional) :: Maybe Observation
-      legacy.content `shouldBe` "legacy overwrite"
-      legacy.contentVersion `shouldNotBe` rebase.contentVersion
+      missingPrecondition <- requestWithHeaders app methodPut path [("X-Request-Id", quotedContentVersion original.contentVersion)] (body "legacy overwrite")
+      Network.HTTP.Types.statusCode (responseStatus missingPrecondition) `shouldBe` 428
+      readAfterMissing <- request app methodGet path ""
+      decode (responseBody readAfterMissing) `shouldBe` Just rebase
       deleted <- request app methodDelete path ""
       responseStatus deleted `shouldBe` status200
-      put legacy.contentVersion "deleted" >>= (\response -> responseStatus response `shouldBe` status404)
+      put rebase.contentVersion "deleted" >>= (\response -> responseStatus response `shouldBe` status404)
       requestWithHeaders app methodPut "/api/v1/observations/00000000-0000-0000-0000-000000000000"
-        [("If-Match", quotedContentVersion legacy.contentVersion)] (body "missing") >>= (\response -> responseStatus response `shouldBe` status404)
+        [("If-Match", quotedContentVersion rebase.contentVersion)] (body "missing") >>= (\response -> responseStatus response `shouldBe` status404)
 
     it "rejects malformed and duplicate If-Match values while preserving other PUT routes" $ \(env, app) -> do
       original <- createVersionObservation env app "observation-version-malformed"
       let path = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show original.id))
           valid = quotedContentVersion original.contentVersion
-          body = encode (object ["content" .= ("must not apply" :: T.Text)])
+          body = encode (object ["content" .= ("must not apply" :: T.Text), "reviewed_git_sha" .= T.replicate 40 "b"])
           malformed = ["", "*", "not-a-uuid", Text.encodeUtf8 (T.pack (show original.contentVersion)), "W/" <> valid
                       , valid <> "," <> valid, "\"00000000-0000-0000-0000-00000000AAAA\"", "\"not-a-uuid\"", "\"\"", "\" " <> valid <> "\""]
           duplicates = [[("If-Match", valid), ("if-match", valid)]
@@ -1467,6 +1515,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       forM_ (map (\value -> [("If-Match", value)]) malformed <> duplicates) $ \headers -> do
         response <- requestWithHeaders app methodPut path headers body
         responseStatus response `shouldBe` status400
+        let Just failure = decode (responseBody response) :: Maybe Value
+        jsonField "error" failure `shouldBe` Just (String "validation_error")
       unchanged <- request app methodGet path ""
       decode (responseBody unchanged) `shouldBe` Just original
       getAuditLogRows env.pool "observation" (T.pack (show original.id)) `shouldReturn` auditBefore
@@ -1498,7 +1548,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
             path = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show original.id))
             conditional = [("If-Match", quotedContentVersion original.contentVersion)]
             duplicate = conditional <> conditional
-            body = encode (object ["content" .= ("authorized correction" :: T.Text)])
+            body = encode (object ["content" .= ("authorized correction" :: T.Text), "reviewed_git_sha" .= T.replicate 40 "b"])
         forM_ [conditional, duplicate, [("If-Match", "bad-token")]] $ \condition -> do
           unauthenticated <- requestWithHeaders ctx.deployedApplication methodPut path condition body
           responseStatus unauthenticated `shouldBe` status401
@@ -1631,7 +1681,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           jsonField "subject_kind" similarObservationJson `shouldBe` Just (String "file")
           jsonField "subject" similarObservationJson `shouldBe` Just (String "src/Main.hs")
           pure True
-      updated <- request app methodPut ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))) (encode (object ["content" .= ("revised observation" :: T.Text)]))
+      updated <- requestWithHeaders app methodPut ("/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))) [("If-Match", quotedContentVersion created.contentVersion)] (encode (object ["content" .= ("revised observation" :: T.Text), "reviewed_git_sha" .= T.replicate 40 "b"]))
       responseStatus updated `shouldBe` status200
       let Just revised = decode (responseBody updated) :: Maybe Observation
       revised.content `shouldBe` "revised observation"
@@ -1769,8 +1819,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       beforeResponse <- request app methodGet (base <> "&query=needle") ""
       let Just facetsBefore = decode (responseBody beforeResponse) :: Maybe (PaginatedResult ObservationSubjectFacet)
       map (.subject) facetsBefore.items `shouldBe` ["aaa-stable-only.hs", "src/Shared.hs"]
-      updatedResponse <- request app methodPut (observationPath moving.id)
-        (encode (object ["content" .= ("needle revised" :: T.Text)]))
+      updatedResponse <- requestWithHeaders app methodPut (observationPath moving.id) [("If-Match", quotedContentVersion moving.contentVersion)]
+        (encode (object ["content" .= ("needle revised" :: T.Text), "reviewed_git_sha" .= T.replicate 40 "b"]))
       responseStatus updatedResponse `shouldBe` status200
       let Just updated = decode (responseBody updatedResponse) :: Maybe Observation
       updated.updatedAt `shouldSatisfy` (> backdatedStable.updatedAt)
@@ -1919,7 +1969,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         let Just created = decode (responseBody createdResponse) :: Maybe Observation
             observationPath = "/api/v1/observations/" <> Text.encodeUtf8 (T.pack (show created.id))
             getWith token = requestWithHeaders ctx.deployedApplication methodGet observationPath (authHeader token) ""
-            updateWith token payload = requestWithHeaders ctx.deployedApplication methodPut observationPath (authHeader token) (encode payload)
+            updateWith token payload = requestWithHeaders ctx.deployedApplication methodPut observationPath (authHeader token <> [("If-Match", quotedContentVersion created.contentVersion)]) (encode (case payload of Object fields -> Object (KeyMap.insert "reviewed_git_sha" (toJSON (T.replicate 40 "b")) fields); value -> value))
             deleteWith token = requestWithHeaders ctx.deployedApplication methodDelete observationPath (authHeader token) ""
         backdateObservation ctx.deployedEnv created.id
         beforeResponse <- getWith editorToken
@@ -1928,6 +1978,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
 
         requestWithHeaders ctx.deployedApplication methodGet listPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
         getWith readerToken >>= (\response -> responseStatus response `shouldBe` status200)
+        requestWithHeaders ctx.deployedApplication methodGet (observationPath <> "/history") (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
         requestWithHeaders ctx.deployedApplication methodGet facetsPath (authHeader readerToken) "" >>= (\response -> responseStatus response `shouldBe` status200)
         requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations/match" (authHeader readerToken) matchInput >>= (\response -> responseStatus response `shouldBe` status200)
         updateWith readerToken (object ["content" .= ("reader denied" :: T.Text)]) >>= (\response -> responseStatus response `shouldBe` status403)
@@ -1935,6 +1986,8 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
 
         requestWithHeaders ctx.deployedApplication methodGet listPath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
         getWith outsiderToken >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodGet (observationPath <> "/history") (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
+        requestWithHeaders ctx.deployedApplication methodPut observationPath (authHeader outsiderToken) "{" >>= (\response -> responseStatus response `shouldBe` status403)
         requestWithHeaders ctx.deployedApplication methodGet facetsPath (authHeader outsiderToken) "" >>= (\response -> responseStatus response `shouldBe` status403)
         requestWithHeaders ctx.deployedApplication methodPost "/api/v1/observations/match" (authHeader outsiderToken) matchInput >>= (\response -> responseStatus response `shouldBe` status403)
         updateWith outsiderToken (object ["content" .= ("outsider denied" :: T.Text)]) >>= (\response -> responseStatus response `shouldBe` status403)
@@ -1959,6 +2012,10 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
         updated.workspaceId `shouldBe` before.workspaceId
         updated.subjects `shouldBe` before.subjects
         updated.gitSha `shouldBe` before.gitSha
+        let Just trustedActor = updated.currentProvenance
+        trustedActor.actorType `shouldBe` Just "bot"
+        trustedActor.actorId `shouldBe` Just (T.pack (show editorToken.tokenId))
+        trustedActor.actorId `shouldNotBe` Just (T.pack (show editorId))
         updated.createdAt `shouldBe` before.createdAt
         updated.updatedAt `shouldSatisfy` (> before.updatedAt)
 
@@ -2013,7 +2070,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       postJson app "/api/v1/observations/count" (object ["workspace_id" .= repository.id]) >>= rejected
       postJson app "/api/v1/observations/similar" (object ["workspace_id" .= repository.id, "embedding" .= ([] :: [Double])]) >>= rejected
       request app methodGet observationPath "" >>= rejected
-      request app methodPut observationPath (encode (object ["content" .= ("rejected" :: T.Text)])) >>= rejected
+      request app methodPut observationPath (encode (object ["content" .= ("rejected" :: T.Text), "reviewed_git_sha" .= T.replicate 40 "b"])) >>= rejected
       request app methodDelete observationPath "" >>= rejected
       request app methodPut (observationPath <> "/embedding") (encode ([] :: [Double])) >>= rejected
       postJson app "/api/v1/search" (object ["workspace_id" .= repository.id, "entity_types" .= ["observation" :: T.Text]]) >>= rejected
@@ -2184,13 +2241,21 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       hasSchemaProperty "Observation" "subjects" `shouldBe` True
       hasSchemaProperty "Observation" "content_version" `shouldBe` True
       requiredSchemaFields "Observation" `shouldSatisfy` maybe False (elem "content_version")
+      requiredSchemaFields "Observation" `shouldSatisfy` maybe False (elem "current_provenance")
+      requiredSchemaFields "Observation" `shouldSatisfy` maybe False (elem "latest_sequence")
+      (schema "Observation" >>= jsonField "properties" >>= jsonField "current_provenance" >>= jsonField "nullable") `shouldBe` Just (Bool True)
+      (schema "ObservationSearchHit" >>= jsonField "properties" >>= jsonField "current_provenance" >>= jsonField "nullable") `shouldBe` Just (Bool True)
+      (paths >>= jsonField "/api/v1/observations/{observationId}/history") `shouldSatisfy` isJust
+      requiredSchemaFields "ReviewedObservationUpdate" `shouldBe` Just ["content", "reviewed_git_sha"]
+      (schema "ReviewedObservationUpdate" >>= jsonField "additionalProperties") `shouldBe` Just (Bool False)
+      (schema "ObservationRevisionEvent" >>= jsonField "properties" >>= jsonField "content_digest" >>= jsonField "nullable") `shouldBe` Just (Bool True)
       (schema "Observation" >>= jsonField "properties" >>= jsonField "content_version" >>= jsonField "format") `shouldBe` Just (String "uuid")
       let ifMatchParameter = pathParameter "/api/v1/observations/{observationId}" "put" "If-Match"
           observationUpdateResponses = jsonPath ["paths", "/api/v1/observations/{observationId}", "put", "responses"] document
       (ifMatchParameter >>= jsonField "in") `shouldBe` Just (String "header")
-      (ifMatchParameter >>= jsonField "required") `shouldBe` Just (Bool False)
+      (ifMatchParameter >>= jsonField "required") `shouldBe` Just (Bool True)
       (ifMatchParameter >>= jsonField "schema" >>= jsonField "pattern") `shouldBe` Just (String "^[ \\t]*\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\"[ \\t]*$")
-      mapM_ (\status -> (observationUpdateResponses >>= jsonField status) `shouldSatisfy` isJust) ["400", "401", "403", "404", "409"]
+      mapM_ (\status -> (observationUpdateResponses >>= jsonField status) `shouldSatisfy` isJust) ["400", "401", "403", "404", "409", "428"]
       (observationUpdateResponses >>= jsonField "409" >>= jsonField "content" >>= jsonField "application/json" >>= jsonField "schema" >>= jsonField "$ref") `shouldBe` Just (String "#/components/schemas/ObservationContentConflict")
       requiredSchemaFields "ObservationContentConflict" `shouldBe` Just ["code", "latest"]
       (schema "ObservationContentConflict" >>= jsonField "properties" >>= jsonField "code" >>= jsonField "enum") `shouldBe` Just (toJSON (["observation_content_conflict"] :: [T.Text]))

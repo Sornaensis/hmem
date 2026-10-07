@@ -116,6 +116,12 @@ counts. Apply consistently to list, unified Observation search, path matching,
 similarity, counts, and subject facets; embedding-space restrictions stay intact.
 Paginated results keep their existing envelope and bounds.
 
+Filtered Observation rows and search hits include bounded `provenance_match`
+query context: the supplied matching `original_git_sha`, `current_git_sha`, and
+`history_git_sha` selectors. These selectors explain why the current row matched.
+A historical selector may match an unbound legacy creation claim; it never says
+the returned current content was the content asserted at that historical SHA.
+
 ## Embedding and live compatibility
 
 Retain the current immutable-creation-SHA + ordered-subjects + exact-content
@@ -130,8 +136,11 @@ one stored vector, exact space matching, and operations without pgvector.
 
 Observation snapshot items change to `schema_version: 2` and require nullable
 current provenance and history head. Other snapshot kinds stay version 1.
-Invalidate old materialized snapshots and replay/resume tokens at cutover
-before serving the new contract. Clients resync on old/incompatible Observation
+Invalidate all pre-cutover workspace materialized snapshots and replay/resume
+bearers, including shell/empty snapshots and detached resume tokens, before
+serving the new contract. Global catalogue envelopes and bearers remain
+compatible because their stream cannot replay workspace Observations.
+Clients resync on old/incompatible Observation
 envelopes rather than silently accepting missing fields. Live event reductions
 use the committed canonical projection and version/head to retire stale editor
 and history results; full history remains a separately requested bounded page.

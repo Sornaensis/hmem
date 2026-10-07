@@ -47,7 +47,7 @@ spec = around withTestEnv $ do
       setObservationEmbeddingInSpace env.pool workspace.id legacy.id legacyManualEmbeddingSpace unitX
       setObservationEmbeddingInSpace env.pool workspace.id managed.id managedSpace unitX
       results <- similarObservations env.pool SimilarObservationQuery
-        { workspaceId = workspace.id, subjectKind = Nothing, subject = Nothing, gitSha = Nothing
+        { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = workspace.id, subjectKind = Nothing, subject = Nothing, gitSha = Nothing
         , embedding = unitX, spaceFingerprint = Just managedSpace, minSimilarity = Just 1
         , limit = Nothing, offset = Nothing
         }
@@ -810,7 +810,7 @@ historicalManagedFingerprint =
 
 similarQueryFor :: UUID -> EmbeddingSpaceFingerprint -> SimilarObservationQuery
 similarQueryFor workspace space = SimilarObservationQuery
-  { workspaceId = workspace, subjectKind = Nothing, subject = Nothing, gitSha = Nothing
+  { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = workspace, subjectKind = Nothing, subject = Nothing, gitSha = Nothing
   , embedding = 1 : replicate (observationEmbeddingDimensions - 1) 0
   , spaceFingerprint = Just space, minSimilarity = Just 1
   , limit = Nothing, offset = Nothing

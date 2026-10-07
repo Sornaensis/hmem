@@ -25,18 +25,18 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         [ObservationSubject SubjectFile "src/Main.hs", ObservationSubject SubjectGlob "src/**/*.hs"] canonicalSha "needle")
       _ <- createObservation env.pool (CreateObservation workspace.id [ObservationSubject SubjectFile "src/Other.hs"] alternateSha "needle")
       _ <- createObservation env.pool (newObservation other.id SubjectFile "src/Main.hs" "needle")
-      let input = ObservationCountQuery workspace.id Nothing Nothing Nothing Nothing Nothing
+      let input = ObservationCountQuery workspace.id Nothing Nothing Nothing Nothing Nothing Nothing Nothing
       countObservations env.pool input `shouldReturn` ObservationCounts workspace.id 2 2
       countObservations env.pool input { subjectKind = Just SubjectGlob, subject = Just "src/Main.hs" } `shouldReturn` ObservationCounts workspace.id 2 0
       let exact :: ObservationCountQuery
           exact = input { subjectKind = Just SubjectFile, subject = Just "src/Main.hs", gitSha = Just canonicalSha, query = Just "needle" }
-      listed <- listObservations env.pool (ObservationQuery workspace.id exact.subjectKind exact.subject exact.gitSha exact.query (Just 200) Nothing)
+      listed <- listObservations env.pool (ObservationQuery workspace.id exact.subjectKind exact.subject exact.gitSha exact.query (Just 200) Nothing Nothing Nothing)
       counted <- countObservations env.pool exact
       counted.matchCount `shouldBe` fromIntegral (length listed)
       map (.id) listed `shouldBe` [first.id]
       let matched :: ObservationCountQuery
           matched = input { subjectKind = Just SubjectGlob, paths = Just ["src/Main.hs", "src/Main.hs", "src/Other.hs"], query = Just "needle" }
-      matches <- matchObservations env.pool (ObservationMatchQuery workspace.id ["src/Main.hs", "src/Main.hs", "src/Other.hs"] matched.subjectKind Nothing matched.query (Just 200) Nothing)
+      matches <- matchObservations env.pool (ObservationMatchQuery workspace.id ["src/Main.hs", "src/Main.hs", "src/Other.hs"] matched.subjectKind Nothing matched.query (Just 200) Nothing Nothing Nothing)
       result <- countObservations env.pool matched
       result.matchCount `shouldBe` fromIntegral (length matches)
       result.matchCount `shouldBe` 1
@@ -45,7 +45,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
 
     it "returns honest zero and validates path/exact exclusivity" $ \env -> do
       workspace <- createTestWorkspace env "counts-zero"
-      let input = ObservationCountQuery workspace.id Nothing Nothing Nothing Nothing Nothing
+      let input = ObservationCountQuery workspace.id Nothing Nothing Nothing Nothing Nothing Nothing Nothing
       countObservations env.pool input `shouldReturn` ObservationCounts workspace.id 0 0
       validateObservationCountQuery input { paths = Just [] } `shouldSatisfy` (not . null)
       validateObservationCountQuery input { paths = Just ["../bad"] } `shouldSatisfy` (not . null)
@@ -110,7 +110,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
         , gitSha = canonicalSha, content = "path evidence"
         }
       results <- matchObservations env.pool ObservationMatchQuery
-        { workspaceId = workspace.id
+        { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = workspace.id
         , paths = ["docs/guide.md", "src/ConfigMain.hs", "README.md", "docs/guide.md"]
         , subjectKind = Nothing, gitSha = Nothing, query = Nothing, limit = Nothing, offset = Nothing
         }
@@ -135,7 +135,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $ do
       -- internal extra-row behavior rather than merely validation.
       mapM_ (\n -> createObservation env.pool (newObservation workspace.id SubjectFile "README.md" ("bulk " <> T.pack (show n)))) [1 .. (201 :: Int)]
       let baseMatchQuery = ObservationMatchQuery
-            { workspaceId = workspace.id, paths = ["README.md"], subjectKind = Nothing
+            { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = workspace.id, paths = ["README.md"], subjectKind = Nothing
             , gitSha = Nothing, query = Nothing, limit = Nothing, offset = Nothing }
       matchObservationsOverfetch env.pool baseMatchQuery >>= (\page -> length page `shouldBe` 51)
       matchObservationsOverfetch env.pool baseMatchQuery { limit = Just 200 } >>= (\page -> length page `shouldBe` 201)
@@ -393,22 +393,22 @@ newObservationWithSha workspace kind path sha body = CreateObservation
 
 observationQuery :: UUID -> Maybe T.Text -> Maybe Int -> Maybe Int -> ObservationQuery
 observationQuery workspace searchTerm pageLimit pageOffset = ObservationQuery
-  { workspaceId = workspace, subjectKind = Nothing, subject = Nothing, gitSha = Nothing
+  { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = workspace, subjectKind = Nothing, subject = Nothing, gitSha = Nothing
   , query = searchTerm, limit = pageLimit, offset = pageOffset }
 
 queryWith :: UUID -> Maybe SubjectKind -> Maybe T.Text -> Maybe T.Text -> ObservationQuery
 queryWith workspace kind path sha = ObservationQuery
-  { workspaceId = workspace, subjectKind = kind, subject = path, gitSha = sha
+  { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = workspace, subjectKind = kind, subject = path, gitSha = sha
   , query = Just "needle", limit = Nothing, offset = Nothing }
 
 similarQuery :: UUID -> Maybe SubjectKind -> Maybe T.Text -> Maybe T.Text -> [Double] -> Maybe Double -> Maybe Int -> Maybe Int -> SimilarObservationQuery
 similarQuery workspace kind path sha vector threshold pageLimit pageOffset = SimilarObservationQuery
-  { workspaceId = workspace, subjectKind = kind, subject = path, gitSha = sha
+  { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = workspace, subjectKind = kind, subject = path, gitSha = sha
   , embedding = vector, spaceFingerprint = Nothing, minSimilarity = threshold, limit = pageLimit, offset = pageOffset }
 
 facetQuery :: UUID -> Maybe SubjectKind -> Maybe T.Text -> Maybe T.Text -> Maybe Int -> Maybe Int -> ObservationSubjectFacetQuery
 facetQuery workspace kind sha searchTerm pageLimit pageOffset = ObservationSubjectFacetQuery
-  { workspaceId = workspace, subjectKind = kind, gitSha = sha, query = searchTerm
+  { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = workspace, subjectKind = kind, gitSha = sha, query = searchTerm
   , limit = pageLimit, offset = pageOffset }
 
 unitX, unitY :: [Double]

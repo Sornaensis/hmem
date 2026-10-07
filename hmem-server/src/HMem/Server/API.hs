@@ -10,6 +10,7 @@ module HMem.Server.API
   ( HMemAPI
   , ObservationEmbedding(..)
   , CreateObservationRequest(..)
+  , ReviewedObservationRequest(..)
   , ObservationMatchRequest(..)
   , ObservationCountRequest(..)
   , LinkDependencyRequest(..)
@@ -124,6 +125,8 @@ type ObservationAPI =
          :> QueryParam "subject_kind" SubjectKind
          :> QueryParam "subject" Text
          :> QueryParam "git_sha" Text
+         :> QueryParam "current_git_sha" Text
+         :> QueryParam "history_git_sha" Text
          :> QueryParam "query" Text
          :> QueryParam "limit" Int
          :> QueryParam "offset" Int
@@ -134,6 +137,8 @@ type ObservationAPI =
          :> QueryParam' '[Required] "workspace_id" UUID
          :> QueryParam "subject_kind" SubjectKind
          :> QueryParam "git_sha" Text
+         :> QueryParam "current_git_sha" Text
+         :> QueryParam "history_git_sha" Text
          :> QueryParam "query" Text
          :> QueryParam "limit" Int
          :> QueryParam "offset" Int
@@ -148,9 +153,12 @@ type ObservationAPI =
          :> Description "Requires active repository workspace read authorization. Returns full workspace total_count and distinct match_count from one database statement snapshot. Filters share list same-subject provenance, SHA and simple full-text predicates; optional concrete paths use canonical file/glob OR matching. subject and paths are mutually exclusive. Counts ignore pagination and are nonnegative exact integers at most 9007199254740991. Deployed cookie requests require CSRF."
          :> Post '[JSON] ObservationCounts
   :<|> Capture "observationId" UUID :> Get '[JSON] Observation
+  :<|> Capture "observationId" UUID :> "history" :> QueryParam "limit" Int :> QueryParam "offset" Int
+         :> Description "Authorized compact revision assertions in descending sequence order. Defaults limit 50, offset 0; limit 1..200, offset 0..100000. No previous content or diff is retained. Legacy creation claims have unknown digest/version/actor."
+         :> Get '[JSON] (PaginatedResult ObservationRevisionEvent)
   :<|> Capture "observationId" UUID :> Header "If-Match" Text
-         :> Description "Replaces content only. Optional If-Match accepts one strong quoted canonical UUID from content_version; weak tags, lists, wildcard and malformed tokens return 400. A stale token returns 409 with code observation_content_conflict and latest canonical Observation without mutation; missing/deleted records return 404. Success returns the advanced content_version. Omitting If-Match deliberately retains unconditional legacy REST/MCP behavior and can overwrite competing content. X-Request-Id is correlation only."
-         :> ReqBody '[JSON] UpdateObservation :> Put '[JSON] Observation
+         :> Description "Asserts content at required reviewed_git_sha with required If-Match, one strong quoted canonical content_version UUID. Missing If-Match returns 428; malformed tags return 400. A stale token returns 409 observation_content_conflict with latest canonical Observation and no mutation. Each accepted assertion, including repeated SHA/text, advances version and sequence and returns current provenance. X-Request-Id is correlation only."
+         :> ReqBody '[TolerantJSON] ReviewedObservationRequest :> Put '[JSON] Observation
   :<|> Capture "observationId" UUID :> Delete '[JSON] NoContent
   :<|> Capture "observationId" UUID :> "embedding" :> ReqBody '[JSON] ObservationEmbedding :> Put '[JSON] NoContent
 
@@ -244,6 +252,7 @@ decodeLifecycleDetail detail = fromMaybe (Aeson.String detail) $
   Aeson.decode (LBS8.pack (Text.unpack detail))
 
 newtype CreateObservationRequest = CreateObservationRequest (Either Text CreateObservation)
+newtype ReviewedObservationRequest = ReviewedObservationRequest (Either Text ReviewedObservationUpdate)
 newtype ObservationMatchRequest = ObservationMatchRequest (Either Text ObservationMatchQuery)
 newtype ObservationCountRequest = ObservationCountRequest (Either Text ObservationCountQuery)
 newtype LinkDependencyRequest = LinkDependencyRequest (Either Text LinkDependency)
@@ -255,6 +264,14 @@ data TolerantJSON
 
 instance Accept TolerantJSON where
   contentType _ = "application" // "json"
+
+instance MimeUnrender TolerantJSON ReviewedObservationRequest where
+  mimeUnrender _ body = Right $ ReviewedObservationRequest $
+    case Aeson.eitherDecode body of
+      Left message -> Left (Text.pack message)
+      Right value -> case Aeson.fromJSON value of
+        Aeson.Error message -> Left (Text.pack message)
+        Aeson.Success parsed -> Right parsed
 
 instance MimeUnrender TolerantJSON UpdateWorkspaceRequest where
   mimeUnrender _ body = Right $ UpdateWorkspaceRequest $
@@ -687,20 +704,20 @@ groups pool = listH :<|> createH :<|> getH :<|> deleteH :<|> listMembersH :<|> a
     pure NoContent
 
 observations :: Pool Hasql.Connection -> Server ObservationAPI
-observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> similarH :<|> countH :<|> getH :<|> updateH :<|> deleteH :<|> embeddingH where
+observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> similarH :<|> countH :<|> getH :<|> historyH :<|> updateH :<|> deleteH :<|> embeddingH where
   countH (ObservationCountRequest requestBody) = do
     value <- decodeRequest requestBody
     requireObservationWorkspace pool value.workspaceId Auth.WorkspaceRoleRead
     reject (validateObservationCountQuery value)
     handleDBErrors $ Observation.countObservations pool value
-  listH workspaceId kind subjectValue sha queryValue limit offset = do
+  listH workspaceId kind subjectValue sha currentSha historySha queryValue limit offset = do
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
     -- Validate client-supplied values before pagination defaults/caps are
     -- applied; otherwise invalid bounds would be silently normalized.
-    let rawQuery = ObservationQuery workspaceId kind subjectValue sha queryValue limit offset
+    let rawQuery = ObservationQuery workspaceId kind subjectValue sha queryValue limit offset currentSha historySha
     reject (validateObservationQuery rawQuery)
     let (takeN, skipN) = page limit offset
-        query = ObservationQuery workspaceId kind subjectValue sha queryValue (Just takeN) (Just skipN)
+        query = ObservationQuery workspaceId kind subjectValue sha queryValue (Just takeN) (Just skipN) currentSha historySha
     rows <- handleDBErrors $ Observation.listObservationsOverfetch pool query
     pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
   createH (CreateObservationRequest requestBody) = do
@@ -709,12 +726,12 @@ observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> simi
     reject (validateCreateObservationInput input)
     created <- handleDBErrors $ withWorkspaceIdContext (Just input.workspaceId) (Observation.createObservation pool input)
     pure created
-  subjectFacetsH workspaceId kind sha queryValue limit offset = do
+  subjectFacetsH workspaceId kind sha currentSha historySha queryValue limit offset = do
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
-    let rawQuery = ObservationSubjectFacetQuery workspaceId kind sha queryValue limit offset
+    let rawQuery = ObservationSubjectFacetQuery workspaceId kind sha queryValue limit offset currentSha historySha
     reject (validateObservationSubjectFacetQuery rawQuery)
     let (takeN, skipN) = page limit offset
-        pagedQuery = ObservationSubjectFacetQuery workspaceId kind sha queryValue (Just takeN) (Just skipN)
+        pagedQuery = ObservationSubjectFacetQuery workspaceId kind sha queryValue (Just takeN) (Just skipN) currentSha historySha
     rows <- handleDBErrors $ Observation.listObservationSubjectFacetsOverfetch pool pagedQuery
     pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
   matchH (ObservationMatchRequest requestBody) = do
@@ -724,7 +741,7 @@ observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> simi
     let (takeN, skipN) = page query.limit query.offset
         pagedQuery = ObservationMatchQuery
           query.workspaceId query.paths query.subjectKind query.gitSha query.query
-          (Just takeN) (Just skipN)
+          (Just takeN) (Just skipN) query.currentGitSha query.historyGitSha
     rows <- handleDBErrors $ Observation.matchObservationsOverfetch pool pagedQuery
     pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
   similarH query = do
@@ -735,22 +752,28 @@ observations pool = listH :<|> createH :<|> subjectFacetsH :<|> matchH :<|> simi
     workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleRead
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
     handleDBErrors (Observation.getObservation pool workspaceId observationId) >>= maybe (throwError err404) pure
-  updateH observationId ifMatch input = do
+  historyH observationId limit offset = do
+    workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleRead
+    requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleRead
+    _ <- handleDBErrors (Observation.getObservation pool workspaceId observationId) >>= maybe (throwError err404) pure
+    let (takeN, _) = page limit offset
+    rows <- handleDBErrors $ Observation.listObservationHistoryOverfetch pool workspaceId observationId limit offset
+    pure PaginatedResult { items = take takeN rows, hasMore = length rows > takeN }
+  updateH observationId ifMatch (ReviewedObservationRequest requestBody) = do
     workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleEdit
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
-    reject (validateUpdateObservationInput input)
-    expectedVersion <- traverse (maybe (throwError invalidIfMatch) pure . parseObservationIfMatch) ifMatch
-    case expectedVersion of
-      Nothing -> handleDBErrors (Observation.updateObservation pool workspaceId observationId input) >>= maybe (throwError err404) pure
-      Just version -> do
-        result <- handleDBErrors (Observation.updateObservationConditional pool workspaceId observationId version input)
-        case result of
-          ObservationUpdated updated -> pure updated
-          ObservationNotFound -> throwError err404
-          ObservationVersionMismatch latest -> throwError err409
-            { errBody = Aeson.encode (object ["code" .= ("observation_content_conflict" :: Text), "latest" .= latest])
-            , errHeaders = [("Content-Type", "application/json")]
-            }
+    input <- decodeRequest requestBody
+    reject (validateReviewedObservationUpdate input)
+    supplied <- maybe (throwError missingObservationPrecondition) pure ifMatch
+    version <- maybe (throwError invalidIfMatch) pure (parseObservationIfMatch supplied)
+    result <- handleDBErrors (Observation.updateObservationReviewed pool workspaceId observationId version input)
+    case result of
+      ObservationUpdated updated -> pure updated
+      ObservationNotFound -> throwError err404
+      ObservationVersionMismatch latest -> throwError err409
+        { errBody = Aeson.encode (object ["code" .= ("observation_content_conflict" :: Text), "latest" .= latest])
+        , errHeaders = [("Content-Type", "application/json")]
+        }
   deleteH observationId = do
     workspaceId <- requireEntity pool Auth.EntityObservation observationId Auth.WorkspaceRoleEdit
     requireObservationWorkspace pool workspaceId Auth.WorkspaceRoleEdit
@@ -774,8 +797,13 @@ parseObservationIfMatch supplied = do
   where
     trimmed = Text.dropAround (\c -> c == ' ' || c == '\t') supplied
 
+missingObservationPrecondition :: ServerError
+missingObservationPrecondition = ServerError 428 "Precondition Required"
+  (Aeson.encode (object ["code" .= ("observation_content_precondition_required" :: Text), "message" .= ("If-Match content_version is required" :: Text)]))
+  [("Content-Type", "application/json")]
+
 invalidIfMatch :: ServerError
-invalidIfMatch = badRequest "invalid_if_match" "If-Match must contain one strong quoted canonical content_version UUID"
+invalidIfMatch = badRequest "validation_error" "If-Match must contain one strong quoted canonical content_version UUID"
 
 projects :: Pool Hasql.Connection -> Server ProjectAPI
 projects pool = listH :<|> createH :<|> createSpecH :<|> getH :<|> updateH :<|> deleteH :<|> overviewH :<|> nextH where

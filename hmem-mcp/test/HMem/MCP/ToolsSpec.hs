@@ -34,10 +34,45 @@ import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkAppWithChangeStream)
 import HMem.Server.Snapshot (materializeSnapshot)
 import HMem.Server.WebSocket (newWSState)
-import HMem.Types (BatchMoveTasksRequest(..), CreateObservation(..), ObservationSubject(..), SubjectKind(..), UpdateObservation(..), Workspace(..), maxObservationSubjects)
+import HMem.Types (BatchMoveTasksRequest(..), CreateObservation(..), ObservationSubject(..), SubjectKind(..), ReviewedObservationUpdate(..), Workspace(..), maxObservationSubjects)
 
 spec :: Spec
 spec = do
+  describe "Revision transport MCP" $ do
+    it "rejects content-only, absent/null/malformed preconditions and reviewed SHAs before HTTP dispatch" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        let complete = object ["observation_id" .= observationId, "content" .= ("reviewed" :: Text), "reviewed_git_sha" .= gitSha, "expected_content_version" .= observationId]
+            replace key value (Object fields) = Object (KM.insert key value fields)
+            replace _ _ value = value
+            omit key (Object fields) = Object (KM.delete key fields)
+            omit _ value = value
+        forM_ [omit "reviewed_git_sha" complete, omit "expected_content_version" complete, replace "expected_content_version" Null complete, replace "expected_content_version" (String "BAD") complete, replace "reviewed_git_sha" Null complete, replace "reviewed_git_sha" (String "BAD") complete] $ \args -> do
+          result <- handleToolCall manager base Nothing (object ["name" .= ("observation_update" :: Text), "arguments" .= args])
+          result `shouldSatisfy` isMcpError
+      (length <$> readTVarIO requests) `shouldReturn` 0
+
+    it "forwards all distinct exact SHA selectors and bounded history paging" $ do
+      requests <- newTVarIO []
+      withMock requests $ \manager base -> do
+        let filters = ["workspace_id" .= workspaceId, "git_sha" .= gitSha, "current_git_sha" .= gitSha, "history_git_sha" .= gitSha]
+        _ <- call manager base "observation_list" (object filters)
+        _ <- call manager base "search" (object filters)
+        _ <- call manager base "observation_match" (object (filters <> ["paths" .= (["src/HMem/Types.hs"] :: [Text])]))
+        result <- call manager base "observation_history" (object ["observation_id" .= observationId, "limit" .= (1 :: Int), "offset" .= (1 :: Int)])
+        jsonField "has_more" result `shouldBe` Just (Bool False)
+        jsonField "next_offset" result `shouldBe` Nothing
+      [listed, searched, matched, history] <- readTVarIO requests
+      listed.requestQuery `shouldSatisfy` BS.isInfixOf "current_git_sha="
+      listed.requestQuery `shouldSatisfy` BS.isInfixOf "history_git_sha="
+      forM_ [searched, matched] $ \request -> do
+        let Just body = decode request.requestBody :: Maybe Value
+        jsonField "git_sha" body `shouldBe` Just (String gitSha)
+        jsonField "current_git_sha" body `shouldBe` Just (String gitSha)
+        jsonField "history_git_sha" body `shouldBe` Just (String gitSha)
+      history.requestPath `shouldBe` "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/history"
+      history.requestQuery `shouldBe` "?limit=1&offset=1"
+
   describe "Workspace rename MCP registry" $ do
     it "advertises a strict name-only workspace_update call" $ do
       toolNames `shouldContain` ["workspace_update"]
@@ -175,11 +210,12 @@ spec = do
 
   describe "Observation MCP registry" $ do
     it "advertises and parses every Observation capability, with no removed memory, link, or context tools" $ do
-      toolNames `shouldContain` ["observation_create", "observation_get", "observation_update", "observation_list", "observation_match", "observation_delete", "observation_set_embedding", "observation_similar"]
+      toolNames `shouldContain` ["observation_create", "observation_get", "observation_update", "observation_history", "observation_list", "observation_match", "observation_delete", "observation_set_embedding", "observation_similar"]
       mapM_ (\(name, arguments) -> parseToolCall name arguments `shouldSatisfy` isRight)
         [ ("observation_create", observationArguments)
         , ("observation_get", object ["observation_id" .= observationId])
-        , ("observation_update", object ["observation_id" .= observationId, "content" .= ("replacement" :: Text)])
+        , ("observation_update", object ["observation_id" .= observationId, "content" .= ("replacement" :: Text), "reviewed_git_sha" .= gitSha, "expected_content_version" .= observationId])
+        , ("observation_history", object ["observation_id" .= observationId, "limit" .= (1 :: Int), "offset" .= (0 :: Int)])
         , ("observation_list", observationListArguments)
         , ("observation_match", observationMatchArguments)
         , ("observation_delete", object ["observation_id" .= observationId])
@@ -196,7 +232,8 @@ spec = do
       schemaRequired "observation_create" `shouldBe` ["subjects", "git_sha", "content"]
       (schemaProperty "observation_create" "subjects" >>= jsonField "maxItems") `shouldBe` Just (Number (fromIntegral maxObservationSubjects))
       all (`elem` schemaProperties "observation_update") ["observation_id", "content"] `shouldBe` True
-      length (schemaProperties "observation_update") `shouldBe` 2
+      length (schemaProperties "observation_update") `shouldBe` 4
+      schemaRequired "observation_update" `shouldBe` ["observation_id", "content", "reviewed_git_sha", "expected_content_version"]
       all (`elem` schemaProperties "search") ["subject_kind", "subject", "git_sha"] `shouldBe` True
       schemaProperties "search" `shouldContain` ["offset"]
       all (`elem` schemaProperties "observation_list") ["subject_kind", "subject", "git_sha", "query", "limit", "offset"] `shouldBe` True
@@ -274,13 +311,13 @@ spec = do
     it "guides Observations as durable repository insights and treats Git SHAs as staleness sentinels" $ do
       toolDescriptionIs "search" "Search observations, projects, and tasks (default 10 per type, limit 1..200, offset 0..2147483647). An Observation is a durable, non-obvious repository insight tied to file or glob subjects; subject_kind, subject, and git_sha are exact provenance filters. has_more reports each requested type; next_offset contains only types with another page. To continue one type, repeat with entity_types set to that type and offset set to its next_offset, keeping workspace_id, query, and filters unchanged. If a further page would exceed the offset range, the server returns a continuation_limit error."
       toolDescriptionIs "observation_create" "Create an Observation: a durable, non-obvious repository insight tied to one or more repository-relative file or glob subjects. git_sha records the repository state where the insight was established; use it as a sentinel to decide whether the insight needs re-audit, not as timeless proof. Pass subjects as an ordered array; they are OR alternatives and, with git_sha, immutable after creation. File subjects must be concrete paths. Glob subjects may use only *, ?, and ** path components (for example my/src/proj/**/*.java)."
-      toolDescriptionIs "observation_update" "Replace only the content of a durable, non-obvious repository insight. Subjects and git_sha are immutable provenance; git_sha remains the state where the insight was established and a staleness-audit sentinel, not timeless proof."
+      toolDescriptionIs "observation_update" "Assert current content at reviewed_git_sha with the expected_content_version returned by a read. Repeated SHA/text assertions are accepted and advance version/history. Subjects and creation git_sha remain immutable; conflicts preserve latest canonical content."
       toolDescriptionIs "observation_list" "List durable, non-obvious repository insights using exact subject and git_sha provenance filters and optional text search. git_sha is a sentinel for deciding when an insight needs re-audit, not timeless proof. When has_more is true, pass next_offset to retrieve the next page."
       toolDescriptionIs "observation_match" "Find durable, non-obvious repository insights whose stored file subjects or safe glob subjects match any concrete repository-relative path supplied in paths. Paths are ORed; do not pass globs here and no repository filesystem is read. Optional filters compose with matching. git_sha is a staleness-audit sentinel, not timeless proof. Continue with next_offset until has_more is false."
       toolDescriptionIs "observation_similar" "Find semantically similar durable, non-obvious repository insights. Subject and git_sha filters are exact provenance filters; git_sha is a staleness-audit sentinel, not timeless proof. To continue, add returned_count to offset and repeat until returned_count is less than limit or zero."
       schemaPropertyDescriptionIs "observation_create" "content" "Durable, non-obvious repository insight about its subjects; not a progress update or routine fact"
       schemaPropertyDescriptionIs "observation_create" "git_sha" "Lowercase 40-character Git SHA for the repository state where this insight was established; a staleness-audit sentinel, not timeless proof"
-      schemaPropertyDescriptionIs "observation_update" "content" "Replacement durable, non-obvious repository insight about the existing subjects; not a progress update or routine fact"
+      schemaPropertyDescriptionIs "observation_update" "content" "Reviewed current content"
       schemaPropertyDescriptionIs "observation_match" "paths" "One to 256 concrete repository-relative files to match against stored Observation subjects; globs are rejected"
       observationGuidance `shouldSatisfy` observationGuidanceContract
       T.replace "durable, non-obvious" "routine, obvious" observationGuidance `shouldNotSatisfy` observationGuidanceContract
@@ -601,18 +638,18 @@ spec = do
         jsonPath ["affected_tasks"] dependencyResult `shouldSatisfy` maybe False (arrayFirst (\effect -> jsonPath ["task", "description"] effect == Nothing && jsonField "current_status" effect == Just (String "blocked")))
 
   describe "Observation parsing and validation" $ do
-    it "parses provenance-bound creates and content-only updates" $ do
+    it "parses provenance-bound creates and reviewed conditional updates" $ do
       case parseToolCall "observation_create" observationArguments of
         Right (ObservationCreate (CreateObservation _ values sha _)) -> do
           values `shouldBe` observationSubjects
           sha `shouldBe` gitSha
         result -> expectationFailure (show result)
-      case parseToolCall "observation_update" (object ["workspace_id" .= workspaceId, "observation_id" .= observationId, "content" .= ("replacement" :: Text)]) of
-        Right (ObservationUpdate _ (UpdateObservation content)) -> content `shouldBe` "replacement"
+      case parseToolCall "observation_update" (object ["workspace_id" .= workspaceId, "observation_id" .= observationId, "content" .= ("replacement" :: Text), "reviewed_git_sha" .= gitSha, "expected_content_version" .= observationId]) of
+        Right (ObservationUpdate _ _ (ReviewedObservationUpdate content _)) -> content `shouldBe` "replacement"
         result -> expectationFailure (show result)
 
     it "rejects mutable provenance fields on update and malformed provenance on create" $ do
-      parseToolCall "observation_update" (object ["observation_id" .= observationId, "content" .= ("replacement" :: Text), "git_sha" .= gitSha]) `shouldSatisfy` isLeft
+      parseToolCall "observation_update" (object ["observation_id" .= observationId, "content" .= ("replacement" :: Text), "reviewed_git_sha" .= gitSha, "expected_content_version" .= observationId, "git_sha" .= gitSha]) `shouldSatisfy` isLeft
       parseToolCall "observation_create" (object ["workspace_id" .= workspaceId, "subjects" .= observationSubjects, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= ("content" :: Text)]) `shouldSatisfy` isLeft
       case parseToolCall "observation_create" (object ["workspace_id" .= workspaceId, "subjects" .= [object ["subject_kind" .= ("file" :: Text), "subject" .= ("/absolute" :: Text)]], "git_sha" .= ("bad" :: Text), "content" .= ("content" :: Text)]) of
         Right parsed -> validateToolCall parsed `shouldSatisfy` isLeft
@@ -702,11 +739,13 @@ spec = do
         jsonField "content" detail `shouldBe` Just (String "complete observation content")
         detail `shouldSatisfy` hasFields ["subjects", "subject_kind", "subject"]
         detail `shouldSatisfy` not . contains "workspace_id"
-        update <- call manager base "observation_update" (object ["observation_id" .= observationId, "content" .= ("replacement" :: Text)])
+        update <- call manager base "observation_update" (object ["observation_id" .= observationId, "content" .= ("replacement" :: Text), "reviewed_git_sha" .= gitSha, "expected_content_version" .= observationId])
         jsonField "action" update `shouldBe` Just (String "updated")
       observed <- readTVarIO requests
       map (.requestPath) observed `shouldBe` ["/api/v1/observations", "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]
       map (.requestMethod) observed `shouldBe` [methodPost, methodGet, methodPut]
+      (last observed).requestIfMatch `shouldBe` Just (TE.encodeUtf8 ("\"" <> observationId <> "\""))
+      decode ((last observed).requestBody) `shouldBe` Just (object ["content" .= ("replacement" :: Text), "reviewed_git_sha" .= gitSha])
 
     it "passes exact provenance filters through unified search and compacts observations" $ do
       requests <- newTVarIO []
@@ -714,7 +753,7 @@ spec = do
         result <- call manager base "search" (object ["workspace_id" .= workspaceId, "entity_types" .= (["observation"] :: [Text]), "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha])
         jsonField "observations" result `shouldSatisfy` maybe False (arrayFirst (hasFields ["id", "subject_kind", "subject", "git_sha", "content_preview"]))
         result `shouldSatisfy` not . contains "linked_memories"
-      [RequestInfo _ _ _ body _ _ _ _] <- readTVarIO requests
+      [RequestInfo _ _ _ body _ _ _ _ _] <- readTVarIO requests
       decode body `shouldSatisfy` maybe False (\value -> hasFields ["subject_kind", "subject", "git_sha"] value)
 
     it "forwards list filters and gives an exact next offset only when the server reports another page" $ do
@@ -972,8 +1011,9 @@ toolSamples =
   , ("search", object ["workspace_id" .= workspaceId, "entity_types" .= (["observation"] :: [Text]), "offset" .= (0 :: Int)])
   , ("observation_create", observationArguments)
   , ("observation_get", object ["observation_id" .= observationId])
-  , ("observation_update", object ["observation_id" .= observationId, "content" .= ("replacement" :: Text)])
-  , ("observation_list", observationListArguments)
+  , ("observation_update", object ["observation_id" .= observationId, "content" .= ("replacement" :: Text), "reviewed_git_sha" .= gitSha, "expected_content_version" .= observationId])
+  , ("observation_history", object ["observation_id" .= observationId, "limit" .= (1 :: Int), "offset" .= (0 :: Int)])
+        , ("observation_list", observationListArguments)
   , ("observation_match", observationMatchArguments)
   , ("observation_delete", object ["observation_id" .= observationId])
   , ("observation_set_embedding", object ["observation_id" .= observationId, "embedding" .= embedding])
@@ -1052,7 +1092,7 @@ observationGuidanceContract text =
     [ "durable, non-obvious repository insight"
     , "file or glob subjects"
     , "repository-relative"
-    , "immutable provenance"
+    , "creation git_sha remain immutable"
     , "staleness-audit sentinel"
     , "not timeless proof"
     ]
@@ -1171,6 +1211,7 @@ data RequestInfo = RequestInfo
   , authorization :: Maybe ByteString
   , requestChangeCause :: Maybe ByteString
   , requestMcpProvenance :: Maybe ByteString
+  , requestIfMatch :: Maybe ByteString
   , requestId :: Maybe ByteString
   }
 
@@ -1200,7 +1241,7 @@ withBatchMoveEveryTaskMismatchMock requests action =
 batchMovePreflightApp :: TVar [RequestInfo] -> Value -> Value -> Wai.Application
 batchMovePreflightApp requests taskResponse projectResponse request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
   let path = request.rawPathInfo
       response
         | "/api/v1/tasks/" `BS.isPrefixOf` path = taskResponse
@@ -1211,7 +1252,7 @@ batchMovePreflightApp requests taskResponse projectResponse request respond = do
 batchMoveGetErrorApp :: TVar [RequestInfo] -> Wai.Application
 batchMoveGetErrorApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
   let response
         | "/api/v1/tasks/" `BS.isPrefixOf` request.rawPathInfo = Wai.responseLBS status404 [("Content-Type", "application/json")] (encode (object ["error" .= ("not_found" :: Text), "message" .= ("Task not found." :: Text)]))
         | otherwise = Wai.responseLBS status200 [("Content-Type", "application/json")] (encode projectWithWorkspace)
@@ -1220,7 +1261,7 @@ batchMoveGetErrorApp requests request respond = do
 batchMoveEveryTaskMismatchApp :: TVar [RequestInfo] -> Wai.Application
 batchMoveEveryTaskMismatchApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
   let response
         | request.rawPathInfo == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" = taskWithWorkspace
         | request.rawPathInfo == "/api/v1/tasks/11111111-2222-3333-4444-555555555555" = object ["id" .= workspaceId, "workspace_id" .= ("99999999-2222-3333-4444-555555555555" :: Text)]
@@ -1320,7 +1361,7 @@ withEnvironment name value = bracket acquire restore . const
 mockApp :: TVar [RequestInfo] -> Wai.Application
 mockApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
   case request.requestMethod of
     method | method == methodDelete && "/dependencies/" `T.isInfixOf` TE.decodeUtf8 request.rawPathInfo -> respond $ Wai.responseLBS status200 [("Content-Type", "application/json")] (encode (responseFor request.requestMethod request.rawPathInfo request.rawQueryString body))
     method | method == methodDelete -> respond $ Wai.responseLBS status204 [] ""
@@ -1379,7 +1420,7 @@ workspaceStructuredStatusApp status message _ respond =
 statusApp :: TVar [RequestInfo] -> Wai.Application
 statusApp requests request respond = do
   body <- Wai.strictRequestBody request
-  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
+  atomically $ modifyTVar' requests (<> [RequestInfo request.requestMethod (T.unpack (TE.decodeUtf8 request.rawPathInfo)) request.rawQueryString body (lookup "Authorization" request.requestHeaders) (lookup "X-HMem-Change-Cause" request.requestHeaders) (lookup "X-HMem-MCP-Provenance" request.requestHeaders) (lookup "If-Match" request.requestHeaders) (lookup "X-Request-Id" request.requestHeaders)])
   let status
         | request.rawPathInfo == "/api/v1/observations/match" = status500
         | request.rawPathInfo == "/api/v1/observations/similar" = status400
@@ -1415,6 +1456,7 @@ responseFor method path rawQuery body
   | method == methodPut && path == "/api/v1/workspaces/11111111-2222-3333-4444-555555555555" = object ["id" .= workspaceId, "name" .= ("Renamed" :: Text), "workspace_type" .= ("repository" :: Text)]
   | path == "/api/v1/observations" && "offset=2" `T.isInfixOf` TE.decodeUtf8 rawQuery = object ["items" .= [observation], "has_more" .= False]
   | path == "/api/v1/observations" = object ["items" .= [observation, observation], "has_more" .= True]
+  | path == "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/history" = object ["items" .= ([] :: [Value]), "has_more" .= False]
   | path == "/api/v1/observations/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" = observation
   | path == "/api/v1/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" = task
   | path == "/api/v1/tasks/11111111-2222-3333-4444-555555555555" = object ["id" .= workspaceId, "workspace_id" .= workspaceId, "title" .= ("Task" :: Text), "status" .= ("done" :: Text), "priority" .= (5 :: Int)]
@@ -1422,7 +1464,7 @@ responseFor method path rawQuery body
   | path == "/api/v1/projects/11111111-2222-3333-4444-555555555555" = object ["id" .= workspaceId, "workspace_id" .= workspaceId, "name" .= ("Project" :: Text), "status" .= ("archived" :: Text), "priority" .= (5 :: Int)]
   | otherwise = object []
   where
-    observation = object ["id" .= observationId, "workspace_id" .= workspaceId, "subjects" .= observationSubjects, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= ("complete observation content" :: Text), "content_preview" .= ("complete observation content" :: Text)]
+    observation = object ["id" .= observationId, "workspace_id" .= workspaceId, "subjects" .= observationSubjects, "subject_kind" .= ("file" :: Text), "subject" .= ("src/HMem/Types.hs" :: Text), "git_sha" .= gitSha, "content" .= ("complete observation content" :: Text), "content_preview" .= ("complete observation content" :: Text), "content_version" .= observationId, "latest_sequence" .= (1 :: Int), "current_provenance" .= Null]
     match = object
       [ "observation" .= observation
       , "path_matches" .=

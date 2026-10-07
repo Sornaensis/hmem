@@ -23,6 +23,7 @@ module HMem.Server.TestHarness
   , createDeployedSandboxAuthSession
   , issueDeployedSandboxPAT
   , signDeployedSandboxJwt
+  , writeReviewedObservation
   ) where
 
 import Control.Exception (bracket)
@@ -50,6 +51,8 @@ import HMem.Config qualified as Config
 import HMem.DB.Auth qualified as Auth
 import HMem.DB.Pool qualified as DBPool
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), TestSandbox(..), withTestEnv)
+import HMem.DB.Observation qualified as Observation
+import HMem.Types (Observation(..), ObservationUpdateResult(..), ReviewedObservationUpdate(..))
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkApp)
 import HMem.Server.AuthTokens qualified as AuthTokens
@@ -61,6 +64,20 @@ data LocalSandboxApp = LocalSandboxApp
   , localApplication :: !Application
   , localWSState :: !WSState
   }
+
+-- Fixture setup deliberately reads a base version; contention tests supply
+-- their shared expected version explicitly to the canonical update function.
+writeReviewedObservation :: TestEnv -> UUID -> UUID -> Text -> IO (Maybe Observation)
+writeReviewedObservation env workspace observationId body = do
+  base <- Observation.getObservation env.pool workspace observationId
+  case base of
+    Nothing -> pure Nothing
+    Just row -> do
+      result <- Observation.updateObservationReviewed env.pool workspace observationId row.contentVersion
+        (ReviewedObservationUpdate body (T.replicate 40 "b"))
+      case result of
+        ObservationUpdated updated -> pure (Just updated)
+        other -> fail (show other)
 
 data DeployedSandboxApp = DeployedSandboxApp
   { deployedEnv :: !TestEnv

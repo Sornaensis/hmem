@@ -1,13 +1,13 @@
 module HMem.Types
   ( jsonOptions, camelToSnake
   , ObservationUpdateResult(..)
-  , ObservationProvenance(..), ObservationRevisionEvent(..), ReviewedObservationUpdate(..), validateReviewedObservationUpdate, observationContentDigest
+  , ObservationProvenance(..), ObservationRevisionEvent(..), ObservationProvenanceMatch(..), ReviewedObservationUpdate(..), validateReviewedObservationUpdate, observationContentDigest
   , SubjectKind(..), subjectKindToText, subjectKindFromText
-  , ObservationSubject(..), Observation(..), CreateObservation(..), UpdateObservation(..), ObservationQuery(..), ObservationSubjectFacetQuery(..), ObservationSubjectFacet(..), SimilarObservationQuery(..), SimilarObservation(..), ObservationMatchQuery(..), ObservationPathMatch(..), ObservationMatch(..)
+  , ObservationSubject(..), Observation(..), CreateObservation(..), ObservationQuery(..), ObservationSubjectFacetQuery(..), ObservationSubjectFacet(..), SimilarObservationQuery(..), SimilarObservation(..), ObservationMatchQuery(..), ObservationPathMatch(..), ObservationMatch(..)
   , maxObservationSubjectBytes, maxObservationSubjects, maxObservationSubjectBytesTotal, maxObservationContentBytes, observationEmbeddingDimensions
   , ObservationEmbedding(..), EmbeddingSpaceFingerprint, embeddingSpaceFingerprintText, legacyManualEmbeddingSpace, parseEmbeddingSpaceFingerprint
   , ObservationCountQuery(..), ObservationCounts(..), validateObservationCountQuery
-  , validateCreateObservationInput, validateUpdateObservationInput, validateObservationQuery, validateObservationSubjectFacetQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
+  , validateCreateObservationInput, validateObservationQuery, validateObservationSubjectFacetQuery, validateSimilarObservationQuery, validateObservationMatchQuery, validateObservationSubjects, normalizeObservationSubjects, observationSubjectMatchesPath
   , WorkspaceType(..), Workspace(..), CreateWorkspace(..), UpdateWorkspace(..), WorkspaceCardHydration(..), WorkspaceTaskDependencyLink(..)
   , WorkspaceGroup(..), CreateWorkspaceGroup(..), WorkspaceGroupMemberInput(..)
   , ProjectStatus(..), Project(..), CreateProject(..), ProjectSpecTask(..), CreateProjectSpec(..), ProjectSpecResult(..), UpdateProject(..), ProjectListQuery(..), ProjectOverview(..), ProjectReadinessRollup(..), ProjectCardSummary(..)
@@ -396,6 +396,7 @@ data Observation = Observation
   , contentVersion :: UUID
   , latestSequence :: Int64
   , currentProvenance :: Maybe ObservationProvenance
+  , provenanceMatch :: Maybe ObservationProvenanceMatch
   } deriving (Show, Eq, Generic)
 
 instance ToJSON Observation where
@@ -407,12 +408,23 @@ instance ToJSON Observation where
     , "content_version" .= observation.contentVersion
     , "latest_sequence" .= observation.latestSequence
     , "current_provenance" .= observation.currentProvenance
-    ] <> legacySubjectPairs observation.subjects
+    ] <> legacySubjectPairs observation.subjects <> maybe [] (\context -> ["provenance_match" .= context]) observation.provenanceMatch
 instance FromJSON Observation where
   parseJSON = withObject "Observation" $ \o -> Observation
     <$> o .: "id" <*> o .: "workspace_id" <*> parseSubjects o <*> o .: "git_sha"
     <*> o .: "content" <*> o .: "created_at" <*> o .: "updated_at" <*> o .: "content_version"
-    <*> o .: "latest_sequence" <*> o .: "current_provenance"
+    <*> o .: "latest_sequence" <*> o .: "current_provenance" <*> o .:? "provenance_match"
+
+-- | Matched exact query selectors explain why current content was returned.
+-- A history selector may match an unbound legacy claim; it never claims that
+-- the returned content was the content historically asserted at that SHA.
+data ObservationProvenanceMatch = ObservationProvenanceMatch
+  { originalGitSha :: Maybe Text
+  , currentGitSha :: Maybe Text
+  , historyGitSha :: Maybe Text
+  } deriving (Show, Eq, Generic)
+instance ToJSON ObservationProvenanceMatch where toJSON = genericToJSON jsonOptions
+instance FromJSON ObservationProvenanceMatch where parseJSON = genericParseJSON jsonOptions
 
 -- | Compact assertions preserve creation identity without retaining old text.
 -- Nullable fields are required in JSON so legacy unknowns remain explicit.
@@ -473,7 +485,7 @@ instance FromJSON ReviewedObservationUpdate where
     ReviewedObservationUpdate <$> o .: "content" <*> o .: "reviewed_git_sha"
 
 validateReviewedObservationUpdate :: ReviewedObservationUpdate -> [Text]
-validateReviewedObservationUpdate p = validateUpdateObservationInput (UpdateObservation p.content)
+validateReviewedObservationUpdate p = validateRequiredText "content" maxObservationContentBytes p.content
   <> validateGitSha p.reviewedGitSha
 
 observationContentDigest :: Text -> Text
@@ -504,19 +516,6 @@ instance FromJSON CreateObservation where
   parseJSON = withObject "CreateObservation" $ \o -> CreateObservation
     <$> o .: "workspace_id" <*> parseCreateObservationSubjects o <*> o .: "git_sha" <*> o .: "content"
 
--- | Observation updates deliberately expose only mutable content.
-newtype UpdateObservation = UpdateObservation { content :: Text }
-  deriving (Show, Eq, Generic)
-
-instance ToJSON UpdateObservation where
-  toJSON = genericToJSON jsonOptions
-instance FromJSON UpdateObservation where
-  parseJSON = withObject "UpdateObservation" $ \updateObject -> do
-    let unknownKeys = filter (`notElem` ["content"]) (map Key.toText (KM.keys updateObject))
-    if null unknownKeys
-      then UpdateObservation <$> updateObject .: "content"
-      else fail $ "UpdateObservation accepts only content; unexpected fields: " <> show unknownKeys
-
 -- | Exact provenance filters compose with optional full-text search.
 data ObservationQuery = ObservationQuery
   { workspaceId :: UUID
@@ -526,6 +525,7 @@ data ObservationQuery = ObservationQuery
   , query       :: Maybe Text
   , limit       :: Maybe Int
   , offset      :: Maybe Int
+  , currentGitSha :: Maybe Text, historyGitSha :: Maybe Text
   } deriving (Show, Eq, Generic)
 
 instance ToJSON ObservationQuery where
@@ -542,6 +542,7 @@ data ObservationCountQuery = ObservationCountQuery
   , gitSha :: Maybe Text
   , query :: Maybe Text
   , paths :: Maybe [Text]
+  , currentGitSha :: Maybe Text, historyGitSha :: Maybe Text
   } deriving (Show, Eq, Generic)
 
 instance ToJSON ObservationCountQuery where toJSON = genericToJSON jsonOptions
@@ -560,6 +561,8 @@ validateObservationCountQuery :: ObservationCountQuery -> [Text]
 validateObservationCountQuery value =
   maybe [] validateObservationSubject value.subject
   <> maybe [] validateGitSha value.gitSha
+  <> maybe [] validateGitSha value.currentGitSha
+  <> maybe [] validateGitSha value.historyGitSha
   <> maybe [] validateConcretePaths value.paths
   <> ["subject and paths are mutually exclusive" | isJust value.subject && isJust value.paths]
 
@@ -570,6 +573,7 @@ data ObservationSubjectFacetQuery = ObservationSubjectFacetQuery
   , query       :: Maybe Text
   , limit       :: Maybe Int
   , offset      :: Maybe Int
+  , currentGitSha :: Maybe Text, historyGitSha :: Maybe Text
   } deriving (Show, Eq, Generic)
 
 instance ToJSON ObservationSubjectFacetQuery where toJSON = genericToJSON jsonOptions
@@ -596,6 +600,7 @@ data SimilarObservationQuery = SimilarObservationQuery
   , minSimilarity  :: Maybe Double
   , limit          :: Maybe Int
   , offset         :: Maybe Int
+  , currentGitSha :: Maybe Text, historyGitSha :: Maybe Text
   } deriving (Show, Eq, Generic)
 
 instance ToJSON SimilarObservationQuery where
@@ -606,6 +611,7 @@ instance FromJSON SimilarObservationQuery where
     <*> objectValue .:? "subject" <*> objectValue .:? "git_sha"
     <*> objectValue .: "embedding" <*> presentFingerprint objectValue
     <*> objectValue .:? "min_similarity" <*> objectValue .:? "limit" <*> objectValue .:? "offset"
+    <*> objectValue .:? "current_git_sha" <*> objectValue .:? "history_git_sha"
 
 presentFingerprint :: Object -> Parser (Maybe EmbeddingSpaceFingerprint)
 presentFingerprint objectValue
@@ -633,6 +639,7 @@ data ObservationMatchQuery = ObservationMatchQuery
   , query       :: Maybe Text
   , limit       :: Maybe Int
   , offset      :: Maybe Int
+  , currentGitSha :: Maybe Text, historyGitSha :: Maybe Text
   } deriving (Show, Eq, Generic)
 
 instance ToJSON ObservationMatchQuery where toJSON = genericToJSON jsonOptions
@@ -675,26 +682,28 @@ validateCreateObservationInput co =
   <> ["git_sha must be a lowercase 40-character hexadecimal Git SHA" | not (validGitSha co.gitSha)]
   <> validateRequiredText "content" maxObservationContentBytes co.content
 
-validateUpdateObservationInput :: UpdateObservation -> [Text]
-validateUpdateObservationInput (UpdateObservation value) =
-  validateRequiredText "content" maxObservationContentBytes value
-
 validateObservationQuery :: ObservationQuery -> [Text]
 validateObservationQuery oq =
   validateObservationPagination oq.limit oq.offset
   <> maybe [] validateObservationSubject oq.subject
   <> maybe [] validateGitSha oq.gitSha
+  <> maybe [] validateGitSha oq.currentGitSha
+  <> maybe [] validateGitSha oq.historyGitSha
 
 validateObservationSubjectFacetQuery :: ObservationSubjectFacetQuery -> [Text]
 validateObservationSubjectFacetQuery queryValue =
   validateObservationPagination queryValue.limit queryValue.offset
   <> maybe [] validateGitSha queryValue.gitSha
+  <> maybe [] validateGitSha queryValue.currentGitSha
+  <> maybe [] validateGitSha queryValue.historyGitSha
 
 validateSimilarObservationQuery :: SimilarObservationQuery -> [Text]
 validateSimilarObservationQuery soq =
   validateObservationPagination soq.limit soq.offset
   <> maybe [] validateObservationSubject soq.subject
   <> maybe [] validateGitSha soq.gitSha
+  <> maybe [] validateGitSha soq.currentGitSha
+  <> maybe [] validateGitSha soq.historyGitSha
   <> ["embedding must contain exactly 1536 finite dimensions"
      | length soq.embedding /= observationEmbeddingDimensions
        || any (\x -> isNaN x || isInfinite x) soq.embedding]
@@ -708,6 +717,8 @@ validateObservationMatchQuery omq =
   validateObservationPagination omq.limit omq.offset
   <> validateConcretePaths omq.paths
   <> maybe [] validateGitSha omq.gitSha
+  <> maybe [] validateGitSha omq.currentGitSha
+  <> maybe [] validateGitSha omq.historyGitSha
 
 normalizeObservationSubjects :: [ObservationSubject] -> [ObservationSubject]
 normalizeObservationSubjects = reverse . snd . foldl' keep ([], [])
@@ -2197,6 +2208,7 @@ data UnifiedSearchQuery = UnifiedSearchQuery
   , subjectKind :: Maybe SubjectKind, subject :: Maybe Text, gitSha :: Maybe Text
   , projectStatus :: Maybe ProjectStatus, taskStatus :: Maybe TaskStatus
   , taskPriority :: Maybe Int, projectId :: Maybe UUID
+  , currentGitSha :: Maybe Text, historyGitSha :: Maybe Text
   } deriving (Show, Eq, Generic)
 instance ToJSON UnifiedSearchQuery where toJSON = genericToJSON jsonOptions
 instance FromJSON UnifiedSearchQuery where parseJSON = genericParseJSON jsonOptions
@@ -2205,17 +2217,22 @@ instance FromJSON UnifiedSearchQuery where parseJSON = genericParseJSON jsonOpti
 -- the full, potentially large Observation content body.
 data ObservationSearchHit = ObservationSearchHit
   { id :: UUID, workspaceId :: UUID, subjects :: [ObservationSubject]
-  , gitSha :: Text, contentPreview :: Text, updatedAt :: UTCTime }
+  , gitSha :: Text, contentPreview :: Text, updatedAt :: UTCTime
+  , contentVersion :: UUID, latestSequence :: Int64, currentProvenance :: Maybe ObservationProvenance
+  , provenanceMatch :: Maybe ObservationProvenanceMatch }
   deriving (Show, Eq, Generic)
 instance ToJSON ObservationSearchHit where
   toJSON hit = object $
     [ "id" .= hit.id, "workspace_id" .= hit.workspaceId, "subjects" .= hit.subjects
     , "git_sha" .= hit.gitSha, "content_preview" .= hit.contentPreview, "updated_at" .= hit.updatedAt
-    ] <> legacySubjectPairs hit.subjects
+    , "content_version" .= hit.contentVersion, "latest_sequence" .= hit.latestSequence
+    , "current_provenance" .= hit.currentProvenance
+    ] <> legacySubjectPairs hit.subjects <> maybe [] (\context -> ["provenance_match" .= context]) hit.provenanceMatch
 instance FromJSON ObservationSearchHit where
   parseJSON = withObject "ObservationSearchHit" $ \o -> ObservationSearchHit
     <$> o .: "id" <*> o .: "workspace_id" <*> parseSubjects o <*> o .: "git_sha"
     <*> o .: "content_preview" <*> o .: "updated_at"
+    <*> o .: "content_version" <*> o .: "latest_sequence" <*> o .: "current_provenance" <*> o .:? "provenance_match"
 
 data UnifiedSearchResults = UnifiedSearchResults
   { observations :: [ObservationSearchHit], projects :: [Project], tasks :: [Task]
@@ -2245,6 +2262,10 @@ validateUnifiedSearchQuery usq =
   ["query must not be empty" | maybe False (T.null . T.strip) usq.query]
   <> ["workspace_id is required for unified search" | usq.workspaceId == Nothing]
   <> ["invalid search_language" | not (validFtsLanguage usq.searchLanguage)]
+  <> maybe [] validateObservationSubject usq.subject
+  <> maybe [] validateGitSha usq.gitSha
+  <> maybe [] validateGitSha usq.currentGitSha
+  <> maybe [] validateGitSha usq.historyGitSha
   <> validateObservationPagination usq.limit Nothing
   <> validateUnifiedSearchOffset usq.offset
   <> validateOptionalIntRange "task_priority" 1 10 usq.taskPriority

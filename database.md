@@ -366,8 +366,11 @@ aggregate counts, and subject facets so their totals remain consistent.
 
 Observation snapshot envelopes use `schema_version: 2` with the mandatory
 nullable `current_provenance` and `latest_sequence` fields. Planning envelope
-kinds retain version 1. Cutover invalidates pre-cutover materialized snapshots
-and replay/resume sessions, requiring authorized resync before using the new
+kinds retain version 1. Cutover invalidates all pre-cutover workspace materialized
+snapshots and replay/resume bearers, including shell/empty snapshots and tokens
+without a session link. Global catalogue envelopes and bearers remain compatible:
+global replay cannot contain workspace Observation records. Workspace clients
+must perform authorized resync before using the new
 canonical projection. Live events carry the same committed current fields;
 history loads separately and stale responses must not overwrite current state.
 

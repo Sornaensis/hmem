@@ -129,7 +129,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       capUnifiedSearchOverfetch (Just 200) (Just 100001) `shouldBe` (201, 100001)
       capUnifiedSearchOverfetch (Just 10) (Just maxUnifiedSearchOffset) `shouldBe` (11, maxUnifiedSearchOffset)
       capPaginationOverfetch (Just 200) (Just 100001) `shouldBe` (200, 100000)
-      validateObservationQuery (ObservationQuery workspace.id Nothing Nothing Nothing Nothing (Just 10) (Just 100001)) `shouldSatisfy` (not . null)
+      validateObservationQuery (ObservationQuery workspace.id Nothing Nothing Nothing Nothing (Just 10) (Just 100001) Nothing Nothing) `shouldSatisfy` (not . null)
       searchNextOffset 100000 10 `shouldBe` Right 100010
       searchNextOffset (maxUnifiedSearchOffset - 1) 1 `shouldBe` Right maxUnifiedSearchOffset
       searchNextOffset maxUnifiedSearchOffset 1 `shouldBe` Left unifiedSearchContinuationError
@@ -142,7 +142,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
 
 unifiedQuery :: Maybe UUID -> Maybe [EntitySearchType] -> Maybe SubjectKind -> Maybe Text -> Maybe Text -> UnifiedSearchQuery
 unifiedQuery workspace kinds kind path sha = UnifiedSearchQuery
-  { workspaceId = workspace, query = Just "needle", entityTypes = kinds, searchLanguage = Nothing
+  { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = workspace, query = Just "needle", entityTypes = kinds, searchLanguage = Nothing
   , limit = Just 10, offset = Just 0, subjectKind = kind, subject = path, gitSha = sha
   , projectStatus = Nothing, taskStatus = Nothing, taskPriority = Nothing, projectId = Nothing }
 

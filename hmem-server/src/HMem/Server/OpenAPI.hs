@@ -15,7 +15,7 @@ import Data.Proxy (Proxy(..))
 import Data.Text (Text)
 import Servant.OpenApi (toOpenApi)
 
-import HMem.Server.API (HMemAPI, CreateObservationRequest, ObservationMatchRequest, ObservationCountRequest, LinkDependencyRequest, UpdateWorkspaceRequest)
+import HMem.Server.API (HMemAPI, CreateObservationRequest, ReviewedObservationRequest, ObservationMatchRequest, ObservationCountRequest, LinkDependencyRequest, UpdateWorkspaceRequest)
 import HMem.Types
 
 openApiSpec :: OpenApi
@@ -45,6 +45,7 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
   & paths . at "/api/v1/observations/{observationId}" . _Just . get %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}" . _Just . put %~ fmap (documentObservationUpdate . tagObservation)
   & paths . at "/api/v1/observations/{observationId}" . _Just . delete %~ fmap tagObservation
+  & paths . at "/api/v1/observations/{observationId}/history" . _Just . get %~ fmap tagObservation
   & paths . at "/api/v1/observations/{observationId}/embedding" . _Just . put %~ fmap tagObservation
   & paths . at "/api/v1/search" . _Just . post %~ fmap documentUnifiedSearch
   & paths . at "/api/v1/workspaces/{workspaceId}" . _Just . put %~ fmap tagWorkspaceRename
@@ -63,11 +64,13 @@ openApiSpec = toOpenApi (Proxy @HMemAPI)
       & responses %~ (<> observationUpdateErrors)
     documentIfMatch parameterRef = case parameterRef of
       Inline parameter | parameter ^. name == "If-Match" -> Inline $ parameter
-        & description ?~ "One strong quoted canonical UUID from content_version, for example \"00000000-0000-0000-0000-000000000001\". Omission is an unconditional compatibility write; weak tags, lists, repeated header lines, wildcard and malformed forms are rejected."
+        & required ?~ True
+        & description ?~ "Required strong quoted canonical UUID from content_version. Missing preconditions return 428; weak tags, lists, repeated header lines, wildcard and malformed forms return 400."
         & schema ?~ Inline (mempty & type_ ?~ OpenApiString & pattern ?~ "^[ \\t]*\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\"[ \\t]*$")
       _ -> parameterRef
     observationUpdateErrors = Responses Nothing $ InsOrdMap.fromList
-      [ (400, Inline (mempty & description .~ "Invalid content-only JSON or unsupported If-Match token form."))
+      [ (400, Inline (mempty & description .~ "Invalid reviewed content/SHA JSON or unsupported If-Match token form."))
+      , (428, Inline (mempty & description .~ "Required If-Match content_version was omitted; no mutation occurred."))
       , (401, Inline (mempty & description .~ "Authentication is required."))
       , (403, Inline (mempty & description .~ "Edit authorization or deployed cookie CSRF verification failed."))
       , (404, Inline (mempty & description .~ "The authorized Observation is missing or permanently deleted."))
@@ -150,7 +153,9 @@ instance ToSchema EntitySearchType where
 instance ToSchema ObservationSearchHit where
   declareNamedSchema _ = do
     NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ObservationSearchHit)
-    pure $ NamedSchema name (withLegacySubjectProperties schema)
+    pure $ NamedSchema name (withLegacySubjectProperties schema
+      & required %~ (<> ["current_provenance"])
+      & properties . at "current_provenance" ?~ Inline (mempty & allOf ?~ [Ref (Reference "ObservationProvenance")] & nullable ?~ True))
 instance ToParamSchema EntitySearchType where toParamSchema _ = mempty & type_ ?~ OpenApiString & enum_ ?~ ["observation", "project", "task"]
 instance ToSchema ProjectStatus where declareNamedSchema _ = pure $ NamedSchema (Just "ProjectStatus") (mempty & type_ ?~ OpenApiString & enum_ ?~ ["active", "paused", "completed", "archived"])
 instance ToParamSchema ProjectStatus where toParamSchema _ = mempty & type_ ?~ OpenApiString
@@ -185,6 +190,8 @@ instance ToSchema Observation where
   declareNamedSchema _ = do
     NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @Observation)
     pure $ NamedSchema name (withLegacySubjectProperties schema
+      & required %~ (<> ["current_provenance"])
+      & properties . at "current_provenance" ?~ Inline (mempty & allOf ?~ [Ref (Reference "ObservationProvenance")] & nullable ?~ True)
       & properties . at "content_version" ?~ Inline (uuidSchema
           & description ?~ "Opaque content precondition advanced by every accepted content write. Not ordered; embedding-only writes do not advance it. Send as a strong quoted If-Match token for conditional curation."))
 instance ToSchema ObservationSubjectFacet where
@@ -197,7 +204,25 @@ instance ToSchema CreateObservation where
     & description ?~ "Create with exactly one non-empty canonical `subjects` array or the complete deprecated legacy `subject_kind` plus `subject` pair. The forms are mutually exclusive; missing or half legacy pairs are rejected. Duplicate canonical subjects are de-duplicated in first-occurrence order. Subjects and Git provenance are immutable after creation."
     & oneOf ?~ [Inline canonicalCreateObservationSchema, Inline legacyCreateObservationSchema]
 instance ToSchema CreateObservationRequest where declareNamedSchema _ = declareNamedSchema (Proxy @CreateObservation)
-instance ToSchema UpdateObservation where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ObservationProvenanceMatch where declareNamedSchema = genericDeclareNamedSchema opts
+instance ToSchema ObservationProvenance where
+  declareNamedSchema _ = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ObservationProvenance)
+    pure $ NamedSchema name (schema & required .~ ["sequence","event_kind","reviewed_git_sha","content_version","content_digest","recorded_at","actor_type","actor_id","actor_label"]
+      & properties . at "content_version" ?~ Inline (uuidSchema & nullable ?~ True)
+      & properties . at "content_digest" ?~ Inline (mempty & type_ ?~ OpenApiString & pattern ?~ "^[0-9a-f]{64}$" & nullable ?~ True)
+      & properties . at "actor_type" ?~ Inline (mempty & type_ ?~ OpenApiString & nullable ?~ True)
+      & properties . at "actor_id" ?~ Inline (mempty & type_ ?~ OpenApiString & nullable ?~ True)
+      & properties . at "actor_label" ?~ Inline (mempty & type_ ?~ OpenApiString & nullable ?~ True))
+instance ToSchema ObservationRevisionEvent where
+  declareNamedSchema _ = do
+    NamedSchema _ schema <- declareNamedSchema (Proxy @ObservationProvenance)
+    pure $ NamedSchema (Just "ObservationRevisionEvent") (schema & required %~ ("observation_id":) & properties . at "observation_id" ?~ Inline uuidSchema)
+instance ToSchema ReviewedObservationUpdate where
+  declareNamedSchema _ = do
+    NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @ReviewedObservationUpdate)
+    pure $ NamedSchema name (schema & required .~ ["content","reviewed_git_sha"] & additionalProperties ?~ AdditionalPropertiesAllowed False)
+instance ToSchema ReviewedObservationRequest where declareNamedSchema _ = declareNamedSchema (Proxy @ReviewedObservationUpdate)
 instance ToSchema SimilarObservationQuery where
   declareNamedSchema _ = do
     NamedSchema name schema <- genericDeclareNamedSchema opts (Proxy @SimilarObservationQuery)

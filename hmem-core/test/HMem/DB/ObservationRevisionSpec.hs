@@ -19,14 +19,62 @@ import HMem.DB.ChangeStream (ChangeScope(..), listOutboxAfter)
 import HMem.DB.Embedding
 import HMem.DB.Migration qualified as Migration
 import HMem.DB.Observation
-import HMem.DB.Pool (DBException(..), createPool, runSession)
+import HMem.DB.Pool (DBException(..), checkPgvector, createPool, runSession)
 import HMem.DB.RequestContext
+import HMem.DB.Search (searchAll)
 import HMem.DB.TestHarness
 import HMem.Types
 
 spec :: Spec
 spec = do
   around withTestEnv $ describe "Observation revision assertions" $ do
+    it "composes original/current/history filters without duplicating current rows or their facets and search hits" $ \env -> do
+      workspace <- createTestWorkspace env "revision-filter-parity"
+      original <- create env workspace.id "needle old"
+      ObservationUpdated second <- updateObservationReviewed env.pool workspace.id original.id original.contentVersion
+        (ReviewedObservationUpdate "needle middle" reviewSha)
+      ObservationUpdated repeated <- updateObservationReviewed env.pool workspace.id original.id second.contentVersion
+        (ReviewedObservationUpdate second.content reviewSha)
+      let currentSha = T.replicate 40 "c"
+          context = Just (ObservationProvenanceMatch (Just original.gitSha) (Just currentSha) (Just reviewSha))
+      ObservationUpdated current <- updateObservationReviewed env.pool workspace.id original.id repeated.contentVersion
+        (ReviewedObservationUpdate "needle current" currentSha)
+      let input = ObservationQuery workspace.id Nothing Nothing (Just original.gitSha) (Just "needle") (Just 1) Nothing (Just currentSha) (Just reviewSha)
+      rows <- listObservationsOverfetch env.pool input
+      map (.id) rows `shouldBe` [current.id]
+      map (.content) rows `shouldBe` [current.content]
+      map (.provenanceMatch) rows `shouldBe` [context]
+      listObservations env.pool input { currentGitSha = Just reviewSha } `shouldReturn` []
+      listObservations env.pool input { historyGitSha = Just (T.replicate 40 "d") } `shouldReturn` []
+      countObservations env.pool (ObservationCountQuery workspace.id Nothing Nothing (Just original.gitSha) (Just "needle") Nothing (Just currentSha) (Just reviewSha))
+        `shouldReturn` ObservationCounts workspace.id 1 1
+      facets <- listObservationSubjectFacets env.pool (ObservationSubjectFacetQuery workspace.id Nothing (Just original.gitSha) (Just "needle") Nothing Nothing (Just currentSha) (Just reviewSha))
+      map (.observationCount) facets `shouldBe` [1]
+      matches <- matchObservations env.pool (ObservationMatchQuery workspace.id ["src/Revision.hs", "src/Revision.hs"] Nothing (Just original.gitSha) (Just "needle") Nothing Nothing (Just currentSha) (Just reviewSha))
+      map (\(m :: ObservationMatch) -> m.observation.id) matches `shouldBe` [current.id]
+      map (\(m :: ObservationMatch) -> m.observation.provenanceMatch) matches `shouldBe` [context]
+      hits <- searchAll env.pool UnifiedSearchQuery
+        { workspaceId = Just workspace.id, query = Just "needle", entityTypes = Just [SearchObservation], searchLanguage = Nothing
+        , limit = Just 1, offset = Nothing, subjectKind = Nothing, subject = Nothing, gitSha = Just original.gitSha
+        , projectStatus = Nothing, taskStatus = Nothing, taskPriority = Nothing, projectId = Nothing
+        , currentGitSha = Just currentSha, historyGitSha = Just reviewSha }
+      map (.id) hits.observations `shouldBe` [current.id]
+      map (.contentVersion) hits.observations `shouldBe` [current.contentVersion]
+      map (.currentProvenance) hits.observations `shouldBe` [current.currentProvenance]
+      map (.provenanceMatch) hits.observations `shouldBe` [context]
+      validateObservationQuery input { currentGitSha = Just "BAD" } `shouldSatisfy` (not . null)
+      validateObservationQuery input { historyGitSha = Just "BAD" } `shouldSatisfy` (not . null)
+      available <- checkPgvector env.pool
+      putStrLn ("[revision-filter-parity] pgvector_present=" <> show available)
+      if not available then pure () else do
+        let vector = 1 : replicate (observationEmbeddingDimensions - 1) 0
+            similar = SimilarObservationQuery workspace.id Nothing Nothing (Just original.gitSha) vector Nothing Nothing Nothing Nothing (Just currentSha) (Just reviewSha)
+        setObservationEmbedding env.pool workspace.id current.id vector
+        neighbors <- similarObservations env.pool similar
+        map (\(m :: SimilarObservation) -> m.observation.id) neighbors `shouldBe` [current.id]
+        map (\(m :: SimilarObservation) -> m.observation.provenanceMatch) neighbors `shouldBe` [context]
+        similarObservations env.pool similar { currentGitSha = Just reviewSha } `shouldReturn` []
+
     it "binds exact UTF-8 and advances repeated SHA/text assertions with bounded ordered history" $ \env -> do
       workspace <- createTestWorkspace env "revision-events"
       original <- create env workspace.id "é\r\n"
@@ -78,12 +126,10 @@ spec = do
           Enc.noParams (Dec.rowList (Dec.column (Dec.nonNullable Dec.jsonb))) False
         recorded `shouldBe` replicate 2 (object ["actor_type" .= actorTypeToText actor.actorType, "actor_id" .= actor.actorId, "actor_label" .= actor.actorLabel])
 
-    it "rejects legacy writes before any session and rejects invalid/projection/event mutation without effects" $ \env -> do
+    it "rejects invalid/projection/event mutation without effects" $ \env -> do
       workspace <- createTestWorkspace env "revision-guards"
       row <- create env workspace.id "guarded"
       before <- allEffects env row.id
-      expectRejected $ updateObservation (error "legacy updater touched DB") workspace.id row.id (UpdateObservation "bypass")
-      expectRejected $ updateObservationConditional (error "legacy conditional updater touched DB") workspace.id row.id row.contentVersion (UpdateObservation "bypass")
       expectRejected $ updateObservationReviewed env.pool workspace.id row.id row.contentVersion (ReviewedObservationUpdate "invalid" "BAD")
       forM_ [ "UPDATE observations SET current_provenance = NULL"
             , "UPDATE observations SET latest_sequence = latest_sequence + 1"

@@ -41,6 +41,7 @@ import HMem.Server.Embedding.Http (makeValidatedGpuEmbeddingProviderWithLifecycl
 import HMem.Server.Embedding.HttpSpec (testHelperExecutable)
 import HMem.Server.Embedding.Provider
 import HMem.Server.Embedding.Worker
+import HMem.Server.TestHarness (writeReviewedObservation)
 import HMem.Types
 
 spec :: Spec
@@ -207,7 +208,7 @@ spec = around Harness.withTestEnv $ do
       let provider = EmbeddingProvider
             { availability = pure EmbeddingAvailable
             , embed = \_ -> do
-                _ <- updateObservation env.pool workspace.id observation.id (UpdateObservation "after worker race")
+                _ <- writeReviewedObservation env workspace.id observation.id ("after worker race")
                 pure (Right (EmbeddingBatch [unitX] managedTeiSpaceFingerprint))
             }
       runEmbeddingWorkerOnce EmbeddingWorker { pool = env.pool, provider = provider, leaseOwner = "race", batchSize = 1, clock = getCurrentTime, cancelled = pure False }
@@ -1104,7 +1105,7 @@ exerciseMixedAdmission env oversizedPosition = do
     ["placeholder-a", "placeholder-b", "placeholder-c"]
   let observations = sortOn (.id) placeholders
   mapM_ (\(observation, body) -> void $
-    updateObservation env.pool workspace.id observation.id (UpdateObservation body))
+    writeReviewedObservation env workspace.id observation.id (body))
     (zip observations bodies)
   actualClaimOrder <- runSession env.pool $ Session.statement workspace.id claimOrderContentsStatement
   elemIndex oversized actualClaimOrder `shouldBe` Just oversizedPosition

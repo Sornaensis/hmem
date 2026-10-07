@@ -22,6 +22,7 @@ import Hasql.Session qualified as Session
 import Test.Hspec
 
 import HMem.DB.Observation
+import HMem.DB.Embedding qualified as CoreEmbedding
 import HMem.DB.Pool qualified as DBPool
 import HMem.DB.TestHarness
 import HMem.Server.CtlEmbeddings
@@ -39,6 +40,8 @@ spec = do
             ]
           original = observationContentFingerprint canonicalSha subjects "content"
       original `shouldBe` observationContentFingerprint canonicalSha subjects "content"
+      original `shouldBe` CoreEmbedding.observationContentFingerprint canonicalSha subjects "content"
+      observationContentFingerprint canonicalSha subjects "é\r\n" `shouldBe` CoreEmbedding.observationContentFingerprint canonicalSha subjects "é\r\n"
       original `shouldSatisfy` isLowerHexDigest
       original `shouldNotBe` observationContentFingerprint canonicalSha (reverse subjects) "content"
       original `shouldNotBe` observationContentFingerprint canonicalSha subjects "changed"
@@ -168,9 +171,19 @@ spec = do
         repeatSummary.alreadySatisfied `shouldBe` 1
         map (.outcome) repeatResults `shouldBe` [EmbeddingImportAlreadySatisfied]
 
+        -- A SHA-only/same-input assertion clears the stored vector but keeps
+        -- the portable input fingerprint valid for a previously exported job.
+        Just reaudited <- ServerHarness.writeReviewedObservation env owner.id appliedObservation.id appliedObservation.content
+        reaudited.contentVersion `shouldNotBe` appliedObservation.contentVersion
+        reaudited.latestSequence `shouldBe` 2
+        (reauditSummary, reauditResults) <- importLines env [encodeImportRecord appliedRecord]
+        reauditSummary.applied `shouldBe` 1
+        map (.outcome) reauditResults `shouldBe` [EmbeddingImportApplied]
+        similarIds env owner.id unitX `shouldReturn` [appliedObservation.id]
+
         let staleRecord = recordFor staleObservation unitY
         setObservationEmbedding env.pool owner.id staleObservation.id unitX
-        _ <- updateObservation env.pool owner.id staleObservation.id (UpdateObservation "after edit")
+        _ <- ServerHarness.writeReviewedObservation env owner.id staleObservation.id ("after edit")
         (staleSummary, staleResults) <- importLines env [encodeImportRecord staleRecord]
         staleSummary.stale `shouldBe` 1
         map (.outcome) staleResults `shouldBe` [EmbeddingImportStale]
@@ -209,6 +222,7 @@ spec = do
         let pendingRecord = recordFor target unitX
         DBPool.withConn env.pool $ \connection -> do
           runConnectionSql connection "BEGIN"
+          runConnectionSql connection "SET LOCAL hmem.reviewed_git_sha = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'"
           runConnectionSql connection $
             "UPDATE public.observations SET content = 'after race', embedding = NULL WHERE id = '"
               <> BS8.pack (show target.id) <> "'"
@@ -313,7 +327,7 @@ newObservation workspace contentValue = CreateObservation
 similarIds :: TestEnv -> UUID -> [Double] -> IO [UUID]
 similarIds env workspace vector = fmap (map (.observation.id)) $
   similarObservations env.pool SimilarObservationQuery
-    { workspaceId = workspace
+    { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = workspace
     , subjectKind = Nothing
     , subject = Nothing
     , gitSha = Nothing

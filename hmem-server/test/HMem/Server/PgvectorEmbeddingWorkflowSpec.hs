@@ -61,7 +61,7 @@ workflow env = do
       -- The same configured PostgreSQL remains fully usable for non-vector
       -- Observation work while the optional artifacts are absent.
       fmap (fmap (.content))
-        (updateObservation env.pool workspace.id first.id (UpdateObservation "first content before enable"))
+        (ServerHarness.writeReviewedObservation env workspace.id first.id ("first content before enable"))
         `shouldReturn` Just "first content before enable"
       unavailable <- try @DBException $
         setObservationEmbedding env.pool workspace.id first.id unitX
@@ -165,7 +165,7 @@ workflow env = do
 
       similarIds env workspace.id unitX `shouldReturn` [first.id]
       fmap (fmap (.content))
-        (updateObservation env.pool workspace.id first.id (UpdateObservation "first content after embedding"))
+        (ServerHarness.writeReviewedObservation env workspace.id first.id ("first content after embedding"))
         `shouldReturn` Just "first content after embedding"
       similarIds env workspace.id unitX `shouldReturn` []
 
@@ -290,7 +290,7 @@ exportIds env operations workspaceId exportAll fileName = do
 similarIds :: TestEnv -> UUID -> [Double] -> IO [UUID]
 similarIds env workspaceId vector = fmap (map (.observation.id)) $
   similarObservations env.pool SimilarObservationQuery
-    { workspaceId = workspaceId
+    { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = workspaceId
     , subjectKind = Nothing
     , subject = Nothing
     , gitSha = Nothing

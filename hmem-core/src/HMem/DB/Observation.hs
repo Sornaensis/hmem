@@ -1,8 +1,6 @@
 module HMem.DB.Observation
   ( createObservation
   , getObservation
-  , updateObservation
-  , updateObservationConditional
   , updateObservationReviewed
   , listObservationHistory
   , listObservationHistoryOverfetch
@@ -108,16 +106,6 @@ getObservation pool workspace observationId = do
     (row:_) -> Just row
     [] -> Nothing
 
-updateObservation :: Pool Hasql.Connection -> UUID -> UUID -> UpdateObservation -> IO (Maybe Observation)
-updateObservation _ _ _ _ = throwIO $ DBCheckViolation "Observation updates require reviewed_git_sha and expected content_version"
-
--- | Compare the opaque base token in the same UPDATE that replaces content.
--- PostgreSQL rechecks the predicate after a competing row writer commits.
-updateObservationConditional :: Pool Hasql.Connection -> UUID -> UUID -> UUID -> UpdateObservation -> IO ObservationUpdateResult
-updateObservationConditional _ _ _ _ _ = throwIO $ DBCheckViolation "Observation updates require reviewed_git_sha and expected content_version"
-
--- Temporary legacy signatures above fail before any DB/session. The dependent
--- API cutover removes them; no unknown-SHA content-write bypass is retained.
 updateObservationReviewed :: Pool Hasql.Connection -> UUID -> UUID -> UUID -> ReviewedObservationUpdate -> IO ObservationUpdateResult
 updateObservationReviewed pool workspace observationId expectedVersion update = do
   validateOrThrow $ validateReviewedObservationUpdate update
@@ -171,12 +159,12 @@ updateObservationStatement sql = Statement.Statement
 
 listObservationHistory :: Pool Hasql.Connection -> UUID -> UUID -> Maybe Int -> Maybe Int -> IO [ObservationRevisionEvent]
 listObservationHistory pool workspace observationId pageLimit pageOffset = do
-  validateOrThrow $ validateObservationQuery (ObservationQuery workspace Nothing Nothing Nothing Nothing pageLimit pageOffset)
+  validateOrThrow $ validateObservationQuery (ObservationQuery workspace Nothing Nothing Nothing Nothing pageLimit pageOffset Nothing Nothing)
   observationHistoryUnchecked pool workspace observationId (fromMaybe 50 pageLimit) (fromMaybe 0 pageOffset)
 
 listObservationHistoryOverfetch :: Pool Hasql.Connection -> UUID -> UUID -> Maybe Int -> Maybe Int -> IO [ObservationRevisionEvent]
 listObservationHistoryOverfetch pool workspace observationId pageLimit pageOffset = do
-  validateOrThrow $ validateObservationQuery (ObservationQuery workspace Nothing Nothing Nothing Nothing pageLimit pageOffset)
+  validateOrThrow $ validateObservationQuery (ObservationQuery workspace Nothing Nothing Nothing Nothing pageLimit pageOffset Nothing Nothing)
   observationHistoryUnchecked pool workspace observationId (fromMaybe 50 pageLimit + 1) (fromMaybe 0 pageOffset)
 
 observationHistoryUnchecked :: Pool Hasql.Connection -> UUID -> UUID -> Int -> Int -> IO [ObservationRevisionEvent]
@@ -237,15 +225,16 @@ listObservationsUnchecked :: Pool Hasql.Connection -> ObservationQuery -> IO [Ob
 listObservationsUnchecked pool queryValue = do
   let limitValue = fromIntegral (fromMaybe 50 queryValue.limit) :: Int32
       offsetValue = fromIntegral (fromMaybe 0 queryValue.offset) :: Int32
-  runSession pool $ Session.statement
+  rows <- runSession pool $ Session.statement
     ( queryValue.workspaceId
     , subjectKindToText <$> queryValue.subjectKind
     , queryValue.subject
     , queryValue.gitSha
     , queryValue.query
     , limitValue
-    , offsetValue
+    , offsetValue, queryValue.currentGitSha, queryValue.historyGitSha
     ) listObservationsStatement
+  pure $ map (attachProvenanceMatch queryValue.gitSha queryValue.currentGitSha queryValue.historyGitSha) rows
 
 -- | Aggregate exact stored subjects over the full filtered Observation set.
 -- Pagination is applied only after grouping and deterministic ordering.
@@ -270,7 +259,7 @@ listObservationSubjectFacetsUnchecked pool queryValue = do
     , queryValue.gitSha
     , queryValue.query
     , limitValue
-    , offsetValue
+    , offsetValue, queryValue.currentGitSha, queryValue.historyGitSha
     ) listObservationSubjectFacetsStatement
 
 -- | Match concrete repository-relative paths against stored file and glob
@@ -286,10 +275,11 @@ matchObservationsUnchecked :: Pool Hasql.Connection -> ObservationMatchQuery -> 
 matchObservationsUnchecked pool queryValue = do
   let limitValue = fromIntegral (fromMaybe 50 queryValue.limit) :: Int32
       offsetValue = fromIntegral (fromMaybe 0 queryValue.offset) :: Int32
-  runSession pool $ Session.statement
+  rows <- runSession pool $ Session.statement
     ( queryValue.workspaceId, subjectsJson (map (ObservationSubject SubjectFile) (normalizePaths queryValue.paths))
-    , subjectKindToText <$> queryValue.subjectKind, queryValue.gitSha, queryValue.query, limitValue, offsetValue
+    , subjectKindToText <$> queryValue.subjectKind, queryValue.gitSha, queryValue.query, limitValue, offsetValue, queryValue.currentGitSha, queryValue.historyGitSha
     ) matchObservationsStatement
+  pure $ map (\row -> (row :: ObservationMatch) { observation = attachProvenanceMatch queryValue.gitSha queryValue.currentGitSha queryValue.historyGitSha row.observation }) rows
 
 matchObservationsOverfetch :: Pool Hasql.Connection -> ObservationMatchQuery -> IO [ObservationMatch]
 matchObservationsOverfetch pool queryValue = do
@@ -305,6 +295,17 @@ observationFilterSql =
   , "  AND ($5::text IS NULL OR o.search_vector @@ plainto_tsquery('simple', $5))"
   ]
 
+-- EXISTS retains one current row even when many historical assertions match.
+revisionFilterSql :: Int -> Int -> String
+revisionFilterSql current history =
+  "AND ($" <> show current <> "::text IS NULL OR o.current_provenance ->> 'reviewed_git_sha' = $" <> show current <> ") "
+  <> "AND ($" <> show history <> "::text IS NULL OR EXISTS (SELECT 1 FROM observation_revision_events e WHERE e.observation_id = o.id AND e.reviewed_git_sha = $" <> show history <> "))"
+
+attachProvenanceMatch :: Maybe Text -> Maybe Text -> Maybe Text -> Observation -> Observation
+attachProvenanceMatch original current history row = row
+  { provenanceMatch = if all (== Nothing) [original,current,history] then Nothing
+      else Just (ObservationProvenanceMatch original current history) }
+
 filePathPredicate :: String -> String
 filePathPredicate path = "s.subject_kind = 'file' AND s.subject = " <> path
 
@@ -318,40 +319,42 @@ countObservations pool value = do
   validateOrThrow $ validateObservationCountQuery value
   (total, matched) <- runSession pool $ Session.statement
     (value.workspaceId, subjectKindToText <$> value.subjectKind, value.subject, value.gitSha, value.query,
-     subjectsJson . map (ObservationSubject SubjectFile) . normalizePaths <$> value.paths) countObservationsStatement
+     subjectsJson . map (ObservationSubject SubjectFile) . normalizePaths <$> value.paths, value.currentGitSha, value.historyGitSha) countObservationsStatement
   validateOrThrow ["Observation count exceeds the supported exact integer range" | total > 9007199254740991 || matched > 9007199254740991]
   pure $ ObservationCounts value.workspaceId total matched
 
 countObservationsStatement :: Statement.Statement
-  (UUID, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Maybe Text) (Int64, Int64)
+  (UUID, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Maybe Text) (Int64, Int64)
 countObservationsStatement = Statement.Statement sql encoder decoder True
   where
     sql = BS8.pack $ unlines $
       [ "SELECT (SELECT COUNT(*) FROM observations WHERE workspace_id = $1), COUNT(*)"
       , "FROM observations o"
-      ] <> observationFilterSql <>
+      ] <> observationFilterSql <> [revisionFilterSql 7 8] <>
       [ "AND ($6::jsonb IS NULL OR EXISTS (SELECT 1 FROM observation_subjects s"
       , "  JOIN jsonb_array_elements($6::jsonb) rp ON (" <> filePathPredicate "(rp.value ->> 'subject')" <> " OR " <> globPathPredicate "(rp.value ->> 'subject')" <> ")"
       , "  WHERE s.observation_id = o.id AND ($2::text IS NULL OR s.subject_kind::text = $2)))"
       ]
     encoder =
-         contramap (\(a,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
-      <> contramap (\(_,b,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,c,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,d,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,_,e,_) -> e) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,_,_,f) -> f) (Enc.param (Enc.nullable Enc.text))
+         contramap (\(a,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,b,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,c,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,d,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,e,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,f,_,_) -> f) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,g,_) -> g) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,h) -> h) (Enc.param (Enc.nullable Enc.text))
     decoder = Dec.singleRow $ (,) <$> Dec.column (Dec.nonNullable Dec.int8) <*> Dec.column (Dec.nonNullable Dec.int8)
 
 listObservationsStatement :: Statement.Statement
-  (UUID, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Int32, Int32) [Observation]
+  (UUID, Maybe Text, Maybe Text, Maybe Text, Maybe Text, Int32, Int32, Maybe Text, Maybe Text) [Observation]
 listObservationsStatement = Statement.Statement sql encoder (Dec.rowList observationDecoder) True
   where
     sql = BS8.pack $ unlines $
       [ "SELECT o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version,"
       , "       jsonb_agg(jsonb_build_object('subject_kind', s.subject_kind::text, 'subject', s.subject) ORDER BY s.ordinal)::text, o.latest_sequence, o.current_provenance"
       , "FROM observations o JOIN observation_subjects s ON s.observation_id = o.id"
-      ] <> observationFilterSql <>
+      ] <> observationFilterSql <> [revisionFilterSql 8 9] <>
       [ "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.search_vector, o.latest_sequence, o.current_provenance"
       , "ORDER BY"
       , "  CASE WHEN $5::text IS NULL THEN 0 ELSE ts_rank(search_vector, plainto_tsquery('simple', $5)) END DESC,"
@@ -359,16 +362,18 @@ listObservationsStatement = Statement.Statement sql encoder (Dec.rowList observa
       , "LIMIT $6 OFFSET $7"
       ]
     encoder =
-         contramap (\(a,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
-      <> contramap (\(_,b,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,c,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,d,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,_,e,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,_,_,f,_) -> f) (Enc.param (Enc.nonNullable Enc.int4))
-      <> contramap (\(_,_,_,_,_,_,g) -> g) (Enc.param (Enc.nonNullable Enc.int4))
+         contramap (\(a,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,b,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,c,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,d,_,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,e,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,f,_,_,_) -> f) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,g,_,_) -> g) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,_,h,_) -> h) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,_,i) -> i) (Enc.param (Enc.nullable Enc.text))
 
 listObservationSubjectFacetsStatement :: Statement.Statement
-  (UUID, Maybe Text, Maybe Text, Maybe Text, Int32, Int32) [ObservationSubjectFacet]
+  (UUID, Maybe Text, Maybe Text, Maybe Text, Int32, Int32, Maybe Text, Maybe Text) [ObservationSubjectFacet]
 listObservationSubjectFacetsStatement = Statement.Statement sql encoder (Dec.rowList observationSubjectFacetDecoder) True
   where
     sql = BS8.pack $ unlines
@@ -378,20 +383,23 @@ listObservationSubjectFacetsStatement = Statement.Statement sql encoder (Dec.row
       , "  AND ($2::text IS NULL OR s.subject_kind::text = $2)"
       , "  AND ($3::text IS NULL OR o.git_sha = $3)"
       , "  AND ($4::text IS NULL OR o.search_vector @@ plainto_tsquery('simple', $4))"
+      , revisionFilterSql 7 8
       , "GROUP BY s.subject_kind, s.subject"
       , "ORDER BY COUNT(DISTINCT o.id) DESC, MAX(o.updated_at) DESC, s.subject_kind::text ASC, s.subject ASC"
       , "LIMIT $5 OFFSET $6"
       ]
     encoder =
-         contramap (\(a,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
-      <> contramap (\(_,b,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,c,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,d,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,_,e,_) -> e) (Enc.param (Enc.nonNullable Enc.int4))
-      <> contramap (\(_,_,_,_,_,f) -> f) (Enc.param (Enc.nonNullable Enc.int4))
+         contramap (\(a,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,b,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,c,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,d,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,e,_,_,_) -> e) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,f,_,_) -> f) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,g,_) -> g) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,h) -> h) (Enc.param (Enc.nullable Enc.text))
 
 matchObservationsStatement :: Statement.Statement
-  (UUID, Text, Maybe Text, Maybe Text, Maybe Text, Int32, Int32) [ObservationMatch]
+  (UUID, Text, Maybe Text, Maybe Text, Maybe Text, Int32, Int32, Maybe Text, Maybe Text) [ObservationMatch]
 matchObservationsStatement = Statement.Statement sql encoder (Dec.rowList matchObservationDecoder) True
   where
     sql = BS8.pack $ unlines
@@ -403,6 +411,7 @@ matchObservationsStatement = Statement.Statement sql encoder (Dec.rowList matchO
       , "  FROM observations o"
       , "  WHERE o.workspace_id = $1"
       , "    AND ($4::text IS NULL OR o.git_sha = $4)"
+      , revisionFilterSql 8 9
       , "    AND ($5::text IS NULL OR o.search_vector @@ plainto_tsquery('simple', $5))"
       , "), matching_subjects AS ("
       , "  SELECT s.observation_id, s.ordinal, s.subject_kind, s.subject, rp.path, rp.path_ordinal"
@@ -442,13 +451,15 @@ matchObservationsStatement = Statement.Statement sql encoder (Dec.rowList matchO
       , "LIMIT $6 OFFSET $7"
       ]
     encoder =
-         contramap (\(a,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
-      <> contramap (\(_,b,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text))
-      <> contramap (\(_,_,c,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,d,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,_,e,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,_,_,f,_) -> f) (Enc.param (Enc.nonNullable Enc.int4))
-      <> contramap (\(_,_,_,_,_,_,g) -> g) (Enc.param (Enc.nonNullable Enc.int4))
+         contramap (\(a,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,b,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,_,c,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,d,_,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,e,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,f,_,_,_) -> f) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,g,_,_) -> g) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,_,h,_) -> h) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,_,i) -> i) (Enc.param (Enc.nullable Enc.text))
 
 similarObservations :: Pool Hasql.Connection -> SimilarObservationQuery -> IO [SimilarObservation]
 similarObservations pool queryValue = do
@@ -457,7 +468,7 @@ similarObservations pool queryValue = do
   let limitValue = fromIntegral (fromMaybe 50 queryValue.limit) :: Int32
       offsetValue = fromIntegral (fromMaybe 0 queryValue.offset) :: Int32
       minSimilarityValue = fromMaybe 0 queryValue.minSimilarity
-  runSession pool $ Session.statement
+  rows <- runSession pool $ Session.statement
     ( vecText queryValue.embedding
     , queryValue.workspaceId
     , subjectKindToText <$> queryValue.subjectKind
@@ -466,8 +477,9 @@ similarObservations pool queryValue = do
     , minSimilarityValue
     , embeddingSpaceFingerprintText (fromMaybe legacyManualEmbeddingSpace queryValue.spaceFingerprint)
     , limitValue
-    , offsetValue
+    , offsetValue, queryValue.currentGitSha, queryValue.historyGitSha
     ) similarObservationsStatement
+  pure $ map (\row -> (row :: SimilarObservation) { observation = attachProvenanceMatch queryValue.gitSha queryValue.currentGitSha queryValue.historyGitSha row.observation }) rows
 
 setObservationEmbedding :: Pool Hasql.Connection -> UUID -> UUID -> [Double] -> IO ()
 setObservationEmbedding pool workspace observationId embeddingValue =
@@ -491,7 +503,7 @@ observationVectorCapabilityStatement = Statement.Statement
   True
 
 similarObservationsStatement :: Statement.Statement
-  (Text, UUID, Maybe Text, Maybe Text, Maybe Text, Double, Text, Int32, Int32) [SimilarObservation]
+  (Text, UUID, Maybe Text, Maybe Text, Maybe Text, Double, Text, Int32, Int32, Maybe Text, Maybe Text) [SimilarObservation]
 similarObservationsStatement = Statement.Statement sql encoder (Dec.rowList similarObservationDecoder) True
   where
     sql = BS8.pack $ unlines
@@ -505,20 +517,23 @@ similarObservationsStatement = Statement.Statement sql encoder (Dec.rowList simi
       , "  AND ($5::text IS NULL OR o.git_sha = $5)"
       , "  AND 1 - (o.embedding <=> $1::vector) >= $6"
       , "  AND o.embedding_space_fingerprint = $7"
+      , revisionFilterSql 10 11
       , "GROUP BY o.id, o.workspace_id, o.git_sha, o.content, o.created_at, o.updated_at, o.content_version, o.embedding, o.latest_sequence, o.current_provenance"
       , "ORDER BY o.embedding <=> $1::vector ASC, o.updated_at DESC, o.id DESC"
       , "LIMIT $8 OFFSET $9"
       ]
     encoder =
-         contramap (\(a,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.text))
-      <> contramap (\(_,b,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid))
-      <> contramap (\(_,_,c,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,d,_,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,_,e,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
-      <> contramap (\(_,_,_,_,_,f,_,_,_) -> f) (Enc.param (Enc.nonNullable Enc.float8))
-      <> contramap (\(_,_,_,_,_,_,g,_,_) -> g) (Enc.param (Enc.nonNullable Enc.text))
-      <> contramap (\(_,_,_,_,_,_,_,h,_) -> h) (Enc.param (Enc.nonNullable Enc.int4))
-      <> contramap (\(_,_,_,_,_,_,_,_,i) -> i) (Enc.param (Enc.nonNullable Enc.int4))
+         contramap (\(a,_,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,b,_,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.uuid))
+      <> contramap (\(_,_,c,_,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,d,_,_,_,_,_,_,_) -> d) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,e,_,_,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,f,_,_,_,_,_) -> f) (Enc.param (Enc.nonNullable Enc.float8))
+      <> contramap (\(_,_,_,_,_,_,g,_,_,_,_) -> g) (Enc.param (Enc.nonNullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,h,_,_,_) -> h) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,_,_,i,_,_) -> i) (Enc.param (Enc.nonNullable Enc.int4))
+      <> contramap (\(_,_,_,_,_,_,_,_,_,j,_) -> j) (Enc.param (Enc.nullable Enc.text))
+      <> contramap (\(_,_,_,_,_,_,_,_,_,_,k) -> k) (Enc.param (Enc.nullable Enc.text))
 
 observationDecoder :: Dec.Row Observation
 observationDecoder = do
@@ -540,7 +555,7 @@ observationDecoder = do
     { id = observationId, workspaceId = workspace, subjects = subjectsValue
     , gitSha = sha, content = observationContent
     , createdAt = created, updatedAt = updated, contentVersion = version
-    , latestSequence = historyHead, currentProvenance = provenanceValue
+    , latestSequence = historyHead, currentProvenance = provenanceValue, provenanceMatch = Nothing
     }
 
 similarObservationDecoder :: Dec.Row SimilarObservation

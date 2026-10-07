@@ -57,6 +57,8 @@ toolDefinitions =
       , "subject_kind" .= enumProp "Exact kind of repository subject tied to observations" ["file", "glob"]
       , "subject" .= prop "string" "Exact repository-relative subject tied to observations"
       , "git_sha" .= prop "string" "Exact Git SHA where an Observation insight was established; use it to select potentially stale insights for re-audit"
+      , "current_git_sha" .= prop "string" "Exact SHA bound to the current content assertion; legacy unknown rows do not match"
+      , "history_git_sha" .= prop "string" "Exact SHA of any recorded assertion, including unbound legacy creation claims; returns current content once"
       , "project_status" .= enumProp "Project status" ["active", "paused", "completed", "archived"]
       , "task_status" .= enumProp "Task status" ["todo", "in_progress", "blocked", "done", "cancelled"]
       , "project_id" .= prop "string" "Filter tasks by project UUID"
@@ -69,11 +71,14 @@ toolDefinitions =
       , "content" .= prop "string" "Durable, non-obvious repository insight about its subjects; not a progress update or routine fact"
       ] ["subjects", "git_sha", "content"])
   , tool "observation_get" "Get an observation by ID, including content and immutable provenance." (schema ["observation_id" .= prop "string" "Observation UUID"] ["observation_id"])
-  , tool "observation_update" "Replace only the content of a durable, non-obvious repository insight. Subjects and git_sha are immutable provenance; git_sha remains the state where the insight was established and a staleness-audit sentinel, not timeless proof." (schema ["observation_id" .= prop "string" "Observation UUID", "content" .= prop "string" "Replacement durable, non-obvious repository insight about the existing subjects; not a progress update or routine fact"] ["observation_id", "content"])
+  , tool "observation_update" "Assert current content at reviewed_git_sha with the expected_content_version returned by a read. Repeated SHA/text assertions are accepted and advance version/history. Subjects and creation git_sha remain immutable; conflicts preserve latest canonical content." (strictSchema ["observation_id" .= prop "string" "Observation UUID", "content" .= prop "string" "Reviewed current content", "reviewed_git_sha" .= prop "string" "Lowercase 40-character SHA of the reviewed repository state", "expected_content_version" .= prop "string" "Opaque content_version UUID returned by a canonical read"] ["observation_id", "content", "reviewed_git_sha", "expected_content_version"])
+  , tool "observation_history" "Get compact revision assertions in descending sequence order; historical claims never reconstruct previous content. Legacy creation claims have unknown content binding. Continue with next_offset when has_more is true." (schema ["observation_id" .= prop "string" "Observation UUID", "limit" .= prop "integer" "Maximum events (default 50, 1..200)", "offset" .= prop "integer" "Event offset (0..100000)"] ["observation_id"])
   , tool "observation_list" "List durable, non-obvious repository insights using exact subject and git_sha provenance filters and optional text search. git_sha is a sentinel for deciding when an insight needs re-audit, not timeless proof. When has_more is true, pass next_offset to retrieve the next page." (schema
       [ "subject_kind" .= enumProp "Exact kind of repository subject tied to observations" ["file", "glob"]
       , "subject" .= prop "string" "Exact repository-relative subject tied to observations"
       , "git_sha" .= prop "string" "Exact Git SHA where an Observation insight was established; use it to select potentially stale insights for re-audit"
+      , "current_git_sha" .= prop "string" "Exact SHA bound to the current content assertion; legacy unknown rows do not match"
+      , "history_git_sha" .= prop "string" "Exact SHA of any recorded assertion, including unbound legacy creation claims; returns current content once"
       , "query" .= prop "string" "Optional full-text query over durable repository insights"
       , "limit" .= prop "integer" "Maximum results (1-200)"
       , "offset" .= prop "integer" "Result offset"
@@ -82,6 +87,8 @@ toolDefinitions =
       [ "paths" .= object ["type" .= ("array" :: Text), "description" .= ("One to 256 concrete repository-relative files to match against stored Observation subjects; globs are rejected" :: Text), "minItems" .= (1 :: Int), "maxItems" .= (256 :: Int), "items" .= prop "string" "Concrete repository-relative file to match against Observation subjects"]
       , "subject_kind" .= enumProp "Filter matching repository subjects by kind" ["file", "glob"]
       , "git_sha" .= prop "string" "Exact Git SHA where an Observation insight was established; use it to select potentially stale insights for re-audit"
+      , "current_git_sha" .= prop "string" "Exact SHA bound to the current content assertion; legacy unknown rows do not match"
+      , "history_git_sha" .= prop "string" "Exact SHA of any recorded assertion, including unbound legacy creation claims; returns current content once"
       , "query" .= prop "string" "Optional full-text query over durable repository insights"
       , "limit" .= prop "integer" "Maximum results (1-200)"
       , "offset" .= prop "integer" "Result offset"
@@ -96,6 +103,8 @@ toolDefinitions =
       [ "subject_kind" .= enumProp "Exact kind of repository subject tied to observations" ["file", "glob"]
       , "subject" .= prop "string" "Exact repository-relative subject tied to observations"
       , "git_sha" .= prop "string" "Exact Git SHA where an Observation insight was established; use it to select potentially stale insights for re-audit"
+      , "current_git_sha" .= prop "string" "Exact SHA bound to the current content assertion; legacy unknown rows do not match"
+      , "history_git_sha" .= prop "string" "Exact SHA of any recorded assertion, including unbound legacy creation claims; returns current content once"
        , "embedding" .= object ["type" .= ("array" :: Text), "description" .= ("Exactly 1536 finite numeric dimensions" :: Text), "minItems" .= (observationEmbeddingDimensions :: Int), "maxItems" .= (observationEmbeddingDimensions :: Int), "items" .= object ["type" .= ("number" :: Text)]]
        , "space_fingerprint" .= spaceFingerprintProp
       , "min_similarity" .= prop "number" "Minimum similarity from 0 through 1"
@@ -165,7 +174,8 @@ toolDefinitions =
 data ToolCall
   = ObservationCreate CreateObservation
   | ObservationGet UUID
-  | ObservationUpdate UUID UpdateObservation
+  | ObservationUpdate UUID UUID ReviewedObservationUpdate
+  | ObservationHistory UUID (Maybe Int) (Maybe Int)
   | ObservationList ObservationQuery
   | ObservationMatchCall ObservationMatchQuery
   | ObservationDelete UUID
@@ -198,7 +208,8 @@ parseToolCall :: Text -> Value -> Either String ToolCall
 parseToolCall name args = case name of
   "observation_create" -> ObservationCreate <$> parseCreateObservation args
   "observation_get" -> ObservationGet <$> required "observation_id"
-  "observation_update" -> ObservationUpdate <$> required "observation_id" <*> parseUpdateObservation args
+  "observation_update" -> ObservationUpdate <$> required "observation_id" <*> required "expected_content_version" <*> parseReviewedObservationUpdate args
+  "observation_history" -> ObservationHistory <$> required "observation_id" <*> optional "limit" <*> optional "offset"
   "observation_list" -> ObservationList <$> parse args
   "observation_match" -> ObservationMatchCall <$> parse args
   "observation_delete" -> ObservationDelete <$> required "observation_id"
@@ -236,12 +247,11 @@ parseToolCall name args = case name of
         then Just <$> objectValue .: "space_fingerprint"
         else pure Nothing) value
 
-parseUpdateObservation :: Value -> Either String UpdateObservation
-parseUpdateObservation = parseEither $ withObject "observation_update" $ \o -> do
-  contentValue <- o .: "content"
-  let unexpected = filter (`notElem` ["observation_id", "content", "workspace_id"]) (Key.toText <$> KM.keys o)
-  if null unexpected then pure (UpdateObservation contentValue)
-  else fail ("observation_update accepts only observation_id and content; unexpected fields: " <> show unexpected)
+parseReviewedObservationUpdate :: Value -> Either String ReviewedObservationUpdate
+parseReviewedObservationUpdate = parseEither $ withObject "observation_update" $ \o -> do
+  let unexpected = filter (`notElem` ["observation_id", "content", "reviewed_git_sha", "expected_content_version", "workspace_id"]) (Key.toText <$> KM.keys o)
+  if null unexpected then ReviewedObservationUpdate <$> o .: "content" <*> o .: "reviewed_git_sha"
+  else fail ("observation_update received server-owned or unexpected fields: " <> show unexpected)
 
 parseWorkspaceUpdate :: Value -> Either String UpdateWorkspace
 parseWorkspaceUpdate = parseEither $ withObject "workspace_update" $ \o -> do
@@ -276,7 +286,8 @@ parseCreateObservation = parseEither $ withObject "observation_create" $ \o -> d
 validateToolCall :: ToolCall -> Either String ToolCall
 validateToolCall call = case call of
   ObservationCreate input -> checked (validateCreateObservationInput input) call
-  ObservationUpdate _ input -> checked (validateUpdateObservationInput input) call
+  ObservationUpdate _ _ input -> checked (validateReviewedObservationUpdate input) call
+  ObservationHistory _ limit offset -> checked (validateObservationQuery (ObservationQuery UUID.nil Nothing Nothing Nothing Nothing limit offset Nothing Nothing)) call
   ObservationList input -> checked (validateObservationQuery input) call
   ObservationMatchCall input -> checked (validateObservationMatchQuery input) call
   ObservationSetEmbedding _ (ObservationEmbedding values _) -> checked (validateEmbedding values) call
@@ -318,12 +329,13 @@ execute :: Manager -> String -> Maybe Text -> ToolCall -> IO Value
 execute manager base apiKey = \case
   ObservationCreate input -> request manager base apiKey "POST" "/api/v1/observations" (Just (encode input)) (mutationAck "created" "observation" . compactObservationSummary)
   ObservationGet oid -> request manager base apiKey "GET" ("/api/v1/observations/" <> uuidPath oid) Nothing compactObservationDetail
-  ObservationUpdate oid input -> request manager base apiKey "PUT" ("/api/v1/observations/" <> uuidPath oid) (Just (encode input)) (mutationAck "updated" "observation" . compactObservationSummary)
-  ObservationList input@(ObservationQuery _ _ _ _ _ _ offset) -> request manager base apiKey "GET" (observationListPath input) Nothing (compactObservationList (fromMaybe 0 offset))
-  ObservationMatchCall input@(ObservationMatchQuery _ _ _ _ _ _ offset) -> request manager base apiKey "POST" "/api/v1/observations/match" (Just (encode input)) (compactObservationMatches (fromMaybe 0 offset))
+  ObservationUpdate oid expected input -> requestWithHeaders manager base apiKey "PUT" ("/api/v1/observations/" <> uuidPath oid) (Just (encode input)) [("If-Match", TE.encodeUtf8 ("\"" <> UUID.toText expected <> "\""))] (mutationAck "updated" "observation" . compactObservationSummary)
+  ObservationHistory oid limit offset -> request manager base apiKey "GET" ("/api/v1/observations/" <> uuidPath oid <> "/history" <> query [("limit", show <$> limit), ("offset", show <$> offset)]) Nothing (compactObservationHistory (fromMaybe 0 offset))
+  ObservationList input -> request manager base apiKey "GET" (observationListPath input) Nothing (compactObservationList (fromMaybe 0 input.offset))
+  ObservationMatchCall input -> request manager base apiKey "POST" "/api/v1/observations/match" (Just (encode input)) (compactObservationMatches (fromMaybe 0 input.offset))
   ObservationDelete oid -> noContentRequest manager base apiKey "DELETE" ("/api/v1/observations/" <> uuidPath oid) Nothing (statusAck "deleted" "observation" oid)
   ObservationSetEmbedding oid embeddingValue -> noContentRequest manager base apiKey "PUT" ("/api/v1/observations/" <> uuidPath oid <> "/embedding") (Just (encode embeddingValue)) (statusAck "embedding_set" "observation" oid)
-  ObservationSimilar input@(SimilarObservationQuery _ _ _ _ _ _ _ limit offset) -> request manager base apiKey "POST" "/api/v1/observations/similar" (Just (encode input)) (compactSimilarObservations (fromMaybe 50 limit) (fromMaybe 0 offset))
+  ObservationSimilar input -> request manager base apiKey "POST" "/api/v1/observations/similar" (Just (encode input)) (compactSimilarObservations (fromMaybe 50 input.limit) (fromMaybe 0 input.offset))
   WorkspaceList limit -> request manager base apiKey "GET" ("/api/v1/workspaces" <> query [("limit", show <$> limit)]) Nothing compactWorkspaceList
   WorkspaceRegister input -> request manager base apiKey "POST" "/api/v1/workspaces" (Just (encode input)) (mutationAck "created" "workspace" . compactWorkspaceSummary)
   WorkspaceUpdate workspaceId input -> request manager base apiKey "PUT" ("/api/v1/workspaces/" <> uuidPath workspaceId) (Just (encode input)) (mutationAck "updated" "workspace" . compactWorkspaceSummary)
@@ -398,6 +410,11 @@ request manager base apiKey method path body shape = do
   result <- rawRequest manager base apiKey method path body
   pure $ either id (mcpJSON . shape) result
 
+requestWithHeaders :: Manager -> String -> Maybe Text -> String -> String -> Maybe BL.ByteString -> [(HeaderName, ByteString)] -> (Value -> Value) -> IO Value
+requestWithHeaders manager base apiKey method path body headers shape = do
+  result <- rawRequestWithHeaders manager base apiKey method path body headers
+  pure $ either id (mcpJSON . shape) result
+
 noContentRequest :: Manager -> String -> Maybe Text -> String -> String -> Maybe BL.ByteString -> Value -> IO Value
 noContentRequest manager base apiKey method path body acknowledgement = do
   outcome <- try $ do
@@ -417,13 +434,16 @@ noContentRequest manager base apiKey method path body acknowledgement = do
       pure (mcpError "Could not connect to hmem-server")
 
 rawRequest :: Manager -> String -> Maybe Text -> String -> String -> Maybe BL.ByteString -> IO (Either Value Value)
-rawRequest manager base apiKey method path body = do
+rawRequest manager base apiKey method path body = rawRequestWithHeaders manager base apiKey method path body []
+
+rawRequestWithHeaders :: Manager -> String -> Maybe Text -> String -> String -> Maybe BL.ByteString -> [(HeaderName, ByteString)] -> IO (Either Value Value)
+rawRequestWithHeaders manager base apiKey method path body extraHeaders = do
   outcome <- try $ do
     initial <- parseRequest (base <> path)
     provenance <- mcpProvenanceHeaders
     requestId <- UUIDv4.nextRandom
     let auth = maybe [] (\token -> [("Authorization", TE.encodeUtf8 ("Bearer " <> token))]) apiKey
-        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : ("X-Request-Id", TE.encodeUtf8 (UUID.toText requestId)) : provenance <> auth, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
+        requestValue = initial { method = fromString method, requestHeaders = ("Content-Type", "application/json") : ("X-Request-Id", TE.encodeUtf8 (UUID.toText requestId)) : provenance <> auth <> extraHeaders, requestBody = maybe (RequestBodyBS mempty) RequestBodyLBS body }
     response <- httpLbs requestValue manager
     if statusCode (responseStatus response) >= 200 && statusCode (responseStatus response) < 300
       then case eitherDecode (responseBody response) of
@@ -452,7 +472,7 @@ mcpProvenanceHeadersFor configured =
       | otherwise = Just value
 
 compactObservationSummary :: Value -> Value
-compactObservationSummary value = object (catMaybes [copy "id", copy "subjects", copy "subject_kind", copy "subject", copy "git_sha", preview])
+compactObservationSummary value = object (catMaybes [copy "id", copy "subjects", copy "subject_kind", copy "subject", copy "git_sha", copy "content_version", copy "latest_sequence", copy "current_provenance", copy "provenance_match", preview])
   where
     copy key = (Key.fromText key .=) <$> field key value
     preview = case field "content_preview" value of
@@ -462,12 +482,20 @@ compactObservationSummary value = object (catMaybes [copy "id", copy "subjects",
         _ -> Nothing
 
 compactObservationDetail :: Value -> Value
-compactObservationDetail value = object (catMaybes [copy "id", copy "subjects", copy "subject_kind", copy "subject", copy "git_sha", copy "content"])
+compactObservationDetail value = object (catMaybes [copy "id", copy "subjects", copy "subject_kind", copy "subject", copy "git_sha", copy "content_version", copy "latest_sequence", copy "current_provenance", copy "provenance_match", copy "content"])
   where copy key = (Key.fromText key .=) <$> field key value
 
 compactObservationList :: Int -> Value -> Value
 compactObservationList offsetValue value = object
   ( [ "items" .= mapField "items" compactObservationSummary value
+    , "has_more" .= hasMoreValue
+    ] <> ["next_offset" .= (offsetValue + length (mapField "items" id value)) | hasMoreValue] )
+  where
+    hasMoreValue = field "has_more" value == Just (Bool True)
+
+compactObservationHistory :: Int -> Value -> Value
+compactObservationHistory offsetValue value = object
+  ( [ "items" .= fromMaybe (toJSON ([] :: [Value])) (field "items" value)
     , "has_more" .= hasMoreValue
     ] <> ["next_offset" .= (offsetValue + length (mapField "items" id value)) | hasMoreValue] )
   where
@@ -632,12 +660,14 @@ query parameters = case [(key, value) | (key, Just value) <- parameters] of
   values -> "?" <> concat (zipWith (\index (key, value) -> (if index == 0 then "" else "&") <> key <> "=" <> value) [0 :: Int ..] values)
 
 observationListPath :: ObservationQuery -> String
-observationListPath (ObservationQuery workspace kind subjectValue sha queryValue limit offset) =
+observationListPath (ObservationQuery workspace kind subjectValue sha queryValue limit offset currentSha historySha) =
   "/api/v1/observations" <> query
     [ ("workspace_id", Just (show workspace))
     , ("subject_kind", T.unpack . subjectKindToText <$> kind)
     , ("subject", queryText <$> subjectValue)
     , ("git_sha", queryText <$> sha)
+    , ("current_git_sha", queryText <$> currentSha)
+    , ("history_git_sha", queryText <$> historySha)
     , ("query", queryText <$> queryValue)
     , ("limit", show <$> limit)
     , ("offset", show <$> offset)

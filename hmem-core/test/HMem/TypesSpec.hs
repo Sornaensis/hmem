@@ -96,12 +96,12 @@ spec = do
   where
     workspace = read "00000000-0000-0000-0000-000000000001" :: UUID
     observationSearch = UnifiedSearchQuery
-      { workspaceId = Nothing, query = Nothing, entityTypes = Nothing, searchLanguage = Nothing
+      { currentGitSha = Nothing, historyGitSha = Nothing,  workspaceId = Nothing, query = Nothing, entityTypes = Nothing, searchLanguage = Nothing
       , limit = Nothing, offset = Nothing, subjectKind = Nothing, subject = Nothing, gitSha = Nothing
       , projectStatus = Nothing, taskStatus = Nothing, taskPriority = Nothing, projectId = Nothing }
     savedView = CreateSavedView workspace "view" Nothing "activity" Null
     observedAt = read "2026-01-02 03:04:05 UTC" :: UTCTime
-    observationValue = Observation workspace workspace create.subjects canonicalSha "body" observedAt observedAt workspace 1 Nothing
+    observationValue = Observation workspace workspace create.subjects canonicalSha "body" observedAt observedAt workspace 1 Nothing Nothing
     matchValue = ObservationMatch
       { observation = observationValue
       , pathMatches =
@@ -118,20 +118,20 @@ spec = do
       ]
     searchHit = ObservationSearchHit workspace workspace
       [ObservationSubject SubjectFile "src/Main.hs", ObservationSubject SubjectGlob "src/**/*.hs"]
-      "deadbeef" "preview" observedAt
+      "deadbeef" "preview" observedAt workspace 1 Nothing Nothing
     legacySearchHitValue = ObservationSearchHit workspace workspace
-      [ObservationSubject SubjectFile "src/Main.hs"] "deadbeef" "preview" observedAt
+      [ObservationSubject SubjectFile "src/Main.hs"] "deadbeef" "preview" observedAt workspace 1 Nothing Nothing
     legacySearchHit = object
       [ "id" .= workspace, "workspace_id" .= workspace, "subject_kind" .= SubjectFile
       , "subject" .= ("src/Main.hs" :: String), "git_sha" .= ("deadbeef" :: String)
-      , "content_preview" .= ("preview" :: String), "updated_at" .= observedAt ]
+      , "content_preview" .= ("preview" :: String), "updated_at" .= observedAt, "content_version" .= workspace, "latest_sequence" .= (1 :: Int), "current_provenance" .= Null ]
     canonicalSearchHit = object
       [ "id" .= workspace, "workspace_id" .= workspace, "subjects" .= searchHit.subjects
-      , "git_sha" .= ("deadbeef" :: String), "content_preview" .= ("preview" :: String), "updated_at" .= observedAt ]
+      , "git_sha" .= ("deadbeef" :: String), "content_preview" .= ("preview" :: String), "updated_at" .= observedAt, "content_version" .= workspace, "latest_sequence" .= (1 :: Int), "current_provenance" .= Null ]
     dualSearchHit = object
       [ "id" .= workspace, "workspace_id" .= workspace, "subjects" .= searchHit.subjects
       , "subject_kind" .= SubjectGlob, "subject" .= ("ignored/**/*.hs" :: String)
-      , "git_sha" .= ("deadbeef" :: String), "content_preview" .= ("preview" :: String), "updated_at" .= observedAt ]
+      , "git_sha" .= ("deadbeef" :: String), "content_preview" .= ("preview" :: String), "updated_at" .= observedAt, "content_version" .= workspace, "latest_sequence" .= (1 :: Int), "current_provenance" .= Null ]
     create = CreateObservation workspace [ObservationSubject SubjectFile "src/Main.hs", ObservationSubject SubjectGlob "src/**/*.hs"] canonicalSha "body"
     legacyCreateValue = CreateObservation workspace [ObservationSubject SubjectFile "src/Legacy.hs"] canonicalSha "body"
     canonicalCreate = object

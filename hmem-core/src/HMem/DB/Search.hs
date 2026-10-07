@@ -38,6 +38,7 @@ searchAll pool queryValue = do
         , subjectKind = queryValue.subjectKind
         , subject = queryValue.subject
         , gitSha = queryValue.gitSha
+        , currentGitSha = queryValue.currentGitSha, historyGitSha = queryValue.historyGitSha
         , query = queryValue.query
         , limit = Just limitValue
         , offset = Just offsetValue
@@ -109,4 +110,6 @@ compactObservation observation = ObservationSearchHit
   { id = observation.id, workspaceId = observation.workspaceId
   , subjects = observation.subjects
   , gitSha = observation.gitSha, contentPreview = Text.take 280 observation.content
-  , updatedAt = observation.updatedAt }
+  , updatedAt = observation.updatedAt, contentVersion = observation.contentVersion
+  , latestSequence = observation.latestSequence, currentProvenance = observation.currentProvenance
+  , provenanceMatch = observation.provenanceMatch }

@@ -21,6 +21,12 @@ All time starts at the earliest lifecycle event and the client follows bounded
 bucket pages without changing the selected bucket size. Displayed timestamps use
 the database timestamp's represented date and time, formatted `YYYY-MM-DD HH:MM`.
 
+Observation cards show the bound current reviewed revision when available, or
+the immutable creation revision for legacy observations. The expanded revision
+value has a compact History disclosure with copyable SHAs and recorded dates.
+Open history follows sequential pages of 25 records in recorded order; collapsing
+stops continuation, and a failed page offers an explicit Retry.
+
 ```sh
 npm run build
 npm run preview

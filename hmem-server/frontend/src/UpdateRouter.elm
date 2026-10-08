@@ -39,7 +39,7 @@ update msg model =
             Ok (Feature.Cards.updateViewport payload model)
 
         _ ->
-            route msg model |> Result.map (Feature.Cards.refreshViewportFor msg model >> Feature.Observation.refreshViewport model)
+            route msg model |> Result.map (Feature.Cards.refreshViewportFor msg model >> Feature.Observation.refreshHistory >> Feature.Observation.refreshViewport model)
 
 
 route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
@@ -440,6 +440,9 @@ route msg model =
             Ok (Feature.Observation.update msg model)
 
         LoadObservationHistory ->
+            Ok (Feature.Observation.update msg model)
+
+        ToggleObservationHistory ->
             Ok (Feature.Observation.update msg model)
 
         GotObservationHistory _ _ ->

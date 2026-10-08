@@ -4404,9 +4404,12 @@ textarea.observation-edit-content {
 .observation-subject-group-toggle { flex: 0 1 auto; }
 .membership-user, .audit-detail-value, .search-result-main { min-width: 0; overflow-wrap: anywhere; }
 
-.observation-history { margin: 0.75rem 0; }
+.observation-history { margin: 0.25rem 0 0; }
+.observation-history-toggle { background: none; border: none; padding: 0; color: var(--text-muted); font: inherit; font-size: 0.75rem; cursor: pointer; }
+.observation-history-toggle:hover { color: var(--text); }
 .observation-history ol { list-style: none; margin: 0.5rem 0; padding: 0; }
-.observation-history-entry { padding: 0.5rem 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; font-size: 0.85rem; }
+.observation-history-entry { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; padding: 0.125rem 0; overflow-wrap: anywhere; font-size: 0.75rem; }
+.observation-history-time { color: var(--text-muted); white-space: nowrap; }
 .observation-current-provenance .observation-detail-meta-value { overflow-wrap: anywhere; }
 .observation-provenance-match { overflow-wrap: anywhere; }
 .observation-edit-form #observation-reviewed-sha { width: 100%; box-sizing: border-box; }

@@ -1894,7 +1894,7 @@ suite =
                     , \_ -> Feature.Observation.viewObservationsState repository { empty | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Loading observations..." ]
                     , \_ -> Feature.Observation.viewObservationsState repository empty |> Query.fromHtml |> Query.has [ Selector.text "No observations found" ]
                     , \_ -> Feature.Observation.viewObservationsState repository { empty | error = Just "Failed to load observations." } |> Query.fromHtml |> Query.has [ Selector.text "Unable to load observations", Selector.text "Failed to load observations." ]
-                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Original creation revision (Git SHA)", Selector.text fullSha, Selector.text "Subject kind", Selector.text "File", Selector.text "Subject", Selector.text "src/Main.elm" ]
+                    , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Creation revision", Selector.text fullSha, Selector.text "Subject kind", Selector.text "File", Selector.text "Subject", Selector.text "src/Main.elm" ]
                     , \_ -> Feature.Observation.viewObservationsState repository loaded |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Load more" ] ] |> Query.hasNot [ Selector.disabled True ]
                     , \_ -> Feature.Observation.viewObservationsState repository paginating |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Loading..." ] ] |> Query.has [ Selector.disabled True ]
                     , \_ -> Feature.Observation.viewObservationsState repository detailLoading |> Query.fromHtml |> Query.has [ Selector.text "Loading detail..." ]
@@ -2012,7 +2012,7 @@ suite =
                     , \_ -> view |> Query.has [ Selector.class "tree-toggle", Selector.text "▼" ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-content" ] |> Query.has [ Selector.text content ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "src/**/*.elm", Selector.text "src/Second.elm", Selector.text fullSha ]
-                    , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "Original creation revision (Git SHA)", Selector.text "Content updated", Selector.class "copyable-value" ]
+                    , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "Creation revision", Selector.text "Content updated", Selector.class "copyable-value" ]
                     ] ()
         , test "Observation timestamps display the database date and minute without timezone conversion" <|
             \_ ->
@@ -4603,6 +4603,76 @@ revisionTests =
                     , \_ -> Feature.Observation.historyResponseMatches request headChanged |> Expect.equal False
                     , \_ -> Feature.Observation.historyResponseMatches request denied |> Expect.equal False
                     , \_ -> Feature.Observation.update (GotObservationHistory request (Ok page)) headChanged |> Tuple.first |> .observations |> Expect.equal headChanged.observations ] ()
+    , test "collapsed history caches a received page without continuation and reopening resumes it" <| \_ ->
+        let
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            selected = { original | latestSequence = 53 }
+            loading = Feature.Observation.update ToggleObservationHistory (editableModel (selectedObservationState selected)) |> Tuple.first
+            collapsed = Feature.Observation.update ToggleObservationHistory loading |> Tuple.first
+            page = { items = List.range 29 53 |> List.reverse |> List.map (\sequence -> { observationId = selected.id, provenance = revisionProvenance sequence fullSha }), hasMore = True }
+        in
+        case loading.observations.history |> Maybe.andThen .active of
+            Nothing -> Expect.fail "Expected first history page"
+            Just request ->
+                let
+                    received = Feature.Observation.update (GotObservationHistory request (Ok page)) collapsed |> Tuple.first
+                    resumed = Feature.Observation.update ToggleObservationHistory received |> Tuple.first
+                    workspaceChanged = { loading | sessionContext = Just { editorSession | workspace = Just { workspaceId = "other-workspace", role = Just "admin", canRead = True, canEdit = True, canAdmin = True } } }
+                in Expect.all
+                    [ \_ -> received.observations.history |> Maybe.map (\saved -> ( List.length saved.items, saved.active )) |> Expect.equal (Just ( 25, Nothing ))
+                    , \_ -> resumed.observations.history |> Maybe.andThen .active |> Maybe.map .offset |> Expect.equal (Just 25)
+                    , \_ -> Feature.Observation.historyResponseMatches request workspaceChanged |> Expect.equal False
+                    , \_ -> Feature.Observation.update (GotObservationHistory request (Ok page)) workspaceChanged |> Tuple.first |> .observations |> Expect.equal workspaceChanged.observations
+                    ] ()
+    , test "history failures stop until explicit retry and reject a malformed sequence" <| \_ ->
+        let
+            selected = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            loading = Feature.Observation.update ToggleObservationHistory (editableModel (selectedObservationState selected)) |> Tuple.first
+        in
+        case loading.observations.history |> Maybe.andThen .active of
+            Nothing -> Expect.fail "Expected history request"
+            Just request ->
+                let
+                    failed = Feature.Observation.update (GotObservationHistory request (Err Http.NetworkError)) loading |> Tuple.first
+                    quiet = Feature.Observation.refreshHistory ( failed, Cmd.none ) |> Tuple.first
+                    retry = Feature.Observation.update LoadObservationHistory quiet |> Tuple.first
+                    malformed = Feature.Observation.update (GotObservationHistory request (Ok { items = [ { observationId = selected.id, provenance = revisionProvenance 2 fullSha } ], hasMore = False })) loading |> Tuple.first
+                in Expect.all
+                    [ \_ -> quiet.observations.history |> Maybe.andThen .active |> Expect.equal Nothing
+                    , \_ -> retry.observations.history |> Maybe.andThen .active |> Maybe.map (\active -> ( active.offset, active.token /= request.token )) |> Expect.equal (Just ( 0, True ))
+                    , \_ -> malformed.observations.history |> Maybe.map (\saved -> ( List.isEmpty saved.items, saved.error /= Nothing, saved.active )) |> Expect.equal (Just ( True, True, Nothing ))
+                    ] ()
+    , test "history honors the endpoint offset boundary and reports incomplete history without retry" <| \_ ->
+        let
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            selected = { original | latestSequence = 100026 }
+            base = editableModel (selectedObservationState selected)
+            state = base.observations
+            prepared = { base | observations = { state | historyExpanded = True, history = Just { workspaceId = selected.workspaceId, observationId = selected.id, sessionEpoch = base.sessionRequestEpoch, head = selected.latestSequence, items = [], hasMore = True, nextOffset = 100000, loading = False, error = Nothing, active = Nothing } } }
+            loading = Feature.Observation.refreshHistory ( prepared, Cmd.none ) |> Tuple.first
+        in
+        case loading.observations.history |> Maybe.andThen .active of
+            Nothing -> Expect.fail "Endpoint accepts offset 100000"
+            Just request ->
+                let
+                    page = { items = List.range 2 26 |> List.reverse |> List.map (\sequence -> { observationId = selected.id, provenance = revisionProvenance sequence fullSha }), hasMore = True }
+                    completed = Feature.Observation.update (GotObservationHistory request (Ok page)) loading |> Tuple.first
+                in Expect.all
+                    [ \_ -> request.offset |> Expect.equal 100000
+                    , \_ -> completed.observations.history |> Maybe.map (\saved -> ( saved.nextOffset, saved.hasMore, ( saved.error, saved.active ) )) |> Expect.equal (Just ( 100025, True, ( Just "History is incomplete at the bounded page limit.", Nothing ) ))
+                    , \_ -> Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) completed.observations |> Query.fromHtml |> Query.hasNot [ Selector.id "observation-history-load" ]
+                    ] ()
+    , test "legacy current claim objects remain creation revisions while bound assertions take precedence" <| \_ ->
+        let
+            original = fixtureObservation "curated" "2026-01-01T00:00:00Z"
+            current = revisionProvenance 1 (String.repeat 40 "b")
+            legacy = { current | eventKind = "legacy_creation", contentVersion = Nothing, contentDigest = Nothing }
+            view claim = Feature.Observation.viewObservationsState (observationWorkspace Api.Repository) (selectedObservationState { original | currentProvenance = Just claim }) |> Query.fromHtml
+        in Expect.all
+            [ \_ -> view legacy |> Query.find [ Selector.class "observation-current-provenance" ] |> Query.has [ Selector.text "Creation revision", Selector.text fullSha ]
+            , \_ -> view current |> Query.find [ Selector.class "observation-current-provenance" ] |> Query.has [ Selector.text "Current reviewed revision", Selector.text (String.repeat 40 "b") ]
+            , \_ -> view legacy |> Query.findAll [ Selector.class "observation-detail-sha" ] |> Query.count (Expect.equal 1)
+            ] ()
     , test "three SHA predicates round-trip independently through links and API requests" <| \_ ->
         let
             initial = Feature.Observation.init

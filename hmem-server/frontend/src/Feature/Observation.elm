@@ -8,6 +8,7 @@ module Feature.Observation exposing
     , clearSelection
     , deleteDialogFocusTarget
     , historyResponseMatches
+    , refreshHistory
     , detailResponseMatches
     , failResultPage
     , facetKey
@@ -149,6 +150,7 @@ init =
     , inlineOwner = Nothing
     , selectedDetail = Nothing
     , history = Nothing
+    , historyExpanded = False
     , nextHistoryRequestToken = 1
     , detailLoading = False
     , detailError = Nothing
@@ -285,6 +287,7 @@ clearSelection state =
         , inlineOwner = Nothing
         , selectedDetail = Nothing
         , history = Nothing
+        , historyExpanded = False
         , detailLoading = False
         , detailError = Nothing
         , activeDetailRequest = Nothing
@@ -572,7 +575,10 @@ updateRaw msg model =
             ( updateObservation (\state -> { state | edit = Maybe.map (\edit -> if edit.saving then edit else { edit | reviewedGitShaDraft = value, error = Nothing }) state.edit }) model, Cmd.none )
 
         LoadObservationHistory ->
-            loadHistory model
+            refreshHistory ( updateObservation (\state -> { state | historyExpanded = True, history = Maybe.map (\saved -> { saved | error = Nothing }) state.history }) model, Cmd.none )
+
+        ToggleObservationHistory ->
+            refreshHistory ( updateObservation (\state -> { state | historyExpanded = not state.historyExpanded }) model, Cmd.none )
 
         GotObservationHistory request result ->
             receiveHistory request result model
@@ -2503,6 +2509,7 @@ selectDifferentObservation observationId model =
                             { current
                                 | selectedId = Just observationId
                                 , history = Nothing
+                                , historyExpanded = False
                                 , selectedDetail =
                                     current.edit
                                         |> Maybe.andThen
@@ -4255,7 +4262,7 @@ viewObservationRow canEdit owner state context observation =
                 , div [ class "card-meta-group observation-card-meta observation-card-footer" ]
                     [ dl [ class "observation-detail-meta" ] [ viewSubjects cardId observation.id state.expandedSubjects observation.subjects ]
                     , div [ class "card-meta-row" ]
-                        [ span [ class "card-meta observation-sha" ] [ text "Current reviewed revision: ", (observation.currentProvenance |> Maybe.map (\provenance -> Helpers.copyableValue "" "current reviewed revision" provenance.reviewedGitSha (String.left 12 provenance.reviewedGitSha ++ "…")) |> Maybe.withDefault (text "Unknown legacy binding")) ]
+                        [ viewRevisionSummary observation
                         , span [ class "card-meta observation-updated" ] [ text ("Content updated: " ++ formatObservationTimestamp observation.updatedAt) ]
                         ]
                     ]
@@ -4354,12 +4361,11 @@ viewDetail canEdit state =
                               else text ""
                             , div [ class "observation-card-footer" ]
                                 [ viewMatchContext observation.provenanceMatch
-                                , viewHistory observation state
                                 , dl [ class "observation-detail-meta" ]
                                     [ viewDetailMeta "Workspace ID" observation.workspaceId "observation-detail-workspace"
                                     , viewSubjects (Maybe.withDefault "observation-detached" (selectedOwner state)) observation.id state.expandedSubjects observation.subjects
-                                    , viewCurrentProvenance observation
-                                    , viewProvenanceRevision observation.gitSha
+                                    , viewCurrentProvenance observation state
+                                    , if boundCurrentProvenance observation /= Nothing then viewProvenanceRevision observation.gitSha else text ""
                                     , viewDetailMeta "Created" (formatObservationTimestamp observation.createdAt) ""
                                     , viewDetailMeta "Content updated" (formatObservationTimestamp observation.updatedAt) ""
                                     ]
@@ -4707,7 +4713,7 @@ loadHistory model =
                     saved = Maybe.withDefault { workspaceId = observation.workspaceId, observationId = observation.id, sessionEpoch = model.sessionRequestEpoch, head = observation.latestSequence, items = [], hasMore = True, nextOffset = 0, loading = False, error = Nothing, active = Nothing } previous
                     request = { workspaceId = observation.workspaceId, observationId = observation.id, sessionEpoch = model.sessionRequestEpoch, head = observation.latestSequence, token = model.observations.nextHistoryRequestToken, offset = saved.nextOffset }
                 in
-                if saved.loading || not saved.hasMore || saved.nextOffset > 10000 then ( model, Cmd.none )
+                if not model.observations.historyExpanded || saved.loading || saved.error /= Nothing || not saved.hasMore || saved.nextOffset > 100000 then ( model, Cmd.none )
                 else
                     ( updateObservation (\state -> { state | history = Just { saved | loading = True, error = Nothing, active = Just request }, nextHistoryRequestToken = request.token + 1 }) model
                     , Api.fetchObservationHistory model.flags.apiUrl observation.id request.offset (GotObservationHistory request)
@@ -4732,17 +4738,49 @@ receiveHistory request result model =
                 if List.length page.items /= Basics.min 25 (Basics.max 0 (request.head - request.offset)) || page.hasMore /= (request.offset + List.length page.items < request.head) || (page.hasMore && List.length page.items /= 25) || sequences /= expected || List.any (\event -> event.observationId /= request.observationId) page.items then
                     failure "History changed or returned an inconsistent page. Refresh the Observation before retrying."
                 else
-                    finish (\saved -> { saved | items = saved.items ++ page.items, nextOffset = saved.nextOffset + List.length page.items, hasMore = page.hasMore, error = if page.hasMore && saved.nextOffset + List.length page.items > 10000 then Just "History is incomplete at the bounded page limit." else Nothing })
+                    finish (\saved -> { saved | items = saved.items ++ page.items, nextOffset = saved.nextOffset + List.length page.items, hasMore = page.hasMore, error = if page.hasMore && saved.nextOffset + List.length page.items > 100000 then Just "History is incomplete at the bounded page limit." else Nothing })
+                        |> refreshHistory
 
 
-viewCurrentProvenance : Api.Observation -> Html Msg
-viewCurrentProvenance observation =
-    div [ class "observation-detail-meta-row observation-current-provenance" ]
-        [ dt [ class "observation-detail-meta-label" ] [ text "Current reviewed revision" ]
+refreshHistory : ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
+refreshHistory ( model, command ) =
+    let
+        ( updated, historyCommand ) = loadHistory model
+    in
+    ( updated, Cmd.batch [ command, historyCommand ] )
+
+
+boundCurrentProvenance : Api.Observation -> Maybe Api.ObservationProvenance
+boundCurrentProvenance observation =
+    observation.currentProvenance |> Maybe.andThen (\provenance ->
+        if provenance.eventKind /= "legacy_creation" && provenance.contentVersion /= Nothing && provenance.contentDigest /= Nothing then Just provenance else Nothing)
+
+
+revisionDisplay : Api.Observation -> { label : String, sha : String, recordedAt : String }
+revisionDisplay observation =
+    case boundCurrentProvenance observation of
+        Just provenance -> { label = "Current reviewed revision", sha = provenance.reviewedGitSha, recordedAt = provenance.recordedAt }
+        Nothing -> { label = "Creation revision", sha = observation.gitSha, recordedAt = observation.createdAt }
+
+
+viewRevisionSummary : Api.Observation -> Html Msg
+viewRevisionSummary observation =
+    let revision = revisionDisplay observation in
+    span [ class "card-meta observation-sha" ]
+        [ text (revision.label ++ ": ")
+        , Helpers.copyableValue "" (String.toLower revision.label) revision.sha (String.left 12 revision.sha ++ "…")
+        , text (" · " ++ formatObservationTimestamp revision.recordedAt)
+        ]
+
+
+viewCurrentProvenance : Api.Observation -> ObservationModel -> Html Msg
+viewCurrentProvenance observation state =
+    let revision = revisionDisplay observation in
+    div [ class ("observation-detail-meta-row observation-current-provenance" ++ (if boundCurrentProvenance observation == Nothing then " observation-detail-sha" else "")) ]
+        [ dt [ class "observation-detail-meta-label" ] [ text revision.label ]
         , dd [ class "observation-detail-meta-value" ]
-            [ observation.currentProvenance
-                |> Maybe.map (\provenance -> span [] [ Helpers.copyableValue "" "current reviewed revision" provenance.reviewedGitSha provenance.reviewedGitSha, text (" · assertion " ++ String.fromInt provenance.sequence ++ " · " ++ formatObservationTimestamp provenance.recordedAt) ])
-                |> Maybe.withDefault (text "Unknown legacy content binding")
+            [ span [ class "observation-revision-value" ] [ Helpers.copyableValue "" (String.toLower revision.label) revision.sha revision.sha, text (" · " ++ formatObservationTimestamp revision.recordedAt) ]
+            , viewHistory observation state
             ]
         ]
 
@@ -4765,22 +4803,20 @@ viewHistory observation state =
         saved = currentHistory (Just observation) state.history
         entry event =
             li [ class "observation-history-entry" ]
-                [ text ("Assertion " ++ String.fromInt event.provenance.sequence ++ " · ")
-                , Helpers.copyableValue "" "recorded revision" event.provenance.reviewedGitSha event.provenance.reviewedGitSha
-                , text (" · " ++ formatObservationTimestamp event.provenance.recordedAt ++ " · ")
-                , text (if event.provenance.eventKind == "legacy_creation" then "Migrated creation claim; content binding unknown" else "Content-bound " ++ event.provenance.eventKind)
-                , event.provenance.contentVersion |> Maybe.map (\version -> span [] [ text " · version ", Helpers.copyableValue "" "content version" version version ]) |> Maybe.withDefault (text "")
-                , text (" · " ++ Maybe.withDefault "Unknown actor" event.provenance.actorLabel)
-                , event.provenance.actorId |> Maybe.map (\actorId -> span [] [ text " · ", Helpers.copyableValue "" "actor ID" actorId actorId ]) |> Maybe.withDefault (text "")
+                [ Helpers.copyableValue "" "recorded revision" event.provenance.reviewedGitSha event.provenance.reviewedGitSha
+                , span [ class "observation-history-time" ] [ text (formatObservationTimestamp event.provenance.recordedAt) ]
                 ]
-        buttonLabel =
-            saved |> Maybe.map (\history -> if history.loading then "Loading history..." else if history.error /= Nothing then "Retry history" else "Load more history") |> Maybe.withDefault "Load revision history"
     in
     section [ class "observation-history", attribute "aria-label" "Revision history" ]
-        [ p [ class "form-help" ] [ text ("Revision history · head " ++ String.fromInt observation.latestSequence ++ ". Compact assertions contain no prior content.") ]
-        , saved |> Maybe.map (\history -> ol [] (List.map entry history.items)) |> Maybe.withDefault (text "")
-        , saved |> Maybe.andThen .error |> Maybe.map (\message -> p [ class "form-error", attribute "role" "alert" ] [ text message ]) |> Maybe.withDefault (text "")
-        , if saved |> Maybe.map (\history -> history.hasMore && history.nextOffset <= 10000) |> Maybe.withDefault True then
-            button [ id "observation-history-load", type_ "button", class "btn btn-secondary", onClick LoadObservationHistory, disabled (saved |> Maybe.map .loading |> Maybe.withDefault False) ] [ text buttonLabel ]
+        [ button [ id "observation-history-toggle", type_ "button", class "observation-history-toggle", onClick ToggleObservationHistory, attribute "aria-expanded" (if state.historyExpanded then "true" else "false") ] [ text (if state.historyExpanded then "− History" else "+ History") ]
+        , if state.historyExpanded then
+            div [ class "observation-history-content" ]
+                [ saved |> Maybe.map (\history -> ol [] (List.map entry history.items)) |> Maybe.withDefault (text "")
+                , if saved |> Maybe.map .loading |> Maybe.withDefault False then span [ class "form-help", attribute "role" "status" ] [ text "Loading…" ] else text ""
+                , saved |> Maybe.andThen .error |> Maybe.map (\message -> div [ class "form-error", attribute "role" "alert" ]
+                    [ text message
+                    , if saved |> Maybe.map (\history -> history.nextOffset <= 100000) |> Maybe.withDefault False then button [ id "observation-history-load", type_ "button", class "observation-history-toggle", onClick LoadObservationHistory ] [ text "Retry" ] else text ""
+                    ]) |> Maybe.withDefault (text "")
+                ]
           else text ""
         ]

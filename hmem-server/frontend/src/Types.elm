@@ -401,6 +401,7 @@ type alias ObservationModel =
     , inlineOwner : Maybe String
     , selectedDetail : Maybe Api.Observation
     , history : Maybe ObservationHistoryState
+    , historyExpanded : Bool
     , nextHistoryRequestToken : Int
     , detailLoading : Bool
     , detailError : Maybe String
@@ -1134,6 +1135,7 @@ type Msg
     | SetObservationDraft String
     | SetObservationReviewedGitSha String
     | LoadObservationHistory
+    | ToggleObservationHistory
     | GotObservationHistory ObservationHistoryRequest (Result Http.Error (Api.PaginatedResult Api.ObservationRevision))
     | SaveObservationEdit
     | CancelObservationEdit

@@ -8,7 +8,7 @@ const patterns = new Map([
   ['src/**/*.js', /^src\/(?:[^/]+\/)*[^/]+\.js$/],
   ['docs/**/*.md', /^docs\/(?:[^/]+\/)*[^/]+\.md$/]
 ])
-export async function openDiscovery(viewport = { width: 1440, height: 900 }, transformObservations = values => values) {
+export async function openDiscovery(viewport = { width: 1440, height: 900 }, transformObservations = values => values, additionalFixtures = []) {
   const fixture = hierarchyFixture()
   fixture.projects = []; fixture.tasks = []
   const sha = '0123456789abcdef0123456789abcdef01234567'
@@ -25,11 +25,12 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
     ...Array.from({ length: 61 }, (_, index) => observation('guide-' + index, 'docs/Guide-' + String(index).padStart(3, '0') + '.md', 'docs/**/*.md', 'Documentation guide ' + index, index + 4))
   ]
   fixture.observations = transformObservations(fixture.observations)
-  const h = await openHierarchy(fixture)
+  const h = await openHierarchy(fixture, additionalFixtures)
   await h.page.setViewportSize(viewport)
   const receipts = []
   await h.page.route('**/api/v1/observations**', async route => {
     const request = route.request(), url = new URL(request.url())
+    const scopedFixture = [fixture, ...additionalFixtures].find(value => value.workspace.id === url.searchParams.get('workspace_id')) || fixture
     const receipt = { endpoint: url.pathname, method: request.method(), params: Object.fromEntries(url.searchParams), done: false }
     receipts.push(receipt)
     try {
@@ -38,7 +39,7 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
       if (url.pathname.endsWith('/count')) {
         assert.equal(request.method(), 'POST')
         receipt.payload = request.postDataJSON()
-        body = fixtureObservationCounts(fixture, receipt.payload)
+        body = fixtureObservationCounts(scopedFixture, receipt.payload)
       } else if (url.pathname.endsWith('/match')) {
         assert.equal(request.method(), 'POST')
         const query = request.postDataJSON(); receipt.payload = query; options.gitSha = query.git_sha; options.currentGitSha = query.current_git_sha; options.historyGitSha = query.history_git_sha
@@ -51,8 +52,8 @@ export async function openDiscovery(viewport = { width: 1440, height: 900 }, tra
           return path_matches.length ? [{ observation, path_matches }] : []
         })
         body = { items: matched.slice(query.offset, query.offset + query.limit), has_more: query.offset + query.limit < matched.length }
-      } else if (url.pathname.endsWith('/subject-facets')) body = queryObservationFacets(fixture, options)
-      else if (url.pathname === '/api/v1/observations') body = queryObservations(fixture, options)
+      } else if (url.pathname.endsWith('/subject-facets')) body = queryObservationFacets(scopedFixture, options)
+      else if (url.pathname === '/api/v1/observations') body = queryObservations(scopedFixture, options)
       else {
         assert.equal(request.method(), 'GET')
         body = fixture.observations.find(value => value.id === decodeURIComponent(url.pathname.split('/').at(-1)))

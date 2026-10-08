@@ -1,23 +1,13 @@
-# hmem auth guide
+# Authentication
 
-This page describes hmem authentication modes, permissions, and client configuration.
+Use local mode for a personal installation and deployed mode for shared access.
+For container configuration, see [Docker](docker.md); for HTTP requests, see
+[the API guide](api.md).
 
-## Modes
+## Local installation
 
-hmem supports two auth modes.
-
-### Local mode
-
-Use local mode for personal development and single-user automation.
-
-- Default mode: `auth.mode: local`
-- Local bootstrap is enabled by default.
-- With local bootstrap enabled, the local user has superadmin privileges.
-- The implicit local superadmin is loopback/local-CORS only by default; binding local mode to a non-loopback host or permissive CORS requires the explicit `auth.local.allow_remote_bootstrap: true` escape hatch and should only be used on trusted private networks.
-- Optional local bot tokens label automated actions in audit/events.
-- Setting `auth.enabled: true` with `auth.api_key` or `HMEM_API_KEY` enables a local static bearer token. This configuration is accepted only in local mode.
-
-Minimal local config:
+Local mode is the native default. With bootstrap enabled, local requests have
+superadmin access without a login:
 
 ```yaml
 auth:
@@ -25,151 +15,109 @@ auth:
   local:
     bootstrap_enabled: true
     allow_remote_bootstrap: false
-    bot_tokens:
-      - label: local-service
-        token: replace-with-local-service-token
 ```
 
-### Deployed mode
+Keep this server on loopback with local CORS origins. A remote bind or broad CORS
+is rejected unless `auth.local.allow_remote_bootstrap: true` is set; that option
+exposes superadmin access and is only suitable for trusted private development
+networks.
 
-Use deployed mode for shared installations.
+To require a bearer token in local mode, set `auth.enabled: true`, supply
+`HMEM_API_KEY` (or `auth.api_key`), and turn bootstrap off. Local bot tokens under
+`auth.local.bot_tokens` can label automated actions, but have superadmin access
+too. Local credentials and bootstrap do not work in deployed mode.
 
-- Set `auth.mode: deployed` explicitly.
-- Browser users should authenticate through server-side OIDC authorization-code login and `HttpOnly` cookie sessions.
-- Explicit bearer JWT/PAT authentication remains supported for MCP, services, and fallback. If both bearer and cookie are present, bearer wins.
-- Service access uses bearer tokens resolved through database-backed `access_tokens` rows.
-- Local bootstrap and local bot tokens are not accepted in deployed mode.
-- Protected requests without a valid deployed principal fail closed.
+## Shared installation
 
-Example deployed config:
+1. Apply database migrations and configure an OIDC client with the callback URL
+   `https://hmem.example.com/api/v1/auth/callback`.
+2. Set the following in `~/.hmem/config.yaml`, replacing the example values.
+   Keep secrets in your deployment's secret store; container environment settings
+   are listed in the [configuration reference](config/container-runtime-contract.md).
 
-```yaml
-auth:
-  mode: deployed
-  deployed:
-    issuer: https://issuer.example
-    audience: hmem-web
-    discovery_url: https://issuer.example/.well-known/openid-configuration
-    jwks_url: https://issuer.example/.well-known/jwks.json
-    client_id: hmem-web
-    client_secret: replace-with-oidc-client-secret
-    redirect_uri: https://hmem.example.com/api/v1/auth/callback
-    scopes: [openid, profile, email]
-    token_lookup: database
-    session_cookie_name: hmem_session
-    csrf_cookie_name: hmem_csrf
-    csrf_header_name: X-CSRF-Token
-    session_ttl_seconds: 28800
-    cookie_secure: true
-    cookie_same_site: Lax
-    # Optional but recommended before issuing service/PAT tokens.
-    token_hash_secret: replace-with-secret-manager-value
-```
+   ```yaml
+   auth:
+     mode: deployed
+     deployed:
+       issuer: https://issuer.example
+       audience: hmem-web
+       discovery_url: https://issuer.example/.well-known/openid-configuration
+       client_id: hmem-web
+       client_secret: replace-with-oidc-client-secret
+       redirect_uri: https://hmem.example.com/api/v1/auth/callback
+       token_hash_secret: replace-with-stable-secret
+   ```
 
-## Permission model
+   The issuer must match the provider, and `audience` must match bearer JWTs
+   intended for hmem. Browser login validates the ID token against `client_id`.
+   Serve hmem over HTTPS: session cookies are secure by default, and OIDC
+   authorization and token endpoints require HTTPS.
+3. Run this operator command against the same configured database. Use the
+   provider's stable `sub` claim, rather than the user's email address:
 
-hmem has two global permissions and three workspace roles.
+   ```bash
+   hmem-ctl auth bootstrap-superadmin \
+     --auth-subject oidc-subject-from-provider \
+     --display-name "Primary Operator" --email operator@example.com
+   ```
 
-### Global permissions
+   Repeating it for the same subject is safe. If another superadmin exists, it
+   refuses; use `--force` only for deliberate recovery or an additional superadmin.
+4. Sign in and check `GET /api/v1/session` for the `superadmin` permission.
+   Other provider users must also be registered in hmem before they can sign in.
 
-| Permission | Allows |
-| --- | --- |
-| `create_workspace` | Create workspaces. The creator becomes `admin` of the new workspace. |
-| `superadmin` | Bypass authorization checks, administer every workspace, purge resources, and view the global audit log. |
-
-### Workspace roles
-
-| Role | Allows |
-| --- | --- |
-| `read` | View workspace-scoped resources. |
-| `edit` | `read` plus create/update/link/unlink/reorder/restore/soft-delete workspace resources. |
-| `admin` | `edit` plus purge, workspace audit-log access, and workspace membership administration. |
-
-Bot and service tokens identify automated clients in audit/events. In deployed mode, permissions come from the token's grant-bearing user.
-
-## Deployed setup checklist
-
-1. Apply database migrations before enabling deployed auth.
-2. Configure `auth.mode: deployed`, provider verification settings, and OIDC client settings. Keycloak is the recommended self-hosted example provider, but hmem only relies on standard OIDC discovery, code exchange, and ID-token validation.
-3. Bootstrap at least one `superadmin` user using the supported operator workflow.
-4. Grant `create_workspace` or workspace roles to non-superadmin users as needed.
-5. For automated clients, create service/PAT tokens linked to a grant-bearing user using the token workflow below.
-6. Store raw service tokens in your secret manager or runtime environment; hmem stores token hashes.
-7. Verify `/api/v1/session`, one protected read, and one protected write before production traffic.
-
-### First superadmin bootstrap workflow
-
-The supported first-user bootstrap path is an operator-run `hmem-ctl` command that connects directly to the configured database after migrations have run:
-
-```bash
-hmem-ctl auth bootstrap-superadmin \
-  --auth-subject oidc-subject-from-provider \
-  --display-name "Primary Operator" \
-  --email operator@example.com
-```
-
-Command behavior:
-
-- `--auth-subject` is the stable subject claim that deployed bearer/JWT authentication resolves later.
-- The command creates or updates exactly that user with `is_superadmin = true` and `can_create_workspace = true`.
-- Running it again for the same `--auth-subject` is idempotent.
-- If a different superadmin already exists, the command refuses unless the operator passes an explicit break-glass `--force` override.
-- Logs and output identify the affected user and bootstrap decision, but never print bearer tokens or provider credentials.
-- Operators must verify the result by authenticating as that provider subject and checking that `/api/v1/session` reports `superadmin`.
-
-### User and global-grant administration
-
-Operators can create or update deployed users and global grants with `hmem-ctl auth users upsert`:
+Register a user who can create workspaces:
 
 ```bash
 hmem-ctl auth users upsert \
   --auth-subject oidc-subject-from-provider \
-  --display-name "Workspace Creator" \
-  --email creator@example.com \
-  --can-create-workspace
+  --display-name "Workspace Creator" --can-create-workspace
 ```
 
-Use `--superadmin` / `--no-superadmin` and `--can-create-workspace` / `--no-create-workspace` to update global grants. Use `--disabled` to make JWT and PAT authentication for that grant-bearing user fail closed, and `--active` to re-enable the user. Workspace memberships remain managed by workspace-admin APIs.
+Use `--no-create-workspace`, `--superadmin`, or `--no-superadmin` to change global
+grants. `--disabled` denies that user's access; `--active` re-enables it.
 
-### Service/PAT token lifecycle
+## Permissions
 
-Operators can issue, rotate, and revoke deployed service/PAT tokens with `hmem-ctl auth tokens`. Issuance generates a high-entropy raw token, stores only `token_hash`, and prints the raw token exactly once:
+| Grant or role | Access |
+| --- | --- |
+| Global `create_workspace` | Create a workspace and become its admin. |
+| Global `superadmin` | Administer all workspaces and view the global audit log. |
+| Workspace `read` | View that workspace's resources. |
+| Workspace `edit` | Read, create, edit, reorder, restore, and delete its resources. |
+| Workspace `admin` | Edit access plus permanent deletion and workspace audit access. |
+
+A service token inherits its linked user's grants and workspace roles. It does
+not grant access by itself. Existing workspace membership has no public management
+command or HTTP endpoint; `users upsert` changes global grants only.
+
+## Service and MCP tokens
+
+Issue a token for a user with the needed permissions:
 
 ```bash
 hmem-ctl auth tokens issue \
   --grant-user-id user-uuid-with-required-permissions \
-  --actor-label deploy-bot \
-  --expires-at YYYY-MM-DDTHH:MM:SSZ
+  --actor-label deploy-bot --expires-at 2027-01-01T00:00:00Z
 ```
 
-Rotation creates an overlapping replacement by default; revoke the old token after clients switch, or pass `--revoke-old` for immediate cutover:
+Save the raw token in your secret manager when it is printed; it is shown once.
+Keep the returned token ID for rotation and revocation. `--actor-type` defaults
+to `bot`; use `user` for a personal token. Expiry is optional.
+
+Rotate, switch clients to the replacement, then revoke the old token:
 
 ```bash
-hmem-ctl auth tokens rotate --token-id existing-token-row-uuid
-hmem-ctl auth tokens revoke --token-id existing-token-row-uuid
+hmem-ctl auth tokens rotate --token-id existing-token-uuid
+hmem-ctl auth tokens revoke --token-id existing-token-uuid
 ```
 
-Issued tokens contain at least 256 bits of cryptographically secure random material and are printed only when issued. Tokens are operator-managed rather than self-service UI objects. Use `--actor-type bot|user`, stable `--actor-label` values, and least-privilege grant-bearing users so automated clients inherit only the permissions they need.
+Rotation leaves both tokens valid by default and keeps the old expiry unless
+`--expires-at` is supplied. Add `--revoke-old` to rotate with immediate revocation.
+Keep `auth.deployed.token_hash_secret` stable across the server and operator
+commands: changing or removing it invalidates tokens issued with the old secret.
 
-When `auth.deployed.token_hash_secret` is configured, issued and rotated tokens are stored as keyed HMAC-SHA256 hashes. Keep this secret stable and manage it through the deployment's secret store. Changing or removing it invalidates tokens hashed with the previous value, so rotate affected client credentials as part of the same operation.
-
-If an operator pre-provisions an `access_tokens` row outside `hmem-ctl`, the raw bearer secret must still be generated from at least 256 bits of cryptographically secure randomness. Do not use short, human-chosen, or reusable secrets; store only the canonical `token_hash`, and record the raw token only in a secret manager.
-
-## Frontend and MCP
-
-The server authorizes requests. Clients forward credentials and display server-provided session state.
-
-Configure the frontend with the HTTP and WebSocket server URLs. Load session state before fetching protected data.
-
-For deployed browser auth, set `window.HMEM_CONFIG.loginUrl` to `/api/v1/auth/login` and `logoutUrl` to `/api/v1/auth/logout` (or the same paths behind your reverse proxy). The frontend starts login with a browser redirect and performs logout with a CSRF-protected `POST`. The server validates OIDC state, exchanges the provider code, links the ID-token `sub` to `users.auth_subject`, creates a revocable `HttpOnly` session cookie, and emits a non-HttpOnly CSRF cookie that the frontend sends as `X-CSRF-Token` on unsafe API requests.
-
-For cookie-session deployments, keep `cors.allowed_origins` restricted to trusted frontend origins. Do not deploy browser cookie sessions with wildcard or over-broad credentialed CORS.
-
-If you customize `auth.deployed.csrf_cookie_name` or `auth.deployed.csrf_header_name`, set matching frontend runtime values (`window.HMEM_CONFIG.csrfCookieName` / `csrfHeaderName`). The defaults are `hmem_csrf` and `X-CSRF-Token`.
-
-For explicit bearer-token frontend fallback flows, provider callbacks must return tokens in URL fragments, not query strings. The frontend strips auth callback parameters from the URL after processing. By default it stores bearer tokens in `localStorage` for cross-tab persistence; this is convenient but exposes tokens to any successful XSS in the hmem origin. Operators can set `window.HMEM_CONFIG.authTokenStorage` to `session` for per-tab browser session storage or `memory` for in-memory-only storage; the frontend clears inactive storage locations on startup and logout.
-
-MCP can point at a separate server:
+Pass the raw token as `Authorization: Bearer <token>` to HTTP clients. For MCP:
 
 ```bash
 HMEM_SERVER_URL=https://hmem.example.com \
@@ -177,13 +125,35 @@ HMEM_MCP_AUTH_TOKEN=replace-with-service-token \
 hmem-mcp
 ```
 
-MCP token precedence is:
+MCP uses the first available token: `--auth-token`, `HMEM_MCP_AUTH_TOKEN`,
+`HMEM_AUTH_TOKEN`, then local static bearer configuration for loopback servers
+only. `--no-auth` suppresses forwarding. See [the README](README.md) for MCP setup.
 
-1. `--auth-token`
-2. `HMEM_MCP_AUTH_TOKEN`
-3. `HMEM_AUTH_TOKEN`
-4. local static bearer `auth.api_key` or `HMEM_API_KEY` when `auth.enabled` is set, considered only when the resolved hmem server URL is loopback
+## Browser login
 
-Use `--no-auth` to suppress bearer forwarding entirely.
+Set `window.HMEM_CONFIG.loginUrl` to `/api/v1/auth/login` and `logoutUrl` to
+`/api/v1/auth/logout`, including any reverse-proxy prefix. The frontend handles
+login redirects, session cookies, and logout.
 
-Workspace deletion uses `DELETE /api/v1/workspaces/:id` and requires workspace admin access (including local superadmin). It soft-deletes the workspace and retains its contents and audit history. Deletion is available from the workspace header after confirmation and is not an MCP tool. Deployed cookie requests require CSRF as for other writes.
+Cookie-authenticated writes, including logout, need the `hmem_csrf` cookie value
+in the `X-CSRF-Token` header. If you customize the server's CSRF names, match them
+with frontend `csrfCookieName` and `csrfHeaderName`. Keep `cors.allowed_origins`
+restricted to trusted frontend origins; leave it empty for same-origin hosting.
+
+An explicit bearer token takes precedence over a session cookie, even if the
+token is invalid. Remove an old bearer token before relying on cookie login.
+For browser bearer fallback, return tokens in URL fragments, never query strings.
+Bearer storage defaults to `localStorage`, where script access can expose it.
+Set `window.HMEM_CONFIG.authTokenStorage` to `session` for per-tab storage or
+`memory` to discard the token when the page closes or reloads.
+
+## Access problems
+
+| Symptom | Check |
+| --- | --- |
+| Login unavailable | OIDC discovery/endpoints, client ID/secret, and registered callback URL. |
+| Login callback rejected | The provider subject is an active hmem user; issuer and client ID match. Start login again if the state cookie expired. |
+| HTTP 401 | Token expiry/revocation, disabled user, issuer/audience, and any stale bearer overriding a cookie. |
+| HTTP 403 | Required global grant or workspace role. Check `/api/v1/session?workspace_id=<uuid>` with the same credential. |
+| `csrf_required` | Matching CSRF cookie/header on cookie-authenticated writes, including logout. |
+| `unsafe local bootstrap` | Loopback bind and restricted CORS, or switch to bearer/deployed authentication. |

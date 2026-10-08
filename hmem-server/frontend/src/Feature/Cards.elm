@@ -3576,6 +3576,13 @@ viewHierarchyViewport ws incoming =
                     else Nothing
                 Nothing -> Nothing
         familyAt position = Array.get position viewport.index.keys |> Maybe.andThen (taskFamily Set.empty)
+        familyStatus family =
+            let
+                taskId = String.dropLeft 5 family
+            in
+            case Dict.get taskId model.tasks of
+                Just task -> taskCardStatusClass task.status
+                Nothing -> Dict.get taskId model.dataLoading.taskCardSummaries |> Maybe.map (.status >> taskCardStatusClass) |> Maybe.withDefault ""
         pieceFamily piece =
             case piece of
                 Viewport.Row position _ _ -> familyAt position
@@ -3633,7 +3640,7 @@ viewHierarchyViewport ws incoming =
                                 ( members, following ) = collect [ first ] rest
                             in
                             ( family, Keyed.node "div"
-                                [ class "hierarchy-task-family", attribute "data-task-family" (String.dropLeft 5 family)
+                                [ class ("hierarchy-task-family" ++ familyStatus family), attribute "data-task-family" (String.dropLeft 5 family)
                                 , style "margin-left" (String.fromInt (depth * 20) ++ "px")
                                 ] (List.map (pieceView depth) members)
                             ) :: groupedPieces following

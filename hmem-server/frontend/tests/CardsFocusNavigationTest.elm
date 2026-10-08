@@ -26,7 +26,44 @@ import Url
 suite : Test
 suite =
     describe "bounded Cards and Focus loading"
-        [ test "collapsed project counts retain authoritative totals when readiness caches are reset" <|
+        [ test "project activity accents follow authoritative descendant rollups with no cached tasks" <| \_ ->
+            let
+                base = project "activity"
+                rollup = base.readinessRollup
+                active = { base | readinessRollup = { rollup | inProgressTaskCount = 2 } }
+                seeded = DataLoading.mergeNavigationSummaries [ active ] [] model
+                dependencies = seeded.dependencies
+                cards = seeded.cards
+                fallback = { seeded | tasks = Dict.empty, dependencies = { dependencies | projectReadinessRollups = Dict.empty }, cards = { cards | collapsedNodes = Dict.singleton "proj-activity" True } }
+                stopped = DataLoading.mergeNavigationSummaries [ base ] [] fallback
+            in
+            Expect.all
+                [ \_ -> Cards.viewProjectsTree workspaceId fallback |> Query.fromHtml |> Query.has [ Selector.class "card-project-in-progress" ]
+                , \_ -> Cards.viewProjectsTree workspaceId stopped |> Query.fromHtml |> Query.hasNot [ Selector.class "card-project-in-progress" ]
+                ] ()
+        , test "offscreen partitioned task families keep canonical parent status and independent child status" <| \_ ->
+            let
+                parentBase = task "parent" Nothing
+                parent = { parentBase | status = Api.InProgress, hasChildren = True, directSubtaskCount = 80 }
+                children = List.range 1 80 |> List.map (\n -> let child = task ("child-" ++ String.padLeft 3 '0' (String.fromInt n)) (Just parent.id) in { child | status = Api.Done })
+                ready = DataLoading.mergeNavigationSummaries [] (parent :: children) (rootSeed []) |> viewportReady
+                target = "task:child-060"
+                position = Dict.get target ready.cards.viewport.index.positions |> Maybe.withDefault 0
+                editing = ready.editing
+                pinned = { ready | editing = { editing | inlineCreate = Just (Types.InlineCreateTask { projectId = Nothing, parentId = Just "child-060", title = "" }) } }
+                scrolled = Cards.updateViewport (viewportEvent pinned (Viewport.offset position ready.cards.viewport.index) [] Nothing []) pinned |> Tuple.first
+                summaryOnly = { scrolled | tasks = Dict.remove parent.id scrolled.tasks }
+                familyCheck source = Cards.viewProjectsTree workspaceId source |> Query.fromHtml
+                    |> Query.findAll [ Selector.attribute (Html.Attributes.attribute "data-task-family" "parent") ]
+                    |> Query.each (Query.has [ Selector.class "card-status-in_progress" ])
+            in
+            Expect.all
+                [ \_ -> Expect.equal False (List.member "task:parent" (Cards.mountedViewportKeys scrolled))
+                , \_ -> familyCheck scrolled
+                , \_ -> familyCheck summaryOnly
+                , \_ -> Cards.viewProjectsTree workspaceId scrolled |> Query.fromHtml |> Query.has [ Selector.class "card-subtask", Selector.class "card-status-done" ]
+                ] ()
+        , test "collapsed project counts retain authoritative totals when readiness caches are reset" <|
             \_ ->
                 let
                     base =

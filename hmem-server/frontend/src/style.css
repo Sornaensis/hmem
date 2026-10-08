@@ -3192,29 +3192,37 @@ textarea.observation-edit-content {
 
 /* Status-based card styling */
 
+.hierarchy-task-family {
+  background: var(--bg-surface);
+}
+
 .card-status-active,
 .card-status-todo {
   background: var(--bg-surface);
 }
 
 .card-status-in_progress {
+  --card-status-border: rgba(14, 165, 233, 0.25);
   background: rgba(14, 165, 233, 0.06);
   border-color: rgba(14, 165, 233, 0.25);
 }
 
 .card-status-paused {
+  --card-status-border: rgba(234, 179, 8, 0.25);
   background: rgba(234, 179, 8, 0.06);
   border-color: rgba(234, 179, 8, 0.25);
 }
 
 .card-status-completed,
 .card-status-done {
+  --card-status-border: rgba(34, 197, 94, 0.2);
   background: rgba(34, 197, 94, 0.06);
   border-color: rgba(34, 197, 94, 0.2);
 }
 
 .card-status-archived,
 .card-status-cancelled {
+  --card-status-border: rgba(148, 163, 184, 0.2);
   background: rgba(148, 163, 184, 0.06);
   border-color: rgba(148, 163, 184, 0.2);
   opacity: 0.75;
@@ -4361,13 +4369,11 @@ textarea.observation-edit-content {
 .hierarchy-viewport, .observation-viewport, .observation-detached { box-sizing: border-box; width: 100%; max-width: 78rem; margin-left: 0; margin-right: auto; }
 .hierarchy-row { box-sizing: border-box; padding-bottom: 6px; }
 .hierarchy-task-family {
-  background: var(--bg-surface);
   border-radius: 0.5rem;
-  box-shadow: inset 0 0 0 1px var(--border), inset 3px 0 #14b8a6;
+  box-shadow: inset 0 0 0 1px var(--card-status-border, var(--border)), inset 3px 0 var(--card-status-border, #14b8a6);
 }
-.hierarchy-task-family > .hierarchy-row > .card-task {
-  border-color: transparent;
-  background: transparent;
+.hierarchy-task-family.card-status-cancelled {
+  opacity: 1;
 }
 .hierarchy-task-family > .hierarchy-row > .card-subtask { margin-right: 1rem; }
 .hierarchy-row > .card, .hierarchy-row .tree-card { margin-bottom: 0; }
@@ -4417,5 +4423,5 @@ textarea.observation-edit-content {
 .observation-edit-form #observation-reviewed-sha { width: 100%; box-sizing: border-box; }
 
 .copyable-uuid { font-size: 0.6875rem; line-height: 1.35; font-family: var(--font-mono, monospace); }
-.card-project-in-progress { border-left: 3px solid var(--accent); }
+.card-project-in-progress { border-left: 3px solid #0ea5e9; }
 .filter-checkbox { cursor: pointer; font-size: 0.8rem; gap: 0.35rem; }

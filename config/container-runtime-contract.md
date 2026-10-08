@@ -68,7 +68,8 @@ Secrets that do not currently have hmem runtime env overrides, such as OIDC `cli
 
 The entrypoint writes only existing `embedding` YAML fields. It does not
 configure a CPU or ONNX fallback. An unavailable managed or HTTP provider
-leaves vector operations unavailable while ordinary API health remains usable.
+prevents automatic vectorization; manual vector storage and similarity remain
+available when pgvector is ready. Ordinary API health remains usable.
 
 | Env | Default | YAML field | Rule |
 | --- | --- | --- | --- |

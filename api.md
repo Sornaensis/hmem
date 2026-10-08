@@ -1,171 +1,170 @@
-# Observation revision API contract
+# API guide
 
-This is the approved coordinated update contract for core, REST, MCP, OpenAPI,
-and Elm. [Database semantics](database.md) define storage and migration.
-The provenance ADR retains immutable creation identity and appends reviewed
-assertions. Implementation ships these changes together; old content-only
-clients must upgrade with that release. There is no retained unconditional
-transition or server inspection of Git.
+The HTTP API is available at `/api/v1` on your hmem server, normally
+`http://127.0.0.1:8420` for a local installation. Requests and responses use JSON.
 
-## Canonical shape
+## Connect and discover endpoints
 
-Observation reads keep `git_sha` as the original creation SHA and keep the
-ordered `subjects`, workspace, content, and opaque UUID `content_version`.
-Add required `latest_sequence` and required nullable `current_provenance`:
+Choose a credential using [the authentication guide](auth.md). Service and MCP
+clients use a bearer token; the browser normally uses an OIDC session. Local
+native bootstrap can work without a token, but the default Docker setup requires
+one. Cookie-authenticated POST, PUT, and DELETE requests need the CSRF header,
+including POST endpoints that only search or count.
+
+With your token in `HMEM_AUTH_TOKEN`, check your session and fetch the server's
+OpenAPI document:
+
+```bash
+curl --fail-with-body -H "Authorization: Bearer $HMEM_AUTH_TOKEN" \
+  http://127.0.0.1:8420/api/v1/session
+curl --fail-with-body -H "Authorization: Bearer $HMEM_AUTH_TOKEN" \
+  http://127.0.0.1:8420/api/v1/openapi.json -o hmem-openapi.json
+```
+
+Use that OpenAPI document for the current routes, request fields, and response
+schemas. Send `Content-Type: application/json` with JSON bodies. Use HTTPS for
+shared installations. [MCP setup](README.md) shows how to use hmem through tools;
+it uses a bearer credential and an active workspace context.
+
+## Workspaces and planning
+
+Workspaces scope your data and permissions. Create one with
+`POST /api/v1/workspaces`, using `name` and `workspace_type` (`repository`,
+`personal`, `organization`, or `planning`). Creation needs the global `create_workspace` grant
+or superadmin access. List accessible workspaces with `GET /api/v1/workspaces`.
+
+Projects and tasks can belong to any workspace. Observations require an active
+`repository` workspace, including when requested by ID. Use `workspace_id` in
+workspace-scoped requests; possession of a resource UUID does not grant access.
+
+For planning clients, create projects/tasks through their OpenAPI routes or use
+`POST /api/v1/projects/spec` to create a project with 1–50 initial tasks.
+Tasks allow one level of subtasks. Start a parent before starting its subtask,
+satisfy dependency prerequisites, and finish open children before marking a task
+done or a project completed. A lifecycle conflict returns HTTP 409 with a
+`code`, `message`, and optional `detail`/`hint`; resolve the reported blockers
+before retrying. Archiving a project and cancelling a task can affect descendants,
+so check the returned result rather than assuming only one record changed.
+
+Most list routes return `{"items":[...],"has_more":true}`. Start at `offset=0`,
+advance by the number of returned items, and stop when `has_more` is false.
+Ordinary list pages default to 50 items and allow up to 200; navigation pages
+allow up to 100. Observation limits are 1–200 and offsets 0–100000. Check OpenAPI
+for route-specific pagination, especially unified search and similarity, whose
+response shapes differ.
+
+## Create an Observation
+
+An Observation records an insight about repository files at a Git revision.
+For example, send this body to `POST /api/v1/observations` with edit access:
 
 ```json
 {
-  "latest_sequence": 2,
-  "current_provenance": {
-    "sequence": 2,
-    "event_kind": "update",
-    "reviewed_git_sha": "0123456789abcdef0123456789abcdef01234567",
-    "content_version": "00000000-0000-0000-0000-000000000002",
-    "content_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "recorded_at": "2026-10-07T12:00:00Z",
-    "actor_type": "user",
-    "actor_id": "local-user",
-    "actor_label": "Local user"
-  }
+  "workspace_id": "00000000-0000-0000-0000-000000000001",
+  "subjects": [
+    {"subject_kind": "file", "subject": "src/Main.hs"},
+    {"subject_kind": "glob", "subject": "src/**/*.hs"}
+  ],
+  "git_sha": "0123456789abcdef0123456789abcdef01234567",
+  "content": "The server loads configuration before connecting to PostgreSQL."
 }
 ```
 
-The illustrative digest is not an assertion about a particular content string.
-The actual digest is SHA-256 of exact accepted UTF-8 content bytes as lowercase
-64-character hex. No normalization, trimming, or newline conversion occurs.
-The server owns positive sequence, resulting version, time, and actor attribution
-from the authorized request context. `actor_type` (`user` or `bot`), textual
-`actor_id`, and optional `actor_label` mirror the trusted Principal and existing
-audit attribution. Preserve known synthetic local user/bot IDs. A deployed
-bot's actor ID is its token ID, distinct from the grant-user ID that authorizes
-it; never attribute that bot assertion to its grant holder. Null type/ID is
-allowed only for genuinely absent context or unknown legacy attribution.
-Client fields cannot override the actor. New creation uses `event_kind: creation`,
-sequence 1, and the supplied creation SHA. An update/re-audit uses `update`.
-Both are bound assertions. Migrated creation claims use `legacy_creation`,
-original SHA, historical creation time, and null version/digest/actor. All
-migrated records initially have null current provenance until a new assertion.
-Canonical list/get/write/search/match/similarity/snapshot projections agree.
-The digest/history API provides no old content, snapshots, or diffs.
+Replace the example UUID and SHA with your workspace and reviewed revision.
+SHAs must be 40 lowercase hexadecimal characters. Subjects use repository-relative
+forward-slash paths without `./`, `..`, absolute paths, or backslashes.
+Glob subjects support `*`, `?`, and whole-component `**`; file subjects are
+concrete paths. Supply 1–256 subjects, each at most 4096 UTF-8 bytes and together
+at most 256 KiB. Content must be nonempty and at most 512 KiB.
 
-## Update and conflict
+Creation returns the Observation, including its ID and `content_version`.
+Its workspace, ordered subjects, and original `git_sha` cannot be changed.
+Create a new Observation when correcting that identity. The server accepts your
+revision assertion; it does not inspect a Git checkout.
 
-`PUT /api/v1/observations/{observationId}` requires one strong quoted lowercase
-UUID `If-Match` and JSON fields `content` and `reviewed_git_sha`. SHA must match
-`^[0-9a-f]{40}$`; content retains its existing UTF-8 byte limits. Unknown request
-fields do not grant access to server-owned event fields or immutable identity.
+## Update without overwriting another edit
+
+Read the Observation and keep its `content_version`. Send that UUID as one
+strong quoted `If-Match` header, with the new content and the revision at which
+you reviewed it:
 
 ```http
 PUT /api/v1/observations/00000000-0000-0000-0000-000000000010
 Content-Type: application/json
-If-Match: "00000000-0000-0000-0000-000000000001"
+If-Match: "00000000-0000-0000-0000-000000000002"
 
-{"content":"Corrected repository insight","reviewed_git_sha":"0123456789abcdef0123456789abcdef01234567"}
+{"content":"Updated repository insight","reviewed_git_sha":"0123456789abcdef0123456789abcdef01234567"}
 ```
 
-After existing workspace authorization and cookie-CSRF checks:
+Add your authentication header, or session cookie and CSRF header.
 
-| Outcome | HTTP response | Mutation |
-| --- | --- | --- |
-| Missing precondition | 428, `observation_content_precondition_required` | None |
-| Malformed precondition or missing/null/invalid SHA/content | 400, `validation_error` | None |
-| Absent/hard-deleted Observation | 404 | None |
-| Stale expected version | 409, `observation_content_conflict`, `latest` canonical Observation | None |
-| Matching version | 200, canonical Observation with fresh version/current event/head | One atomic assertion |
+| Response | Next step |
+| --- | --- |
+| 200 | Keep the returned Observation and its new version. |
+| 428 `observation_content_precondition_required` | Read the Observation and supply `If-Match`. |
+| 400 | Correct the body or header. Use one quoted lowercase UUID; weak tags, `*`, lists, repeated headers, and unquoted values are invalid. |
+| 409 `observation_content_conflict` | Review the returned `latest` Observation, reconcile your draft, and deliberately retry with its version. |
+| 404 | The Observation is absent or deleted; do not recreate it automatically. |
 
-Preconditions allow optional outer HTTP spaces/tabs. Weak tags, wildcard, lists,
-repeated headers, unquoted/malformed tokens are invalid. Two writers sharing a
-base cannot both succeed: the loser receives the winner's canonical state and
-must consciously rebase. Repeated SHA/text is accepted with fresh version and
-event. There is no request-ID/SHA deduplication. Authorized actor, version,
-sequence, digest, content, embedding invalidation, job reset, audit, and outbox
-effects commit atomically; failure leaves them all unchanged. Readers/outsiders
-and non-repository workspaces retain existing restrictions. Creation request
-shape stays compatible and now binds its accepted content to creation SHA.
+A successful same-text update is a new review assertion and advances the version.
+Content writes clear the stored embedding, so similarity needs a replacement
+vector. Embedding-only writes leave the content version unchanged.
+`X-Request-Id` identifies a request; it does not deduplicate repeated updates.
 
-MCP `observation_update` requires `observation_id`, `content`,
-`reviewed_git_sha`, and `expected_content_version` (canonical lowercase UUID).
-It translates the token to REST `If-Match`, forwards server conflicts including
-`latest`, and retains bounded response conventions. It adds no persistence or
-Git inspection. Core removes its unconditional update API rather than providing
-a permanent bypass. REST, MCP schema, OpenAPI, core callers, and Elm upgrade in
-one coordinated cutover. Existing manually supplied embedding operations remain
-separate and retain their contracts.
+MCP `observation_update` uses `observation_id`, `content`, `reviewed_git_sha`,
+and `expected_content_version` instead of an HTTP header.
 
-## History and filters
+## History and revision filters
 
-`GET /api/v1/observations/{observationId}/history?limit=50&offset=0` and MCP
-`observation_history` (`observation_id`, optional `limit`, `offset`) return
-`{items,has_more}`. Each item has the event fields shown above plus
-`observation_id`. Sort descending by sequence; default limit is 50, maximum 200,
-and offset is nonnegative with the existing integer bounds. Use bounded
-overfetch to calculate `has_more`. Empty pages are valid. Concurrent appends
-can shift offsets; clients refresh from offset 0 when canonical head changes
-and must discard results stamped with old identity/session/head. History has
-the same repository read authorization as the parent Observation; absent/deleted
-parents return 404. Hard deletion cascades compact events; audit/outbox retention
-follows existing policy and offers no Observation recovery.
+`GET /api/v1/observations/{id}/history?limit=50&offset=0` returns
+`{items,has_more}` in descending sequence order, with a maximum page size of 200.
+MCP exposes `observation_history`. History records revision assertions, time,
+and actor attribution; it contains no previous content or diffs and cannot
+restore an Observation. Older creation claims may have unknown attribution and
+no binding to current content. A nullable `current_provenance` in an Observation
+means there may be no reviewed assertion for its current content.
 
-Keep exact `git_sha` filters for original creation provenance. Add exact
-`current_git_sha` for the bound current event and `history_git_sha` for any
-recorded SHA claim (including the explicitly unbound legacy creation claim).
-Null current provenance matches no current-SHA filter. Every supplied SHA must
-be a lowercase full SHA; filters combine with AND and subject/text rules remain
-unchanged. History uses EXISTS so repeated assertions never duplicate rows or
-counts. Apply consistently to list, unified Observation search, path matching,
-similarity, counts, and subject facets; embedding-space restrictions stay intact.
-Paginated results keep their existing envelope and bounds.
+For Observation listing, search, matching, and similarity:
 
-Filtered Observation rows and search hits include bounded `provenance_match`
-query context: the supplied matching `original_git_sha`, `current_git_sha`, and
-`history_git_sha` selectors. These selectors explain why the current row matched.
-A historical selector may match an unbound legacy creation claim; it never says
-the returned current content was the content asserted at that historical SHA.
+| Filter | Matches |
+| --- | --- |
+| `git_sha` | Original creation revision. |
+| `current_git_sha` | Revision asserted for current content. |
+| `history_git_sha` | Any recorded revision claim, including older creation claims. |
 
-## Embedding and live compatibility
+Supplied filters combine with AND. A historical match returns current content,
+not content as it existed at that revision. If history changes while paging,
+restart at offset 0 to refresh.
 
-Retain the current immutable-creation-SHA + ordered-subjects + exact-content
-embedding fingerprint and its existing byte encoding in both core and manual
-NDJSON code. Reviewed SHA, sequence, version, and event digest are excluded.
-Every accepted assertion clears any vector and space label and resets leased
-work regardless of equal fingerprint: old owners/attempts cannot renew or store
-delayed vectors. Enabled jobs are requeued atomically. Manual exports with
-unchanged input can still apply across SHA-only or same-text assertions;
-changed-content imports are stale. Retain versions 1/2 of the manual exchange,
-one stored vector, exact space matching, and operations without pgvector.
+## Match files and search by vector
 
-Observation snapshot items change to `schema_version: 2` and require nullable
-current provenance and history head. Other snapshot kinds stay version 1.
-Invalidate all pre-cutover workspace materialized snapshots and replay/resume
-bearers, including shell/empty snapshots and detached resume tokens, before
-serving the new contract. Global catalogue envelopes and bearers remain
-compatible because their stream cannot replay workspace Observations.
-Clients resync on old/incompatible Observation
-envelopes rather than silently accepting missing fields. Live event reductions
-use the committed canonical projection and version/head to retire stale editor
-and history results; full history remains a separately requested bounded page.
+Send concrete repository-relative paths to `POST /api/v1/observations/match`:
 
-Elm editing requires a reviewed SHA and preserves the expected version captured
-at edit start. Conflict handling preserves the draft and requires conscious
-rebase. Read-only views distinguish Original revision, Current reviewed revision,
-and unknown legacy current provenance. History shows SHA, sequence, version,
-digest, time, actor/unknown attribution, and legacy claim labels. Session change,
-deletion, authorization loss, or a newer canonical head retires stale history
-work. It does not alter subject identity or introduce historical content editing.
+```json
+{"workspace_id":"00000000-0000-0000-0000-000000000001","paths":["src/Main.hs",".github/workflows/ci.yml"],"limit":50,"offset":0}
+```
 
-## Required verification
+The response includes each matching Observation once with `matched_paths`,
+`matched_subjects`, and `path_matches`. Paths match stored file/glob subjects;
+the request does not expand caller globs or read your filesystem. Path count and
+byte limits are the same as the subject limits above.
 
-Verify honest populated legacy migration and atomic ledger registration; exact
-UTF-8 digests including Unicode/newlines; creation and repeated assertions;
-two-writer conflicts with no rejected side effects; ordered bounded history;
-immutable identity and event guards; original/current/history filters without
-duplicates, including count/facet consistency; authorized reads/writes/history,
-CSRF and deleted/absent behavior; pgvector present/absent;
-and event/audit actor parity for local user/bot, deployed user and deployed bot
-with distinct token/grant-holder IDs; vector invalidation
-and old worker rejection even for identical input; reusable same-input manual
-exports and stale changed-content imports with core/export fingerprint parity;
-snapshot v2 and old-session resync; MCP/OpenAPI shape; and Elm editing/conflict/
-unknown/history/stale-response flows. Local task checks and final cross-system
-suite acceptance are separate. Routine success is reported with exact commands,
-outcomes, and input provenance, without requiring retained raw success logs.
+For similarity, supply an externally generated vector to
+`POST /api/v1/observations/similar` or MCP `observation_similar`.
+Store an individual vector with `PUT /api/v1/observations/{id}/embedding` or MCP
+`observation_set_embedding`. Vectors need 1536 finite numbers and matching
+embedding spaces. There is no raw-text query embedding endpoint. See
+[embeddings](embeddings.md) for setup, request compatibility, and bulk import.
+
+## Deletion and errors
+
+Observation deletion is permanent, including its history. Workspace deletion
+requires admin access and soft-deletes the workspace while retaining its contents.
+Project/task deletion also retains records for audit-based restoration; permanent
+purge requires admin access. Workspace deletion has no MCP tool.
+
+HTTP 401 means the credential needs attention; 403 means permission or CSRF is
+missing. A 503 `capability_unavailable` on vector operations means pgvector is
+not ready. Check [authentication](auth.md) or [embedding readiness](embeddings.md)
+for recovery. For validation and lifecycle errors, use the response message and
+hint; avoid blindly retrying the same rejected request.

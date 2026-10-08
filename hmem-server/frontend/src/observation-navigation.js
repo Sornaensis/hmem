@@ -45,6 +45,13 @@ export function installObservationNavigation(app, options = {}) {
     }
   })
 
+  function revealHeader(element, scroll) {
+    const rect = element.getBoundingClientRect(), host = scroll.getBoundingClientRect()
+    const bottom = rect.top + Math.min(rect.height ?? (rect.bottom - rect.top), 72)
+    if (rect.top < host.top + 12) scroll.scrollTop = Math.max(0, scroll.scrollTop + rect.top - host.top - 12)
+    else if (bottom > host.bottom - 12) scroll.scrollTop += bottom - host.bottom + 12
+  }
+
   function capture(card, root, scroll, context) {
     const rect = card?.getBoundingClientRect()
     const viewport = scroll?.getBoundingClientRect()
@@ -122,7 +129,7 @@ export function installObservationNavigation(app, options = {}) {
         if (detailFocusAllowed() && visible(anchor, root)) {
           anchor.focus({ preventScroll: true })
           viewport?.retainNavigationFocus(anchor)
-          anchor.scrollIntoView({ block: 'start', behavior: 'instant' })
+          revealHeader(anchor, scroller)
         }
       } else {
         const card = origin && doc.getElementById(origin.id)
@@ -130,13 +137,8 @@ export function installObservationNavigation(app, options = {}) {
           card.focus({ preventScroll: true })
           viewport?.retainNavigationFocus(card)
           scroller.scrollTop = origin.top
-          const rect = card.getBoundingClientRect()
-          const scrollBounds = scroller.getBoundingClientRect()
-          // A canonical save may reorder the row. Preserve the physical origin
-          // where possible, then reveal the same card if its layout has moved.
-          if (rect.bottom <= scrollBounds.top || rect.top >= scrollBounds.bottom) {
-            card.scrollIntoView({ block: 'nearest', behavior: 'instant' })
-          }
+          // Preserve the physical origin, then reveal only its header if moved.
+          revealHeader(card, scroller)
         } else {
           const results = doc.getElementById('observation-results')
           if (visible(results, root)) {

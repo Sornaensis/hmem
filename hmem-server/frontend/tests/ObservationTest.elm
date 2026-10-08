@@ -2014,12 +2014,12 @@ suite =
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "src/**/*.elm", Selector.text "src/Second.elm", Selector.text fullSha ]
                     , \_ -> view |> Query.find [ Selector.class "observation-detail-card" ] |> Query.has [ Selector.text "Original creation revision (Git SHA)", Selector.text "Content updated", Selector.class "copyable-value" ]
                     ] ()
-        , test "Observation timestamps retain useful UTC update time and explicit non-UTC offsets" <|
+        , test "Observation timestamps display the database date and minute without timezone conversion" <|
             \_ ->
                 [ Helpers.formatObservationTimestamp "2026-10-06T12:34:56.123Z"
                 , Helpers.formatObservationTimestamp "2026-10-06T12:35:56+00:00"
                 , Helpers.formatObservationTimestamp "2026-10-06T12:34:56+02:00"
-                ] |> Expect.equal [ "2026-10-06 12:34:56.123 UTC", "2026-10-06 12:35:56 UTC", "2026-10-06 12:34:56+02:00" ]
+                ] |> Expect.equal [ "2026-10-06 12:34", "2026-10-06 12:35", "2026-10-06 12:34" ]
         , test "large detail reader uses the UTF-8 threshold and retains an exact read-only value" <|
             \_ ->
                 let

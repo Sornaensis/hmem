@@ -676,4 +676,4 @@ deprecatedTimelineProjection schemaName = Inline $ mempty
 
 timelineBucketsResponseOpts :: SchemaOptions
 timelineBucketsResponseOpts = opts { fieldLabelModifier = \case
-  "timelineBucketsWorkspaceId" -> "workspace_id"; "timelineBucketsSince" -> "since"; "timelineBucketsUntil" -> "until"; "timelineBucketsBucket" -> "bucket"; "timelineBucketsBuckets" -> "buckets"; other -> camelToSnake other }
+  "timelineBucketsWorkspaceId" -> "workspace_id"; "timelineBucketsSince" -> "since"; "timelineBucketsUntil" -> "until"; "timelineBucketsBucket" -> "bucket"; "timelineBucketsBuckets" -> "buckets"; "timelineBucketsNextSince" -> "next_since"; other -> camelToSnake other }

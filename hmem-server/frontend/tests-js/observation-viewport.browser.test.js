@@ -76,10 +76,14 @@ test('production native Tab mounts offscreen logical targets and retained detail
     await h.start()
     const initial = await h.page.locator('#observation-viewport').getAttribute('data-observation-logical-count')
     assert.equal(initial, '200')
-    const last = h.page.locator('.observation-viewport-row').last()
+    const last = h.page.locator('.observation-viewport-row').filter({ has: h.page.locator('.observation-result .copyable-value') }).last()
     const originKey = await last.getAttribute('data-observation-key')
-    const copy = last.locator('.observation-sha .copyable-value').last()
-    await copy.focus(); await paint(h.page); await h.page.keyboard.press('Tab')
+    // Legacy fixtures have no reviewed-revision copy button. Enter through
+    // the actual final native control, including a collapsed subjects toggle.
+    await last.evaluate(row => {
+      const controls = [...row.querySelectorAll('a[href],button,input,textarea,select,[tabindex]')].filter(control => !control.disabled && control.tabIndex >= 0 && control.getClientRects().length)
+      controls.at(-1).focus({ preventScroll: true })
+    }); await paint(h.page); await h.page.keyboard.press('Tab')
     try { await h.page.waitForFunction(key => document.activeElement?.closest('[data-observation-key]')?.dataset.observationKey !== key && document.activeElement?.classList.contains('observation-card'), originKey, { timeout: 5000 }) } catch (error) { console.log('Bounded native focus diagnostic', await h.page.evaluate(() => ({ active: document.activeElement?.outerHTML?.slice(0, 350), stamp: document.querySelector('#observation-viewport')?.dataset.observationViewportContext, keys: [...document.querySelectorAll('[data-observation-key]')].map(row => row.dataset.observationPosition), top: document.querySelector('#main-content-scroll')?.scrollTop }))); throw error }
     const card = h.page.locator('.observation-card:focus'), origin = await card.getAttribute('id')
     await card.focus()

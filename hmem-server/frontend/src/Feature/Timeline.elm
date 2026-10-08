@@ -4,9 +4,9 @@ import Api
 import Char
 import Dict
 import Feature.Focus as Focus
-import Helpers exposing (buildFragment, focusElement, formatDate, pushUrl)
+import Helpers exposing (buildFragment, focusElement, formatDate, pushUrl, saveFiltersCmd)
 import Html exposing (..)
-import Html.Attributes exposing (attribute, class, disabled, title, type_, value)
+import Html.Attributes exposing (attribute, class, disabled, selected, title, type_, value)
 import Html.Events exposing (onClick, onInput, preventDefaultOn)
 import Json.Decode as Decode
 import Process
@@ -37,12 +37,14 @@ init =
     , histogramSince = ""
     , histogramUntil = ""
     , histogramBucket = "week"
+    , histogramWindow = "30"
     , histogramClockWorkspaceId = Nothing
     , histogramActiveRequest = Nothing
     , histogramActiveIdentity = Nothing
     , histogramLoadedRequest = Nothing
     , histogramSelectedBucket = Nothing
     , chartSeries = { projects = True, tasks = True, subtasks = True, observations = True }
+    , chartActions = Dict.fromList (List.map (\key -> ( key, True )) [ "created", "completed", "deleted", "archived", "cancelled" ])
     , chartPointFocus = Dict.empty
     , refreshGeneration = 0
     , refreshTimerGeneration = Nothing
@@ -304,10 +306,10 @@ markDirty model =
 
 timelineHistogramRequest : String -> TimelineModel -> Maybe TimelineHistogramRequest
 timelineHistogramRequest wsId timeline =
-    if completeDateInput timeline.histogramSince && completeDateInput timeline.histogramUntil && validTimelineBucket timeline.histogramBucket then
+    if (completeDateInput timeline.histogramSince || timeline.histogramWindow == "all") && completeDateInput timeline.histogramUntil && validTimelineBucket timeline.histogramBucket then
         Just
             { workspaceId = wsId
-            , since = timeline.histogramSince ++ "T00:00:00Z"
+            , since = if timeline.histogramWindow == "all" then "" else timeline.histogramSince ++ "T00:00:00Z"
             , until = timeline.histogramUntil ++ "T00:00:00Z"
             , bucket = timeline.histogramBucket
             }
@@ -326,8 +328,8 @@ validTimelineBucket bucket =
     List.member bucket [ "day", "week", "month", "quarter" ]
 
 
-defaultTimelineHistogramRange : Time.Posix -> { since : String, until : String }
-defaultTimelineHistogramRange now =
+defaultTimelineHistogramRange : String -> Time.Posix -> { since : String, until : String }
+defaultTimelineHistogramRange window now =
     let
         millisPerDay =
             24 * 60 * 60 * 1000
@@ -335,9 +337,25 @@ defaultTimelineHistogramRange now =
         nowMillis =
             Time.posixToMillis now
     in
-    { since = dateInputFromPosix (Time.millisToPosix (nowMillis - (90 * millisPerDay)))
+    { since = case window of
+        "all" -> ""
+        "6months" -> shiftedMonthDate 6 now
+        "year" -> shiftedMonthDate 12 now
+        _ -> dateInputFromPosix (Time.millisToPosix (nowMillis - ((Maybe.withDefault 30 (String.toInt window) - 1) * millisPerDay)))
     , until = dateInputFromPosix (Time.millisToPosix (nowMillis + millisPerDay))
     }
+
+
+shiftedMonthDate : Int -> Time.Posix -> String
+shiftedMonthDate count now =
+    let
+        monthIndex = Time.toYear Time.utc now * 12 + monthNumber (Time.toMonth Time.utc now) - 1 - count
+        year = monthIndex // 12
+        month = modBy 12 monthIndex + 1
+        leap = modBy 4 year == 0 && (modBy 100 year /= 0 || modBy 400 year == 0)
+        lastDay = if month == 2 then (if leap then 29 else 28) else if List.member month [ 4, 6, 9, 11 ] then 30 else 31
+    in
+    String.fromInt year ++ "-" ++ pad2 month ++ "-" ++ pad2 (min lastDay (Time.toDay Time.utc now))
 
 
 dateInputFromPosix : Time.Posix -> String
@@ -468,14 +486,32 @@ update msg model =
         SetTimelineHistogramUntil until ->
             updateHistogramControls model (\timeline -> { timeline | histogramUntil = until, histogramSelectedBucket = Nothing })
 
+        SetTimelineHistogramWindow window ->
+            if not (List.member window [ "7", "14", "30", "6months", "year", "all" ]) then ( model, Cmd.none ) else
+                let
+                    current = model.timeline
+                    next = { model | timeline = { current | histogramWindow = window, histogramSince = "", histogramUntil = "", histogramSelectedBucket = Nothing, histogramActiveRequest = Nothing, histogramActiveIdentity = Nothing, histogramLoadedRequest = Nothing, histogramLoading = True, histogramClockWorkspaceId = model.selectedWorkspaceId } }
+                in
+                ( next, Cmd.batch [ saveFiltersCmd next, model.selectedWorkspaceId |> Maybe.map (\ws -> Task.perform (GotTimelineHistogramClock ws) Time.now) |> Maybe.withDefault Cmd.none ] )
+
         SetTimelineHistogramBucket bucket ->
-            updateHistogramControls model (\timeline -> { timeline | histogramBucket = bucket, histogramSelectedBucket = Nothing })
+            let
+                ( next, command ) = updateHistogramControls model (\timeline -> { timeline | histogramBucket = bucket, histogramSelectedBucket = Nothing })
+            in
+            ( next, Cmd.batch [ command, saveFiltersCmd next ] )
 
         SelectTimelineHistogramBucket label since until ->
             selectHistogramBucket model { label = label, since = since, until = until }
 
         ResetTimelineHistogramSelection ->
             resetHistogramSelection model
+
+        ToggleTimelineChartAction action ->
+            let
+                current = model.timeline
+                actions = Dict.update action (Maybe.map not) current.chartActions
+            in
+            ( { model | timeline = { current | chartActions = actions } }, Cmd.none )
 
         ToggleTimelineChartSeries series ->
             let
@@ -566,7 +602,7 @@ update msg model =
                         model.timeline
 
                     defaultRange =
-                        defaultTimelineHistogramRange now
+                        defaultTimelineHistogramRange currentTimeline.histogramWindow now
 
                     initializedTimeline =
                         { currentTimeline
@@ -840,11 +876,13 @@ viewTimelineHistogram timeline =
         [ div [ class "timeline-graph-header" ]
             [ div []
                 [ h4 [] [ text "Lifecycle activity" ]
-                , p [] [ text "Create, Complete, and Delete counts by ascending UTC bucket. Select a point or table row to filter the event cards below." ]
+                , p [] [ text "Lifecycle counts by UTC bucket. Select a graph point to filter the event cards below." ]
                 ]
             ]
         , viewTimelineHistogramControls timeline
         , viewTimelineChartToggles timeline.chartSeries
+        , div [ class "timeline-chart-toggles", attribute "aria-label" "Visible lifecycle events" ]
+            (List.map (\( key, labelText ) -> button [ class ("timeline-series-toggle timeline-series-" ++ key), attribute "aria-pressed" (if Dict.get key timeline.chartActions |> Maybe.withDefault False then "true" else "false"), onClick (ToggleTimelineChartAction key) ] [ span [ class "timeline-series-marker" ] [], text labelText ]) lifecycleActions)
         , viewTimelineHistogramContent timeline
         ]
 
@@ -853,25 +891,9 @@ viewTimelineHistogramControls : TimelineModel -> Html Msg
 viewTimelineHistogramControls timeline =
     div [ class "timeline-graph-controls" ]
         [ label [ class "timeline-graph-control" ]
-            [ span [] [ text "Since" ]
-            , input
-                [ type_ "date"
-                , value timeline.histogramSince
-                , onInput SetTimelineHistogramSince
-                , disabled timeline.histogramLoading
-                ]
-                []
-            ]
-        , label [ class "timeline-graph-control" ]
-            [ span [] [ text "Until" ]
-            , input
-                [ type_ "date"
-                , value timeline.histogramUntil
-                , onInput SetTimelineHistogramUntil
-                , disabled timeline.histogramLoading
-                , title "Exclusive UTC date boundary"
-                ]
-                []
+            [ span [] [ text "Time window" ]
+            , select [ value timeline.histogramWindow, onInput SetTimelineHistogramWindow ]
+                (List.map (\( key, labelText ) -> option [ value key, selected (key == timeline.histogramWindow) ] [ text labelText ]) [ ( "7", "Last 7 days" ), ( "14", "Last 14 days" ), ( "30", "Last 30 days" ), ( "6months", "Last 6 months" ), ( "year", "Last Year" ), ( "all", "All time" ) ])
             ]
         , label [ class "timeline-graph-control" ]
             [ span [] [ text "Bucket" ]
@@ -880,10 +902,10 @@ viewTimelineHistogramControls timeline =
                 , onInput SetTimelineHistogramBucket
                 , disabled timeline.histogramLoading
                 ]
-                [ option [ value "day" ] [ text "Day" ]
-                , option [ value "week" ] [ text "Week" ]
-                , option [ value "month" ] [ text "Month" ]
-                , option [ value "quarter" ] [ text "Quarter" ]
+                [ option [ value "day", selected (timeline.histogramBucket == "day") ] [ text "Day" ]
+                , option [ value "week", selected (timeline.histogramBucket == "week") ] [ text "Week" ]
+                , option [ value "month", selected (timeline.histogramBucket == "month") ] [ text "Month" ]
+                , option [ value "quarter", selected (timeline.histogramBucket == "quarter") ] [ text "Quarter" ]
                 ]
             ]
         ]
@@ -897,7 +919,7 @@ viewTimelineHistogramContent timeline =
     in
     div [ class "timeline-graph-content" ]
         [ if timeline.histogramLoading && not hasBuckets then
-            div [ class "timeline-graph-state" ] [ text "Loading lifecycle graphs..." ]
+            div [ class "timeline-graph-state" ] [ text "Loading lifecycle graph..." ]
 
           else
             text ""
@@ -920,11 +942,26 @@ viewTimelineHistogramContent timeline =
 
 viewTimelineHistogramChart : TimelineModel -> Html Msg
 viewTimelineHistogramChart timeline =
-    div [ class "timeline-line-graphs", title "Timeline line graphs by lifecycle action and entity kind" ]
-        [ viewTimelineLineChart timeline "Create" "created"
-        , viewTimelineLineChart timeline "Complete" "completed"
-        , viewTimelineLineChart timeline "Delete" "deleted"
-        ]
+    div [ class "timeline-line-graphs", title "Lifecycle activity by UTC bucket" ]
+        [ viewTimelineLineChart timeline "Lifecycle activity" "lifecycle" ]
+
+
+lifecycleActions : List ( String, String )
+lifecycleActions =
+    [ ( "created", "Create" ), ( "completed", "Complete" ), ( "deleted", "Delete" ), ( "archived", "Archive" ), ( "cancelled", "Cancel" ) ]
+
+
+lifecycleChartSeries : TimelineModel -> List TimelineSeriesDefinition
+lifecycleChartSeries timeline =
+    lifecycleActions
+        |> List.filter (\( key, _ ) -> Dict.get key timeline.chartActions |> Maybe.withDefault False)
+        |> List.map (\( key, labelText ) ->
+            let
+                entitySeries = timelineChartSeries timeline.chartSeries key timeline.histogramBuckets
+                counts = List.foldl (\series totals -> List.map2 (+) (List.map .count series.values) totals) (List.repeat (List.length timeline.histogramBuckets) 0) entitySeries
+            in
+            { key = key, label = labelText, values = List.map2 (\bucket count -> { label = bucket.label, since = bucket.bucketStart, until = bucket.bucketEnd, count = count }) timeline.histogramBuckets counts }
+        )
 
 
 viewTimelineChartToggles : TimelineChartSeries -> Html Msg
@@ -972,7 +1009,7 @@ viewTimelineLineChart : TimelineModel -> String -> String -> Html Msg
 viewTimelineLineChart timeline actionLabel action =
     let
         visibleSeries =
-            timelineChartSeries timeline.chartSeries action timeline.histogramBuckets
+            lifecycleChartSeries timeline
 
         actualMaximum =
             lineChartMaximum visibleSeries
@@ -1004,7 +1041,6 @@ viewTimelineLineChart timeline actionLabel action =
                     ++ List.concatMap (viewTimelineSeriesSvg timeline.chartPointFocus timeline.histogramSelectedBucket actionLabel action renderDomain canvasWidth bucketCount) visibleSeries
                 )
             ]
-        , viewTimelineValueTable timeline.histogramSelectedBucket actionLabel action timeline.chartSeries timeline.histogramBuckets
         ]
 
 
@@ -1068,6 +1104,12 @@ timelineActionValue action counts =
 
         "deleted" ->
             counts.deleted
+
+        "archived" ->
+            counts.archived
+
+        "cancelled" ->
+            counts.cancelled
 
         _ ->
             0
@@ -1153,7 +1195,7 @@ viewTimelinePoint : Dict.Dict String Int -> Maybe TimelineHistogramSelection -> 
 viewTimelinePoint pointFocus selectedBucket actionLabel action series pointCount index point =
     let
         matchingBucket =
-            -- labels are response labels; the table remains the keyboard activation path.
+            -- Every action line has a roving keyboard point for bucket activation.
             (selectedBucket |> Maybe.map .label) == Just point.label
 
         displayX =
@@ -1173,7 +1215,7 @@ viewTimelinePoint pointFocus selectedBucket actionLabel action series pointCount
         , attribute "role" "button"
         , attribute "tabindex" (if isRovingTarget then "0" else "-1")
         , attribute "aria-pressed" (if matchingBucket then "true" else "false")
-        , attribute "aria-label" (actionLabel ++ ", " ++ series.label ++ ", " ++ point.label ++ ", " ++ point.since ++ " to " ++ point.until ++ " exclusive, " ++ String.fromInt point.count ++ ", " ++ if matchingBucket then "selected" else "not selected")
+        , attribute "aria-label" (actionLabel ++ ", " ++ series.label ++ ", " ++ point.label ++ ", " ++ formatDate point.since ++ " to " ++ formatDate point.until ++ " exclusive, " ++ String.fromInt point.count ++ ", " ++ if matchingBucket then "selected" else "not selected")
         , onClick (SelectTimelineHistogramBucket point.label point.since point.until)
         , onTimelinePointKey action series.key index pointCount (SelectTimelineHistogramBucket point.label point.since point.until)
         ]
@@ -1191,13 +1233,28 @@ viewTimelinePoint pointFocus selectedBucket actionLabel action series pointCount
             , SA.class "timeline-point"
             ]
             []
-        , Svg.title [] [ Svg.text (actionLabel ++ " — " ++ series.label ++ " — " ++ point.label ++ " [" ++ point.since ++ ", " ++ point.until ++ "): " ++ String.fromInt point.count) ]
+        , Svg.title [] [ Svg.text (actionLabel ++ " — " ++ series.label ++ " — " ++ point.label ++ " [" ++ formatDate point.since ++ ", " ++ formatDate point.until ++ "): " ++ String.fromInt point.count) ]
         ]
 
 
 pointMarkerOffset : String -> Float
 pointMarkerOffset key =
     case key of
+        "created" ->
+            -48
+
+        "completed" ->
+            -24
+
+        "deleted" ->
+            0
+
+        "archived" ->
+            24
+
+        "cancelled" ->
+            48
+
         "projects" ->
             -36
 
@@ -1283,7 +1340,7 @@ chartX count index =
 
 chartCanvasWidth : Int -> Int
 chartCanvasWidth bucketCount =
-    max 720 (160 + (max 0 (bucketCount - 1) * 104))
+    max 720 (160 + (max 0 (bucketCount - 1) * 128))
 
 
 chartXWithWidth : Int -> Int -> Int -> Float
@@ -1310,31 +1367,6 @@ timelinePath points =
 floatString : Float -> String
 floatString value =
     String.fromFloat value
-
-
-viewTimelineValueTable : Maybe TimelineHistogramSelection -> String -> String -> TimelineChartSeries -> List Api.WorkspaceTimelineBucket -> Html Msg
-viewTimelineValueTable selectedBucket actionLabel action visibility buckets =
-    table [ class "timeline-value-table" ]
-        [ caption [] [ text (actionLabel ++ " values by UTC bucket") ]
-        , thead [] [ tr [] [ th [] [ text "Bucket" ], th [] [ text "Projects" ], th [] [ text "Tasks" ], th [] [ text "Subtasks" ], th [] [ text "Observations" ] ] ]
-        , tbody []
-            (List.map
-                (\bucket ->
-                    let
-                        selected = selectedBucket == Just { label = bucket.label, since = bucket.bucketStart, until = bucket.bucketEnd }
-                        valueFor enabled counts = if enabled then String.fromInt (timelineActionValue action counts) else "Hidden"
-                    in
-                    tr [ class (if selected then "timeline-value-row-selected" else "") ]
-                        [ th [] [ button [ class "timeline-bucket-button", onClick (SelectTimelineHistogramBucket bucket.label bucket.bucketStart bucket.bucketEnd), attribute "aria-label" ("Show events for " ++ bucket.label ++ ", " ++ bucket.bucketStart ++ " through " ++ bucket.bucketEnd) ] [ text bucket.label ] ]
-                        , td [] [ text (valueFor visibility.projects bucket.series.project) ]
-                        , td [] [ text (valueFor visibility.tasks bucket.series.task) ]
-                        , td [] [ text (valueFor visibility.subtasks bucket.series.subtask) ]
-                        , td [] [ text (valueFor visibility.observations bucket.series.observation) ]
-                        ]
-                )
-                buckets
-            )
-        ]
 
 
 viewTimelineBody : String -> TimelineModel -> Html Msg
@@ -1400,7 +1432,7 @@ viewTimelineSelectionNote maybeSelection =
         Just selection ->
             div [ class "timeline-selection-note" ]
                 [ span [] [ text ("Showing events for " ++ selection.label) ]
-                , span [ class "timeline-selection-range" ] [ text (selection.since ++ " → " ++ selection.until) ]
+                , span [ class "timeline-selection-range" ] [ text (formatDate selection.since ++ " → " ++ formatDate selection.until) ]
                 , button [ class "btn-secondary timeline-selection-reset", onClick ResetTimelineHistogramSelection ] [ text "Reset range" ]
                 ]
 
@@ -1640,7 +1672,8 @@ viewTimelineGroup ( dateLabel, events ) =
 viewTimelineEvent : Api.WorkspaceTimelineEvent -> Html Msg
 viewTimelineEvent event =
     button
-        [ class ("timeline-event-card " ++ timelineEventToneClass event.eventType ++ " timeline-entity-" ++ event.entityType)
+        [ Html.Attributes.id ("timeline-event-" ++ event.id)
+        , class ("timeline-event-card " ++ timelineEventToneClass event.eventType ++ " timeline-entity-" ++ event.entityType)
         , onClick (NavigateToTimelineEntity event)
         , title ("Open " ++ String.toLower (entityTypeLabel event.entityType))
         ]

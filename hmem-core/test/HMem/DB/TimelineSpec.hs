@@ -48,7 +48,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       rangeEnd <- addUTCTime 1 <$> getCurrentTime
       buckets <- listWorkspaceTimelineBuckets env.pool workspace.id rangeStart rangeEnd "day"
       let total get = sum (map get buckets)
-          sumSeries get = foldr addSeries (TimelineBucketSeriesCounts 0 0 0) (map get buckets)
+          sumSeries get = foldr addSeries (TimelineBucketSeriesCounts 0 0 0 0 0) (map get buckets)
           project = sumSeries (\bucket -> bucket.timelineBucketSeries.seriesProject)
           task = sumSeries (\bucket -> bucket.timelineBucketSeries.seriesTask)
           child = sumSeries (\bucket -> bucket.timelineBucketSeries.seriesSubtask)
@@ -57,6 +57,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       project.created `shouldBe` 2
       project.completed `shouldBe` 1
       project.deleted `shouldBe` 2
+      project.archived `shouldBe` 1
       task.created `shouldBe` 1
       task.completed `shouldBe` 1
       task.deleted `shouldBe` 1
@@ -66,6 +67,8 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       observationSeries.created `shouldBe` 1
       observationSeries.completed `shouldBe` 0
       observationSeries.deleted `shouldBe` 1
+      observationSeries.archived `shouldBe` 0
+      observationSeries.cancelled `shouldBe` 0
       seriesTotals.created `shouldBe` 5
       seriesTotals.completed `shouldBe` 3
       seriesTotals.deleted `shouldBe` 5
@@ -80,7 +83,7 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       buckets <- listWorkspaceTimelineBuckets env.pool workspace.id since untilTime "day"
       length buckets `shouldBe` 3
       map (.timelineBucketStart) buckets `shouldBe` sort (map (.timelineBucketStart) buckets)
-      map (.timelineBucketSeriesTotals) buckets `shouldBe` replicate 3 (TimelineBucketSeriesCounts 0 0 0)
+      map (.timelineBucketSeriesTotals) buckets `shouldBe` replicate 3 (TimelineBucketSeriesCounts 0 0 0 0 0)
 
     it "uses audit-time ownership and half-open UTC ranges for canonical series" $ \env -> do
       workspace <- createTestWorkspace env "timeline-deterministic"
@@ -115,14 +118,22 @@ spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
       insertAudit env workspace.id "task" "00000000-0000-0000-0000-000000000206" "update"
         (Just (payload ["title" Aeson..= ("before" :: Text)]))
         (Just (payload ["title" Aeson..= ("after" :: Text)])) inRange
+      insertAudit env workspace.id "task" "00000000-0000-0000-0000-000000000207" "update"
+        (Just (payload ["status" Aeson..= ("todo" :: Text)]))
+        (Just (payload ["status" Aeson..= ("cancelled" :: Text)])) inRange
+      insertAudit env workspace.id "task" "00000000-0000-0000-0000-000000000208" "update"
+        (Just (payload ["status" Aeson..= ("todo" :: Text), "parent_id" Aeson..= rootParent]))
+        (Just (payload ["status" Aeson..= ("cancelled" :: Text), "parent_id" Aeson..= rootParent])) inRange
       insertAudit env otherWorkspace.id "observation" "00000000-0000-0000-0000-000000000399" "create" Nothing (Just (payload [])) inRange
       insertAudit env workspace.id "observation" "00000000-0000-0000-0000-000000000303" "create" Nothing (Just (payload [])) endBoundary
+      earliestWorkspaceLifecycle env.pool workspace.id untilTime `shouldReturn` Just inRange
+      earliestWorkspaceLifecycle env.pool workspace.id inRange `shouldReturn` Nothing
       buckets <- listWorkspaceTimelineBuckets env.pool workspace.id since untilTime "day"
       let series = foldr addTimelineSeries emptyTimelineSeries (map (.timelineBucketSeries) buckets)
-      series.seriesProject `shouldBe` TimelineBucketSeriesCounts 1 1 1
-      series.seriesTask `shouldBe` TimelineBucketSeriesCounts 1 0 0
-      series.seriesSubtask `shouldBe` TimelineBucketSeriesCounts 1 1 1
-      series.seriesObservation `shouldBe` TimelineBucketSeriesCounts 1 0 1
+      series.seriesProject `shouldBe` TimelineBucketSeriesCounts 1 1 1 0 0
+      series.seriesTask `shouldBe` TimelineBucketSeriesCounts 1 0 0 0 1
+      series.seriesSubtask `shouldBe` TimelineBucketSeriesCounts 1 1 1 0 1
+      series.seriesObservation `shouldBe` TimelineBucketSeriesCounts 1 0 1 0 0
 
     it "uses exact UTC edges for every bucket size" $ \env -> do
       workspace <- createTestWorkspace env "timeline-edges"
@@ -140,11 +151,13 @@ addSeries left right = TimelineBucketSeriesCounts
   { created = left.created + right.created
   , completed = left.completed + right.completed
   , deleted = left.deleted + right.deleted
+  , archived = left.archived + right.archived
+  , cancelled = left.cancelled + right.cancelled
   }
 
 emptyTimelineSeries :: TimelineBucketSeries
 emptyTimelineSeries = TimelineBucketSeries zero zero zero zero
-  where zero = TimelineBucketSeriesCounts 0 0 0
+  where zero = TimelineBucketSeriesCounts 0 0 0 0 0
 
 addTimelineSeries :: TimelineBucketSeries -> TimelineBucketSeries -> TimelineBucketSeries
 addTimelineSeries left right = TimelineBucketSeries

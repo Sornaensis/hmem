@@ -13,6 +13,12 @@ import HMem.ObservationSubjectMatchCorpus (observationSubjectMatchCorpus)
 
 spec :: Spec
 spec = do
+  describe "Timeline lifecycle JSON compatibility" $ do
+    it "defaults additive action fields for older payloads and preserves distinct counts" $ do
+      (eitherDecode "{\"created\":1,\"completed\":2,\"deleted\":3}" :: Either String TimelineBucketSeriesCounts)
+        `shouldBe` Right (TimelineBucketSeriesCounts 1 2 3 0 0)
+      let counts = TimelineBucketSeriesCounts 1 2 3 4 5
+      eitherDecode (encode counts) `shouldBe` Right counts
   describe "Unified observation search validation" $ do
     it "requires a workspace for every entity selection" $
       validateUnifiedSearchQuery observationSearch `shouldBe` ["workspace_id is required for unified search"]

@@ -1294,6 +1294,30 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       bucketResponse.timelineBucketsBucket `shouldBe` "day"
       bucketResponse.timelineBucketsBuckets `shouldSatisfy` (not . null)
       request app methodGet (workspacePath <> "/timeline/buckets?since=2020-01-01T00:00:00Z&until=2021-01-02T00:00:00Z&bucket=day") "" >>= (\response -> responseStatus response `shouldBe` status400)
+      paged <- request app methodGet (workspacePath <> "/timeline/buckets?since=2020-01-01T00:00:00Z&until=2021-01-02T00:00:00Z&bucket=day&paged=true") ""
+      responseStatus paged `shouldBe` status200
+      let Just firstBuckets = decode (responseBody paged) :: Maybe WorkspaceTimelineBucketsResponse
+      length firstBuckets.timelineBucketsBuckets `shouldBe` 366
+      firstBuckets.timelineBucketsNextSince `shouldBe` Just (read "2021-01-01 00:00:00 UTC")
+      next <- request app methodGet (workspacePath <> "/timeline/buckets?since=2021-01-01T00:00:00Z&until=2021-01-02T00:00:00Z&bucket=day&paged=true") ""
+      responseStatus next `shouldBe` status200
+      let Just finalBuckets = decode (responseBody next) :: Maybe WorkspaceTimelineBucketsResponse
+      length finalBuckets.timelineBucketsBuckets `shouldBe` 1
+      finalBuckets.timelineBucketsNextSince `shouldBe` Nothing
+      mapM_ (\size -> do
+        firstResponse <- request app methodGet (workspacePath <> "/timeline/buckets?since=2000-02-15T12:00:00Z&until=2025-01-01T00:00:00Z&paged=true&bucket=" <> size) ""
+        responseStatus firstResponse `shouldBe` status200
+        let Just first = decode (responseBody firstResponse) :: Maybe WorkspaceTimelineBucketsResponse
+            Just edge = first.timelineBucketsNextSince
+        length first.timelineBucketsBuckets `shouldSatisfy` (<= 366)
+        (last first.timelineBucketsBuckets).timelineBucketEnd `shouldBe` edge
+        all (\row -> row.timelineBucketSeriesTotals == TimelineBucketSeriesCounts 0 0 0 0 0) first.timelineBucketsBuckets `shouldBe` True
+        secondResponse <- request app methodGet (workspacePath <> "/timeline/buckets?since=" <> Text.encodeUtf8 (T.pack (iso8601Show edge)) <> "&until=2025-01-01T00:00:00Z&paged=true&bucket=" <> size) ""
+        responseStatus secondResponse `shouldBe` status200
+        let Just second = decode (responseBody secondResponse) :: Maybe WorkspaceTimelineBucketsResponse
+        (head second.timelineBucketsBuckets).timelineBucketStart `shouldBe` edge
+        second.timelineBucketsBucket `shouldBe` Text.decodeUtf8 size
+        ) ["week", "month", "quarter"]
       mapM_ (\suffix -> request app methodGet (workspacePath <> suffix) "" >>= (\response -> responseStatus response `shouldBe` status400))
         [ "/timeline?limit=0", "/timeline?limit=201", "/timeline?offset=-1"
         , "/timeline?since=2021-01-02T00:00:00Z&until=2021-01-01T00:00:00Z"
@@ -1397,7 +1421,7 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
           totals select = sum (map select buckets.timelineBucketsBuckets)
           Just rawBuckets = decode (responseBody bucketsResponse) :: Maybe Value
           seriesActions entity = firstJsonArrayValue (jsonField "buckets" rawBuckets) >>= jsonPath ["series", entity]
-          hasActions entity = all (\action -> isJust (seriesActions entity >>= jsonField action)) ["created", "completed", "deleted"]
+          hasActions entity = all (\action -> isJust (seriesActions entity >>= jsonField action)) ["created", "completed", "deleted", "archived", "cancelled"]
       totals (\bucket -> bucket.timelineBucketCounts.projectCounts.created) `shouldBe` 1
       totals (\bucket -> bucket.timelineBucketCounts.subprojectCounts.created) `shouldBe` 1
       totals (\bucket -> bucket.timelineBucketCounts.subprojectCounts.completed) `shouldBe` 1
@@ -1411,6 +1435,16 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       totals (\bucket -> bucket.timelineBucketTotals.cancelled) `shouldBe` 1
       totals (\bucket -> bucket.timelineBucketSeries.seriesProject.created) `shouldBe` 2
       totals (\bucket -> bucket.timelineBucketSeries.seriesProject.completed) `shouldBe` 0
+      totals (\bucket -> bucket.timelineBucketSeries.seriesProject.archived) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketSeries.seriesTask.cancelled) `shouldBe` 1
+      totals (\bucket -> bucket.timelineBucketSeries.seriesObservation.archived) `shouldBe` 0
+      totals (\bucket -> bucket.timelineBucketSeries.seriesObservation.cancelled) `shouldBe` 0
+      allTimeResponse <- request app methodGet (workspacePath <> "/timeline/buckets?until=" <> timestamp rangeEnd <> "&bucket=week&paged=true") ""
+      responseStatus allTimeResponse `shouldBe` status200
+      let Just allTime = decode (responseBody allTimeResponse) :: Maybe WorkspaceTimelineBucketsResponse
+      allTime.timelineBucketsSince `shouldBe` minimum (map (.occurredAt) events)
+      allTime.timelineBucketsBucket `shouldBe` "week"
+      sum (map (\bucket -> bucket.timelineBucketSeriesTotals.created) allTime.timelineBucketsBuckets) `shouldBe` 6
       totals (\bucket -> bucket.timelineBucketSeries.seriesTask.created) `shouldBe` 3
       totals (\bucket -> bucket.timelineBucketSeries.seriesTask.completed) `shouldBe` 1
       totals (\bucket -> bucket.timelineBucketSeries.seriesSubtask.created) `shouldBe` 1

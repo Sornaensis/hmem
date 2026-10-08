@@ -95,7 +95,16 @@ export function installHierarchyViewport(app, options = {}) {
       const element = doc.getElementById(pendingElement.id)
       if (Date.now() > pendingElement.expires) pendingElement = null
       else if (element) {
-        element.scrollIntoView?.({ block: 'center' })
+        if (pendingElement.id.startsWith('timeline-event-')) {
+          const scroll = doc.getElementById('main-content-scroll')
+          if (scroll) {
+            const box = element.getBoundingClientRect(), host = scroll.getBoundingClientRect()
+            const headerBottom = box.top + Math.min(box.height, 72)
+            if (box.top < host.top + 12) scroll.scrollTop = Math.max(0, scroll.scrollTop + box.top - host.top - 12)
+            else if (headerBottom > host.top + scroll.clientHeight - 12) scroll.scrollTop += headerBottom - host.top - scroll.clientHeight + 12
+          }
+          focusControl(element)
+        } else element.scrollIntoView?.({ block: 'center' })
         pendingElement = null
       }
     }
@@ -153,7 +162,8 @@ export function installHierarchyViewport(app, options = {}) {
       // a newer scroll can arrive before its event is delivered. Layouts
       // admitted after our own clamped writes sample their resulting position.
       if (currentTarget && (layoutScrollTop == null || scroller.scrollTop === layoutScrollTop)) {
-        if (anchor) scroller.scrollTop = scroller.scrollTop + anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top + pendingLayout.delta
+        if (pendingLayout.target && rowFor(pendingLayout.target)) { /* Reveal below only if its header is outside the viewport. */ }
+        else if (anchor) scroller.scrollTop = scroller.scrollTop + anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top + pendingLayout.delta
         else scroller.scrollTop = origin() + Math.max(0, pendingLayout.top)
       }
       if (pendingLayout.target && currentTarget) {
@@ -167,7 +177,10 @@ export function installHierarchyViewport(app, options = {}) {
     if (pendingTarget) {
       const target = rowFor(pendingTarget.key)
       if (target) {
-        scroller.scrollTop += target.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+        const box = target.getBoundingClientRect(), host = scroller.getBoundingClientRect()
+        const headerBottom = box.top + Math.min(box.height, 72)
+        if (box.top < host.top + 12) scroller.scrollTop = Math.max(0, scroller.scrollTop + box.top - host.top - 12)
+        else if (headerBottom > host.top + scroller.clientHeight - 12) scroller.scrollTop += headerBottom - host.top - scroller.clientHeight + 12
         if (pendingTarget.focus) {
           const controls = tabbable(target)
           const control = pendingTarget.focus === 'last' ? controls.at(-1) : controls[0]
@@ -237,6 +250,7 @@ export function installHierarchyViewport(app, options = {}) {
     schedule()
   }
   function keyboard(event) {
+    if (pendingElement?.id.startsWith('timeline-event-')) pendingElement = null
     if (['Tab', 'Escape', 'Enter'].includes(event.key)) retainedFocus = null
     if (event.key !== 'Tab' || event.ctrlKey || event.metaKey || event.altKey) return
     const row = event.target.closest?.('[data-hierarchy-key]')
@@ -250,6 +264,7 @@ export function installHierarchyViewport(app, options = {}) {
     pendingTarget = { key, focus: event.shiftKey ? 'last' : 'first', stamp: context, admission: admitTarget() }; schedule()
   }
   function focusIn(event) {
+    if (event.target !== bridgeFocusedControl && pendingElement?.id.startsWith('timeline-event-')) pendingElement = null
     if (event.target !== bridgeFocusedControl) retireTargetIntent()
     const control = event.target, row = control.closest?.('[data-hierarchy-key]')
     let stamp = null
@@ -266,10 +281,11 @@ export function installHierarchyViewport(app, options = {}) {
     schedule()
   }
   function pointerIntent(event) {
+    if (pendingElement?.id.startsWith('timeline-event-')) pendingElement = null
     retireTargetIntent()
     if (retainedFocus && event.target !== retainedFocus.control && !retainedFocus.control.contains?.(event.target)) retainedFocus = null
   }
-  function navigationIntent() { retainedFocus = null; retireTargetIntent() }
+  function navigationIntent() { pendingElement = null; retainedFocus = null; retireTargetIntent() }
   const mutations = MO ? new MO(records => {
     if (retainedFocus) for (const record of records) {
       const includesRow = nodes => Array.from(nodes || []).some(node => node === retainedFocus.row || node.contains?.(retainedFocus.row))

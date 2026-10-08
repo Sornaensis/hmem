@@ -3648,7 +3648,7 @@ textarea.observation-edit-content {
 
 .timeline-line-graphs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.875rem;
 }
 
@@ -3669,6 +3669,16 @@ textarea.observation-edit-content {
 .timeline-chart-x-axis { fill: var(--text-muted); font-size: 11px; text-anchor: middle; }
 .timeline-line { fill: none; stroke: currentColor; stroke-width: 3; vector-effect: non-scaling-stroke; pointer-events: none; }
 .timeline-series-projects { color: #a5b4fc; }
+.timeline-series-created { color: #a5b4fc; }
+.timeline-series-completed { color: #5eead4; stroke-dasharray: 8 4; }
+.timeline-series-deleted { color: #f9a8d4; stroke-dasharray: 2 4; }
+.timeline-series-archived { color: #fdba74; stroke-dasharray: 12 3 2 3; }
+.timeline-series-cancelled { color: #fcd34d; stroke-dasharray: 10 4; }
+.timeline-series-created .timeline-series-marker { border-color: #a5b4fc; }
+.timeline-series-completed .timeline-series-marker { border-color: #5eead4; border-top-style: dashed; }
+.timeline-series-deleted .timeline-series-marker { border-color: #f9a8d4; border-top-style: dotted; }
+.timeline-series-archived .timeline-series-marker { border-color: #fdba74; border-top-style: dashed; }
+.timeline-series-cancelled .timeline-series-marker { border-color: #fcd34d; border-top-style: dashed; }
 .timeline-series-tasks { color: #5eead4; stroke-dasharray: 8 4; }
 .timeline-series-subtasks { color: #fdba74; stroke-dasharray: 2 4; }
 .timeline-series-observations { color: #f9a8d4; stroke-dasharray: 12 3 2 3; }

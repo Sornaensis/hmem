@@ -33,7 +33,7 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Pool (Pool, tryWithResource)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Time (NominalDiffTime, UTCTime, diffUTCTime)
+import Data.Time (NominalDiffTime, UTCTime(..), diffUTCTime, addUTCTime, addDays, addGregorianMonthsClip, toGregorian, fromGregorian, dayOfWeek, DayOfWeek(..))
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Hasql.Connection qualified as Hasql
@@ -104,7 +104,7 @@ type WorkspaceAPI =
          :> Description "Revalidates at most 100 unique project_ids/task_ids. Input order is preserved; missing/deleted IDs are reported without disclosing foreign IDs."
          :> ReqBody '[JSON] NavigationSummariesRequest :> Post '[JSON] NavigationSummariesResponse
   :<|> Capture "workspaceId" UUID :> "timeline" :> "buckets"
-         :> QueryParam "since" UTCTime :> QueryParam "until" UTCTime :> QueryParam "bucket" Text
+         :> QueryParam "since" UTCTime :> QueryParam "until" UTCTime :> QueryParam "bucket" Text :> QueryParam "paged" Bool
          :> Get '[JSON] WorkspaceTimelineBucketsResponse
   :<|> Capture "workspaceId" UUID :> "timeline"
          :> QueryParam "entity_type" Text :> QueryParam "event_type" Text
@@ -618,13 +618,18 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> na
         let projectById = Map.fromList [ (value.id, value) | value <- projectRows, value.workspaceId == workspace ]
         liftIO $ Overview.projectCardSummaries pool (mapMaybe (`Map.lookup` projectById) (ancestorIds ++ [project.id]))
     pure (targetSummary, projectAncestorSummaries, taskAncestorSummaries)
-  timelineBucketsH workspaceId mSince mUntil mBucket = do
+  timelineBucketsH workspaceId mSince mUntil mBucket mPaged = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
-    since <- requireTimelineBucketParam "since" mSince
     untilTime <- requireTimelineBucketParam "until" mUntil
     let bucket = fromMaybe "week" mBucket
-    reject (validateTimelineBucketQuery since untilTime bucket)
-    buckets <- handleDBErrors $ Timeline.listWorkspaceTimelineBuckets pool workspaceId since untilTime bucket
+        paged = mPaged == Just True
+    since <- case mSince of
+      Just value -> pure value
+      Nothing | paged -> fromMaybe (addUTCTime (-86400) untilTime) <$> handleDBErrors (Timeline.earliestWorkspaceLifecycle pool workspaceId untilTime)
+      Nothing -> requireTimelineBucketParam "since" mSince
+    let pageUntil = if paged then Prelude.min untilTime (timelineBucketPageEnd since bucket) else untilTime
+    reject (validateTimelineBucketQuery since pageUntil bucket)
+    buckets <- handleDBErrors $ Timeline.listWorkspaceTimelineBuckets pool workspaceId since pageUntil bucket
     when (length buckets > maxTimelineBuckets) $
       reject ["timeline bucket range produces too many buckets; narrow the range or choose a larger bucket"]
     pure WorkspaceTimelineBucketsResponse
@@ -632,7 +637,8 @@ workspaces pool = listH :<|> createH :<|> getH :<|> updateH :<|> deleteH :<|> na
       , timelineBucketsSince = since
       , timelineBucketsUntil = untilTime
       , timelineBucketsBucket = bucket
-      , timelineBucketsBuckets = buckets }
+      , timelineBucketsBuckets = buckets
+      , timelineBucketsNextSince = if pageUntil < untilTime then Just pageUntil else Nothing }
   timelineH workspaceId entityType eventType since untilTime limit offset = do
     requireWorkspace pool workspaceId Auth.WorkspaceRoleRead
     reject (validateTimelineRangeQuery since untilTime <> validateTimelinePagination limit offset)
@@ -658,6 +664,20 @@ validateTimelineBucketQuery since untilTime bucket =
   ["bucket must be one of day, week, month, or quarter" | bucket `notElem` validTimelineBuckets]
   <> validateTimelineRangeQuery (Just since) (Just untilTime)
   <> ["timeline bucket range must not exceed ten years" | diffUTCTime untilTime since > tenYearsSeconds]
+
+-- Each opt-in page keeps the existing ten-year and 366-bucket query limits.
+-- UTC bucket boundaries prevent partial buckets from being counted twice.
+timelineBucketPageEnd :: UTCTime -> Text -> UTCTime
+timelineBucketPageEnd since bucket = UTCTime end 0
+  where
+    day = utctDay since
+    (year, month, _) = toGregorian day
+    end = case bucket of
+      "day" -> addDays 366 day
+      "week" -> addDays (366 * 7) (addDays (negate (toInteger (fromEnum (dayOfWeek day)) - toInteger (fromEnum Monday))) day)
+      "month" -> addGregorianMonthsClip 120 (fromGregorian year month 1)
+      "quarter" -> addGregorianMonthsClip 120 (fromGregorian year (((month - 1) `div` 3) * 3 + 1) 1)
+      _ -> addDays 1 day
 
 validTimelineBuckets :: [Text]
 validTimelineBuckets = ["day", "week", "month", "quarter"]

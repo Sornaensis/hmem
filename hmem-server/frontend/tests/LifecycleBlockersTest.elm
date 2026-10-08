@@ -1093,7 +1093,7 @@ suite =
                         , List.member ( "Target ID", "project-1" ) contextRows
                         , List.member ( "Workspace ID", "workspace-a" ) contextRows
                         , List.member ( "Request ID", "req-create-project" ) contextRows
-                        , List.member ( "Timestamp", "2026-01-01T00:00:00Z" ) contextRows
+                        , List.member ( "Timestamp", "2026-01-01 00:00" ) contextRows
                         ]
                             |> Expect.equal (List.repeat 9 True)
 

@@ -221,6 +221,7 @@ import Json.Decode as D exposing (Decoder)
 import Json.Decode.Pipeline exposing (custom, optional, required)
 import Json.Encode as E
 import Time
+import Task
 import Url
 
 
@@ -808,6 +809,8 @@ type alias TimelineBucketActionCounts =
     { created : Int
     , completed : Int
     , deleted : Int
+    , archived : Int
+    , cancelled : Int
     }
 
 
@@ -815,6 +818,8 @@ type alias TimelineBucketActionTotals =
     { created : Int
     , completed : Int
     , deleted : Int
+    , archived : Int
+    , cancelled : Int
     }
 
 
@@ -835,6 +840,7 @@ type alias WorkspaceTimelineBucketsResponse =
     , until : String
     , bucket : String
     , buckets : List WorkspaceTimelineBucket
+    , nextSince : Maybe String
     }
 
 
@@ -2014,6 +2020,7 @@ workspaceTimelineBucketsResponseDecoder =
         |> required "until" D.string
         |> required "bucket" D.string
         |> required "buckets" (D.list workspaceTimelineBucketDecoder)
+        |> optional "next_since" (D.nullable D.string) Nothing
 
 
 workspaceTimelineBucketDecoder : Decoder WorkspaceTimelineBucket
@@ -2060,6 +2067,8 @@ timelineBucketActionCountsDecoder =
         |> required "created" D.int
         |> required "completed" D.int
         |> required "deleted" D.int
+        |> optional "archived" D.int 0
+        |> optional "cancelled" D.int 0
 
 
 timelineBucketActionTotalsDecoder : Decoder TimelineBucketActionTotals
@@ -2068,6 +2077,8 @@ timelineBucketActionTotalsDecoder =
         |> required "created" D.int
         |> required "completed" D.int
         |> required "deleted" D.int
+        |> optional "archived" D.int 0
+        |> optional "cancelled" D.int 0
 
 
 revertResultDecoder : Decoder RevertResult
@@ -3159,10 +3170,41 @@ fetchWorkspaceTimelineRange apiUrl wsId maybeSince maybeUntil toMsg =
 
 fetchWorkspaceTimelineBuckets : String -> String -> String -> String -> String -> (Result Http.Error WorkspaceTimelineBucketsResponse -> msg) -> Cmd msg
 fetchWorkspaceTimelineBuckets apiUrl wsId since until bucket toMsg =
-    Http.get
-        { url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/timeline/buckets?since=" ++ since ++ "&until=" ++ until ++ "&bucket=" ++ bucket
-        , expect = Http.expectJson toMsg workspaceTimelineBucketsResponseDecoder
-        }
+    let
+        fetchPage lower collected =
+            Http.task
+                { method = "GET"
+                , headers = []
+                , url = apiUrl ++ "/api/v1/workspaces/" ++ wsId ++ "/timeline/buckets?paged=true&until=" ++ Url.percentEncode until ++ "&bucket=" ++ bucket ++ (if lower == "" then "" else "&since=" ++ Url.percentEncode lower)
+                , body = Http.emptyBody
+                , resolver = Http.stringResolver resolveBuckets
+                , timeout = Nothing
+                }
+                |> Task.andThen (\response ->
+                    let
+                        accumulated = response.buckets :: collected
+                    in
+                    case response.nextSince of
+                        Just next ->
+                            if next <= lower || next >= until then
+                                Task.fail (Http.BadBody "Timeline bucket pagination did not advance.")
+                            else
+                                fetchPage next accumulated
+                        Nothing ->
+                            Task.succeed { response | buckets = List.concat (List.reverse accumulated) }
+                )
+    in
+    Task.attempt toMsg (fetchPage since [])
+
+
+resolveBuckets : Http.Response String -> Result Http.Error WorkspaceTimelineBucketsResponse
+resolveBuckets response =
+    case response of
+        Http.BadUrl_ url -> Err (Http.BadUrl url)
+        Http.Timeout_ -> Err Http.Timeout
+        Http.NetworkError_ -> Err Http.NetworkError
+        Http.BadStatus_ metadata _ -> Err (Http.BadStatus metadata.statusCode)
+        Http.GoodStatus_ _ body -> D.decodeString workspaceTimelineBucketsResponseDecoder body |> Result.mapError (D.errorToString >> Http.BadBody)
 
 
 fetchMemoryLinks : String -> String -> (Result Http.Error (List MemoryLink) -> msg) -> Cmd msg

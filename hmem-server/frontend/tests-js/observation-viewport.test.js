@@ -12,8 +12,8 @@ function harness({ fallback = false } = {}) {
     getBoundingClientRect: () => ({ top: 100 - scroll.scrollTop }), querySelectorAll: () => rows }
   const scroll = { scrollTop: 0, clientHeight: 600, getBoundingClientRect: () => ({ top: 0 }),
     addEventListener: (name, fn) => events.set('scroll:' + name, fn), removeEventListener: name => events.delete('scroll:' + name) }
-  const row = key => {
-    const value = { dataset: { observationKey: key }, getBoundingClientRect: () => ({ height: 180 }), scrollIntoView: () => effects.push('scroll:' + key) }
+  const row = (key, top = 100 + Number(key) * 180) => {
+    const value = { dataset: { observationKey: key }, getBoundingClientRect: () => ({ top: top - scroll.scrollTop, height: 180 }), scrollIntoView: () => effects.push('scroll:' + key) }
     value.controls = [{ tagName: 'BUTTON', type: 'button', className: 'primary', disabled: false, tabIndex: 0, closest: selector => selector === '[data-observation-key]' ? value : null,
       getClientRects: () => [{}], focus: () => { doc.activeElement = value.controls[0]; effects.push('focus:' + key) } }]
     value.heading = value.controls[0]
@@ -35,7 +35,7 @@ function harness({ fallback = false } = {}) {
   return { stamp, root, panel, scroll, doc, frames, sent, effects, observed, bridge,
     sync(change = {}) { sync({ stamp, navigationToken: 0, keys: ['0', '1', '2'], target: null, adjustment: 0, top: null, settled: true, ...change }) },
     flush() { const queued = [...frames.values()]; frames.clear(); queued.forEach(fn => fn()) },
-    mount(key) { rows.push(row(key)); mutations?.() },
+    mount(key, top) { rows.push(row(key, top)); mutations?.() },
     replace(key) { rows = rows.map(value => value.dataset.observationKey === key ? row(key) : value); mutations?.() },
     move(key) { rows = [...rows.filter(value => value.dataset.observationKey !== key), ...rows.filter(value => value.dataset.observationKey === key)]; mutations?.() },
     retire() { disposed = true; mutations?.() },
@@ -61,9 +61,9 @@ test('offscreen Tab requests exact next key and focuses only after stamped mount
   assert.deepEqual(h.effects, [])
   h.sync({ target: { key: '2', edge: 'first', offset: 360 } }); h.flush()
   assert.deepEqual(h.effects, [])
-  h.mount('2'); h.flush()
-  assert.deepEqual(h.effects, ['focus:2', 'scroll:2'])
-  assert.equal(h.scroll.scrollTop, 460)
+  h.mount('2', 1000); h.flush()
+  assert.deepEqual(h.effects, ['focus:2'])
+  assert.equal(h.scroll.scrollTop, 484)
   h.bridge.dispose()
 })
 

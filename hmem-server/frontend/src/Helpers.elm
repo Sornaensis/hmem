@@ -438,6 +438,8 @@ encodeFilterState model =
                 Nothing ->
                     Encode.null
           )
+        , ( "timelineWindow", Encode.string model.timeline.histogramWindow )
+        , ( "timelineBucket", Encode.string model.timeline.histogramBucket )
         , ( "searchQuery", Encode.string model.search.query )
         , ( "filterShowOnly"
           , Encode.string
@@ -572,7 +574,23 @@ applyStoredFilters json model =
     { model
         | search = updatedSearch
         , cards = updatedCards
+        , timeline = restoreTimelinePreferences json model.timeline
     }
+
+
+restoreTimelinePreferences : Encode.Value -> TimelineModel -> TimelineModel
+restoreTimelinePreferences json timeline =
+    let
+        valid field choices fallback =
+            Decode.decodeValue (Decode.field field Decode.string) json
+                |> Result.toMaybe
+                |> Maybe.andThen (\value -> if List.member value choices then Just value else Nothing)
+                |> Maybe.withDefault fallback
+        window = valid "timelineWindow" [ "7", "14", "30", "6months", "year", "all" ] "30"
+        bucket = valid "timelineBucket" [ "day", "week", "month", "quarter" ] "week"
+    in
+    if timeline.histogramWindow == window && timeline.histogramBucket == bucket then timeline else
+        { timeline | histogramWindow = window, histogramBucket = bucket, histogramSince = "", histogramUntil = "", histogramLoadedRequest = Nothing, histogramActiveRequest = Nothing, histogramActiveIdentity = Nothing, histogramClockWorkspaceId = Nothing }
 
 
 applyStoredFiltersIfCurrentWorkspace : Encode.Value -> Model -> Model
@@ -1292,22 +1310,15 @@ scrollToElement elemId =
 
 formatDate : String -> String
 formatDate dateStr =
-    String.left 10 dateStr
+    String.left 16 (String.replace "T" " " dateStr)
 
 
-{-| Observation metadata keeps the content-update time separate from revision
-provenance. Preserve non-UTC offsets instead of inventing a timezone conversion.
+{-| Display the date and minute represented by the database timestamp.
+Transport values remain unchanged; presentation does not convert timezones.
 -}
 formatObservationTimestamp : String -> String
 formatObservationTimestamp timestamp =
-    if String.endsWith "Z" timestamp then
-        String.dropRight 1 timestamp |> String.replace "T" " " |> (\value -> value ++ " UTC")
-
-    else if String.endsWith "+00:00" timestamp then
-        String.dropRight 6 timestamp |> String.replace "T" " " |> (\value -> value ++ " UTC")
-
-    else
-        String.replace "T" " " timestamp
+    formatDate timestamp
 
 
 {-| Bound plain text by Unicode codepoints, including the ellipsis, without

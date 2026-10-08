@@ -32,6 +32,30 @@ function harness({ resizeObserver = true } = {}) {
     setRows(value) { rows = value }, setStamp(value) { container.dataset.hierarchyContext = JSON.stringify(value) }, mutate(records) { for (const callback of mutationCallbacks) callback(records) }, hide() { viewport = false }, show() { viewport = true } }
 }
 
+for (const intent of ['focus', 'pointer', 'keyboard', 'navigation']) {
+  test('delayed timeline card reveal retires after newer ' + intent + ' intent', () => {
+    const h = harness(); h.callbacks.sync({ ...h.stamp, top: 0 }); h.flush()
+    h.callbacks.target('timeline-event-source'); h.flush()
+    const outside = { closest: () => null }; h.doc.activeElement = outside
+    if (intent === 'focus') h.listeners.get('focusin')({ target: outside })
+    if (intent === 'pointer') h.listeners.get('pointerdown')({ target: outside })
+    if (intent === 'keyboard') h.listeners.get('keydown')({ key: 'ArrowDown', target: outside })
+    if (intent === 'navigation') h.windowListeners.get('popstate')()
+    h.elements.set('timeline-event-source', { getBoundingClientRect: () => ({ top: 1000, height: 2000 }), focus() { h.doc.activeElement = this } })
+    h.mutate([]); h.flush()
+    assert.equal(h.doc.activeElement, outside); assert.equal(h.scroller.scrollTop, 0)
+    h.bridge.dispose()
+  })
+}
+test('returned tall timeline card reveals its header and focuses exact card', () => {
+  const h = harness(); h.callbacks.sync({ ...h.stamp, top: 0 }); h.flush(); h.scroller.scrollTop = 700
+  const card = { getBoundingClientRect: () => ({ top: 500 - h.scroller.scrollTop, height: 2000 }), focus() { h.doc.activeElement = card } }
+  h.elements.set('timeline-event-source', card); h.callbacks.target('timeline-event-source'); h.flush()
+  assert.equal(h.doc.activeElement, card); assert.equal(h.scroller.scrollTop, 488)
+  h.callbacks.target('timeline-event-source'); h.flush(); assert.equal(h.scroller.scrollTop, 488)
+  h.bridge.dispose()
+})
+
 test('only a proven same-row move restores the exact retained native control', () => {
   const h = harness(), row = h.row('project:p', 0)
   h.setRows([row]); h.flush(); row.button.focus(); h.listeners.get('focusin')({ target: row.button })
@@ -123,7 +147,7 @@ test('direct focus first requests logical mounting and scrolls only after stampe
   assert.equal(h.sent.at(-1).request, 'entity:z'); assert.equal(h.scroller.scrollTop, 0)
   const target = h.row('task:z', 9000)
   h.setRows([target]); h.callbacks.sync({ ...h.stamp, anchor: null, delta: 0, top: 9000, target: 'task:z' }); h.flush()
-  assert.equal(h.scroller.scrollTop, 9000); assert.equal(h.sent.at(-1).acknowledged, true)
+  assert.equal(h.scroller.scrollTop, 8484); assert.equal(h.sent.at(-1).acknowledged, true)
   h.bridge.dispose()
 })
 
@@ -273,7 +297,7 @@ test('a genuinely newer different layout target supersedes keyboard without borr
   const route = h.row('task:c', 1400)
   h.setRows([current, route]); h.flush()
   reverse(); h.callbacks.sync(layout('task:c')); h.flush()
-  assert.equal(h.scroller.scrollTop, 1400)
+  assert.equal(h.scroller.scrollTop, 884)
   assert.equal(h.doc.activeElement, null)
   assert.equal(h.sent.at(-1).acknowledged, true)
   h.bridge.dispose()
@@ -282,7 +306,7 @@ test('a genuinely newer different layout target supersedes keyboard without borr
 test('a newer direct route target supersedes the pending keyboard predecessor', () => {
   const { h, reverse } = reverseFixture()
   reverse(); h.callbacks.target('entity-b'); h.flush()
-  assert.equal(h.scroller.scrollTop, 700)
+  assert.equal(h.scroller.scrollTop, 184)
   assert.equal(h.doc.activeElement, null)
   h.bridge.dispose()
 })
@@ -291,7 +315,7 @@ test('a newer painted stamp retires the old keyboard target and accepts its layo
   const { h, reverse, layout } = reverseFixture()
   reverse(); const next = { ...layout('project:b'), revision: h.stamp.revision + 1 }
   h.callbacks.sync(next); h.setStamp(next); h.flush()
-  assert.equal(h.scroller.scrollTop, 700)
+  assert.equal(h.scroller.scrollTop, 184)
   assert.equal(h.doc.activeElement, null)
   assert.equal(h.sent.at(-1).request, null)
   h.bridge.dispose()
@@ -335,7 +359,7 @@ test('bridge-owned recovery emits native focusin without retiring a newer mounte
     if (mounted) h.setRows([retained, route])
     h.callbacks.sync({ ...h.stamp, anchor: null, top: 0, target: 'task:c' }); h.flush()
     assert.equal(h.doc.activeElement, retained.button)
-    if (mounted) { assert.equal(h.scroller.scrollTop, 1400); assert.equal(h.sent.at(-1).acknowledged, true) }
+    if (mounted) { assert.equal(h.scroller.scrollTop, 884); assert.equal(h.sent.at(-1).acknowledged, true) }
     else assert.equal(h.sent.at(-1).request, 'task:c')
     h.bridge.dispose()
   }

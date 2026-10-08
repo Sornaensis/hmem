@@ -752,12 +752,14 @@ type alias TimelineModel =
     , histogramSince : String
     , histogramUntil : String
     , histogramBucket : String
+    , histogramWindow : String
     , histogramClockWorkspaceId : Maybe String
     , histogramActiveRequest : Maybe TimelineHistogramRequest
     , histogramActiveIdentity : Maybe TimelineRequestIdentity
     , histogramLoadedRequest : Maybe TimelineHistogramRequest
     , histogramSelectedBucket : Maybe TimelineHistogramSelection
     , chartSeries : TimelineChartSeries
+    , chartActions : Dict String Bool
     , chartPointFocus : Dict String Int
     , refreshGeneration : Int
     , refreshTimerGeneration : Maybe Int
@@ -1270,9 +1272,11 @@ type Msg
     | SetTimelineEventFilter TimelineEventFilter
     | SetTimelineHistogramSince String
     | SetTimelineHistogramUntil String
+    | SetTimelineHistogramWindow String
     | SetTimelineHistogramBucket String
     | SelectTimelineHistogramBucket String String String
     | ResetTimelineHistogramSelection
+    | ToggleTimelineChartAction String
     | ToggleTimelineChartSeries String
     | FocusTimelineChartPoint String String Int
     | ToggleEntityHistory String String

@@ -201,8 +201,8 @@ suite =
                         Feature.Timeline.chartXWithWidth width 100 99
                 in
                 [ Feature.Timeline.chartCanvasWidth 1 == 720
-                , width == 10456
-                , second - first >= 104
+                , width == 12832
+                , second - first >= 128
                 , first >= 80
                 , last <= toFloat width - 80
                 , List.all (\offset -> first + offset >= 11) [ -36, -12, 12, 36 ]

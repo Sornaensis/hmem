@@ -212,6 +212,9 @@ route msg model =
         SetTimelineHistogramUntil _ ->
             Ok (Feature.Timeline.update msg model)
 
+        SetTimelineHistogramWindow _ ->
+            Ok (Feature.Timeline.update msg model)
+
         SetTimelineHistogramBucket _ ->
             Ok (Feature.Timeline.update msg model)
 
@@ -219,6 +222,9 @@ route msg model =
             Ok (Feature.Timeline.update msg model)
 
         ResetTimelineHistogramSelection ->
+            Ok (Feature.Timeline.update msg model)
+
+        ToggleTimelineChartAction _ ->
             Ok (Feature.Timeline.update msg model)
 
         ToggleTimelineChartSeries _ ->

@@ -479,7 +479,7 @@ viewAuditLogFilters model =
                 , option [ value "workspace", selected (filters.entityType == Just "workspace") ] [ text "Workspace" ]
                 , option [ value "project", selected (filters.entityType == Just "project") ] [ text "Project" ]
                 , option [ value "task", selected (filters.entityType == Just "task") ] [ text "Task" ]
-                , option [ value "memory", selected (filters.entityType == Just "memory") ] [ text "Memory" ]
+                , option [ value "observation", selected (filters.entityType == Just "observation") ] [ text "Observations" ]
                 , option [ value "category", selected (filters.entityType == Just "category") ] [ text "Category" ]
                 ]
             ]
@@ -673,7 +673,7 @@ auditContextDetailItems entry =
     , ( "Action type", auditActionToDisplay entry.action )
     , ( "Target entity", auditEntityTypeLabel entry.entityType )
     , ( "Target ID", entry.entityId )
-    , ( "Timestamp", entry.changedAt )
+    , ( "Timestamp", formatDate entry.changedAt )
     , ( "Audit entry ID", entry.id )
     ]
         ++ maybeDetail "Actor type" entry.actorType
@@ -1375,11 +1375,16 @@ viewAuditLogEntry model entry =
                     )
                 ]
             , span [ class ("audit-action-badge " ++ actionClass) ] [ text actionLabel ]
-            , span [ class "audit-entity-type" ] [ text entry.entityType ]
+            , span [ class "audit-entity-type" ] [ text (if entry.entityType == "observation" || entry.entityType == "memory" then "Observations" else entry.entityType) ]
             , span summaryAttrs
                 [ viewAuditSummary model entry
-                , if navigable then button [ class "btn-small", stopPropagationOn "click" (Decode.succeed ( NavigateToAuditEntity entry, True )) ] [ text "Open" ] else text ""
                 ]
+            , case auditStatusChange entry of
+                Just ( oldStatus, newStatus ) ->
+                    span [ class "audit-status-change" ] [ text (oldStatus ++ " → " ++ newStatus) ]
+
+                Nothing ->
+                    text ""
             , span [ class "audit-timestamp" ] [ text (formatDate entry.changedAt) ]
             ]
         , if expanded then
@@ -1752,6 +1757,7 @@ viewAuditValue labelText value =
                     else text "Unsupported subject kind") subjects)
             Err _ -> text (truncateAuditValue 160 value)
     else if isTypedAuditField labelText && value /= "(unset)" && value /= "null" && value /= "(empty)" then Helpers.copyableValue "" labelText value value
+    else if List.member (String.toLower labelText) [ "timestamp", "created at", "updated at", "changed at", "recorded at", "completed at", "due at", "deleted at" ] && String.length value >= 16 then text (formatDate value)
     else text value
 
 

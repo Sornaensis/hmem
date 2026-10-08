@@ -3,7 +3,7 @@ module Feature.Focus exposing (auditReturnContext, buildProjectBreadcrumb, build
 import Api
 import Dict
 import Feature.DataLoading
-import Helpers exposing (buildFragment, pushUrl, replaceFragment)
+import Helpers exposing (buildFragment, pushUrl, replaceFragment, scrollToElement)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
@@ -330,7 +330,10 @@ returnToTimelineSource context model =
             }
     in
     ( nextModel
-    , pushUrl model.key ("/workspace/" ++ context.workspaceId ++ "#" ++ buildFragment TimelineTab Nothing Nothing)
+    , Cmd.batch
+        [ pushUrl model.key ("/workspace/" ++ context.workspaceId ++ "#" ++ buildFragment TimelineTab Nothing Nothing)
+        , scrollToElement ("timeline-event-" ++ context.entryId)
+        ]
     )
 
 

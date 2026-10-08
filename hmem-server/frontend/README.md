@@ -14,6 +14,13 @@ The browser install command provisions the Chromium revision required by the
 locked Playwright dependency. Vite serves development on port 3000 and proxies
 API and WebSocket traffic to the server on port 8420.
 
+The workspace Timeline shows one horizontal lifecycle graph with entity and
+Create, Complete, Delete, Archive, and Cancel toggles. Its default window is the
+last 30 days with weekly buckets. Window and bucket choices persist per workspace.
+All time starts at the earliest lifecycle event and the client follows bounded
+bucket pages without changing the selected bucket size. Displayed timestamps use
+the database timestamp's represented date and time, formatted `YYYY-MM-DD HH:MM`.
+
 ```sh
 npm run build
 npm run preview

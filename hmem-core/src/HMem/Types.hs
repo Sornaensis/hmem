@@ -1669,12 +1669,16 @@ data TimelineBucketSeriesCounts = TimelineBucketSeriesCounts
   { created :: Int
   , completed :: Int
   , deleted :: Int
+  , archived :: Int
+  , cancelled :: Int
   } deriving (Show, Eq, Generic)
 
 instance ToJSON TimelineBucketSeriesCounts where
   toJSON = genericToJSON jsonOptions
 instance FromJSON TimelineBucketSeriesCounts where
-  parseJSON = genericParseJSON jsonOptions
+  parseJSON = withObject "TimelineBucketSeriesCounts" $ \o ->
+    TimelineBucketSeriesCounts <$> o .: "created" <*> o .: "completed" <*> o .: "deleted"
+      <*> o .:? "archived" .!= 0 <*> o .:? "cancelled" .!= 0
 
 -- | Canonical Timeline series. Nested projects fold into 'seriesProject'.
 data TimelineBucketSeries = TimelineBucketSeries
@@ -1738,6 +1742,7 @@ data WorkspaceTimelineBucketsResponse = WorkspaceTimelineBucketsResponse
   , timelineBucketsUntil       :: UTCTime
   , timelineBucketsBucket      :: Text
   , timelineBucketsBuckets     :: [WorkspaceTimelineBucket]
+  , timelineBucketsNextSince   :: Maybe UTCTime
   } deriving (Show, Eq, Generic)
 
 instance ToJSON WorkspaceTimelineBucketsResponse where
@@ -1747,6 +1752,7 @@ instance ToJSON WorkspaceTimelineBucketsResponse where
     , "until" .= timelineBucketsUntil
     , "bucket" .= timelineBucketsBucket
     , "buckets" .= timelineBucketsBuckets
+    , "next_since" .= timelineBucketsNextSince
     ]
 instance FromJSON WorkspaceTimelineBucketsResponse where
   parseJSON = withObject "WorkspaceTimelineBucketsResponse" $ \o ->
@@ -1756,6 +1762,7 @@ instance FromJSON WorkspaceTimelineBucketsResponse where
       <*> o .: "until"
       <*> o .: "bucket"
       <*> o .: "buckets"
+      <*> o .:? "next_since"
 
 ------------------------------------------------------------------------
 -- Saved views

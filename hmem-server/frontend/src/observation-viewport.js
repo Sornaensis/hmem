@@ -78,11 +78,13 @@ export function installObservationViewport(app, options = {}) {
       if (row) {
         const target = pending; pending = null
         const listOrigin = origin()
-        scroller.scrollTop = Math.max(0, listOrigin + target.offset)
+        const box = row.getBoundingClientRect(), host = scroller.getBoundingClientRect()
+        const headerBottom = box.top + Math.min(box.height, 72)
+        if (box.top < host.top + 12) scroller.scrollTop = Math.max(0, scroller.scrollTop + box.top - host.top - 12)
+        else if (headerBottom > host.top + scroller.clientHeight - 12) scroller.scrollTop += headerBottom - host.top - scroller.clientHeight + 12
         const tabbable = controls(row)
         const control = target.edge === 'last' ? tabbable.at(-1) : tabbable[0]
         control?.focus({ preventScroll: true })
-        row.scrollIntoView({ block: 'nearest', behavior: 'instant' })
       }
     }
     send(); settleNativeOwner(); completeNavigation()
@@ -91,7 +93,11 @@ export function installObservationViewport(app, options = {}) {
     if (currentReveal() && same(settledStamp, stamp) && doc.activeElement?.id === revealOwner.targetId) {
       const target = doc.getElementById(revealOwner.targetId)
       const bounds = target?.getBoundingClientRect?.(), host = scroller.getBoundingClientRect()
-      if (bounds && (bounds.top < host.top || bounds.bottom > host.bottom)) target.scrollIntoView?.({ block: 'nearest', behavior: 'instant' })
+      if (bounds) {
+        const bottom = bounds.top + Math.min(bounds.height ?? (bounds.bottom - bounds.top), 72)
+        if (bounds.top < host.top + 12) scroller.scrollTop += bounds.top - host.top - 12
+        else if (bottom > host.bottom - 12) scroller.scrollTop += bottom - host.bottom + 12
+      }
     }
   }
   function completeNavigation() {

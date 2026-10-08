@@ -26,6 +26,19 @@ schemas. Send `Content-Type: application/json` with JSON bodies. Use HTTPS for
 shared installations. [MCP setup](README.md) shows how to use hmem through tools;
 it uses a bearer credential and an active workspace context.
 
+## Workspace lifecycle graph
+
+`GET /workspaces/{id}/timeline/buckets` exposes canonical `series` counts for
+`created`, `completed`, `deleted`, `archived`, and `cancelled`. Legacy `counts`
+and `totals` retain their existing meaning. Observation archive and cancel counts
+are zero because Observations do not support those lifecycle actions.
+
+The optional `paged=true` query supports long graph ranges while each response
+keeps the existing ten-year and 366-bucket bounds. Follow `next_since`, keeping
+`until` and `bucket` unchanged, until it is null. With `paged=true`, omitting
+`since` starts at the workspace's earliest eligible lifecycle audit event. Without
+the opt-in, `since` remains required and oversized ranges still return HTTP 400.
+
 ## Workspaces and planning
 
 Workspaces scope your data and permissions. Create one with

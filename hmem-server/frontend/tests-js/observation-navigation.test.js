@@ -106,8 +106,8 @@ test('return reveals the exact card when a canonical mutation has moved its layo
   h.command('detail', 'first', 'A'); h.flush()
   h.elements.get('first').getBoundingClientRect = () => ({ top: -200, bottom: -100 })
   h.command('return', 'first', null); h.flush()
-  assert.equal(h.effects.at(-2).id, 'first')
-  assert.equal(h.effects.at(-1).scroll, 'first')
+  assert.equal(h.effects.at(-1).id, 'first')
+  assert.equal(h.scroll.scrollTop, 0)
   h.bridge.dispose()
 })
 

@@ -423,15 +423,30 @@ handleOwnedRaw ownedMsg model =
                     loaded.auth.status == AuthReady
                         && Permissions.canReadCurrentWorkspace loaded
                         && loaded.selectedWorkspaceId /= Nothing
-            in
-            if canReloadNavigation && navigationFiltersChanged then
-                Feature.DataLoading.reloadNavigationForFilters loaded
+                ( navigationModel, navigationCmd ) =
+                    if canReloadNavigation && navigationFiltersChanged then
+                        Feature.DataLoading.reloadNavigationForFilters loaded
 
-            else if canReloadNavigation && collapsedNodesChanged then
-                Feature.DataLoading.ensureAllNavigationPresentations loaded
+                    else if canReloadNavigation && collapsedNodesChanged then
+                        Feature.DataLoading.ensureAllNavigationPresentations loaded
+
+                    else
+                        ( loaded, Cmd.none )
+            in
+            if canReloadNavigation && loaded.activeTab == TimelineTab then
+                case loaded.selectedWorkspaceId of
+                    Just workspaceId ->
+                        let
+                            ( timeline, timelineCmd ) =
+                                Feature.Timeline.ensureLoaded loaded.flags.apiUrl workspaceId loaded.sessionRequestEpoch navigationModel.timeline
+                        in
+                        ( { navigationModel | timeline = timeline }, Cmd.batch [ navigationCmd, timelineCmd ] )
+
+                    Nothing ->
+                        ( navigationModel, navigationCmd )
 
             else
-                ( loaded, Cmd.none )
+                ( navigationModel, navigationCmd )
 
         GlobalKeyDownMsg keyCode ->
             if keyCode == 27 then

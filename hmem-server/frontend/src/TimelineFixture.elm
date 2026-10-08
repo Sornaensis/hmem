@@ -43,6 +43,9 @@ update msg model =
 
         TimelineMessage timelineMsg ->
             case timelineMsg of
+                Types.ToggleTimelineChartAction key ->
+                    ( { model | chartActions = Dict.update key (Maybe.map not) model.chartActions }, Cmd.none )
+
                 Types.ToggleTimelineChartSeries key ->
                     ( { model | chartSeries = Feature.Timeline.toggleTimelineChartSeries key model.chartSeries }, Cmd.none )
 
@@ -175,16 +178,16 @@ bucketForDates count start ending label =
             { created = 0, completed = 0, cancelled = 99 }
 
         project =
-            { created = count, completed = 0, deleted = count }
+            { created = count, completed = 0, deleted = count, archived = 0, cancelled = 0 }
 
         task =
-            { created = modBy 7 (count + 2), completed = 0, deleted = modBy 6 (count + 3) }
+            { created = modBy 7 (count + 2), completed = 0, deleted = modBy 6 (count + 3), archived = 0, cancelled = 0 }
 
         subtask =
-            { created = modBy 5 (count + 1), completed = 0, deleted = modBy 4 (count + 2) }
+            { created = modBy 5 (count + 1), completed = 0, deleted = modBy 4 (count + 2), archived = 0, cancelled = 0 }
 
         observation =
-            { created = modBy 4 (count + 3), completed = 0, deleted = modBy 3 (count + 1) }
+            { created = modBy 4 (count + 3), completed = 0, deleted = modBy 3 (count + 1), archived = 0, cancelled = 0 }
     in
     { bucketStart = start
     , bucketEnd = ending
@@ -192,7 +195,7 @@ bucketForDates count start ending label =
     , counts = { project = legacy, subproject = legacy, task = legacy, subtask = legacy }
     , totals = legacy
     , series = { project = project, task = task, subtask = subtask, observation = observation }
-    , seriesTotals = { created = project.created + task.created + subtask.created + observation.created, completed = 0, deleted = project.deleted + task.deleted + subtask.deleted + observation.deleted }
+    , seriesTotals = { created = project.created + task.created + subtask.created + observation.created, completed = 0, deleted = project.deleted + task.deleted + subtask.deleted + observation.deleted, archived = 0, cancelled = 0 }
     }
 
 

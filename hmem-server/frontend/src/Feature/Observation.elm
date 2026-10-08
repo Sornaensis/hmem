@@ -1467,7 +1467,11 @@ switchBrowseMode mode model =
                 model
 
         withFocus ( updated, command ) =
-            ( updated, Cmd.batch [ command, focusElement "observation-mode-heading" ] )
+            if List.member mode [ ObservationFlatMode, ObservationFacetMode ] then
+                let state = updated.observations
+                    viewport = state.viewport
+                in ( { updated | observations = { state | viewport = { viewport | preserveScroll = True, preserveExtent = Basics.max viewport.preserveExtent (HierarchyViewport.height model.observations.viewport.index) } } }, command )
+            else ( updated, Cmd.batch [ command, focusElement "observation-mode-heading" ] )
     in
     case mode of
         ObservationFacetMode ->
@@ -3432,6 +3436,13 @@ refreshViewport previous ( incoming, command ) =
         old = previous.observations
         state = model.observations
         lifetime = viewportLifetime model
+        sameContext = lifetime.workspace /= "" && lifetime.workspace == old.viewport.stamp.workspace && lifetime.epoch == old.viewport.stamp.epoch
+        preserveScroll = sameContext && state.viewport.preserveScroll && List.member state.requestMode [ ObservationFlatMode, ObservationFacetMode ]
+            && (old.requestMode /= state.requestMode || lifetime.generation == old.viewport.stamp.generation)
+            && old.selectedId == state.selectedId && old.detailNavigationToken == state.detailNavigationToken
+            && (old.requestMode /= state.requestMode || (old.expandedMatchGroups == state.expandedMatchGroups && old.expandedSubjects == state.expandedSubjects))
+        currentViewport = state.viewport
+        preparedViewport = { currentViewport | preserveScroll = preserveScroll, preserveExtent = if preserveScroll then currentViewport.preserveExtent else 0 }
         changed = old.items /= state.items || old.orderedIds /= state.orderedIds || old.requestMode /= state.requestMode
             || old.selectedFacet /= state.selectedFacet || old.facets /= state.facets || old.facetKeys /= state.facetKeys
             || old.matchAppliedPaths /= state.matchAppliedPaths || old.matchEvidence /= state.matchEvidence
@@ -3440,9 +3451,9 @@ refreshViewport previous ( incoming, command ) =
             || lifetime.generation /= state.viewport.stamp.generation
         rows = if changed then (if lifetime.workspace == "" then Array.empty else projectResultRows state) else state.resultRows
         projectedViewport = if changed then
-            let rebuilt = ObservationViewport.rebuild lifetime (Array.toList rows |> List.map resultRowKey) state.viewport in
+            let rebuilt = ObservationViewport.rebuild lifetime (Array.toList rows |> List.map resultRowKey) preparedViewport in
             if old.items /= state.items || old.expandedMatchGroups /= state.expandedMatchGroups then { rebuilt | origin = Nothing } else rebuilt
-            else state.viewport
+            else preparedViewport
         oldStamp = projectedViewport.stamp
         navigationChanged = projectedViewport.navigationToken /= state.detailNavigationToken
         viewport = if navigationChanged then { projectedViewport | navigationToken = state.detailNavigationToken, stamp = { oldStamp | revision = oldStamp.revision + 1 } } else projectedViewport
@@ -3452,7 +3463,7 @@ refreshViewport previous ( incoming, command ) =
         pending = if invalidatedReturn then ownedPending |> Maybe.map (\intent -> { intent | fallback = intent.intent == "return" && not (Dict.member intent.originKey viewport.index.positions), readyRevision = Nothing }) else ownedPending
         owner = if changed || old.selectedId /= state.selectedId || old.detailReturnTarget /= state.detailReturnTarget then resolveSelectedOwner rows viewport state else state.inlineOwner
         updated = { state | resultRows = rows, viewport = viewport, inlineOwner = owner, pendingReturnNavigation = pending }
-        synchronize = changed || navigationChanged || old.selectedId /= state.selectedId || old.detailReturnTarget /= state.detailReturnTarget || old.viewport.focus /= viewport.focus || old.viewport.returnPin /= viewport.returnPin || old.viewport.stamp /= viewport.stamp
+        synchronize = changed || navigationChanged || old.selectedId /= state.selectedId || old.detailReturnTarget /= state.detailReturnTarget || old.viewport.focus /= viewport.focus || old.viewport.returnPin /= viewport.returnPin || old.viewport.stamp /= viewport.stamp || old.viewport.preserveScroll /= viewport.preserveScroll || (preserveScroll && (old.loading /= state.loading || old.facetLoading /= state.facetLoading))
     in
     let
         ( automatic, automaticCmd ) = continueAutomaticRefresh { model | observations = updated }
@@ -3615,9 +3626,12 @@ updateViewport payload model =
                     settled = viewport.stamp == state.viewport.stamp && viewport.index.heights == state.viewport.index.heights
                         && not viewport.restoring && abs adjustment < 0.01 && target == Nothing
                         && (pending == Nothing || Maybe.map .readyRevision pending == Maybe.map .readyRevision state.pendingReturnNavigation)
+                    releaseExtent = settled && viewport.preserveExtent > 0 && not (if state.requestMode == ObservationFacetMode then state.facetLoading else state.loading)
+                    stamp = viewport.stamp
+                    finalViewport = if releaseExtent then { viewport | preserveExtent = 0, stamp = { stamp | revision = stamp.revision + 1 } } else viewport
                 in
-                ( { model | observations = { state | viewport = viewport, pendingReturnNavigation = pending } }
-                , Cmd.batch [ Ports.syncObservationViewport (ObservationViewport.syncReceipt settled adjustment target viewport), navigation ] )
+                ( { model | observations = { state | viewport = finalViewport, pendingReturnNavigation = pending } }
+                , Cmd.batch [ Ports.syncObservationViewport (ObservationViewport.syncReceipt (settled && not releaseExtent) adjustment target finalViewport), navigation ] )
 
 
 viewResultRows : Bool -> ObservationModel -> Html Msg
@@ -3639,6 +3653,8 @@ viewResultRows canEdit state =
     in
     Keyed.node "div"
         [ id "observation-viewport", class "observation-list-rows observation-viewport"
+        , style "min-height" (String.fromFloat viewport.preserveExtent ++ "px")
+        , attribute "data-observation-preserve-scroll" (if viewport.preserveScroll then "true" else "false")
         , attribute "data-observation-viewport-context" (Encode.encode 0 (ObservationViewport.stampValue viewport.stamp))
         , attribute "data-observation-layout-ready" (if viewport.restoring then "false" else "true")
         , attribute "data-observation-focus-key" (Maybe.withDefault "" viewport.focus)

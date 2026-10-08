@@ -84,6 +84,18 @@ test('mounted fallback measurement and native anchor adjustment work without Res
   h.bridge.dispose()
 })
 
+test('mode-preservation ignores relative origin and measured adjustments while current physical scroll stays authoritative', () => {
+  const h = harness(); h.sync(); h.flush(); h.scroll.scrollTop = 500
+  h.sync({ preserveScroll: true, top: 0, adjustment: 70 }); h.flush()
+  assert.equal(h.scroll.scrollTop, 500)
+  h.scroll.scrollTop = 530
+  h.sync({ preserveScroll: true, top: 0, adjustment: 90 }); h.flush()
+  assert.equal(h.scroll.scrollTop, 530, 'newer physical scroll wins over the older layout command')
+  h.sync({ preserveScroll: false, top: null, adjustment: 20 }); h.flush()
+  assert.equal(h.scroll.scrollTop, 550, 'ordinary anchoring resumes after the preservation lifetime')
+  h.bridge.dispose()
+})
+
 test('native Tab mounts the next directly copyable path label', () => {
   const h = harness(); h.sync({ keys: ['0', '1', 'observation-path-label', '2'] }); h.flush()
   assert.equal(h.keyboard(), true)

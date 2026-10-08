@@ -4351,7 +4351,39 @@ observationReturnReceiptTests =
 
 observationProjectionTests : List Test
 observationProjectionTests =
-    [ test "flat and exact projections retain the complete ordered150 members independently of mounted windows" <| \_ ->
+    [ test "explicit browse modes preserve pending extent across replacement and internal group reset, with scope retirement" <| \_ ->
+        let
+            value = fixtureObservation "selected-observation" "2026-01-01T00:00:00Z"
+            state = selectedObservationState value
+            base = editableModel { state | requestMode = ObservationMatchMode, matchAppliedPaths = [ "src/Main.elm" ], expandedMatchGroups = Dict.singleton "old-group" True }
+            projected = Feature.Observation.refreshViewport base ( base, Cmd.none ) |> Tuple.first
+            oldState = projected.observations
+            oldViewport = oldState.viewport
+            positioned = { projected | observations = { oldState | viewport = { oldViewport | top = 400, preserveExtent = 1500 } } }
+            subject = Feature.Observation.update (SetObservationBrowseMode ObservationFacetMode) positioned |> Feature.Observation.refreshViewport positioned |> Tuple.first
+            all = Feature.Observation.update (SetObservationBrowseMode ObservationFlatMode) subject |> Feature.Observation.refreshViewport subject |> Tuple.first
+            workspace = Feature.Observation.refreshViewport all ( { all | sessionRequestEpoch = all.sessionRequestEpoch + 1 }, Cmd.none ) |> Tuple.first
+            allState = all.observations
+            explicitGroup = Feature.Observation.refreshViewport all ( { all | observations = { allState | expandedMatchGroups = Dict.singleton "another" True } }, Cmd.none ) |> Tuple.first
+        in Expect.all
+            [ \_ -> subject.observations.viewport.preserveScroll |> Expect.equal True
+            , \_ -> Dict.isEmpty subject.observations.expandedMatchGroups |> Expect.equal True
+            , \_ -> all.observations.viewport |> (\viewport -> ( viewport.top, viewport.preserveExtent, viewport.preserveScroll )) |> Expect.equal ( 400, 1500, True )
+            , \_ -> workspace.observations.viewport |> (\viewport -> ( viewport.preserveExtent, viewport.preserveScroll )) |> Expect.equal ( 0, False )
+            , \_ -> explicitGroup.observations.viewport.preserveScroll |> Expect.equal False
+            ] ()
+    , test "preserved receipt measurement uses physical offset and keyboard navigation retires its phase" <| \_ ->
+        let
+            stamp = { workspace = "workspace-1", epoch = 0, generation = "flat", revision = 1 }
+            viewport = ObservationViewport.rebuild stamp [ "first", "second" ] ObservationViewport.init
+            preserving = { viewport | preserveScroll = True, preserveExtent = 360, top = 200, width = 800, layout = "font16" }
+            measured = measuredReturnReceipt preserving 800 "font16" Nothing [ ( "first", 300 ) ]
+            keyboard = Decode.decodeValue (Decode.keyValuePairs Decode.value) measured |> Result.map (Dict.fromList >> Dict.insert "target" (Encode.object [ ( "key", Encode.string "second" ), ( "edge", Encode.string "first" ) ]) >> Dict.toList >> Encode.object) |> Result.withDefault measured
+        in Expect.all
+            [ \_ -> ObservationViewport.update Nothing measured preserving |> Maybe.map (\( next, _, adjustment ) -> ( next.top, adjustment )) |> Expect.equal (Just ( 200, 0 ))
+            , \_ -> ObservationViewport.update Nothing keyboard preserving |> Maybe.map (\( next, _, _ ) -> ( next.preserveScroll, next.preserveExtent )) |> Expect.equal (Just ( False, 0 ))
+            ] ()
+    , test "flat and exact projections retain the complete ordered150 members independently of mounted windows" <| \_ ->
         let
             observations = List.range 0 149 |> List.map (\number -> fixtureObservation (String.fromInt number) "2026-01-01T00:00:00Z")
             ids = List.map .id observations

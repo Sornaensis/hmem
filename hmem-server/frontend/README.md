@@ -27,6 +27,11 @@ value has a compact History disclosure with copyable SHAs and recorded dates.
 Open history follows sequential pages of 25 records in recorded order; collapsing
 stops continuation, and a failed page offers an explicit Retry.
 
+All and Subject mode switches preserve the current physical scroll position,
+including newer scrolling while results load. Observation and Project card
+surfaces are left aligned with a responsive maximum outer width of 78rem; their
+controls and the lifecycle graph retain the full available width.
+
 ```sh
 npm run build
 npm run preview

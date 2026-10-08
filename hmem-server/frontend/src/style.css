@@ -2230,6 +2230,7 @@ textarea.observation-filter-input {
 }
 
 .observation-list-rows.observation-viewport { display: block; overflow-anchor: none; }
+.main-content:has(#observation-viewport[data-observation-preserve-scroll="true"]) { overflow-anchor: none; }
 .observation-viewport-row { display: flow-root; min-width: 0; padding-bottom: 0.75rem; }
 .observation-viewport-spacer { pointer-events: none; min-width: 0; }
 
@@ -4357,6 +4358,7 @@ textarea.observation-edit-content {
 
 /* Every row owns its spacing, so measured heights equal spacer geometry. */
 .hierarchy-viewport { display: block; overflow-anchor: none; }
+.hierarchy-viewport, .observation-viewport, .observation-detached { box-sizing: border-box; width: 100%; max-width: 78rem; margin-left: 0; margin-right: auto; }
 .hierarchy-row { box-sizing: border-box; padding-bottom: 6px; }
 .hierarchy-task-family {
   background: var(--bg-surface);

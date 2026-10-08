@@ -24,6 +24,8 @@ type alias State =
     , layout : String
     , origin : Maybe Origin
     , restoring : Bool
+    , preserveScroll : Bool
+    , preserveExtent : Float
     }
 
 type alias Origin =
@@ -36,7 +38,7 @@ init =
     , navigationToken = 0
     , index = HierarchyViewport.build 180 Dict.empty []
     , top = 0, height = 1000, width = 0, focus = Nothing, returnPin = Nothing
-    , layout = "", origin = Nothing, restoring = False
+    , layout = "", origin = Nothing, restoring = False, preserveScroll = False, preserveExtent = 0
     }
 
 captureOrigin : State -> State
@@ -66,7 +68,8 @@ rebuild lifetime keys old =
         within = old.top - HierarchyViewport.offset at old.index
         index = HierarchyViewport.build 180 (if retained then old.index.heights else Dict.empty) keys
         top =
-            if retained then
+            if old.preserveScroll then old.top
+            else if retained then
                 anchor |> Maybe.andThen (\key -> Dict.get key index.positions)
                     |> Maybe.map (\position -> HierarchyViewport.offset position index + within)
                     |> Maybe.withDefault old.top
@@ -114,6 +117,7 @@ encodeSync changed settled adjustment target state =
         [ ( "stamp", stampValue state.stamp )
         , ( "navigationToken", Encode.int state.navigationToken )
         , ( "settled", Encode.bool settled )
+        , ( "preserveScroll", Encode.bool state.preserveScroll )
         , ( "top", if changed then Encode.float state.top else Encode.null )
         , ( "adjustment", Encode.float adjustment )
         , ( "keys", if changed then Encode.list Encode.string (Array.toList state.index.keys) else Encode.null )
@@ -171,7 +175,7 @@ updateWithOwner selected returned value state =
                         if Set.member key mounted && height > 0 && height < 100000 then HierarchyViewport.measure key height current else current)
                         measuredIndex receipt.measurements
                     anchorAt = HierarchyViewport.positionAt receipt.top state.index
-                    anchoredTop = if restored /= Nothing then receipt.top else HierarchyViewport.offset anchorAt index + receipt.top - HierarchyViewport.offset anchorAt state.index
+                    anchoredTop = if state.preserveScroll || restored /= Nothing then receipt.top else HierarchyViewport.offset anchorAt index + receipt.top - HierarchyViewport.offset anchorAt state.index
                     currentStamp = state.stamp
                     nextStamp = if changedWidth || restored /= Nothing then { currentStamp | revision = currentStamp.revision + 1 } else currentStamp
                     updated = { state | index = index, top = max 0 anchoredTop, height = receipt.height, width = receipt.width, stamp = nextStamp
@@ -179,7 +183,8 @@ updateWithOwner selected returned value state =
                             Just ( key, _ ) -> Just key
                             Nothing -> if focus /= Nothing then focus else if List.member receipt.focus [ Just "@outside", Just "@results" ] then Nothing else state.focus
                         , returnPin = if focus /= Nothing || receipt.focus == Just "@results" then Nothing else state.returnPin
-                        , layout = receipt.layout, restoring = False
+                        , layout = receipt.layout, restoring = False, preserveScroll = state.preserveScroll && target == Nothing
+                        , preserveExtent = if target == Nothing then state.preserveExtent else 0
                         , origin = if state.restoring || receipt.layout /= state.layout then Nothing else state.origin }
                 in
                 Just ( updated, target, anchoredTop - receipt.top )

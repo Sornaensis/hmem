@@ -11,7 +11,7 @@ export function installObservationViewport(app, options = {}) {
   let layoutEpoch = 0
   let restoringNative = false
   let nativeFrame = null, settledStamp = null, settlement = 0
-  let navigationToken = null, revealOwner = null, pendingNavigation = null
+  let navigationToken = null, revealOwner = null, pendingNavigation = null, preserveScroll = false
   const same = (a, b) => a && b && ['workspace', 'epoch', 'generation', 'revision'].every(key => a[key] === b[key])
   const sameLifetime = (a, b) => a && b && ['workspace', 'epoch', 'generation'].every(key => a[key] === b[key])
   const readStamp = element => { try { return JSON.parse(element?.dataset.observationViewportContext || 'null') } catch { return null } }
@@ -34,7 +34,7 @@ export function installObservationViewport(app, options = {}) {
     if (scroller) scroller.removeEventListener('scroll', schedule)
     resize?.disconnect(); observed.clear()
     root = scroller = stamp = null; keys = []; pending = nativeOwner = null; anchorTop = null; adjustment = 0; last = ''
-    cancelNativePaint(); settledStamp = null; revealOwner = null; navigationToken = null; pendingNavigation = null
+    cancelNativePaint(); settledStamp = null; revealOwner = null; navigationToken = null; pendingNavigation = null; preserveScroll = false
   }
   function receipt(target = null, focusChange = false) {
     if (!root || !scroller || !same(stamp, readStamp(root)) || root.closest('[inert]')) return null
@@ -56,14 +56,14 @@ export function installObservationViewport(app, options = {}) {
     const next = doc.getElementById('observation-viewport'), scroll = doc.getElementById('main-content-scroll')
     if (!next || !scroll) { detach(); return }
     if (root !== next || scroller !== scroll) {
-      const retainedStamp = stamp, retainedKeys = keys, retainedPending = pending, retainedTop = anchorTop, retainedAdjustment = adjustment, retainedNavigation = navigationToken
+      const retainedStamp = stamp, retainedKeys = keys, retainedPending = pending, retainedTop = anchorTop, retainedAdjustment = adjustment, retainedNavigation = navigationToken, retainedPreserve = preserveScroll
       detach(); root = next; scroller = scroll
       // A painted command may arrive before its first container is mounted.
-      if (same(retainedStamp, readStamp(root))) { stamp = retainedStamp; keys = retainedKeys; pending = retainedPending; anchorTop = retainedTop; adjustment = retainedAdjustment; navigationToken = retainedNavigation }
+      if (same(retainedStamp, readStamp(root))) { stamp = retainedStamp; keys = retainedKeys; pending = retainedPending; anchorTop = retainedTop; adjustment = retainedAdjustment; navigationToken = retainedNavigation; preserveScroll = retainedPreserve }
       scroller.addEventListener('scroll', schedule, { passive: true }); resize?.observe(scroller)
     }
     if (!same(stamp, readStamp(root)) || navigationContext()?.token !== navigationToken) return
-    if (!currentReveal()) {
+    if (!currentReveal() && !preserveScroll) {
       revealOwner = null
       if (anchorTop !== null) scroller.scrollTop = Math.max(0, origin() + anchorTop)
       else if (adjustment) scroller.scrollTop = Math.max(0, scroller.scrollTop + adjustment)
@@ -154,6 +154,7 @@ export function installObservationViewport(app, options = {}) {
     }
     if (navigationToken !== command.navigationToken) { anchorTop = null; adjustment = 0; pending = null; revealOwner = null; nativeOwner = null; cancelNativePaint() }
     stamp = next; navigationToken = command.navigationToken
+    preserveScroll = command.preserveScroll === true
     if (command.settled === true && !command.target && !command.adjustment && command.top === null) {
       settledStamp = next; settlement++
     } else {
